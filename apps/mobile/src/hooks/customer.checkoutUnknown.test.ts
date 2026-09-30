@@ -259,14 +259,15 @@ describe('[AX372 R1] an unknown outcome keeps the intent SENT', () => {
     ['a validation refusal (400)', failure(400, 'VALIDATION_ERROR')],
     ['no riders (409)', failure(409, 'DELIVERY_NO_RIDERS')],
     ['under the store minimum (422)', failure(422, 'MIN_ORDER_NOT_MET')],
-  ])('%s is definitive: nothing was placed, the intent re-opens at once, nothing is asked', async (_label, reply) => {
+  ])('%s re-opens only after the receipt authority proves nothing was placed', async (_label, reply) => {
     placeReplies = [reply];
+    probeReplies = [NONE];
     const out = await placeOrder(DELIVERY);
     const K = posts()[0]!.slice('POST '.length);
     expect(checkoutAttempt.currentFor(PRINCIPAL)).toMatchObject({ key: K, state: 'open' });
     expect(out.ok).toBe(false);
     expect((out as { err: unknown }).err).toBeInstanceOf(AxiosError);
-    expect(requests()).toEqual([`POST ${K}`]);
+    expect(requests()).toEqual([`POST ${K}`, `GET ${K}`]);
   });
 
   it('when asking settles it: placed goes to the order (the intent ends); none re-opens the same key and shows the server’s own answer', async () => {
@@ -419,12 +420,11 @@ describe('[SX391] checkout belongs to its captured account through completion', 
   });
   it('cart refill preserves unresolved K and its placed receipt prevents K2', async () => {
     const K = await unresolvedFirstOrder();
-    useAddToCart();
+    const hook = useAddToCart();
     const cart = env.mutation!;
-    const principal = cart['onMutate']();
     const item = { vendorId: 'v1', itemId: 'i1' };
-    const added = await cart['mutationFn'](item);
-    cart['onSuccess']?.(added, item, principal);
+    const added = await hook.mutateAsync(item);
+    cart['onSuccess']?.(added, env.variables);
     expect(checkoutAttempt.currentFor(PRINCIPAL)).toMatchObject({ key: K, state: 'sent' });
     seen = []; probeReplies = [placed(['order-a'])]; placeReplies = [ORDER];
     const answer = await placeOrder(PICKUP);
@@ -491,21 +491,24 @@ describe('[SX391] checkout belongs to its captured account through completion', 
   ];
   it.each(cartChanges)('%s preserves sent K; a late cart success cannot clear B', async (_name, render, payload) => {
     const K = await unresolvedFirstOrder();
-    render(); const mutation = env.mutation!; const principal = mutation['onMutate']();
-    const changed = await mutation['mutationFn'](payload);
-    mutation['onSuccess'](changed, payload, principal);
+    const hook = render() as { mutateAsync: (payload: unknown) => Promise<unknown> };
+    const mutation = env.mutation!;
+    const changed = await hook.mutateAsync(payload);
+    const operation = env.variables;
+    mutation['onSuccess'](changed, operation);
     expect(checkoutAttempt.currentFor(PRINCIPAL)).toMatchObject({ key: K, state: 'sent' });
     const bKey = switchToB();
     const before = env.invalidations.length;
-    mutation['onSuccess'](changed, payload, principal);
+    mutation['onSuccess'](changed, operation);
     expect(checkoutAttempt.currentFor(B)?.key).toBe(bKey);
     expect(env.invalidations).toHaveLength(before);
   });
   it('an open unsent intent is safely superseded after a successful cart change', async () => {
     const initial = checkoutAttempt.begin({ principal: PRINCIPAL, bodyHash: stableBodyHash(DELIVERY) });
-    useAddToCart(); const mutation = env.mutation!; const principal = mutation['onMutate']();
+    const hook = useAddToCart(); const mutation = env.mutation!;
     const item = { vendorId: 'v1', itemId: 'i1' };
-    mutation['onSuccess'](await mutation['mutationFn'](item), item, principal);
+    const changed = await hook.mutateAsync(item);
+    mutation['onSuccess'](changed, env.variables);
     expect(checkoutAttempt.currentFor(PRINCIPAL)).toBeNull();
     expect(checkoutAttempt.begin({ principal: PRINCIPAL, bodyHash: stableBodyHash(DELIVERY) }).key).not.toBe(initial.key);
   });

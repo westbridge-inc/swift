@@ -190,7 +190,7 @@ describe('the counters', () => {
 });
 
 describe('[AX372 R1] a failed checkout is read for what it says about the order', () => {
-  it('no answer (offline, a timeout), a 408 or any 5xx (CHECKOUT_OUTCOME_UNKNOWN among them) is UNKNOWN; a 4xx refusal is REFUSED', () => {
+  it('every transport failure stays UNKNOWN until receipt authority proves none', () => {
     expect(checkoutFailureOutcome({})).toBe('unknown');
     expect(checkoutFailureOutcome({ status: 503, code: 'CHECKOUT_OUTCOME_UNKNOWN' })).toBe('unknown');
     expect(checkoutFailureOutcome({ status: 500 })).toBe('unknown');
@@ -199,10 +199,16 @@ describe('[AX372 R1] a failed checkout is read for what it says about the order'
     expect(checkoutFailureOutcome({ status: 408 })).toBe('unknown');
     // the code is the server saying it cannot tell, whatever status carries it
     expect(checkoutFailureOutcome({ status: 409, code: 'CHECKOUT_OUTCOME_UNKNOWN' })).toBe('unknown');
-    expect(checkoutFailureOutcome({ status: 400, code: 'VALIDATION_ERROR' })).toBe('refused');
-    expect(checkoutFailureOutcome({ status: 409, code: 'DELIVERY_NO_RIDERS' })).toBe('refused');
-    expect(checkoutFailureOutcome({ status: 422 })).toBe('refused');
-    expect(checkoutFailureOutcome({ status: 429 })).toBe('refused');
+    expect(checkoutFailureOutcome({ status: 400, code: 'VALIDATION_ERROR' })).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 409, code: 'DELIVERY_NO_RIDERS' })).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 422 })).toBe('unknown');
+    // Rate limiting is upstream of the receipt authority.
+    expect(checkoutFailureOutcome({ status: 429 })).toBe('unknown');
+    for (const status of [400, 401, 403, 404, 409, 422, 429]) {
+      expect(checkoutFailureOutcome({ status })).toBe('unknown');
+      expect(checkoutFailureOutcome({ status, receipt: { status: 'in_flight' } })).toBe('unknown');
+      expect(checkoutFailureOutcome({ status, receipt: { status: 'none' } })).toBe('refused');
+    }
   });
 });
 

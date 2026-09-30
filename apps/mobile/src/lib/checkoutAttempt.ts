@@ -222,20 +222,14 @@ export type CheckoutAttempt = ReturnType<typeof createCheckoutAttempt>;
 // [AX372 R1] An unknown outcome is never read as a failure.
 // ---------------------------------------------------------------------------
 
-/** What a failed checkout request says about its order:
- *  unknown  no answer came back (offline, a timeout), or the server could not
- *           say: a 408, any 5xx, or CHECKOUT_OUTCOME_UNKNOWN (the server lost
- *           the commit's acknowledgement). The order may exist: the intent
- *           stays SENT until the receipt probe settles it.
- *  refused  the server answered a 4xx: it refused the request before placing
- *           anything, so the same key may retry and a changed body supersede. */
+/** Transport status cannot settle a SENT key. Another send may have committed
+ * while this response was delayed, including a first send's 4xx refusal.
+ * Only the receipt authority's `none` permits reopening. Committed receipts
+ * are handled separately as placed; absent/in-flight evidence stays unknown. */
 export type CheckoutFailureOutcome = 'unknown' | 'refused';
 
-export function checkoutFailureOutcome(failure: { status?: number; code?: string }): CheckoutFailureOutcome {
-  if (failure.code === 'CHECKOUT_OUTCOME_UNKNOWN') return 'unknown';
-  const { status } = failure;
-  if (status === undefined || status === 408 || status >= 500) return 'unknown';
-  return status >= 400 ? 'refused' : 'unknown';
+export function checkoutFailureOutcome(failure: { status?: number; code?: string; receipt?: ReceiptProbe }): CheckoutFailureOutcome {
+  return failure.receipt?.status === 'none' ? 'refused' : 'unknown';
 }
 
 /** The receipt probe's answer for a key (GET /customer/checkout/receipts/:key). */

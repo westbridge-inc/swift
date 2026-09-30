@@ -647,10 +647,6 @@ export function usePlaceOrder<T = any>() {
           recordCheckoutOutcome('in_flight_refused');
           throw new CheckoutInFlightError();
         }
-        if (checkoutFailureOutcome({ status, code }) === 'refused') {
-          checkoutAttempt.markOpen(key, principal);
-          throw err;
-        }
         checking(true);
         let settled: ReceiptProbe;
         try { settled = await settleSentIntent(key, principal); }
@@ -662,7 +658,7 @@ export function usePlaceOrder<T = any>() {
           checkoutAttempt.end(key, principal);
           throw new CheckoutAlreadyPlacedError(settled.orderIds);
         }
-        if (settled.status === 'none') {
+        if (checkoutFailureOutcome({ status, code, receipt: settled }) === 'refused') {
           checkoutAttempt.markOpen(key, principal);
           throw err;
         }
@@ -787,83 +783,100 @@ function invalidateCart(qc: ReturnType<typeof useQueryClient>, principal: Checko
   checkoutAttempt.invalidateCart(principal);
 }
 
-export function useAddToCart() {
+interface CartOperation<T> { principal: CheckoutPrincipal; payload: T }
+
+/** Capture before React Query can await onMutate or queue this operation. Each
+ * invocation owns its principal; callbacks and results cannot follow a login. */
+function useCartMutation<T>(send: (payload: T, session: AuthSessionSnapshot) => Promise<any>) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (data: {
+  useAuthStore((state) => state.sessionGeneration);
+  const latest = useRef<CartOperation<T> | null>(null);
+  const current = (operation: CartOperation<T>) => latest.current === operation && checkoutCurrent(operation.principal);
+  const m = useMutation<any, unknown, CartOperation<T>>({
+    mutationFn: async (operation) => {
+      const session = requireAuthSessionForPrincipal(operation.principal);
+      try {
+        const data = await send(operation.payload, session);
+        requireAuthSessionForPrincipal(operation.principal);
+        return data;
+      } catch (error) {
+        requireAuthSessionForPrincipal(operation.principal);
+        throw error;
+      }
+    },
+    onSuccess: (_data, operation) => { invalidateCart(qc, operation.principal); },
+  });
+  type Options = MutateOptions<any, unknown, T>;
+  const callbacks = (operation: CartOperation<T>, options?: Options): MutateOptions<any, unknown, CartOperation<T>> => ({
+    onSuccess: (data, _variables, ...context) => { if (current(operation)) options?.onSuccess?.(data, operation.payload, ...context); },
+    onError: (error, _variables, ...context) => { if (current(operation)) options?.onError?.(error, operation.payload, ...context); },
+    onSettled: (data, error, _variables, ...context) => { if (current(operation)) options?.onSettled?.(data, error, operation.payload, ...context); },
+  });
+  const capture = (payload: T): CartOperation<T> => {
+    const operation = { payload, principal: checkoutPrincipal() };
+    latest.current = operation;
+    return operation;
+  };
+  const mutate = (payload: T, options?: Options) => {
+    const operation = capture(payload);
+    m.mutate(operation, callbacks(operation, options));
+  };
+  const mutateAsync = async (payload: T, options?: Options) => {
+    const operation = capture(payload);
+    try {
+      const data = await m.mutateAsync(operation, callbacks(operation, options));
+      requireAuthSessionForPrincipal(operation.principal);
+      return data;
+    } catch (error) {
+      requireAuthSessionForPrincipal(operation.principal);
+      throw error;
+    }
+  };
+  const visible = latest.current && current(latest.current);
+  return { ...m, mutate, mutateAsync,
+    data: visible ? m.data : undefined, error: visible ? m.error : null,
+    variables: visible ? m.variables?.payload : undefined, failureReason: visible ? m.failureReason : null,
+    isIdle: !visible || m.isIdle, status: visible ? m.status : 'idle' as const,
+    isSuccess: !!visible && m.isSuccess, isError: !!visible && m.isError, isPending: !!visible && m.isPending };
+}
+
+export function useAddToCart() {
+  return useCartMutation((data: {
       vendorId: string;
       itemId: string;
       quantity?: number;
       selectedOptions?: Record<string, unknown>;
       specialInstructions?: string;
-    }) => unwrap(customerApi.addToCart(data)),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+    }, session) => unwrap(customerApi.addToCart(data, session)));
 }
 
 export function useUpdateCartItem() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, quantity }: { id: string; quantity: number }) =>
-      unwrap(customerApi.updateCartItem(id, { quantity })),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+  return useCartMutation(({ id, quantity }: { id: string; quantity: number }, session) =>
+    unwrap(customerApi.updateCartItem(id, { quantity }, session)));
 }
 
 export function useRemoveCartItem() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => unwrap(customerApi.removeCartItem(id)),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+  return useCartMutation((id: string, session) => unwrap(customerApi.removeCartItem(id, session)));
 }
 
 export function useClearCart() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => unwrap(customerApi.clearCart()),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+  return useCartMutation((_payload: void, session) => unwrap(customerApi.clearCart(session)));
 }
 
 export function useSetCartAddress() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (addressId: string) => unwrap(customerApi.setCartAddress(addressId)),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+  return useCartMutation((addressId: string, session) => unwrap(customerApi.setCartAddress(addressId, session)));
 }
 
 export function useSetCartTip() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (amount: number) => unwrap(customerApi.setCartTip(amount)),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+  return useCartMutation((amount: number, session) => unwrap(customerApi.setCartTip(amount, session)));
 }
 
 export function useRemoveCartPromo() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => unwrap(customerApi.removeCartPromo()),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+  return useCartMutation((_payload: void, session) => unwrap(customerApi.removeCartPromo(session)));
 }
 
 export function useReorder() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => unwrap(customerApi.reorder(id)),
-    onMutate: checkoutPrincipal,
-    onSuccess: (_data, _variables, principal) => { if (principal) invalidateCart(qc, principal); },
-  });
+  return useCartMutation((id: string, session) => unwrap(customerApi.reorder(id, session)));
 }
 
 // ── Support / dispute ────────────────────────────────────────────────────

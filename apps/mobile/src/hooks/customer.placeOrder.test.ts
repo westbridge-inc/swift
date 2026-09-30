@@ -13,9 +13,8 @@ import { readFileSync } from 'node:fs';
 //   ambiguous: a sent intent with another body is resolved by the receipt
 //             probe BEFORE anything is placed — placed ends it, in flight
 //             keeps asking with backoff [AX372 R1], none supersedes
-//   sent:     marked before the request leaves; only a 4xx refusal re-opens
-//             it — an unknown outcome (no answer, any 5xx) is asked about
-//             first and re-opens only on "none" [AX372 R1]
+//   sent:     marked before the request leaves; every transport failure is
+//             asked about and re-opens only on authoritative "none"
 //   422 IDEMPOTENCY_KEY_REUSED → the order already exists (never a retry)
 //   409 DUPLICATE_REQUEST      → still being placed (never a second order)
 //   replayed: true             → counted as a dedupe replay
@@ -86,16 +85,13 @@ describe('the intent', () => {
   it('is marked SENT before the request leaves, and re-opened only on a definitive answer', () => {
     const fn = body(hook, 'mutationFn: async (operation) => {', 'meta: { silent: true }');
     expect(fn.indexOf('checkoutAttempt.markSent(key, principal);')).toBeLessThan(fn.indexOf('customerApi.placeOrder(payload, key, session)'));
-    // [AX372 R1] Re-opened in exactly two places: a 4xx refusal, and an
-    // unknown outcome the receipt probe settled as "none".
-    expect(fn.match(/checkoutAttempt\.markOpen\(key, principal\)/g) ?? []).toHaveLength(2);
-    const refused = body(fn, "if (checkoutFailureOutcome({ status, code }) === 'refused') {", 'throw err;');
-    expect(refused).toContain('checkoutAttempt.markOpen(key, principal);');
-    const unknown = fn.slice(fn.indexOf("if (checkoutFailureOutcome({ status, code }) === 'refused') {") + 1);
-    const none = body(unknown, "if (settled.status === 'none') {", 'throw err;');
+    // Exactly one reopening branch, after receipt authority is consulted.
+    expect(fn.match(/checkoutAttempt\.markOpen\(key, principal\)/g) ?? []).toHaveLength(1);
+    const refusal = "if (checkoutFailureOutcome({ status, code, receipt: settled }) === 'refused') {";
+    const none = body(fn, refusal, 'throw err;');
     expect(none).toContain('checkoutAttempt.markOpen(key, principal);');
-    expect(unknown.indexOf('settled = await settleSentIntent(key, principal);')).toBeLessThan(unknown.indexOf("if (settled.status === 'none') {"));
-    expect(unknown).toContain('throw new CheckoutOutcomeUnknownError();');
+    expect(fn.indexOf('settled = await settleSentIntent(key, principal);')).toBeLessThan(fn.indexOf(refusal));
+    expect(fn).toContain('throw new CheckoutOutcomeUnknownError();');
     expect(fn).not.toMatch(/markOpen\(key, principal\);\s*\}\s*catch/);
   });
 
@@ -162,8 +158,12 @@ describe('the cart seam', () => {
     const cartHooks = body(HOOKS, 'export function useAddToCart', 'export function useMySupportTickets');
     const direct = cartHooks.match(/invalidateQueries\(\{ queryKey: \['customer', 'cart'\]/g) ?? [];
     expect(direct).toHaveLength(0);
-    expect((cartHooks.match(/invalidateCart\(qc, principal\)/g) ?? []).length).toBe(8);
-    expect((cartHooks.match(/onMutate: checkoutPrincipal/g) ?? []).length).toBe(8);
+    expect((cartHooks.match(/return useCartMutation\(/g) ?? []).length).toBe(8);
+    expect(seam).toContain('invalidateCart(qc, operation.principal)');
+    expect(seam).toContain('const operation = { payload, principal: checkoutPrincipal() };');
+    expect(seam).toContain('const session = requireAuthSessionForPrincipal(operation.principal);');
+    expect(seam).toContain('await send(operation.payload, session)');
+    expect(seam).not.toContain('onMutate: checkoutPrincipal');
   });
 });
 
