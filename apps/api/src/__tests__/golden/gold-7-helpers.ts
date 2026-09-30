@@ -89,6 +89,8 @@ export function createGolden(phonePrefix: string, fixture: string) {
       const ids = users.map((u) => u.id);
       if (!ids.length) return;
       const vendorIds = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: ids } } }, select: { id: true } })).map((v) => v.id);
+      const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+      const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
       const docs = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
       const cases = (await app.prisma.reviewCase.findMany({ where: { submissionId: { in: docs } }, select: { id: true } })).map((c) => c.id);
       await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...docs, ...cases, ...vendorIds] } }] }, `test-cleanup:${fixture}`);
@@ -128,7 +130,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       if (orderIds.length) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
       await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
       await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
-      await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds] } } });
+      await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
       await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
       // Stock movements, consent and deletion receipts are append-only evidence.
       // Their scalar subject IDs allow the mutable fixtures to be removed.
@@ -138,6 +140,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
       await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
       await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
+      await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
       await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
       await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
       await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
@@ -146,7 +149,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
       await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
       await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-      const wanted = new Set([...ids, ...vendorIds, ...orderIds]);
+      const wanted = new Set([...ids, ...vendorIds, ...orderIds, ...riderIds, ...sessionIds]);
       let cursor = '0';
       do {
         const [next, keys] = await app.redis.scan(cursor, 'COUNT', 1000);
