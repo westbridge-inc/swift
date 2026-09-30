@@ -254,7 +254,8 @@ async function purgeBlock() {
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: sids } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: sids } } });
   await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: sids } } });
-  await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: sids } }, { userId: { in: ids } }] }, 'test-cleanup:ax332-rate-change').catch(() => 0);
+  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+  await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: [...sids, ...ids] } }, { userId: { in: ids } }] }, 'test-cleanup:ax332-rate-change');
   await app.prisma.subscription.deleteMany({ where: { id: { in: sids } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: ids } } } });

@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PrismaClient, VehicleType } from '@prisma/client';
+import { authorityTables } from './helpers/fee-authority-fixture';
 
 // ---------------------------------------------------------------------------
 // The Guyana partner weekly fee is ONE contract: the number the public price
@@ -112,28 +113,37 @@ type SignupSubject =
 /** An in-memory partner table for the REAL SubscriptionService: one partner of
  *  the given kind, optionally already holding a subscription, and a record of
  *  every subscription row the service creates. */
+
 function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY', opts: { existing?: boolean } = {}) {
   const created: Array<Record<string, unknown>> = [];
   const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     created.push(data);
     return { id: `sub-${created.length}`, ...data };
   });
-  const existing = opts.existing ? { id: 'sub-existing', weeklyRate: 12345, status: 'ACTIVE' } : null;
+  const user = { id: `user-${subject.kind.toLowerCase()}`, tenantId: 'swift-default', countryCode };
+  const profile = { userId: user.id, user, ...(subject.kind !== 'VENDOR' ? { vehicleType: subject.vehicleType } : {}) };
+  const decorate = (row: Record<string, unknown>) => ({ ...row,
+    type: subject.kind === 'DRIVER' ? 'TAXI_DRIVER' : 'DELIVERY_RIDER',
+    ...(subject.kind === 'RIDER' ? { riderId: 'rider-1', rider: profile } : subject.kind === 'DRIVER' ? { driverId: 'driver-1', driver: profile } : {}),
+  });
+  const existing = opts.existing ? decorate({ id: 'sub-existing', weeklyRate: 12345, status: 'ACTIVE' }) : null;
+  const authority = authorityTables(() => [...(existing ? [existing] : []), ...created.map((row, i) => decorate({ id: `sub-${i + 1}`, ...row }))], () => [user]);
   const prisma = {
+    ...authority,
     countryConfig: countryConfigFake({ [countryCode]: tiers }),
     rider: {
       findUnique: vi.fn(async () =>
         subject.kind === 'RIDER'
-          ? { riderType: subject.riderType ?? 'BOTH', vehicleType: subject.vehicleType, subscription: existing, user: { countryCode } }
+          ? { ...profile, riderType: subject.riderType ?? 'BOTH', subscription: existing }
           : null,
       ),
-      findUniqueOrThrow: vi.fn(async () => ({ userId: 'user-rider' })),
+      findUniqueOrThrow: vi.fn(async () => profile),
     },
     driver: {
       findUnique: vi.fn(async () =>
-        subject.kind === 'DRIVER' ? { vehicleType: subject.vehicleType, subscription: existing, user: { countryCode } } : null,
+        subject.kind === 'DRIVER' ? { ...profile, subscription: existing } : null,
       ),
-      findUniqueOrThrow: vi.fn(async () => ({ userId: 'user-driver' })),
+      findUniqueOrThrow: vi.fn(async () => profile),
     },
     vendor: {
       findUnique: vi.fn(async () =>
@@ -147,9 +157,12 @@ function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY',
       ),
       findUniqueOrThrow: vi.fn(async () => ({ owner: { userId: 'user-vendor' } })),
     },
-    subscription: { create, findFirstOrThrow: vi.fn() },
+    subscription: { ...authority.subscription, create, findFirstOrThrow: vi.fn() },
     enforcementAction: { create: vi.fn(() => Promise.resolve({})) },
-    $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => callback({ subscription: { create } })),
+    $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => {
+      const tx = Object.fromEntries(Object.entries(prisma).filter(([name]) => name !== '$transaction'));
+      return callback(tx);
+    }),
   } as unknown as PrismaClient;
   return { prisma, created };
 }
@@ -234,10 +247,17 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
     stage(where.id, to);
     return { count: 1 };
   };
+  const authority = authorityTables(() => [...moverRows, ...vendorRows].map((r) => ({ ...r, weeklyRate: rates.get(String(r['id'])) })),
+    () => [...moverRows, ...vendorRows].map((r) => (r['rider'] as any)?.user ?? (r['driver'] as any)?.user ?? (r['vendor'] as any)?.owner.user));
   const transaction = async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> => {
     const staged: { updates: Array<[string, number]>; events: Array<Record<string, unknown>> } = { updates: [], events: [] };
     const tx = {
+      ...authority,
+      countryConfig: countryConfigFake(tiersByCountry),
+      rider: { findUniqueOrThrow: vi.fn(async ({ where }: { where: { userId: string } }) => moverRows.find((r) => (r['rider'] as any)?.user.id === where.userId)?.['rider']) },
+      driver: { findUniqueOrThrow: vi.fn(async ({ where }: { where: { userId: string } }) => moverRows.find((r) => (r['driver'] as any)?.user.id === where.userId)?.['driver']) },
       subscription: {
+        ...authority.subscription,
         updateMany: vi.fn(async ({ where, data }: { where: { id: string; weeklyRate?: unknown }; data: { weeklyRate: number } }) =>
           compareAndSet(where, Number(data.weeklyRate), (id, rate) => staged.updates.push([id, rate])),
         ),
@@ -309,9 +329,9 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
   async function run(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = []) {
     for (const s of [...movers, ...vendors]) if (!rates.has(s.id)) rates.set(s.id, s.weeklyRate);
     moverRows = movers.map((m) => {
-      const person = { vehicleType: m.vehicleType, user: { countryCode: m.countryCode ?? 'GY' } };
+      const person = { vehicleType: m.vehicleType, user: { id: `${m.id}-payer`, tenantId: 'swift-default', countryCode: m.countryCode ?? 'GY' } };
       return {
-        id: m.id,
+        id: m.id, type: m.kind === 'DRIVER' ? 'TAXI_DRIVER' : 'DELIVERY_RIDER',
         riderId: m.kind === 'RIDER' ? `${m.id}-rider` : null,
         driverId: m.kind === 'DRIVER' ? `${m.id}-driver` : null,
         weeklyRate: rates.get(m.id),
@@ -332,7 +352,7 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
       vendor: {
         id: `${v.id}-vendor`,
         vendorType: v.vendorType,
-        owner: { user: { countryCode: v.countryCode ?? 'GY', id: `${v.id}-owner` }, _count: { vendors: v.ownedStores ?? 1 } },
+        owner: { user: { countryCode: v.countryCode ?? 'GY', id: `${v.id}-owner`, tenantId: 'swift-default' }, _count: { vendors: v.ownedStores ?? 1 } },
       },
     }));
     itemCounts = new Map(vendors.map((v) => [`${v.id}-vendor`, v.activeItems]));

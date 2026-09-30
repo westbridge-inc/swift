@@ -205,13 +205,14 @@ afterAll(async () => {
   delete process.env['CARD_RAIL_V2'];
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();
+  // Purge the whole synthetic payer before its retained authority sources.
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
 });
 

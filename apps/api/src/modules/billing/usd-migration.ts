@@ -6,6 +6,7 @@ import { convertUsdToLocal, formatMoney, resolveRateForRun } from './fx';
 import { log } from '../../utils/logger';
 import { usdMigrationFlipsCounter, usdMigrationHeldGauge } from '../../plugins/observability';
 import { weeklyFeeAmount } from './subscription-fee';
+import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 
 // System 2 Part 13/20 — migration of existing local-priced subscriptions.
 // The founder picks a mode per tenant at enable time:
@@ -63,18 +64,21 @@ export async function previewModeA(prisma: PrismaClient) {
   return {
     rateId: rate.id,
     rate: Number(rate.rate),
-    rows: subs.map((s) => {
-      const role = SUB_ROLE[s.type] ?? 'VENDOR';
-      const amountUsd = book.get(`${role}|${s.type}`) ?? book.get(`${role}|`);
+    rows: (await Promise.all(subs.map(async (s) => {
+      const authority = await readFeeCollectionAuthority(prisma, s.id);
+      if (!authority.canonical) return null;
+      const feeType = authority.mover?.feeType ?? s.type;
+      const role = SUB_ROLE[feeType] ?? 'VENDOR';
+      const amountUsd = book.get(`${role}|${feeType}`) ?? book.get(`${role}|`);
       const current = weeklyFeeAmount(s);
       const next = amountUsd !== undefined ? convertUsdToLocal(amountUsd, Number(rate.rate), increment).amountLocal : null;
       return {
-        subscriptionId: s.id, type: s.type,
+        subscriptionId: s.id, type: feeType,
         currentLocal: current, mappedUsd: amountUsd ?? null, nextLocal: next,
         deltaPct: next !== null && current > 0 ? Math.round(((next - current) / current) * 10000) / 100 : null,
         unmapped: amountUsd === undefined,
       };
-    }),
+    }))).filter((row): row is NonNullable<typeof row> => row !== null),
   };
 }
 
@@ -142,8 +146,12 @@ export async function enableModeB(prisma: PrismaClient, sunsetAt: Date, tenantId
   });
   let grandfathered = 0;
   for (const s of subs) {
-    await prisma.$transaction(async (tx) => {
-      await tx.subscription.update({ where: { id: s.id }, data: { customRate: s.weeklyRate } });
+    const changed = await prisma.$transaction(async (tx) => {
+      const authority = await lockFeeCollectionAuthority(tx, s.id);
+      if (authority.mover && authority.mover.canonicalSubscriptionId !== s.id) return false;
+      const current = await tx.subscription.findUniqueOrThrow({ where: { id: s.id } });
+      if (current.customRate !== null) return false;
+      await tx.subscription.update({ where: { id: s.id }, data: { customRate: current.weeklyRate } });
       // The immutable assignment: what this payer was pinned at, and when.
       // [M-15] `skipDuplicates`, not a swallowed P2002: inside an interactive
       // transaction a unique violation ABORTS the transaction in Postgres, and
@@ -151,14 +159,15 @@ export async function enableModeB(prisma: PrismaClient, sunsetAt: Date, tenantId
       // rollback could never be processed again.
       await tx.billingEvent.createMany({
         data: [{
-          subscriptionId: s.id, type: 'TIER_CHANGE', amount: s.weeklyRate, currencyCode: s.currencyCode,
+          subscriptionId: s.id, type: 'TIER_CHANGE', amount: current.weeklyRate, currencyCode: current.currencyCode,
           idempotencyKey: modeBKey(s.id, 'freeze'),
-          note: `Mode B grandfathered at ${formatMoney(Number(s.weeklyRate), s.currencyCode)} (tenant ${tenantId}, sunset ${sunsetAt.toISOString().slice(0, 10)})`,
+          note: `Mode B grandfathered at ${formatMoney(Number(current.weeklyRate), current.currencyCode)} (tenant ${tenantId}, sunset ${sunsetAt.toISOString().slice(0, 10)})`,
         }],
         skipDuplicates: true,
       });
+      return true;
     });
-    grandfathered += 1;
+    if (changed) grandfathered += 1;
   }
   // [ADM-002] The mode flip is the consequential switch; its audit row commits
   // with it. The per-payer freezes above are idempotent rows that precede it.
@@ -205,6 +214,8 @@ export async function sweepModeB(
     });
     let heldHere = 0;
     for (const s of grandfathered) {
+      const authority = await readFeeCollectionAuthority(prisma, s.id);
+      if (!authority.canonical) continue;
       const phases: Array<{ key: 't30' | 't7'; dueFrom: number }> = [
         { key: 't30', dueFrom: sunset.getTime() - 30 * DAY_MS },
         { key: 't7', dueFrom: sunset.getTime() - 7 * DAY_MS },
@@ -267,7 +278,9 @@ export async function sweepModeB(
           log().error({ subscriptionId: s.id, proofs, tenantId: tenant.tenantId }, '[M-15] Mode B past sunset with notice proof missing — payer HELD at the grandfathered rate');
           continue;
         }
-        await prisma.$transaction(async (tx) => {
+        const changed = await prisma.$transaction(async (tx) => {
+          const authority = await lockFeeCollectionAuthority(tx, s.id);
+          if (authority.mover && authority.mover.canonicalSubscriptionId !== s.id) return false;
           // The immutable snapshot rollback points to: the pinned price, now released.
           try {
             // [M-15] `skipDuplicates`: a payer flipped, rolled back and flipped
@@ -285,7 +298,9 @@ export async function sweepModeB(
             if ((err as { code?: string }).code !== 'P2002') throw err;
           }
           await tx.subscription.update({ where: { id: s.id }, data: { customRate: null } });
+          return true;
         });
+        if (!changed) continue;
         out.flipped += 1;
         usdMigrationFlipsCounter.labels('flipped').inc();
       }
@@ -319,6 +334,7 @@ export async function rollbackModeB(prisma: PrismaClient, tenantId: string, now 
   for (const flip of flips) {
     if (flip.amount == null) continue;
     await prisma.$transaction(async (tx) => {
+      await lockFeeCollectionAuthority(tx, flip.subscriptionId);
       await tx.subscription.update({ where: { id: flip.subscriptionId }, data: { customRate: flip.amount! } });
       await tx.billingEvent.create({
         data: {

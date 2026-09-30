@@ -176,7 +176,7 @@ export class CardRailService {
       if (replay) return replay;
     }
 
-    let priced: { amount: number; currencyCode: string; periodStart: Date } | null = null;
+    let priced: Awaited<ReturnType<BillingService['quoteCardPayNow']>> | null = null;
     if (input.purpose === 'ENROLL') {
       if (input.consentVersion !== CARD_ON_FILE_CONSENT_VERSION) {
         throw new AppError(400, 'CARD_CONSENT_REQUIRED', 'Agree to weekly card charges before adding a card.');
@@ -193,6 +193,20 @@ export class CardRailService {
       session = await this.prisma.$transaction(async (tx) => {
         const authority = await lockFeeCollectionAuthority(tx, sub.id);
         if (!authority.allowed) throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before opening another payment page.');
+        if (priced) {
+          const current = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+          // A read-only quote can project revision zero before this same
+          // locked transaction records the first unchanged classification.
+          const sameRevision = (authority.mover?.revision ?? null) === priced.feeBasis.authorityRevision
+            || (priced.feeBasis.authorityRevision === 0 && authority.mover?.revision === 1);
+          if (!sameRevision
+            || (authority.mover?.feeType ?? current.type) !== priced.feeBasis.type
+            || Number(current.weeklyRate) !== priced.feeBasis.weeklyRate || String(current.customRate) !== priced.feeBasis.customRate
+            || current.feeWaived !== priced.feeBasis.feeWaived || current.currencyCode !== priced.currencyCode
+            || current.nextBillingDate.getTime() !== priced.periodStart.getTime()) {
+            throw new AppError(409, 'MOVER_FEE_PRICE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
+          }
+        }
         return tx.cardSession.create({
         data: {
           tenantId,
@@ -775,4 +789,3 @@ export class CardRailService {
     return { card, paymentInProgress: inFlight > 0 };
   }
 }
-

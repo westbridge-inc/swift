@@ -48,7 +48,7 @@ export async function paidMoverResolutionBlocker(db: Db, sources: Subscription[]
     const [balance, unconfirmed, paidPeriod, refund, topup, agent, provider, session, tombstone, contacts] = await Promise.all([
       db.prepaidBalance.findUnique({ where: linked }),
       db.subscriptionPayment.findFirst({ where: { ...linked, status: { not: 'CAPTURED' } }, select: { id: true } }),
-      db.subscriptionPayment.findFirst({ where: { ...linked, status: 'CAPTURED', paidAt: { not: null }, periodStart: s.currentPeriodStart, periodEnd: s.currentPeriodEnd }, select: { id: true } }),
+      db.subscriptionPayment.findFirst({ where: { ...linked, status: 'CAPTURED', paidAt: { not: null }, periodStart: s.currentPeriodStart, periodEnd: s.currentPeriodEnd }, select: { id: true, amount: true } }),
       db.subscriptionRefund.findFirst({ where: linked, select: { id: true } }),
       db.topUpCommand.findFirst({ where: { ...linked, tailDoneAt: null }, select: { id: true } }),
       db.mmgAgentPayment.findFirst({ where: { OR: [linked, ...(s.san ? [{ sanNormalized: s.san }] : [])], status: { notIn: ['MATCHED', 'RESOLVED', 'RECONCILED'] } }, select: { id: true } }),
@@ -61,6 +61,26 @@ export async function paidMoverResolutionBlocker(db: Db, sources: Subscription[]
     if (balance && balance.currencyCode !== s.currencyCode) return 'SOURCE_CURRENCY_REQUIRES_REVIEW';
     if (unconfirmed || refund || topup || agent || provider || session || tombstone || contacts) return 'SOURCE_OBLIGATIONS_REQUIRE_RECONCILIATION';
     if (!paidPeriod) return 'PAID_PERIOD_PROOF_REQUIRED';
+    // A capture banked into a wallet is not proof that the paid week advanced.
+    // Require the immutable success event for this exact original paid period.
+    if (!await db.billingEvent.findFirst({ where: { ...linked, type: 'CHARGE_SUCCESS', amount: paidPeriod.amount,
+      idempotencyKey: `success:${s.id}:${s.currentPeriodStart.toISOString().slice(0, 10)}` }, select: { id: true } })) return 'PAID_PERIOD_PROOF_REQUIRED';
+    const observations = await db.$queryRaw<Array<{ unresolved: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM card_observations o
+        WHERE (o."subscriptionId"=${s.id} OR o."sessionId" IN (SELECT id FROM card_sessions WHERE "subscriptionId"=${s.id})
+          OR o."instrumentId" IN (SELECT id FROM payment_instruments WHERE "subscriptionId"=${s.id})
+          OR o."paymentId" IN (SELECT id FROM subscription_payments WHERE "subscriptionId"=${s.id}))
+        AND o.source <> 'RETURN' AND (o."parsedStatus" NOT IN ('SUCCEEDED','FAILED') OR o.verdict <> 'ACCEPTED'
+          OR (o."parsedStatus"='SUCCEEDED' AND NOT EXISTS (SELECT 1 FROM subscription_payments p WHERE p.id=o."paymentId" AND p."subscriptionId"=${s.id} AND p.status='CAPTURED')))
+        UNION ALL
+        SELECT 1 FROM provider_payments p
+        WHERE (p."subscriptionId"=${s.id} OR p.id IN (SELECT a."providerPaymentId" FROM mmg_agent_payments a
+          WHERE a."subscriptionId"=${s.id} OR (${s.san}::text IS NOT NULL AND regexp_replace(a."sanRaw",'[^0-9]','','g')=${s.san})))
+        AND p.status <> 'CREDITED'
+      ) AS unresolved
+    `;
+    if (observations[0]?.unresolved) return 'SOURCE_OBLIGATIONS_REQUIRE_RECONCILIATION';
     if (s.san) {
       const rows = await db.$queryRaw<Array<{ pending: boolean }>>`
         SELECT EXISTS (

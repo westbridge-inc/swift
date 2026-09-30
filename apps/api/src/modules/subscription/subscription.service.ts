@@ -363,11 +363,16 @@ export class SubscriptionService {
     const due = await this.prisma.subscription.findMany({ where: { status: 'TRIAL', trialEndDate: { lte: now } }, select: { id: true } });
     let count = 0;
     for (const sub of due) {
-      count += await this.prisma.$transaction(async (tx) => {
-        if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return 0;
-        return (await tx.subscription.updateMany({ where: { id: sub.id, status: 'TRIAL', trialEndDate: { lte: now } },
-          data: { status: 'ACTIVE', isTrialActive: false, nextBillingDate: now } })).count;
-      });
+      try {
+        count += await this.prisma.$transaction(async (tx) => {
+          if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return 0;
+          return (await tx.subscription.updateMany({ where: { id: sub.id, status: 'TRIAL', trialEndDate: { lte: now } },
+            data: { status: 'ACTIVE', isTrialActive: false, nextBillingDate: now } })).count;
+        });
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'MOVER_FEE_OWNERSHIP_INVALID') throw error;
+        log().warn({ subscriptionId: sub.id }, 'trial conversion held: original financial source has no valid payer');
+      }
     }
     return count;
   }

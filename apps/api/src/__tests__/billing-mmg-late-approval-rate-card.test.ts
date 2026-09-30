@@ -146,13 +146,13 @@ beforeAll(async () => {
 afterAll(async () => {
   // Fee receipts and ledger lines are append-only financial records and stay,
   // as in the other billing suites; everything keyed to the fixtures goes.
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
 });
 

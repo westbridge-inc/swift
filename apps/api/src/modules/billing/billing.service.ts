@@ -1,6 +1,6 @@
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
-import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus } from '@prisma/client';
+import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus, SubscriptionType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -459,6 +459,10 @@ export class BillingService {
         rider: { select: { userId: true } }, driver: { select: { userId: true } },
         vendor: { select: { id: true, owner: { select: { userId: true } } } },
       } });
+      // A worker selected one period and attempt. Refreshing ownership or
+      // price must not license it to open the next retry after another worker
+      // already advanced that selection.
+      if (fresh.nextBillingDate.getTime() !== sub.nextBillingDate.getTime() || fresh.failedAttempts !== sub.failedAttempts) return null;
       return { ...fresh, type: authority.mover?.feeType ?? fresh.type };
     });
     if (!candidate) return 'skipped';
@@ -473,7 +477,12 @@ export class BillingService {
 
     if (!reclaimedAttempt) try {
       const reserved = await this.prisma.$transaction(async (tx) => {
-        if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+        const current = await lockFeeCollectionAuthority(tx, sub.id);
+        if (!current.allowed) return false;
+        const latest = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+        if (latest.nextBillingDate.getTime() !== sub.nextBillingDate.getTime() || latest.failedAttempts !== sub.failedAttempts
+          || (current.mover?.feeType ?? latest.type) !== sub.type || Number(latest.weeklyRate) !== Number(sub.weeklyRate)
+          || String(latest.customRate) !== String(sub.customRate) || latest.feeWaived !== sub.feeWaived) return false;
         await tx.billingEvent.create({
           data: {
             subscriptionId: sub.id,
@@ -1322,23 +1331,27 @@ export class BillingService {
    * prices it. When a week is owed, that is the owed week; when nothing is
    * due, it is the next week, paid ahead. A client never names the amount.
    */
-  async quoteCardPayNow(subscriptionId: string, now = new Date()): Promise<{ amount: number; currencyCode: string; periodStart: Date; due: boolean }> {
+  async quoteCardPayNow(subscriptionId: string, now = new Date()): Promise<{ amount: number; currencyCode: string; periodStart: Date; due: boolean;
+    feeBasis: { authorityRevision: number | null; type: SubscriptionType; weeklyRate: number; customRate: string; feeWaived: boolean } }> {
     let sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } });
     if (!sub) throw new NotFoundError('Subscription', subscriptionId);
     const payer = await subscriptionPayer(this.prisma, subscriptionId);
+    let authorityRevision: number | null = null;
     if (payer.kind === 'MOVER') {
       const authority = await resolveMoverFeeAuthority(this.prisma, payer);
       if (!authority || authority.state !== 'ACTIVE' || authority.canonicalSubscriptionId !== subscriptionId) {
         throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before another payment.');
       }
       sub = { ...sub, type: authority.feeType };
+      authorityRevision = authority.revision;
     }
     if (sub.feeWaived) throw new AppError(409, 'NOTHING_TO_PAY', 'This week is waived — there is nothing to pay.');
     const priced = await this.priceEligibleFor(sub, await this.loadUsdPricing());
     const amount = Number(priced.amount);
     if (!(amount > 0)) throw new AppError(409, 'NOTHING_TO_PAY', 'There is no weekly fee to pay.');
     const due = sub.nextBillingDate.getTime() <= now.getTime() || ['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(sub.status);
-    return { amount, currencyCode: sub.currencyCode, periodStart: sub.nextBillingDate, due };
+    return { amount, currencyCode: sub.currencyCode, periodStart: sub.nextBillingDate, due,
+      feeBasis: { authorityRevision, type: sub.type, weeklyRate: Number(sub.weeklyRate), customRate: String(sub.customRate), feeWaived: sub.feeWaived } };
   }
 
   /**
@@ -3110,8 +3123,9 @@ export class BillingService {
       if (payer.kind === 'MOVER') {
         const authority = await lockMoverFeeAuthority(tx, payer);
         if (authority?.canonicalSubscriptionId !== subscriptionId) throw new AppError(409, 'MOVER_FEE_SOURCE_CHANGED', 'Use the current shared weekly fee.');
-        // Stopping cannot erase a hold or leave another source collecting.
-        await tx.subscription.updateMany({ where: { id: { in: authority.sourceSubscriptionIds.filter((id) => id !== subscriptionId) } }, data: { autoRenew: false, nextRetryAt: null } });
+        // Only the canonical fee collects and gates both roles. Changing an
+        // alias here would invent a separate manual stop that a later shared
+        // resume could not distinguish from an original source restriction.
       }
       const rows = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus; autoRenew: boolean; currencyCode: string; updatedAt: Date }>>`
         SELECT "id", "status", "autoRenew", "currencyCode", "updatedAt" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE
