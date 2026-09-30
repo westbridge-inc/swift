@@ -16,6 +16,7 @@ import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BrandSwitch } from '../../../kit/controls';
+import { retryRead } from '../../../lib/appQueryPolicy';
 
 const GUTTER = space['2xl'];
 
@@ -156,7 +157,8 @@ export function ProfileScreen() {
       </Screen>
     );
   }
-  if (profile.isError && !profile.data) {
+  if (profile.isError && (!profile.data || !retryRead(0, profile.error))) {
+    // Cached details are useful during outages, not after permanent rejection.
     // [REPORT-022 F-022-19] An API failure must never trap the session: the
     // account controls that don't depend on profile data stay reachable.
     return (

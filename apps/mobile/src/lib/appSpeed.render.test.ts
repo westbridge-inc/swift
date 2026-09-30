@@ -6,6 +6,7 @@ import * as jsx from 'react/jsx-runtime';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { HOME_RAIL_WINDOW, MARKET_WINDOW } from './listPerformance';
+import { retryRead } from './appQueryPolicy';
 
 // Execute the real TSX control flow with inert native leaves. This is a Node
 // render/descriptor contract, not a native renderer, FPS or device benchmark.
@@ -90,7 +91,12 @@ describe('actual tab render contracts', () => {
     for (const name of ['Home', 'Cart']) expect(customer).toContain(`name="${name}" component={${name}Screen} options={{ freezeOnBlur: false }}`);
   });
 
-  it.each([[true, false], [true, true], [false, true]])('Profile hasData=%s, error=%s retains content and retry', (hasData, isError) => {
+  it.each([
+    [true, false, 0, true], [true, true, 0, true], [false, true, 0, true],
+    [true, true, 401, true], [true, true, 403, true], [true, true, 400, true],
+    [true, true, 503, true], [true, true, 408, true], [true, true, 429, true],
+    [true, true, 401, false],
+  ] as const)('F4: Profile hasData=%s, error=%s, status=%s, authenticated=%s retains only recoverable content', (hasData, isError, status, authenticated) => {
     let retries = 0;
     const kit = new Proxy({ useLogoutConfirm: () => ({ requestLogout() {}, logoutDialog: null }) }, { get: (target, key) => key in target ? target[key as keyof typeof target] : String(key) });
     const { ProfileScreen } = execute(new URL('../modules/profile/screens/ProfileScreen.tsx', import.meta.url).pathname, {
@@ -100,18 +106,21 @@ describe('actual tab render contracts', () => {
       '@react-navigation/native': { useNavigation: () => ({ navigate() {} }) },
       'react-native-safe-area-context': { useSafeAreaInsets: () => ({ top: 48 }) },
       '@swift/ui': theme, '../../../lib/haptics': { haptic: { select() {} } },
-      '../../../hooks/customer': { useProfile: () => ({ data: hasData ? { firstName: 'Fixture', lastName: 'Account' } : undefined, isLoading: false, isError, refetch: () => { retries++; } }), useMyRating: () => ({}), useLiveOrders: () => ({}) },
-      '../../../stores/authStore': { useAuthStore: () => ({ isAuthenticated: true, user: { id: 'fixture' } }) },
+      '../../../hooks/customer': { useProfile: () => ({ data: hasData ? { firstName: 'Fixture', lastName: 'Account' } : undefined, isLoading: false, isError, error: status ? { response: { status } } : new Error('Network Error'), refetch: () => { retries++; } }), useMyRating: () => ({}), useLiveOrders: () => ({}) },
+      '../../../stores/authStore': { useAuthStore: () => ({ isAuthenticated: authenticated, user: { id: 'fixture' } }) },
+      '../../../lib/appQueryPolicy': { retryRead },
       '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' },
       'react-native-reanimated': { default: { View: 'AnimatedView' }, __esModule: true, FadeInDown: fluent, ReduceMotion: { System: 'system' } },
       '../../../components/RoleSwitcherSheet': { RoleSwitcherSheet: 'RoleSwitcherSheet' },
       '../../../services/api': { API_URL: 'https://invalid.example' }, '../../../lib/payLink': {}, '@tanstack/react-query': {},
     });
     const rendered = nodes(ProfileScreen());
-    expect(rendered.some((node) => node.type === 'ScrollView')).toBe(hasData);
-    expect(rendered.some((node) => node.type === 'ErrorState')).toBe(!hasData);
+    const hasContent = authenticated && hasData && ![400, 401, 403].includes(status);
+    expect(rendered.some((node) => node.type === 'ScrollView')).toBe(hasContent);
+    expect(rendered.some((node) => node.type === 'ErrorState')).toBe(authenticated && !hasContent);
+    expect(rendered.some((node) => node.type === 'EmptyState')).toBe(!authenticated);
     expect(rendered.some((node) => node.type === 'LoadingBlock')).toBe(false);
-    if (isError && hasData) {
+    if (isError && hasContent) {
       const masthead = rendered.find((node) => node.type === 'AnimatedView');
       expect(masthead.props.style.paddingTop).toBeGreaterThanOrEqual(48);
       const retry = nodes(masthead).find((node) => node.type === 'PillButton' && node.props.label === 'Try again');

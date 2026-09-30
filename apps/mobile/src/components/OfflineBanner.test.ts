@@ -7,6 +7,10 @@ const app = readFileSync(join(process.cwd(), 'src/App.tsx'), 'utf8');
 const appConfig = readFileSync(join(process.cwd(), 'app.config.ts'), 'utf8');
 
 describe('connectivity boundary contract', () => {
+  it('F5: offline copy is honest even on a cold start with no cached content', () => {
+    expect(banner).toContain("You're offline. Some things may not load until you're back online.");
+    expect(banner).not.toContain('saved content is still available');
+  });
   it('confirms stale false samples and refreshes when the app returns foreground', () => {
     expect(banner).toContain('OFFLINE_CONFIRMATION_MS');
     expect(banner).toContain('void netInfo.refresh()');

@@ -26,7 +26,7 @@ export const queryClient: QueryClient = new QueryClient({
   mutationCache,
   defaultOptions: {
     queries: {
-      staleTime: 30_000,
+      staleTime: 0, // Unknown families are live; reviewed exceptions are installed below.
       gcTime: QUERY_GC_MS,
       retry: retryRead,
       retryDelay: readRetryDelay,

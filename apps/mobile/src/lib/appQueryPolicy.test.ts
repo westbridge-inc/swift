@@ -8,6 +8,46 @@ const tick = async () => { for (let i = 0; i < 20; i++) await Promise.resolve();
 afterEach(() => { client.clear(); onlineManager.setOnline(true); vi.useRealTimers(); });
 
 describe('app query policy with the real QueryClient', () => {
+  it.each([
+    ['customer', 'vendor'], ['customer', 'vendors'], ['customer', 'search'],
+    ['customer', 'favorites'], ['market', 'items'],
+  ])('F1: %s/%s remount at 45 seconds shows cache immediately and refreshes availability', async (...prefix) => {
+    vi.useFakeTimers();
+    const queryKey = [...prefix, 'availability-fixture'];
+    const cached = { isOpen: true, price: 100 };
+    client.setQueryData(queryKey, cached);
+    const first = new QueryObserver(client, { queryKey, refetchOnMount: false });
+    first.subscribe(() => {})();
+    await vi.advanceTimersByTimeAsync(45_000);
+    let finish!: (value: typeof cached) => void;
+    const load = vi.fn(() => new Promise<typeof cached>((resolve) => { finish = resolve; }));
+    const observer = new QueryObserver(client, { queryKey, queryFn: load });
+    const off = observer.subscribe(() => {});
+    try {
+      expect(load).toHaveBeenCalledOnce();
+      expect(observer.getCurrentResult()).toMatchObject({ data: cached, isLoading: false, isFetching: true });
+      finish({ isOpen: false, price: 125 });
+      await tick();
+      expect(observer.getCurrentResult().data).toEqual({ isOpen: false, price: 125 });
+    } finally { off(); }
+  });
+
+  it.each([['customer', 'notifications'], ['future', 'unclassified']])(
+    'F2: unknown %s/%s refetches on remount inside 30 seconds', async (...queryKey) => {
+      client.setQueryData(queryKey, { unread: 0 });
+      const first = new QueryObserver(client, { queryKey, refetchOnMount: false });
+      first.subscribe(() => {})();
+      const load = vi.fn(async () => ({ unread: 1 }));
+      const observer = new QueryObserver(client, { queryKey, queryFn: load });
+      const off = observer.subscribe(() => {});
+      try {
+        expect(load).toHaveBeenCalledOnce();
+        expect(observer.getCurrentResult()).toMatchObject({ data: { unread: 0 }, isLoading: false });
+        await tick();
+        expect(observer.getCurrentResult().data).toEqual({ unread: 1 });
+      } finally { off(); }
+    },
+  );
   it('keeps Home content visible through three settled attention refreshes', async () => {
     const queryKey = homeQueryKey(6, -58, 'fixture');
     client.setQueryData(queryKey, { activeOrder: { status: 'PREPARING' }, featured: [] });
@@ -35,7 +75,7 @@ describe('app query policy with the real QueryClient', () => {
     const second = new QueryObserver(client, { queryKey: key, queryFn: load });
     const off1 = first.subscribe(() => {});
     const off2 = second.subscribe(() => {});
-    const refresh = client.invalidateQueries({ queryKey: key });
+    const refresh = client.invalidateQueries({ queryKey: key }, { cancelRefetch: false });
     expect(first.getCurrentResult()).toMatchObject({ isLoading: false, isFetching: true, data: { items: ['last loaded item'] } });
     expect(second.getCurrentResult().isLoading).toBe(false);
     expect(load).toHaveBeenCalledOnce();
@@ -56,8 +96,8 @@ describe('app query policy with the real QueryClient', () => {
     observer.destroy();
   });
 
-  it('retains browse data for a minute without requesting it again on remount', async () => {
-    const key = ['market', 'items', 'all', 'new'];
+  it.each(['profile', 'addresses', 'my-rating', 'search-suggestions'])('retains reviewed %s data for a minute without requesting it again on remount', async (family) => {
+    const key = ['customer', family];
     client.setQueryData(key, { items: [] }, { updatedAt: Date.now() - 45_000 });
     const load = vi.fn(async () => ({ items: [] }));
     const observer = new QueryObserver(client, { queryKey: key, queryFn: load });
@@ -126,4 +166,38 @@ describe('app query policy with the real QueryClient', () => {
     await outcome;
     expect(action).toHaveBeenCalledOnce();
   });
+
+  it.each(['settle', 'scope-wipe', 'no-observers'] as const)(
+    'F3: preserves a trailing refresh across a failed in-flight read (%s)', async (ending) => {
+      vi.useFakeTimers();
+      client.mount();
+      let fail!: (error: Error) => void;
+      const load = vi.fn()
+        .mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }))
+        .mockResolvedValue({ current: true });
+      const queryKey = ['customer', 'order', 'slow-reconnect-fixture'];
+      client.setQueryData(queryKey, { current: false });
+      const observer = new QueryObserver(client, { queryKey, queryFn: load, retry: false, refetchOnMount: false });
+      const off = observer.subscribe(() => {});
+      try {
+        onlineManager.setOnline(false); onlineManager.setOnline(true);
+        await tick();
+        await vi.advanceTimersByTimeAsync(2_000);
+        onlineManager.setOnline(false); onlineManager.setOnline(true);
+        await tick();
+        await vi.advanceTimersByTimeAsync(8_000);
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(observer.getCurrentResult()).toMatchObject({ data: { current: false }, isFetching: true });
+        if (ending === 'scope-wipe') client.clear();
+        if (ending === 'no-observers') off();
+        fail(new Error('read outlived reconnect deadline'));
+        await tick();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(load).toHaveBeenCalledTimes(ending === 'settle' ? 2 : 1);
+        if (ending === 'settle') {
+          expect(observer.getCurrentResult()).toMatchObject({ data: { current: true }, isError: false, isFetching: false });
+        }
+      } finally { off(); client.unmount(); }
+    },
+  );
 });

@@ -196,7 +196,7 @@ export function ConnectivityBoundary({ children }: { children: ReactNode }) {
         >
           <MaterialCommunityIcons name={offline ? 'wifi-off' : 'wifi-strength-1'} size={14} color={color.white} />
           <T variant="caption" weight="semibold" style={{ color: color.white, flexShrink: 1 }}>
-            {offline ? 'No connection — saved content is still available' : 'Slow connection — still trying'}
+            {offline ? "You're offline. Some things may not load until you're back online." : 'Slow connection — still trying'}
           </T>
         </View>
       ) : null}
