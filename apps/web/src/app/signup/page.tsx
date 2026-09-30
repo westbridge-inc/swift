@@ -7,6 +7,8 @@ import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
 import { currentSessionEpoch, getSessionPrincipal, sendOtp, verifySessionNow } from '@/lib/auth';
 import { Providers, useCacheIdentityReady, usePrivateCacheEpoch } from '@/components/providers';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
+import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
+import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { SwiftLogo } from '@/components/swift-logo';
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
@@ -17,8 +19,7 @@ type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
 
 function safeReturnPath(): string {
   if (typeof window === 'undefined') return '';
-  const candidate = new URLSearchParams(window.location.search).get('next') ?? '';
-  return /^\/(?!\/)/.test(candidate) && !candidate.includes('..') && !candidate.includes('\\') ? candidate : '';
+  return storefrontAuthReturn(new URLSearchParams(window.location.search).get('next'));
 }
 
 const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
@@ -44,6 +45,8 @@ function SignupForm() {
   const router = useRouter();
   const epoch = usePrivateCacheEpoch();
   const [formEpoch, setFormEpoch] = useState(currentSessionEpoch);
+  const continueJourney = useStorefrontAuthJourney();
+  useEffect(() => { safeReturnPath(); }, []);
   const [step, setStep] = useState<Step>('role');
   const [role, setRole] = useState<Role>('CUSTOMER');
   const [phone, setPhone] = useState('+592');
@@ -111,6 +114,7 @@ function SignupForm() {
       const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
       const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
+      if (customerReturnPath) continueJourney();
       router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
       return;
     }
@@ -139,7 +143,9 @@ function SignupForm() {
     if (role === 'CUSTOMER') {
       // [E27] No profile selfie merely to browse or order: a new customer goes
       // where they were headed (else to ordering), not to the camera.
-      router.replace(safeReturnPath() || '/');
+      const destination = safeReturnPath();
+      if (destination) continueJourney();
+      router.replace(destination || '/');
     }
     else {
       // Carry only the verified registration's role/phone into an empty
@@ -185,13 +191,13 @@ function SignupForm() {
             <ChevronLeft size={18} aria-hidden="true" /> Back
           </button>
         ) : null}
-        <Link href="/" aria-label="Swift home" className={styles.brandLink}><SwiftLogo /></Link>
+        <Link href="/" aria-label="Swift home" onClick={clearStorefrontContinuation} className={styles.brandLink}><SwiftLogo /></Link>
 
         {step === 'role' && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>What brings you to Swift?</h1>
             {ROLES.map(({ role: r, title, desc, Icon }) => (
-              <button key={r} type="button" onClick={() => { setRole(r); setStep('phone'); }} className={styles.roleButton}>
+              <button key={r} type="button" onClick={() => { if (r !== 'CUSTOMER') clearStorefrontContinuation(); setRole(r); setStep('phone'); }} className={styles.roleButton}>
                 <span className={styles.roleIcon}><Icon size={22} aria-hidden="true" /></span>
                 <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{desc}</span></span>
               </button>
@@ -199,6 +205,7 @@ function SignupForm() {
             <p className={styles.inlineText}>Already on Swift? <Link
               href="/login?next=/"
               onClick={(event) => {
+                continueJourney();
                 const next = safeReturnPath();
                 if (!next) return;
                 event.preventDefault();

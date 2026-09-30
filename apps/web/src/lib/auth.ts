@@ -1,5 +1,6 @@
 'use client';
 
+import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { clearPrivateBrowserState, listenForSessionInvalidation, publishSessionInvalidation } from './session-events';
 
@@ -76,6 +77,7 @@ function ensureSessionEvents(): void {
   });
 }
 function forgetSession(): void {
+  invalidateStorefrontContinuations();
   authGeneration += 1;
   sessionPrincipal = null;
   invalidatePrivateCaches();
@@ -180,6 +182,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
       // fail every concurrent request with a spurious SESSION_CHANGED. Only a
       // switch between two KNOWN people is a change.
       if (sessionPrincipal !== null) {
+        invalidateStorefrontContinuations();
         authGeneration += 1;
         invalidatePrivateCaches();
         publishSessionInvalidation();
@@ -220,6 +223,10 @@ export function verifySessionNow(): Promise<SessionAnswer> {
 export function adoptSession(principal: string | null) {
   if (typeof window === 'undefined') return;
   ensureSessionEvents();
+  if (sessionPrincipal !== principal || principal === null) {
+    // Only this tab’s guest sign-in may carry its Add into the new session.
+    invalidateStorefrontContinuations(sessionPrincipal === null && principal !== null);
+  }
   authGeneration += 1;
   invalidatePrivateCaches();
   sessionPrincipal = principal;
