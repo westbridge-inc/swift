@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus } from '../order/order.service';
+import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, releaseLapsedHoldInTransaction } from '../order/order.service';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -1564,6 +1564,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       : null;
     const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor', {
       withinTransaction: async (tx, lockedOrder) => {
+        // [Q12 · AX289 F1] An order whose hold lapsed before the release sweep
+        // reached it: accepting takes it out of the sweep's reach, so the
+        // acceptance releases it — counted for the store once, here.
+        await releaseLapsedHoldInTransaction(tx, order.id);
         if (appointmentItemId && order.appointmentSlot) {
           await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx);
         }
@@ -2253,6 +2257,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       note: reason,
       cancellation: { by: request.user.userId, reason },
       releaseStaleMoverPointer: true,
+      // [Q12 · AX289 F1] A decline of an order whose hold lapsed before the
+      // release sweep reached it releases it first — the store saw it, so it
+      // counts for the store once, here (the sweep can no longer reach it).
+      withinTransaction: async (tx) => { await releaseLapsedHoldInTransaction(tx, order.id); },
       invalidStatus: () => new AppError(400, 'INVALID_STATUS', 'This order can no longer be rejected'),
     });
     const updated = await app.prisma.order.findUniqueOrThrow({

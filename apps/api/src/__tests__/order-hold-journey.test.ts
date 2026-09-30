@@ -15,6 +15,7 @@ import { holdReleaseObserver } from '../modules/order/order.service';
 import { LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import { escalateVendorAlert } from '../modules/notification/notification.service';
 import { autoCancelUnresponsiveOrder, enqueueVendorAlertFollowup, releaseHeldOrdersJob } from '../jobs/queue';
+import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,10 @@ const openSockets: Socket[] = [];
 let seq = 0;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
+/** [AX289 F8] Fixtures deliberately OUTSIDE this file's release scope — the
+ *  stand-in for another suite's orders in the shared database. */
+const foreignUserIds: string[] = [];
+const foreignVendorIds: string[] = [];
 
 type Actor = { userId: string; token: string; phone: string };
 type Store = { owner: Actor; vendorId: string; itemId: string; device: string };
@@ -77,7 +82,7 @@ const sockets: Emitted[] = [];
 
 const ctx = () => ({ prisma: app.prisma, io: app.io, redis: app.redis, log: app.log });
 
-async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRole): Promise<Actor> {
+async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRole, opts: { foreign?: boolean } = {}): Promise<Actor> {
   seq += 1;
   const phone = `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`;
   const user = await app.prisma.user.create({
@@ -87,7 +92,7 @@ async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRo
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
   });
-  userIds.push(user.id);
+  (opts.foreign ? foreignUserIds : userIds).push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
   await app.prisma.session.create({
     data: {
@@ -99,8 +104,8 @@ async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRo
 }
 
 /** A customer with a Georgetown home, a stranger to every earlier case. */
-async function makeCustomer(firstName: string): Promise<Actor> {
-  const customer = await makeUser(firstName, ['CUSTOMER'], 'CUSTOMER');
+async function makeCustomer(firstName: string, opts: { foreign?: boolean } = {}): Promise<Actor> {
+  const customer = await makeUser(firstName, ['CUSTOMER'], 'CUSTOMER', opts);
   await app.prisma.address.create({
     data: {
       userId: customer.userId, label: 'Home', addressLine1: '3 Cancel Close', city: 'Georgetown',
@@ -112,8 +117,8 @@ async function makeCustomer(firstName: string): Promise<Actor> {
 
 /** A fresh store per case, so its board and analytics hold only this case's
  *  orders. Its owner's phone is registered for push, so every push is seen. */
-async function makeStore(vendorType: 'RESTAURANT' | 'SUPERMARKET', opts: { stock?: number; lowStockThreshold?: number; mmg?: boolean } = {}): Promise<Store> {
-  const owner = await makeUser(vendorType === 'RESTAURANT' ? 'Rohan' : 'Sita', ['VENDOR_OWNER'], 'VENDOR_OWNER');
+async function makeStore(vendorType: 'RESTAURANT' | 'SUPERMARKET', opts: { stock?: number; lowStockThreshold?: number; mmg?: boolean; foreign?: boolean } = {}): Promise<Store> {
+  const owner = await makeUser(vendorType === 'RESTAURANT' ? 'Rohan' : 'Sita', ['VENDOR_OWNER'], 'VENDOR_OWNER', { foreign: opts.foreign });
   const vendorOwner = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
   const vendor = await app.prisma.vendor.create({
     data: {
@@ -128,7 +133,7 @@ async function makeStore(vendorType: 'RESTAURANT' | 'SUPERMARKET', opts: { stock
       ...(opts.mmg ? { mmgPayUrl: 'https://pay.example.com/pay/q12-store' } : {}),
     },
   });
-  vendorIds.push(vendor.id);
+  (opts.foreign ? foreignVendorIds : vendorIds).push(vendor.id);
   const category = await app.prisma.category.create({ data: { vendorId: vendor.id, name: 'Shelf', sortOrder: 0 } });
   const item = await app.prisma.item.create({
     data: {
@@ -181,27 +186,47 @@ async function travel(orderId: string, ms: number) {
   });
 }
 
-/** The worker's own release-held-orders job (queue.ts): release every due
- *  hold, arm the vendor alert ladder for each release. Repeated until a tick
- *  releases nothing, so a backlog in the shared database cannot hide ours. */
+/** The worker's own release-held-orders job (queue.ts) — the release, the
+ *  store's alert, and the immediate publish of the alert ladder the release
+ *  wrote — confined to THIS file's orders [AX289 F8]: the job's due-order read
+ *  is narrowed to this file's customers and stores, so it never releases,
+ *  counts or alerts an order another suite left due in the shared database,
+ *  and a backlog there cannot keep ours from being reached. Everything else is
+ *  the real job on the real client. */
 async function releaseSweep(): Promise<string[]> {
-  const all: string[] = [];
-  for (let round = 0; round < 5; round += 1) {
+  const findMany = app.prisma.order.findMany.bind(app.prisma.order);
+  let scoped = 0;
+  const spy = vi.spyOn(app.prisma.order, 'findMany').mockImplementation(((args: Prisma.OrderFindManyArgs = {}) => {
+    scoped += 1;
+    return findMany({ ...args, where: { AND: [args.where ?? {}, { OR: [{ customerId: { in: userIds } }, { vendorId: { in: vendorIds } }] }] } });
+  }) as never);
+  try {
     const released = await releaseHeldOrdersJob(ctx(), queues as never);
-    all.push(...released);
-    if (released.length === 0) break;
+    expect(scoped, 'the sweep read its due orders through the fixture scope').toBeGreaterThan(0);
+    return released;
+  } finally {
+    spy.mockRestore();
   }
-  return all;
 }
+
+/** The worker's checkout-outbox sweep, for one order: publish its due outbox
+ *  rows to the harness queues (the same drainer the worker runs). */
+const outboxSweep = (orderId: string) =>
+  drainCheckoutOutbox({ prisma: app.prisma, queues: queues as never, log: app.log }, { orderIds: [orderId] });
+
+/** The order's durable vendor alert ladder rows (one per order, ever). */
+const ladderRows = (orderId: string) =>
+  app.prisma.orderOutbox.findMany({ where: { orderId, kind: 'vendor-alert-escalate' }, orderBy: { createdAt: 'asc' } });
 
 const jobsFor = (orderId: string) => jobs.filter((j) => j.data['orderId'] === orderId);
 
-/** Run every job scheduled for this order, as the worker would, in the order
- *  their delays fire — including the follow-up rung a re-alert enqueues. */
-async function runJobsFor(orderId: string): Promise<string[]> {
+/** Run every job scheduled for this order (or only the named kinds), as the
+ *  worker would, in the order their delays fire — including the follow-up
+ *  rung a re-alert enqueues. */
+async function runJobsFor(orderId: string, only?: string[]): Promise<string[]> {
   const outcomes: string[] = [];
   for (let guard = 0; guard < 10; guard += 1) {
-    const next = jobsFor(orderId).filter((j) => !j.ran).sort((a, b) => a.dueAt - b.dueAt)[0];
+    const next = jobsFor(orderId).filter((j) => !j.ran && (!only || only.includes(j.name))).sort((a, b) => a.dueAt - b.dueAt)[0];
     if (!next) break;
     next.ran = true;
     if (next.name === 'vendor-alert-escalate') {
@@ -380,6 +405,8 @@ afterAll(async () => {
   vi.unstubAllEnvs();
   if (priorHoldMinutes !== undefined) process.env['ORDER_HOLD_MINUTES'] = priorHoldMinutes;
   vi.restoreAllMocks();
+  userIds.push(...foreignUserIds);
+  vendorIds.push(...foreignVendorIds);
   const orders = await app.prisma.order.findMany({
     where: { OR: [{ customerId: { in: userIds } }, { vendorId: { in: vendorIds } }] },
     select: { id: true },
@@ -493,6 +520,7 @@ describe.each([
     await travel(order.id, HOLD_MS + 1_000);
     expect(await releaseSweep()).not.toContain(order.id);
     expect(jobsFor(order.id).map((j) => j.name)).toEqual(['auto-cancel']);
+    expect(await ladderRows(order.id)).toEqual([]); // not even owed: no release, no ladder
 
     const row = await orderRow(order.id);
     expect(row.status).toBe('CANCELLED');
@@ -537,8 +565,12 @@ describe.each([
     expect(heard.deliveries).toBe(1);
     expect(heard.pushes).toEqual(['New Order!']);
     expect(heard.sms).toEqual([]);
-    // The ladder is armed once — by the release, at rung 0.
+    // The ladder is armed once — by the release, at rung 0 — as the release's
+    // own durable outbox row, published at once [AX289 F5].
     expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate').map((j) => j.data['level'])).toEqual([0]);
+    const ladder = await ladderRows(order.id);
+    expect(ladder.map((r) => ({ key: r.dedupeKey, published: r.processedAt !== null }))).toEqual([{ key: `order:${order.id}:vendor-alert-escalate`, published: true }]);
+    expect(jobsFor(order.id).find((j) => j.name === 'vendor-alert-escalate')?.opts['jobId']).toBe(ladder[0]!.id);
 
     const row = await orderRow(order.id);
     expect(row.holdExpiresAt).toBeNull();
@@ -552,6 +584,8 @@ describe.each([
     expect(await releaseSweep()).not.toContain(order.id);
     expect(await storeHeard(store, order)).toEqual(heard);
     expect(await storeDashboard(store)).toEqual(counted);
+    expect((await ladderRows(order.id)).map((r) => r.id)).toEqual([ladder[0]!.id]);
+    expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate')).toHaveLength(1);
   });
 });
 
@@ -590,6 +624,7 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     expect(heard.sockets).not.toContain('order:new');
     expect(heard.sockets).not.toContain('vendor:order_alert');
     expect(jobsFor(order.id).map((j) => j.name)).toEqual(['auto-cancel']);
+    expect(await ladderRows(order.id)).toEqual([]);
   });
 
   it('release first by a hair: the release commits, the cancel lands before the store was alerted — the store is never told a dead order is new', async () => {
@@ -623,6 +658,14 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
     expect(jobsFor(order.id).map((j) => j.name)).toEqual(['auto-cancel']);
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, cancelledTab: true, detail: 200, banner: false });
+
+    // The ladder committed WITH the release, so it is still owed [AX289 F5];
+    // when the outbox sweep publishes it, it stops at its first rung — the
+    // dead order never rings, pushes or texts.
+    expect((await ladderRows(order.id)).map((r) => r.processedAt)).toEqual([null]);
+    expect(await outboxSweep(order.id)).toMatchObject({ processed: 1, failed: 0 });
+    expect(await runJobsFor(order.id, ['vendor-alert-escalate'])).toEqual(['vendor-alert-escalate:0:stopped']);
+    expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
   });
 
   it('release first, then the cancel: the store was alerted once, the normal cancel rules apply — and the ladder never rings for a dead order', async () => {
@@ -654,6 +697,188 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     expect(after.sms).toEqual([]);
     // The store saw it, so it stays in its history — as cancelled.
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, cancelledTab: true, detail: 200 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (A3 · AX289 F5) The alert ladder a release arms survives a crash and a
+// queue outage: it is the checkout's own durable outbox row, written inside
+// the release transaction — never an enqueue after the commit.
+// ---------------------------------------------------------------------------
+
+describe('Q12 · the alert ladder a release arms is durable', () => {
+  it('a crash right after the release commits: the ladder is still owed — one outbox row the sweep publishes — and a second release adds none', async () => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Nadia');
+    const order = await placeOrder(buyer, store, 1);
+    await travel(order.id, HOLD_MS + 1_000);
+
+    // The worker dies the instant the release commits: before the store is
+    // alerted, and before any queue is touched.
+    holdReleaseObserver.afterRelease = async ({ orderId }) => {
+      if (orderId === order.id) throw new Error('the worker died right after the release committed');
+    };
+    try {
+      await expect(releaseSweep()).rejects.toThrow('the worker died right after the release committed');
+    } finally {
+      delete holdReleaseObserver.afterRelease;
+    }
+    const row = await orderRow(order.id);
+    expect({ hold: row.holdExpiresAt, released: row.releasedToVendorAt !== null }).toEqual({ hold: null, released: true });
+    // Nothing was published — but the ladder committed with the release.
+    expect(jobsFor(order.id).map((j) => j.name)).toEqual(['auto-cancel']);
+    const owed = await ladderRows(order.id);
+    expect(owed.map((r) => ({ key: r.dedupeKey, queue: r.queue, payload: r.payload, delayMs: r.delayMs, published: r.processedAt !== null }))).toEqual([{
+      key: `order:${order.id}:vendor-alert-escalate`, queue: 'notification',
+      payload: { version: 1, orderId: order.id, level: 0 }, delayMs: vendorAlertLadderDelayMs(), published: false,
+    }]);
+
+    // A replayed release sweep releases nothing and writes no second ladder.
+    expect(await releaseSweep()).not.toContain(order.id);
+    expect((await ladderRows(order.id)).map((r) => r.id)).toEqual([owed[0]!.id]);
+
+    // The worker's outbox sweep publishes it — rung 0, under the row's own job id.
+    expect(await outboxSweep(order.id)).toMatchObject({ processed: 1, failed: 0 });
+    expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate').map((j) => ({ level: j.data['level'], jobId: j.opts['jobId'] })))
+      .toEqual([{ level: 0, jobId: owed[0]!.id }]);
+    expect((await ladderRows(order.id))[0]!.processedAt).not.toBeNull();
+  });
+
+  it('the ladder publish fails after the store was told: the row stays owed, the outbox sweep publishes it, and the ladder rings', async () => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Obi');
+    const order = await placeOrder(buyer, store, 1);
+    await travel(order.id, HOLD_MS + 1_000);
+
+    const add = queues.notificationQueue.add;
+    queues.notificationQueue.add = async (name: string, data: Record<string, unknown>, opts: Record<string, unknown> = {}) => {
+      if (name === 'vendor-alert-escalate' && data['orderId'] === order.id) throw new Error('connection lost: the notification queue is down');
+      return add(name, data, opts);
+    };
+    try {
+      expect(await releaseSweep()).toContain(order.id);
+    } finally {
+      queues.notificationQueue.add = add;
+    }
+    // The store was told, once — and its ladder is owed, not lost.
+    expect((await storeHeard(store, order)).pushes).toEqual(['New Order!']);
+    expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate')).toEqual([]);
+    const [owed] = await ladderRows(order.id);
+    expect({ published: owed!.processedAt !== null, attempts: owed!.attempts, lastError: owed!.lastError })
+      .toEqual({ published: false, attempts: 1, lastError: 'connection lost: the notification queue is down' });
+
+    // Its retry backoff lapses; the worker's outbox sweep publishes it, and
+    // the ladder rings the store that has not answered: the re-alert, then the SMS.
+    await app.prisma.orderOutbox.update({ where: { id: owed!.id }, data: { availableAt: new Date(Date.now() - 1_000) } });
+    expect(await outboxSweep(order.id)).toMatchObject({ processed: 1, failed: 0 });
+    expect(await runJobsFor(order.id, ['vendor-alert-escalate'])).toEqual(['vendor-alert-escalate:0:realerted', 'vendor-alert-escalate:1:sms_sent']);
+    const heard = await storeHeard(store, order);
+    expect(heard.pushes).toEqual(['New Order!', 'Order still waiting!']);
+    expect(heard.sms).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (A3 · AX289 F1) The store acts on an order whose hold lapsed before the
+// sweep reached it: the store's first action releases it, counted once.
+// ---------------------------------------------------------------------------
+
+describe('Q12 · the store acts first on an order whose hold lapsed before the sweep', () => {
+  const COUNTED = { totalOrders: 1, itemTotalOrdered: 1 };
+
+  it('accepting it releases it: counted for the store exactly once, at the acceptance — the sweep then neither counts nor alerts it', async () => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Pria');
+    const order = await placeOrder(buyer, store, 1);
+    await travel(order.id, HOLD_MS + 1_000); // the window closed; the sweep has not run yet
+
+    // The board shows it from the moment its hold lapsed; only the lifetime
+    // counters wait for a release.
+    expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, dashboard: { today: 1, totalOrders: 0, itemTotalOrdered: 0 } });
+    const res = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, store.owner.token, {});
+    expect(res.statusCode, res.body).toBe(200);
+    const row = await orderRow(order.id);
+    expect({ status: row.status, hold: row.holdExpiresAt, released: row.releasedToVendorAt !== null }).toEqual({ status: 'ACCEPTED', hold: null, released: true });
+    expect(await storeDashboard(store)).toMatchObject(COUNTED);
+
+    // Out of the sweep's reach: nothing released, counted, alerted or armed.
+    expect(await releaseSweep()).not.toContain(order.id);
+    expect(await storeDashboard(store)).toMatchObject(COUNTED);
+    expect((await storeHeard(store, order)).pushes).toEqual([]);
+    expect(await ladderRows(order.id)).toEqual([]);
+  });
+
+  it('declining it releases it too: counted once, at the decline, and the goods go back on the shelf', async () => {
+    const store = await makeStore('SUPERMARKET', { stock: 5 });
+    const buyer = await makeCustomer('Quin');
+    const order = await placeOrder(buyer, store, 2);
+    await travel(order.id, HOLD_MS + 1_000);
+
+    const res = await call('PUT', `/api/v1/vendor/orders/${order.id}/reject`, store.owner.token, { reason: 'Out of stock' });
+    expect(res.statusCode, res.body).toBe(200);
+    const row = await orderRow(order.id);
+    expect({ status: row.status, hold: row.holdExpiresAt, released: row.releasedToVendorAt !== null }).toEqual({ status: 'CANCELLED', hold: null, released: true });
+    expect(await stockOf(store.itemId)).toBe(5);
+    expect(await storeDashboard(store)).toMatchObject(COUNTED);
+
+    expect(await releaseSweep()).not.toContain(order.id);
+    expect(await storeDashboard(store)).toMatchObject(COUNTED);
+    expect(await ladderRows(order.id)).toEqual([]);
+  });
+
+  it.each([
+    { label: 'the acceptance commits first', seam: 'beforeRelease' as const, ladder: [] as string[] },
+    { label: 'the release commits first', seam: 'afterRelease' as const, ladder: ['vendor-alert-escalate:0:stopped'] },
+  ])('the store accepts at the moment the sweep releases — $label: counted exactly once, and never alerted about the order it is accepting', async ({ seam, ladder }) => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Rui');
+    const order = await placeOrder(buyer, store, 1);
+    await travel(order.id, HOLD_MS + 1_000);
+
+    let accepted: Awaited<ReturnType<typeof call>> | undefined;
+    holdReleaseObserver[seam] = async ({ orderId }) => {
+      if (orderId === order.id) accepted = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, store.owner.token, {});
+    };
+    try {
+      expect(await releaseSweep()).not.toContain(order.id);
+    } finally {
+      delete holdReleaseObserver[seam];
+    }
+    expect(accepted?.statusCode, accepted?.body).toBe(200);
+    expect((await orderRow(order.id)).status).toBe('ACCEPTED');
+    expect(await storeDashboard(store)).toMatchObject(COUNTED);
+    expect((await storeHeard(store, order)).pushes).toEqual([]);
+    // A ladder the release wrote before the acceptance stops at its first rung.
+    await outboxSweep(order.id);
+    expect(await runJobsFor(order.id, ['vendor-alert-escalate'])).toEqual(ladder);
+    expect((await storeHeard(store, order)).pushes).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (AX289 F8) This file's sweep releases only this file's orders
+// ---------------------------------------------------------------------------
+
+describe('Q12 · the sweep this file drives touches only its own orders', () => {
+  it('a foreign order due in the same database is never released, counted or alerted by it', async () => {
+    const foreignStore = await makeStore('RESTAURANT', { foreign: true });
+    const foreignBuyer = await makeCustomer('Sol', { foreign: true });
+    const foreign = await placeOrder(foreignBuyer, foreignStore, 1);
+    await travel(foreign.id, HOLD_MS + 1_000);
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Tara');
+    const mine = await placeOrder(buyer, store, 1);
+    await travel(mine.id, HOLD_MS + 1_000);
+    try {
+      const released = await releaseSweep();
+      expect(released).toContain(mine.id);
+      expect(released).not.toContain(foreign.id);
+      expect((await orderRow(foreign.id)).releasedToVendorAt).toBeNull();
+      expect(await storeHeard(foreignStore, foreign)).toEqual(HEARD_NOTHING);
+    } finally {
+      // Not left due for another suite's sweep to find.
+      await call('POST', `/api/v1/customer/orders/${foreign.id}/cancel`, foreignBuyer.token, {});
+    }
   });
 });
 

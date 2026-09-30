@@ -363,7 +363,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
  */
 export async function releaseHeldOrdersJob(
   ctx: JobContext,
-  queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue'>,
+  queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue' | 'orderQueue'>,
 ): Promise<string[]> {
   const { OrderService } = await import('../modules/order/order.service');
   const orders = new OrderService(ctx.prisma, ctx.io);
@@ -371,17 +371,15 @@ export async function releaseHeldOrdersJob(
     await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
   });
   if (released.length > 0) {
-    // A RELEASED order is the vendor's first sight of it — it deserves
-    // the same escalation ladder a fresh checkout gets (re-alert, then
-    // SMS). Previously only checkout enqueued this; a held order the
-    // vendor slept through escalated nowhere.
-    for (const orderId of released) {
-      await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
-        delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
-        removeOnComplete: 100,
-        removeOnFail: 50,
-      });
-    }
+    // A RELEASED order is the vendor's first sight of it — it deserves the
+    // same escalation ladder a fresh checkout gets (re-alert, then SMS). The
+    // release wrote that ladder as the checkout's own outbox row, inside the
+    // release transaction [Q12 · AX289 F5]; publish those rows now for
+    // latency, exactly as checkout drains its own. A failure here is logged,
+    // never lost: the checkout-outbox sweep publishes whatever this could not.
+    const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
+    await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { orderIds: released })
+      .catch((err: unknown) => ctx.log.error({ err }, '[Q12] release ladder drain failed — the outbox sweep will publish'));
     ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
   }
   return released;

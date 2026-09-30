@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
@@ -170,6 +170,20 @@ const everywhere = (iso: string) => ({
   providerBoard: iso, providerDetail: iso, adminDetail: iso, adminList: iso,
 });
 
+/** Wait until some backend is blocked by the transaction running on `pid` —
+ *  the request under test, queued behind a lock the test holds. Any other
+ *  suite's lock waits never match: only this transaction's locks count. */
+async function waitUntilBlockedBy(pid: number, ms = 10_000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const [row] = await app.prisma.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
+    if ((row?.n ?? 0) > 0) return;
+    if (Date.now() > deadline) throw new Error(`timed out waiting for a request to queue behind backend ${pid}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 const priorHoldMinutes = process.env['ORDER_HOLD_MINUTES'];
 
 beforeAll(async () => {
@@ -251,6 +265,17 @@ afterAll(async () => {
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
+});
+
+// [AX289 F7] Every case hands the next one an unblocked provider. A block a
+// case needs (B3's Monday lunch, B7's whole day) must not outlive it: the
+// lunch block once did, and on a Saturday — when gyDay(2) IS that Monday —
+// B5's noon booking met it and got 409 instead of 200. A block left behind
+// fails the case that left it, and is removed so later cases stay isolated.
+afterEach(async () => {
+  const left = await app.prisma.bookingException.findMany({ where: { vendorId }, select: { date: true, start: true, end: true } });
+  if (left.length > 0) await app.prisma.bookingException.deleteMany({ where: { vendorId } });
+  expect(left, 'a case left a provider block behind').toEqual([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -354,6 +379,11 @@ describe('Q12 · B2/B3 — a time that has passed, or that the provider does not
     expect(blocked.body).not.toContain('Lunch');
     const control = await booked(customer, shaveId, gy(monday, 13, 0));
     expect(control.appointmentSlot).toBe(`${monday}T17:00:00.000Z`);
+
+    // Lunch is over: the provider lifts the block and noon sells again.
+    const lifted = await call('DELETE', `/api/v1/vendor/bookings/exceptions/${block.json().data.id}`, provider.token);
+    expect(lifted.statusCode, lifted.body).toBe(200);
+    expect(await picker(shaveId, monday, customer.token)).toContain(gy(monday, 12, 0).toISOString());
   });
 });
 
@@ -468,6 +498,51 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     expect(told.title).toBe('Your appointment moved');
     expect(told.body).toMatch(/moved from .*17:30 to .*13:00\.$/);
   });
+
+  it('[AX289 F6] a reschedule racing a cancellation of the same order waits on the ORDER first, then loses cleanly — 409 BOOKING_MOVED, never a deadlock or a 500', async () => {
+    const day = gyDay(5);
+    const from = gy(day, 9, 0);
+    const to = gy(day, 9, 30);
+    const customer = await makeUser('Pita', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, from);
+    expect((await accept(order.id)).statusCode).toBe(200);
+    const bookingId = (await bookingOf(order.id)).id;
+
+    // A cancellation of this order, held at its midpoint in the canonical lock
+    // order: it has the ORDER row and has not yet written the bookings.
+    let resume!: () => void;
+    const midpoint = new Promise<void>((resolve) => { resume = resolve; });
+    let holding!: (pid: number) => void;
+    const orderLocked = new Promise<number>((resolve) => { holding = resolve; });
+    const cancellation = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      holding((await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid);
+      await midpoint;
+      // NOWAIT: the queued reschedule must hold no booking lock, so the
+      // cancellation takes its bookings at once and commits — no deadlock.
+      await tx.$queryRaw`SELECT id FROM "bookings" WHERE "orderId" = ${order.id} FOR UPDATE NOWAIT`;
+      await tx.booking.updateMany({ where: { orderId: order.id, status: { not: 'CANCELLED' } }, data: { status: 'CANCELLED' } });
+      await tx.order.update({ where: { id: order.id }, data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledBy: customer.userId } });
+    }, { timeout: 20_000 });
+
+    // (A cancellation that failed before it held the order ends the wait.)
+    const failedEarly = cancellation.then(() => { throw new Error('the cancellation finished before it held the order'); });
+    failedEarly.catch(() => undefined);
+    const cancellerPid = await Promise.race([orderLocked, failedEarly]);
+    const moving = call('POST', `/api/v1/customer/bookings/${bookingId}/reschedule`, customer.token, { newSlotStart: to.toISOString() });
+    await waitUntilBlockedBy(cancellerPid); // the reschedule is queued behind the cancellation
+    resume();
+    await cancellation;
+    const res = await moving;
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'BOOKING_MOVED', message: 'This booking just changed — reload and try again' });
+
+    // The lost move left nothing behind: no live booking at either time, and
+    // the order still names the time it was cancelled at.
+    expect(await app.prisma.booking.count({ where: { orderId: order.id, status: { not: 'CANCELLED' } } })).toBe(0);
+    expect(await app.prisma.booking.count({ where: { itemId: cutId, slotStart: to, status: { not: 'CANCELLED' } } })).toBe(0);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).appointmentSlot?.toISOString()).toBe(from.toISOString());
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -552,5 +627,10 @@ describe('Q12 · B7 — a 23:30 Guyana booking stays on its Guyana date in every
     const dayNum = Number(day.slice(8));
     expect(notice.body).toMatch(new RegExp(`moved from ${weekdayOf(day)} ${dayNum} .*23:30 to ${weekdayOf(day)} ${dayNum} .*22:30\\.$`));
     expect(await slotEverywhere(customer, order)).toEqual(everywhere(`${next}T02:30:00.000Z`)); // 22:30 Guyana
+
+    // The provider lifts the day block; the next date sells again.
+    const lifted = await call('DELETE', `/api/v1/vendor/bookings/exceptions/${block.json().data.id}`, provider.token);
+    expect(lifted.statusCode, lifted.body).toBe(200);
+    expect(await picker(cutId, next, customer.token)).toContain(gy(next, 0, 0).toISOString());
   });
 });

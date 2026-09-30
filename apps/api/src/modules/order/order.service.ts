@@ -35,7 +35,7 @@ import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from '.
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
-import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction } from './checkout-outbox';
+import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
@@ -362,6 +362,51 @@ export function isHeld(order: { holdExpiresAt: Date | null }, now = new Date()):
 async function countOrderForStore(tx: Prisma.TransactionClient, vendorId: string, itemIds: string[]): Promise<void> {
   await tx.vendor.updateMany({ where: { id: vendorId }, data: { totalOrders: { increment: 1 } } });
   await tx.item.updateMany({ where: { id: { in: itemIds } }, data: { totalOrdered: { increment: 1 } } });
+}
+
+/** [Q12 · AX289 F1] THE release of a held order to its store, inside the
+ *  caller's transaction: the hold is cleared, releasedToVendorAt stamped and
+ *  the store's counters count the order. One compare-and-set on
+ *  releasedToVendorAt IS NULL over an expired hold, shared by the release
+ *  sweep and by the store's first action on an order whose hold lapsed before
+ *  the sweep reached it — whichever commits second matches nothing, so the
+ *  order counts exactly once whoever wins. `statusIn` is the sweep's own
+ *  guard (a cancel that landed first leaves nothing to release). Returns the
+ *  released order's store facts, or null when there was nothing to release. */
+async function releaseHoldInTransaction(
+  tx: Prisma.TransactionClient,
+  orderId: string,
+  opts: { now?: Date; statusIn?: OrderStatus[] } = {},
+): Promise<{ vendorId: string | null; tenantId: string } | null> {
+  const now = opts.now ?? new Date();
+  const res = await tx.order.updateMany({
+    where: {
+      id: orderId,
+      releasedToVendorAt: null,
+      holdExpiresAt: { not: null, lte: now },
+      ...(opts.statusIn ? { status: { in: opts.statusIn } } : {}),
+    },
+    data: { holdExpiresAt: null, releasedToVendorAt: now },
+  });
+  if (res.count === 0) return null;
+  const released = await tx.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { vendorId: true, tenantId: true, items: { select: { itemId: true } } },
+  });
+  if (released.vendorId) await countOrderForStore(tx, released.vendorId, released.items.map((i) => i.itemId));
+  return { vendorId: released.vendorId, tenantId: released.tenantId };
+}
+
+/** [Q12 · AX289 F1] The store's first action (accept, reject) on an order
+ *  whose hold lapsed before the release sweep reached it: the board shows the
+ *  order from its holdExpiresAt on, and the action moves it out of PENDING —
+ *  out of the sweep's reach — so the action releases it itself, in its own
+ *  transaction, exactly as the sweep would have (hold cleared, release
+ *  stamped, the store's counters counted). A no-op for an order that was
+ *  never held or is already released. The store is acting on the order, so
+ *  no alert and no ladder. */
+export async function releaseLapsedHoldInTransaction(tx: Prisma.TransactionClient, orderId: string): Promise<boolean> {
+  return (await releaseHoldInTransaction(tx, orderId)) !== null;
 }
 
 const RIDER_ASSIGNMENT_SNAPSHOT_SELECT = {
@@ -2355,7 +2400,9 @@ export class OrderService {
    * is the race protection — a customer cancel that landed a millisecond
    * earlier flips the status, the CAS matches nothing, and we skip. Clearing
    * holdExpiresAt IS the release; a crash after the CAS is recovered by the
-   * vendor board (order now visible) and the dispatch reconcile job.
+   * vendor board (order now visible), the dispatch reconcile job and the
+   * vendor alert ladder, which the release wrote as an outbox row in its own
+   * transaction [Q12 · AX289 F5].
    *
    * Courier orders (born READY_FOR_PICKUP, no vendor) start their offer
    * cascade here instead of at creation.
@@ -2371,18 +2418,18 @@ export class OrderService {
     // [Q10] Read once per sweep: the response SLA the released orders' alert
     // pushes ring until (vendorRespondBy, the auto-cancel cut-off).
     const slaMinutes = due.length > 0 ? await vendorResponseSlaMinutes(this.prisma) : 0;
+    const alertDelayMs = vendorAlertLadderDelayMs();
     for (const { id } of due) {
       await holdReleaseObserver.beforeRelease?.({ orderId: id });
-      // The release CAS and the store's counters commit together [Q12]: the
-      // order counts the moment the store can see it, exactly once.
+      // The release CAS, the store's counters and the store's alert ladder
+      // commit together [Q12]: the order counts the moment the store can see
+      // it, exactly once — and its ladder is a durable outbox row from that
+      // same moment [AX289 F5], published after the commit by the drainer,
+      // never an enqueue a crash between here and the queue could lose.
       const releasedNow = await this.prisma.$transaction(async (tx) => {
-        const res = await tx.order.updateMany({
-          where: { id, status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
-          data: { holdExpiresAt: null, releasedToVendorAt: new Date() },
-        });
-        if (res.count === 0) return false; // cancelled or raced — idempotent skip
-        const counted = await tx.order.findUniqueOrThrow({ where: { id }, select: { vendorId: true, items: { select: { itemId: true } } } });
-        if (counted.vendorId) await countOrderForStore(tx, counted.vendorId, counted.items.map((i) => i.itemId));
+        const store = await releaseHoldInTransaction(tx, id, { statusIn: ['PENDING', 'READY_FOR_PICKUP'] });
+        if (!store) return false; // cancelled or raced — idempotent skip
+        if (store.vendorId) await persistReleaseAlertLadderInTransaction(tx, { orderId: id, tenantId: store.tenantId, alertDelayMs });
         return true;
       });
       if (!releasedNow) continue;

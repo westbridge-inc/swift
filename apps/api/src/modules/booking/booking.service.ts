@@ -19,6 +19,18 @@ export interface BookingConfig {
   minNoticeMinutes?: number;
 }
 
+/** [AX289 F6] A transaction that lost a lock race: Prisma's P2034 (a write
+ *  conflict or a deadlock in an interactive transaction), or PostgreSQL's
+ *  40P01 (deadlock detected) / 40001 (serialization failure) surfacing from a
+ *  raw statement. Exported for the unit pin. */
+export function isTransactionConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const e = error as { code?: unknown; meta?: { code?: unknown } | null; message?: unknown };
+  if (e.code === 'P2034') return true;
+  if (e.meta?.code === '40P01' || e.meta?.code === '40001') return true;
+  return typeof e.message === 'string' && /\b(40P01|40001)\b|deadlock detected|could not serialize access/i.test(e.message);
+}
+
 // ---------------------------------------------------------------------------
 // BookingService — appointment slots on SERVICE listings. The double-booking
 // guarantee is the database's: a partial unique index on (itemId, slotStart)
@@ -187,6 +199,14 @@ export class BookingService {
     const slotEnd = new Date(newSlotStart.getTime() + config.durationMinutes * 60_000);
     try {
       const next = await this.prisma.$transaction(async (tx) => {
+        // [AX289 F6] The canonical lock order is Order → Booking: the
+        // cancellation, the acceptance and every order transition take the
+        // order row first, then its bookings. A reschedule that wrote its
+        // bookings first and the order last could deadlock against a
+        // cancellation of the same order, so it waits on the order row BEFORE
+        // it touches a booking; the guarded write below then sees whatever
+        // that cancellation committed.
+        if (booking.orderId) await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${booking.orderId} FOR UPDATE`;
         const created = await tx.booking.create({
           data: {
             itemId: booking.itemId,
@@ -219,6 +239,11 @@ export class BookingService {
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
+      }
+      // [AX289 F6] A deadlock or serialization failure is a race this move
+      // lost, not a server fault: the customer reloads and tries again.
+      if (isTransactionConflict(error)) {
+        throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
       }
       throw error;
     }
