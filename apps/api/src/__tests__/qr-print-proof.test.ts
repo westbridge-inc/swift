@@ -8,8 +8,7 @@ import { QR_TEMPLATES, renderTemplatePdf, type QrTemplateId } from '../modules/q
 
 // Use pdf-parse's installed renderer dependency, without adding a dependency or
 // reaching into PDFParse's private state, to read actual PDF glyph positions.
-const fromParser = createRequire(import.meta.resolve('pdf-parse'));
-const { getDocument } = await import(fromParser.resolve('pdfjs-dist/legacy/build/pdf.mjs'));
+const fromParser = createRequire(require.resolve('pdf-parse'));
 const mm = 72 / 25.4;
 const names = ["Maggie's Roti & Curry Shop — Regent Street", 'Café Ñandú'];
 const url = 'https://swiftgy.com/s/BCDFGHJKMN';
@@ -61,15 +60,17 @@ describe('actual final PDFs: scan and branding bounds', () => {
             }
           }
           // Optional local review artifacts; the ordinary CI test stays in memory.
-          if (process.env.QR_PRINT_PROOF_DIR) {
-            mkdirSync(process.env.QR_PRINT_PROOF_DIR, { recursive: true });
-            writeFileSync(`${process.env.QR_PRINT_PROOF_DIR}/${template}-${nameIndex}.pdf`, pdf);
-            writeFileSync(`${process.env.QR_PRINT_PROOF_DIR}/${template}-${nameIndex}.png`, raster);
+          const proofDir = process.env['QR_PRINT_PROOF_DIR'];
+          if (proofDir) {
+            mkdirSync(proofDir, { recursive: true });
+            writeFileSync(`${proofDir}/${template}-${nameIndex}.pdf`, pdf);
+            writeFileSync(`${proofDir}/${template}-${nameIndex}.png`, raster);
           }
         } finally {
           await parser.destroy();
         }
 
+        const { getDocument } = await import(fromParser.resolve('pdfjs-dist/legacy/build/pdf.mjs'));
         const doc = await getDocument({ data: new Uint8Array(pdf), useSystemFonts: false }).promise;
         try {
           const page = await doc.getPage(1);
