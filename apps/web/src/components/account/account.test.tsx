@@ -28,6 +28,17 @@ let calls: ApiRequest[];
 let failWrite: boolean;
 const profile = { id: 'test-customer', firstName: 'Test', lastName: 'Customer', phone: '+5920000000', email: 'test@example.test' };
 const ok = (data: unknown) => ({ body: { success: true, data } });
+const genericError = 'Something went wrong. Please try again.';
+const rawError = 'Internal upstream diagnostic';
+const unsafeErrors = [
+  { name: '5xx with a known code', status: 503, body: { error: { code: 'VALIDATION_ERROR', message: rawError } } },
+  { name: '5xx with an internal code', status: 500, body: { error: { code: 'INTERNAL_ERROR', message: rawError } } },
+  { name: '4xx with an unknown code', status: 400, body: { error: { code: 'UNKNOWN_ERROR', message: rawError } } },
+  { name: '4xx without a code', status: 400, body: { error: { message: rawError } } },
+  { name: 'an unknown response shape', status: 400, body: { message: rawError } },
+  { name: 'a non-4xx failure envelope', status: 200, body: { success: false, error: { code: 'VALIDATION_ERROR', message: rawError } } },
+  { name: 'a network failure', status: 0, body: null },
+];
 
 function api() {
   return mockApi((request) => {
@@ -38,13 +49,13 @@ function api() {
     if (failWrite && method !== 'GET') return { status: 503, body: { error: { message: 'Please try again.' } } };
     if (path === '/profile') return ok(method === 'GET' ? profile : { ...profile, ...body });
     if (path === '/consent') return ok({ consents: [{ documentType: 'marketing_consent', state: marketing ? 'granted' : 'withdrawn', current: true }] });
-    if (path === '/consent/marketing') { marketing = body.granted; return ok({ marketing }); }
+    if (path === '/consent/marketing' && method === 'POST') { marketing = body.granted; return ok({ marketing }); }
     if (path === '/favorites' && method === 'GET') return ok(favourites);
     if (path === '/favorites/store-1') { favourites = method === 'DELETE' ? [] : [{ id: 'store-1', name: 'Test Store' }]; return ok({ message: 'Saved' }); }
     if (path === '/addresses' && method === 'GET') return ok(addresses);
     if (path === '/addresses' && method === 'POST') { const row = { ...body, id: 'new-address', isDefault: body.isDefault || addresses.length === 0 }; if (row.isDefault) addresses = addresses.map((a) => ({ ...a, isDefault: false })); addresses.push(row); return ok(row); }
     if (path.endsWith('/default') && method === 'PUT') { const id = path.split('/')[2]; addresses = addresses.map((a) => ({ ...a, isDefault: a.id === id })); return ok(addresses.find((a) => a.id === id)); }
-    if (path.startsWith('/addresses/') && method === 'PUT') { addresses = addresses.map((a) => a.id === path.split('/')[2] ? { ...a, ...body } : a); return ok(addresses[0]); }
+    if (path.startsWith('/addresses/') && method === 'PUT') { addresses = addresses.map((a) => a.id === path.split('/')[2] ? { ...a, ...body } : a); return ok(addresses.find((a) => a.id === path.split('/')[2])); }
     if (path.startsWith('/addresses/') && method === 'DELETE') { addresses = addresses.filter((a) => a.id !== path.split('/')[2]); if (!addresses.some((a) => a.isDefault) && addresses[0]) addresses[0].isDefault = true; return ok({ message: 'Removed' }); }
     if (path === '/support' && method === 'GET') return ok(tickets);
     if (path === '/support' && method === 'POST') { const ticket = { id: 'ticket', subject: body.subject, status: 'OPEN' }; tickets.push(ticket); return ok(ticket); }
@@ -98,6 +109,8 @@ describe('account parity through cookie-authenticated API contracts', () => {
     await user.click(screen.getByRole('checkbox', { name: /Marketing messages/ }));
     await waitFor(() => expect((screen.getByRole('checkbox') as HTMLInputElement).checked).toBe(true));
     const consent = calls.find((c) => c.url.pathname.endsWith('/consent/marketing'))!;
+    expect(consent.method).toBe('POST');
+    expect(consent.url.pathname).toBe('/api/v1/customer/consent/marketing');
     expect(JSON.parse(String(consent.init?.body))).toEqual({ granted: true });
     expect(consent.init?.headers).toMatchObject({ 'x-client-platform': 'web', 'X-Swift-Client': 'web' });
     expect(calls.every((c) => c.init?.credentials === 'include' && c.init?.cache === 'no-store')).toBe(true);
@@ -181,8 +194,48 @@ describe('account parity through cookie-authenticated API contracts', () => {
   it('does not change the default when the server rejects the write', async () => {
     api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
     const change = await screen.findByRole('button', { name: 'Make Work default' }); failWrite = true; await user.click(change);
-    await screen.findByText('Please try again.');
+    await screen.findByText('Something went wrong. Please try again.');
+    expect(screen.queryByText('Please try again.')).toBeNull();
     expect(screen.getByRole('heading', { name: 'Home Default' })).toBeTruthy();
+  });
+
+  it.each(unsafeErrors)('protects account reads from $name and allows curated 4xx copy', async (failure) => {
+    let curated = false;
+    mockApi(() => {
+      if (curated) return { status: 404, body: { error: { code: 'NOT_FOUND', message: 'User not found' } } };
+      if (failure.status === 0) throw new Error(rawError);
+      return failure;
+    });
+    const { user } = renderWithQuery(sessionView(<AccountPage />));
+    await screen.findByText(genericError);
+    expect(screen.queryByText(rawError)).toBeNull();
+    curated = true;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByText('User not found');
+    expect(screen.queryByText(genericError)).toBeNull();
+  });
+
+  it.each(unsafeErrors)('protects account writes from $name and allows curated 4xx copy', async (failure) => {
+    let curated = false;
+    const normal = api();
+    mockApi((request) => {
+      if (request.method === 'PUT') {
+        if (curated) return { status: 404, body: { error: { code: 'NOT_FOUND', message: 'Address not found' } } };
+        if (failure.status === 0) throw new Error(rawError);
+        return failure;
+      }
+      return normal(request.url.toString(), request.init).then(async (response) => ({ status: response.status, body: await response.json() }));
+    });
+    const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    const button = await screen.findByRole('button', { name: 'Make Work default' });
+    await user.click(button);
+    expect((await screen.findByRole('alert')).textContent).toBe(genericError);
+    expect(screen.queryByText(rawError)).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Home Default' })).toBeTruthy();
+    curated = true;
+    await user.click(button);
+    expect((await screen.findByRole('alert')).textContent).toBe('Address not found');
+    expect(screen.queryByText(genericError)).toBeNull();
   });
 
   it('confirms deletion and renders the replacement default returned by the server', async () => {
@@ -207,14 +260,51 @@ describe('account parity through cookie-authenticated API contracts', () => {
     expect(JSON.parse(String(call.init?.body))).not.toHaveProperty('isDefault');
   });
 
-  it('adds a mapped address with an explicit default choice and refreshes the list', async () => {
+  it('keeps saved values on immediate re-edit and save while address refreshes are slow', async () => {
+    const refreshes: (() => void)[] = [];
+    let reads = 0;
+    const normal = api();
+    mockApi((request) => {
+      if (request.url.pathname === '/api/v1/customer/addresses' && request.method === 'GET' && ++reads > 1) {
+        const snapshot = structuredClone(addresses);
+        return new Promise((resolve) => { refreshes.push(() => resolve(ok(snapshot))); });
+      }
+      return normal(request.url.toString(), request.init).then(async (response) => ({ status: response.status, body: await response.json() }));
+    });
+    const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Work' }));
+    await user.clear(screen.getByLabelText('Label')); await user.type(screen.getByLabelText('Label'), 'Updated Work');
+    await user.clear(screen.getByPlaceholderText('Search address…')); await user.type(screen.getByPlaceholderText('Search address…'), 'Mapped');
+    await user.click(await screen.findByRole('button', { name: 'Mapped Test Street' }));
+    await user.type(screen.getByLabelText('Delivery instructions (optional)'), 'First saved instructions');
+    await user.click(screen.getByRole('button', { name: 'Save address' }));
+    await waitFor(() => expect(refreshes).toHaveLength(1));
+    await user.click(screen.getByRole('button', { name: /Edit .*Work/ }));
+    expect((screen.getByLabelText('Label') as HTMLInputElement).value).toBe('Updated Work');
+    expect((screen.getByPlaceholderText('Search address…') as HTMLInputElement).value).toBe('Mapped Test Street');
+    expect((screen.getByLabelText('Delivery instructions (optional)') as HTMLInputElement).value).toBe('First saved instructions');
+    await user.clear(screen.getByLabelText('Delivery instructions (optional)')); await user.type(screen.getByLabelText('Delivery instructions (optional)'), 'Second saved instructions');
+    await user.click(screen.getByRole('button', { name: 'Save address' }));
+    await waitFor(() => expect(refreshes).toHaveLength(2));
+    const writes = calls.filter((call) => call.method === 'PUT');
+    expect(writes).toHaveLength(2);
+    expect(writes[1]!.url.pathname).toBe('/api/v1/customer/addresses/work');
+    expect(JSON.parse(String(writes[1]!.init?.body))).toMatchObject({ label: 'Updated Work', addressLine1: 'Mapped Test Street', latitude: 6.81, longitude: -58.12, instructions: 'Second saved instructions' });
+    await act(async () => { refreshes[1]!(); });
+    await screen.findByText('Second saved instructions');
+    await act(async () => { refreshes[0]!(); });
+    await user.click(screen.getByRole('button', { name: 'Edit Updated Work' }));
+    expect((screen.getByLabelText('Delivery instructions (optional)') as HTMLInputElement).value).toBe('Second saved instructions');
+  });
+
+  it('adds a mapped address as default without changing the phone-matched initial choice', async () => {
     api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
     await user.click(await screen.findByRole('button', { name: 'Add an address' }));
     expect((screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement).disabled).toBe(true);
     await user.type(screen.getByPlaceholderText('Search address…'), 'Mapped');
     await user.click(await screen.findByRole('button', { name: 'Mapped Test Street' }));
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
-    await user.click(screen.getByRole('checkbox', { name: 'Make this my default address' }));
+    expect((screen.getByRole('checkbox', { name: 'Make this my default address' }) as HTMLInputElement).checked).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Save address' }));
     await screen.findByText('Mapped Test Street, Georgetown');
     const body = JSON.parse(String(calls.find((c) => c.method === 'POST')?.init?.body));

@@ -17,6 +17,16 @@ export function SavedAddresses() {
   async function refreshAddresses() {
     await Promise.all([addresses.refetch(), queryClient.invalidateQueries({ queryKey: ['customer', 'addresses', session.scope] })]);
   }
+  async function savedAddress(saved: Address) {
+    const queryKey = ['account', session.scope, session.epoch, 'addresses'];
+    await queryClient.cancelQueries({ queryKey, exact: true });
+    queryClient.setQueryData<Address[]>(queryKey, (rows = []) => {
+      const others = rows.filter((row) => row.id !== saved.id);
+      return [...others.map((row) => saved.isDefault ? { ...row, isDefault: false } : row), saved];
+    });
+    setEditing(null);
+    await refreshAddresses();
+  }
   const [editing, setEditing] = useState<Address | 'new' | null>(null);
   const [removing, setRemoving] = useState<Address | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,17 +62,17 @@ export function SavedAddresses() {
       <div className="flex gap-2"><button className={secondaryClass} disabled={busy} onClick={() => setRemoving(null)}>Keep address</button><button className={buttonClass} disabled={busy} onClick={() => void change(() => accountApi.deleteAddress(removing.id))}>Confirm removal</button></div>
     </div>}
     {error && <p role="alert">{error}</p>}
-    {editing ? <AddressForm key={editing === 'new' ? 'new' : editing.id} address={editing === 'new' ? undefined : editing} onCancel={() => setEditing(null)} onSaved={async () => { setEditing(null); await refreshAddresses(); }} />
+    {editing ? <AddressForm key={editing === 'new' ? 'new' : editing.id} address={editing === 'new' ? undefined : editing} onCancel={() => setEditing(null)} onSaved={savedAddress} />
       : <button className={buttonClass} disabled={busy || !addresses.data || addresses.isError} onClick={() => { setRemoving(null); setEditing('new'); }}>Add an address</button>}
   </AccountFrame>;
 }
 
-function AddressForm({ address, onSaved, onCancel }: { address?: Address; onSaved: () => Promise<void>; onCancel: () => void }) {
+function AddressForm({ address, onSaved, onCancel }: { address?: Address; onSaved: (_saved: Address) => Promise<void>; onCancel: () => void }) {
   const [form, setForm] = useState({ label: address?.label ?? 'Home', addressLine1: address?.addressLine1 ?? '', addressLine2: address?.addressLine2 ?? '', city: address?.city ?? 'Georgetown', region: address?.region ?? 'Demerara-Mahaica', instructions: address?.instructions ?? '' });
   const revision = useRef(0);
   const [fieldRevision, setFieldRevision] = useState(0);
   const [place, setPlace] = useState<PickedPlace | null>(() => address ? { label: address.addressLine1, lat: Number(address.latitude), lng: Number(address.longitude), placeId: address.id } : null);
-  const [isDefault, setIsDefault] = useState(false);
+  const [isDefault, setIsDefault] = useState(true);
   const [busy, setBusy] = useState(false);
   const [locating, setLocating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,9 +112,9 @@ function AddressForm({ address, onSaved, onCancel }: { address?: Address; onSave
     sending.current = true; setBusy(true); setError(null);
     const body: AddressInput = { ...form, label: form.label.trim(), addressLine1: form.addressLine1.trim(), city: form.city.trim(), latitude: place.lat, longitude: place.lng };
     try {
-      if (address) await accountApi.updateAddress(address.id, body);
-      else await accountApi.addAddress({ ...body, isDefault });
-      await onSaved();
+      const saved = address ? await accountApi.updateAddress(address.id, body)
+        : await accountApi.addAddress({ ...body, isDefault });
+      await onSaved(saved);
     } catch (e) { setError((e as Error).message); }
     finally { sending.current = false; setBusy(false); }
   }

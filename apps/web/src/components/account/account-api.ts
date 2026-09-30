@@ -1,5 +1,10 @@
-import { apiFetch } from '@/lib/auth';
+import { ApiRequestError, apiFetch } from '@/lib/auth';
 
+// Curated errors from the customer routes and their shared error handler.
+const customerErrorCodes = new Set([
+  'VALIDATION_ERROR', 'NOT_FOUND', 'FORBIDDEN', 'EMAIL_TAKEN',
+  'ACCOUNT_INACTIVE', 'MAX_ADDRESSES', 'NOT_YOUR_ORDER',
+]);
 
 export interface Favourite { id: string; name: string }
 export interface Profile { id: string; firstName: string; lastName: string; email: string | null; phone: string }
@@ -16,10 +21,16 @@ export interface TicketInput { category: SupportCategory; subject: string; messa
 // The phone's customerApi contracts, using the web's cookie/session guard.
 // Private reads are never cached by the browser; expiry leaves the shell's door visible.
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
-  const response = await apiFetch(`/api/v1/customer${path}`, {
-    method, cache: 'no-store', headers: { 'x-client-platform': 'web' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  }, { redirectOnExpired: false });
-  return response.data as T;
+  try {
+    const response = await apiFetch(`/api/v1/customer${path}`, {
+      method, cache: 'no-store', headers: { 'x-client-platform': 'web' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }, { redirectOnExpired: false });
+    return response.data as T;
+  } catch (error) {
+    const curated = error instanceof ApiRequestError && error.status >= 400 && error.status < 500
+      && customerErrorCodes.has(error.code ?? '');
+    throw new Error(curated ? error.message : 'Something went wrong. Please try again.');
+  }
 }
 
 export const accountApi = {
