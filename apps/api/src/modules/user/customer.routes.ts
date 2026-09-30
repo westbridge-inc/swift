@@ -26,7 +26,7 @@ import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
 import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
-import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED } from '../order/order.service';
+import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
@@ -47,7 +47,7 @@ import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counte
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
-import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
+import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
@@ -2090,6 +2090,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // [M-11] The request's fingerprint travels with the key: one key, one
     // request, one immutable answer — over the canonical request.
     const requestHash = checkoutRequestHash({ ...body, ...(scheduledForCanonical ? { scheduledFor: scheduledForCanonical } : {}) });
+    // [AX366 F1] This request's own claim token: only its holder may release it.
+    const claim = newCheckoutClaim();
     if (redisKey) {
       // [M-11] The DATABASE is the truth for a replay. Before touching the
       // in-flight lock, ask whether this command already has a receipt: if
@@ -2108,12 +2110,28 @@ export async function customerRoutes(app: FastifyInstance) {
         // exposes internal order columns.
         return { success: true, data: shapeStoredCheckoutResult(receipt.result), replayed: true };
       }
-      const claimed = await app.redis.set(redisKey, 'IN_FLIGHT', 'EX', 86_400, 'NX');
+      const claimed = await app.redis.set(redisKey, claim, 'EX', CHECKOUT_CLAIM_TTL_S, 'NX');
       if (!claimed) {
         const existing = await app.redis.get(redisKey);
-        if (existing && existing !== 'IN_FLIGHT') {
-          checkoutIdempotencyCounter.labels('replayed_cache').inc();
-          return { success: true, data: JSON.parse(existing), replayed: true };
+        if (existing && !isCheckoutClaim(existing)) {
+          // [AX372 R2] A cached answer is another request's: it is replayed
+          // only for the request that made it. It can land between this
+          // request's receipt lookup above and its claim (the other request
+          // committed in between), so the durable receipt is read again and
+          // the fingerprint checked: a different body under this key is a
+          // 422, never a 200 replay of another body's order.
+          const committed = await findCheckoutReceipt(app.prisma, userId, idemKey as string);
+          if (committed && committed.requestHash !== requestHash) {
+            checkoutIdempotencyCounter.labels('key_body_conflict').inc();
+            throw new AppError(422, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used for a different order request. Use a new key for a new order.');
+          }
+          if (committed) {
+            checkoutIdempotencyCounter.labels('replayed_cache').inc();
+            return { success: true, data: shapeStoredCheckoutResult(committed.result), replayed: true };
+          }
+          // A cached answer without its receipt cannot be checked against
+          // this body, so it is never replayed: the key is busy, as the probe
+          // reports it (in_flight).
         }
         checkoutIdempotencyCounter.labels('duplicate_in_flight').inc();
         throw new AppError(409, 'DUPLICATE_REQUEST', 'This order is already being placed — hold on.');
@@ -2121,6 +2139,14 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     let result;
+    // [CHECKOUT-IDEM · AX354 S1] The service reports the moment its order
+    // transaction commits. Before that point, a CONFIRMED rollback placed
+    // nothing: this request's claim is released so the same key can retry once
+    // the customer fixes the problem (e.g. MIN_ORDER); an UNKNOWN commit
+    // outcome keeps it [AX366 F1]. After it the order EXISTS: the claim is kept
+    // (releasing it is what let the receipt probe answer "none" for a placed
+    // order) and the answer is the committed receipt.
+    let commit = null as CheckoutCommit | null;
     try {
       result = await orderService.checkout({
         userId,
@@ -2133,12 +2159,41 @@ export async function customerRoutes(app: FastifyInstance) {
         express: body.express,
         appointments: body.appointments,
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
+        onCommitted: (committed) => { commit = committed; },
       });
     } catch (err) {
-      // A failed attempt must not hold the key hostage — release so the same
-      // key can retry once the customer fixes the problem (e.g. MIN_ORDER).
-      if (redisKey) await app.redis.del(redisKey).catch(() => {});
-      throw err;
+      if (!commit) {
+        if (err instanceof CheckoutOutcomeUnknownError) {
+          // [AX366 F1] The commit's outcome is UNKNOWN and no durable receipt
+          // proves the order: unknown is not "nothing placed". The claim is
+          // kept (the probe answers in_flight, a same-key retry is refused).
+          // [AX372 F1b] ...but for a short settle window, not the claim's
+          // day: this request's own claim is re-set (atomic, ownership-
+          // checked) to CHECKOUT_UNKNOWN_SETTLE_S. That is safe because the
+          // receipt is written in the order's own transaction and
+          // checkout_receipts is unique on (userId, idempotencyKey): at most
+          // one commit per key, so once the window lapses a missing receipt
+          // is conclusive (the probe says none, a same-key retry places one
+          // order) and a present one is replayed. See checkoutUnknownSettleSeconds.
+          if (redisKey) {
+            await settleCheckoutClaim(app.redis, redisKey, claim, checkoutUnknownSettleSeconds()).catch((settleErr: unknown) => {
+              request.log.warn({ err: settleErr }, '[CHECKOUT-IDEM] could not shorten the claim to its settle window; it holds its full TTL');
+            });
+          }
+          request.log.error({ err, receiptId: err.receiptId }, '[CHECKOUT-IDEM] checkout outcome unknown; claim kept for its settle window');
+          throw err;
+        }
+        // A CONFIRMED rollback: nothing was placed. A failed attempt must not
+        // hold the key hostage — release so the same key can retry once the
+        // customer fixes the problem (e.g. MIN_ORDER). Only this request's own
+        // claim: never a newer request's after this one's claim was lost.
+        if (redisKey) await releaseCheckoutClaim(app.redis, redisKey, claim).catch(() => {});
+        throw err;
+      }
+      // checkout never throws past its commit point; should anything still
+      // escape it, the order stands: keep the claim, answer the receipt.
+      request.log.error({ err, receiptId: commit.receiptId }, '[CHECKOUT-IDEM] checkout threw after its commit; answering the committed receipt, claim kept');
+      result = commit.answer;
     }
 
     // [M-11] The vendor alert ladder and the auto-cancel were written INSIDE
@@ -2182,16 +2237,37 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/checkout/receipts/:key', async (request: AuthRequest) => {
     const { key } = z.object({ key: z.string().min(8).max(128) }).parse(request.params ?? {});
     const { userId } = request.user;
+    // [CHECKOUT-IDEM · AX354 S1] The claim FIRST, the receipt SECOND. The
+    // checkout route releases a claim only for a confirmed rollback, never
+    // once a commit is reported or while its outcome is unknown [AX366 F1]
+    // (an unknown outcome holds it for its settle window [AX372 F1b], long
+    // enough for its transaction to settle), so by the time a claim is gone
+    // any receipt its transaction wrote is
+    // visible: a receipt read AFTER the claim read sees every order the claim
+    // read missed. Read the other way round, a probe could miss the receipt
+    // (not committed yet), then miss the claim (gone after the commit), and
+    // answer "none" for a placed order.
+    let claimed: string | null = null;
+    let claimUnknown = false;
+    try {
+      claimed = await app.redis.get(`checkout:idem:${userId}:${key}`);
+    } catch (err) {
+      // An unreadable claim is not an absent one: it never answers "none".
+      claimUnknown = true;
+      request.log.warn({ err }, '[CHECKOUT-IDEM] receipt probe could not read the claim');
+    }
     const receipt = await findCheckoutReceipt(app.prisma, userId, key);
     if (receipt) {
       checkoutIdempotencyCounter.labels('probe_placed').inc();
       return { success: true, data: { status: 'placed', orderIds: receipt.orderIds } };
     }
-    const claimed = await app.redis.get(`checkout:idem:${userId}:${key}`);
     if (claimed) {
       // A cached result without a receipt row cannot happen (the receipt is written in the order's transaction); a claim is in flight.
       checkoutIdempotencyCounter.labels('probe_in_flight').inc();
       return { success: true, data: { status: 'in_flight' } };
+    }
+    if (claimUnknown) {
+      throw new AppError(503, 'CHECKOUT_STATUS_UNAVAILABLE', 'We could not check on this order just now. Try again in a moment.');
     }
     checkoutIdempotencyCounter.labels('probe_none').inc();
     return { success: true, data: { status: 'none' } };
