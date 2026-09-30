@@ -12,7 +12,9 @@
 .map { height: 320px; width: 100%; position: relative; overflow: hidden; border: 1px solid var(--swift-border-strong); border-radius: var(--swift-radius-md); background: var(--swift-canvas); cursor: grab; touch-action: none; user-select: none; }
 .map:active { cursor: grabbing; }
 .tile { position: absolute; width: 256px; height: 256px; max-width: none; pointer-events: none; }
-.pin { position: absolute; left: 50%; top: 50%; width: 38px; height: 44px; transform: translate(-50%, -100%); color: var(--swift-red); filter: drop-shadow(0 1px 2px #fff); pointer-events: none; }
+/* Lucide's marker tip is at y=22 in a 24-unit square: at 36px, the
+   final 3px are padding. Anchor the tip itself to the selected coordinate. */
+.pin { position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; transform: translate(-50%, calc(-100% + 3px)); color: var(--swift-red); filter: drop-shadow(0 1px 2px #fff); pointer-events: none; }
 .attribution { font-size: 11px; text-align: end; }
 .attribution a { text-decoration: underline; }
 .controls { display: flex; gap: var(--swift-space-sm); }
