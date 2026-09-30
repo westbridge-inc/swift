@@ -38,9 +38,36 @@ async function browser() {
   return { auth, Providers, Layout, usePrivateCacheEpoch, useCustomerSession, fetcher, deliveries, switchTo: (id: string) => { identity = id; } };
 }
 
-afterEach(() => { route.pathname = '/orders/detail-a'; });
+afterEach(() => { route.pathname = '/orders/detail-a'; vi.useRealTimers(); });
 
 describe('AX350 A–D: one session boundary for state and pending work', () => {
+  it('AX356 F1 masks a second resume inside the throttle and drops A at the trailing probe', async () => {
+    const tab = await browser();
+    const { Layout, auth } = tab;
+    function Draft() {
+      const [address] = useState(() => `Private address ${auth.getSessionPrincipal()}`);
+      return <p>{address}</p>;
+    }
+    render(<Layout><Draft /></Layout>);
+    await screen.findByText('Private address a');
+    vi.useFakeTimers();
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    const probes = () => tab.fetcher.mock.calls.filter(([url]) => String(url).endsWith('/auth/me')).length;
+    const before = probes();
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    tab.switchTo('b');
+    act(() => window.dispatchEvent(new Event('pageshow')));
+    expect(screen.getByText('Private address a').closest('[hidden][inert]')).not.toBeNull();
+    expect(probes()).toBe(before);
+    await act(async () => vi.advanceTimersByTimeAsync(9_999));
+    expect(probes()).toBe(before);
+    expect(screen.getByText('Private address a').closest('[hidden][inert]')).not.toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(probes()).toBe(before + 1);
+    expect(screen.queryByText('Private address a')).toBeNull();
+    expect(screen.getByText('Private address b').closest('[hidden]')).toBeNull();
+  });
+
   it('removes the real order-detail address when B receives not found after a missed notification', async () => {
     const { Layout, fetcher } = await browser();
     const { default: Detail } = await import('@/app/(app)/orders/[id]/page');

@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
-import { sendOtp } from '@/lib/auth';
+import { currentSessionEpoch, getSessionPrincipal, sendOtp, verifySessionNow } from '@/lib/auth';
+import { Providers, useCacheIdentityReady, usePrivateCacheEpoch } from '@/components/providers';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
 import { SwiftLogo } from '@/components/swift-logo';
 import { StoreLocationPicker } from '@/components/store-location-picker';
@@ -28,7 +29,21 @@ const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
 
 
 export default function SignupPage() {
+  return <Providers preserveShell><SignupSession /></Providers>;
+}
+
+function SignupSession() {
+  const ready = useCacheIdentityReady();
+  return <>
+    {!ready && <p role="status">Checking your account…</p>}
+    <div hidden={!ready} inert={!ready}><SignupForm /></div>
+  </>;
+}
+
+function SignupForm() {
   const router = useRouter();
+  const epoch = usePrivateCacheEpoch();
+  const [formEpoch, setFormEpoch] = useState(currentSessionEpoch);
   const [step, setStep] = useState<Step>('role');
   const [role, setRole] = useState<Role>('CUSTOMER');
   const [phone, setPhone] = useState('+592');
@@ -52,20 +67,45 @@ export default function SignupPage() {
   const [error, setError] = useState<string | null>(null);
   const busyNow = useRef(false);
 
+  // Reset before commit, including a same-principal reauthentication. Keep
+  // this component mounted: the QR auth-journey hook owns a separate
+  // continuation epoch and must not interpret registration as leaving signup.
+  if (formEpoch !== epoch) {
+    setFormEpoch(epoch);
+    setStep('role');
+    setRole('CUSTOMER');
+    setPhone('+592');
+    setCode('');
+    setFirst('');
+    setLast('');
+    setBiz({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
+    setStorePin(null);
+    setPlacingStore(false);
+    setVeh({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
+    setBusy(false);
+    setError(null);
+    busyNow.current = false;
+    restorePinFocus.current = false;
+  }
+
   const wrap = async (fn: () => Promise<void>) => {
-    if (busyNow.current) return;
+    if (busyNow.current || currentSessionEpoch() !== formEpoch) return;
     busyNow.current = true;
     setError(null);
     setBusy(true);
     try { await fn(); }
-    catch (e: any) { setError(e.message); }
-    finally { busyNow.current = false; setBusy(false); }
+    catch (e: any) { if (currentSessionEpoch() === formEpoch) setError(e.message); }
+    finally { if (currentSessionEpoch() === formEpoch) { busyNow.current = false; setBusy(false); } }
   };
 
-  const doSend = () => wrap(async () => { await sendOtp(phone.trim()); setStep('code'); });
+  const doSend = () => wrap(async () => {
+    await sendOtp(phone.trim());
+    if (currentSessionEpoch() === formEpoch) setStep('code');
+  });
   const doVerify = () => wrap(async () => {
     const r = await verifyOtp(phone.trim(), code.trim());
     if (r.signedIn) {
+      if (currentSessionEpoch() !== formEpoch + 1 || getSessionPrincipal() !== r.user?.id) return;
       // Existing account: route by its ACTUAL roles, not the tile they tapped.
       const roles: string[] = r.user?.roles ?? [];
       const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
@@ -74,14 +114,16 @@ export default function SignupPage() {
       router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
       return;
     }
-    setStep('name');
+    if (currentSessionEpoch() === formEpoch) setStep('name');
   });
   const doRegister = () => wrap(async () => {
     // Consent is explicit clickwrap: the agreement line sits directly above
     // the button that triggers this. Recorded server-side [SWIFT-AUD-D9-03].
+    let registered;
     try {
-      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role, acceptTerms: true });
+      registered = await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role, acceptTerms: true });
     } catch (cause) {
+      if (currentSessionEpoch() !== formEpoch) return;
       // Registration consumes its HttpOnly continuation before account reads
       // and writes. A transport or server error is therefore ambiguous: never
       // encourage replay of the old code/cookie. Keep the entered profile data
@@ -91,17 +133,29 @@ export default function SignupPage() {
       const detail = cause instanceof Error ? cause.message : 'Could not create your account.';
       throw new Error(`${detail} Request a new verification code to try again.`);
     }
+    // Any additional change while registration was pending invalidates the
+    // handoff, including reauthentication as the same principal.
+    if (currentSessionEpoch() !== formEpoch + 1 || getSessionPrincipal() !== registered.user.id) return;
     if (role === 'CUSTOMER') {
       // [E27] No profile selfie merely to browse or order: a new customer goes
       // where they were headed (else to ordering), not to the camera.
       router.replace(safeReturnPath() || '/');
     }
-    else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
+    else {
+      // Carry only the verified registration's role/phone into an empty
+      // partner form. No personal/business/vehicle draft survives adoption.
+      setRole(role);
+      setPhone(phone.trim());
+      setStep(role === 'VENDOR' ? 'business' : 'vehicle');
+    }
   });
   const doBusiness = () => wrap(async () => {
     if (!storePin || placingStore) throw new Error('Place your store on the map');
     if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
+    const session = await verifySessionNow();
+    if (!session.ok || currentSessionEpoch() !== formEpoch) return;
     await becomePartner({ role: 'VENDOR', business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } });
+    if (currentSessionEpoch() !== formEpoch) return;
     router.replace('/dashboard');
   });
   const editBusinessAddress = (patch: Partial<typeof biz>) => {
@@ -111,7 +165,10 @@ export default function SignupPage() {
     setError(null);
   };
   const doVehicle = () => wrap(async () => {
+    const session = await verifySessionNow();
+    if (!session.ok || currentSessionEpoch() !== formEpoch) return;
     await becomePartner({ role: 'MOVER', vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } });
+    if (currentSessionEpoch() !== formEpoch) return;
     router.replace('/portal');
   });
 

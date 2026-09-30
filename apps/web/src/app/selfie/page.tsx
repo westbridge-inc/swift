@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
-import { sessionProbe } from '@/lib/auth';
+import { SessionBoundary } from '@/components/providers';
+import { currentSessionEpoch, sessionProbe, verifySessionNow } from '@/lib/auth';
 import { uploadSelfie } from '@/lib/customer';
 import styles from './selfie.module.css';
 
@@ -19,6 +20,7 @@ function SelfieSetup() {
   const router = useRouter();
   const params = useSearchParams();
   const next = safeNext(params.get('next'));
+  const [captureEpoch] = useState(currentSessionEpoch);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -66,6 +68,7 @@ function SelfieSetup() {
   }, []);
 
   const startCamera = async () => {
+    if (currentSessionEpoch() !== captureEpoch) return;
     setStartingCamera(true);
     setError(null);
     stopCamera();
@@ -78,7 +81,7 @@ function SelfieSetup() {
         audio: false,
         video: { facingMode: { ideal: 'user' } },
       });
-      if (cameraRequest.current !== request) {
+      if (cameraRequest.current !== request || currentSessionEpoch() !== captureEpoch) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
@@ -90,6 +93,7 @@ function SelfieSetup() {
       }
       videoRef.current.srcObject = stream;
       await videoRef.current.play();
+      if (cameraRequest.current !== request || currentSessionEpoch() !== captureEpoch) return;
       setCameraReady(true);
     } catch (cameraError) {
       if (cameraRequest.current !== request) return;
@@ -102,6 +106,7 @@ function SelfieSetup() {
   };
 
   const capturePhoto = async () => {
+    if (currentSessionEpoch() !== captureEpoch) return;
     const video = videoRef.current;
     if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) {
       setError('The camera is not ready yet. Try again in a moment.');
@@ -120,6 +125,7 @@ function SelfieSetup() {
     context.scale(-1, 1);
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    if (currentSessionEpoch() !== captureEpoch) return;
     if (!blob) {
       setError('This browser could not prepare the captured photo.');
       return;
@@ -129,11 +135,14 @@ function SelfieSetup() {
   };
 
   const save = async () => {
-    if (!file) return;
+    if (!file || currentSessionEpoch() !== captureEpoch) return;
     setBusy(true);
     setError(null);
     try {
+      const session = await verifySessionNow();
+      if (!session.ok || currentSessionEpoch() !== captureEpoch) return;
       await uploadSelfie(file);
+      if (currentSessionEpoch() !== captureEpoch) return;
       router.replace(next);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : 'Could not save this profile photo.');
@@ -202,7 +211,7 @@ function SelfieSetup() {
 export default function SelfiePage() {
   return (
     <Suspense fallback={<main className={styles.page}><p>Loading account setup…</p></main>}>
-      <SelfieSetup />
+      <SessionBoundary><SelfieSetup /></SessionBoundary>
     </Suspense>
   );
 }

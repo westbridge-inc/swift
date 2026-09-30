@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
+import { SessionBoundary } from '@/components/providers';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import {
   addToCart,
@@ -172,6 +173,10 @@ function optionGuidance(group: OptionGroup): string {
 }
 
 export function StorefrontExperience({ store, returnPath }: { store: StorefrontDetail; returnPath: string }) {
+  return <SessionBoundary><StorefrontSession store={store} returnPath={returnPath} /></SessionBoundary>;
+}
+
+function StorefrontSession({ store, returnPath }: { store: StorefrontDetail; returnPath: string }) {
   const router = useRouter();
   const [catalog, setCatalog] = useState<DisplayVendor>(() => publicCatalog(store));
   const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>('loading');

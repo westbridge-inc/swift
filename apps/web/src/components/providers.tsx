@@ -30,11 +30,11 @@ export function Providers({ children, preserveShell = false }: { children: React
   // External-store snapshots are checked before commit, including when a
   // channel event arrives between rendering a route and committing it.
   if (cache.epoch !== epoch) setCache({ epoch, client: createClient() });
-  const [proof, setProof] = useState({ pathname, ready: true });
+  const [proof, setProof] = useState({ pathname, ready: true, checkAt: 0 });
   const lastResume = useRef(-Infinity);
   // Set during render so the new route cannot paint cached personal data for
   // even one frame while its effect waits for the server.
-  if (proof.pathname !== pathname) setProof({ pathname, ready: !hasPrivateQueries(client) });
+  if (proof.pathname !== pathname) setProof({ pathname, ready: !hasPrivateQueries(client), checkAt: 0 });
   const ready = proof.pathname === pathname && proof.ready;
 
   useLayoutEffect(() => subscribeSession(() => {
@@ -52,9 +52,9 @@ export function Providers({ children, preserveShell = false }: { children: React
       // Private component state exists independently of QueryClient. Public
       // routes with account-scoped queries still need the same protection.
       if (customerRoute(pathname).public && !hasPrivateQueries(client)) return;
-      if (Date.now() - lastResume.current < 15_000) return;
-      lastResume.current = Date.now();
-      setProof({ pathname, ready: false });
+      // Mask every resume, even inside the rate limit. A missed cookie
+      // change can happen immediately after the previous successful probe.
+      setProof({ pathname, ready: false, checkAt: Math.max(Date.now(), lastResume.current + 15_000) });
     };
     const visible = () => { if (document.visibilityState === 'visible') recheck(); };
     window.addEventListener('focus', recheck);
@@ -72,16 +72,37 @@ export function Providers({ children, preserveShell = false }: { children: React
   useEffect(() => {
     if (ready) return;
     let cancelled = false;
-    void verifySessionNow().then(() => {
-      if (cancelled) return;
-      setProof({ pathname, ready: true });
-    });
-    return () => { cancelled = true; };
-  }, [pathname, ready]);
+    const verify = () => {
+      lastResume.current = Date.now();
+      void verifySessionNow().then(() => {
+        if (cancelled) return;
+        // A newer resume owns its own proof; an older result cannot unmask it.
+        setProof((current) => current === proof ? { ...current, ready: true } : current);
+      });
+    };
+    const delay = Math.max(0, proof.checkAt - Date.now());
+    const timer = delay > 0 ? window.setTimeout(verify, delay) : undefined;
+    if (!delay) verify();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [proof, ready]);
 
   return <QueryClientProvider client={client}>
     <CacheIdentity.Provider value={{ ready, epoch }}>
       <Fragment key={preserveShell ? 'shell' : epoch}>{preserveShell || ready ? children : <p role="status">Checking your account…</p>}</Fragment>
     </CacheIdentity.Provider>
   </QueryClientProvider>;
+}
+
+/** Standalone pages retain same-session drafts while masked and discard all
+ * component state and refs when the shared session epoch changes. */
+export function SessionBoundary({ children }: { children: React.ReactNode }) {
+  return <Providers preserveShell><SessionContent>{children}</SessionContent></Providers>;
+}
+
+function SessionContent({ children }: { children: React.ReactNode }) {
+  const { ready, epoch } = useContext(CacheIdentity);
+  return <>
+    {!ready && <p role="status">Checking your account…</p>}
+    <div key={epoch} hidden={!ready} inert={!ready}>{children}</div>
+  </>;
 }

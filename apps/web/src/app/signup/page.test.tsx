@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { adoptSession } from '@/lib/auth';
 
 const mocked = vi.hoisted(() => ({
   sendOtp: vi.fn(),
@@ -14,9 +15,10 @@ const mocked = vi.hoisted(() => ({
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ replace: mocked.replace, push: mocked.push }),
+  usePathname: () => '/signup',
 }));
 
-vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp }));
+vi.mock('@/lib/auth', async (actual) => ({ ...await actual<typeof import('@/lib/auth')>(), sendOtp: mocked.sendOtp }));
 vi.mock('@/lib/customer', () => ({
   verifyOtp: mocked.verifyOtp,
   registerAccount: mocked.registerAccount,
@@ -62,7 +64,10 @@ describe('[E27] a new customer is not sent to the camera', () => {
     mocked.replace.mockReset();
     mocked.sendOtp.mockResolvedValue(undefined);
     mocked.verifyOtp.mockResolvedValue({ isNewUser: true, signedIn: false });
-    mocked.registerAccount.mockResolvedValue({ user: { id: 'u1', roles: ['CUSTOMER'] } });
+    mocked.registerAccount.mockImplementation(async () => {
+      adoptSession('u1');
+      return { user: { id: 'u1', roles: ['CUSTOMER'] } };
+    });
   });
 
   async function registerCustomer() {
