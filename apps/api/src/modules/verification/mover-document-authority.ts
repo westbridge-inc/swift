@@ -3,7 +3,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { AppError } from '../../utils/errors';
 import { approvedEvidenceFor, anyChecklistEvidenceFor, type EvidenceDb, type EvidenceRow } from './evidence';
-import { BUCKET_OF } from './doc-registry';
+import { BUCKET_OF, VEHICLE_INSURANCE_DOC_TYPE } from './doc-registry';
 import { normalizeRegistrationMark, rootSubjectId } from './subjects';
 
 export type DocumentMoverKind = 'RIDER' | 'DRIVER';
@@ -55,7 +55,7 @@ export async function evaluateMoverDocuments(
   if (!user) return denied('docs');
   const required = await new CountryConfigService(db as never).getMoverChecklist(user.countryCode, opts.vehicleType, db);
   const hire = opts.kind === 'DRIVER' && isPassengerVehicle(opts.vehicleType);
-  const types = [...new Set([...required, ...(hire ? ['vehicle_insurance'] : [])])];
+  const types = [...new Set([...required, ...(hire ? [VEHICLE_INSURANCE_DOC_TYPE] : [])])];
   const vehicleTypes = types.filter((type) => BUCKET_OF[type] === 'VEHICLE');
   const target = vehicleTypes.length ? await currentVehicle(db, userId, user.countryCode, opts.kind) : null;
   const now = new Date();
@@ -89,7 +89,7 @@ export async function evaluateMoverDocuments(
     return best ? [best] : [];
   });
   if (hire) {
-    const insurance = current.filter((row) => row.docType === 'vehicle_insurance'
+    const insurance = current.filter((row) => row.docType === VEHICLE_INSURANCE_DOC_TYPE
       && row.coverageClass === 'HIRE' && row.hireClassConfirmed && row.plateCrossChecked)
       .sort((a, b) => expiry(b) - expiry(a))[0];
     if (!insurance) return denied('insurance');
