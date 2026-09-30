@@ -15,7 +15,7 @@ import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
-import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
+import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter, shownToStoreFilter } from './hold-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
 import {
@@ -353,6 +353,23 @@ export const holdReleaseObserver: {
 /** A held order = pre-release: hidden, undispatched, freely cancellable. */
 export function isHeld(order: { holdExpiresAt: Date | null }, now = new Date()): boolean {
   return order.holdExpiresAt != null && order.holdExpiresAt > now;
+}
+
+/** [Q10 loud alerts 2/4 · AX291 F01] May CHECKOUT tell the store about this
+ *  order? Decided on the order as it is NOW (the hold-visibility rule on a
+ *  fresh read), never on the checkout's snapshot and the clock: checkout's
+ *  post-commit work can resume after the hold closed, and by then the
+ *  customer may have cancelled inside the window, or the release may own the
+ *  order. Checkout tells the store only about an order that still waits for
+ *  it, that it has been shown (shownToStoreFilter: no hold ahead of it) and
+ *  that no release has shown it (a released order is the release's to
+ *  announce, once). */
+async function checkoutMayTellStore(prisma: PrismaClient, orderId: string): Promise<boolean> {
+  const fresh = await prisma.order.findFirst({
+    where: { id: orderId, status: 'PENDING', releasedToVendorAt: null, AND: [shownToStoreFilter(prisma)] },
+    select: { id: true },
+  });
+  return fresh !== null;
 }
 
 /** [Q12] The store's own counters (vendor.totalOrders, item.totalOrdered)
@@ -1568,13 +1585,15 @@ export class OrderService {
     // the store learning of an order it cannot see; the release publishes them,
     // and an in-window cancel (which restocks) never does.
     for (const order of orders) {
-      const held = isHeld(order);
-      if (!held) {
+      // [Q10 · AX291 F01] The store room, the team alert and the low-stock
+      // notices go out only for an order the store may be told about NOW.
+      const tellStore = order.vendorId != null && await checkoutMayTellStore(this.prisma, order.id);
+      if (tellStore) {
         this.io
           .to(`vendor:${order.vendorId}`)
           .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
       }
-      if (!held && order.vendorId) {
+      if (tellStore && order.vendorId) {
         // [Q10 loud alerts 2/4] The whole store hears it: the owner and every
         // active member of its team (it used to be the owner alone).
         await this.notifications.newOrderForStore({
@@ -1590,7 +1609,7 @@ export class OrderService {
       const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
       if (vendorOwner) {
         if (order.vendorId) {
-          if (!held) {
+          if (tellStore) {
             for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
               await this.notifications.lowStock(vendorOwner.userId, ev);
             }
@@ -2437,8 +2456,10 @@ export class OrderService {
       if (!releasedNow) continue;
       await holdReleaseObserver.afterRelease?.({ orderId: id });
 
-      const order = await this.prisma.order.findUnique({
-        where: { id },
+      // [Q10 · AX291 F01] Read fresh, through the hold-visibility rule: the
+      // store is alerted only about an order it has been shown.
+      const order = await this.prisma.order.findFirst({
+        where: { id, AND: [shownToStoreFilter(this.prisma)] },
         include: {
           items: { select: { id: true } },
           vendor: { select: { id: true, name: true, ownerId: true } },

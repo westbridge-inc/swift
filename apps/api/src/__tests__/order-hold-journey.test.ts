@@ -60,7 +60,7 @@ const foreignUserIds: string[] = [];
 const foreignVendorIds: string[] = [];
 
 type Actor = { userId: string; token: string; phone: string };
-type Store = { owner: Actor; vendorId: string; itemId: string; device: string; phone: string };
+type Store = { owner: Actor; staff: Actor; vendorId: string; itemId: string; device: string; staffDevice: string; phone: string };
 type Placed = { id: string; orderNumber: string; holdExpiresAt: string | null };
 
 // ── Harness: the queues the checkout publishes to, and the socket rooms ─────
@@ -147,7 +147,14 @@ async function makeStore(vendorType: 'RESTAURANT' | 'SUPERMARKET', opts: { stock
   });
   const device = `ExponentPushToken[q12${nanoid(16)}]`;
   await app.prisma.deviceToken.create({ data: { userId: owner.userId, token: device, platform: 'android' } });
-  return { owner, vendorId: vendor.id, itemId: item.id, device, phone: vendor.phone! };
+  // [Q10 loud alerts 2/4] The whole store hears a new order: the owner and
+  // every active member of its team. One member of staff, with a phone that
+  // takes pushes, so everything below asks the whole team what it heard.
+  const staff = await makeUser('Kemi', ['CUSTOMER'], 'CUSTOMER', { foreign: opts.foreign });
+  await app.prisma.vendorStaff.create({ data: { vendorId: vendor.id, userId: staff.userId, role: 'STAFF', invitedBy: owner.userId } });
+  const staffDevice = `ExponentPushToken[q12s${nanoid(15)}]`;
+  await app.prisma.deviceToken.create({ data: { userId: staff.userId, token: staffDevice, platform: 'android' } });
+  return { owner, staff, vendorId: vendor.id, itemId: item.id, device, staffDevice, phone: vendor.phone! };
 }
 
 function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
@@ -241,9 +248,9 @@ const jobsFor = (orderId: string) => jobs.filter((j) => j.data['orderId'] === or
  *  the ladder's first rung schedules. [Q10 loud alerts 2/4] A
  *  'vendor-alert-escalate' job is the ONE store ladder (store-alert-ladder.ts),
  *  run exactly as the notification worker runs it, and recorded by rung. */
-async function runJobsFor(orderId: string, only?: string[]): Promise<string[]> {
+async function runJobsFor(orderId: string, only?: string[], max = 10): Promise<string[]> {
   const outcomes: string[] = [];
-  for (let guard = 0; guard < 10; guard += 1) {
+  for (let guard = 0; guard < max; guard += 1) {
     const next = jobsFor(orderId).filter((j) => !j.ran && (!only || only.includes(j.name))).sort((a, b) => a.dueAt - b.dueAt)[0];
     if (!next) break;
     next.ran = true;
@@ -265,26 +272,40 @@ async function runJobsFor(orderId: string, only?: string[]): Promise<string[]> {
 const mentions = (payload: Record<string, unknown>, orderId: string) =>
   payload['orderId'] === orderId || (payload['data'] as Record<string, unknown> | undefined)?.['orderId'] === orderId;
 
-/** Everything that could have TOLD the store about this order. */
+/** Everything that could have TOLD the store about this order: its room,
+ *  and each member of its team — the owner and the member of staff [Q10
+ *  loud alerts 2/4]: their own socket rooms, inboxes and phones. `told` names
+ *  every member anything reached. */
 async function storeHeard(store: Store, order: Placed) {
-  const inbox = await app.prisma.notification.findMany({
-    where: { userId: store.owner.userId, data: { path: ['orderId'], equals: order.id } },
+  const team = [
+    { who: 'owner', userId: store.owner.userId, device: store.device },
+    { who: 'staff', userId: store.staff.userId, device: store.staffDevice },
+  ];
+  const whoIs = new Map(team.map((m) => [m.userId, m.who]));
+  const rooms = new Map<string, string | null>([[`vendor:${store.vendorId}`, null], ...team.map((m) => [`user:${m.userId}`, m.who] as [string, string])]);
+  const devices = new Map(team.map((m) => [m.device, m.who]));
+  const inbox = (await app.prisma.notification.findMany({
+    where: { userId: { in: team.map((m) => m.userId) }, data: { path: ['orderId'], equals: order.id } },
     orderBy: { createdAt: 'asc' },
-  });
+  })).sort((a, b) => whoIs.get(a.userId)!.localeCompare(whoIs.get(b.userId)!));
+  const heardSockets = sockets.filter((s) => rooms.has(s.room) && mentions(s.payload, order.id));
+  const pushes = devChannelLog.filter((e) => e.channel === 'push' && devices.has(e.to) && (e.data as Record<string, unknown> | undefined)?.['orderId'] === order.id);
+  const told = new Set<string>([
+    ...inbox.map((n) => whoIs.get(n.userId)!),
+    ...heardSockets.flatMap((s) => rooms.get(s.room) ?? []),
+    ...pushes.map((e) => devices.get(e.to)!),
+  ]);
   return {
-    sockets: sockets
-      .filter((s) => (s.room === `vendor:${store.vendorId}` || s.room === `user:${store.owner.userId}`) && mentions(s.payload, order.id))
-      .map((s) => s.event),
-    inbox: inbox.map((n) => ({ title: n.title, kind: (n.data as Record<string, unknown> | null)?.['kind'] ?? null, isRead: n.isRead })),
+    sockets: heardSockets.map((s) => s.event),
+    inbox: inbox.map((n) => ({ who: whoIs.get(n.userId), title: n.title, kind: (n.data as Record<string, unknown> | null)?.['kind'] ?? null, isRead: n.isRead })),
     deliveries: await app.prisma.alertDelivery.count({ where: { kind: 'VENDOR_ORDER', subjectId: order.id } }),
-    pushes: devChannelLog
-      .filter((e) => e.channel === 'push' && e.to === store.device && (e.data as Record<string, unknown> | undefined)?.['orderId'] === order.id)
-      .map((e) => e.title),
+    pushes: pushes.map((e) => e.title),
     // The owner's number, and the store phone the ladder texts [Q10].
     sms: devChannelLog.filter((e) => e.channel === 'sms' && (e.to === store.owner.phone || e.to === store.phone) && e.body.includes(order.orderNumber)).map((e) => e.body),
+    told: [...told].sort(),
   };
 }
-const HEARD_NOTHING = { sockets: [], inbox: [], deliveries: 0, pushes: [], sms: [] };
+const HEARD_NOTHING = { sockets: [], inbox: [], deliveries: 0, pushes: [], sms: [], told: [] };
 
 /** Everything the store can SEE of this order on its own surfaces. */
 async function storeSees(store: Store, orderId: string) {
@@ -461,6 +482,7 @@ afterAll(async () => {
   await app.prisma.deviceToken.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
   await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
+  await app.prisma.vendorStaff.deleteMany({ where: { vendorId: { in: vendorIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
@@ -594,12 +616,18 @@ describe.each([
     expect(await releaseSweep()).toContain(order.id);
 
     const heard = await storeHeard(store, order);
-    // The board's order:new, the inbox row's live copy, and the ringing banner.
-    expect([...heard.sockets].sort()).toEqual(['notification', 'order:new', 'vendor:order_alert']);
-    expect(heard.inbox).toEqual([{ title: 'New Order!', kind: 'vendor_order_alert', isRead: false }]);
-    expect(heard.deliveries).toBe(1);
-    expect(heard.pushes).toEqual(['New Order!']);
+    // The board's order:new, and for each member of the team [Q10] the inbox
+    // row's live copy and the ringing banner, the inbox row, its receipt and
+    // one push to their phone.
+    expect([...heard.sockets].sort()).toEqual(['notification', 'notification', 'order:new', 'vendor:order_alert', 'vendor:order_alert']);
+    expect(heard.inbox).toEqual([
+      { who: 'owner', title: 'New Order!', kind: 'vendor_order_alert', isRead: false },
+      { who: 'staff', title: 'New Order!', kind: 'vendor_order_alert', isRead: false },
+    ]);
+    expect(heard.deliveries).toBe(2);
+    expect(heard.pushes).toEqual(['New Order!', 'New Order!']);
     expect(heard.sms).toEqual([]);
+    expect(heard.told).toEqual(['owner', 'staff']);
     // The ladder is armed once — by the release, at rung 0 — as the release's
     // own durable outbox row, published at once [AX289 F5].
     expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate').map((j) => j.data['level'])).toEqual([0]);
@@ -710,7 +738,8 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     await travel(order.id, HOLD_MS + 1_000);
     expect(await releaseSweep()).toContain(order.id);
     const alerted = await storeHeard(store, order);
-    expect(alerted.pushes).toEqual(['New Order!']);
+    expect(alerted.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(alerted.told).toEqual(['owner', 'staff']);
 
     // The window has closed: the cancel is still honoured, with the recorded
     // (never collected) late-cancel marker the app previews.
@@ -728,7 +757,7 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     // "still waiting" push, no SMS about an order that no longer exists.
     expect(await runJobsFor(order.id)).toEqual(['vendor-alert-escalate:ring1:stopped', 'auto-cancel:false']);
     const after = await storeHeard(store, order);
-    expect(after.pushes).toEqual(['New Order!']);
+    expect(after.pushes).toEqual(['New Order!', 'New Order!']);
     expect(after.sms).toEqual([]);
     // The store saw it, so it stays in its history — as cancelled.
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, cancelledTab: true, detail: 200 });
@@ -796,7 +825,7 @@ describe('Q12 · the alert ladder a release arms is durable', () => {
       queues.notificationQueue.add = add;
     }
     // The store was told, once — and its ladder is owed, not lost.
-    expect((await storeHeard(store, order)).pushes).toEqual(['New Order!']);
+    expect((await storeHeard(store, order)).pushes).toEqual(['New Order!', 'New Order!']);
     expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate')).toEqual([]);
     const [owed] = await ladderRows(order.id);
     expect({ published: owed!.processedAt !== null, attempts: owed!.attempts, lastError: owed!.lastError })
@@ -814,8 +843,10 @@ describe('Q12 · the alert ladder a release arms is durable', () => {
       'vendor-alert-escalate:admin:admin_paged',
     ]);
     const heard = await storeHeard(store, order);
-    expect(heard.pushes).toEqual(['New Order!', 'Order still waiting!', 'Order still waiting!']);
+    // Each rung rings every phone of the team as it is now.
+    expect(heard.pushes).toEqual(['New Order!', 'New Order!', ...Array<string>(4).fill('Order still waiting!')]);
     expect(heard.sms).toHaveLength(1);
+    expect(heard.told).toEqual(['owner', 'staff']);
   });
 });
 
@@ -1015,8 +1046,9 @@ describe('Q12 · express — never held, so the store sees it at once; a cancel 
     expect(row.holdExpiresAt).toBeNull(); // the customer paid 1.5x to skip the wait
 
     const alerted = await storeHeard(store, order);
-    expect([...alerted.sockets].sort()).toEqual(['notification', 'order:new', 'vendor:order_alert']);
-    expect(alerted.pushes).toEqual(['New Order!']);
+    expect([...alerted.sockets].sort()).toEqual(['notification', 'notification', 'order:new', 'vendor:order_alert', 'vendor:order_alert']);
+    expect(alerted.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(alerted.told).toEqual(['owner', 'staff']);
     // The express checkout arms the ladder itself — there is no release.
     expect(jobsFor(order.id).map((j) => j.name).sort()).toEqual(['auto-cancel', 'vendor-alert-escalate']);
 
@@ -1030,7 +1062,7 @@ describe('Q12 · express — never held, so the store sees it at once; a cancel 
     // The ladder the checkout armed stops: no "Order still waiting!", no SMS.
     expect(await runJobsFor(order.id)).toEqual(['vendor-alert-escalate:ring1:stopped', 'auto-cancel:false']);
     const after = await storeHeard(store, order);
-    expect(after.pushes).toEqual(['New Order!']);
+    expect(after.pushes).toEqual(['New Order!', 'New Order!']);
     expect(after.sms).toEqual([]);
     expect(await storeSees(store, order.id)).toMatchObject({ cancelledTab: true });
   });
@@ -1074,7 +1106,7 @@ describe('Q12 · MMG — the one thing the store is told about an order cancelle
     expect(row.lateCancelFeeDue).toBe(0);
 
     const heard = await storeHeard(store, order);
-    expect(heard.inbox).toEqual([{ title: 'Cancelled order may hold an MMG payment', kind: 'mmg_unattested_cancellation', isRead: false }]);
+    expect(heard.inbox).toEqual([{ who: 'owner', title: 'Cancelled order may hold an MMG payment', kind: 'mmg_unattested_cancellation', isRead: false }]);
     expect(heard.deliveries).toBe(0);
     expect(heard.sockets).toEqual(['notification']); // the refund notice's live copy — no order:new, no banner
     expect(heard.pushes).toEqual(['Cancelled order may hold an MMG payment']);
@@ -1103,5 +1135,159 @@ describe('Q12 · MMG — the one thing the store is told about an order cancelle
     expect(refused.json().error.code).toBe('MMG_CANCEL_UNAVAILABLE');
     const mine = await call('GET', `/api/v1/customer/orders/${paid.id}`, buyer.token);
     expect(mine.json().data).toMatchObject({ paymentStatus: 'CLAIMED', canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (Q10 loud alerts 2/4 · AX291 F01) The store is told only about an order it
+// has been SHOWN, decided on the order as it is NOW (hold-visibility.ts,
+// shownToStoreFilter): never on the checkout's snapshot and the clock. A
+// checkout whose worker stalls after the commit and resumes after the window
+// closed must not announce an order the release owns, or one the customer
+// cancelled inside its window meanwhile; and "seen" is refused for an order
+// no release has shown yet, so it can never pre-empt the ladder.
+// ---------------------------------------------------------------------------
+
+describe('Q10 · AX291 F01 — the store hears of an order only once it has been shown it, read fresh', () => {
+  /** The customer's real checkout, whose worker stalls right after the order
+   *  commits: `meanwhile` runs in the stall. A held order's checkout carries on
+   *  with the clock a second past its hold's deadline; an express one (never
+   *  held) carries on at once. */
+  async function placeOrderStalled(
+    buyer: Actor,
+    store: Store,
+    meanwhile: (orderId: string) => Promise<void> = async () => {},
+    body: Record<string, unknown> = { paymentMethod: 'CASH' },
+  ): Promise<Placed> {
+    const transaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let stalled = false;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (...args: unknown[]) => {
+      const result = await transaction(...args);
+      const commit = result as { orders?: Array<{ id: string; holdExpiresAt: Date | null }>; answer?: unknown } | null;
+      if (!stalled && commit && Array.isArray(commit.orders) && commit.answer !== undefined) {
+        stalled = true;
+        for (const placed of commit.orders) {
+          await meanwhile(placed.id);
+          if (placed.holdExpiresAt) vi.useFakeTimers({ toFake: ['Date'], now: placed.holdExpiresAt.getTime() + 1_000 });
+        }
+      }
+      return result;
+    }) as never);
+    try {
+      const placed = await placeOrder(buyer, store, 1, body);
+      expect(stalled, 'the checkout commit was intercepted').toBe(true);
+      return placed;
+    } finally {
+      spy.mockRestore();
+      vi.useRealTimers();
+    }
+  }
+
+  it('checkout resumes after the window, the customer having cancelled inside it: the store and its whole team hear nothing, then or ever', async () => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Ines');
+    let cancelled: Awaited<ReturnType<typeof call>> | undefined;
+    const order = await placeOrderStalled(buyer, store, async (orderId) => {
+      cancelled = await call('POST', `/api/v1/customer/orders/${orderId}/cancel`, buyer.token, { reason: 'Changed my mind' });
+    });
+    expect((await orderRow(order.id)).holdExpiresAt).not.toBeNull();
+    expect(cancelled?.statusCode, cancelled?.body).toBe(200);
+    expect(cancelled!.json().data).toEqual({ message: 'Order cancelled — no charge', cancellationFee: 0 });
+    expect((await orderRow(order.id)).status).toBe('CANCELLED');
+    expect(await storeHeard(store, order)).toEqual(HEARD_NOTHING);
+
+    // The window is behind it in the database too: no sweep, no job and no
+    // ladder ever tells anyone, and none of the store's surfaces shows it.
+    await travel(order.id, HOLD_MS + 1_000);
+    expect(await releaseSweep()).not.toContain(order.id);
+    expect(await ladderRows(order.id)).toEqual([]);
+    expect(await runJobsFor(order.id)).toEqual(['auto-cancel:false']);
+    expect(await storeHeard(store, order)).toEqual(HEARD_NOTHING);
+    expect(await storeSees(store, order.id)).toEqual({
+      board: false, cancelledTab: false, detail: 404, banner: false, ops: { placedOrders: 0, cancellationRate: null },
+      dashboard: DASHBOARD_EMPTY,
+    });
+  });
+
+  it('checkout resumes after the window, before the release: checkout tells the store nothing, and the release tells the whole team once', async () => {
+    const store = await makeStore('SUPERMARKET', { stock: 6 });
+    const buyer = await makeCustomer('Jude');
+    const order = await placeOrderStalled(buyer, store);
+    expect((await orderRow(order.id)).releasedToVendorAt).toBeNull();
+    expect(await storeHeard(store, order)).toEqual(HEARD_NOTHING);
+    expect(jobsFor(order.id).map((j) => j.name)).toEqual(['auto-cancel']);
+
+    await travel(order.id, HOLD_MS + 1_000);
+    expect(await releaseSweep()).toContain(order.id);
+    const heard = await storeHeard(store, order);
+    expect(heard.sockets.filter((e) => e === 'order:new')).toHaveLength(1);
+    expect(heard.inbox.map((n) => [n.who, n.title])).toEqual([['owner', 'New Order!'], ['staff', 'New Order!']]);
+    expect(heard.deliveries).toBe(2);
+    expect(heard.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(heard.told).toEqual(['owner', 'staff']);
+    // ONE ladder: the release's own row, published once.
+    expect((await ladderRows(order.id)).map((r) => r.dedupeKey)).toEqual([`order:${order.id}:vendor-alert-escalate`]);
+    expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate')).toHaveLength(1);
+    expect(await storeDashboard(store)).toMatchObject({ totalOrders: 1, itemTotalOrdered: 1 });
+  });
+
+  it('checkout resumes only after the release already told the store: the whole team hears of the order once, never twice', async () => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Lior');
+    const order = await placeOrderStalled(buyer, store, async (orderId) => {
+      await travel(orderId, HOLD_MS + 1_000);
+      expect(await releaseSweep()).toContain(orderId);
+    });
+    const heard = await storeHeard(store, order);
+    expect(heard.sockets.filter((e) => e === 'order:new')).toHaveLength(1);
+    expect(heard.inbox.map((n) => [n.who, n.title])).toEqual([['owner', 'New Order!'], ['staff', 'New Order!']]);
+    expect(heard.deliveries).toBe(2);
+    expect(heard.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(await storeDashboard(store)).toMatchObject({ totalOrders: 1, itemTotalOrdered: 1 });
+  });
+
+  it('an express order (never held) cancelled before checkout could tell the store: the store is told it died, never that it is new', async () => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Mira');
+    let cancelled: Awaited<ReturnType<typeof call>> | undefined;
+    const order = await placeOrderStalled(buyer, store, async (orderId) => {
+      cancelled = await call('POST', `/api/v1/customer/orders/${orderId}/cancel`, buyer.token, { reason: 'Ordered twice' });
+    }, { paymentMethod: 'CASH', express: true });
+    const row = await orderRow(order.id);
+    expect({ express: row.isExpress, hold: row.holdExpiresAt, status: row.status }).toEqual({ express: true, hold: null, status: 'CANCELLED' });
+    expect(cancelled?.statusCode, cancelled?.body).toBe(200);
+    // The cancel refreshed the store's board; nothing announced the order.
+    expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
+    // Its ladder, armed at checkout, stops at its first rung.
+    expect(await runJobsFor(order.id)).toEqual(['vendor-alert-escalate:ring1:stopped', 'auto-cancel:false']);
+    expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
+  });
+
+  it('"seen" for an order whose hold lapsed but that no release has shown is refused and writes nothing; the ladder the release arms rings, and a seen after it ends it', async () => {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Kofi');
+    const order = await placeOrder(buyer, store, 1);
+    const seen = (actor: Actor) => call('POST', `/api/v1/vendor/orders/${order.id}/alert-seen`, actor.token);
+    // Held: not the store's to see at all.
+    expect((await seen(store.owner)).statusCode).toBe(404);
+    // The hold lapsed; no release has shown it to the store yet.
+    await travel(order.id, HOLD_MS + 1_000);
+    const early = await seen(store.staff);
+    expect(early.statusCode, early.body).toBe(409);
+    expect(await app.prisma.alertDelivery.count({ where: { subjectId: order.id } })).toBe(0);
+
+    // The release shows it to the whole team and arms the ladder: nobody has
+    // seen the alert, so its first rung rings the team.
+    expect(await releaseSweep()).toContain(order.id);
+    expect(await runJobsFor(order.id, ['vendor-alert-escalate'], 1)).toEqual(['vendor-alert-escalate:ring1:realerted']);
+    // Seen now is the store's to say, and it ends the ladder.
+    const later = await seen(store.staff);
+    expect(later.statusCode, later.body).toBe(200);
+    expect(await runJobsFor(order.id, ['vendor-alert-escalate'])).toEqual([
+      'vendor-alert-escalate:ring2:stopped', 'vendor-alert-escalate:sms:stopped', 'vendor-alert-escalate:admin:stopped',
+    ]);
+    const heard = await storeHeard(store, order);
+    expect(heard.pushes).toEqual(['New Order!', 'New Order!', 'Order still waiting!', 'Order still waiting!']);
+    expect(heard.sms).toEqual([]);
   });
 });

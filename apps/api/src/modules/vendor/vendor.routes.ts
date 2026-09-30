@@ -17,6 +17,7 @@ import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } f
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
 import { revokeStoreRoom } from '../notification/store-room';
+import { shownToStoreFilter } from '../order/hold-visibility';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -1479,10 +1480,15 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  no more rings, no text, no operator page. Seen is not answered: the
    *  order still waits for accept or reject, and still auto-cancels.
    *  Ownership FIRST (the PR 1 bug class): an order of another store, or one
-   *  still held, is a 404 before anything is written. Idempotent: the first
-   *  sighting is the one kept. */
+   *  still held, is a 404 before anything is written. [AX291 F01] So is the
+   *  hold-visibility rule on the order as it is now: a hold that lapsed but
+   *  that no release has shown the store yet has no alert to have seen (409,
+   *  nothing written), so a sighting can never pre-empt the ladder its
+   *  release arms. Idempotent: the first sighting is the one kept. */
   app.post<{ Params: IdParam }>('/orders/:id/alert-seen', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    const shown = await app.prisma.order.count({ where: { id: order.id, AND: [shownToStoreFilter(app.prisma)] } });
+    if (shown === 0) throw new AppError(409, 'ORDER_NOT_SHOWN', 'This order has not been shown to the store yet');
     const { markStoreAlertSeen } = await import('../notification/store-alert-ladder');
     await markStoreAlertSeen(app.prisma, order.id, request.user.userId);
     return { success: true, data: { seen: true } };
