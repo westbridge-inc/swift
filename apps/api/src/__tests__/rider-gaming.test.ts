@@ -131,6 +131,10 @@ describe('over HTTP: a row for the reviewer, nothing for the rider', () => {
     const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
     await app.prisma.algoDecision.deleteMany({ where: { subjectType: 'RIDER', subjectId: { in: riders.map((r) => r.id) } } });
     for (const r of riders) await app.redis.del(traceKey('RIDER', r.id));
+    // [ALG-01] A handback re-dispatches to riders tied at one spot, so the
+    // fairness band records decisions about these orders too; they go with them.
+    const orders = await app.prisma.order.findMany({ where: { customerId: { in: ids } }, select: { id: true } });
+    await app.prisma.algoDecision.deleteMany({ where: { subjectType: 'ORDER', subjectId: { in: orders.map((o) => o.id) } } });
     await app.prisma.order.deleteMany({ where: { customerId: { in: ids } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
     const vos = await app.prisma.vendorOwner.findMany({ where: { userId: { in: ids } }, select: { id: true } });

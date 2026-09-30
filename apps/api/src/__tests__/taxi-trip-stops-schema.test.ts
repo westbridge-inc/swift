@@ -29,7 +29,24 @@ const ids = { reviewUser: '', prodUser: '' };
 const orderIds: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'taxi-stops-schema-test');
 
-async function taxiOrder(tenantId: string, customerId: string, extra: Partial<Prisma.OrderUncheckedCreateInput> = {}) {
+/** A passenger of their own, in the ride's tenant, for every ride: one customer
+ *  holds only one live taxi (orders_one_live_taxi_per_customer_key), and each
+ *  ride here stays live. */
+const passengerIds: string[] = [];
+async function passengerIn(tenantId: string): Promise<string> {
+  const user = await system(() => app.prisma.user.create({
+    data: {
+      phone: `+59200STOP${NUM}p${passengerIds.length}`, firstName: 'Stop', lastName: 'Passenger',
+      activeRole: 'CUSTOMER', tenantId, isSynthetic: tenantId !== PRODUCTION,
+    },
+    select: { id: true },
+  }));
+  passengerIds.push(user.id);
+  return user.id;
+}
+
+async function taxiOrder(tenantId: string, extra: Partial<Prisma.OrderUncheckedCreateInput> = {}) {
+  const customerId = await passengerIn(tenantId);
   const order = await system(() => app.prisma.order.create({ data: {
     tenantId, orderNumber: `STOP-${RUN}-${orderIds.length}`, orderType: 'TAXI', customerId,
     pickupAddress: 'Stabroek Market', pickupLat: 6.8045, pickupLng: -58.1553,
@@ -68,7 +85,7 @@ afterAll(async () => {
   await system(async () => {
     // Deleting the rides cascades their stops: the teardown is itself the cascade path.
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: [ids.reviewUser, ids.prodUser] } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: [ids.reviewUser, ids.prodUser, ...passengerIds] } } });
     await app.prisma.tenant.updateMany({ where: { id: REVIEW }, data: { purgeProtected: false } });
     await app.prisma.tenant.deleteMany({ where: { id: REVIEW } });
   });
@@ -116,14 +133,15 @@ describe('[TAXI multi-stop] taxi_trip_stops is walled like every tenant table', 
 
 describe('[TAXI multi-stop] a stop inherits its ride’s tenant', () => {
   it('system mode (the default tenant = unstamped) is DERIVED from the ride — never stored as production', async () => {
-    const ride = await taxiOrder(REVIEW, ids.reviewUser);
+    const ride = await taxiOrder(REVIEW);
     expect((await stop(ride.id, 1)).tenantId).toBe(REVIEW);
   });
 
   it('a stop written INSIDE the ride’s own create inherits too — the shape the request path will use', async () => {
+    const passenger = await passengerIn(REVIEW);
     const ride = await system(() => app.prisma.order.create({
       data: {
-        tenantId: REVIEW, orderNumber: `STOP-${RUN}-nested`, orderType: 'TAXI', customerId: ids.reviewUser,
+        tenantId: REVIEW, orderNumber: `STOP-${RUN}-nested`, orderType: 'TAXI', customerId: passenger,
         deliveryAddress: 'Sheriff Street', deliveryLat: 6.82, deliveryLng: -58.13, taxiStopCount: 2,
         subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
         taxiStops: { create: [{ sequence: 1, lat: 6.81, lng: -58.15, address: 'Bourda Market' }, { sequence: 2, lat: 6.815, lng: -58.14, address: 'Kitty Market' }] },
@@ -135,14 +153,14 @@ describe('[TAXI multi-stop] a stop inherits its ride’s tenant', () => {
   });
 
   it('a bound caller’s stop is stamped with its tenant; a stop naming a ride of ANOTHER tenant is refused', async () => {
-    const mine = await taxiOrder(REVIEW, ids.reviewUser);
+    const mine = await taxiOrder(REVIEW);
     expect((await runWithTenant(REVIEW, () => app.prisma.taxiTripStop.create({ data: stopData(mine.id, 1) }))).tenantId).toBe(REVIEW);
-    const theirs = await taxiOrder(PRODUCTION, ids.prodUser);
+    const theirs = await taxiOrder(PRODUCTION);
     await expect(runWithTenant(REVIEW, () => app.prisma.taxiTripStop.create({ data: stopData(theirs.id, 1) }))).rejects.toThrow(/STA-1 lineage/);
   });
 
   it('an explicit tenant that disagrees with the ride, and a ride that does not exist, are refused', async () => {
-    const ride = await taxiOrder(REVIEW, ids.reviewUser);
+    const ride = await taxiOrder(REVIEW);
     await expect(stop(ride.id, 1, { tenantId: `other-${RUN}` })).rejects.toThrow(/STA-1 lineage|Foreign key/);
     await expect(stop(`no-such-ride-${RUN}`, 1)).rejects.toThrow(/STA-1 lineage|Foreign key/);
   });
@@ -150,8 +168,8 @@ describe('[TAXI multi-stop] a stop inherits its ride’s tenant', () => {
 
 describe('[TAXI multi-stop] the itinerary is frozen at request; progress is not', () => {
   it('refuses a change to the ride, the place in the order, the tenant or the id of a stop', async () => {
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
-    const other = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
+    const other = await taxiOrder(PRODUCTION);
     const s = await stop(ride.id, 1);
     const update = (data: Prisma.TaxiTripStopUncheckedUpdateInput) => system(() => app.prisma.taxiTripStop.update({ where: { id: s.id }, data }));
     await expect(update({ orderId: other.id })).rejects.toThrow(/is frozen/);
@@ -163,14 +181,14 @@ describe('[TAXI multi-stop] the itinerary is frozen at request; progress is not'
   });
 
   it('refuses a key rewrite that arrives by cascade from the ride', async () => {
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
     await stop(ride.id, 1);
     orderIds.push(`${ride.id}-x`); // cleaned up even if the rewrite were ever let through
     await expect(app.prisma.$executeRaw(Prisma.sql`UPDATE orders SET id = ${`${ride.id}-x`} WHERE id = ${ride.id}`)).rejects.toThrow(/is frozen/);
   });
 
   it('lets status, its timestamps, the skip reason, the actor and the evidence move', async () => {
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
     const s = await stop(ride.id, 1);
     const at = new Date();
     const moved = await system(() => app.prisma.taxiTripStop.update({
@@ -187,19 +205,19 @@ describe('[TAXI multi-stop] the itinerary is frozen at request; progress is not'
 
 describe('[TAXI multi-stop] the shape of an itinerary, held by the database', () => {
   it('one stop per place in the order: (orderId, sequence) is unique', async () => {
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
     await stop(ride.id, 2);
     await expect(stop(ride.id, 2)).rejects.toThrow(/Unique constraint/);
   });
 
   it('sequence is 1..3 — intermediate stops only, three at most', async () => {
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
     for (const bad of [0, 4, -1]) await expect(stop(ride.id, bad)).rejects.toThrow(/taxi_trip_stops_sequence_check/);
     for (const good of [1, 2, 3]) expect((await stop(ride.id, good)).sequence).toBe(good);
   });
 
   it('a stop is a real place with an address the request schema would accept', async () => {
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
     await expect(stop(ride.id, 1, { lat: 90.5 })).rejects.toThrow(/taxi_trip_stops_lat_check/);
     await expect(stop(ride.id, 1, { lng: -180.5 })).rejects.toThrow(/taxi_trip_stops_lng_check/);
     await expect(stop(ride.id, 1, { address: '  x  ' })).rejects.toThrow(/taxi_trip_stops_address_check/);
@@ -208,8 +226,8 @@ describe('[TAXI multi-stop] the shape of an itinerary, held by the database', ()
   });
 
   it('a stop leaves with its ride: deleting the order cascades its stops, and no other ride’s', async () => {
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
-    const neighbour = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
+    const neighbour = await taxiOrder(PRODUCTION);
     for (const n of [1, 2, 3]) await stop(ride.id, n);
     await stop(neighbour.id, 1);
     await system(() => app.prisma.order.delete({ where: { id: ride.id } }));
@@ -220,12 +238,12 @@ describe('[TAXI multi-stop] the shape of an itinerary, held by the database', ()
 
 describe('[TAXI multi-stop] the two inert header columns', () => {
   it('orders.taxiStopCount accepts NULL (every ride today) and 1..3, and refuses anything else on a new or updated row', async () => {
-    expect((await taxiOrder(PRODUCTION, ids.prodUser)).taxiStopCount).toBeNull();
-    for (const good of [1, 2, 3]) expect((await taxiOrder(PRODUCTION, ids.prodUser, { taxiStopCount: good })).taxiStopCount).toBe(good);
+    expect((await taxiOrder(PRODUCTION)).taxiStopCount).toBeNull();
+    for (const good of [1, 2, 3]) expect((await taxiOrder(PRODUCTION, { taxiStopCount: good })).taxiStopCount).toBe(good);
     for (const bad of [0, 4, -1]) {
-      await expect(taxiOrder(PRODUCTION, ids.prodUser, { taxiStopCount: bad })).rejects.toThrow(/orders_taxi_stop_count_check/);
+      await expect(taxiOrder(PRODUCTION, { taxiStopCount: bad })).rejects.toThrow(/orders_taxi_stop_count_check/);
     }
-    const ride = await taxiOrder(PRODUCTION, ids.prodUser);
+    const ride = await taxiOrder(PRODUCTION);
     await expect(system(() => app.prisma.order.update({ where: { id: ride.id }, data: { taxiStopCount: 4 } })))
       .rejects.toThrow(/orders_taxi_stop_count_check/);
   });

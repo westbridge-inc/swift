@@ -33,6 +33,14 @@ let app: FastifyInstance;
 let fare: FareService;
 let dispatch: DispatchService;
 const createdUserIds: string[] = [];
+/** [ALG-01] findCandidates runs the fairness band, which records its decision
+ *  under the id it is handed: the class-filter probes below are subjects too. */
+const probeIds: string[] = [];
+function probeId() {
+  const id = `tier-${nanoid(6)}`;
+  probeIds.push(id);
+  return id;
+}
 
 async function purgeFixtures() {
   const users = await app.prisma.user.findMany({
@@ -46,6 +54,9 @@ async function purgeFixtures() {
     select: { id: true },
   });
   const orderIds = orders.map((o) => o.id);
+  // [ALG-01] Drivers tied at one spot make the fairness band record decisions
+  // about these rides and probes; they outlive them unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...probeIds] } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
@@ -245,13 +256,13 @@ describe('Dispatch class filter — an XL request never offers to an Economy car
     const economy = await makeDriver('ECONOMY');
     const xl = await makeDriver('XL');
 
-    const xlCandidates = await dispatch.findCandidates(`tier-${nanoid(6)}`, CENTRAL, 5, 'DRIVER', 0, 'XL');
+    const xlCandidates = await dispatch.findCandidates(probeId(), CENTRAL, 5, 'DRIVER', 0, 'XL');
     const xlIds = xlCandidates.map((c) => c.riderId);
     expect(xlIds).toContain(xl.driverId);
     expect(xlIds).not.toContain(economy.driverId);
 
     // An Economy request can use either (a driver serves all tiers <= its own).
-    const econCandidates = await dispatch.findCandidates(`tier-${nanoid(6)}`, CENTRAL, 5, 'DRIVER', 0, 'ECONOMY');
+    const econCandidates = await dispatch.findCandidates(probeId(), CENTRAL, 5, 'DRIVER', 0, 'ECONOMY');
     const econIds = econCandidates.map((c) => c.riderId);
     expect(econIds).toContain(economy.driverId);
     expect(econIds).toContain(xl.driverId);

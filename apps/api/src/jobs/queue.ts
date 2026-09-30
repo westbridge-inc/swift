@@ -296,7 +296,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
-    ({ order } = await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'CANCELLED',
       allowedFrom: ['PENDING'],
@@ -366,7 +366,7 @@ export async function releaseHeldOrdersJob(
   queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue' | 'orderQueue'>,
 ): Promise<string[]> {
   const { OrderService } = await import('../modules/order/order.service');
-  const orders = new OrderService(ctx.prisma, ctx.io);
+  const orders = new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis);
   const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
     await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
   });
@@ -392,7 +392,7 @@ export async function releaseHeldOrdersJob(
 export async function autoCompleteDeliveredOrder(ctx: JobContext, orderId: string): Promise<boolean> {
   const { OrderService } = await import('../modules/order/order.service');
   try {
-    await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'COMPLETED',
       allowedFrom: ['DELIVERED'],
@@ -1934,7 +1934,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { OrderService, reconcileMissingEarnings } = await import('../modules/order/order.service');
         const { scanned, healed, taxiUnpaidDelivered, courierUnpaidDelivered } = await reconcileMissingEarnings(
           ctx.prisma,
-          new OrderService(ctx.prisma, ctx.io),
+          new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         );
         // [M-29] A cash ride delivered with no captured fare after the fare
         // outcome became mandatory means a completion bypassed the terminal
