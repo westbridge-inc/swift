@@ -1,9 +1,13 @@
 /// <reference types="vite/client" />
 import { readdirSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
-import type { Metadata } from 'next';
-import { describe, expect, it, vi } from 'vitest';
+import type { Metadata, NextConfig } from 'next';
+import { PHASE_PRODUCTION_BUILD } from 'next/constants';
+import { getRedirectUrl, getRewrittenUrl, unstable_getResponseFromNextConfig } from 'next/experimental/testing/server';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { customerRoute } from './lib/customer-routes';
+import { RELEASE_BROWSER_API_ORIGIN } from './lib/browser-api-origin';
+import { SITE_DOMAIN } from './site.domain';
 import robots from './app/robots';
 import sitemap from './app/sitemap';
 
@@ -82,6 +86,30 @@ const PUBLIC_RESOURCES = [
   'well-known/apple-app-site-association/route.ts',
   'well-known/assetlinks.json/route.ts',
 ];
+
+// Configured routes are entry points too, even without an App Router file.
+// Pin the full rules (including order/conditions), so a new alias, destination
+// or host/query condition cannot silently bypass classification.
+const PUBLIC_REWRITES = [
+  { source: '/.well-known/apple-app-site-association', destination: '/well-known/apple-app-site-association' },
+  { source: '/.well-known/assetlinks.json', destination: '/well-known/assetlinks.json' },
+];
+const SCAN_DISALLOWED_REWRITES = [
+  { source: '/s/:code', destination: `${RELEASE_BROWSER_API_ORIGIN}/s/:code` },
+];
+const PUBLIC_REDIRECTS = [
+  { source: '/for-vendors', destination: '/vendors', permanent: true },
+  { source: '/for-drivers', destination: '/drivers', permanent: true },
+  { source: '/delete-account', destination: '/account/delete', permanent: true },
+];
+// This rule spans public AND private paths. It preserves the destination's
+// classification; /s/ must keep its header even on this earlier redirect.
+const CANONICAL_HOST_REDIRECT = {
+  source: '/:path((?!\\.well-known/).*)',
+  has: [{ type: 'host', value: `www.${SITE_DOMAIN}` }],
+  destination: `https://${SITE_DOMAIN}/:path*`,
+  permanent: true,
+};
 
 const APP = join(process.cwd(), 'src', 'app');
 function sourceFiles(directory: string): string[] {
@@ -240,5 +268,71 @@ describe('[DS288] every route has a reviewed search classification', () => {
   it('advertises only classified public pages in the sitemap', () => {
     const publicUrls = PUBLIC_PAGES.map(urlOf);
     for (const entry of sitemap()) expect(publicUrls, entry.url).toContain(new URL(entry.url).pathname);
+  });
+
+  describe('configured rewrites and redirects [AX303 F3]', () => {
+    let config: NextConfig;
+
+    beforeAll(async () => {
+      // Evaluate the real public-release config, not the staging-wide header
+      // (which could mask a missing /s/ rule). No API request is made.
+      vi.stubEnv('NEXT_PUBLIC_API_URL', RELEASE_BROWSER_API_ORIGIN);
+      vi.stubEnv('SWIFT_WEB_CHANNEL', 'production');
+      vi.stubEnv('SWIFT_WEB_IMAGE_BUILD', '0');
+      vi.resetModules();
+      const { default: createNextConfig } = await import('../next.config');
+      config = createNextConfig(PHASE_PRODUCTION_BUILD);
+    });
+
+    afterAll(() => vi.unstubAllEnvs());
+
+    it('classifies every configured rewrite, including the GET-side-effect resolver', async () => {
+      expect(await config.rewrites!()).toEqual([...PUBLIC_REWRITES, ...SCAN_DISALLOWED_REWRITES]);
+    });
+
+    it('classifies every configured redirect, including the mixed public/private host alias', async () => {
+      expect(await config.redirects!()).toEqual([...PUBLIC_REDIRECTS, CANONICAL_HOST_REDIRECT]);
+    });
+
+    it('disallows QR scan crawling and declares an unconditional noindex/nofollow header', async () => {
+      for (const path of ['/s/', '/s/census-code', '/s/census-code/child']) {
+        expect(crawlable(path), `${path} must not invite scan-count inflation`).toBe(false);
+      }
+      const rules = await config.headers!();
+      expect(rules.find((rule) => rule.source === '/s/:path*')).toEqual({
+        source: '/s/:path*',
+        headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }],
+      });
+    });
+
+    it('carries noindex/nofollow through Next header matching and the external QR rewrite', async () => {
+      for (const path of ['/s/census-code', '/s/census-code?source=census']) {
+        const response = await unstable_getResponseFromNextConfig({ url: `https://${SITE_DOMAIN}${path}`, nextConfig: config });
+        expect(getRewrittenUrl(response)).toBe(`${RELEASE_BROWSER_API_ORIGIN}${path}`);
+        expect(response.headers.get('x-robots-tag'), path).toBe('noindex, nofollow');
+      }
+    });
+
+    it('covers /s/ descendants and the www redirect without changing its destination', async () => {
+      for (const path of ['/s/', '/s/census-code/child']) {
+        const response = await unstable_getResponseFromNextConfig({ url: `https://${SITE_DOMAIN}${path}`, nextConfig: config });
+        expect(response.headers.get('x-robots-tag'), path).toBe('noindex, nofollow');
+      }
+      const response = await unstable_getResponseFromNextConfig({
+        url: `https://www.${SITE_DOMAIN}/s/census-code`,
+        headers: { host: `www.${SITE_DOMAIN}` },
+        nextConfig: config,
+      });
+      expect(getRedirectUrl(response)).toBe(`https://${SITE_DOMAIN}/s/census-code`);
+      expect(response.headers.get('x-robots-tag')).toBe('noindex, nofollow');
+    });
+
+    it('keeps public pages and configured public aliases crawlable without a noindex header', async () => {
+      for (const path of [...PUBLIC_PAGES.map(urlOf), ...PUBLIC_REDIRECTS.map((rule) => rule.source), ...PUBLIC_REWRITES.map((rule) => rule.source)]) {
+        expect(crawlable(path), path).toBe(true);
+        const response = await unstable_getResponseFromNextConfig({ url: `https://${SITE_DOMAIN}${path}`, nextConfig: config });
+        expect(response.headers.get('x-robots-tag'), path).toBeNull();
+      }
+    });
   });
 });

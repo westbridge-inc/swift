@@ -8,9 +8,10 @@ import { SITE_ORIGIN } from '@/site.config';
  * directive and could leave an externally linked URL indexed without content.
  *
  * Secret-token and GET-side-effect routes instead keep BOTH Disallow and
- * noindex. The only such pages currently in this app are tracking/share links;
- * the route census requires any new payment return, magic or invite link to
- * be classified explicitly. Auth and access controls remain the data boundary.
+ * noindex. These include tracking/share pages and the configured /s/ rewrite,
+ * whose resolver records a scan on GET. The route census requires any new
+ * payment return, magic or invite link to be classified explicitly. Auth and
+ * access controls remain the data boundary.
  */
 export default function robots(): MetadataRoute.Robots {
   return {
@@ -21,6 +22,7 @@ export default function robots(): MetadataRoute.Robots {
         disallow: [
           '/trip/',        // tokenised trip share — private by construction
           '/track/',       // tokenised parcel tracking — private by construction
+          '/s/',           // QR resolver records a scan on GET [AX303 F3]
           '/api/',
         ],
       },
