@@ -8,6 +8,7 @@ import { notifyAdmins, type NotificationService } from '../notification/notifica
 import { agentCashDuplicateCreditsCounter, agentCashDuplicateCreditsGauge, agentCashProviderIdConflictsCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
+import { amountDueNow } from './amount-due';
 
 // Agent-cash ingestion [san spec PART 4] — three channels, ONE pipeline:
 //   persist raw → idempotency → sanity → cross-channel dedupe → resolve SAN
@@ -61,22 +62,29 @@ const ACTIVATION_COPY: Record<string, string> = {
 };
 
 /** The Pay-screen data block [spec 6.1] — spread into the partner's
- *  GET /subscription next to sanDisplay. One amount-due source of truth
- *  [3.4]: next week's fee minus the parked wallet balance, floored at 0.
+ *  GET /subscription next to sanDisplay. One amount-due source of truth:
+ *  amountDueNow (amount-due.ts), the same helper every notice that states an
+ *  amount owed uses — the charge already issued for the week owed, at its own
+ *  amount (AX332 F2: an 8,000 request still pending when the rate moved to
+ *  6,000 is settled at 8,000, so that is what is due); with none outstanding,
+ *  next week's fee minus the parked wallet balance, floored at 0 [3.4]. The
+ *  weekly fee (weeklyFeeGyd) is the rate in force, reported beside it, never
+ *  in its place.
  *  usdDisplay [usd spec Part 6, System 2 ③]: the dual-currency line — NULL
  *  until the founder enables usdPricingEnabled + displayDual for the tenant,
  *  so it ships dark and every consumer already handles absence. */
 export async function payInfo(
   prisma: PrismaClient,
-  sub: { id: string; type?: string; weeklyRate: unknown; customRate?: unknown | null },
+  sub: { id: string; type?: string; weeklyRate: unknown; customRate?: unknown | null; nextBillingDate: Date },
 ): Promise<{
   walletBalanceGyd: number; weeklyFeeGyd: number; amountDueGyd: number;
-  activationCopy: string; payCashSteps: string[];
+  activationCopy: string;
   usdDisplay: { amountUsd: number; rateUsed: number; line: string } | null;
 }> {
-  const [balanceRow, modeRow] = await Promise.all([
+  const [balanceRow, modeRow, amountDue] = await Promise.all([
     prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } }),
     prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.ingestion_mode' } }),
+    amountDueNow(prisma, sub),
   ]);
   const weekly = weeklyFeeAmount(sub);
   const balance = Number(balanceRow?.balance ?? 0);
@@ -109,13 +117,11 @@ export async function payInfo(
   return {
     walletBalanceGyd: balance,
     weeklyFeeGyd: weekly,
-    amountDueGyd: Math.max(0, weekly - balance),
+    amountDueGyd: amountDue,
     activationCopy: ACTIVATION_COPY[mode] ?? ACTIVATION_COPY['MANUAL']!,
-    payCashSteps: [
-      'Visit any MMG agent',
-      'Say you are paying a Swift bill and give your Swift Number',
-      'Pay cash — keep the receipt',
-    ],
+    // No agent or cash steps (the owner, 29 Sep): partners pay the weekly fee
+    // on the checkout page, with MMG. A build from before that page renders
+    // any steps served here, so none are.
     usdDisplay,
   };
 }
