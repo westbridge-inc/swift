@@ -1,5 +1,5 @@
 import type { OnAudit } from '../../lib/audit-writer';
-import { Prisma, type PrismaClient } from '@prisma/client';
+import { Prisma, type MmgAgentPayment, type PrismaClient } from '@prisma/client';
 import type { BillingService } from './billing.service';
 import { resolveSan } from './san.service';
 import { validateSanShape } from './san';
@@ -167,6 +167,32 @@ export class AgentCashService {
       throw e;
     }
 
+    return this.judge(row, p, onAudit);
+  }
+
+  /** [G5-F6] Finish an observation that was persisted and never judged: the
+   *  process died between step 1 (the raw row) and its verdict. The replay
+   *  guard answers every later delivery of it `duplicate`, so without this
+   *  the money on disk is never credited. Steps 2 to 5 run exactly as ingest
+   *  runs them, and the credit compare-and-set still admits one winner. */
+  async resumeReceived(paymentId: string, onAudit?: OnAudit): Promise<IngestResult> {
+    const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
+    if (row.status !== 'RECEIVED') throw new Error('NOT_RECEIVED');
+    return this.judge(row, {
+      channel: row.channel,
+      externalId: row.externalId,
+      sanRaw: row.sanRaw,
+      amount: Number(row.amount),
+      payerMsisdn: row.payerMsisdn ?? undefined,
+    }, onAudit);
+  }
+
+  /** Steps 2 to 5 for a persisted observation: identity, sanity, SAN, credit. */
+  private async judge(
+    row: MmgAgentPayment,
+    p: { channel: string; externalId: string; sanRaw: string; amount: number; payerMsisdn?: string },
+    onAudit?: OnAudit,
+  ): Promise<IngestResult> {
     // 2. [M-18] The identity: one provider transaction, one lifecycle. This
     //    record is an immutable observation of it. Before, cross-channel
     //    dedupe looked for an already-MATCHED sibling — so two channels

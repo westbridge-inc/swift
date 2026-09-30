@@ -3081,7 +3081,9 @@ model SettlementImport {
   rowCount       Int
   computedTotal  Decimal   @db.Decimal(14, 2)
   controlTotal   Decimal?  @db.Decimal(14, 2)
-  /// STAGED | REJECTED | PUBLISHING | PUBLISHED
+  /// STAGED | REJECTED | PUBLISHING | INTERRUPTED | PUBLISHED. [G5-F6]
+  /// INTERRUPTED: publication stopped part-way and is resumed; while
+  /// PUBLISHING, updatedAt is the publisher heartbeat.
   status         String    @default("STAGED")
   rejectReasons  Json?
   rows           Json

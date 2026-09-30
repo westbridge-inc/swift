@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { AgentCashService, IngestResult } from './agent-cash.service';
 import { settlementImportsRejectedCounter, settlementBatchesUnbalancedGauge } from '../../plugins/observability';
+import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 
 // Channel B — settlement-file import [san spec 4.3]. A configurable header map
@@ -27,6 +28,32 @@ import { log } from '../../utils/logger';
 //      can be held independently of upload (SETTLEMENT_PUBLISH_KILL=1);
 //   4. every row's outcome is written back on the import, and the credited
 //      total is checked against the validated total.
+//
+// [G5-F6] PUBLICATION IS RESUMABLE. Before, a publication that died part-way
+// (a dropped connection, a restart mid-file) stayed PUBLISHING for ever: the
+// same file again answered "replayed, every row a duplicate" while a row was
+// never credited, nothing else ever called the publisher, and the scan read
+// only PUBLISHED and REJECTED imports. Now:
+//   5. a publisher that fails part-way marks its import INTERRUPTED; one that
+//      dies without a word (a killed process) leaves it PUBLISHING with a
+//      heartbeat that stops. Either is resumed by ONE winner, a compare-and-set
+//      on the import as it was read: by importing the same file again (two
+//      people, like any upload), or by the repair pass of poll-mmg-billing. A
+//      live publisher is never taken over, and the hold stops a resume too;
+//   6. a resume runs every row again through the SAME ingest, whose
+//      (channel, externalId) replay guard credits a row at most once. The rows
+//      the import had already observed are its own outcomes and count as
+//      such; an observation persisted but never judged (the process died
+//      inside the ingest) is finished, never written off as a duplicate.
+
+/** [G5-F6] A publisher touches its import (updatedAt) at least this often
+ *  while it credits rows... */
+const PUBLICATION_HEARTBEAT_MS = 15_000;
+/** ...so one silent for this long has died, and its import may be resumed.
+ *  Far above the heartbeat and above any one row of ingest. */
+export const PUBLICATION_LEASE_MS = 5 * 60_000;
+
+const publicationHeld = () => process.env['SETTLEMENT_PUBLISH_KILL'] === '1';
 
 export interface SettlementHeaderMap {
   txnId: string;
@@ -46,7 +73,7 @@ export const DEFAULT_HEADER_MAP: SettlementHeaderMap = {
   agentRef: 'agent_id',
 };
 
-export type SettlementImportStatus = 'STAGED' | 'REJECTED' | 'PUBLISHING' | 'PUBLISHED' | 'HELD' | 'REPLAYED';
+export type SettlementImportStatus = 'STAGED' | 'REJECTED' | 'PUBLISHING' | 'INTERRUPTED' | 'PUBLISHED' | 'HELD' | 'REPLAYED';
 
 export interface SettlementReport {
   importId: string;
@@ -195,7 +222,17 @@ export async function importSettlementCsv(
   const fileHash = settlementFileHash(csvText);
 
   // 1. The same file is ONE import: answer the first import's result.
+  //    [G5-F6] Unless its publication stopped part-way: then this upload
+  //    finishes it. publishSettlementImport takes over only an INTERRUPTED
+  //    import or one whose publisher went silent; a live one is answered.
   const prior = await prisma.settlementImport.findUnique({ where: { tenantId_fileHash: { tenantId, fileHash } } });
+  if (prior && (prior.status === 'INTERRUPTED' || prior.status === 'PUBLISHING')) {
+    if (publicationHeld()) {
+      log().warn({ importId: prior.id, source: opts.source }, '[G5-F6] settlement publication is on hold — the unfinished import waits, nothing credited');
+      return { ...reportFor(prior, true), status: 'HELD' };
+    }
+    return publishSettlementImport(prisma, svc, prior.id, onAudit);
+  }
   if (prior && prior.status !== 'STAGED') return reportFor(prior, true);
 
   // 2. Parse and validate the whole file. Nothing below touches money until
@@ -234,47 +271,120 @@ export async function importSettlementCsv(
 
   // 3. Publication can be held independently of upload: the batch stays
   //    STAGED, validated, and a person releases it later.
-  if (process.env['SETTLEMENT_PUBLISH_KILL'] === '1') {
+  if (publicationHeld()) {
     log().warn({ importId: staged.id, source: opts.source }, '[M-20] settlement publication is on hold — file staged and validated, nothing credited');
     return { ...reportFor(staged, false), status: 'HELD' };
   }
   return publishSettlementImport(prisma, svc, staged.id);
 }
 
+type RowResult = { line: number; txnId: string; status: IngestResult['status']; paymentId: string };
+
 /** Publish a validated import: ONE winner (the compare-and-set), every row
  *  through the same ingest pipeline, every outcome written back, the
- *  credited total checked against the file's validated total. */
-export async function publishSettlementImport(prisma: PrismaClient, svc: AgentCashService, importId: string): Promise<SettlementReport> {
-  const won = await prisma.settlementImport.updateMany({ where: { id: importId, status: 'STAGED' }, data: { status: 'PUBLISHING' } });
+ *  credited total checked against the file's validated total.
+ *
+ *  [G5-F6] The same call resumes a publication that stopped part-way, again
+ *  by one winner; a person who resumes it is audited with the takeover. */
+export async function publishSettlementImport(prisma: PrismaClient, svc: AgentCashService, importId: string, onAudit?: OnAudit): Promise<SettlementReport> {
+  const won = await claimPublication(prisma, importId, onAudit);
   const current = await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } });
-  if (won.count !== 1) return reportFor(current, true); // another publisher owns it, or it is done
+  if (!won) return reportFor(current, true); // another publisher owns it, or it is done
   const rows = current.rows as unknown as StagedRow[];
-  const results: Array<{ line: number; txnId: string; status: IngestResult['status']; paymentId: string }> = [];
-  const report = { credited: 0, reconciled: 0, duplicates: 0, unmatched: 0, creditedGyd: 0 };
-  for (const row of rows) {
-    const res = await svc.ingest({
-      externalId: row.txnId,
-      channel: 'MMG_SETTLEMENT_FILE',
-      mmgTxnId: row.txnId,
-      sanRaw: row.sanRaw,
-      amount: row.amount,
-      currencyCode: 'GYD',
-      paidAt: new Date(row.paidAt),
-      payerMsisdn: row.payerMsisdn,
-      agentRef: row.agentRef,
-      raw: { source: current.source, importId, line: row.line },
-    });
-    results.push({ line: row.line, txnId: row.txnId, status: res.status, paymentId: res.paymentId });
-    if (res.status === 'accepted') { report.credited += 1; report.creditedGyd += row.amount; }
-    else if (res.status === 'reconciled') report.reconciled += 1;
-    else if (res.status === 'duplicate') report.duplicates += 1;
-    else report.unmatched += 1;
+  const results: RowResult[] = [];
+  let beat = Date.now();
+  try {
+    for (const row of rows) {
+      results.push(await publishRow(prisma, svc, current, row));
+      if (Date.now() - beat >= PUBLICATION_HEARTBEAT_MS) {
+        beat = Date.now();
+        await prisma.settlementImport.updateMany({ where: { id: importId, status: 'PUBLISHING' }, data: { updatedAt: new Date(beat) } });
+      }
+    }
+  } catch (err) {
+    // [G5-F6] Say so on the import, with what landed, so the next upload of
+    // the file or the repair pass resumes it at once. If even this write
+    // fails (the database is gone), the heartbeat has stopped and the lease
+    // lapses instead.
+    await prisma.settlementImport.updateMany({
+      where: { id: importId, status: 'PUBLISHING' },
+      data: { status: 'INTERRUPTED', results: results as never, credited: creditedIn(results) },
+    }).catch(() => undefined);
+    log().error({ err, importId, source: current.source, landed: results.length, rows: rows.length }, '[G5-F6] settlement publication interrupted part-way — resumable, no row credits twice');
+    throw err;
   }
-  const published = await prisma.settlementImport.update({
-    where: { id: importId },
-    data: { status: 'PUBLISHED', results: results as never, credited: report.credited, publishedAt: new Date() },
+  // A pass that ran every row closes the import, even one that a silent
+  // publisher woke up to mark INTERRUPTED meanwhile.
+  const closed = await prisma.settlementImport.updateMany({
+    where: { id: importId, status: { in: ['PUBLISHING', 'INTERRUPTED'] } },
+    data: { status: 'PUBLISHED', results: results as never, credited: creditedIn(results), publishedAt: new Date() },
   });
-  return reportFor(published, false);
+  const published = await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } });
+  return reportFor(published, closed.count !== 1);
+}
+
+const creditedIn = (results: RowResult[]) => results.filter((r) => r.status === 'accepted').length;
+
+/** [G5-F6] INTERRUPTED said so; PUBLISHING silent past the lease died without
+ *  a word. Either may be resumed. */
+function stoppedPublication(imp: { status: string; updatedAt: Date }, now = Date.now()): boolean {
+  return imp.status === 'INTERRUPTED' || (imp.status === 'PUBLISHING' && imp.updatedAt.getTime() < now - PUBLICATION_LEASE_MS);
+}
+const stoppedPublicationWhere = (now = Date.now()) => ({
+  OR: [{ status: 'INTERRUPTED' }, { status: 'PUBLISHING', updatedAt: { lt: new Date(now - PUBLICATION_LEASE_MS) } }],
+});
+
+/** ONE publisher at a time. A STAGED import is claimed fresh. [G5-F6] A
+ *  stopped one is taken over by a compare-and-set on the exact version read,
+ *  so of two resumers one runs and the other is answered; a live publisher
+ *  is never taken over. */
+async function claimPublication(prisma: PrismaClient, importId: string, onAudit?: OnAudit): Promise<boolean> {
+  const fresh = await prisma.settlementImport.updateMany({ where: { id: importId, status: 'STAGED' }, data: { status: 'PUBLISHING' } });
+  if (fresh.count === 1) return true;
+  const seen = await prisma.settlementImport.findUnique({ where: { id: importId }, select: { status: true, updatedAt: true, fileHash: true } });
+  if (!seen || !stoppedPublication(seen)) return false;
+  return prisma.$transaction(async (tx) => {
+    const took = await tx.settlementImport.updateMany({
+      where: { id: importId, status: seen.status, updatedAt: seen.updatedAt },
+      data: { status: 'PUBLISHING', updatedAt: new Date() },
+    });
+    if (took.count !== 1) return false; // another resumer took it first
+    // [ADM-002] A person resuming the file is the admin action: its audit row
+    // commits with the takeover and names the import.
+    await onAudit?.(tx, { importId, fileHash: seen.fileHash, status: 'RESUMED', resumedFrom: seen.status });
+    log().warn({ importId, resumedFrom: seen.status, lastHeartbeat: seen.updatedAt }, '[G5-F6] resuming a settlement publication that stopped part-way');
+    return true;
+  });
+}
+
+/** One row through the one ingest pipeline. [G5-F6] On a resume the replay
+ *  guard answers `duplicate` for every row this import observed before:
+ *  those are its OWN outcomes (the observation names the import) and are
+ *  reported as what they were, and one persisted but never judged is
+ *  finished now. A duplicate of another import or channel stays one. */
+async function publishRow(prisma: PrismaClient, svc: AgentCashService, imp: { id: string; source: string }, row: StagedRow): Promise<RowResult> {
+  const res = await svc.ingest({
+    externalId: row.txnId,
+    channel: 'MMG_SETTLEMENT_FILE',
+    mmgTxnId: row.txnId,
+    sanRaw: row.sanRaw,
+    amount: row.amount,
+    currencyCode: 'GYD',
+    paidAt: new Date(row.paidAt),
+    payerMsisdn: row.payerMsisdn,
+    agentRef: row.agentRef,
+    raw: { source: imp.source, importId: imp.id, line: row.line },
+  });
+  const outcome = (status: IngestResult['status']): RowResult => ({ line: row.line, txnId: row.txnId, status, paymentId: res.paymentId });
+  if (res.status !== 'duplicate') return outcome(res.status);
+  const seen = await prisma.mmgAgentPayment.findUnique({ where: { id: res.paymentId }, select: { status: true, raw: true } });
+  if (!seen || (seen.raw as { importId?: unknown } | null)?.importId !== imp.id) return outcome('duplicate');
+  switch (seen.status) {
+    case 'RECEIVED': return outcome((await svc.resumeReceived(res.paymentId)).status);
+    case 'MATCHED': return outcome('accepted');
+    case 'RECONCILED': return outcome('reconciled');
+    default: return outcome('received_unmatched'); // UNMATCHED, or RESOLVED since by a person
+  }
 }
 
 function reportFor(row: { id: string; status: string; fileHash: string; rowCount: number; computedTotal: unknown; controlTotal: unknown; rejectReasons?: unknown; results?: unknown; credited: number }, replayed: boolean): SettlementReport {
@@ -282,6 +392,9 @@ function reportFor(row: { id: string; status: string; fileHash: string; rowCount
   const count = (status: string) => results.filter((r) => r.status === status).length;
   const control = row.controlTotal == null ? null : Number(row.controlTotal);
   const rejections = ((row.rejectReasons as Array<{ line: number; reason: string }> | null | undefined) ?? []);
+  // [G5-F6] A replay of an unfinished publication moved nothing, and none of
+  // its rows is a duplicate of anything yet; only a finished import can say so.
+  const finished = row.status === 'PUBLISHED' || row.status === 'REJECTED';
   return {
     importId: row.id,
     status: row.status as SettlementImportStatus,
@@ -289,7 +402,7 @@ function reportFor(row: { id: string; status: string; fileHash: string; rowCount
     fileRows: row.rowCount,
     credited: replayed ? 0 : row.credited,
     reconciled: count('reconciled'),
-    duplicates: replayed ? row.rowCount : count('duplicate'),
+    duplicates: replayed ? (finished ? row.rowCount : 0) : count('duplicate'),
     unmatched: count('received_unmatched'),
     rejectedRows: rejections,
     totalGyd: Number(row.computedTotal),
@@ -299,13 +412,47 @@ function reportFor(row: { id: string; status: string; fileHash: string; rowCount
   };
 }
 
-/** [M-20 · operations] Two things a person must see: a PUBLISHED import whose
- *  credited money disagrees with its validated total (a row failed after the
- *  batch was accepted — reconcile it), and a REJECTED import any of whose
+/** [G5-F6 · operations] The repair pass (poll-mmg-billing, every two minutes)
+ *  resumes every publication that stopped part-way, one winner each. The
+ *  file was validated whole and approved by two people before a row moved;
+ *  finishing it is that approved act, each row still credits at most once,
+ *  and the hold stops it like any publication. `importIds` narrows the pass
+ *  (tests); the scan below names what the pass could not finish. */
+export async function resumeInterruptedSettlementImports(
+  prisma: PrismaClient,
+  svc: AgentCashService,
+  opts: { importIds?: string[]; limit?: number } = {},
+): Promise<{ resumed: string[]; failed: string[] }> {
+  const out = { resumed: [] as string[], failed: [] as string[] };
+  if (publicationHeld()) return out;
+  const due = await runAsSystem('settlement-import-resume', () => prisma.settlementImport.findMany({
+    where: { ...stoppedPublicationWhere(), ...(opts.importIds ? { id: { in: opts.importIds } } : {}) },
+    orderBy: { createdAt: 'asc' },
+    take: Math.max(1, opts.limit ?? 20),
+    select: { id: true, tenantId: true },
+  }));
+  for (const imp of due) {
+    try {
+      // Inside the import's own tenant, as its first publication ran.
+      const report = await runWithTenant(imp.tenantId, () => publishSettlementImport(prisma, svc, imp.id));
+      if (!report.replayed) out.resumed.push(imp.id);
+    } catch (err) {
+      out.failed.push(imp.id);
+      log().error({ err, importId: imp.id }, '[G5-F6] resuming a settlement publication failed — it stays resumable');
+    }
+  }
+  return out;
+}
+
+/** [M-20 · operations] Three things a person must see: a PUBLISHED import
+ *  whose credited money disagrees with its validated total (a row failed after
+ *  the batch was accepted — reconcile it), a REJECTED import any of whose
  *  provider ids nonetheless credited (through another channel, or through
- *  the pre-staging importer) — reverse only by hand against the statement. */
-export async function scanSettlementImports(prisma: PrismaClient): Promise<{ unbalanced: string[]; rejectedButCredited: string[] }> {
-  const out = { unbalanced: [] as string[], rejectedButCredited: [] as string[] };
+ *  the pre-staging importer) — reverse only by hand against the statement —
+ *  and [G5-F6] a publication still stopped part-way after the repair pass
+ *  (the hold is on, or its resume keeps failing). */
+export async function scanSettlementImports(prisma: PrismaClient): Promise<{ unbalanced: string[]; rejectedButCredited: string[]; stuck: string[] }> {
+  const out = { unbalanced: [] as string[], rejectedButCredited: [] as string[], stuck: [] as string[] };
   const published = await prisma.settlementImport.findMany({ where: { status: 'PUBLISHED' }, orderBy: { createdAt: 'desc' }, take: 200 });
   for (const imp of published) {
     const rows = imp.rows as unknown as StagedRow[];
@@ -320,10 +467,13 @@ export async function scanSettlementImports(prisma: PrismaClient): Promise<{ unb
     const credited = await prisma.mmgAgentPayment.count({ where: { externalId: { in: rows.map((r) => r.txnId) }, channel: 'MMG_SETTLEMENT_FILE', status: { in: ['MATCHED', 'RESOLVED'] } } });
     if (credited > 0) out.rejectedButCredited.push(imp.id);
   }
+  const stuck = await prisma.settlementImport.findMany({ where: stoppedPublicationWhere(), orderBy: { createdAt: 'desc' }, take: 200, select: { id: true } });
+  out.stuck = stuck.map((s) => s.id);
   settlementBatchesUnbalancedGauge.labels('unbalanced').set(out.unbalanced.length);
   settlementBatchesUnbalancedGauge.labels('rejected_but_credited').set(out.rejectedButCredited.length);
-  if (out.unbalanced.length + out.rejectedButCredited.length > 0) {
-    log().error(out, '[M-20] settlement imports needing a person: unbalanced publications and rejected files with credited rows');
+  settlementBatchesUnbalancedGauge.labels('stuck_publication').set(out.stuck.length);
+  if (out.unbalanced.length + out.rejectedButCredited.length + out.stuck.length > 0) {
+    log().error(out, '[M-20] settlement imports needing a person: unbalanced publications, rejected files with credited rows, and publications stopped part-way');
   }
   return out;
 }
