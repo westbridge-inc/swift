@@ -9,6 +9,7 @@ import { Star, Clock, Plus, X, Minus } from 'lucide-react';
 import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem } from '@/lib/customer';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay, formatAppointmentSlot } from '@/lib/appointmentTime';
 import { useCustomerSession } from '@/components/customer-session';
+import { MenuSkeleton } from '@/components/customer-skeletons';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { signInPath } from '@/lib/customer-routes';
@@ -129,24 +130,14 @@ export default function VendorPage() {
   }
 
   if (!v && store.isError) return <DataUnavailable what="this store" error={store.error} onRetry={() => void store.refetch()} />;
-  if (!v) {
-    return (
-      <div aria-busy="true" aria-label="Loading this store" className="space-y-4">
-        <div className="h-44 animate-pulse rounded-2xl bg-[var(--swift-subtle)] motion-reduce:animate-none md:h-56" />
-        <div className="h-8 w-1/2 animate-pulse rounded-xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />
-        <div className="grid gap-3 sm:grid-cols-2">
-          {Array.from({ length: 4 }).map((_, index) => <div key={index} className="h-24 animate-pulse rounded-2xl bg-[var(--swift-subtle)] motion-reduce:animate-none" />)}
-        </div>
-      </div>
-    );
-  }
+  if (!v) return <MenuSkeleton />;
 
   return (
     <div className="space-y-6 pb-24">
       <div className="relative h-44 overflow-hidden rounded-2xl bg-[var(--swift-subtle)] md:h-56">
-        {v.coverImageUrl && <Image src={v.coverImageUrl} alt={v.name} fill unoptimized className="object-cover" />}
+        {v.coverImageUrl && <Image src={v.coverImageUrl} alt={v.name} fill unoptimized sizes="(min-width: 1152px) 1120px, calc(100vw - 32px)" priority className="object-cover" />}
       </div>
-      <div>
+      <div className="swift-menu-heading">
         <h1 className="text-2xl font-extrabold md:text-3xl">{v.name}</h1>
         <p className="mt-1 flex flex-wrap items-center gap-3 text-sm text-[var(--swift-muted)]">
           <span className="flex items-center gap-1"><Star className="h-4 w-4 fill-amber-400 text-amber-400" />{v.displayRating === null ? 'New' : `${v.displayRating.toFixed(1)} ${v.ratingBucket}`}</span>
@@ -163,14 +154,14 @@ export default function VendorPage() {
           <div className="grid gap-3 sm:grid-cols-2">
             {cat.items.map((it) => (
               <button key={it.id} onClick={() => openItem(it)} disabled={!it.isAvailable}
-                className={`flex items-center gap-3 rounded-2xl border border-black/5 bg-white p-3 text-left transition-shadow ${it.isAvailable ? `hover:shadow-md ${PRESS}` : 'opacity-50'}`}>
+                className={`swift-menu-item flex items-center gap-3 rounded-2xl border border-black/5 bg-white p-3 text-left transition-shadow ${it.isAvailable ? `hover:shadow-md ${PRESS}` : 'opacity-50'}`}>
                 <div className="min-w-0 flex-1">
-                  <p className="font-bold">{it.name}</p>
-                  {it.description && <p className="line-clamp-2 text-sm text-[var(--swift-muted)]">{it.description}</p>}
+                  <p className="line-clamp-1 font-bold">{it.name}</p>
+                  <p className="h-10 line-clamp-2 text-sm leading-5 text-[var(--swift-muted)]">{it.description}</p>
                   <p className="mt-1 font-semibold text-[var(--swift-red)]">{money(it.customerPrice ?? it.basePrice)}{!it.isAvailable && ' · sold out'}</p>
                 </div>
                 <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-[var(--swift-subtle)]">
-                  {it.imageUrl && <Image src={it.imageUrl} alt={it.name} fill unoptimized className="object-cover" />}
+                  {it.imageUrl && <Image src={it.imageUrl} alt={it.name} fill unoptimized sizes="80px" loading="lazy" className="object-cover" />}
                   {it.isAvailable && <span className="absolute bottom-1 right-1 grid h-7 w-7 place-items-center rounded-full bg-[var(--swift-red)] text-white shadow"><Plus className="h-4 w-4" /></span>}
                 </div>
               </button>
