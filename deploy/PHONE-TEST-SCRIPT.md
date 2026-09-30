@@ -53,6 +53,8 @@ Every command prints one `OK:` or `FAILED:` line, plus a JSON line with the ids.
   - provider SP1 "Joiner" (carpenter).
 - **Real API, no shortcuts.** Every action is one real API request as that account, through the private `api-journeys` instance. That instance shares the database and worker with the public API the phone uses. There is no database write, no admin call and no test-control write. Its guard is the journeys suite's: private target only, not production, synthetic data, `+5920…` phones only.
 - **Push banners.** A step the helper takes (for example, the store accepting your order) reaches the phone as a **live screen update and an inbox row, but no push banner**. By design, the private instance's own pushes go to an in-memory adapter. Banners the **worker** sends still arrive for real, such as a delivery offer to you as a rider. So does the store-escalation SMS.
+  - An offer banner is titled "🛵 Order available nearby" (delivery or parcel) or "🚕 Someone nearby needs a pickup" (taxi). The offer card inside the app has its own top line; each journey below names it.
+  - The worker sends offer banners only while the server's loud-alert switch is on (`ALERTS_LOUD=1`). With it off, the offer shows in the app with no banner.
 - **Fixing mistakes.** `store close`, `customer cancel`, `customer cancel-ride` and `<mover> offline` undo what the helper started.
 - **Sign-in pacing.** Each command signs in two test accounts with the dev code, and that sign-in is rate limited (5 a minute). When several commands run close together, one may pause about 15 seconds to respect the limit. That is expected.
 
@@ -79,9 +81,9 @@ At the end, whatever happened:
 | RIDE-02 accept an offer | rider | store R1 + customer C4 | yes, once approved |
 | RIDE-04 door handover | rider | store R1 + customer C4 | yes, continues RIDE-02 |
 | TAXI-01 request + queue | passenger | driver T2 | yes, once your ID is verified (L2) |
-| TAXI-02 accept → arrived | driver | passenger C7 | yes, once your driver account is approved |
+| TAXI-02 accept → arrived | driver | passenger C7 | yes, in a Driver session once approved (see TAXI-02) |
 | TAXI-03 PIN → start → complete | driver | passenger C7 | yes, continues TAXI-02 |
-| TAXI-04 cash outcome / no-show | driver | passenger C7 | paid outcome yes; see the no-show note |
+| TAXI-04 cash outcome / no-show | driver | passenger C7 | paid outcome yes; no-show only as a separate last ride |
 | COUR-01 courier | courier (rider) | sender C8 | yes, once approved |
 | SERV-01 provider onboarding | provider-to-be | — (coordinator approves) | yes |
 | SERV-02 job → quote → complete | customer | provider SP1 | yes |
@@ -100,7 +102,7 @@ At the end, whatever happened:
 3. CUST-05, then CUST-02.
 4. SERV-02.
 5. TAXI-01, including SAFE-02 and the SAFE-01 look.
-6. After approvals: VEND-02 and NOTIF-02; RIDE-01, RIDE-02 and RIDE-04; COUR-01; TAXI-02, TAXI-03 and TAXI-04.
+6. After approvals: VEND-02 and NOTIF-02; RIDE-01, RIDE-02 and RIDE-04; COUR-01; then, in a Driver session, TAXI-02, TAXI-03 and TAXI-04, with the optional no-show ride last of all.
 7. `stop`.
 
 ---
@@ -225,22 +227,31 @@ These need no second party. Follow AX309 (`deepseek-audits/AX309-phone-scripts-b
 
 **You:**
 
-3. In **My Jobs** the job shows **Quote received** and "Quote: 45,000".
+3. **My Jobs** does not update while you look at it: after each coordinator step, pull the list down and let go to refresh it. After the quote, the job shows **Quote received** and "Quote: $45,000".
 4. Tap **Accept & book**. Pick a day and a time. Tap **Accept quote — {day} {time}**. It shows **Awaiting confirmation**.
 
 **Coordinator:**
 
 ```bash
 ./deploy/phone-helper.sh provider confirm --job <job id>
+```
+
+**You:**
+
+5. Pull down to refresh. The job shows **Time confirmed**. Tell the coordinator you see it.
+
+**Coordinator**, only after the owner sees **Time confirmed**. The server also accepts completion before the time is confirmed, so running it early would skip that check:
+
+```bash
 ./deploy/phone-helper.sh provider complete --job <job id>
 ```
 
 **You:**
 
-5. The job shows **Time confirmed**, then complete. Under **Rate the work:** tap the stars. You see **Thanks!**.
+6. Pull down to refresh. The job shows **Completed**. Under **Rate the work:** tap the stars. You see **Thanks!**.
 
-**Pass:** each step reaches your screen, and only you can book and rate.
-**Fail:** a step is missing, or the booking or rating is refused without a clear reason.
+**Pass:** each step shows after a refresh, and only you can book and rate.
+**Fail:** a step is still missing after a refresh, or the booking or rating is refused without a clear reason.
 
 ---
 
@@ -370,7 +381,7 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 **You:**
 
-1. **Switch app**, then **Swift Driver**. Tap **GO**. You see **You're online**. Stay on this screen.
+1. **Switch app** (on the customer **Profile** it is the **Earn with Swift** card), then **Swift Driver**. The top of the screen must say **Swift Rider**: only a rider is offered deliveries. (If it asks **How are you working today?**, tap **Deliver orders**. If it says **Swift Driver**, stop and tell the coordinator.) Tap **GO**. You see **You're online**. Stay on this screen.
 
 **Coordinator:**
 
@@ -381,7 +392,7 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 **You:**
 
-2. The offer arrives, with a real push banner if the app is in the background: "NEW DELIVERY REQUEST". Tap **Accept delivery**. That is RIDE-02.
+2. The offer card appears. Its top line reads "EXPRESS · BIGGER FEE", because the helper's order is an express one. A push banner "🛵 Order available nearby" may arrive too. Tap **Accept delivery**. That is RIDE-02.
 3. Open the **ACTIVE JOB** card. Tap **I'm on the way to pick up**, then **I've arrived at pickup**.
 
 **Coordinator:**
@@ -413,7 +424,7 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 ## COUR-01 — carry a parcel with photo proof (you are the courier; after approval)
 
-**You:** online as a rider (**GO**).
+**You:** online as a rider (**GO**; the top of the screen says **Swift Rider**).
 
 **Coordinator:**
 
@@ -424,7 +435,7 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 **You:**
 
-1. Tap **Accept delivery** on the offer.
+1. The offer card appears; its top line reads "NEW DELIVERY REQUEST". Tap **Accept delivery**.
 2. Open the **ACTIVE JOB** card.
 3. Tap **I'm on the way to pick up**, then, at the pickup, **I've arrived at pickup**.
 4. The screen says "The sender pays: collect {fee} BEFORE taking the parcel". Tap **Collected {fee} from the sender**. No real money changes hands in this test.
@@ -445,35 +456,68 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 ## TAXI-02, TAXI-03, TAXI-04 — drive a ride (after your driver account is approved)
 
-**You:** **Switch app**, then **Swift Driver**. Tap **GO**, and stay on the screen.
+**You need a Driver session.** **Swift Driver** is one work screen for both delivery and taxi work. At the top, next to **OFFLINE** or **LIVE**, it says which one you are in: **Swift Driver** (taxi) or **Swift Rider** (delivery). Only **Swift Driver** is offered rides.
+
+- Go to the mover screen (from the customer **Profile**: **Earn with Swift**, then **Swift Driver**) and read the top.
+- If it asks **How are you working today?**, tap **Drive taxi rides**.
+- If it says **Swift Rider**, this account opens as a rider, and build 8 has no switch to taxi work. Use a separate account whose driver application the coordinator approved: tap the round person button at the top right, then **Log out**, and **Log out** again to confirm (this also takes you offline). Sign in with the driver account's phone number, as in AUTH-01, and go to the mover screen again.
+- Don't use **Change vehicle** to switch. It changes your saved vehicle and its papers, and a new vehicle is checked again before you can go online.
+- No approved driver account? Record TAXI-02, TAXI-03 and TAXI-04 as not run.
+
+**You:** when the top says **Swift Driver**, tap **GO**, and stay on the screen.
 
 **Coordinator:**
 
 ```bash
 ./deploy/phone-helper.sh all cleanup
+```
+
+Before asking for a ride, check that the owner really is online as a driver, read-only: `SELECT "isOnline" FROM drivers WHERE "userId"=:uid` must be `true`. If it is not, stop: the owner is not in a Driver session (a Rider session is never offered a ride). Then:
+
+```bash
 ./deploy/phone-helper.sh customer ride --at $OWNER --to <a point about 2 km away>
 # OK: C7 requested ride <ride id> …; the passenger PIN is NNNNNN
 ```
 
 **You:**
 
-1. "NEW RIDE REQUEST" arrives. Tap **Accept ride**, open the **ACTIVE JOB** card, then tap **I'm on the way**, then **I've arrived**. That is TAXI-02.
+1. The offer card appears; its top line reads "NEW RIDE REQUEST". A push banner "🚕 Someone nearby needs a pickup" may arrive too. Tap **Accept ride**, open the **ACTIVE JOB** card, then tap **I'm on the way**, then **I've arrived**. That is TAXI-02.
 2. Type the PIN the coordinator reads you, then tap **Verify rider PIN**. You see **Code accepted — locked in.** Tap **Start trip**, then **Fare collected — complete trip**. That is TAXI-03 and TAXI-04 (paid).
 3. **Trip complete** appears. Tap **Rate passenger** or **Skip**.
 
 **Pass:** each step moves the ride, a wrong PIN is refused, and the fare closes the trip.
 **Fail:** a step refused without a reason, or the trip starts without the PIN.
 
-**No-show (TAXI-04):** **Passenger didn't pay**, then **Left without paying**, records a no-show. That puts a strike on the passenger test account C7, which the journeys need for taxi rides. Do it only as the last check, if the coordinator agrees. The claim that follows is settled by two admins in the admin console, not on the phone.
+**No-show (TAXI-04), a separate last ride.** **Passenger didn't pay** is on the screen only while a trip is under way, so it needs a second ride. It puts a strike on the passenger test account C7, which the journeys need for taxi rides. Do it only as the very last check of the session, and only if the coordinator agrees.
+
+**Coordinator:**
+
+```bash
+./deploy/phone-helper.sh customer ride --at $OWNER --to <a point about 2 km away>
+# OK: C7 requested ride <second ride id> …; the passenger PIN is NNNNNN
+```
+
+**You** (still online, the top still says **Swift Driver**):
+
+4. A new offer card appears ("NEW RIDE REQUEST"). Tap **Accept ride**, open the **ACTIVE JOB** card, then tap **I'm on the way**, then **I've arrived**.
+5. Type the new PIN the coordinator reads you, then tap **Verify rider PIN**, then **Start trip**.
+6. Do **not** tap **Fare collected — complete trip**. Tap **Passenger didn't pay**, then **Left without paying**. A message starting "Unpaid fare recorded" appears.
+
+**Pass:** each ride ends with exactly one outcome: the first paid, the second unpaid.
+**Fail:** **Passenger didn't pay** is missing while the trip is under way, or either ride stays open.
+
+The claim that follows is settled by two admins in the admin console, not on the phone.
 
 **If you stop early:** `./deploy/phone-helper.sh customer cancel-ride --order <ride id>`.
+
+**Cleanup:** when you are done, tap **Stop**. You see **You're offline**.
 
 ---
 
 ## NOTIF-01 — notifications on, a real banner, the inbox
 
 1. Allow notifications when the app asks (**Turn on**). If already allowed, nothing shows; that is fine.
-2. For a **real push banner**, use an event the worker sends. The cleanest is a delivery offer to you as a rider (RIDE-02 step 2) with the app in the background. Tap the banner; it should open the offer or order.
+2. For a **real push banner**, use an event the worker sends. The cleanest is a delivery offer to you as a rider (RIDE-02 step 2) with the app in the background; its banner reads "🛵 Order available nearby". Tap the banner; it should open the offer or order.
 3. Open **Profile**, then **Notifications**. The title is "Notification". Rows from the session are there. Tapping an order row opens its tracking screen.
 
 **Pass:** the device registers, a worker banner arrives and opens the right screen, and the inbox matches.
@@ -483,12 +527,12 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 ## Label sources (for the coordinator)
 
-All paths are in build 8 (`c950da9b`), under `apps/mobile/src/`.
+All paths are in build 8 (`c950da9b`), under `apps/mobile/src/` unless they start with `apps/`.
 
 **Checkout and tracking**
 - `Restaurants, groceries, dishes…` — modules/shop/screens/HomeScreen.tsx:518
 - `Add to cart · {price}` — MenuItemScreen.tsx:478
-- `View cart` — kit/cart-bar.tsx:100
+- `View cart` — kit/cart-bar.tsx:99
 - `Delivery` / `Pickup` — modules/cart/screens/CartScreen.tsx:589
 - `Cash on delivery` / `Pay at the counter` — modules/cart/cartPayment.ts:89-93
 - `Place order` / `Place pickup order` — CartScreen.tsx:1032
@@ -500,13 +544,13 @@ All paths are in build 8 (`c950da9b`), under `apps/mobile/src/`.
 - `Your order has arrived` — DeliveryScreen.tsx:1587
 
 **Store**
-- `Switch app` — modules/profile/screens/ProfileScreen.tsx:136
+- `Switch app` — the sheet's title, components/RoleSwitcherSheet.tsx:146; shown as a control in the store app's header (modules/vendor/shared.tsx:632) and on the mover Account screen (modules/mover/screens/MoverAccountScreen.tsx:231). On a signed-in customer Profile the visible entry is `Earn with Swift`; modules/profile/screens/ProfileScreen.tsx:136 is the guest-only row.
 - `Earn with Swift` — ProfileScreen.tsx:424
 - `Swift Business` — components/RoleSwitcherSheet.tsx:50
 - `ACCEPT ORDER` — modules/vendor/NewOrderTakeover.tsx:210
 - `Start preparing` / `Ready for pickup` — modules/vendor/shared.tsx:35-36
 - `HANDOVER CHECK` / `Mark picked up` — modules/vendor/screens/VendorOrderDetailScreen.tsx:253, 545
-- the board's code-less `Mark picked up` — VendorOps.tsx:266
+- the board's code-less `Mark picked up` — defined at modules/vendor/shared.tsx:45, rendered by modules/vendor/screens/VendorOps.tsx:259-266
 
 **Rider**
 - `GO` / `You're online` — modules/mover/screens/MoverHomeScreen.tsx:721, 742
@@ -514,12 +558,24 @@ All paths are in build 8 (`c950da9b`), under `apps/mobile/src/`.
 - `ACTIVE JOB` card — MoverHomeScreen.tsx:911-916
 - leg steps — lib/riderLeg.ts:23-27
 - `Confirm payment & hand over` — modules/mover/screens/ActiveJobScreen.tsx:999
+- `Stop` / `You're offline` — MoverHomeScreen.tsx:755, 742
+- `Swift Rider` / `Swift Driver` at the top of the mover screen — MoverHomeScreen.tsx:702
+- which side opens: live work, then the one online profile, then the remembered side — lib/moverProfile.ts:66-80; GO remembers it (apps/api/src/modules/rider/rider.routes.ts:673, apps/api/src/modules/driver/driver.routes.ts:417)
+- `How are you working today?` / `Deliver orders` / `Drive taxi rides` — only for an account with both sides and nothing remembered: MoverHomeScreen.tsx:362, 344, 350, 483-491
+- offer card top line `Express · bigger fee` / `New delivery request` / `New ride request` (capitals on the phone) — MoverHomeScreen.tsx:143; the helper's delivery order is express (apps/api/src/modules/order/order.service.ts:1274), its parcel is not (apps/api/src/modules/courier/courier.routes.ts:231)
+- offer banner titles, sent only when `ALERTS_LOUD=1` — apps/api/src/modules/dispatch/dispatch.service.ts:1629-1637; banners show with the app open too — services/push.ts:15-22
+- the round person button (`Account`) — modules/mover/screens/MoverHomeAccountButton.tsx:12, 33; `Log out`, which goes offline — MoverAccountScreen.tsx:266, 38; its confirm `Log out` — kit/logout-confirm.tsx:80
+- `Change vehicle` — MoverAccountScreen.tsx:213; it moves the account between sides by changing the vehicle — apps/api/src/modules/partner/partner.service.ts:300
 
 **Taxi**
 - driver steps — ActiveJobScreen.tsx:59-62, 757-782
+- rides are offered to drivers only — apps/api/src/modules/dispatch/dispatch.service.ts:144-146
+- `Passenger didn't pay` (only while the trip is under way) / `Left without paying` — ActiveJobScreen.tsx:780-787, 1118; `Unpaid fare recorded` — ActiveJobScreen.tsx:430-436; the server takes a fare outcome only during the trip — apps/api/src/modules/cash/cash-rules.service.ts:298-308
+- `Trip complete` / `Rate passenger` / `Skip` — ActiveJobScreen.tsx:1259, 1268, 1276
 - `Request {class} · {fare}` — modules/movement/screens/TaxiScreen.tsx:717
 - ride PIN — TaxiScreen.tsx:829-866
 - `Share trip` / `Stop sharing` — TaxiScreen.tsx:1480, 1509
+- the trip page `Swift — live trip` / `This trip share is no longer available` (no full stop on the page) — apps/web/src/app/trip/[token]/trip-share-client.tsx:94, 107; the API's own message (apps/api/src/modules/safety/safety.routes.ts:320) is not shown
 - SOS — TaxiScreen.tsx:1469, 1600-1645
 - the 911 dial — modules/safety/SosCeremony.tsx:124-125, lib/emergencyPolicy.ts:51
 
@@ -534,6 +590,10 @@ All paths are in build 8 (`c950da9b`), under `apps/mobile/src/`.
 **Services**
 - `Request` / `Send request` — modules/services/screens/ServicesScreen.tsx:242, 302
 - `Quote received` / `Accept & book` / `Accept quote — {day} {time}` — ServiceJobsScreen.tsx:20, 245, 66
+- `Quote: $45,000` — ServiceJobsScreen.tsx:219 with lib/money.ts:22
+- `Awaiting confirmation` / `Time confirmed` / `Completed` — ServiceJobsScreen.tsx:233, 23
+- pull to refresh — ServiceJobsScreen.tsx:326; the open list has no polling or live update — hooks/services.ts:81-83
+- completion is accepted before the time is confirmed — apps/api/src/modules/services/services.routes.ts:527
 - `Rate the work:` — ServiceJobsScreen.tsx:94
 
 **Inbox**
