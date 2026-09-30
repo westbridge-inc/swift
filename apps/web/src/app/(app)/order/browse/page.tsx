@@ -1,5 +1,6 @@
 'use client';
 
+import BrowseLoading from './loading';
 import { Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
@@ -44,5 +45,5 @@ function BrowseInner() {
 }
 
 export default function BrowsePage() {
-  return <Suspense fallback={<VendorGridSkeleton />}><BrowseInner /></Suspense>;
+  return <Suspense fallback={<BrowseLoading />}><BrowseInner /></Suspense>;
 }

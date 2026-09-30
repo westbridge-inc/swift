@@ -69,6 +69,8 @@ export default defineConfig({
       // suites that assert the offer push.
       OFFER_PUSH: '',
       PREVIEW_MODE: '',
+      // [TAXI multi-stop] Off unless a test switches it on per case.
+      TAXI_MAX_STOPS: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)

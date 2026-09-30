@@ -104,6 +104,10 @@ beforeEach(() => {
 
 afterAll(async () => {
   delete process.env['LIFECYCLE_V2'];
+  // A release writes its store's alert ladder as an outbox row [Q12 · AX289 F5]:
+  // no orphan is left for another suite's outbox sweep to publish.
+  const held = await app.prisma.order.findMany({ where: { customerId: { in: userIds } }, select: { id: true } });
+  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: held.map((o) => o.id) } } });
   await app.prisma.order.deleteMany({ where: { customerId: { in: userIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: userIds } } } });
