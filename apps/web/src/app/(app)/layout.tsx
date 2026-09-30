@@ -41,25 +41,10 @@ interface ShellSession {
   principal: string | null;
   /** The refresh cookie has been tried (or the server ended the session). */
   restoreTried: boolean;
-  /** Bumped when the person changes after the first answer — a sign-out, a
-   *  session the server ended, a restored session — in the same update as the
-   *  change itself, so nothing keyed to it can render one person's answer for
-   *  another. (Signing in as someone happens on /login, outside this shell:
-   *  the shell and its whole query cache unmount on the way there.) */
-  epoch: number;
-}
-
-type SessionAnswer = Omit<ShellSession, 'epoch'>;
-
-/** The first answer is learning who this is; any later change of person is a
- *  different person. */
-function settle(current: ShellSession, next: SessionAnswer): ShellSession {
-  const changed = current.status !== 'checking' && current.principal !== next.principal;
-  return { ...next, epoch: changed ? current.epoch + 1 : current.epoch };
 }
 
 function useShellSession(): ShellSession & { ensureSignedIn: () => Promise<boolean> } {
-  const [state, setState] = useState<ShellSession>({ status: 'checking', principal: null, restoreTried: false, epoch: 0 });
+  const [state, setState] = useState<ShellSession>({ status: 'checking', principal: null, restoreTried: false });
   const probe = useRef<Promise<void> | null>(null);
   const restore = useRef<Promise<boolean> | null>(null);
   const restoreSpent = useRef(false);
@@ -68,7 +53,7 @@ function useShellSession(): ShellSession & { ensureSignedIn: () => Promise<boole
   // first page that needs the answer before that — whichever comes first.
   const startProbe = useCallback(() => {
     probe.current ??= sessionProbe().then((session) => {
-      setState((current) => settle(current, session.ok
+      setState((current) => (session.ok
         ? { status: 'signed-in', principal: getSessionPrincipal(), restoreTried: current.restoreTried }
         : { status: 'guest', principal: null, restoreTried: current.restoreTried }));
     });
@@ -83,8 +68,8 @@ function useShellSession(): ShellSession & { ensureSignedIn: () => Promise<boole
     const principal = getSessionPrincipal();
     if (!principal) restoreSpent.current = true;
     setState((current) => {
-      if (principal) return settle(current, { status: 'signed-in', principal, restoreTried: current.restoreTried });
-      return current.status === 'checking' ? current : settle(current, { status: 'guest', principal: null, restoreTried: true });
+      if (principal) return { status: 'signed-in', principal, restoreTried: current.restoreTried };
+      return current.status === 'checking' ? current : { status: 'guest', principal: null, restoreTried: true };
     });
   }), []);
 
@@ -94,9 +79,9 @@ function useShellSession(): ShellSession & { ensureSignedIn: () => Promise<boole
     if (restoreSpent.current) return false;
     restore.current ??= restoreSession().then((session) => {
       restoreSpent.current = true;
-      setState((current) => settle(current, session.ok
+      setState(session.ok
         ? { status: 'signed-in', principal: getSessionPrincipal(), restoreTried: true }
-        : { status: 'guest', principal: null, restoreTried: true }));
+        : { status: 'guest', principal: null, restoreTried: true });
       return session.ok;
     });
     return restore.current;
@@ -144,13 +129,17 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   const session = useShellSession();
   const cacheIdentityReady = useCacheIdentityReady();
   const cacheEpoch = usePrivateCacheEpoch();
-  const { status, principal, restoreTried, epoch, ensureSignedIn } = session;
+  const { status, principal, restoreTried, ensureSignedIn } = session;
   const depth = useInAppDepth(pathname);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [nearPoint, setNearPoint] = useState<NearPoint | null>(null);
+  const [location, setLocation] = useState<{ epoch: number; point: NearPoint | null }>(() => ({ epoch: cacheEpoch, point: null }));
+  const nearPoint = location.epoch === cacheEpoch ? location.point : null;
+  const setNearPoint = useCallback((point: NearPoint | null) => {
+    // A geolocation callback from the old subtree retains its old epoch.
+    setLocation({ epoch: cacheEpoch, point });
+  }, [cacheEpoch]);
 
   useEffect(() => { setMenuOpen(false); }, [pathname]);
-  useEffect(() => { setNearPoint(null); }, [cacheEpoch]);
 
   // [Q7b] Market is a tab only when the server's depth verdict says so — the
   // phone app's rule, read from the same public endpoint.
@@ -175,13 +164,12 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   );
 
   const context = useMemo<CustomerSession>(
-    () => ({ status, scope: principal ?? 'guest', epoch, ensureSignedIn, nearPoint, setNearPoint }),
-    [status, principal, epoch, ensureSignedIn, nearPoint],
+    () => ({ status, scope: principal ?? 'guest', epoch: cacheEpoch, ensureSignedIn, nearPoint, setNearPoint }),
+    [status, principal, cacheEpoch, ensureSignedIn, nearPoint, setNearPoint],
   );
 
   let content: React.ReactNode;
-  if (!cacheIdentityReady) content = <div aria-label="Opening this page"><ContentSkeleton /></div>;
-  else if (route.public || status === 'signed-in') content = children;
+  if (route.public || status === 'signed-in') content = children;
   else if (status === 'guest' && restoreTried) content = <SignInDoor door={route.door} returnPath={returnPath()} />;
   else content = <div aria-label="Opening this page">{pathname === '/cart' ? <CartSkeleton /> : pathname === '/orders' ? <OrdersSkeleton /> : pathname.startsWith('/orders/') ? <OrderDetailSkeleton /> : <ContentSkeleton />}</div>;
 
@@ -205,7 +193,10 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
         />
         <main className="mx-auto max-w-6xl px-4 pt-4 pb-[calc(5rem_+_env(safe-area-inset-bottom))] md:pt-6 md:pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]">
           <OfflineNotice />
-          <div key={`${pathname}:${cacheEpoch}`} className="swift-route-in">{content}</div>
+          {!cacheIdentityReady && <div aria-label="Opening this page"><ContentSkeleton /></div>}
+          {/* Retain same-session drafts while proving identity, but never paint
+              or allow interaction with them. An epoch change remounts it all. */}
+          <div key={`${pathname}:${cacheEpoch}`} hidden={!cacheIdentityReady} inert={!cacheIdentityReady} className="swift-route-in">{content}</div>
         </main>
         <MarketAvailability key={cacheEpoch} onChange={setMarketVisible} />
         <TabBar activeTab={route.tab} marketVisible={marketVisible} />

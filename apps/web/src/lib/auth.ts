@@ -51,23 +51,20 @@ export function subscribeSession(listener: () => void): () => void {
   return () => { sessionListeners.delete(listener); };
 }
 
+/** Synchronous, tab-wide generation for keys and asynchronous work. Capture
+ * before starting work and compare again before using its result. */
+export function currentSessionEpoch(): number {
+  return authGeneration;
+}
+
 function announceSessionChange(): void {
   for (const listener of [...sessionListeners]) listener();
 }
 
-// Private cache owners subscribe separately from the shell: first learning an
-// identity is not a transition, but even signing back in as the same person is.
-const privateCacheListeners = new Set<() => void>();
-export function subscribePrivateCacheInvalidation(listener: () => void): () => void {
-  ensureSessionEvents();
-  privateCacheListeners.add(listener);
-  return () => { privateCacheListeners.delete(listener); };
-}
 function invalidatePrivateCaches(): void {
   clearStoredCheckoutAttempts();
   clearPrivateBrowserState();
   try { localStorage.removeItem(STORE_KEY); } catch { /* Storage disabled. */ }
-  for (const listener of [...privateCacheListeners]) listener();
 }
 function ensureSessionEvents(): void {
   listenForSessionInvalidation(() => {
@@ -191,6 +188,27 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     lastSettledProbe = Math.max(lastSettledProbe, probeId);
     return { ok: false };
   }
+}
+
+type SessionAnswer = { ok: boolean; user?: Record<string, unknown> };
+let verification: { epoch: number; promise: Promise<SessionAnswer> } | undefined;
+
+/** Force server proof; concurrent callers in this epoch share one request.
+ * Resume throttling belongs to the caller, never to an explicit verification.
+ * Unknown/offline proof invalidates local private state without broadcasting
+ * an unproven sign-out to other tabs. */
+export function verifySessionNow(): Promise<SessionAnswer> {
+  if (typeof window === 'undefined') return Promise.resolve({ ok: false });
+  const epoch = currentSessionEpoch();
+  if (verification?.epoch === epoch) return verification.promise;
+  const promise = sessionProbe().then((answer) => {
+    if (!answer.ok && currentSessionEpoch() === epoch) forgetSession();
+    return answer;
+  }).finally(() => {
+    if (verification?.promise === promise) verification = undefined;
+  });
+  verification = { epoch, promise };
+  return promise;
 }
 
 /** Adopt a session the server has just issued as cookies. No tokens involved. */
@@ -320,6 +338,10 @@ export async function apiFetch(
     throw new ApiRequestError('The signed-in account or selected store changed while this request was running. Try again.', 409, 'SESSION_CHANGED');
   }
   const json = await res.json().catch(() => ({}));
+  // A resumed tab may be proving new cookies while an old request finishes.
+  // Do not settle that request (including a shared pending query) ahead of
+  // the proof that can invalidate its captured principal/epoch.
+  if (verification) await verification.promise;
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
   }

@@ -37,7 +37,7 @@ it('an old session write cannot seed the profile cache after signing back in as 
   const read = vi.fn(async () => profile('a', 'Current'));
   await readSessionProfile(read);
   pending.resolve(profile('a', 'Old'));
-  await saving;
+  await expect(saving).rejects.toThrow('The signed-in session changed');
   expect((await readSessionProfile(read)).firstName).toBe('Current');
   expect(read).toHaveBeenCalledTimes(1);
 });

@@ -1,9 +1,10 @@
 'use client';
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useState } from 'react';
+import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { usePathname } from 'next/navigation';
-import { sessionProbe, subscribePrivateCacheInvalidation } from '@/lib/auth';
+import { currentSessionEpoch, subscribeSession, verifySessionNow } from '@/lib/auth';
+import { customerRoute } from '@/lib/customer-routes';
 
 const CacheIdentity = createContext({ ready: true, epoch: 0 });
 export const useCacheIdentityReady = () => useContext(CacheIdentity).ready;
@@ -13,8 +14,8 @@ export const usePrivateCacheEpoch = () => useContext(CacheIdentity).epoch;
 // current identity. Clear the entire client on an auth transition, including
 // inactive queries, mutations and pending responses, rather than guessing
 // which of its other keys contain personal data.
-function hasPrivateData(client: QueryClient): boolean {
-  return client.getQueryCache().getAll().some((query) => query.queryKey[0] !== 'market' && query.state.data !== undefined);
+function hasPrivateQueries(client: QueryClient): boolean {
+  return client.getQueryCache().getAll().some((query) => query.queryKey[0] !== 'market');
 }
 
 function createClient() {
@@ -23,31 +24,47 @@ function createClient() {
 
 export function Providers({ children, preserveShell = false }: { children: React.ReactNode; preserveShell?: boolean }) {
   const pathname = usePathname();
-  const [client, setClient] = useState(createClient);
-  const [epoch, setEpoch] = useState(0);
+  const epoch = useSyncExternalStore(subscribeSession, currentSessionEpoch, () => 0);
+  const [cache, setCache] = useState(() => ({ epoch, client: createClient() }));
+  const { client } = cache;
+  // External-store snapshots are checked before commit, including when a
+  // channel event arrives between rendering a route and committing it.
+  if (cache.epoch !== epoch) setCache({ epoch, client: createClient() });
   const [proof, setProof] = useState({ pathname, ready: true });
+  const lastResume = useRef(-Infinity);
   // Set during render so the new route cannot paint cached personal data for
   // even one frame while its effect waits for the server.
-  if (proof.pathname !== pathname) setProof({ pathname, ready: !hasPrivateData(client) });
+  if (proof.pathname !== pathname) setProof({ pathname, ready: !hasPrivateQueries(client) });
   const ready = proof.pathname === pathname && proof.ready;
 
-  useLayoutEffect(() => subscribePrivateCacheInvalidation(() => {
+  useLayoutEffect(() => subscribeSession(() => {
+    if (currentSessionEpoch() === cache.epoch) return;
+    // clear() cancels pending queries synchronously, even without a fetch
+    // abort handler, before their promise can populate any observer.
     client.clear();
     // A late mutation rollback retains its old client; it must not be able to
     // repopulate the new person's cache after the transition.
-    setClient(createClient());
-    setEpoch((value) => value + 1); // discard forms and observers as well
-  }), [client]);
+    setCache({ epoch: currentSessionEpoch(), client: createClient() });
+  }), [client, cache.epoch]);
 
   useEffect(() => {
-    const recheck = () => { if (hasPrivateData(client)) setProof({ pathname, ready: false }); };
+    const recheck = () => {
+      // Private component state exists independently of QueryClient. Public
+      // routes with account-scoped queries still need the same protection.
+      if (customerRoute(pathname).public && !hasPrivateQueries(client)) return;
+      if (Date.now() - lastResume.current < 15_000) return;
+      lastResume.current = Date.now();
+      setProof({ pathname, ready: false });
+    };
     const visible = () => { if (document.visibilityState === 'visible') recheck(); };
     window.addEventListener('focus', recheck);
     window.addEventListener('pageshow', recheck);
+    window.addEventListener('online', recheck);
     document.addEventListener('visibilitychange', visible);
     return () => {
       window.removeEventListener('focus', recheck);
       window.removeEventListener('pageshow', recheck);
+      window.removeEventListener('online', recheck);
       document.removeEventListener('visibilitychange', visible);
     };
   }, [client, pathname]);
@@ -55,17 +72,12 @@ export function Providers({ children, preserveShell = false }: { children: React
   useEffect(() => {
     if (ready) return;
     let cancelled = false;
-    void sessionProbe().then((session) => {
+    void verifySessionNow().then(() => {
       if (cancelled) return;
-      if (!session.ok) {
-        client.clear(); // offline/unknown must not reuse proof
-        setClient(createClient());
-        setEpoch((value) => value + 1);
-      }
       setProof({ pathname, ready: true });
     });
     return () => { cancelled = true; };
-  }, [client, pathname, ready]);
+  }, [pathname, ready]);
 
   return <QueryClientProvider client={client}>
     <CacheIdentity.Provider value={{ ready, epoch }}>
