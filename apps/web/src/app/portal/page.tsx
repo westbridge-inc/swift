@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MutationNotice } from '@/components/mutation-notice';
@@ -37,6 +38,7 @@ function SubscriptionCard({ title, sub, isError, error, onRetry }: {
   return (
     <div className="rounded-2xl border border-black/5 bg-white p-5">
       <p className="font-bold">{title}</p>
+      <Link href="/portal/weekly-fee" className="text-sm font-semibold underline">Weekly fee — view and pay</Link>
       <p className="mt-1 text-sm">
         Status: <b className={good ? 'text-green-600' : 'text-[var(--swift-red)]'}>{status}</b>
         {status === 'TRIAL' && sub['trialEndsAt'] ? (

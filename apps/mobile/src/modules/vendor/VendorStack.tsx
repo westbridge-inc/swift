@@ -251,7 +251,7 @@ export function VendorStack() {
       {/* [MKT G3] Where the backfill's "review your categories" push lands.
           Accepting a suggestion is what writes the tag the Market feed reads. */}
       <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
-      <Stack.Screen name="VendorMySwiftNumber" component={VendorSwiftNumberScreen} />
+      <Stack.Screen name="WeeklyFee" component={VendorSwiftNumberScreen} />
       {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
       <Stack.Screen name="VendorTier" component={VendorTierScreen} />
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO

@@ -98,11 +98,13 @@ function responseContextIsCurrent(snapshot: AuthSnapshot, storeId: string | null
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly details?: { ref?: string };
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, details?: { ref?: string }) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
+    this.details = details;
     if (code !== undefined) this.code = code;
   }
 }
@@ -253,6 +255,7 @@ export async function apiFetch(
         // Multipart bodies set their own boundary — only default JSON otherwise.
         ...(options?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
         ...clientHeaders,
+        ...(/^\/api\/v1\/(vendor|rider|driver)(?:\/|$)/.test(path) ? { 'x-client-platform': 'web' } : {}),
         ...(requestStore && { 'x-vendor-id': requestStore }),
         ...options?.headers,
       },
@@ -286,6 +289,7 @@ export async function apiFetch(
       json?.error?.message || `Request failed (${res.status})`,
       res.status,
       typeof json?.error?.code === 'string' ? json.error.code : undefined,
+      typeof json?.error?.details?.ref === 'string' ? { ref: json.error.details.ref } : undefined,
     );
   }
   return json;

@@ -53,10 +53,16 @@ describe('[Q11] the staging website build', () => {
     });
   });
 
-  it('asks every crawler not to index the staging copy; the public site never sends that', async () => {
+  it('keeps staging entirely noindex and the public MMG return private', async () => {
     expect(headerOf(await siteWideHeaders(await productionConfig(STAGING)), 'X-Robots-Tag')).toBe('noindex, nofollow');
     const publicRules = await (await productionConfig(PUBLIC_SITE)).headers!();
-    expect(publicRules.flatMap((rule) => rule.headers).map((header) => header.key)).not.toContain('X-Robots-Tag');
+    const privateReturn = publicRules.find((rule) => rule.source === '/pay/mmg/:outcome');
+    expect(privateReturn?.headers).toEqual([
+      { key: 'X-Robots-Tag', value: 'noindex' },
+      { key: 'Cache-Control', value: 'no-store' },
+      { key: 'Referrer-Policy', value: 'no-referrer' },
+    ]);
+    expect(publicRules.filter((rule) => rule !== privateReturn).flatMap((rule) => rule.headers).map((header) => header.key)).not.toContain('X-Robots-Tag');
   });
 
   it('keeps every security header the public site sends, unchanged but for the API it connects to', async () => {
@@ -87,11 +93,12 @@ describe('[Q11] the staging website build', () => {
     }
   });
 
-  it('Vercel and CI (no channel, no image switch) get exactly the config they had', async () => {
+  it('public builds keep their release config and suppress private MMG request logs', async () => {
     const config = await productionConfig(PUBLIC_SITE);
     expect(Object.keys(config).sort()).toEqual(
-      ['env', 'headers', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
+      ['env', 'headers', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
     );
+    expect(config.logging).toEqual({ incomingRequests: { ignore: [/^\/pay\/mmg\//] } });
     expect(config.env).toEqual({ NEXT_PUBLIC_API_URL: RELEASE_BROWSER_API_ORIGIN });
     expect(headerOf(await siteWideHeaders(config), 'Content-Security-Policy')).toBe(
       buildBrowserContentSecurityPolicy('production'),

@@ -223,9 +223,9 @@ export function MoverAccountScreen({ navigation }: any) {
           />
           <SettingsRow
             icon="hash"
-            label="My Swift Number"
-            sub="Pay the weekly fee at any MMG agent"
-            onPress={() => navigation?.navigate?.('MySwiftNumber')}
+            label="Weekly fee"
+            sub="View your fee and recent payments"
+            onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
@@ -234,7 +234,7 @@ export function MoverAccountScreen({ navigation }: any) {
         {/* Honest billing status — wallet balance, grace deadline, or the
             paused block. Silent on a healthy account (the row above is the way
             in). */}
-        <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('MySwiftNumber')} compact />
+        <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('WeeklyFee')} compact />
         <BillingStopControl
           sub={sub}
           who={kind === 'DRIVER' ? 'driver' : 'rider'}

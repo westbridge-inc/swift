@@ -762,7 +762,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           Share or pay
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          Your store QR is for customers. Your Swift Number is for the weekly fee.
+          Your store QR is for customers. View your weekly fee separately.
         </T>
         <PillButton
           label="Open store QR"
@@ -774,13 +774,13 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           }}
         />
         <PillButton
-          label="Open Swift Number"
+          label="Weekly fee"
           icon="hash"
           variant="soft"
           style={{ alignSelf: 'stretch', marginTop: space.md }}
           onPress={() => {
             setShareOpen(false);
-            afterDismiss(() => navigation.navigate('VendorMySwiftNumber'));
+            afterDismiss(() => navigation.navigate('WeeklyFee'));
           }}
         />
       </PopupCard>

@@ -20,6 +20,7 @@ type Destination = { screen: string; params?: Record<string, unknown> };
  *  looked like a route and was not one, so its pushes silently went nowhere. */
 export function destinationFor(data: Record<string, unknown> | null | undefined): Destination | null {
   if (!data) return null;
+  if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
   // Server-tagged surface ('customer' | 'earner' | 'business'), merged into

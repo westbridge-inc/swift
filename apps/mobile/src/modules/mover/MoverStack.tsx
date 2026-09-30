@@ -120,7 +120,7 @@ export function MoverStack() {
         <Stack.Screen name="MoverDocuments" component={MoverDocumentsScreen} />
         {/* [VEHICLES] Change the vehicle: offline until the new one's papers are approved. */}
         <Stack.Screen name="MoverVehicle" component={MoverVehicleScreen} />
-        <Stack.Screen name="MySwiftNumber" component={MoverSwiftNumberScreen} />
+        <Stack.Screen name="WeeklyFee" component={MoverSwiftNumberScreen} />
         <Stack.Screen name="Conversation" component={ConversationScreen} />
         <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         <Stack.Screen name="LivenessCheck" component={LivenessCheckScreen} />

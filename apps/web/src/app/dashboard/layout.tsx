@@ -16,6 +16,7 @@ const NAV = [
   { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
   { href: '/dashboard/inventory', label: 'Inventory', icon: Boxes, exact: true },
   { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false },
+  { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Settings, exact: true },
   { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },
 ];
 
