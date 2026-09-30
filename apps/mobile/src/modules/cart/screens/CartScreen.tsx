@@ -14,6 +14,8 @@ import {
   useCheckoutRecovery,
   CheckoutAlreadyPlacedError,
   CheckoutInFlightError,
+  CheckoutOutcomeUnknownError,
+  CHECKING_ORDER_MESSAGE,
   useRemoveCartItem,
   useRemoveCartPromo,
   useSetCartTip,
@@ -517,15 +519,20 @@ export function CartScreen() {
   // the order is still being placed (a concurrent twin). Neither is retried.
   const alreadyPlaced = placeOrder.error instanceof CheckoutAlreadyPlacedError || recovery.placedOrderIds !== null;
   const stillPlacing = placeOrder.error instanceof CheckoutInFlightError;
+  // [AX372 R1] Nor is an order whose outcome is unknown while the phone asks
+  // the server what became of it (after a timeout, a 5xx, or on a restart).
+  const checkingOutcome = placeOrder.checkingOutcome || recovery.recovering || placeOrder.error instanceof CheckoutOutcomeUnknownError;
   const orderErr = alreadyPlaced
     ? 'This order was already placed — it is in your orders.'
-    : stillPlacing
-      ? 'This order is already being placed — hold on a moment.'
-      : placeOrder.isError
-        // [E01-B] A refusal at CHECKOUT (promo refusals included) is shown as
-        // the message checkout returned — exactly what the web cart shows.
-        ? checkoutErrorMessage(placeOrder.error)
-        : undefined;
+    : checkingOutcome
+      ? CHECKING_ORDER_MESSAGE
+      : stillPlacing
+        ? 'This order is already being placed — hold on a moment.'
+        : placeOrder.isError
+          // [E01-B] A refusal at CHECKOUT (promo refusals included) is shown as
+          // the message checkout returned — exactly what the web cart shows.
+          ? checkoutErrorMessage(placeOrder.error)
+          : undefined;
   // Availability spec §2: zero riders online → the server refuses delivery
   // honestly; pickup is the same food without the wait for a rider.
   const noRiders = (placeOrder.error as any)?.response?.data?.error?.code === 'DELIVERY_NO_RIDERS';
