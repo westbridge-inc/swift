@@ -112,6 +112,7 @@ export interface VendorDetail extends Vendor {
 export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptionNames?: string[]; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
   items: CartLine[];
+  vendors?: Array<{ vendorId: string; name: string }>;
   subtotal?: number;
   subtotalCustomer?: number;
   deliveryFee?: number;
@@ -253,6 +254,7 @@ export async function removeCartLine(lineId: string) {
   return apiFetch(`/api/v1/customer/cart/items/${lineId}`, { method: 'DELETE' });
 }
 export async function clearCart() { return apiFetch('/api/v1/customer/cart', { method: 'DELETE' }); }
+export async function removeCartPromo() { return apiFetch('/api/v1/customer/cart/promo', { method: 'DELETE' }); }
 export async function setCartAddress(addressId: string): Promise<Cart> {
   const payload = (await apiFetch('/api/v1/customer/cart/address', {
     method: 'PUT',

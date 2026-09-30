@@ -29,10 +29,12 @@ beforeEach(() => {
   fx.become.mockResolvedValue({});
   fx.coords.mockResolvedValue(DEVICE);
   fx.search.mockResolvedValue([DOOR]);
-  fx.api.mockResolvedValue({ data: { address: 'Store entrance, Georgetown' } });
+  fx.api.mockImplementation(async (path: string) => path.startsWith('/api/v1/verification/status')
+    ? { data: { checklist: ['owner_national_id'], missing: ['owner_national_id'], documents: [], roleVerified: false } }
+    : { data: { address: 'Store entrance, Georgetown' } });
 });
 
-async function business() {
+async function business(agree = true) {
   const user = userEvent.setup();
   render(<SignupPage />);
   await user.click(screen.getByRole('button', { name: /Put my business on Swift/ }));
@@ -47,6 +49,7 @@ async function business() {
   for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
     fireEvent.change(screen.getByLabelText(label!), { target: { value } });
   }
+  if (agree) await user.click(screen.getByRole('checkbox', { name: /I accept the vendor agreement/ }));
   return user;
 }
 
@@ -62,6 +65,19 @@ async function chooseDoor(user: Awaited<ReturnType<typeof business>>) {
 }
 
 describe('Q8 website store pin', () => {
+  it('requires the vendor agreement after the store pin is confirmed', async () => {
+    const user = await business(false);
+    await picker(user);
+    await chooseDoor(user);
+    await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
+    expect(disabled('Create business')).toBe(true);
+    expect(screen.getByRole('link', { name: 'vendor agreement' }).getAttribute('href')).toBe('http://vendor-api.test/legal/vendor-agreement');
+    await user.click(screen.getByRole('button', { name: 'Create business' }));
+    expect(fx.become).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('checkbox', { name: /I accept the vendor agreement/ }));
+    expect(disabled('Create business')).toBe(false);
+  });
+
   it('cannot create a business until the owner explicitly confirms a pin', async () => {
     const user = await business();
     expect(disabled('Create business')).toBe(true);
@@ -85,14 +101,14 @@ describe('Q8 website store pin', () => {
     await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
     await user.click(screen.getByRole('button', { name: 'Create business' }));
     expect(fx.become).toHaveBeenCalledExactlyOnceWith({
-      role: 'VENDOR', business: {
+      role: 'VENDOR', acceptAgreement: true, business: {
         name: 'Test shop', vendorType: 'RESTAURANT', phone: '+5926001003',
         addressLine1: '12 Regent Street', city: 'Georgetown', region: 'Demerara-Mahaica',
         latitude: DOOR.lat, longitude: DOOR.lng,
       },
     });
     expect(fx.coords).toHaveBeenCalledTimes(1);
-    expect(fx.replace).toHaveBeenCalledWith('/dashboard');
+    expect(fx.replace).toHaveBeenCalledWith('/dashboard#documents');
   });
 
   it('geolocation denied still allows keyboard placement and confirmation', async () => {
