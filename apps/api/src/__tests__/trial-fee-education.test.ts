@@ -64,7 +64,7 @@ afterAll(async () => {
 });
 
 describe('the trial fee-education sweep', () => {
-  it('day-10 trials get the how-to (with SAN); day-13 get the exact amount; each stage once', async () => {
+  it('day-10 trials get the due date; day-13 get the exact amount; neither carries the SAN or an agent; each stage once', async () => {
     const early = await makeTrial(3.5); // ~4 days left → d10 stage
     const late = await makeTrial(0.8); // <1 day → d13 stage
 
