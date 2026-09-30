@@ -22,6 +22,7 @@ export type Actor = { userId: string; token: string; refreshToken: string; sessi
 export const DAY = 86_400_000;
 
 export function createGolden(phonePrefix: string, fixture: string) {
+  const fixturePrefix = `${fixture}-${nanoid(16)}`;
   let app: FastifyInstance;
   let seq = 0;
   const createdIds = new Set<string>();
@@ -47,7 +48,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
     seq += 1;
     const phone = `${phonePrefix}${String(seq).padStart(3, '0')}`;
     const user = await sys(() => app.prisma.user.create({ data: {
-      id: `${fixture}-${nanoid(12)}`, phone, firstName: 'Golden', lastName: fixture, roles, activeRole,
+      id: `${fixturePrefix}-${nanoid(12)}`, phone, firstName: 'Golden', lastName: fixture, roles, activeRole,
       isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L2', countryCode: 'GY',
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
       ...(roles.includes('ADMIN') && { admin: { create: { permissions: ['*'] } } }),
@@ -56,7 +57,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
     const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
     const refreshToken = nanoid(48);
     const session = await sys(() => app.prisma.session.create({ data: {
-      userId: user.id, token, refreshToken, authMethod: 'OTP', deviceId: `${fixture}-${seq}`,
+      userId: user.id, token, refreshToken, authMethod: 'OTP', deviceId: `${fixturePrefix}-${seq}`,
       deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     } }));
     if (roles.includes('CUSTOMER')) await sys(() => app.prisma.address.create({ data: {
@@ -69,7 +70,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
   async function vendor(owner: Actor) {
     const row = await sys(() => app.prisma.vendorOwner.create({ data: { userId: owner.userId } }));
     const store = await sys(() => app.prisma.vendor.create({ data: {
-      ownerId: row.id, name: 'Golden Counter', slug: `${fixture}-${nanoid(8).toLowerCase()}`,
+      ownerId: row.id, name: 'Golden Counter', slug: `${fixturePrefix}-${nanoid(8)}`.toLowerCase(),
       vendorType: 'RESTAURANT', phone: owner.phone, addressLine1: '7 Golden Road', city: 'Georgetown',
       region: 'Demerara-Mahaica', latitude: 6.8013, longitude: -58.1551, status: 'ACTIVE',
       acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, deliveryRadius: 50,
@@ -83,9 +84,12 @@ export function createGolden(phonePrefix: string, fixture: string) {
 
   async function purge() {
     await sys(async () => {
+      // ADMIN_OPS subjects/recipients can be shared by overlapping runs.
+      // Even with no surviving users, only our tracked insert IDs are ours.
+      await app.prisma.alertDelivery.deleteMany({ where: { kind: 'ADMIN_OPS', id: { in: [...createdAdminAlerts] } } });
       const users = await app.prisma.user.findMany({ where: { OR: [
-        { phone: { startsWith: phonePrefix } }, { id: { in: [...createdIds] } },
-        { id: { startsWith: `${fixture}-` } },
+        { id: { in: [...createdIds] } },
+        { id: { startsWith: `${fixturePrefix}-` } },
       ] }, select: { id: true } });
       const ids = users.map((u) => u.id);
       if (!ids.length) return;
@@ -130,7 +134,10 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.actorRatingStat.deleteMany({ where: { subjectId: { in: [...ids, ...vendorIds] } } });
       if (orderIds.length) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
       await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
+      await app.prisma.alertDelivery.deleteMany({ where: {
+        kind: { not: 'ADMIN_OPS' },
+        OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }],
+      } });
       await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
       await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
       // Stock movements, consent and deletion receipts are append-only evidence.
@@ -186,7 +193,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       const owned: string[] = [];
       const data = (Array.isArray(args.data) ? args.data : [args.data]).map((row) => {
         if (row.id || row.kind !== 'ADMIN_OPS' || !adminAlertKinds.includes(row.subjectId)) return row;
-        const id = `${fixture}-alert-${nanoid(16)}`;
+        const id = `${fixturePrefix}-alert-${nanoid(16)}`;
         owned.push(id);
         return { ...row, id };
       });
@@ -209,7 +216,6 @@ export function createGolden(phonePrefix: string, fixture: string) {
         // Admin audit writes may finish just after the response (GOLD-5).
         await new Promise((resolve) => setTimeout(resolve, 300));
         await purge();
-        await sys(() => app.prisma.alertDelivery.deleteMany({ where: { id: { in: [...createdAdminAlerts] } } }));
       } finally { restoreAlertTracking?.(); await app.close(); }
     },
   };
