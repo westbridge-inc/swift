@@ -1,13 +1,12 @@
 import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
-import { formatSan } from './san';
-import { ensureSan } from './san.service';
 import { weeklyFeeAmount } from './subscription-fee';
+import { CHECKOUT_PAY_WAY } from './fee-notice-copy';
 
 // Trial first-payment funnel [san spec 21.4]: teach HOW to pay before the
 // first bill ever exists. Day 10 (trial end − 4d): "how you'll pay your
-// weekly fee" with the agent steps + their Swift Number. Day 13 (− 1d): the
-// exact GY$ and the nudge to preload so conversion is seamless. Dedup rides
+// weekly fee": with MMG in the app (the owner, 29 Sep: never an agent or the
+// Swift Number). Day 13 (− 1d): the exact GY$. Dedup rides
 // the same BillingEvent unique-key idiom as every other reminder — restart
 // and overlap safe. first_payment_before_trial_end is THE pilot metric; it
 // derives from rows this sequence leaves behind.
@@ -53,7 +52,6 @@ export async function sweepTrialFeeEducation(
     } catch {
       continue; // this stage already sent — the unique key is the gate
     }
-    const san = formatSan(await ensureSan(prisma, sub.id));
     const weekly = weeklyFeeAmount(sub);
     const audience = sub.vendor ? 'VENDOR' : 'MOVER';
     if (stage === 'd10') {
@@ -61,7 +59,7 @@ export async function sweepTrialFeeEducation(
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'How you’ll pay your weekly fee',
-        body: `Your trial ends in ${daysLeft} days. Pay cash at any MMG agent — say you’re paying a Swift bill and give your Swift Number ${san}. Load it before your trial ends and service continues without a beat.`,
+        body: `Your trial ends in ${daysLeft} days. ${CHECKOUT_PAY_WAY}.`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
       });
@@ -71,7 +69,7 @@ export async function sweepTrialFeeEducation(
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your trial ends tomorrow',
-        body: `Your first weekly fee is GY$${weekly.toLocaleString()}. Pay cash at any MMG agent with your Swift Number ${san} — pay today and you won’t be interrupted.`,
+        body: `Your first weekly fee is GY$${weekly.toLocaleString()}. ${CHECKOUT_PAY_WAY}.`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
       });

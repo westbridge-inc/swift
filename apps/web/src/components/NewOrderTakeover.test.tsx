@@ -104,4 +104,19 @@ describe('new-order takeover', () => {
     expect(screen.queryByText('20 min prep')).toBeNull();
     expect(screen.getByRole('button', { name: 'Decline' })).toBeTruthy();
   });
+
+  it('stacks full-width, touch-sized decisions on a narrow phone', async () => {
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder())]} />);
+    await screen.findByText('NEW ORDER');
+    const accept = screen.getByRole('button', { name: 'Accept' });
+    const reject = screen.getByRole('button', { name: 'Reject' });
+    const prep = screen.getByRole('option', { name: '20 min prep' }).closest('select')!;
+    const reason = screen.getByRole('combobox', { name: 'Reject reason' });
+    for (const control of [prep, accept, reason, reject]) {
+      expect(control.className).toContain('w-full');
+      expect(control.className).toContain('min-h-11');
+    }
+    expect(accept.parentElement?.className).toContain('flex-col');
+  });
 });

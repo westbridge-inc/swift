@@ -9,6 +9,7 @@ import type {
   PromoFunder,
 } from '@prisma/client';
 import type { Server } from 'socket.io';
+import type Redis from 'ioredis';
 import { clampDriverFare, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
@@ -35,6 +36,7 @@ import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from '.
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
+import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
 import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
@@ -567,6 +569,11 @@ export class OrderService {
      *  floatRequired mirrors dispatch's cash-float gate so the probe counts only
      *  riders that could actually take THIS order. */
     private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number) => Promise<{ level: string }>,
+    /** [DISPATCH 1/3 · B4] Where live offer cards are kept. A cancellation
+     *  withdraws the card of the order it closes (withdrawLiveOffer). Every
+     *  production construction passes it, which offer-withdrawal-census.test.ts
+     *  enforces; without it (unit tests, scripts) the withdrawal is skipped. */
+    private offerStore?: Redis,
   ) {
     this.notifications = new NotificationService(prisma, io);
     this.countryConfig = new CountryConfigService(prisma);
@@ -2116,6 +2123,14 @@ export class OrderService {
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
+  /** [DISPATCH 1/3 · B4] After a commit that closed this order, withdraw its
+   * live offer card through THE one withdrawal point (offer-withdrawal.ts).
+   * Never throws: the order is already closed. */
+  private async withdrawLiveOffer(orderId: string): Promise<void> {
+    if (!this.offerStore) return;
+    await withdrawOfferOfClosedOrder({ prisma: this.prisma, redis: this.offerStore, io: this.io }, orderId);
+  }
+
   /** Serialize a transition on the canonical Order lock, then publish only
    * after commit. [REPORT-006/007-v4] Every claim entrance now acquires
    * User → Order → Rider, so the historical Rider→Order inversion is gone;
@@ -2138,6 +2153,13 @@ export class OrderService {
       }
     }
     if (!committed) throw new Error('Order transition transaction did not produce a result');
+
+    // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
+    // reject, courier sender cancel, admin cancel, the no-response
+    // auto-cancel, a cash refusal): the committed close withdraws the card.
+    if (isCancellationTerminalization(committed.sourceStatus, input.target)) {
+      await this.withdrawLiveOffer(input.orderId);
+    }
 
     if (committed.cancelledSearches > 0) {
       dispatchSearchesCounter.inc({ status: 'cancelled' }, committed.cancelledSearches);
@@ -2318,6 +2340,9 @@ export class OrderService {
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
     const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
+    // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
+    // too, so the pinged mover cannot keep accepting it and is free at once.
+    await this.withdrawLiveOffer(orderId);
 
     // The socket room only reaches a foregrounded app that subscribed to this
     // ride. A driver already en route with the app backgrounded would keep

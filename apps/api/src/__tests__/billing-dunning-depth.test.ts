@@ -218,26 +218,31 @@ describe('§11 stages 6..N — suspended nudges and the CHURNED terminal', () =>
 });
 
 // ---------------------------------------------------------------------------
-// The notices say only what is TRUE about paying. The app has no pay button
-// and no card door: its How-to-pay screen shows the Swift Number and the agent
-// steps (agent-cash.service.ts payCashSteps), and an agent payment is recorded
-// at its channel pace (within 1 business day in MANUAL mode), so no notice may
-// promise an instant restore either. The MMG request is offered only where the
-// rail really sends one: MOBILE_MONEY with a payer number, while still retried.
+// The notices say only what is TRUE about paying. The owner, 29 Sep: partners
+// pay the weekly fee on ONE checkout page, with MMG, in the app — never at an
+// MMG agent, never in cash, never with the Swift Number. That page's MMG
+// action is not live yet, so no notice may offer it as if it were ("pay in
+// the app"): it says payment with MMG opens in the app soon (the truthful-copy
+// rule, #1359). No notice promises an instant restore either. The MMG request
+// is offered only where the rail really sends one: MOBILE_MONEY with a payer
+// number, while still retried.
 // ---------------------------------------------------------------------------
 
 /** Every door a fee notice named that the app does not have. */
 const UNTRUE_DOORS = [/tap pay/i, /open the app to pay/i, /pay (?:your weekly fee )?in the app/i, /balance in the app/i, /update your card/i];
-/** The promise an agent payment cannot keep. */
+/** The doors the owner closed for partners (29 Sep). */
+const CLOSED_DOORS = [/\bagents?\b/i, /swift number/i, /\bcash\b/i];
+/** The promise no channel can keep. */
 const INSTANT = /instantly|the moment you pay/i;
 
 function expectTruthful(text: string | null | undefined, label: string) {
   expect(text, label).toBeTruthy();
   for (const door of UNTRUE_DOORS) expect(text, `${label} names a door the app does not have: ${door}`).not.toMatch(door);
+  for (const door of CLOSED_DOORS) expect(text, `${label} offers a door the owner closed: ${door}`).not.toMatch(door);
   expect(text, `${label} promises an instant restore`).not.toMatch(INSTANT);
-  // The one door every partner has: cash at an MMG agent with the Swift Number.
-  expect(text, label).toContain('MMG agent');
-  expect(text, label).toContain('Swift Number');
+  // The one door every partner has: the Weekly fee page's MMG checkout, said
+  // truthfully while it is not live yet.
+  expect(text, label).toContain('Payment with MMG opens in the app soon');
 }
 
 const pushBody = async (userId: string, title: string) =>
@@ -280,7 +285,7 @@ async function makeSuspendedVendorSub(rail: { billingMethod: 'MOBILE_MONEY' | 'C
 }
 
 describe('fee notices name only the ways to pay that exist', () => {
-  it('the retry notice, the final warning and the suspension send the partner to an MMG agent with the Swift Number', async () => {
+  it('the retry notice, the final warning and the suspension name the MMG checkout, never an agent, cash or the Swift Number', async () => {
     const t0 = new Date('2026-07-01T12:00:00Z');
     const v = await makeBrokeVendorSub(t0);
 

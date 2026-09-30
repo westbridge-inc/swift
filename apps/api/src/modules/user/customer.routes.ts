@@ -651,6 +651,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // §2 checkout gate reads the SAME supply dispatch would search — including
     // the cash-float requirement, so the probe and the real dispatch agree.
     (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
+    app.redis,
   );
   const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma, app.io, (vendorId) => scheduleVendorSearchSync(app, vendorId));

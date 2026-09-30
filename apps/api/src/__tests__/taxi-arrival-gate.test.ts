@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -143,8 +143,13 @@ beforeAll(async () => {
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await app.ready();
 
-  customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
   otherCustomer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+});
+
+// Each case books a live ride, and one customer holds one live taxi
+// (orders_one_live_taxi_per_customer_key): every case gets its own ride owner.
+beforeEach(async () => {
+  customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
 });
 
 afterAll(async () => {
