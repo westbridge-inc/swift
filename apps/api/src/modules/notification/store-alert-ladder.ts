@@ -64,8 +64,15 @@ export const LADDER: ReadonlyArray<{ readonly rung: LadderRung; readonly afterMs
 export const FIRST_RUNG_DELAY_MS = LADDER[0]!.afterMs;
 
 /** The job every rung runs as, on the NOTIFICATION queue. The name predates
- *  the ladder and stays: the checkout outbox writes it, and jobs and outbox
- *  rows written before this change must still run. */
+ *  the ladder and stays: jobs and outbox rows written before this change must
+ *  still run.
+ *
+ *  [Q12 · AX289 F5 · AX291] The ladder is armed in ONE way: its first rung is
+ *  the order's durable outbox row (checkout-outbox.ts, kind
+ *  'vendor-alert-escalate', `level: 0`, delay vendorAlertLadderDelayMs() =
+ *  FIRST_RUNG_DELAY_MS), written by checkout for an order with no hold and by
+ *  the release, inside its transaction, for a held one. The first rung
+ *  schedules the rest under deterministic job ids. */
 export const LADDER_JOB = 'vendor-alert-escalate';
 
 export type RungOutcome =
@@ -124,22 +131,10 @@ export function ladderJobId(orderId: string, rung: LadderRung): string {
   return `store-ladder-${orderId}-${rung}`;
 }
 
-/** Arm the ladder for an order the store was just shown: its first rung, 30 s
- *  on. The checkout outbox writes the same job for an order with no hold
- *  (checkout-outbox.ts); a held order is armed here when the hold releases
- *  it. `level: 0` is the first rung, the shape the outbox has always written. */
-export async function armStoreAlertLadder(queue: LadderQueue, orderId: string): Promise<void> {
-  await queue.add(LADDER_JOB, { orderId, level: 0 }, {
-    jobId: ladderJobId(orderId, 'ring1'),
-    delay: FIRST_RUNG_DELAY_MS,
-    removeOnComplete: 100,
-    removeOnFail: 50,
-  });
-}
-
 /** The rung a job runs. New jobs name it; `level` is the shape jobs had
- *  before the ladder was rebuilt (the checkout outbox still writes it for the
- *  first rung): 0 or absent is ring1, 1 was the SMS fallback. */
+ *  before the ladder was rebuilt (the checkout's and the release's outbox
+ *  rows still write it for the first rung): 0 or absent is ring1, 1 was the
+ *  SMS fallback. */
 export function rungOf(data: Record<string, unknown>): LadderRung | null {
   const rung = data['rung'];
   if (rung !== undefined) return LADDER.find((step) => step.rung === rung)?.rung ?? null;
@@ -207,7 +202,7 @@ async function readWaitingOrder(prisma: PrismaClient, orderId: string): Promise<
   if (order.status !== 'PENDING') return { stop: 'answered' };
   // Still inside the free-cancel hold, or not yet released from it: the store
   // has not been shown this order, so there is nothing to escalate. Release
-  // clears holdExpiresAt and arms a ladder of its own.
+  // clears holdExpiresAt and writes the ladder's first rung itself.
   if (order.holdExpiresAt !== null) return { stop: 'held' };
   if (await teamHasSeen(prisma, orderId)) return { stop: 'seen' };
   return { order: { ...order, vendorId: order.vendorId, vendor: order.vendor } };

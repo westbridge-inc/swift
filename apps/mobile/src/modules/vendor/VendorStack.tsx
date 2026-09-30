@@ -116,7 +116,7 @@ function VendorRoot() {
         <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
         <ErrorState
           message={
-            failure === 'unauthorized' ? 'Your session ended. Sign in again to open your store.'
+            failure === 'unauthorized' ? 'You were signed out. Sign in again to open your store.'
               : failure === 'forbidden' ? 'This account cannot open that store. Ask the owner to add you again.'
                 : failure === 'malformed' ? "Swift could not read your store's details. This is our problem, not yours — try again."
                   : "Swift can't reach your store right now. Your orders are safe; try again in a moment."

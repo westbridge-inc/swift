@@ -343,6 +343,38 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   return true;
 }
 
+/**
+ * LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed become
+ * visible to the vendor + dispatchable. No-op while every order is unheld
+ * (flag off ⇒ nothing ever matches). Exported so tests drive the worker's own
+ * job — the release AND the ladder it arms — never a copy of it [Q12].
+ */
+export async function releaseHeldOrdersJob(
+  ctx: JobContext,
+  queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue' | 'orderQueue'>,
+): Promise<string[]> {
+  const { OrderService } = await import('../modules/order/order.service');
+  const orders = new OrderService(ctx.prisma, ctx.io);
+  const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
+    await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+  });
+  if (released.length > 0) {
+    // A RELEASED order is the store's first sight of it — it gets the ONE
+    // store ladder a fresh checkout gets (store-alert-ladder.ts: the team
+    // rung twice, the store texted, the operators told), measured from the
+    // release. The release wrote the ladder's first rung as the checkout's own
+    // outbox row, inside the release transaction [Q12 · AX289 F5]; nothing
+    // else arms it [Q10 · AX291]. Publish those rows now for latency, exactly
+    // as checkout drains its own. A failure here is logged, never lost: the
+    // checkout-outbox sweep publishes whatever this could not.
+    const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
+    await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { orderIds: released })
+      .catch((err: unknown) => ctx.log.error({ err }, '[Q12] release ladder drain failed — the outbox sweep will publish'));
+    ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
+  }
+  return released;
+}
+
 /** Delivery-window auto-completion. COMPLETED and its immutable status log
  * share the canonical row-lock transaction; retries after a committed attempt
  * are a clean no-op, while an injected pre-commit failure leaves DELIVERED for
@@ -1891,27 +1923,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'release-held-orders') {
-        // LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed
-        // become visible to the vendor + dispatchable. No-op while every order
-        // is unheld (flag off ⇒ nothing ever matches).
-        const { OrderService } = await import('../modules/order/order.service');
-        const orders = new OrderService(ctx.prisma, ctx.io);
-        const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
-          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-        });
-        if (released.length > 0) {
-          // A RELEASED order is the vendor's first sight of it — it deserves
-          // the same escalation ladder a fresh checkout gets. Previously only
-          // checkout enqueued this; a held order the vendor slept through
-          // escalated nowhere. [Q10 loud alerts 2/4] The ladder starts HERE
-          // for a held order, never inside its free-cancel window (owner,
-          // 09-24): its rungs are measured from this release.
-          const { armStoreAlertLadder } = await import('../modules/notification/store-alert-ladder');
-          for (const orderId of released) {
-            await armStoreAlertLadder(queues.notificationQueue, orderId);
-          }
-          ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
-        }
+        await releaseHeldOrdersJob(ctx, queues);
         return;
       }
 

@@ -34,6 +34,7 @@ import {
   storeRoomSubscribeHandler,
   type StoreRoomConvergeOptions,
 } from '../modules/notification/store-room';
+import { vendorVisibleFilter } from '../modules/order/hold-visibility';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -608,7 +609,9 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
               { customerId: userId },
               { rider: { userId } },
               { driver: { userId } },
-              { vendor: { owner: { userId } } },
+              // [Q12] The store joins only an order its board may show: never
+              // one still held, never one cancelled inside its hold.
+              { vendor: { owner: { userId } }, AND: [vendorVisibleFilter(app.prisma)] },
             ],
           },
           select: { id: true },

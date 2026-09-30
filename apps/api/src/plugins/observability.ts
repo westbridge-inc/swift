@@ -747,7 +747,7 @@ export const refundsAwaitingReviewGauge = new client.Gauge({
  *  first-match pick per end, or the table ignored by the kill switch. */
 export const fareZoneCounter = new client.Counter({
   name: 'swift_fare_zone_events_total',
-  help: 'Fare-zone resolution events (ambiguous, shadow_diff_from, shadow_diff_to, killed)',
+  help: 'Fare-zone resolution events (ambiguous, shadow_diff_from, shadow_diff_to, shadow_diff_stop, killed)',
   labelNames: ['event'] as const,
   registers: [registry],
 });

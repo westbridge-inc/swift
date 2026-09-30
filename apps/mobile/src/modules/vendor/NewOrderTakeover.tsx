@@ -8,7 +8,7 @@ import { T, Money, PillButton } from '../../kit';
 import { haptic } from '../../lib/haptics';
 import { useVendorOrder, useOrderAction } from '../../hooks/vendorops';
 import { rejectReasonsFor } from './rejectReasons';
-import { acceptClockLabel } from './acceptClock';
+import { acceptClockLabel, takeoverSettled } from './acceptClock';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1 + design-100× Part 5 moment 2):
@@ -82,6 +82,15 @@ export function NewOrderTakeover({
     const t = setInterval(() => setNowTs(Date.now()), 1000);
     return () => clearInterval(t);
   }, [clockActive]);
+
+  // [Q12] The buzz is for a decision that is still open. An order that
+  // stopped waiting — cancelled by the customer, answered on another device,
+  // reaped by the no-response timer — leaves the queue by itself; the order
+  // query refetches on the board socket's order:status_changed.
+  const settled = takeoverSettled(o);
+  useEffect(() => {
+    if (orderId && settled) onDismiss(orderId);
+  }, [orderId, settled, onDismiss]);
 
   if (!current) return null;
   const remainSecs = clockActive ? Math.max(0, Math.ceil((respondByMs - nowTs) / 1000)) : 0;
