@@ -214,7 +214,9 @@ async function publicGet<T>(path: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { cache: 'no-store' });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || json?.success === false) {
-    throw new Error(json?.error?.message || `Request failed (${response.status})`);
+    throw new Error(json?.error?.message || (response.status >= 500
+      ? 'Something went wrong on our side. Please try again.'
+      : 'We couldn’t complete that. Please try again.'));
   }
   return json.data as T;
 }
@@ -257,7 +259,7 @@ export async function setCartAddress(addressId: string): Promise<Cart> {
     body: JSON.stringify({ addressId }),
   })).data as { cart?: Cart };
   if (!payload?.cart || !Array.isArray(payload.cart.items)) {
-    throw new Error('Swift did not return an updated delivery quote. Checkout stays locked.');
+    throw new Error('Swift couldn’t update your delivery total. Checkout is paused. Check your cart and try again.');
   }
   return payload.cart;
 }

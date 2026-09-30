@@ -137,7 +137,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     transitDescription = 'This step begins when the assigned rider sets off.';
   } else if (['RIDER_ASSIGNED', 'DRIVER_ASSIGNED'].includes(status)) {
     transitLabel = 'Rider assigned';
-    transitDescription = 'The rider is assigned. The next server update will show when they set off.';
+    transitDescription = 'A rider is assigned. We’ll show when they set off.';
   } else if (['RIDER_EN_ROUTE_PICKUP', 'DRIVER_EN_ROUTE'].includes(status)) {
     transitLabel = 'Rider heading to pickup';
     transitDescription = 'The rider is heading to the pickup.';
@@ -146,7 +146,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     transitDescription = 'The rider reached the pickup.';
   } else if (status === 'PICKED_UP') {
     transitLabel = 'Picked up';
-    transitDescription = 'The rider has the order. Waiting for the server to confirm the delivery leg.';
+    transitDescription = 'The rider has your order. We’ll show when they head to you.';
   } else if (status === 'ARRIVED') {
     transitLabel = 'Rider arrived';
     transitDescription = 'The rider reached the delivery address.';
@@ -158,8 +158,8 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     {
       key: 'placed',
       label: courier ? 'Requested' : appointment ? 'Booked' : 'Placed',
-      description: 'The server received your request.',
-      upcomingDescription: 'The server will record the request here.',
+      description: 'We received your request.',
+      upcomingDescription: 'Your request will appear here.',
       icon: 'clipboard',
       timestamp: order.placedAt,
     },
@@ -171,15 +171,15 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
           ? 'The rider search starts only when the ring closes.'
           : `Until the ring closes, ${appointment ? 'the provider' : vendorName} hasn’t been told.`
         : releasePending
-          ? 'The timer ended. Waiting for the server to confirm release.'
+          ? 'The timer ended. Checking whether your request was sent.'
           : courier
             ? 'The request is visible to eligible riders.'
             : `${appointment ? 'The provider' : vendorName} can see the request now.`,
       doneDescription: courier
-        ? 'The server released the request to eligible riders.'
+        ? 'The request was sent to riders who can take it.'
         : `${appointment ? 'The provider' : vendorName} received the request.`,
       upcomingDescription: courier
-        ? 'The server will release the request to eligible riders.'
+        ? 'The request will be sent to riders who can take it.'
         : `${appointment ? 'The provider' : vendorName} will receive the request after the hold.`,
       icon: 'send',
     },
@@ -195,7 +195,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
               ? 'Preparing'
               : acceptedRecorded || status === 'ACCEPTED' ? 'Accepted' : 'Preparing',
       description: courier
-        ? 'The assigned rider appears here when the server confirms them.'
+        ? 'Your rider will appear here once assigned.'
         : appointment
           ? 'The provider has confirmed the booking.'
           : status === 'READY_FOR_PICKUP'
@@ -206,12 +206,12 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
               ? `${vendorName} is working on your order.`
               : `${vendorName} accepted the order; preparation is next.`,
       doneDescription: courier
-        ? 'The server assigned a rider.'
+        ? 'A rider was assigned.'
         : appointment
           ? 'The provider confirmed the booking.'
           : `${vendorName} finished this step.`,
       upcomingDescription: courier
-        ? 'The assigned rider will appear after the server confirms them.'
+        ? 'Your rider will appear here once assigned.'
         : appointment
           ? 'The provider will confirm the booking here.'
           : `${vendorName} will accept and prepare the order here.`,
@@ -241,8 +241,8 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
       key: 'complete',
       label: pickup ? 'Picked up' : appointment ? 'Completed' : 'Delivered',
       description: pickup ? 'The store confirms collection.' : appointment ? 'The booking is complete.' : 'The delivery is complete.',
-      doneDescription: pickup ? 'The store confirmed collection.' : appointment ? 'The server marked the booking complete.' : 'The server marked the delivery complete.',
-      upcomingDescription: pickup ? 'The store will confirm collection here.' : appointment ? 'The server will mark the booking complete here.' : 'The server will mark the delivery complete here.',
+      doneDescription: pickup ? 'The store confirmed collection.' : appointment ? 'The booking is complete.' : 'The delivery is complete.',
+      upcomingDescription: pickup ? 'The store will confirm collection here.' : appointment ? 'You’ll see here when the booking is complete.' : 'You’ll see here when delivery is complete.',
       icon: 'check',
       timestamp: pickup ? order.pickedUpAt : order.deliveredAt,
     },
@@ -257,7 +257,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
         <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
           <Feather name="info" size={18} color={color.info} />
           <T variant="label" tone="info" style={{ flex: 1 }}>
-            Current server status: {humanStatus(String(order.status ?? 'unknown'))}.
+            Current status: {humanStatus(String(order.status ?? 'unknown'))}.
           </T>
         </View>
       ) : null}
@@ -386,7 +386,7 @@ export function DeliveryScreen() {
         setConfirmCancel(false);
         toast.show(
           'Checking cancellation status',
-          'We couldn’t confirm the outcome. The latest server status is being refreshed before you try again.',
+          'We couldn’t confirm whether the order was cancelled. Check its latest status before trying again.',
         );
       }
       // The outcome is unknown (a timeout can mean the cancel DID land), so
@@ -434,7 +434,7 @@ export function DeliveryScreen() {
         return;
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
-        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
         return;
       }
       if (latest.orderType !== 'COURIER') {
@@ -470,7 +470,7 @@ export function DeliveryScreen() {
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
         setConfirmCancel(false);
-        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
         return;
       }
       if (latest.orderType !== 'COURIER') {
@@ -482,7 +482,7 @@ export function DeliveryScreen() {
         if (cancelPreviewFee !== latestFee) {
           setCancelPreviewFee(latestFee);
           setCancelPreviewFresh(true);
-          toast.show('Cancellation cost updated', 'Review the new server preview, then confirm again.');
+          toast.show('Cancellation fee changed', 'Check the new amount, then confirm again.');
           return;
         }
       }
@@ -740,7 +740,7 @@ export function DeliveryScreen() {
   const mapAnchor = courierPos ?? pickupPos ?? dropPos;
   const initialRegion = mapAnchor ? { ...mapAnchor, latitudeDelta: 0.05, longitudeDelta: 0.05 } : null;
   const mapNotice = holdTimingUnavailable
-    ? 'Checking the cancellation window with the server.'
+    ? 'Checking whether you can still cancel.'
     : holdActive || releasePending
     ? o.orderType === 'COURIER'
       ? 'Live tracking starts after the request is released to riders.'
@@ -831,7 +831,7 @@ export function DeliveryScreen() {
     etaCopy = 'Ready for pickup';
   } else if (o.fulfillment === 'PICKUP' && serverPrepMinutes != null) {
     etaCopy = `Estimated ready time · ~${serverPrepMinutes} min`;
-  } else if (serverEstimateMinutes != null) etaCopy = `Server estimate · ~${serverEstimateMinutes} min total`;
+  } else if (serverEstimateMinutes != null) etaCopy = `Estimated time · ~${serverEstimateMinutes} min total`;
 
   // [ALG-12] The promise the customer was given at checkout — a RANGE on
   // five-minute marks from the server, recomputed against this screen's
@@ -1003,7 +1003,7 @@ export function DeliveryScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />
               <T variant="label" tone="info" style={{ flex: 1 }}>
-                Checking the hold timing with the server. No progress ring is shown without both server timestamps.
+                Checking when this order will be sent. Try again in a moment.
               </T>
             </View>
           ) : null}
@@ -1011,7 +1011,7 @@ export function DeliveryScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="send" size={18} color={color.info} />
               <T variant="label" tone="info" style={{ flex: 1 }}>
-                Timer closed. Checking with the server before marking this order sent.
+                The wait is over. Checking whether your order was sent.
               </T>
             </View>
           ) : null}
@@ -1487,11 +1487,11 @@ export function DeliveryScreen() {
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {o.orderType === 'COURIER'
             ? rider
-              ? 'This cancels the pickup and puts the assigned rider back in the dispatch pool. It can’t be undone.'
+              ? 'This cancels the pickup. The rider can take other jobs. It can’t be undone.'
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
-              ? `Cancelling stops fulfilment. If you already sent the MMG payment, ${refundParty} refunds you directly.`
-              : 'Cancelling stops fulfilment. The server preview is shown below; the final outcome is confirmed when cancellation completes.'}
+              ? `Cancelling stops this ${cancelledNoun}. If you already sent the MMG payment, ${refundParty} refunds you directly.`
+              : `Cancelling stops this ${cancelledNoun}. Check the possible fee below. We’ll show the final result when cancellation is confirmed.`}
         </T>
         {cancelPreviewFresh && o.orderType === 'COURIER' ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
@@ -1499,7 +1499,7 @@ export function DeliveryScreen() {
               <Feather name="info" size={18} color={color.info} />
             </DecorativeIcon>
             <T variant="label" tone="info" style={{ flex: 1 }}>
-              Fresh server check: cancellation is still available. This courier flow does not quote an in-app cancellation fee, and Swift does not collect courier payment.
+              You can still cancel. Swift cannot show a cancellation fee for this courier request in the app. Swift does not collect courier payment.
             </T>
           </View>
         ) : cancelPreviewFresh && cancelPreviewFee != null ? (
@@ -1509,8 +1509,8 @@ export function DeliveryScreen() {
             </DecorativeIcon>
             <T variant="label" tone={cancelPreviewFee > 0 ? 'warning' : 'info'} style={{ flex: 1 }}>
               {cancelPreviewFee > 0
-                ? `Server preview: ${money(cancelPreviewFee)} would be recorded if you cancel now. Swift does not collect it.`
-                : 'Server preview: no cancellation fee.'}
+                ? `If you cancel now, a ${money(cancelPreviewFee)} fee may be recorded. Swift does not collect it. We’ll check again when you confirm.`
+                : 'The last check showed no cancellation fee. We’ll check again when you confirm.'}
             </T>
           </View>
         ) : null}
