@@ -42,12 +42,18 @@ function itemPrice(item: MenuItem, sel: Record<string, string>) {
 }
 
 export default function VendorPage() {
+  const { scope, epoch } = useCustomerSession();
+  // Drop open item/booking state along with the previous session's menu.
+  return <SessionVendorPage key={JSON.stringify([scope, epoch])} />;
+}
+
+function SessionVendorPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const session = useCustomerSession();
-  // [Q7b] Cached per store, so going back to it is instant; refreshed in the
-  // background. A menu is the same for everyone who opens it.
-  const store = useQuery<VendorDetail>({ queryKey: ['customer', 'vendor', id], queryFn: () => getVendor(id) });
+  // Visibility is session-specific; returning to this store in a new session
+  // must fetch again without showing a previous session's menu.
+  const store = useQuery<VendorDetail>({ queryKey: ['customer', 'vendor', session.scope, session.epoch, id], queryFn: () => getVendor(id) });
   const v = store.data ?? null;
   const [modal, setModal] = useState<MenuItem | null>(null);
   const [sel, setSel] = useState<Record<string, string>>({});

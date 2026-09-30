@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getVendors, type Vendor } from '@/lib/customer';
 import { VendorCard, VendorGridSkeleton, EmptyNote } from '@/components/order-ui';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { useCustomerSession } from '@/components/customer-session';
 
 const TABS = [
   { key: '', label: 'All' },
@@ -30,8 +31,10 @@ function BrowseInner() {
 function StoreBrowse() {
   const params = useSearchParams();
   const type = params.get('type') ?? '';
-  // [Q7b] Each list is kept per category, so going back to it is instant.
-  const vendors = useQuery<Vendor[]>({ queryKey: ['customer', 'vendors', type], queryFn: () => getVendors(type || undefined) });
+  const { scope, epoch } = useCustomerSession();
+  // Store visibility depends on the session, even when the type stays put.
+  // A new session starts without the previous session's data or placeholder.
+  const vendors = useQuery<Vendor[]>({ queryKey: ['customer', 'vendors', scope, epoch, type], queryFn: () => getVendors(type || undefined) });
 
   return (
     <div className="space-y-5">
