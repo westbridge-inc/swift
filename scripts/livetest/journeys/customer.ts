@@ -244,13 +244,13 @@ export const CUST_03: Journey<Ctx> = {
     rec.expect('reorder retried once the item is back', retry, [200, 201]);
     await clearCart(C6);
 
-    // convert to pickup (flag-gated)
+    // convert to pickup (flag-gated): the probe on the cancelled order says whether the route answers.
     const probe = await POST(`/customer/orders/${id}/convert-to-pickup`, {}, C6.token);
     if (probe.status === 404 && /not available/i.test(String(probe.json?.error?.message ?? ''))) {
-      rec.skipCase('convert to pickup', 'the route answers 404 "Not available": DISPATCH_EXHAUSTION is off on this target (the documented default); the conversion ships dark until the flag is set');
+      rec.skipCase('convert to pickup', 'the route answers 404 "Not available": DISPATCH_EXHAUSTION is off on this target; the pilot ruling (STG-DRILLS D1) sets DISPATCH_EXHAUSTION=1 in the staging deploy/.env, after which the api and worker must be recreated');
     } else {
       rec.deny('converting a cancelled order', probe, [400, 409]);
-      rec.skipCase('convert to pickup (happy path)', 'needs a delivery order whose dispatch has exhausted; not produced deterministically in one run');
+      await convertToPickup(rec, ctx, C6, C2);
     }
 
     // cancel/ready race on a released order: exactly one wins
@@ -273,6 +273,42 @@ export const CUST_03: Journey<Ctx> = {
     }
   },
 };
+
+/**
+ * [STG-DRILLS D1] Convert to pickup, the happy path. The route allows it on
+ * any cash DELIVERY with no rider assigned (customer.routes.ts, CAS on the
+ * locked row) — the no-rider-found prompt is when the app offers it. A fresh
+ * delivery with a tip, still in its hold, has no rider: the switch takes the
+ * delivery fee and the tip off (both were the rider's money; no Swift money
+ * moves), issues a pickup code, and cannot be done twice or by anyone else.
+ */
+async function convertToPickup(rec: Recorder, ctx: Ctx, C6: Session, C2: Session): Promise<void> {
+  const R1 = ctx.roster.vendors.R1!, item = ctx.world.items.R1, c6 = ctx.roster.customers.C6!;
+  rec.require('a delivery store (R1) orderable for the conversion', !!item && !!R1.vendorId, ctx.world.notReady.R1 ?? '');
+  const placed = await placeOrder(C6, R1.vendorId!, item!.itemId, c6.lat, c6.lng, { tip: 200, key: idemKey(ctx.runId, 'cust03-convert') });
+  const oid = orderIdsOf(placed)[0];
+  rec.require('convert to pickup: a cash delivery order with a tip', !!oid, brief(placed));
+  try {
+    const before = await customerOrder(C6, oid!);
+    const fee = Number(before?.deliveryFee ?? 0), tip = Number(before?.tipAmount ?? 0), total = Number(before?.totalAmount ?? 0);
+    rec.require('convert to pickup: it is a delivery with a fee, and no rider has it', before?.fulfillment === 'DELIVERY' && !before?.riderId && fee > 0,
+      `fulfillment=${before?.fulfillment} rider=${before?.riderId ?? 'none'} fee=${fee} tip=${tip} total=${total}`);
+    rec.deny('convert to pickup: another customer cannot switch it', await POST(`/customer/orders/${oid}/convert-to-pickup`, {}, C2.token), [404]);
+    const conv = await POST(`/customer/orders/${oid}/convert-to-pickup`, {}, C6.token);
+    rec.expect('convert to pickup: the customer switches the delivery to pickup', conv, 200);
+    const d = conv.json?.data;
+    rec.check('convert to pickup: the delivery fee and the tip come off exactly, and a pickup code is issued',
+      d?.fulfillment === 'PICKUP' && Number(d?.deliveryFee) === 0 && Number(d?.tipAmount) === 0
+        && Math.abs(total - Number(d?.totalAmount) - (fee + tip)) < 0.01 && /^\d{6}$/.test(String(d?.pickupCode ?? '')),
+      `fulfillment=${d?.fulfillment} fee ${fee}→${d?.deliveryFee} tip ${tip}→${d?.tipAmount} total ${total}→${d?.totalAmount} code=${d?.pickupCode ? 'issued' : 'none'}`);
+    const after = await customerOrder(C6, oid!);
+    rec.check('convert to pickup: the customer reads a pickup order', after?.fulfillment === 'PICKUP' && Number(after?.totalAmount) === Number(d?.totalAmount), `fulfillment=${after?.fulfillment} total=${after?.totalAmount}`);
+    rec.deny('convert to pickup: a pickup order cannot be switched again', await POST(`/customer/orders/${oid}/convert-to-pickup`, {}, C6.token), [400], ['NOT_A_DELIVERY']);
+  } finally {
+    const cancel = await POST(`/customer/orders/${oid}/cancel`, { reason: 'journey cleanup' }, C6.token);
+    rec.cleanup('the converted order cancels', cancel.ok, `→ ${brief(cancel)}`);
+  }
+}
 
 export const CUST_04: Journey<Ctx> = {
   id: 'CUST-04',

@@ -12,6 +12,11 @@
 //         physical phones, OS backgrounding — the ledger's separate device
 //         gate) may remain unproven under a PASS; they are listed in
 //         `skippedCases` with gate 'device' and named in `reason`.
+//         [STG-DRILLS] So may an AUTOMATED-ONLY case: one a live target can
+//         never stage because it is days of clock (three failed charges 24 h
+//         apart), which the automated gate proves instead by driving the real
+//         job with a controllable clock. Gate 'automated', named in `reason`
+//         with the test that proves it — never silently counted as run here.
 //   A case this target cannot run for any other reason (no second admin, a
 //   clock-driven job, a dark feature flag, a provider secret the runner must
 //   not hold) is a 'target' skip, and it makes the journey SKIP.
@@ -23,7 +28,7 @@ import type { Res } from './client.js';
 export type Status = 'PASS' | 'FAIL' | 'SKIP';
 
 export interface Step { name: string; ok: boolean; detail: string; cleanup?: boolean }
-export interface SkippedCase { case: string; reason: string; gate: 'device' | 'target' }
+export interface SkippedCase { case: string; reason: string; gate: 'device' | 'target' | 'automated' }
 
 export interface TargetInfo { deploymentId: string; environment: string; buildSha: string }
 
@@ -110,6 +115,15 @@ export class Recorder {
   /** A case that only a physical device can prove (the ledger's device gate); does not block a PASS. */
   deviceCase(caseName: string, reason: string): void {
     this.skipped.push({ case: caseName, reason, gate: 'device' });
+  }
+
+  /**
+   * [STG-DRILLS] A case no live target can stage (days of clock), proven
+   * instead by the automated gate that drives the real job with a
+   * controllable clock. `reason` must name that proof. Does not block a PASS.
+   */
+  automatedCase(caseName: string, reason: string): void {
+    this.skipped.push({ case: caseName, reason, gate: 'automated' });
   }
 
   /** The whole journey cannot run here. */
@@ -205,9 +219,12 @@ function finalize<C>(j: Journey<C>, rec: Recorder, startedAt: string, target: Ta
     reason = 'runner coverage: no negative check executed';
   } else {
     status = 'PASS';
-    if (rec.skipped.length > 0) {
-      reason = `every server-side case passed; left to the device gate: ${rec.skipped.map((s) => `${s.case} (${s.reason})`).join('; ')}`;
-    }
+    const left = (gate: SkippedCase['gate']) => rec.skipped.filter((s) => s.gate === gate).map((s) => `${s.case} (${s.reason})`).join('; ');
+    const parts = [
+      rec.skipped.some((s) => s.gate === 'device') ? `left to the device gate: ${left('device')}` : '',
+      rec.skipped.some((s) => s.gate === 'automated') ? `automated-only (clock), proven by the automated gate: ${left('automated')}` : '',
+    ].filter(Boolean);
+    if (parts.length > 0) reason = `every server-side case passed; ${parts.join('; ')}`;
   }
   return {
     journeyId: j.id,

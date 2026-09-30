@@ -4,6 +4,7 @@
 import type { Session } from '../client.js';
 import type { Roster } from '../roster.js';
 import type { TargetIdentity } from '../guard.js';
+import type { DrillManifest } from '../drills.js';
 
 export interface WorldItem { itemId: string; categoryId: string; price: number; name: string }
 
@@ -32,4 +33,6 @@ export interface Ctx {
   world: World;
   /** Per-journey scratch: prepare → run. */
   stash: Record<string, any>;
+  /** [STG-DRILLS] The server-side drill fixtures of this run (deploy/drill-fixtures.sh), or null. */
+  drill: DrillManifest | null;
 }

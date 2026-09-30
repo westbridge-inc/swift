@@ -7,6 +7,7 @@ import type { Journey } from '../journey.js';
 import { GET, POST, PUT, req, brief, pick, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf } from './common.js';
 import type { Ctx } from './context.js';
 import { twoPerson } from './admin-util.js';
+import { settleDrillBill } from './drill-billing.js';
 
 export const MONEY_01: Journey<Ctx> = {
   id: 'MONEY-01',
@@ -70,7 +71,8 @@ export const MONEY_03: Journey<Ctx> = {
     const R1 = ctx.roster.vendors.R1!;
     const sub = (await GET('/vendor/subscription', R1.session.token)).json?.data;
     rec.check('the store has a weekly-fee account (SAN) and rate', !!sub?.san && Number(sub?.weeklyFeeGyd ?? sub?.weeklyRate) > 0, `status=${sub?.status} san=${sub?.sanFormatted ?? sub?.san} weekly=${sub?.weeklyFeeGyd ?? sub?.weeklyRate}`);
-    const body = JSON.stringify({ transactionId: `SYN-${ctx.runId}`, accountNumber: String(sub?.san ?? ''), amount: 1000, currency: 'GYD' });
+    const drill = ctx.drill?.billing.money03;
+    const body = JSON.stringify({ transactionId: `SYN-${ctx.runId}`, accountNumber: String(drill?.san ?? sub?.san ?? ''), amount: 1000, currency: 'GYD' });
     const unsigned = await req('POST', '/billing/mmg/agent-notification', { body: JSON.parse(body) });
     const dark = unsigned.status === 503;
     rec.check('an unsigned agent-cash notification is refused', dark || unsigned.status === 401, `→ ${unsigned.status} ${unsigned.text.slice(0, 120)}`);
@@ -82,8 +84,17 @@ export const MONEY_03: Journey<Ctx> = {
     const stale = await req('POST', '/billing/mmg/agent-notification', { body: JSON.parse(body), headers: { 'x-swift-timestamp': String(Date.now() - 3_600_000), 'x-swift-signature': forged } });
     rec.deny('a notification with a stale timestamp', stale, dark ? [503] : [401]);
     if (dark) rec.step('disabled channel: the agent-cash webhooks answer 503 channel_disabled', true, 'AGENT_CASH_WEBHOOK_SECRET is not configured on this target, so the channel is dark by design');
-    const inq = await req('POST', '/billing/mmg/inquiry', { body: { accountNumber: String(sub?.san ?? '') } });
+    const inq = await req('POST', '/billing/mmg/inquiry', { body: { accountNumber: String(drill?.san ?? sub?.san ?? '') } });
     rec.check('the agent inquiry is gated the same way', inq.status === (dark ? 503 : 401), `→ ${inq.status}`);
+
+    if (drill) {
+      // [STG-DRILLS D3] The defining case, for real: the drill store's week was
+      // billed by the real job, and a signed-off (two-operator) agent receipt
+      // settles it; its replay credits once.
+      await settleDrillBill(rec, ctx, drill, 'M03');
+      void pick; void codeOf;
+      return;
+    }
 
     // A manual agent receipt recorded by operators (two people), then the same receipt again.
     const receipt = { san: String(sub?.san ?? ''), amount: 1000, paidAt: new Date().toISOString(), receiptNumber: `SYN-${ctx.runId}`.slice(0, 60), verifiedInPortal: true };
@@ -98,7 +109,7 @@ export const MONEY_03: Journey<Ctx> = {
       rec.check('the same receipt is not credited twice (the wallet does not move; the answer names the duplicate)', afterDup === after && (!dup.done || dupData?.status === 'duplicate' || dupData?.duplicate === true || !!dupData?.duplicateOf),
         `→ ${dup.final ? brief(dup.final) : 'held'} status=${dupData?.status ?? '-'} wallet ${after} → ${afterDup}`);
     }
-    rec.skipAll(`the defining case — a weekly bill settled by a signed agent receipt — cannot run here: the bill is produced by the hourly billing job only after the 14-day trial${dark ? ', the agent-cash channel is dark (no webhook secret on this target)' : ''}, and a signed receipt needs the webhook secret, which the runner must never hold`);
+    rec.skipAll(`no drill fixtures on this run: the defining case — a weekly bill settled by a signed agent receipt — needs a billed store, and the bill is produced by the hourly billing job only after the 14-day trial${dark ? ' (the agent-cash webhook is dark on this target: no secret)' : ''}. deploy/drill-fixtures.sh makes one (LIVETEST_DRILL_MANIFEST); the runner never holds the webhook secret`);
     void pick; void codeOf;
   },
 };

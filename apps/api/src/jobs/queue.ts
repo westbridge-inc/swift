@@ -211,6 +211,70 @@ export async function runWeeklySettlement(ctx: JobContext) {
   if (delta.length > 0) ctx.log.warn({ count: delta.length }, '[M-27] sales digests differ from the ledger — adjust them');
 }
 
+/** The billing services one subscription job runs on — the same construction
+ *  for every job of that queue, whether the worker or a caller runs it. */
+async function billingFor(ctx: JobContext) {
+  const { BillingService } = await import('../modules/billing/billing.service');
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+  return new BillingService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), getPaymentProvider());
+}
+
+/** The hourly subscription billing cycle (`process-billing`). Exported so the
+ *  ONE body is what runs, whoever starts it: the subscription worker delegates
+ *  here, and the staging drill trigger (modules/ops/drills/jobs.ts) imports
+ *  this same function rather than a copy [STG-DRILLS D2]. */
+export async function runBillingCycleJob(ctx: JobContext): Promise<void> {
+  const billing = await billingFor(ctx);
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const result = await billing.runBillingCycle();
+  // [E12] A stopped subscription stays ACTIVE until its paid period
+  // ends, then turns PAUSED (not operable, owing nothing); resuming
+  // restarts it with this week's fee billed like any renewal.
+  const lapse = await billing.lapseStoppedSubscriptions();
+  const reminders = await billing.sendUpcomingReminders();
+  // §11 stages 6..N: daily reinstatement nudges for the suspended
+  // (idempotent per day via the REMINDER event key) + CHURNED terminal
+  // past SUSPENSION_MAX_DAYS so dunning — and the daily MMG
+  // re-request — never runs forever against a dead account.
+  const swept = await billing.sweepSuspended();
+  const billingNotices = await billing.drainPendingNotices();
+  // Trial first-payment funnel [san spec 21.4]: day-10 how-to-pay +
+  // day-13 exact-amount education, each stage once per trial
+  // (BillingEvent unique-key gate) — preloaded wallets make trial→
+  // paid conversion seamless.
+  const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
+  const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
+  ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+  // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
+  // broken rail silently suspends paying partners.
+  // [DS213 F1-1] A stopped plan that fails to pause counts too.
+  const troubled = result.failed + result.errors + result.suspended + lapse.failed;
+  const threshold = Number(process.env['BILLING_FAILURE_ALERT_THRESHOLD'] ?? '3');
+  if (troubled >= threshold) {
+    const { notifyAdmins } = await import('../modules/notification/notification.service');
+    await opsPageOnce(ctx, 'billing-failures', 3600, () =>
+      notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+        // Platform-wide ops page: an aggregate scan or infra alarm, not one
+        // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
+        tenantId: null,
+        title: 'Billing failures spiking',
+        body: `${troubled} subscriptions failed, errored, or suspended this cycle (threshold ${threshold}). Check the billing dashboard before partners start calling.`,
+        data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended, lapseFailed: lapse.failed },
+      }),
+    );
+  }
+}
+
+/** The daily trial conversion (`convert-trials`): a trial past its 14 days
+ *  turns ACTIVE and due, so the next billing cycle charges it. Exported for the
+ *  same reason as runBillingCycleJob — one body, whoever starts it. */
+export async function runConvertTrialsJob(ctx: JobContext): Promise<void> {
+  const { SubscriptionService } = await import('../modules/subscription/subscription.service');
+  const converted = await new SubscriptionService(ctx.prisma).convertExpiredTrials();
+  ctx.log.info({ converted }, 'Expired trials converted to active');
+}
+
 /** One ops page per condition per window [SWIFT-AUD-D7-02]: redis SET NX is
  *  the dedup, so N instances or repeated scans can never spam the admins.
  *  Fire-and-caught — paging must not fail the job that noticed the problem. */
@@ -473,57 +537,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const subscriptionWorker = buildWorker(
     QUEUE_NAMES.SUBSCRIPTION,
     async (job: Job) => {
-      const { BillingService } = await import('../modules/billing/billing.service');
-      const { SubscriptionService } = await import('../modules/subscription/subscription.service');
-      const { NotificationService } = await import('../modules/notification/notification.service');
-      const { getPaymentProvider } = await import('../providers/payment/payment-provider');
-
-      const billing = new BillingService(
-        ctx.prisma,
-        new NotificationService(ctx.prisma, ctx.io),
-        getPaymentProvider(),
-      );
-      const subscriptions = new SubscriptionService(ctx.prisma);
+      const billing = await billingFor(ctx);
 
       switch (job.name) {
         case 'process-billing': {
-          const result = await billing.runBillingCycle();
-          // [E12] A stopped subscription stays ACTIVE until its paid period
-          // ends, then turns PAUSED (not operable, owing nothing); resuming
-          // restarts it with this week's fee billed like any renewal.
-          const lapse = await billing.lapseStoppedSubscriptions();
-          const reminders = await billing.sendUpcomingReminders();
-          // §11 stages 6..N: daily reinstatement nudges for the suspended
-          // (idempotent per day via the REMINDER event key) + CHURNED terminal
-          // past SUSPENSION_MAX_DAYS so dunning — and the daily MMG
-          // re-request — never runs forever against a dead account.
-          const swept = await billing.sweepSuspended();
-          const billingNotices = await billing.drainPendingNotices();
-          // Trial first-payment funnel [san spec 21.4]: day-10 how-to-pay +
-          // day-13 exact-amount education, each stage once per trial
-          // (BillingEvent unique-key gate) — preloaded wallets make trial→
-          // paid conversion seamless.
-          const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
-          const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
-          // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
-          // broken rail silently suspends paying partners.
-          // [DS213 F1-1] A stopped plan that fails to pause counts too.
-          const troubled = result.failed + result.errors + result.suspended + lapse.failed;
-          const threshold = Number(process.env['BILLING_FAILURE_ALERT_THRESHOLD'] ?? '3');
-          if (troubled >= threshold) {
-            const { notifyAdmins } = await import('../modules/notification/notification.service');
-            await opsPageOnce(ctx, 'billing-failures', 3600, () =>
-              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
-                // Platform-wide ops page: an aggregate scan or infra alarm, not one
-                // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
-                tenantId: null,
-                title: 'Billing failures spiking',
-                body: `${troubled} subscriptions failed, errored, or suspended this cycle (threshold ${threshold}). Check the billing dashboard before partners start calling.`,
-                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended, lapseFailed: lapse.failed },
-              }),
-            );
-          }
+          // The body lives in runBillingCycleJob so the staging drill runs this
+          // exact function, never a copy of it.
+          await runBillingCycleJob(ctx);
           break;
         }
         case 'tier-recalc': {
@@ -535,8 +555,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           break;
         }
         case 'convert-trials': {
-          const converted = await subscriptions.convertExpiredTrials();
-          ctx.log.info({ converted }, 'Expired trials converted to active');
+          await runConvertTrialsJob(ctx);
           break;
         }
         case 'poll-mmg-billing': {

@@ -9,6 +9,7 @@ import { submitDoc, approveDoc, asAdmin, vendorOf } from '../provision.js';
 import { vendorAdvance } from './customer.js';
 import { mover, onlineOf, pollOffer, placeExpress, storeAccepts, freeRider } from './dispatch.js';
 import { BUSINESS_PHONE } from '../roster.js';
+import { settleDrillBill } from './drill-billing.js';
 
 const VENDOR_BUSINESS = (name: string, type: string, lat: number, lng: number) => ({
   name, vendorType: type, phone: BUSINESS_PHONE, addressLine1: `1 ${name} Street`, city: 'Georgetown', region: 'Demerara-Mahaica', latitude: lat, longitude: lng,
@@ -264,7 +265,14 @@ export const VEND_04: Journey<Ctx> = {
     if (stop.ok) await PUT('/vendor/subscription/billing-method', { method: 'CASH' }, R1.session.token);
     const inquiry = await req('POST', '/billing/mmg/inquiry', { body: { accountNumber: String(sub?.san ?? '0') } });
     rec.check('the agent-cash channel refuses an unsigned inquiry (dark or signature-gated)', inquiry.status === 503 || inquiry.status === 401, `→ ${inquiry.status} ${inquiry.text.slice(0, 120)}`);
-    rec.skipAll('the weekly bill runs from the hourly billing job only after the 14-day trial ends, and suspension follows three failed charges 24 h apart; a run cannot advance the clock (no HTTP trigger). Agent-cash receipts need the webhook secret, which the runner must not hold');
+    const drill = ctx.drill?.billing.vend04;
+    if (!drill) {
+      rec.skipAll('no drill fixtures on this run: the weekly bill runs from the hourly billing job only after the 14-day trial ends, and a run cannot advance the clock — deploy/drill-fixtures.sh makes a store whose trial ended 15 days ago (LIVETEST_DRILL_MANIFEST) and deploy/drill-run-job.sh runs the real jobs that bill it');
+      return;
+    }
+    // [STG-DRILLS D2] The weekly bill, the agent cash that settles it, and the idempotent receipt — for real.
+    await settleDrillBill(rec, ctx, drill, 'V04');
+    rec.automatedCase('suspension/reinstatement', 'automated-only (clock): suspension follows three failed charges 24 h apart, and reinstatement the payment after it — days of clock no staging run can stage. The automated gate proves it by driving the real billing cycle with a controllable clock (GOLD-2 VEND-04, apps/api/src/__tests__/golden/gold-2-money.test.ts)');
   },
 };
 

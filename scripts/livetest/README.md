@@ -32,7 +32,9 @@ itself errored, `3` = the target was refused (journeys suite).
 | `LIVETEST_PUBLIC_HOST` | the public hostname, refused by name |
 | `LIVETEST_OUT_DIR`, `LIVETEST_RUN_ID` | where results land and what the run is called |
 | `LIVETEST_EXPECT_DEPLOYMENT_ID` / `_ENVIRONMENT` / `_BUILD_SHA` | optional pins on the target identity |
+| `LIVETEST_DRILL_MANIFEST` | optional: the staging drill fixtures (`deploy/drill-fixtures.sh create`); VEND-04, MONEY-03, ADMIN-01 and PLAT-01 then run their drill cases |
 | `--only=AUTH-01,CUST-02` | run a subset |
+| `--suite=crash-drill --phase=setup\|verify` | the runner half of the PLAT-02 worker crash drill (`deploy/drill-crash.sh` drives it) |
 
 ## Safety (journeys suite)
 
@@ -57,7 +59,9 @@ re-runs log existing accounts straight in.
 `skippedCases[] {case, reason, gate}`, `startedAt`, `finishedAt`,
 `target {deploymentId, environment, buildSha}`, `runId` — and
 `journeys-summary.md` for people. PASS means every server-side case ran and
-passed (only device-gate cases may remain); SKIP means a case cannot run on the
+passed (only device-gate cases, and automated-only cases a live target can
+never stage because they are days of clock, may remain — each named with its
+gate); SKIP means a case cannot run on the
 target (the reason names it); FAIL means a step failed or no negative check ran.
 
 ## Layout
@@ -69,6 +73,8 @@ target (the reason names it); FAIL means a step failed or no negative check ran.
 | `provision.ts` | documents → admin review → stores open, movers online, heal leftovers |
 | `flows.ts` | the golden-path assertions (cash-only, IDOR, stock race, …) |
 | `guard.ts` | the target and phone refusals |
+| `drills.ts` | reads and validates the staging drill fixture manifest (never builds a fixture) |
+| `crash-drill.ts` | the PLAT-02 crash drill's two HTTP phases (the host kills the worker between them) |
 | `journey.ts`, `report.ts` | journey recording, status rules, result files |
 | `journeys/*.ts` | the 42 journeys, by ledger group |
 | `run.ts` | orchestrates either suite, prints the summary, sets the exit code |

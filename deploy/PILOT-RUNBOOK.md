@@ -450,6 +450,110 @@ journey's staging gate with the run id. Re-runs reuse the roster (accounts in
 the +59204 block) and create new orders, bookings and rides; accounts a journey
 must create afresh (signup, deletion, onboarding) come from +592049xxxx.
 
+## 8b. Staging drills: the journeys staging cannot stage by itself
+
+Seven journeys SKIP on a plain staging run because the test server cannot
+produce their conditions. The drills produce them — on staging only, through
+scripts, never through a route: nothing is added to the public or admin API.
+
+| Journey | Why it skipped | Drill | What then runs |
+| --- | --- | --- | --- |
+| CUST-03 | convert-to-pickup answers 404 | D1: `DISPATCH_EXHAUSTION=1` in the staging deploy/.env (pilot ruling) | a cash delivery with a tip is switched to pickup: fee and tip off, a pickup code, no second switch |
+| VEND-04 | the bill needs a trial that ended days ago | D2: a DRILL store whose trial ended 15 days ago; the REAL jobs bill it | the bill, the agent cash that settles it, the idempotent receipt; suspension and reinstatement stay **automated-only (clock)** (three failed charges 24 h apart; proven by the golden VEND-04 test that drives the billing cycle with a controllable clock) |
+| MONEY-03 | same clock | D3: a second DRILL store, billed the same way | the bill settled by the two-operator agent receipt; its replay credits once; the webhook's bad/unsigned/stale signatures refused |
+| ADMIN-04 | digests are written only by the Sunday 00:00 job | D4: `drill-run-job.sh settlement-digest` runs that SAME job now | a digest acknowledged (two operators), the duplicate refused, a correction as an ADJUSTMENT row |
+| ADMIN-01 | no case about the reviewer exists | D5: a DRILL applicant who shares the test admin's phone (one identity-graph edge) | the admin cannot claim or decide the case; the second admin (+5920400001) decides it |
+| PLAT-01 | staging has one tenant | D6: a second tenant `swift-drill` (CRAWLER kind: synthetic, never shown to guests) with a store, a customer, an order and a partner | the cross-tenant denial matrix, both ways, and no foreign data in any response |
+| PLAT-02 | the runner cannot kill containers | D7: `drill-crash.sh` kills the worker mid-offer on the host | the cascade resumes within 120 s, nothing runs twice, one completion |
+
+Every drill refuses twice before it acts. On the host, `deploy/drill-common.sh`
+refuses the root user, anything but `PILOT_ENV=staging` with
+`NODE_ENV=loadtest`, a deploy/.env without `SWIFT_STAGING_DRILLS=1`, a running
+worker that does not carry that marker, and a worker that is not the
+checked-out revision. Inside the worker container the drill code checks again
+(apps/api/src/modules/ops/drills/guard.ts): the marker, never
+`NODE_ENV=production`, the stack's own Postgres (`postgres:5432`,
+`POSTGRES_DB`, and the server must answer that name), and the database's own
+deployment identity saying `staging` (never production, never absent). Each
+condition alone refuses production. Fixtures are named `DRILL-<run id>`, their
+accounts are `+592048…` numbers no subscriber can hold, and a re-run with the
+same run id returns the same fixtures.
+
+One-time settings, staging only (never in production): add
+`SWIFT_STAGING_DRILLS=1` and `DISPATCH_EXHAUSTION=1` to deploy/.env, then
+redeploy so the api and worker are recreated with them:
+
+    cd /opt/swift
+    ./deploy/pilot-up.sh "$APPROVED_SHA"
+
+`DISPATCH_EXHAUSTION=1` is also on the production launch checklist (the pilot
+ruling); `SWIFT_STAGING_DRILLS` never is.
+
+The order, as swift-deploy, when the owner is not testing:
+
+1. One run id for everything that follows:
+
+       RUN_ID="staging-$(date -u +%Y%m%dT%H%M%SZ)"
+
+2. Fixtures (D2, D3, D5, D6):
+
+       LIVETEST_ADMIN_PHONE=+5920400000 ./deploy/drill-fixtures.sh create "$RUN_ID"
+
+   Expect `drill fixtures for <run id>: ~/swift-journeys/drills/<run id>/drill-manifest.json`
+   and the next command printed. A refusal prints `REFUSED: [STG-DRILLS <code>] …`
+   and creates nothing.
+
+3. The real jobs, once, now (D2, D3, D4):
+
+       ./deploy/drill-run-job.sh convert-trials billing-cycle
+       ./deploy/drill-run-job.sh settlement-digest
+
+   Each prints one JSON line naming the jobs it ran. After the first, both
+   DRILL stores are billed (`PAST_DUE`, one failed cash charge each). The
+   digest covers the most recent complete calendar week: it needs one order
+   completed in that week, which any journeys run in that week provides.
+
+4. The journeys, with the manifest:
+
+       LIVETEST_ADMIN_PHONE=+5920400000 LIVETEST_ADMIN2_PHONE=+5920400001 LIVETEST_RUN_ID="$RUN_ID" \
+         LIVETEST_DRILL_MANIFEST="$HOME/swift-journeys/drills/$RUN_ID/drill-manifest.json" ./deploy/journeys-run.sh
+
+   The manifest is copied into the run's results. Expect CUST-03, VEND-04,
+   MONEY-03, ADMIN-01, ADMIN-04 and PLAT-01 to run their drill cases (VEND-04
+   names its automated-only case in its PASS reason) and PLAT-02 to SKIP,
+   pointing at the crash drill. The runner refuses a manifest made on another
+   deployment or naming a live phone. Without `LIVETEST_DRILL_MANIFEST` the run
+   is exactly as before.
+
+5. The crash drill (D7), same run id:
+
+       LIVETEST_ADMIN_PHONE=+5920400000 LIVETEST_RUN_ID="$RUN_ID" ./deploy/drill-crash.sh
+
+   It starts the private instance, reaches mid-offer (an express delivery at
+   R1 offered to a roster rider), then `docker kill`s the worker, waits 15 s,
+   `docker start`s it, and verifies. Expect `worker … killed at …, started again
+   at …` and `PLAT-02 PASS`; it writes `plat02-crash-drill.json`, replaces the
+   PLAT-02 row of the run's journeys-result.json (the original is kept as
+   `journeys-result.before-plat02-crash-drill.json`) and rewrites
+   journeys-summary.md. Whatever stops it, the worker is started again on exit.
+   It needs the roster provisioned, so it runs after the journeys.
+
+6. Cleanup:
+
+       ./deploy/drill-fixtures.sh cleanup "$RUN_ID"
+
+   Expect a report with `"kept":[]` and `"tenant":"removed"`, filed as
+   drill-cleanup.json beside the manifest; the exit status is 1 if anything
+   was kept, with the reason. Removal goes through parent rows; append-only
+   evidence (audit, consent, deletion receipts, order status logs, the ledger,
+   receipts, agent-payment observations) is never deleted, and each SAN goes
+   to the tombstone registry, never reused.
+
+Evidence for the record, per run: `~/swift-journeys/<run id>/` (journeys-result.json,
+journeys-summary.md, drill-manifest.json, crash-drill-state.json,
+crash-drill-host.json, plat02-crash-drill.json) and
+`~/swift-journeys/drills/<run id>/` (drill-manifest.json, drill-cleanup.json).
+
 ## 9. Production go-live: the TLS pin on api.swiftgy.com
 
 The iOS and Android apps pin `api.swiftgy.com` (and its subdomains) to three CA roots: ISRG Root X1 and X2
