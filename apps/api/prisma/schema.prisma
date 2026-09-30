@@ -2921,6 +2921,11 @@ model Subscription {
   /// cleared on reinstatement.
   suspendedAt    DateTime?
 
+  /// Query projection of the one shared confirmation/dunning clock.
+  billingConfirmationPausedAt DateTime?
+  billingEnforcementDueAt      DateTime?
+  dunningClock                 BillingDunningClock?
+
   /// Swift Account Number [san spec PART 2] — the universal payment reference
   /// for platform fees across every rail (agent cash / checkout / card).
   /// 10 digits, Luhn-checked, IMMUTABLE: never changes, never re-issued,
@@ -2980,6 +2985,104 @@ model BillingEvent {
   @@index([type])
   @@index([type, deliveredAt])
   @@map("billing_events")
+}
+
+/// One active-time clock for the canonical subscription's current fee obligation.
+/// Provider uncertainty stops this clock; it never rewrites the original due date.
+model BillingDunningClock {
+  subscriptionId String @id
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  tenantId String
+  dueAt DateTime
+  epoch Int @default(1)
+  version Int @default(0)
+  elapsedMs BigInt @default(0)
+  runningSince DateTime?
+  pausedAt DateTime?
+  resumedAt DateTime?
+  retryAtMs BigInt?
+  nudgeAtMs BigInt?
+  churnAtMs BigInt?
+  holds PaymentConfirmationHold[]
+  notices BillingFeeNotice[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@map("billing_dunning_clocks")
+}
+
+/// Exactly one original payment source. Resolved evidence is retained; a
+/// second source can keep the aggregate paused after this one resolves.
+model PaymentConfirmationHold {
+  id String @id @default(cuid())
+  tenantId String
+  subscriptionId String
+  clock BillingDunningClock @relation(fields: [subscriptionId], references: [subscriptionId], onDelete: Restrict)
+  sourceEpoch Int
+  paymentId String? @unique
+  payment SubscriptionPayment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  checkoutId String? @unique
+  checkout MmgCheckoutIntent? @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  cardSessionId String? @unique
+  cardSession CardSession? @relation(fields: [cardSessionId], references: [id], onDelete: Restrict)
+  /// ACTIVE | SETTLEMENT_APPLY_PENDING | PAID | PROVEN_UNPAID | PROVEN_NO_EFFECT
+  status String @default("ACTIVE")
+  reason String
+  beganAt DateTime
+  resolvedAt DateTime?
+  resolvedBy String?
+  resolutionEvidence String?
+  reviewDueAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([subscriptionId, status])
+  @@index([status, reviewDueAt])
+  @@map("payment_confirmation_holds")
+}
+
+/// A fee-demand stage survives pause/restart without acquiring another identity.
+model BillingFeeNotice {
+  id String @id @default(cuid())
+  tenantId String
+  subscriptionId String
+  clock BillingDunningClock @relation(fields: [subscriptionId], references: [subscriptionId], onDelete: Restrict)
+  epoch Int
+  stageKey String
+  userId String
+  /// PENDING | DELIVERED | OBSOLETE
+  status String @default("PENDING")
+  payload Json
+  channels BillingNoticeHandoff[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([subscriptionId, epoch, stageKey, userId])
+  @@index([tenantId])
+  @@index([status, createdAt])
+  @@map("billing_fee_notices")
+}
+
+/// Persist UNKNOWN before a network handoff; never blindly resend a demand
+/// whose provider acknowledgement was lost. Inbox/push/SMS have separate keys.
+model BillingNoticeHandoff {
+  id String @id @default(cuid())
+  tenantId String
+  noticeId String
+  notice BillingFeeNotice @relation(fields: [noticeId], references: [id], onDelete: Restrict)
+  channel String
+  part String
+  /// PREPARED | UNKNOWN | DELIVERED | NOT_SENT
+  status String
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([noticeId, channel, part])
+  @@index([tenantId])
+  @@map("billing_notice_handoffs")
 }
 
 enum BillingEventType {
@@ -3121,6 +3224,7 @@ model MmgCheckoutIntent {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
   keys                  MmgCheckoutKey[]
+  confirmationHold      PaymentConfirmationHold?
 
   @@index([tenantId])
   @@index([subscriptionId, createdAt])
@@ -3430,6 +3534,7 @@ model SubscriptionPayment {
   id             String               @id @default(cuid())
   subscriptionId String
   subscription   Subscription         @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  confirmationHold PaymentConfirmationHold?
   amount         Decimal              @db.Decimal(10, 2)
   status         PaymentStatus
   paymentMethod  PaymentMethod
@@ -3579,6 +3684,7 @@ model CardSession {
   paymentId          String?            @unique
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
+  confirmationHold   PaymentConfirmationHold?
 
   @@unique([subscriptionId, purpose, idempotencyKey])
   @@index([tenantId])

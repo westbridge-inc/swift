@@ -31,6 +31,7 @@ import {
 import { toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
+import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, readDunningClock, resolveConfirmationInTx, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -464,7 +465,7 @@ export class BillingService {
   ): Promise<'succeeded' | 'failed' | 'suspended' | 'skipped' | 'pending'> {
     // An unresolved positive observation may concern this or an older attempt.
     // A new retry key, rail choice or wallet top-up is not manual disposition.
-    if (await this.subscriptionHasMmgApprovalHold(this.prisma, sub.id)) return 'pending';
+    if (await this.subscriptionHasConfirmationHold(this.prisma, sub.id, undefined, now)) return 'pending';
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
@@ -1088,7 +1089,7 @@ export class BillingService {
         await closeUnsentCardIntents(tx, { intentId }, 'CARD_OUT_OF_SERVICE', now);
         return 'card_changed' as const;
       }
-      const maySend = !await this.subscriptionHasMmgApprovalHold(tx, sub.id)
+      const maySend = !await this.subscriptionHasConfirmationHold(tx, sub.id, intentId, now)
         && !authority.bankInsteadOfAdvance
         && !authority.suppressNotice
         && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
@@ -1149,7 +1150,7 @@ export class BillingService {
         if (!card || card.subscriptionId !== sub.id || card.status !== 'ACTIVE') {
           return { outcome: 'card_changed' as const, cardStatus: card?.status ?? 'MISSING' };
         }
-        const maySend = !await this.subscriptionHasMmgApprovalHold(tx, sub.id)
+        const maySend = !await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)
           && !authority.bankInsteadOfAdvance
           && !authority.suppressNotice
           && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
@@ -1180,6 +1181,7 @@ export class BillingService {
           },
           select: { id: true },
         });
+        if (maySend) await beginConfirmationInTx(tx, sub.id, { paymentId: intent.id }, 'CARD_AUTHORIZATION_PENDING', now);
         return maySend ? { outcome: 'authorized' as const, intentId: intent.id } : { outcome: 'revoked' as const, intentId: intent.id };
       });
     } catch (error) {
@@ -1626,7 +1628,7 @@ export class BillingService {
     amount: number,
     now: Date,
   ): Promise<ChargeAttemptResult> {
-    if (await this.subscriptionHasMmgApprovalHold(this.prisma, sub.id)) return { ok: false, deferred: true };
+    if (await this.subscriptionHasConfirmationHold(this.prisma, sub.id, undefined, now)) return { ok: false, deferred: true };
     // Prepaid balance is money Swift already holds — spend it before pinging any
     // external rail. This is also what makes an admin top-up reinstate a CARD/MMG
     // sub: the recorded cash settles the fee instead of firing a fresh (and
@@ -1899,7 +1901,7 @@ export class BillingService {
     // uses this order too; without it, prepaid could own the wallet while MMG
     // owned the subscription and PostgreSQL correctly killed the cycle.
     const authority = await this.lockSubscriptionMoneyAuthority(tx, sub);
-    const mmgHeld = await this.subscriptionHasMmgApprovalHold(tx, sub.id);
+    const mmgHeld = await this.subscriptionHasConfirmationHold(tx, sub.id, settlePaymentId, now);
     // A card capture is an external money fact, not permission to reactivate a
     // subscription. Fence its durable intent and choose a single disposition
     // before applying the ordinary prepaid/free/service-advance path below.
@@ -2031,6 +2033,8 @@ export class BillingService {
         suspendedAt: null,
       },
     });
+
+    await advanceDunningObligation(tx, sub.id, periodEnd, now);
 
     await tx.billingEvent.create({
       data: {
@@ -2220,39 +2224,20 @@ export class BillingService {
   /** The payment holds the current quarantine; append-only billing events
    * retain every distinct approval fact. No automatic path clears this marker.
    * A separate, audited manual reconciliation must decide its disposition. */
-  private async subscriptionHasMmgApprovalHold(
-    db: Pick<Prisma.TransactionClient, 'subscriptionPayment' | 'mmgCheckoutIntent'>,
+  private async subscriptionHasConfirmationHold(
+    db: PrismaClient | Prisma.TransactionClient,
     subscriptionId: string,
     exceptPaymentId?: string,
+    now = new Date(),
   ): Promise<boolean> {
-    // [MMG checkout I5] A checkout the partner may be paying right now (OPEN,
-    // not yet expired) or one MMG sent them back from (CONFIRMING) is money in
-    // flight, exactly like an unresolved approval: no charge on another rail,
-    // no dunning, no suspension, until it resolves. EXPIRED, NOT_PAID and HELD
-    // do not hold billing (I8: expiry is not failure). A late MMG confirmation
-    // credits them anyway, and a new payment always reinstates at once.
-    const checkoutInFlight = await db.mmgCheckoutIntent.findFirst({
-      where: {
-        subscriptionId,
-        OR: [{ status: 'CONFIRMING' }, { status: 'OPEN', expiresAt: { gt: new Date() } }],
-      },
-      select: { id: true },
-    });
-    if (checkoutInFlight) return true;
-    return !!await db.subscriptionPayment.findFirst({
-      where: {
-        subscriptionId,
-        paymentMethod: 'MOBILE_MONEY',
-        ...(exceptPaymentId ? { id: { not: exceptPaymentId } } : {}),
-        OR: [
-          { failureCode: 'SETTLEMENT_MISMATCH' },
-          { failureCode: 'HISTORY_APPROVAL_UNVERIFIED' },
-          { failureRaw: { path: ['settlementHold'], equals: MMG_APPROVAL_HOLD } },
-          { failureRaw: { path: ['settlementHold'], equals: MMG_HISTORY_HOLD } },
-        ],
-      },
-      select: { id: true },
-    });
+    const check = async (tx: Prisma.TransactionClient) => {
+      const payment = exceptPaymentId ? await tx.subscriptionPayment.findUnique({ where: { id: exceptPaymentId }, select: { clientKey: true } }) : null;
+      const except = payment?.clientKey?.startsWith(CARD_PAY_NOW_KEY_PREFIX)
+        ? { cardSessionId: payment.clientKey.slice(CARD_PAY_NOW_KEY_PREFIX.length) }
+        : exceptPaymentId ? { paymentId: exceptPaymentId } : undefined;
+      return hasConfirmationInTx(tx, subscriptionId, now, except);
+    };
+    return '$transaction' in db ? db.$transaction(check) : check(db);
   }
 
   private async retainMmgApprovalHold(
@@ -2558,7 +2543,7 @@ export class BillingService {
       if (!payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== rail
         || payment.status !== 'UNKNOWN' || payment.externalRef !== null) return false;
 
-      const maySend = !await this.subscriptionHasMmgApprovalHold(tx, sub.id)
+      const maySend = !await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)
         && !authority.bankInsteadOfAdvance
         && !authority.suppressNotice
         && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
@@ -2603,6 +2588,7 @@ export class BillingService {
           },
         },
       });
+      if (authorized.count === 1) await beginConfirmationInTx(tx, sub.id, { paymentId }, 'PAYMENT_DISPATCHED', now);
       return authorized.count === 1;
     });
   }
@@ -2651,7 +2637,7 @@ export class BillingService {
         where: { id: sub.id },
         select: { autoRenew: true },
       });
-      if (await this.subscriptionHasMmgApprovalHold(tx, sub.id)
+      if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)
         || authority.bankInsteadOfAdvance || authority.suppressNotice || !live?.autoRenew
         || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) return false;
 
@@ -2739,7 +2725,7 @@ export class BillingService {
         where: { idempotencyKey: `success:${sub.id}:${periodKey}` },
         select: { id: true },
       });
-      const otherApprovalHeld = await this.subscriptionHasMmgApprovalHold(tx, sub.id, payment.id);
+      const otherApprovalHeld = await this.subscriptionHasConfirmationHold(tx, sub.id, payment.id, now);
       if (covered || authority.bankInsteadOfAdvance || otherApprovalHeld) {
         const walletHold = await this.holdWalletCurrencyMismatch(tx, payment, originalAttempt!.currencyCode, evidence.transactionId);
         if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the wallet', paymentId: payment.id, notify: walletHold.notify };
@@ -3292,7 +3278,7 @@ export class BillingService {
           // The scan is only a candidate list. Deletion/cancellation, approval,
           // another repair or a retry may have committed since it was read.
           const authority = await this.lockPaymentOutcomeAuthority(tx, sub as SubWithRelations);
-          if (await this.subscriptionHasMmgApprovalHold(tx, sub.id)) return { kind: 'skipped' as const };
+          if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return { kind: 'skipped' as const };
           // Retry adoption can reopen a FAILED payment without locking the
           // subscription; fence its status too, after payer -> subscription.
           await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${p.id} FOR UPDATE`;
@@ -3391,9 +3377,15 @@ export class BillingService {
         },
       });
     }
+    const scheduled = await scheduleDunningFailure(tx, sub.id, now);
     const attempts = sub.failedAttempts + 1;
-    const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled;
-    const nextRetryAt = new Date(now.getTime() + RETRY_HOURS * 60 * 60 * 1000);
+    const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled && scheduled.maySuspend;
+    const gracePeriodEnd = activeDeadline(scheduled.clock, FULL_FEE_GRACE_MS, now)!;
+    const nextRetryAt = attempts >= MAX_FAILED_ATTEMPTS && !willSuspend && sub.autoSuspendEnabled
+      ? gracePeriodEnd : activeDeadline(scheduled.clock, scheduled.clock.retryAtMs!, now)!;
+    if (attempts >= MAX_FAILED_ATTEMPTS && !willSuspend && sub.autoSuspendEnabled) {
+      await tx.billingDunningClock.update({ where: { subscriptionId: sub.id }, data: { retryAtMs: BigInt(FULL_FEE_GRACE_MS) } });
+    }
     await tx.subscription.update({
       where: { id: sub.id },
       data: {
@@ -3401,7 +3393,7 @@ export class BillingService {
         failedAttempts: attempts,
         nextRetryAt,
         isInGracePeriod: !willSuspend,
-        gracePeriodEnd: willSuspend ? null : nextRetryAt,
+        gracePeriodEnd,
         ...(willSuspend ? { suspendedAt: now } : {}),
       },
     });
@@ -3481,7 +3473,7 @@ export class BillingService {
       // All rails preserve current lifecycle authority; a card decline must
       // not overwrite cancellation merely because it is not an MMG result.
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
-      if (await this.subscriptionHasMmgApprovalHold(tx, sub.id)) return null;
+      if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return null;
       await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${payment.id} FOR UPDATE`;
       const currentPayment = await tx.subscriptionPayment.findUnique({ where: { id: payment.id } });
       if (!currentPayment || currentPayment.subscriptionId !== sub.id) return null;
@@ -3570,7 +3562,7 @@ export class BillingService {
   ): Promise<'failed' | 'suspended' | 'skipped'> {
     const result = await this.prisma.$transaction(async (tx) => {
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
-      if (await this.subscriptionHasMmgApprovalHold(tx, sub.id)) return null;
+      if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return null;
       const covered = await tx.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${periodKey}` }, select: { id: true } });
       if (authority.bankInsteadOfAdvance || covered || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) return null;
       const fresh = await tx.subscription.findUnique({ where: { id: sub.id } });
@@ -3760,7 +3752,7 @@ export class BillingService {
               vendor: { select: { id: true, owner: { select: { userId: true } } } },
             },
           });
-          if (!sub || sub.status !== 'SUSPENDED' || await this.subscriptionHasMmgApprovalHold(tx, sub.id)) return null;
+          if (!sub || sub.status !== 'SUSPENDED' || await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, now)) return null;
           const suspendedSince = sub.suspendedAt ?? sub.updatedAt; // pre-migration rows fall back to last touch
           if (now.getTime() - suspendedSince.getTime() >= suspensionMaxDays() * DAY_MS) {
             // Keep the state and its audit fact in one commit. The CAS also

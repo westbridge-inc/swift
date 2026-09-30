@@ -94,6 +94,7 @@ const TENANT_QUERY_EXTENSIONS = {
   providerPayment: scoped,
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it.
   mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped,
+  billingDunningClock: scoped, paymentConfirmationHold: scoped, billingFeeNotice: scoped, billingNoticeHandoff: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
   // [M-08] The prepaid top-up as one persisted command.
   topUpCommand: scoped,
