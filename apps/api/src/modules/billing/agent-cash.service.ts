@@ -78,7 +78,7 @@ export async function payInfo(
   sub: { id: string; type?: string; weeklyRate: unknown; customRate?: unknown | null; nextBillingDate: Date },
 ): Promise<{
   walletBalanceGyd: number; weeklyFeeGyd: number; amountDueGyd: number;
-  activationCopy: string; payCashSteps: string[];
+  activationCopy: string;
   usdDisplay: { amountUsd: number; rateUsed: number; line: string } | null;
 }> {
   const [balanceRow, modeRow, amountDue] = await Promise.all([
@@ -119,11 +119,9 @@ export async function payInfo(
     weeklyFeeGyd: weekly,
     amountDueGyd: amountDue,
     activationCopy: ACTIVATION_COPY[mode] ?? ACTIVATION_COPY['MANUAL']!,
-    payCashSteps: [
-      'Visit any MMG agent',
-      'Say you are paying a Swift bill and give your Swift Number',
-      'Pay cash — keep the receipt',
-    ],
+    // No agent or cash steps (the owner, 29 Sep): partners pay the weekly fee
+    // on the checkout page, with MMG. A build from before that page renders
+    // any steps served here, so none are.
     usdDisplay,
   };
 }

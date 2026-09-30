@@ -17,7 +17,7 @@ import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
 import { amountDueNow } from './amount-due';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice, type BillingNoticeLeaseGuard } from './billing-notice-delivery';
-import { AGENT_PAY_WAY, FEE_RESTORE_LINE, feePayWays } from './fee-notice-copy';
+import { CHECKOUT_PAY_WAY, FEE_RESTORE_LINE, feePayWays } from './fee-notice-copy';
 import { cardRailKilled } from '../../utils/card-rail';
 
 // ---------------------------------------------------------------------------
@@ -2572,7 +2572,7 @@ export class BillingService {
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment failed',
-      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${feePayWays(sub)} to stay active.`,
+      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${feePayWays(sub)}.`,
       audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
     }).catch(() => {});
@@ -2748,8 +2748,8 @@ export class BillingService {
   }
 
   /** Post-commit suspension side effects (push + SMS). The ways to pay are
-   *  the real ones (fee-notice-copy.ts): the app has no pay button, and an
-   *  agent payment is not recorded instantly. */
+   *  the real ones (fee-notice-copy.ts): MMG only, never an agent or cash,
+   *  and no promise of an instant restore. */
   private async suspendAccessNotices(sub: SubWithRelations) {
     const ways = feePayWays(sub);
     await this.notifications.send({
@@ -2900,7 +2900,7 @@ export class BillingService {
               title: 'Subscription closed',
               body: 'Your subscription was closed after 30 days unpaid. You can rejoin anytime — pay your weekly fee and your access is restored.',
               // Never the MMG request here: a CHURNED account is no longer retried.
-              sms: `Swift: your subscription was closed after 30 days unpaid. You can rejoin anytime. ${AGENT_PAY_WAY}. ${FEE_RESTORE_LINE}`,
+              sms: `Swift: your subscription was closed after 30 days unpaid. You can rejoin anytime. ${CHECKOUT_PAY_WAY}. ${FEE_RESTORE_LINE}`,
               data: { kind: 'billing_churned', subscriptionId: sub.id },
             };
             await tx.billingEvent.create({
