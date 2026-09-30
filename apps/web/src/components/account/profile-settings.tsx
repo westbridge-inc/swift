@@ -1,5 +1,7 @@
 'use client';
 
+import { AppDetails } from '@/components/app-details';
+
 import { useRef, useState, type FormEvent } from 'react';
 import { accountApi, type Profile } from './account-api';
 import { AccountFrame, buttonClass, fieldClass, useAccountQuery } from './account-frame';
@@ -11,6 +13,7 @@ export function ProfileSettings() {
     {profile.isError ? <DataUnavailable what="your profile" error={profile.error} onRetry={() => void profile.refetch()} />
       : profile.data ? <ProfileForm profile={profile.data} /> : <p role="status">Loading your profile…</p>}
     <MarketingPreference />
+    <AppDetails />
   </AccountFrame>;
 }
 

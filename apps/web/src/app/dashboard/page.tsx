@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { StoreDocuments } from '@/components/store-documents';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Star } from 'lucide-react';
 import { getLowStock, getOverview, money, toggleOpen, toggleOrders } from '@/lib/vendor-api';
@@ -61,6 +62,8 @@ export default function TodayPage() {
           {Number(d.vendor.averageRating).toFixed(1)} ({d.vendor.totalRatings} ratings)
         </div>
       </div>
+
+      <StoreDocuments />
 
       {d.pendingOrders > 0 && (
         <Link

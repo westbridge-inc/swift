@@ -112,6 +112,7 @@ export interface VendorDetail extends Vendor {
 export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptionNames?: string[]; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
   items: CartLine[];
+  vendors?: Array<{ vendorId: string; name: string }>;
   subtotal?: number;
   subtotalCustomer?: number;
   deliveryFee?: number;
@@ -257,7 +258,7 @@ export async function setCartAddress(addressId: string): Promise<Cart> {
     body: JSON.stringify({ addressId }),
   })).data as { cart?: Cart };
   if (!payload?.cart || !Array.isArray(payload.cart.items)) {
-    throw new Error('Swift did not return an updated delivery quote. Checkout stays locked.');
+    throw new Error('Could not confirm your delivery total. Please try again before ordering.');
   }
   return payload.cart;
 }

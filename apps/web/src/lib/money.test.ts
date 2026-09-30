@@ -137,7 +137,7 @@ describe('[W-13] the surfaces that spent money use it', () => {
     expect(cart).toMatch(/const moneyUnreadable = cart != null && totalParts === null;/);
     // both checkout buttons refuse
     expect(cart.match(/disabled=\{busy[^}]*moneyUnreadable/g) ?? []).toHaveLength(2);
-    expect(cart).toMatch(/Checkout stays locked until the total is/);
+    expect(cart).toMatch(/Could not confirm your total. Refresh your cart before ordering/);
   });
 
   it('there is ONE parser, not two that drift', () => {

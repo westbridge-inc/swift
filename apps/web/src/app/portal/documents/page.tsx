@@ -4,12 +4,14 @@ import { useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, ShieldCheck, AlertTriangle } from 'lucide-react';
 import {
-  getRiderProfile, getVerificationStatus, submitVerificationDocument, uploadVerificationFile,
+  getVerificationStatus, submitVerificationDocument, uploadVerificationFile,
 } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/api';
+import { documentLabel } from '@/lib/verification';
+import { ServiceProviderDocuments } from '@/components/document-checklist';
 
-const pretty = (docType: string) => docType.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+const pretty = documentLabel;
 
 function statusTone(s: string, expiresAt: string | null) {
   const expiringSoon = expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
@@ -22,12 +24,10 @@ function statusTone(s: string, expiresAt: string | null) {
 
 export default function DocumentsPage() {
   const queryClient = useQueryClient();
-  const rider = useQuery({ queryKey: ['p-rider'], queryFn: getRiderProfile, retry: 0 });
-  const vehicleType = (rider.data?.['vehicleType'] as string | undefined) ?? undefined;
   const status = useQuery({
-    queryKey: ['p-docs', vehicleType],
-    queryFn: () => getVerificationStatus(vehicleType),
-    enabled: !rider.isLoading,
+    queryKey: ['p-docs'],
+    // The API resolves the saved rider/driver vehicle, just like the phone.
+    queryFn: () => getVerificationStatus(),
   });
 
   const fileRef = useRef<HTMLInputElement>(null);
@@ -67,13 +67,16 @@ export default function DocumentsPage() {
         </p>
       </div>
 
-      {d && (
+      <p className="text-sm text-[var(--swift-muted)]">Riders, drivers and couriers: this checklist matches your saved vehicle in the Swift phone app.</p>
+      <ServiceProviderDocuments />
+
+      {d && d.checklist.length > 0 && (
         <div className={`flex items-center gap-3 rounded-2xl p-4 ${d.roleVerified ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
           {d.roleVerified ? <ShieldCheck className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
           <p className="text-sm font-semibold">
             {d.roleVerified
-              ? 'You are fully verified and cleared to work.'
-              : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still needed before you can go online.`}
+              ? 'Your required documents are approved.'
+              : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still need approval.`}
           </p>
         </div>
       )}
@@ -90,6 +93,7 @@ export default function DocumentsPage() {
             onRetry={() => void status.refetch()}
           />
         )}
+        {d && !d.checklist.length && <p role="status">We cannot confirm your requirements right now. Please try again later.</p>}
         {(d?.checklist ?? []).map((docType) => {
           const doc = latestByType.get(docType);
           const tone = doc ? statusTone(doc.status, doc.expiresAt) : null;

@@ -1,5 +1,7 @@
 'use client';
 
+import { AppDetails } from '@/components/app-details';
+
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { cancelPendingMmgPayUrl, getDriverProfile, getRiderProfile, updateDriverProfile } from '@/lib/mover-api';
@@ -53,6 +55,7 @@ export default function AccountPage() {
   return (
     <div className="max-w-2xl space-y-6">
       <h1 className="text-2xl font-extrabold">Account</h1>
+      <AppDetails />
 
       {user && (
         <div className="rounded-2xl border border-black/5 bg-white p-6">

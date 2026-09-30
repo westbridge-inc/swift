@@ -1,5 +1,7 @@
 'use client';
 
+import { AppDetails } from '@/components/app-details';
+
 import { useRef, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { site } from '@/site.config';
@@ -35,7 +37,7 @@ export function Help({ orderId = '' }: { orderId?: string }) {
   }
   return <AccountFrame title="Help">
     <p>Tell us what happened. Track your request and our reply here.</p>
-    <div className="flex flex-wrap gap-4 text-[var(--swift-red)] underline"><a href={`mailto:${site.supportEmail}`}>Email support</a><Link href="/faq">Frequently asked questions</Link><Link href="/account/safety">Safety</Link></div>
+    <div className="flex flex-wrap gap-4 text-[var(--swift-red)] underline"><a href={`mailto:${site.supportEmail}`}>Email support</a><Link href="/account/safety">Safety</Link></div>
     <form onSubmit={submit} className="space-y-4 rounded-2xl border border-black/5 bg-white p-5">
       <fieldset disabled={busy} className="space-y-4">
         <label className="block space-y-1"><span>Topic</span><select className={fieldClass} value={category} onChange={(e) => setCategory(e.target.value as SupportCategory)}>{categories.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}</select></label>
@@ -54,5 +56,6 @@ export function Help({ orderId = '' }: { orderId?: string }) {
         : tickets.data.length === 0 ? <p>No requests yet.</p>
         : <ul className="space-y-3">{tickets.data.map((ticket) => <li key={ticket.id} className="rounded-2xl border border-black/5 bg-white p-4"><h3 className="font-bold">{ticket.subject}</h3><p>{ticket.status === 'RESOLVED' ? 'Resolved' : ticket.status === 'IN_PROGRESS' ? 'In progress' : 'Open'}</p>{ticket.adminNote && <p>Swift: {ticket.adminNote}</p>}</li>)}</ul>}
     </section>
+    <AppDetails />
   </AccountFrame>;
 }
