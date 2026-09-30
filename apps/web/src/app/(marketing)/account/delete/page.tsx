@@ -38,10 +38,10 @@ const KEPT = [
 const GONE = [
   'Your name, phone number and email',
   'Your profile photo and verification selfie',
-  'Your identity documents — the stored file is deleted and its encryption key destroyed, so the data cannot be recovered even from a backup',
+  'Your identity documents — deleted so they cannot be recovered, even from a backup',
   'Your saved addresses and precise locations',
   'Your cart, favourites, emergency contacts and any active trip-share links',
-  'Your sign-in sessions and push notification tokens',
+  'Your sign-ins on all devices and the details Swift uses to send app notifications',
 ];
 
 export default function DeleteAccountPage() {

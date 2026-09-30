@@ -104,7 +104,7 @@ export function ProfileScreen() {
   // Kit logout popup (51), now the one shared ask. The cart is a server
   // query and the account keeps it; logout clears this device's copy.
   const { requestLogout, logoutDialog } = useLogoutConfirm({
-    body: 'Your cart and session leave this device; your account keeps everything.',
+    body: 'You’ll be signed out on this device. Your cart and account details stay with your account.',
   });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);

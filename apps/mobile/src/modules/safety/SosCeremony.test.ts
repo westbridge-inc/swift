@@ -81,6 +81,10 @@ describe('every rendered state is the server’s', () => {
 });
 
 describe('the paged copy is honest about the evidence', () => {
+  it('explains the countdown and keeps the emergency call separate', () => {
+    expect(STRIPPED).toContain('When the countdown ends, Swift alerts its safety team. Your emergency call is separate. Try alerting Swift now.');
+    expect(STRIPPED).toContain('The alert may still reach Swift’s safety team when the countdown ends. Try cancelling again.');
+  });
   it('never claims a live map; it states what was attached, by accuracy band, or that nothing was', () => {
     expect(STRIPPED).not.toMatch(/live map/i);
     expect(STRIPPED).toContain('No location could be attached');

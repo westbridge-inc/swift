@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
 import { haversineDistance } from '../../utils/distance';
+import { launchMarketAt } from '../auth/launch-market';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop] The itinerary of one ride: the pickup, then up to three
@@ -13,8 +14,8 @@ import { haversineDistance } from '../../utils/distance';
 // path calls it before anything is priced or written, so a ride that cannot be
 // driven as asked is refused before anyone quotes it.
 //
-// Inert today: nothing calls it yet, and it never reads TAXI_MAX_STOPS — the
-// caller passes the configured maximum in.
+// It never reads TAXI_MAX_STOPS: the caller (taxi-stops-flag.ts, the one
+// reader of the switch) passes the configured maximum in.
 // ---------------------------------------------------------------------------
 
 /** The most intermediate stops a ride can carry: the database cap
@@ -72,8 +73,8 @@ function tooManyStops(maxStops: number, stopCount: number): AppError {
 }
 
 /** The name a passenger knows each point by: 0 is the pickup, 1..n the stops,
- *  n + 1 the final destination. */
-function placeCode(index: number, stopCount: number): string {
+ *  n + 1 the final destination. The estimate names its legs with it too. */
+export function placeCode(index: number, stopCount: number): string {
   if (index === 0) return 'PICKUP';
   if (index === stopCount + 1) return 'DESTINATION';
   return `STOP_${index}`;
@@ -141,4 +142,31 @@ export function normalizeTaxiStops(input: {
     if (meters < MIN_TAXI_STOP_GAP_METERS) throw stopTooClose(i - 1, i, plan.length, meters);
   }
   return Object.freeze(plan);
+}
+
+/**
+ * [DS282 F3] Every point of a route with stops lies where Swift works: the
+ * pickup, each stop and the destination. The whole route is routed in one
+ * call, and a routing engine snaps a point far off its map to the nearest road
+ * it knows and still answers Ok, so a stop abroad would be priced as somewhere
+ * in Guyana. The area is the launch market box of auth/launch-market.ts, the
+ * one the store pin obeys (coarse on purpose: no real Guyana place is refused).
+ *
+ * Refuses the first point outside it, 400 STOP_OUT_OF_MARKET naming the place
+ * (PICKUP, STOP_n or DESTINATION), so the passenger can choose another. A ride
+ * without stops is not judged here: its pickup and destination keep the rules
+ * they have today.
+ */
+export function assertTaxiRouteInMarket(route: { pickup: TaxiPoint; stops: readonly TaxiPoint[]; dropoff: TaxiPoint }): void {
+  const stopCount = route.stops.length;
+  if (stopCount === 0) return;
+  const points = [route.pickup, ...route.stops, route.dropoff];
+  for (let i = 0; i < points.length; i++) {
+    const point = points[i]!;
+    if (launchMarketAt(point.lat, point.lng) !== null) continue;
+    const name = placeName(i, stopCount);
+    throw new AppError(400, 'STOP_OUT_OF_MARKET',
+      `${name.charAt(0).toUpperCase()}${name.slice(1)} is outside Guyana, where Swift works today. Choose a place in Guyana.`,
+      { place: placeCode(i, stopCount) });
+  }
 }
