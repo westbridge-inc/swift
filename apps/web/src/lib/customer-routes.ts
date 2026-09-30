@@ -61,6 +61,7 @@ const RULES: RouteRule[] = [
     match: exact('/account'), public: false, tab: 'profile', parent: null,
     door: { title: 'You’re browsing as a guest', body: 'Sign in to see your orders and your delivery addresses.' },
   },
+  { match: under('/account'), public: false, tab: 'profile', parent: '/account' },
   {
     match: exact('/orders'), public: false, tab: 'profile', parent: '/account',
     door: { title: 'Sign in to see your orders', body: 'Your orders and their live tracking are kept on your account.' },

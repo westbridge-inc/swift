@@ -12,6 +12,7 @@ import { useCustomerSession } from '@/components/customer-session';
 import { MenuSkeleton } from '@/components/customer-skeletons';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { FavouriteButton } from '@/components/account/favourites';
 import { signInPath } from '@/lib/customer-routes';
 
 /** The store, reopened at one item: `?item=` from Home's popular rail, the
@@ -138,7 +139,7 @@ export default function VendorPage() {
         {v.coverImageUrl && <Image src={v.coverImageUrl} alt={v.name} fill unoptimized sizes="(min-width: 1152px) 1120px, calc(100vw - 32px)" priority className="object-cover" />}
       </div>
       <div className="swift-menu-heading">
-        <h1 className="text-2xl font-extrabold md:text-3xl">{v.name}</h1>
+        <div className="flex items-center justify-between gap-3"><h1 className="text-2xl font-extrabold md:text-3xl">{v.name}</h1><FavouriteButton vendorId={v.id} name={v.name} /></div>
         <p className="mt-1 flex flex-wrap items-center gap-3 text-sm text-[var(--swift-muted)]">
           <span className="flex items-center gap-1"><Star className="h-4 w-4 fill-amber-400 text-amber-400" />{v.displayRating === null ? 'New' : `${v.displayRating.toFixed(1)} ${v.ratingBucket}`}</span>
           <span className="flex items-center gap-1"><Clock className="h-4 w-4" />~{v.estimatedPrepTime} min</span>

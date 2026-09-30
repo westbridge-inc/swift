@@ -51,6 +51,47 @@ function announceSessionChange(): void {
   for (const listener of [...sessionListeners]) listener();
 }
 
+// Non-identifying, tab-local flags survive a full-page redirect to /login.
+// A first-time guest must never be told they used to have a session.
+const KNOWN_SESSION = 'swift_web_known_session';
+const SIGNED_OUT_NOTICE = 'swift_web_signed_out_notice';
+let knownSession = false;
+let signedOutNotice = false;
+let deliberateLogout = 0;
+function sessionFlag(key: string, value?: boolean): boolean {
+  try {
+    if (value !== undefined) {
+      if (value) window.sessionStorage.setItem(key, '1');
+      else window.sessionStorage.removeItem(key);
+    }
+    return window.sessionStorage.getItem(key) === '1';
+  } catch { return false; }
+}
+function rememberSession(persist = false) {
+  knownSession = true;
+  if (persist) sessionFlag(KNOWN_SESSION, true);
+  signedOutNotice = false;
+  sessionFlag(SIGNED_OUT_NOTICE, false);
+}
+export function consumeSignedOutNotice(): boolean {
+  const pending = signedOutNotice || sessionFlag(SIGNED_OUT_NOTICE);
+  signedOutNotice = false;
+  sessionFlag(SIGNED_OUT_NOTICE, false);
+  return pending;
+}
+function expireSession(rejected: boolean, redirect: boolean) {
+  const shouldNotify = rejected && deliberateLogout === 0
+    && (sessionPrincipal !== null || knownSession || sessionFlag(KNOWN_SESSION));
+  clearSession();
+  if (shouldNotify) {
+    signedOutNotice = true;
+    sessionFlag(SIGNED_OUT_NOTICE, true);
+    // A full-page redirect consumes this on the destination, not on the
+    // screen that is about to disappear.
+    if (!redirect) announceSessionChange();
+  }
+}
+
 type AuthSnapshot = { principal: string | null; generation: number };
 
 function clearStoredCheckoutAttempts(): void {
@@ -131,6 +172,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;
     if (!user || typeof user.id !== 'string') return forget();
+    rememberSession(true);
     if (sessionPrincipal !== user.id) {
       // LEARNING the principal (null -> id) is not an account change: the
       // request that discovered it carried the very same cookies, so nothing
@@ -157,6 +199,7 @@ export function adoptSession(principal: string | null) {
   if (!sessionPrincipal || !principal || sessionPrincipal !== principal) clearStoredCheckoutAttempts();
   authGeneration += 1;
   sessionPrincipal = principal;
+  if (principal) rememberSession();
   announceSessionChange();
 }
 
@@ -173,7 +216,13 @@ export function adoptSession(principal: string | null) {
  */
 export async function restoreSession(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
   if (typeof window === 'undefined') return { ok: false };
-  if (!(await tryRefresh())) return { ok: false };
+  const snapshot = authSnapshot();
+  const refreshed = await tryRefresh();
+  if (!snapshotIsCurrent(snapshot)) return { ok: false };
+  if (refreshed !== 'ok') {
+    if (refreshed === 'rejected') expireSession(true, false);
+    return { ok: false };
+  }
   return sessionProbe();
 }
 
@@ -186,6 +235,7 @@ export async function restoreSession(): Promise<{ ok: boolean; user?: Record<str
  * either way, so an unreachable server still lands on /login.
  */
 export async function logout(): Promise<void> {
+  deliberateLogout += 1;
   try {
     // Through apiFetch on purpose: the access cookie lives fifteen minutes, so
     // a tab left open and then signed out would 401 here — and a logout that
@@ -198,12 +248,16 @@ export async function logout(): Promise<void> {
     // and the local clear below still takes the person to /login.
   }
   clearSession();
+  deliberateLogout -= 1;
 }
 
 export function clearSession() {
   if (typeof window === 'undefined') return;
   authGeneration += 1;
   sessionPrincipal = null;
+  knownSession = false;
+  sessionFlag(KNOWN_SESSION, false);
+  consumeSignedOutNotice();
   clearStoredCheckoutAttempts();
   localStorage.removeItem(STORE_KEY);
   announceSessionChange();
@@ -216,20 +270,21 @@ export function setSelectedStore(vendorId: string) {
   if (typeof window !== 'undefined') localStorage.setItem(STORE_KEY, vendorId);
 }
 
-let refreshFlight: Promise<boolean> | null = null;
+type RefreshResult = 'ok' | 'rejected' | 'unavailable';
+let refreshFlight: Promise<RefreshResult> | null = null;
 
 /** One refresh at a time: concurrent 401s share the flight, so a rotated
  *  refresh cookie is never replayed and the family is never revoked by us. */
-async function tryRefresh(): Promise<boolean> {
+async function tryRefresh(): Promise<RefreshResult> {
   if (!refreshFlight) {
     refreshFlight = (async () => {
       try {
         const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
           method: 'POST', credentials: 'include', headers: { ...clientHeaders },
         });
-        return res.ok;
+        return res.ok ? 'ok' : res.status === 401 || res.status === 403 ? 'rejected' : 'unavailable';
       } catch {
-        return false;
+        return 'unavailable';
       } finally {
         refreshFlight = null;
       }
@@ -261,13 +316,14 @@ export async function apiFetch(
   let res = await doFetch();
   if (res.status === 401) {
     const refreshed = await tryRefresh();
-    if (refreshed && snapshotIsCurrent(requestSession)) res = await doFetch();
+    if (refreshed === 'ok' && snapshotIsCurrent(requestSession)) res = await doFetch();
     if (res.status === 401) {
       if (!snapshotIsCurrent(requestSession)) {
         throw new ApiRequestError('The signed-in account changed while this request was running. Try again.', 409, 'SESSION_CHANGED');
       }
-      clearSession();
-      if (policy.redirectOnExpired !== false && window.location.pathname !== '/login') {
+      const redirect = policy.redirectOnExpired !== false && window.location.pathname !== '/login';
+      expireSession(refreshed === 'rejected', redirect);
+      if (redirect) {
         const returnPath = `${window.location.pathname}${window.location.search}`;
         window.location.href = `/login?next=${encodeURIComponent(returnPath)}`;
       }

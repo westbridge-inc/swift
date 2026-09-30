@@ -1,5 +1,6 @@
 'use client';
 
+import { CategoryFeed, CategoryGrid, RecommendedStores } from '@/components/customer-discovery';
 import BrowseLoading from './loading';
 import { Suspense } from 'react';
 import Link from 'next/link';
@@ -19,6 +20,14 @@ const TABS = [
 const TITLE: Record<string, string> = { RESTAURANT: 'Food & takeaway', SUPERMARKET: 'Groceries', STORE: 'Shops', SERVICE: 'Services', '': 'All stores' };
 
 function BrowseInner() {
+  const params = useSearchParams();
+  if (params.get('category')) return <CategoryFeed key={params.get('category')} slug={params.get('category')!} name={params.get('name') || params.get('category')!} emoji={params.get('emoji') || ''} />;
+  if (params.get('view') === 'categories') return <CategoryGrid />;
+  if (params.get('view') === 'recommended') return <RecommendedStores />;
+  return <StoreBrowse />;
+}
+
+function StoreBrowse() {
   const params = useSearchParams();
   const type = params.get('type') ?? '';
   // [Q7b] Each list is kept per category, so going back to it is instant.

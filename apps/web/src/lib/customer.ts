@@ -84,6 +84,7 @@ export interface Vendor {
   // ?? 0` type-check while being undefined at runtime, so every vendor card
   // on the web rendered 0.0.
   displayRating: number | null; ratingBucket: string; ratingCount: number; topRated: boolean;
+  itemsInCategory?: number;
   estimatedPrepTime: number; distanceKm?: number | null;
   isCurrentlyOpen: boolean; acceptingOrders: boolean; city?: string;
   deliveryFee?: number | string | null; etaMin?: number | null;
