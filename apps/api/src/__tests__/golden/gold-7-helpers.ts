@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
-import { expect } from 'vitest';
+import { expect, vi } from 'vitest';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
 import { authPlugin } from '../../plugins/auth';
@@ -26,7 +26,8 @@ export function createGolden(phonePrefix: string, fixture: string) {
   let seq = 0;
   const createdIds = new Set<string>();
   const savedClusterIds = new Set<string>();
-  const priorAdminAlerts = new Set<string>();
+  const createdAdminAlerts = new Set<string>();
+  let restoreAlertTracking: (() => void) | undefined;
   const adminAlertKinds = ['vendor_pending', 'verification_pending', 'doc_review', 'dup_doc'];
   const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, fixture);
 
@@ -176,12 +177,24 @@ export function createGolden(phonePrefix: string, fixture: string) {
     await app.register(authRoutes, { prefix: '/api/v1/auth' });
     if (extra) await extra(app);
     await app.ready();
-    // Like GOLD-5, run files serially in the assigned database. Shared admin
-    // alert rows have no document/vendor FK; preserve every pre-existing row
-    // and clean only this run's added rows in the kinds this fixture emits.
-    for (const row of await sys(() => app.prisma.alertDelivery.findMany({ where: {
-      kind: 'ADMIN_OPS', subjectId: { in: adminAlertKinds },
-    }, select: { id: true } }))) priorAdminAlerts.add(row.id);
+    // [G7-01] Shared subjects are NOT ownership. Give only this app's new,
+    // unkeyed tracking inserts explicit run-owned IDs, forwarding the real
+    // database write unchanged otherwise. Existing keyed/deduped rows stay
+    // outside cleanup; another client's concurrent inserts are never ours.
+    const createMany = app.prisma.alertDelivery.createMany.bind(app.prisma.alertDelivery);
+    const tracking = vi.spyOn(app.prisma.alertDelivery, 'createMany').mockImplementation((async (args: Prisma.AlertDeliveryCreateManyArgs) => {
+      const owned: string[] = [];
+      const data = (Array.isArray(args.data) ? args.data : [args.data]).map((row) => {
+        if (row.id || row.kind !== 'ADMIN_OPS' || !adminAlertKinds.includes(row.subjectId)) return row;
+        const id = `${fixture}-alert-${nanoid(16)}`;
+        owned.push(id);
+        return { ...row, id };
+      });
+      const result = await createMany({ ...args, data });
+      for (const id of owned) createdAdminAlerts.add(id);
+      return result;
+    }) as typeof createMany);
+    restoreAlertTracking = () => tracking.mockRestore();
     await purge();
   }
 
@@ -196,11 +209,8 @@ export function createGolden(phonePrefix: string, fixture: string) {
         // Admin audit writes may finish just after the response (GOLD-5).
         await new Promise((resolve) => setTimeout(resolve, 300));
         await purge();
-        const added = (await sys(() => app.prisma.alertDelivery.findMany({ where: {
-          kind: 'ADMIN_OPS', subjectId: { in: adminAlertKinds },
-        }, select: { id: true } }))).filter((row) => !priorAdminAlerts.has(row.id));
-        await sys(() => app.prisma.alertDelivery.deleteMany({ where: { id: { in: added.map((row) => row.id) } } }));
-      } finally { await app.close(); }
+        await sys(() => app.prisma.alertDelivery.deleteMany({ where: { id: { in: [...createdAdminAlerts] } } }));
+      } finally { restoreAlertTracking?.(); await app.close(); }
     },
   };
 }
