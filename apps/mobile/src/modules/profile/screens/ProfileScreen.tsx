@@ -156,7 +156,7 @@ export function ProfileScreen() {
       </Screen>
     );
   }
-  if (profile.isError) {
+  if (profile.isError && !profile.data) {
     // [REPORT-022 F-022-19] An API failure must never trap the session: the
     // account controls that don't depend on profile data stay reachable.
     return (
@@ -208,6 +208,14 @@ export function ProfileScreen() {
           entering={FadeInDown.duration(320).reduceMotion(ReduceMotion.System)}
           style={{ paddingTop: insets.top + space.lg, paddingHorizontal: GUTTER }}
         >
+          {profile.isError ? (
+            <View style={{ gap: space.sm, marginBottom: space.md }}>
+              <T variant="caption" tone="muted">
+                Couldn’t refresh your profile. Showing the last loaded details.
+              </T>
+              <PillButton size="sm" label="Try again" onPress={() => { void profile.refetch(); }} />
+            </View>
+          ) : null}
           {/* [ref 05] The page names itself before it names the person. */}
           <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>ACCOUNT</T>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>

@@ -18,7 +18,8 @@ describe('connectivity boundary contract', () => {
   it('reserves measured banner body space instead of covering navigation headers', () => {
     expect(app).toContain('<ConnectivityBoundary>');
     expect(app).toContain('<RootNavigator />');
-    expect(banner).toContain('paddingTop: offline ? bannerBodyHeight : 0');
+    expect(banner).toContain('const showBanner = offline || slow');
+    expect(banner).toContain('paddingTop: showBanner ? bannerBodyHeight : 0');
     expect(banner).toContain('offlineBannerBodyHeight(event.nativeEvent.layout.height, insets.top)');
     expect(banner).toContain('pointerEvents="none"');
   });

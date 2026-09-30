@@ -1,6 +1,7 @@
 import { QueryClient, MutationCache } from '@tanstack/react-query';
 import { toast } from '../kit/toast';
 import { errorMessage } from './apiError';
+import { installQueryFreshness, QUERY_GC_MS, readRetryDelay, reconnectPolicy, retryRead } from './appQueryPolicy';
 
 export { errorMessage };
 
@@ -24,11 +25,20 @@ const mutationCache = new MutationCache({
 export const queryClient = new QueryClient({
   mutationCache,
   defaultOptions: {
-    queries: { staleTime: 30_000, retry: 2 },
+    queries: {
+      staleTime: 30_000,
+      gcTime: QUERY_GC_MS,
+      retry: retryRead,
+      retryDelay: readRetryDelay,
+      refetchOnReconnect: reconnectPolicy(() => queryClient),
+    },
     // A mutation function is invoked again from scratch. On a shared device,
     // account A can log out during the retry delay and the second invocation
     // can then authorize a state-changing request as account B. Mutations fail
     // fast globally; explicitly idempotent workflows own any safe retry policy.
-    mutations: { retry: false },
+    // Run once and fail normally even offline: never pause a money action
+    // here and silently replay it when the network returns.
+    mutations: { retry: false, networkMode: 'always' },
   },
 });
+installQueryFreshness(queryClient);
