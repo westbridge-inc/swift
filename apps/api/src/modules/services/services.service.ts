@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
+import { SweepFailures } from '../verification/sweep-failures';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 
@@ -247,6 +248,7 @@ export async function reconcileProviderVerifications(
   const take = Math.max(1, Math.min(batchSize, 500));
   let cursor: string | undefined;
   let reconciled = 0;
+  const failures = new SweepFailures();
 
   for (;;) {
     const providers = await prisma.serviceProvider.findMany({
@@ -255,11 +257,20 @@ export async function reconcileProviderVerifications(
       take,
       select: { id: true, userId: true },
     });
-    if (providers.length === 0) return reconciled;
+    if (providers.length === 0) {
+      failures.throwIfAny(reconciled);
+      return reconciled;
+    }
 
     for (const provider of providers) {
-      await refreshProviderVerification(prisma, provider.userId);
-      reconciled += 1;
+      try {
+        await refreshProviderVerification(prisma, provider.userId);
+        reconciled += 1;
+      } catch {
+        // The failed transaction rolled back. Do not count it as reconciled;
+        // continue the cursor and leave this provider for the next retry.
+        failures.add('provider_reconcile', provider.id);
+      }
     }
     cursor = providers[providers.length - 1]!.id;
   }

@@ -1,7 +1,8 @@
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
-import { hopDocState } from './doc-state';
+import { DOC_TRANSITIONS, hopDocState } from './doc-state';
+import { SweepFailures, VerificationSweepIncomplete } from './sweep-failures';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
@@ -1671,72 +1672,123 @@ export class VerificationService {
   // Expiry automation (daily job)
   // -------------------------------------------------------------------------
 
-  /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend. */
+  /** Expire only legal machine states; report held/failed rows after the batch. */
   async expireLapsedDocuments(): Promise<number> {
+    const failures = new SweepFailures();
     // Reconcile first so a prior process failure after marking EXPIRED cannot
     // remain invisible forever merely because the next query skips terminal rows.
-    await reconcileProviderVerifications(this.prisma);
+    try {
+      await reconcileProviderVerifications(this.prisma);
+    } catch (error) {
+      if (!(error instanceof VerificationSweepIncomplete)) throw error;
+      failures.merge(error);
+    }
     // [STRAND-2 belt] Vendor projections ride the same daily heal.
     await this.reconcileVendorActivations();
     const now = new Date();
-    const lapsed = await this.prisma.verificationDocument.findMany({
-      where: { status: { in: ['APPROVED', 'PENDING'] }, expiresAt: { lt: now } },
-    });
-
+    // Derive the legal expiry sources from the existing authority; never
+    // invent a transition for a stalled extraction/approval pipeline.
+    const expirable = DOC_TRANSITIONS.filter((t) => t.to === 'EXPIRED').map((t) => t.from);
+    const terminal: DocState[] = ['SUPERSEDED', 'PURGED', 'REVOKED', 'REJECTED'];
     let expired = 0;
-    for (const doc of lapsed) {
-      const transitioned = await this.prisma.$transaction(async (tx) => {
-        const users = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "users"
-          WHERE "id" = ${doc.userId}
-          FOR UPDATE /* verification-document-expiry-authority */
-        `;
-        if (!users[0]) return false;
-        const won = await tx.verificationDocument.updateMany({
-          where: {
-            id: doc.id,
-            userId: doc.userId,
-            status: { in: ['APPROVED', 'PENDING'] },
-            expiresAt: { lt: now },
-          },
-          data: { status: 'EXPIRED' },
-        });
-        // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
-        if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
-        if (won.count !== 1) return false;
-        await projectProviderVerificationLocked(tx, doc.userId);
-        // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
-        // transaction — document truth and the derived vendor flags are one
-        // generation, not "EXPIRED now, store closes at some later sweep".
-        await this.projectVendorActivation(tx, doc.userId);
-        return true;
+    let cursor: string | undefined;
+    for (;;) {
+      const lapsed = await this.prisma.verificationDocument.findMany({
+        where: {
+          ...(cursor && { id: { gt: cursor } }),
+          expiresAt: { lt: now }, purgedAt: null,
+          OR: [{ state: null }, { state: { notIn: terminal } }],
+        },
+        orderBy: { id: 'asc' }, take: 100,
       });
-      if (!transitioned) continue;
-      expired += 1;
+      if (!lapsed.length) break;
+      for (const doc of lapsed) {
+        let phase: 'document_expiry' | 'expiry_effects' = 'document_expiry';
+        try {
+          const outcome = await this.prisma.$transaction(async (tx) => {
+            const users = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT "id" FROM "users"
+              WHERE "id" = ${doc.userId}
+              FOR UPDATE /* verification-document-expiry-authority */
+            `;
+            if (!users[0]) return { kind: 'SKIPPED' as const };
+            // A renewal or pipeline hop may have won since the page was read.
+            const current = await tx.verificationDocument.findUnique({ where: { id: doc.id } });
+            if (!current || current.purgedAt || !current.expiresAt || current.expiresAt >= now || (current.state && terminal.includes(current.state))) {
+              return { kind: 'SKIPPED' as const };
+            }
+            if (current.state === 'EXPIRED') return { kind: 'REPLAY' as const, doc: current };
+            if (current.state === null || !expirable.includes(current.state)) {
+              return { kind: 'HELD' as const, state: current.state };
+            }
+            const won = await tx.verificationDocument.updateMany({
+              where: {
+                id: doc.id,
+                userId: doc.userId,
+                state: { in: expirable },
+                purgedAt: null,
+                expiresAt: { lt: now },
+              },
+              data: { state: 'EXPIRED' },
+            });
+            // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
+            if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
+            if (won.count !== 1) return { kind: 'SKIPPED' as const };
+            await projectProviderVerificationLocked(tx, doc.userId);
+            // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
+            // transaction — document truth and the derived vendor flags are one
+            // generation, not "EXPIRED now, store closes at some later sweep".
+            await this.projectVendorActivation(tx, doc.userId);
+            return { kind: 'EXPIRED' as const, doc: current };
+          });
+          if (outcome.kind === 'SKIPPED') continue;
+          if (outcome.kind === 'HELD') {
+            failures.add('expiry_policy_hold', doc.id, outcome.state);
+            continue;
+          }
+          if (outcome.kind === 'EXPIRED') expired += 1;
+          phase = 'expiry_effects';
+          const expiredDoc = outcome.doc;
 
-      // L2 is permanent once earned — an expired ID does not demote the user
-      if (doc.docType === IDENTITY_DOC_TYPE) continue;
+          // L2 is permanent once earned — an expired ID does not demote the user
+          if (expiredDoc.docType === IDENTITY_DOC_TYPE) continue;
+          // The final inbox notice acknowledges the existing enforcement steps.
+          // Without it a post-commit failure remains replayable on the next run.
+          const acknowledged = await this.prisma.notification.findFirst({
+            where: { userId: expiredDoc.userId, AND: [
+              { data: { path: ['kind'], equals: 'verification_expired' } },
+              { data: { path: ['docId'], equals: expiredDoc.id } },
+            ] }, select: { id: true },
+          });
+          if (acknowledged) continue;
 
-      // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
-      // and a mover whose live-operation status broke is pulled offline now —
-      // not "after they next toggle" (an uninsured taxi must stop getting jobs).
-      if (doc.role === 'MOVER') {
-        await this.forceMoverOfflineIfNotLive(doc.userId);
-      } else {
-        await this.suspendListingsIfUnverified(doc.userId);
+          // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
+          // and a mover whose live-operation status broke is pulled offline now —
+          // not "after they next toggle" (an uninsured taxi must stop getting jobs).
+          if (expiredDoc.role === 'MOVER') {
+            await this.forceMoverOfflineIfNotLive(expiredDoc.userId);
+          } else {
+            await this.suspendListingsIfUnverified(expiredDoc.userId);
+          }
+          // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
+          await this.propagateVehicleLapse(expiredDoc, 'expired');
+          const noticeId = await this.notifications.send({
+            userId: expiredDoc.userId,
+            type: 'SYSTEM_ANNOUNCEMENT',
+            title: 'Document expired',
+            body: `Your ${expiredDoc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+            audience: audienceForRole(expiredDoc.role),
+            data: { kind: 'verification_expired', docId: expiredDoc.id },
+            dedupeKey: `verification-expired:${expiredDoc.id}`,
+          });
+          if (!noticeId) failures.add('expiry_effects', expiredDoc.id);
+        } catch {
+          failures.add(phase, doc.id);
+        }
       }
-      // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
-      await this.propagateVehicleLapse(doc, 'expired');
-      await this.notifications.send({
-        userId: doc.userId,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Document expired',
-        body: `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
-        audience: audienceForRole(doc.role),
-        data: { kind: 'verification_expired', docId: doc.id },
-      });
+      cursor = lapsed[lapsed.length - 1]!.id;
     }
-
+    failures.throwIfAny(expired);
     return expired;
   }
 
