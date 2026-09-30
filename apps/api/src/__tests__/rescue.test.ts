@@ -766,7 +766,12 @@ describe('[ALG-06] source pins — the hook sits where the law says', () => {
     for (const prefix of ['dispatch:declined:${', 'dispatch:exhausts:${', 'dispatch:round:${']) {
       expect(generationKeys).toContain(prefix);
     }
-    expect(service).toContain('`dispatch:offer:${orderId}`');
+    // The offer key format lives once, in the shared helper module (like the
+    // declined, round and exhaust keys above); the service only aliases it.
+    expect(service).toContain('const offerKey = dispatchOfferKey;');
+    expect(service).not.toContain('`dispatch:offer:${');
+    expect(generationKeys).toContain('export const dispatchOfferKey');
+    expect(generationKeys).toContain('`dispatch:offer:${orderId}`');
     expect(rescue).toContain('`dispatch:offer:${orderId}`');
     const emit = service.indexOf("emit('dispatch:offer', {");
     expect(service.slice(emit, emit + 4000)).toContain('rescueIncentiveGyd: rescueGyd > 0 ? rescueGyd : null,');

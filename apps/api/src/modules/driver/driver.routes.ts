@@ -11,6 +11,7 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { freshRidePinReset } from '../rides/ride-pin';
@@ -98,7 +99,7 @@ const driverEarningsQuerySchema = z.object({
 });
 
 export async function driverRoutes(app: FastifyInstance) {
-  const orderService = new OrderService(app.prisma, app.io);
+  const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const notifications = new NotificationService(app.prisma, app.io);
   // [M-29] The cash rail — the same one the rider's handover at the door uses.
   const cashRules = new CashRulesService(app.prisma, notifications, orderService);
@@ -1015,6 +1016,17 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS', 'You cannot cancel once the trip has started — end the trip instead.');
     }
     if (!release.released) throw new AppError(409, 'INVALID_STATUS', 'This ride can no longer be cancelled');
+
+    // [DISPATCH 1/3 · B2] The driver who just gave this ride up is excluded
+    // from its re-dispatch, exactly like the rider handback: the cascade key
+    // was wiped when they were assigned, so "next nearest" was this driver
+    // again. BEST-EFFORT, like the handback: written after the release
+    // commits, so a sweep already in flight (or Redis being down) can still
+    // offer them the ride once. That costs one card they can decline, never a
+    // double assignment: the claim compare-and-set decides every winner.
+    const cancelledDeclinedKey = dispatchDeclinedKey(id);
+    await app.redis.sadd(cancelledDeclinedKey, driver.id).catch(() => {});
+    await app.redis.expire(cancelledDeclinedKey, 3600).catch(() => {});
 
     // Tell the rider honestly, then re-dispatch so their ride survives.
     app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'PENDING', reason: 'driver_cancelled' });

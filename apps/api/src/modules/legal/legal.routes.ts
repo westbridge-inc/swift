@@ -23,8 +23,10 @@ import type { FastifyInstance } from 'fastify';
 // childsafety@swiftgy.com — the owner's real zone, where the mailboxes live.
 // The words changed, so the version moves (the law above): the 2026-09-23 row
 // stays in every ledger that holds it, and these words get their own stamp.
-export const LEGAL_VERSION = '2026-09-24';
-const LAST_UPDATED = '24 September 2026'; // human form of LEGAL_VERSION
+// [LEGAL-FEE · owner 2026-09-29] Partner weekly fees are paid through MMG's
+// checkout in the Swift app, or by card where offered. New words, new version.
+export const LEGAL_VERSION = '2026-09-30';
+const LAST_UPDATED = '30 September 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -195,7 +197,7 @@ export const DRIVER_AGREEMENT = page(
 <p>You provide transport services as an independent business, in your own name and at your own direction. You choose when to go online, which jobs to accept, and how to run your work. Nothing in this Agreement or the platform creates employment, agency, partnership or a joint venture between you and Swift; you are not entitled to employment benefits from Swift, and you are responsible for your own national insurance, tax and statutory obligations as an independent earner under Guyanese law.</p>
 
 <h2>2. What you pay Swift — and what you keep</h2>
-<p>You pay Swift a flat weekly subscription for the software, shown to you before you start and payable through your Swift Number at any MMG agent or by the methods shown in the app. Swift takes <b>no commission</b>: 100% of every fare, delivery fee and tip is yours, collected by you directly from the customer in cash — or, where you offer it, into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period shown in the app pauses your ability to take new jobs until the fee is settled.</p>
+<p>You pay Swift a flat weekly subscription for the software, shown to you before you start and payable in the Swift app through MMG's checkout, or by card where the app offers it. Swift takes <b>no commission</b>: 100% of every fare, delivery fee and tip is yours, collected by you directly from the customer in cash — or, where you offer it, into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period shown in the app pauses your ability to take new jobs until the fee is settled.</p>
 
 <h2>3. Verification and documents</h2>
 <p>Before operating — and continuously afterwards — you must hold and keep current the documents the app lists for your vehicle class (for example: national ID, driver's licence, vehicle registration, insurance appropriate to carrying passengers where you drive passengers, and a police clearance). You upload them in the app; they are verified before you can go online and re-verified as they expire, with renewal windows shown in advance. An expired required document takes you offline automatically until it is renewed. Handling of these documents is governed by the Privacy Policy.</p>
@@ -234,7 +236,7 @@ export const VENDOR_AGREEMENT = page(
 <p>Your Business is an independent seller. Swift provides the software that publishes your listings, transmits orders and arranges delivery; Swift is not your employer, franchisor, agent or reseller, and the sale contract for every order is between your Business and the customer.</p>
 
 <h2>2. What you pay Swift — and what you keep</h2>
-<p>You pay Swift a flat weekly subscription for the software, shown before you start and payable through your store's Swift Number at any MMG agent or by the methods shown in the app. Swift takes <b>no commission</b>: 100% of every sale is yours, paid by the customer in cash at handover or into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period pauses new orders until the fee is settled; your data and listings are retained as the Privacy Policy describes.</p>
+<p>You pay Swift a flat weekly subscription for the software, shown before you start and payable in the Swift app through MMG's checkout, or by card where the app offers it. Swift takes <b>no commission</b>: 100% of every sale is yours, paid by the customer in cash at handover or into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. Non-payment after the grace period pauses new orders until the fee is settled; your data and listings are retained as the Privacy Policy describes.</p>
 
 <h2>3. Verification and licences</h2>
 <p>Before selling — and continuously afterwards — you must hold and keep current the documents the app lists for your business type (for example: the owner's national ID, business registration, TIN certificate, and the food-safety licences and certificates your category requires). Expired required documents suspend new orders automatically until renewed. You are responsible for operating with every licence and permit Guyanese law requires of your trade.</p>

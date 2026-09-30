@@ -257,7 +257,7 @@ const startOfMonth = startOfMonthGY;
 // ---------------------------------------------------------------------------
 
 export async function riderRoutes(app: FastifyInstance) {
-  const orderService = new OrderService(app.prisma, app.io);
+  const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const floatService = new FloatService(app.prisma);
   const verification = new VerificationService(
     app.prisma,

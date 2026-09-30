@@ -1,5 +1,6 @@
 'use client';
 
+import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // ── The session ──────────────────────────────────────────────────────────────
@@ -124,7 +125,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
   const forget = () => {
     const known = sessionPrincipal !== null;
     sessionPrincipal = null;
-    if (known) announceSessionChange();
+    if (known) { invalidateStorefrontContinuations(); announceSessionChange(); }
     return { ok: false };
   };
   try {
@@ -140,6 +141,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
       // fail every concurrent request with a spurious SESSION_CHANGED. Only a
       // switch between two KNOWN people is a change.
       if (sessionPrincipal !== null) {
+        invalidateStorefrontContinuations();
         clearStoredCheckoutAttempts();
         authGeneration += 1;
       }
@@ -156,6 +158,10 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
 /** Adopt a session the server has just issued as cookies. No tokens involved. */
 export function adoptSession(principal: string | null) {
   if (typeof window === 'undefined') return;
+  if (sessionPrincipal !== principal || principal === null) {
+    // Only this tab’s guest sign-in may carry its Add into the new session.
+    invalidateStorefrontContinuations(sessionPrincipal === null && principal !== null);
+  }
   if (!sessionPrincipal || !principal || sessionPrincipal !== principal) clearStoredCheckoutAttempts();
   authGeneration += 1;
   sessionPrincipal = principal;
@@ -203,6 +209,7 @@ export async function logout(): Promise<void> {
 }
 
 export function clearSession() {
+  invalidateStorefrontContinuations();
   if (typeof window === 'undefined') return;
   authGeneration += 1;
   sessionPrincipal = null;

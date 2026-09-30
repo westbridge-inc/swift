@@ -2931,6 +2931,11 @@ model Subscription {
 
   billingEvents BillingEvent[]
 
+  /// [PT-1] Card rail v2: the cards enrolled for this fee, and the hosted
+  /// sessions (enrol a card / pay now) opened for it.
+  paymentInstruments PaymentInstrument[]
+  cardSessions       CardSession[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3081,7 +3086,9 @@ model SettlementImport {
   rowCount       Int
   computedTotal  Decimal   @db.Decimal(14, 2)
   controlTotal   Decimal?  @db.Decimal(14, 2)
-  /// STAGED | REJECTED | PUBLISHING | PUBLISHED
+  /// STAGED | REJECTED | PUBLISHING | INTERRUPTED | PUBLISHED. [G5-F6]
+  /// INTERRUPTED: publication stopped part-way and is resumed; while
+  /// PUBLISHING, updatedAt is the publisher heartbeat.
   status         String    @default("STAGED")
   rejectReasons  Json?
   rows           Json
@@ -3344,9 +3351,218 @@ model SubscriptionPayment {
   expiresAt      DateTime?
   lastPolledAt   DateTime?
   pollBackoffSec Int       @default(30)
+  /// [PT-1 · C2] Card rail v2: the PaymentInstrument this intent charges. Its
+  /// retrieval goes to the provider, environment and account that instrument
+  /// is bound to, never to whatever is configured now. Null on every other
+  /// rail and on legacy card intents. A plain reference, not a relation: the
+  /// payment is money evidence and must outlive anything that happens to the
+  /// instrument row.
+  instrumentId   String?
 
   @@index([status, lastPolledAt])
+  @@index([instrumentId])
   @@map("subscription_payments")
+}
+
+/// [PT-1 · AH.10.9 / AH.10.9.2] A card the partner enrolled on the provider's
+/// hosted page, for Swift's weekly fee. Swift never receives the card number,
+/// the security code or a PIN [C1]: it holds the provider's vault token, sealed
+/// at rest with the envelope helper (providers/storage/envelope.ts — AES-256-GCM
+/// under a per-row data key that the master KEK wraps), and the display facts
+/// only (brand, last 4, expiry) [C9]. The token is BOUND [C2]: it is only ever
+/// sent to the provider, environment and account recorded here, and no later
+/// configuration change can re-rail it. One ACTIVE instrument per subscription
+/// (a partial unique index in the migration). The database holds the rest: the
+/// binding, token, card facts and every replace/revoke/expire fact are frozen
+/// once written; the row's tenant is its payer's (lineage through userId); and
+/// nothing deletes it except its own subscription's deletion — a card leaves
+/// service through REVOKED or EXPIRED, never by DELETE.
+model PaymentInstrument {
+  id               String                  @id @default(cuid())
+  tenantId         String                  @default("swift-default")
+  subscriptionId   String
+  subscription     Subscription            @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  /// The payer who enrolled it: the subscription's owner at that moment.
+  userId           String
+  /// Who minted the vault token [C2]: the provider, its environment
+  /// (sandbox | live) and the merchant-account LABEL (never the merchant
+  /// number, never a credential).
+  provider         String
+  environment      String
+  providerAccount  String
+  /// iv(12) | authTag(16) | ciphertext of the vault token, and its data key
+  /// wrapped by the master KEK. Opened only at the instant of a charge; never
+  /// selected into a DTO or a log line.
+  vaultTokenSealed Bytes
+  vaultTokenDek    Bytes
+  brand            String
+  last4            String                  @db.Char(4)
+  expMonth         Int
+  expYear          Int
+  status           PaymentInstrumentStatus @default(ACTIVE)
+  /// The off-session consent (Swift charges this card for the weekly fee
+  /// without the partner present) that the partner accepted when they started
+  /// the enrolment, and when they accepted it.
+  consentVersion   String
+  consentAt        DateTime
+  replacedAt       DateTime?
+  replacedById     String?
+  revokedAt        DateTime?
+  revokedBy        String?
+  expiredAt        DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  @@index([tenantId])
+  @@index([subscriptionId, status])
+  @@map("payment_instruments")
+}
+
+/// ACTIVE is the only status a charge may use. REPLACED (a newer card took
+/// over), EXPIRED (past its expiry month) and REVOKED (the partner removed it)
+/// are terminal: nothing ever charges them again.
+enum PaymentInstrumentStatus {
+  ACTIVE
+  REPLACED
+  EXPIRED
+  REVOKED
+}
+
+/// [PT-1 · AH.10.9.2] One hosted card session — "add a card" (ENROLL) or "pay
+/// the fee now" (PAY_NOW) — and the durable intent behind it: it exists before
+/// the provider is asked for a page. It is bound to one payer, one
+/// subscription, one purpose, one provider/environment/account and (for
+/// PAY_NOW) one server-priced amount [C8]. Its one-use callback state is kept
+/// only as a sha256 [C8]. A browser return is an observation, never money
+/// truth [C5]: money moves only on the provider's server-side answer. One live
+/// (OPEN or UNKNOWN) session per subscription and purpose [C6] — a partial
+/// unique index in the migration. The binding and price are frozen for life,
+/// the one-use markers (the accepted return, the confirmation, the instrument
+/// or payment it produced, the provider's page) move from empty to a value
+/// once and never again, and the row's tenant is its payer's (lineage).
+model CardSession {
+  id                 String             @id @default(cuid())
+  tenantId           String             @default("swift-default")
+  subscriptionId     String
+  subscription       Subscription       @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  userId             String
+  purpose            CardSessionPurpose
+  status             CardSessionStatus  @default(OPEN)
+  provider           String
+  environment        String
+  providerAccount    String
+  /// PAY_NOW only: what the server priced (never a client figure), in the
+  /// subscription's currency, for the billing period starting periodStart.
+  amount             Decimal?           @db.Decimal(12, 2)
+  currencyCode       String?
+  periodStart        DateTime?
+  /// sha256 (hex) of the one-use callback state; the state itself is never stored.
+  stateHash          String             @db.Char(64)
+  /// The client's retry key for "open this session", unique per subscription and purpose.
+  idempotencyKey     String?
+  providerSessionRef String?
+  hostedUrl          String?
+  expiresAt          DateTime
+  /// The first accepted browser return. Set once; a second return is a replay.
+  returnedAt         DateTime?
+  confirmedAt        DateTime?
+  lastCheckedAt      DateTime?
+  consentVersion     String?
+  consentAt          DateTime?
+  failureCode        String?
+  /// What the session produced: the instrument (ENROLL) or the payment (PAY_NOW).
+  instrumentId       String?            @unique
+  paymentId          String?            @unique
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([subscriptionId, purpose, idempotencyKey])
+  @@index([tenantId])
+  @@index([status, expiresAt])
+  @@map("card_sessions")
+}
+
+enum CardSessionPurpose {
+  ENROLL
+  PAY_NOW
+}
+
+/// OPEN: the hosted page is live. UNKNOWN: past its window, and the provider
+/// cannot yet say whether money moved — reconciliation keeps asking.
+/// SUCCEEDED / FAILED / EXPIRED / CANCELLED are terminal. HELD: the provider's
+/// answer disagrees with the session (amount, currency) or could not be booked,
+/// and waits for a person; it never credits by itself.
+enum CardSessionStatus {
+  OPEN
+  UNKNOWN
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  CANCELLED
+  HELD
+}
+
+/// [PT-1 · AH.10.9.2 step 6] APPEND-ONLY evidence of every card-rail answer:
+/// a browser return, a session confirmation, an off-session charge, a
+/// retrieval. The raw payload is never stored — its sha256 only — with what
+/// Swift parsed from it and what Swift decided. A database trigger refuses
+/// UPDATE and DELETE. The links are plain references so the evidence outlives
+/// every row it describes; the row's tenant is its session's, or — for an
+/// off-session charge, which has no session — its instrument's (lineage).
+model CardObservation {
+  id             String                @id @default(cuid())
+  tenantId       String                @default("swift-default")
+  source         CardObservationSource
+  sessionId      String?
+  subscriptionId String?
+  instrumentId   String?
+  paymentId      String?
+  provider       String
+  environment    String
+  rawSha256      String                 @db.Char(64)
+  /// What the answer said, parsed into the closed set [C4 reads it exactly].
+  parsedStatus   CardObservedStatus
+  /// What Swift decided about it: ACCEPTED, or the one reason it was refused.
+  verdict        CardObservationVerdict
+  createdAt      DateTime               @default(now())
+
+  @@index([tenantId])
+  @@index([sessionId])
+  @@index([subscriptionId, createdAt])
+  @@map("card_observations")
+}
+
+enum CardObservationSource {
+  RETURN
+  CONFIRM
+  CHARGE
+  RETRIEVE
+}
+
+/// The five v2 outcomes, plus INVALID for a payload that parses as none of them.
+enum CardObservedStatus {
+  SUCCEEDED
+  FAILED
+  UNKNOWN
+  REQUIRES_ACTION
+  PENDING
+  INVALID
+}
+
+/// ACCEPTED: the observation was taken as what it is (a return may prompt a
+/// confirmation; a provider answer drives the reducer). Every REJECTED_* names
+/// the one reason it granted nothing.
+enum CardObservationVerdict {
+  ACCEPTED
+  REJECTED_STATE
+  REJECTED_USER
+  REJECTED_TENANT
+  REJECTED_PURPOSE
+  REJECTED_EXPIRED
+  REJECTED_REPLAY
+  REJECTED_CLOSED
+  REJECTED_BINDING
+  REJECTED_MISMATCH
 }
 
 // ==========================================
