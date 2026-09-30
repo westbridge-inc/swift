@@ -313,7 +313,8 @@ async function buildCartResponse(
   choices: CartQuoteChoices = {},
 ) {
   const cart = await app.prisma.cart.findUnique({
-    where: { customerId: userId },
+    // Historical cart relations need the same caller wall as direct reads.
+    where: { customerId: userId, vendor: vendorTenantForCaller() },
     include: {
       vendor: {
         select: {
@@ -324,6 +325,7 @@ async function buildCartResponse(
         },
       },
       items: {
+        where: { item: { vendor: vendorTenantForCaller() } },
         include: {
           item: {
             select: {
@@ -1330,7 +1332,9 @@ export async function customerRoutes(app: FastifyInstance) {
       );
       total = idRows.length;
       const pageIds = idRows.slice(skip, skip + limit).map((r) => r.id);
-      const rows = await app.prisma.vendor.findMany({ where: { id: { in: pageIds } } });
+      // Recheck all caller filters after ranking; visibility can change
+      // between the ID projection and this page read.
+      const rows = await app.prisma.vendor.findMany({ where: { AND: [where, { id: { in: pageIds } }] } });
       const byId = new Map(rows.map((r) => [r.id, r]));
       vendors = pageIds.map((id) => byId.get(id)).filter((v): v is NonNullable<typeof v> => v != null);
     } else {
@@ -1775,7 +1779,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Validate item
     const item = await app.prisma.item.findFirst({
-      where: { id: body.itemId, vendorId: body.vendorId, isAvailable: true },
+      where: { id: body.itemId, vendorId: body.vendorId, isAvailable: true, vendor: vendorTenantForCaller() },
       include: { optionGroups: { include: { options: true } } },
     });
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
