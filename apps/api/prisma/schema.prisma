@@ -3060,7 +3060,7 @@ model ProviderPayment {
   provider          String
   /// The provider's transaction id, normalized (trimmed, upper-cased)
   providerTxnId     String
-  /// OPEN | CREDITED
+  /// OPEN | CREDITED | HELD_DUPLICATE (requires finance review; never credits)
   status            String    @default("OPEN")
   creditedPaymentId String?
   subscriptionId    String?
@@ -3070,7 +3070,8 @@ model ProviderPayment {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  @@unique([provider, providerTxnId])
+  // Raw migration owns the partial unique expression index using mmg_txn_canon.
+  @@index([provider, providerTxnId])
   @@index([tenantId])
   @@index([status])
   @@map("provider_payments")

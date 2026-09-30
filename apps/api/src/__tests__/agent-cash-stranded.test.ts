@@ -103,7 +103,7 @@ async function makeForeignVendorSub() {
     },
   });
   subIds.push(sub.id);
-  return { sub, san: await ensureSan(prisma, sub.id) };
+  return { sub, san: await ensureSan(prisma, sub.id), tenant };
 }
 
 const txnId = () => { const id = `RECV-${nanoid(10)}`; externalIds.push(id); providerTxnIds.push(id.toUpperCase()); return id; };
@@ -750,15 +750,187 @@ describe('[AX369] one MMG transaction, one credit authority, whatever the key no
     expect(await money(sub.id, [tabbed, spaced])).toEqual({ credits: 1, ledger: 1, observations: 2 });
   });
 
-  it('two identities already standing for one transaction (both normalisations) hold a new observation for a person, unlinked: nothing credited', async () => {
+  it('the database refuses two live identities for one transaction; a held duplicate cannot displace the live identity', async () => {
     const { sub, san } = await makeVendorSub();
     const { core, spaced } = legacyPair();
-    await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: `\t${core}\t`, amount: 2100, currencyCode: 'GYD' } });
-    await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: core, amount: 2100, currencyCode: 'GYD' } });
+    const live = await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: `\t${core}\t`, amount: 2100, currencyCode: 'GYD' } });
+    await expect(prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: core, amount: 2100, currencyCode: 'GYD' } })).rejects.toMatchObject({ code: 'P2002' });
+    await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: core, status: 'HELD_DUPLICATE', amount: 2100, currencyCode: 'GYD' } });
     externalIds.push(spaced);
-    expect(await svc.ingest(webhookPayment(spaced, san))).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
+    expect(await svc.ingest(webhookPayment(spaced, san))).toMatchObject({ status: 'accepted' });
     const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { channel_externalId: { channel: 'MMG_AGENT_WEBHOOK', externalId: spaced } } });
-    expect({ status: row.status, providerPaymentId: row.providerPaymentId }).toEqual({ status: 'UNMATCHED', providerPaymentId: null });
-    expect(await money(sub.id, [spaced])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+    expect({ status: row.status, providerPaymentId: row.providerPaymentId }).toEqual({ status: 'MATCHED', providerPaymentId: live.id });
+    expect(await money(sub.id, [spaced])).toEqual({ credits: 1, ledger: 1, observations: 1 });
   });
+
+  it.each(['plain', 'spaces'])('[AX384] a %s observation of the tab-padded credited legacy transaction cannot mint or credit again', async (spelling) => {
+    const { sub, san } = await makeVendorSub();
+    const { core, tabbed } = legacyPair();
+    const legacy = await creditedLegacy(san, sub.id, tabbed, tabbed);
+    const incoming = spelling === 'plain' ? core : ` ${core} `;
+    externalIds.push(incoming);
+    expect(await svc.ingest(webhookPayment(incoming, san))).toMatchObject({ status: 'reconciled' });
+    expect(await identitiesFor(core)).toBe(1);
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { channel_externalId: { channel: 'MMG_AGENT_WEBHOOK', externalId: incoming } } })).providerPaymentId).toBe(legacy.id);
+    expect(await money(sub.id, [tabbed, incoming])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
+  it.each(['straße', 'ﬁle'])('[AX384] %s uses database case folding for every channel', async (suffix) => {
+    const { sub, san } = await makeVendorSub();
+    const raw = `${txnId()}-${suffix}`;
+    const { key } = (await prisma.$queryRaw<Array<{ key: string }>>`SELECT upper(${raw}) AS key`)[0]!;
+    providerTxnIds.push(key!, raw.toUpperCase());
+    externalIds.push(raw);
+    await creditedLegacy(san, sub.id, key!, raw);
+    externalIds.push(`MANUAL:${raw}`);
+    expect(await svc.ingest(manualPayment(raw, san, 'admin-portal'))).toMatchObject({ status: 'reconciled' });
+    expect(await money(sub.id, [raw, `MANUAL:${raw}`])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
+  it('[AX384] a stale resolver cannot link an observation after it was held; later attach cannot credit it', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const stale = await prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, sanRaw: san,
+      amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {},
+    } });
+    await prisma.mmgAgentPayment.update({ where: { id: stale.id }, data: { status: 'UNMATCHED', failureCode: 'PROVIDER_ID_CONFLICT' } });
+    await expect(realIdentityFor.call(svc, stale, stale.channel)).rejects.toThrow('NOT_RECEIVED');
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: stale.id } })).providerPaymentId).toBeNull();
+    await expect(svc.attach(stale.id, sub.id, 'admin-resolver')).rejects.toThrow('PROVIDER_ID_CONFLICT');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it('[AX384] a linked held identity goes to suspense and can never be reconciled as an unknown credit or attached', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const held = await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: txn.toUpperCase(), status: 'HELD_DUPLICATE', amount: 2100, currencyCode: 'GYD' } });
+    const row = await prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, providerPaymentId: held.id, sanRaw: san,
+      amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {},
+    } });
+    expect(await realIdentityFor.call(svc, row, row.channel)).toMatchObject({ conflict: true });
+    expect(await svc.resumeReceived(row.id)).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
+    await expect(svc.attach(row.id, sub.id, 'admin-resolver')).rejects.toThrow('PROVIDER_ID_CONFLICT');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it('[AX384] the same-state hold wins against an old unmatched resolver snapshot without linking it', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const stale = await prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, sanRaw: san,
+      amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', failureCode: 'UNFINISHED', raw: {},
+    } });
+    await prisma.mmgAgentPayment.update({ where: { id: stale.id }, data: { failureCode: 'PROVIDER_ID_CONFLICT' } });
+    expect(await realIdentityFor.call(svc, stale, stale.channel)).toMatchObject({ conflict: true });
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: stale.id } })).providerPaymentId).toBeNull();
+    await expect(svc.attach(stale.id, sub.id, 'admin-resolver')).rejects.toThrow('PROVIDER_ID_CONFLICT');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it('[AX384] credit waits for the identity row lock, re-reads the hold, and durably suspenses without money movement', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const identity = await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: txn.toUpperCase(), amount: 2100, currencyCode: 'GYD' } });
+    const row = await prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, providerPaymentId: identity.id, sanRaw: san,
+      amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {},
+    } });
+    let pending: Promise<IngestResult> | undefined;
+    await prisma.$transaction(async (tx) => {
+      await tx.providerPayment.update({ where: { id: identity.id }, data: { status: 'HELD_DUPLICATE' } });
+      const { pid } = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!;
+      pending = svc.credit(row.id, sub.id, { amount: 2100, channel: row.channel, externalId: txn });
+      pending.catch(() => undefined);
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const { blocked } = (await prisma.$queryRaw<Array<{ blocked: boolean }>>`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity a WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))) AS blocked`)[0]!;
+        if (blocked) break;
+        if (Date.now() > deadline) throw new Error('credit never reached the identity row lock');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }, { timeout: 15_000 });
+    expect(await pending).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('UNMATCHED');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it.each(['canonical', 'tenant'])('[AX384] credit validates the identity %s inside the money transaction', async (mismatch) => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const other = txnId();
+    const identity = await prisma.providerPayment.create({ data: {
+      provider: 'MMG', providerTxnId: mismatch === 'canonical' ? other.toUpperCase() : txn.toUpperCase(),
+      tenantId: mismatch === 'tenant' ? (await makeForeignVendorSub()).tenant.id : 'swift-default', amount: 2100, currencyCode: 'GYD',
+    } });
+    const row = await prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, providerPaymentId: identity.id, sanRaw: san,
+      amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {},
+    } });
+    await expect(svc.credit(row.id, sub.id, { amount: 2100, channel: row.channel, externalId: txn })).rejects.toThrow('PROVIDER_ID_CONFLICT');
+    expect((await prisma.providerPayment.findUniqueOrThrow({ where: { id: identity.id } })).status).toBe('OPEN');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it('[AX384] an alternate raw alias of a historical JS-collapsed identity cannot mint another credit authority', async () => {
+    const { sub, san } = await makeVendorSub();
+    const raw = `${txnId()}-straße`;
+    const { key } = (await prisma.$queryRaw<Array<{ key: string }>>`SELECT upper(${raw}) AS key`)[0]!;
+    providerTxnIds.push(key!, raw.toUpperCase());
+    const identity = await creditedLegacy(san, sub.id, key!, raw);
+    const alias = raw.toUpperCase();
+    const historical = await linkedInSuspense(san, identity.id, alias);
+    expect(await realIdentityFor.call(svc, historical, historical.channel)).toMatchObject({ conflict: true });
+    externalIds.push(alias);
+    expect(await svc.ingest(webhookPayment(alias, san))).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
+    await expect(svc.attach(historical.id, sub.id, 'admin-resolver')).rejects.toThrow('PROVIDER_ID_CONFLICT');
+    expect(await prisma.providerPayment.count({ where: { providerTxnId: { in: [key!, alias] } } })).toBe(1);
+    expect(await money(sub.id, [raw, alias, `MANUAL:${alias}`])).toEqual({ credits: 1, ledger: 1, observations: 3 });
+  });
+
+  it('[AX384] a stale unlinked snapshot cannot overwrite a link another resolver already set to a held identity', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: txn.toUpperCase(), amount: 2100, currencyCode: 'GYD' } });
+    const held = await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: txn.toUpperCase(), status: 'HELD_DUPLICATE', amount: 2100, currencyCode: 'GYD' } });
+    const stale = await prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, sanRaw: san,
+      amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', failureCode: 'UNFINISHED', raw: {},
+    } });
+    await prisma.mmgAgentPayment.update({ where: { id: stale.id }, data: { providerPaymentId: held.id } });
+    expect(await realIdentityFor.call(svc, stale, stale.channel)).toMatchObject({ conflict: true, payment: { id: held.id } });
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: stale.id } })).providerPaymentId).toBe(held.id);
+    await expect(svc.attach(stale.id, sub.id, 'admin-resolver')).rejects.toThrow('PROVIDER_ID_CONFLICT');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it('[AX384] a resolver must retry after the observation changes status, even without a conflict hold', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const stale = await prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, sanRaw: san,
+      amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {},
+    } });
+    await prisma.mmgAgentPayment.update({ where: { id: stale.id }, data: { status: 'UNMATCHED', failureCode: 'UNFINISHED' } });
+    await expect(realIdentityFor.call(svc, stale, stale.channel)).rejects.toThrow('NOT_RECEIVED');
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: stale.id } })).providerPaymentId).toBeNull();
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+    expect(await svc.attach(stale.id, sub.id, 'admin-resolver')).toMatchObject({ status: 'accepted' });
+    expect(await money(sub.id, [txn])).toEqual({ credits: 1, ledger: 1, observations: 1 });
+  });
+
+  it.each(['\u00a0', '\u202f', '\ufeff'])('[AX384] database whitespace includes adapter-trimmed %j so manual and webhook observations share one identity', async (space) => {
+    const { sub, san } = await makeVendorSub();
+    const core = txnId();
+    const raw = `${space}${core}${space}`;
+    externalIds.push(raw, `MANUAL:${core}`);
+    providerTxnIds.push(raw.toUpperCase());
+    expect(await svc.ingest(webhookPayment(raw, san))).toMatchObject({ status: 'accepted' });
+    // The portal and CSV adapters trim receipt strings before ingestion.
+    expect(await svc.ingest(manualPayment(raw.trim(), san, 'admin-portal'))).toMatchObject({ status: 'reconciled' });
+    expect(await money(sub.id, [raw, `MANUAL:${core}`])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
 });

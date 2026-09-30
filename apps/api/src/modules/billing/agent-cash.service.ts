@@ -1,5 +1,5 @@
 import type { OnAudit } from '../../lib/audit-writer';
-import { Prisma, type MmgAgentPayment, type PrismaClient } from '@prisma/client';
+import { Prisma, type MmgAgentPayment, type ProviderPayment, type PrismaClient } from '@prisma/client';
 import type { BillingService } from './billing.service';
 import { resolveSan, subscriptionOwnerTenant } from './san.service';
 import { validateSanShape } from './san';
@@ -111,24 +111,12 @@ export type IngestResult =
   | { status: 'reconciled'; paymentId: string; originalPaymentId: string }
   | { status: 'received_unmatched'; paymentId: string; failureCode: string };
 
-/** [M-18] One real-world provider transaction is ONE identity, whatever
- *  channel observed it. The key is the provider's transaction id — or, for a
- *  manual entry, the receipt reference the admin verified in the MMG portal,
- *  which is that same id — normalized so a spelling cannot mint a second one. */
-export function providerTxnKey(p: { mmgTxnId?: string | null; externalId: string; channel: string }): string {
-  const raw = p.mmgTxnId ?? (p.channel === 'MANUAL_ADMIN' ? p.externalId.replace(/^MANUAL:/, '') : p.externalId);
-  return raw.trim().toUpperCase();
+/** Preserve the provider's raw spelling. Only mmg_txn_canon in PostgreSQL
+ *  decides transaction equivalence; JavaScript case folding differs. */
+export function providerTxnRaw(p: { mmgTxnId?: string | null; externalId: string; channel: string }): string {
+  return p.mmgTxnId ?? (p.channel === 'MANUAL_ADMIN' ? p.externalId.replace(/^MANUAL:/, '') : p.externalId);
 }
 export const PROVIDER = 'MMG';
-
-/** [AX369] The key the identity backfill (20260902030000) wrote, exactly as its
- *  SQL computed it: upper(trim(COALESCE(mmgTxnId, regexp_replace(externalId,
- *  '^MANUAL:', '')))). Postgres trim() strips SPACES only, where
- *  providerTxnKey strips all whitespace, so a tab-padded legacy id was keyed
- *  differently; an identity is looked up under both before one is minted. */
-export function backfillTxnKey(p: { mmgTxnId?: string | null; externalId: string }): string {
-  return (p.mmgTxnId ?? p.externalId.replace(/^MANUAL:/, '')).replace(/^ +| +$/g, '').toUpperCase();
-}
 
 /** Channel-honest activation copy [spec 4.5 / SO-7]: the screen must state
  *  the LIVE channel's real latency — never "instant" in manual mode. */
@@ -316,55 +304,81 @@ export class AgentCashService {
    *  amount or currency disagrees with the identity is a CONFLICT: never
    *  credited, suspensed for a person, counted and paged. */
   private async identityFor(
-    row: { id: string; tenantId: string; channel: string; externalId: string; mmgTxnId: string | null; amount: Prisma.Decimal; currencyCode: string; providerPaymentId: string | null },
+    row: Pick<MmgAgentPayment, 'id' | 'tenantId' | 'channel' | 'externalId' | 'mmgTxnId' | 'amount' | 'currencyCode' | 'providerPaymentId' | 'status' | 'failureCode'>,
     channel: string,
   ): Promise<{ payment: { id: string; status: string; creditedPaymentId: string | null }; conflict: boolean }> {
-    const key = providerTxnKey(row);
-    // [AX369] An observation that already links its identity USES that link.
-    // A key recomputed today may be normalised differently from the one that
-    // linked it (the backfill's Postgres trim()), so it never re-points the
-    // observation and never mints a second credit authority for it. A link
-    // to nothing fails closed.
-    let payment = row.providerPaymentId
-      ? await this.prisma.providerPayment.findUniqueOrThrow({ where: { id: row.providerPaymentId } })
-      : null;
-    if (!payment) {
-      // Before minting, the identity is looked up under EVERY accepted form of
-      // the key: today's, and the one the backfill wrote.
-      const forms = [...new Set([key, backfillTxnKey(row)])];
-      const existing = await this.prisma.providerPayment.findMany({ where: { provider: PROVIDER, providerTxnId: { in: forms } }, orderBy: { createdAt: 'asc' } });
-      if (existing.length > 1) {
-        // Two authorities already stand for one transaction; nothing here may
-        // choose between them. Held for a person, never linked or credited.
-        agentCashProviderIdConflictsCounter.labels(channel).inc();
-        log().error({ paymentId: row.id, identities: existing.map((e) => e.id), forms }, '[AX369] one MMG transaction has two provider identities under different normalisations of its id — suspensed, never credited; a person must reconcile them');
-        await this.page('agent-cash-provider-id-ambiguous', 'One MMG transaction, two identities', `Transaction ${key} matches ${existing.length} provider identities under different normalisations of its id. Nothing is credited: reconcile them against the MMG statement.`, { variant: 'provider_id_ambiguous', paymentId: row.id, providerTxnId: key });
-        return { payment: existing[0]!, conflict: true };
-      }
-      payment = existing[0] ?? null;
-      if (!payment) {
-        const where = { provider_providerTxnId: { provider: PROVIDER, providerTxnId: key } };
-        try {
-          payment = await this.prisma.providerPayment.create({
-            data: { tenantId: row.tenantId, provider: PROVIDER, providerTxnId: key, amount: row.amount, currencyCode: row.currencyCode },
-          });
-        } catch (e) {
-          if (!(e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002')) throw e;
-          payment = await this.prisma.providerPayment.findUniqueOrThrow({ where });
+    const raw = providerTxnRaw(row);
+    const resolved = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const readLive = () => tx.$queryRaw<ProviderPayment[]>`
+        SELECT * FROM "provider_payments" WHERE "provider" = ${PROVIDER}
+          AND mmg_txn_canon("providerTxnId") = mmg_txn_canon(${raw})
+          AND "status" <> 'HELD_DUPLICATE'`;
+      let payment: ProviderPayment | undefined;
+      let historicalConflict = false;
+      if (row.providerPaymentId) {
+        // Never redirect a linked observation, including one the migration held.
+        [payment] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${row.providerPaymentId}`;
+      } else {
+        [payment] = await readLive();
+        if (!payment) {
+          // Legacy JS keys sometimes collapsed several SQL spellings into one
+          // identity. If the migration retained a different raw spelling, the
+          // historical observation is evidence, never permission to mint again.
+          [payment] = await tx.$queryRaw<ProviderPayment[]>`
+            SELECT p.* FROM "provider_payments" p WHERE p."provider" = ${PROVIDER} AND (
+              (p."status" = 'HELD_DUPLICATE' AND mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${raw})) OR
+              (mmg_txn_canon(p."providerTxnId") <> mmg_txn_canon(${raw}) AND EXISTS (
+                SELECT 1 FROM "mmg_agent_payments" m WHERE m."providerPaymentId" = p."id"
+                  AND mmg_txn_canon(COALESCE(m."mmgTxnId", CASE WHEN m."channel" = 'MANUAL_ADMIN'
+                    THEN regexp_replace(m."externalId", '^MANUAL:', '') ELSE m."externalId" END)) = mmg_txn_canon(${raw})
+              ))) ORDER BY p."createdAt", p."id" LIMIT 1`;
+          historicalConflict = !!payment;
+        }
+        if (!payment) {
+          await tx.$executeRaw`
+            INSERT INTO "provider_payments" ("id", "tenantId", "provider", "providerTxnId", "amount", "currencyCode", "updatedAt")
+            VALUES (gen_random_uuid()::text, ${row.tenantId}, ${PROVIDER}, mmg_txn_canon(${raw}), ${row.amount}, ${row.currencyCode}, CURRENT_TIMESTAMP)
+            ON CONFLICT ("provider", mmg_txn_canon("providerTxnId")) WHERE "status" <> 'HELD_DUPLICATE' DO NOTHING`;
+          // A separate READ COMMITTED statement sees a concurrent winner that
+          // committed after INSERT began. A single-statement CTE cannot.
+          [payment] = await readLive();
+        }
+        if (!payment) throw new Error('PROVIDER_IDENTITY_MISSING');
+        if (!historicalConflict) {
+          const linked = await tx.$executeRaw`
+            UPDATE "mmg_agent_payments" SET "providerPaymentId" = ${payment.id}
+             WHERE "id" = ${row.id} AND "tenantId" = ${row.tenantId}
+               AND "providerPaymentId" IS NULL AND "status" = ${row.status}
+               AND "status" IN ('RECEIVED', 'UNMATCHED')
+               AND "failureCode" IS DISTINCT FROM 'PROVIDER_ID_CONFLICT'`;
+          if (linked !== 1) {
+            const current = await tx.mmgAgentPayment.findUniqueOrThrow({ where: { id: row.id } });
+            if (current.status !== row.status) throw new Error(row.status === 'UNMATCHED' ? 'NOT_UNMATCHED' : 'NOT_RECEIVED');
+            if (current.failureCode === 'PROVIDER_ID_CONFLICT') return { payment, conflict: true };
+            if (!current.providerPaymentId) throw new Error('PROVIDER_IDENTITY_MISSING');
+            [payment] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${current.providerPaymentId}`;
+          }
         }
       }
-      await this.prisma.mmgAgentPayment.update({ where: { id: row.id }, data: { providerPaymentId: payment.id } });
-    }
-    const conflict = Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode;
-    if (conflict) {
+      if (!payment) throw new Error('PROVIDER_IDENTITY_MISSING');
+      const [canonical] = await tx.$queryRaw<Array<{ matches: boolean }>>`
+        SELECT mmg_txn_canon(${payment.providerTxnId}) = mmg_txn_canon(${raw}) AS matches`;
+      const conflict = historicalConflict || row.failureCode === 'PROVIDER_ID_CONFLICT'
+        || payment.status === 'HELD_DUPLICATE' || payment.provider !== PROVIDER
+        || payment.tenantId !== row.tenantId || !canonical?.matches
+        || Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode;
+      return { payment, conflict };
+    });
+    if (resolved.conflict) {
       agentCashProviderIdConflictsCounter.labels(channel).inc();
-      log().error(
-        { paymentId: row.id, providerPaymentId: payment.id, providerTxnId: key, observed: { amount: Number(row.amount), currency: row.currencyCode }, identity: { amount: Number(payment.amount), currency: payment.currencyCode } },
-        '[M-18] provider transaction observed with a different amount — suspensed, never credited; a person must look',
-      );
-      await this.page('agent-cash-provider-id-conflict', 'One MMG transaction, two amounts', `Transaction ${key} arrived by ${channel} with a different amount than an earlier observation. It is parked in suspense — reconcile against the MMG statement before crediting anything.`, { variant: 'provider_id_conflict', paymentId: row.id, providerTxnId: key });
+      log().error({ paymentId: row.id, providerPaymentId: resolved.payment.id },
+        '[AX384] provider identity conflicts with this observation; held for finance review');
+      await this.page('agent-cash-provider-id-conflict', 'Payment needs finance review',
+        `Observation ${row.id} conflicts with its provider identity. No money was credited.`,
+        { variant: 'provider_id_conflict', paymentId: row.id });
     }
-    return { payment, conflict };
+    return resolved;
   }
 
   /** Mark an observation as a duplicate of the credit that already stands. */
@@ -411,6 +425,7 @@ export class AgentCashService {
     onAudit?: OnAudit,
   ): Promise<IngestResult> {
     const committed = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       // A same-value compare-and-set acquires the row lock at the beginning of
       // the transaction. A concurrent attach waits, rechecks the predicate,
       // and gets count=0 after the winner commits — before it can move money.
@@ -431,8 +446,21 @@ export class AgentCashService {
       // fallback key that could credit the same cash a second time.
       const providerPaymentId = payment.providerPaymentId;
       if (!providerPaymentId) throw new Error('PROVIDER_IDENTITY_MISSING');
-      const identity = await tx.providerPayment.findUniqueOrThrow({ where: { id: providerPaymentId } });
-      if (Number(identity.amount) !== Number(payment.amount) || identity.currencyCode !== payment.currencyCode) {
+      // Re-read under the identity lock after claiming the observation. A
+      // resolver's earlier read cannot authorize a credit after a hold.
+      const [identity] = await tx.$queryRaw<Array<ProviderPayment & { canonicalMatches: boolean }>>`
+        SELECT p.*, mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${providerTxnRaw(payment)}) AS "canonicalMatches"
+          FROM "provider_payments" p WHERE p."id" = ${providerPaymentId} FOR UPDATE`;
+      if (!identity) throw new Error('PROVIDER_IDENTITY_MISSING');
+      if (payment.failureCode === 'PROVIDER_ID_CONFLICT' || identity.status === 'HELD_DUPLICATE') {
+        await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'UNMATCHED', failureCode: 'PROVIDER_ID_CONFLICT' } });
+        return { paymentId, subscriptionId: requestedSubscriptionId, credited: false, duplicateOf: null, conflict: true };
+      }
+      if (identity.provider !== PROVIDER || identity.tenantId !== payment.tenantId || !identity.canonicalMatches
+        || Number(identity.amount) !== Number(payment.amount) || identity.currencyCode !== payment.currencyCode) {
+        throw new Error('PROVIDER_ID_CONFLICT');
+      }
+      if (identity.status !== 'OPEN' && !(identity.status === 'CREDITED' && identity.creditedPaymentId)) {
         throw new Error('PROVIDER_ID_CONFLICT');
       }
       // [AX363-F2] The destination belongs to the observation's tenant, read
@@ -453,7 +481,8 @@ export class AgentCashService {
       });
       if (won.count !== 1) {
         const credited = await tx.providerPayment.findUniqueOrThrow({ where: { id: providerPaymentId } });
-        const original = credited.creditedPaymentId ?? 'unknown';
+        if (credited.status !== 'CREDITED' || !credited.creditedPaymentId) throw new Error('PROVIDER_ID_CONFLICT');
+        const original = credited.creditedPaymentId;
         await tx.mmgAgentPayment.updateMany({
           where: { id: paymentId, status: resolution.expectedStatus },
           data: { status: 'RECONCILED', note: `duplicate of ${original} (already credited)`, resolvedAt: new Date() },
@@ -509,6 +538,10 @@ export class AgentCashService {
       return { paymentId: payment.id, subscriptionId, credited: !legacy, duplicateOf: null as string | null };
     });
 
+    if ('conflict' in committed && committed.conflict) {
+      if (resolution.expectedStatus === 'UNMATCHED') throw new Error('PROVIDER_ID_CONFLICT');
+      return { status: 'received_unmatched', paymentId, failureCode: 'PROVIDER_ID_CONFLICT' };
+    }
     if (committed.duplicateOf) {
       // [M-18] A credit attempt on an already-credited transaction: the race
       // loser, or an admin attaching the unmatched original after the second
