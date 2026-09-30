@@ -16,8 +16,8 @@ export function WeeklyFeeDestination() {
       if (!session.ok) session = await restoreSession();
       if (cancelled) return;
       if (!session.ok) { router.replace('/login?next=%2Fweekly-fee'); return; }
-      const roles = Array.isArray(session.user?.roles) ? session.user.roles : [];
-      const vendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!session.user?.vendorOwner;
+      const roles = Array.isArray(session.user?.['roles']) ? session.user['roles'] : [];
+      const vendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!session.user?.['vendorOwner'];
       const mover = roles.some((r) => ['MOVER', 'RIDER', 'DRIVER'].includes(r));
       if (vendor && mover) setChoice('both');
       else if (vendor) router.replace('/dashboard/weekly-fee');

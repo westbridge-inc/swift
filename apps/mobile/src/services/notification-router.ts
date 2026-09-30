@@ -217,7 +217,7 @@ let installed = false;
 async function go(dest: Destination | null) {
   if (!dest) return;
   if (!navigationRef.isReady()) { pending = dest; return; }
-  if (dest.screen === 'WeeklyFee' && typeof dest.params?.vendorId === 'string') {
+  if (dest.screen === 'WeeklyFee' && typeof dest.params?.['vendorId'] === 'string') {
     const { resolveFeeNotification } = await import('./weekly-fee-notification');
     const params = await resolveFeeNotification(dest.params);
     if (!params) return;

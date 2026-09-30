@@ -6,7 +6,7 @@ let resolution = 0;
 /** Validate the notified store with its explicit header before selecting it.
  * No checkout ref is read until the router has adopted that store. */
 export async function resolveFeeNotification(params: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  if (typeof params.vendorId !== 'string') return params;
+  if (typeof params['vendorId'] !== 'string') return params;
   const owner = getAuthSessionSnapshot();
   if (!owner) return null;
   const attempt = ++resolution;
@@ -18,11 +18,11 @@ export async function resolveFeeNotification(params: Record<string, unknown>): P
   };
   useStoreSwitcher.getState().setFeeContextPending(true);
   try {
-    const response = await vendorApi.subscription(owner, params.vendorId);
+    const response = await vendorApi.subscription(owner, params['vendorId']);
     if (!current()) return null;
     const subscription = response.data.data;
-    if (subscription.id !== params.subscriptionId) return { ref: undefined, subscriptionId: undefined, vendorId: previous };
-    useStoreSwitcher.getState().setSelectedStore(params.vendorId);
+    if (subscription.id !== params['subscriptionId']) return { ref: undefined, subscriptionId: undefined, vendorId: previous };
+    useStoreSwitcher.getState().setSelectedStore(params['vendorId']);
     return params;
   } catch (error) {
     if (!current()) return null;
