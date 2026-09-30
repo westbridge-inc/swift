@@ -19,6 +19,7 @@ import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotice
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { amountDueNow } from './amount-due';
+import { weeklyFeeAmount } from './subscription-fee';
 import { payInfo } from './agent-cash.service';
 import { claimProviderPaymentInTx, ProviderIdentityError, subscriptionTenantInTx } from './provider-identity';
 import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';

@@ -173,7 +173,7 @@ const offProvider = () => ({ driver: 'disabled', merchantId: null }) as unknown 
 const brokenProvider = (): MmgCheckoutProvider => { throw new Error('FATAL: MMG_CHECKOUT_MERCHANT_ID is required'); };
 const sub = (patch: Record<string, unknown> = {}) => ({
   id: 'sub-1', status: 'ACTIVE' as const, feeWaived: false, currencyCode: 'GYD',
-  weeklyRate: new Prisma.Decimal(2100), customRate: null, ...patch,
+  weeklyRate: new Prisma.Decimal(2100), customRate: null, nextBillingDate: new Date('2026-10-02T12:00:00Z'), ...patch,
 });
 /** A test double of the one delegate the rule reads: the per-platform switch row. */
 function configWith(value: unknown): Pick<PrismaClient, 'platformConfig'> {
@@ -237,6 +237,8 @@ describe('payActions — MMG_CHECKOUT is live only when it truly is, and off is 
     const prisma = {
       ...configWith(undefined),
       prepaidBalance: { findUnique: vi.fn(async () => ({ balance: new Prisma.Decimal(600) })) },
+      // [#1389] payInfo's due-now reads an issued charge first; none here.
+      subscriptionPayment: { findFirst: vi.fn(async () => null) },
       tenantBillingCurrency: { findUnique: vi.fn(async () => null) },
     } as never;
     expect(await feePayActions(prisma, sub(), 'ios', liveProvider)).toEqual([

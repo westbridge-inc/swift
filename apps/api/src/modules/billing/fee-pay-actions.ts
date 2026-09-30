@@ -92,7 +92,7 @@ export async function mmgCheckoutLive(
 /** payActions for the subscription payload, in display order. */
 export async function feePayActions(
   prisma: PrismaClient,
-  sub: PayableSub & Pick<Subscription, 'id'> & { type?: string },
+  sub: PayableSub & Pick<Subscription, 'id' | 'nextBillingDate'> & { type?: string },
   platform: ClientPlatform,
   checkout?: () => MmgCheckoutProvider,
 ): Promise<PayAction[]> {
