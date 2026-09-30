@@ -625,7 +625,9 @@ export class AgentCashService {
             ? 'valid checksum but nobody holds it (mis-key that beat the odds)'
             : r.failureCode === 'TOMBSTONED' || r.failureCode === 'ACCOUNT_CLOSED'
               ? 'paid to a closed account — refund flag likely'
-              : r.failureCode ?? 'unknown',
+              : r.failureCode === 'UNFINISHED'
+                ? 'saved but never credited: the repair pass kept failing (check it against the MMG statement, then attach)'
+                : r.failureCode ?? 'unknown',
       hoursOld: Math.round((now - r.createdAt.getTime()) / 3_600_000),
       breachesSla: now - r.createdAt.getTime() > 24 * 3_600_000,
     }));
