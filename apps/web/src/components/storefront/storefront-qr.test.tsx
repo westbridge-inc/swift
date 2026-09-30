@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { renderToString } from 'react-dom/server';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import styles from './storefront.module.css';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import StorePage from '@/app/store/[slug]/page';
 import type { StorefrontDetail } from '@/lib/api';
 import * as api from '@/lib/api';
@@ -24,7 +26,18 @@ const page = (search: Record<string, string | string[] | undefined> = {}) => Sto
   params: Promise.resolve({ slug: store.slug }), searchParams: Promise.resolve(search),
 });
 
+// happy-dom does not calculate layout bounds. Load the actual module rules
+// under their transformed class names so computed-style assertions exercise CSS.
+const stylesheet = document.createElement('style');
+beforeAll(() => {
+  stylesheet.textContent = readFileSync(`${process.cwd()}/src/components/storefront/storefront.module.css`, 'utf8')
+    .replace(/\.([a-zA-Z][\w-]*)/g, (selector, name: string) => styles[name as keyof typeof styles] ? `.${styles[name as keyof typeof styles]}` : selector);
+  document.head.append(stylesheet);
+});
+afterAll(() => stylesheet.remove());
+
 beforeEach(() => {
+  sessionStorage.clear();
   nav.push.mockReset();
   vi.spyOn(api, 'fetchStorefront').mockResolvedValue(store);
   vi.spyOn(auth, 'sessionProbe').mockResolvedValue({ ok: false });
@@ -60,17 +73,90 @@ describe('the actual /store/[slug] QR arrival', () => {
     },
   );
 
-  it('dismisses without removing the reserved space or covering menu/cart', async () => {
+  it('preserves the menu/cart flow slot and computed layout styles on dismissal', async () => {
     render(await page({ src: 'qr' }));
     const dismiss = screen.getByRole('button', { name: 'Dismiss dining-in message' });
     const slot = dismiss.parentElement!;
-    expect(slot.style.position).not.toMatch(/fixed|absolute/);
+    const menu = screen.getByRole('region', { name: 'Menu' });
+    const checkout = screen.getByRole('complementary', { name: 'Your order and checkout' });
+    const cartLinks = screen.getAllByRole('link', { name: /Your order/ });
+    const layoutStyles = (element: Element) => {
+      const computed = getComputedStyle(element);
+      return Object.fromEntries([
+        'display', 'position', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
+        'margin-top', 'margin-bottom', 'margin-left', 'margin-right',
+        'padding-top', 'padding-bottom', 'padding-left', 'padding-right',
+        'border-top-width', 'border-bottom-width', 'border-left-width', 'border-right-width',
+        'transform', 'translate', 'scale',
+      ].map(property => [property, computed.getPropertyValue(property)]));
+    };
+    const beforeStyles = [slot, menu, checkout].map(layoutStyles);
+    expect(getComputedStyle(slot).position).toBe('static');
+    expect(getComputedStyle(slot).display).toBe('flex');
+    for (const property of ['transform', 'translate', 'scale']) {
+      expect(['', 'none']).toContain(getComputedStyle(slot).getPropertyValue(property));
+    }
+    expect(Number.parseFloat(getComputedStyle(dismiss).minWidth)).toBeGreaterThanOrEqual(44);
+    expect(Number.parseFloat(getComputedStyle(dismiss).minHeight)).toBeGreaterThanOrEqual(44);
+    expect(getComputedStyle(dismiss).flexShrink).toBe('0');
+    const before = slot.getBoundingClientRect();
+    const menuBounds = menu.getBoundingClientRect();
+    if (before.height && menuBounds.height) {
+      expect(before.bottom).toBeLessThanOrEqual(menuBounds.top);
+      for (const cartLink of [checkout, ...cartLinks]) {
+        const cartBounds = cartLink.getBoundingClientRect();
+        expect(before.bottom <= cartBounds.top || before.top >= cartBounds.bottom || before.right <= cartBounds.left || before.left >= cartBounds.right).toBe(true);
+      }
+    } else {
+      // No invented geometry: prove the stylesheet rule and separate flow slot.
+      expect(stylesheet.textContent).toMatch(/position: static/);
+      expect(slot.parentElement).toBe(menu.parentElement?.parentElement);
+      expect(checkout.parentElement).toBe(menu.parentElement);
+      expect(getComputedStyle(menu.parentElement!).display).toBe('grid');
+      expect(slot.compareDocumentPosition(menu) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(slot.compareDocumentPosition(checkout) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      for (const cartLink of cartLinks) expect(slot.contains(cartLink)).toBe(false);
+    }
     fireEvent.click(dismiss);
     expect(slot.isConnected).toBe(true);
     expect(slot.getAttribute('aria-hidden')).toBe('true');
+    expect(getComputedStyle(slot).visibility).toBe('hidden');
+    expect(getComputedStyle(slot).display).toBe('flex');
+    expect([slot, menu, checkout].map(layoutStyles)).toEqual(beforeStyles);
+    // happy-dom returns zero bounds: only compare geometry if it was computed.
+    // The fallback proves CSS/DOM invariants, not a measured browser CLS score.
+    if (before.height) expect(slot.getBoundingClientRect()).toEqual(before);
     expect(screen.queryByRole('button', { name: 'Dismiss dining-in message' })).toBeNull();
     expect(screen.getByRole('region', { name: 'Menu' })).toBe(document.activeElement);
     expect(screen.getAllByRole('link', { name: /Your order/ }).length).toBeGreaterThan(0);
+  });
+
+
+  it('remembers dismissal for this store across remounts in the browser session', async () => {
+    const first = render(await page({ src: 'qr' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss dining-in message' }));
+    first.unmount();
+    render(await page({ src: 'qr' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Dismiss dining-in message' })).toBeNull());
+    expect(screen.getByText(copy).parentElement?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  it('does not carry dismissal to another store', async () => {
+    const first = render(await page({ src: 'qr' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss dining-in message' }));
+    first.unmount();
+    vi.mocked(api.fetchStorefront).mockResolvedValue({ ...store, id: 'another-store', name: 'Another Store' });
+    render(await page({ src: 'qr' }));
+    expect(screen.getByRole('button', { name: 'Dismiss dining-in message' })).toBeTruthy();
+  });
+
+  it('still dismisses and leaves the menu usable when session storage is blocked', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    render(await page({ src: 'qr' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss dining-in message' }));
+    expect(screen.queryByRole('button', { name: 'Dismiss dining-in message' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Menu' })).toBe(document.activeElement);
   });
 
   it('lets a guest start an order and returns sign-in to the same scanned store', async () => {

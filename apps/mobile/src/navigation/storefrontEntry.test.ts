@@ -39,3 +39,37 @@ describe('a linked menu survives the root authentication boundary', () => {
     expect(flushAuthContinuation({ isAuthenticated: true, entryGate: 'main', intent }, deliver)).toBe('none');
   });
 });
+
+
+describe('item Add continuation', () => {
+  const destination: AuthContinuationDestination = { screen: 'MenuItem', vendorId: 'scanned-store', itemId: 'roti',
+    addDraft: { quantity: 2, selectedOptions: { filling: 'chickpea' }, dayOffset: 0, slot: null, visitMode: 'AT_BUSINESS' },
+  };
+
+  it.each(['customer', 'vendor', 'mover', 'advertiser'] as const)('resumes the item above its own menu for %s, once navigation is ready', intent => {
+    requestAuthContinuation(destination, vi.fn());
+    const deliver = vi.fn(() => false as boolean);
+    expect(flushAuthContinuation({ isAuthenticated: true, entryGate: 'main', intent }, deliver)).toBe('retry');
+    deliver.mockReturnValue(true);
+    expect(flushAuthContinuation({ isAuthenticated: true, entryGate: 'main', intent }, deliver)).toBe('delivered');
+    expect(deliver).toHaveBeenLastCalledWith(destination);
+    const route = rootRouteForAuthContinuation(destination);
+    expect(route.screen).toBe('Storefront');
+    if (!('state' in route.params)) throw new Error('Missing item stack');
+    const router = StackRouter({});
+    const options = { routeNames: ['Tabs', 'Restaurant', 'MenuItem'], routeParamList: {}, routeGetIdList: {} };
+    const state = router.getRehydratedState(route.params.state, options);
+    expect(state.routes[state.index]).toMatchObject({ name: 'MenuItem', params: { vendorId: 'scanned-store', itemId: 'roti', addDraft: destination.addDraft, addAfterSignIn: true } });
+    const back = router.getStateForAction(state, { type: 'GO_BACK' }, options)!;
+    expect(back.routes[back.index]).toMatchObject({ name: 'Restaurant', params: { vendorId: 'scanned-store' } });
+    expect(flushAuthContinuation({ isAuthenticated: true, entryGate: 'main', intent }, deliver)).toBe('none');
+  });
+
+  it('cancels the pending item Add when authentication is cancelled', () => {
+    requestAuthContinuation(destination, vi.fn());
+    discardAuthContinuation();
+    const deliver = vi.fn(() => true);
+    expect(flushAuthContinuation({ isAuthenticated: true, entryGate: 'main', intent: 'customer' }, deliver)).toBe('none');
+    expect(deliver).not.toHaveBeenCalled();
+  });
+});

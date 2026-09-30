@@ -268,6 +268,8 @@ export async function renderTemplatePdf(template: QrTemplateId, data: TemplateDa
     doc.on('error', reject);
   });
 
+  // All branding stays inside the trim; the surrounding 3 mm is expendable bleed.
+  doc.rect(0, 0, pageW, pageH).fill(PAPER);
   if (template === 'sticker') {
     drawStickerSheet(doc, data, pageW, pageH, bleed, codePt);
   } else if (template === 'tabletent') {
@@ -276,13 +278,13 @@ export async function renderTemplatePdf(template: QrTemplateId, data: TemplateDa
     const half = pageH / 2;
     doc.save();
     doc.rotate(180, { origin: [pageW / 2, half / 2] });
-    drawPanel(doc, data, { x: 0, y: 0, w: pageW, h: half }, codePt * 0.82);
+    drawPanel(doc, data, { x: bleed, y: 0, w: pageW - bleed * 2, h: half - bleed }, codePt * 0.82);
     doc.restore();
-    drawPanel(doc, data, { x: 0, y: half, w: pageW, h: half }, codePt * 0.82);
+    drawPanel(doc, data, { x: bleed, y: half, w: pageW - bleed * 2, h: half - bleed }, codePt * 0.82);
     doc.save().lineWidth(0.25).strokeColor(MUTED)
       .moveTo(0, half).lineTo(pageW, half).dash(4, { space: 4 }).stroke().undash().restore();
   } else {
-    drawPanel(doc, data, { x: 0, y: 0, w: pageW, h: pageH }, codePt);
+    drawPanel(doc, data, { x: bleed, y: bleed, w: pageW - bleed * 2, h: pageH - bleed * 2 }, codePt);
   }
 
   drawTrimMarks(doc, pageW, pageH, bleed);

@@ -172,7 +172,17 @@ function optionGuidance(group: OptionGroup): string {
 
 export function StorefrontExperience({ store, returnPath, fromQr = false }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean }) {
   const router = useRouter();
-  const [diningNoticeDismissed, setDiningNoticeDismissed] = useState(false);
+  const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
+  const diningNoticeDismissed = dismissedDiningStore === store.id;
+  const diningNoticeStorageKey = `swift:dining-notice:${store.id}`;
+  useEffect(() => {
+    if (!fromQr) return;
+    try {
+      setDismissedDiningStore(sessionStorage.getItem(diningNoticeStorageKey) === 'dismissed' ? store.id : null);
+    } catch {
+      // Storage can be blocked. The notice remains dismissible in memory.
+    }
+  }, [fromQr, store.id, diningNoticeStorageKey]);
   const menu = useRef<HTMLDivElement | null>(null);
   const [catalog, setCatalog] = useState<DisplayVendor>(() => publicCatalog(store));
   const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
@@ -799,7 +809,12 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
               className={styles.diningDismiss}
               aria-label="Dismiss dining-in message"
               onClick={() => {
-                setDiningNoticeDismissed(true);
+                setDismissedDiningStore(store.id);
+                try {
+                  sessionStorage.setItem(diningNoticeStorageKey, 'dismissed');
+                } catch {
+                  // Browsing and ordering must also work without storage.
+                }
                 menu.current?.focus({ preventScroll: true });
               }}
             >

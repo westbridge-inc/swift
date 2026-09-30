@@ -72,6 +72,7 @@
 }
 
 .diningNotice {
+  position: static;
   display: flex;
   align-items: center;
   gap: var(--swift-space-sm);
@@ -94,6 +95,7 @@
 }
 
 .diningDismiss {
+  flex-shrink: 0;
   display: grid;
   place-items: center;
   min-width: 44px;

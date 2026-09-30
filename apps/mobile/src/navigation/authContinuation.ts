@@ -1,13 +1,24 @@
 import type { RootEntryGate, RootIntent } from './rootEntryGate';
 
+export interface MenuItemAddDraft {
+  quantity: number;
+  selectedOptions: Record<string, string | string[]>;
+  dayOffset: number;
+  slot: string | null;
+  visitMode: 'AT_BUSINESS' | 'MOBILE';
+}
+
 export type AuthContinuationDestination = {
   /** Destinations resume only after the root authentication gates complete. */
   screen: 'ServiceProvider' | 'Taxi';
-} | { screen: 'Restaurant'; vendorId: string };
+} | { screen: 'Restaurant'; vendorId: string }
+  | { screen: 'MenuItem'; vendorId: string; itemId: string; addDraft: MenuItemAddDraft };
 
 export interface AuthContinuationRootRoute {
   screen: 'Main' | 'Storefront';
-  params: { screen: AuthContinuationDestination['screen']; params?: { vendorId: string } };
+  params: { screen: AuthContinuationDestination['screen']; params?: { vendorId: string } } | {
+    state: { stale: true; index: number; routes: Array<{ name: string; params: Record<string, unknown> }> };
+  };
 }
 
 export type AuthContinuationFlushResult =
@@ -37,6 +48,13 @@ export function discardAuthContinuation(): void {
 export function rootRouteForAuthContinuation(
   destination: AuthContinuationDestination,
 ): AuthContinuationRootRoute {
+  if (destination.screen === 'MenuItem') {
+    const { vendorId, itemId, addDraft } = destination;
+    return { screen: 'Storefront', params: { state: { stale: true, index: 1, routes: [
+      { name: 'Restaurant', params: { vendorId } },
+      { name: 'MenuItem', params: { vendorId, itemId, addDraft, addAfterSignIn: true } },
+    ] } } };
+  }
   if (destination.screen === 'Restaurant') {
     return { screen: 'Storefront', params: { screen: 'Restaurant', params: { vendorId: destination.vendorId } } };
   }
@@ -58,7 +76,7 @@ export function flushAuthContinuation(
 
   // Taxi/provider onboarding belong to the selected customer experience.
   // A scanned menu has its own public root and preserves any selected role.
-  if (pending.screen !== 'Restaurant' && state.intent !== 'customer') {
+  if (pending.screen !== 'Restaurant' && pending.screen !== 'MenuItem' && state.intent !== 'customer') {
     pending = null;
     return 'discarded';
   }
