@@ -2,6 +2,7 @@ import { screen, waitFor, render } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import OrderDetailPage from './page';
+import { lineDisplayAmount } from '@/lib/money';
 import * as customer from '@/lib/customer';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,27 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 const payButton = () => screen.findByRole('button', { name: /Pay Shanta Kitchen by MMG/ });
+
+describe('receipt amount presentation', () => {
+  it('shows an unknown line as unknown, while a real zero stays zero', () => {
+    expect(lineDisplayAmount(undefined, undefined, 2)).toBeNull();
+    expect(lineDisplayAmount(undefined, NaN, 2)).toBeNull();
+    expect(lineDisplayAmount(undefined, 0, 2)).toBe(0);
+    expect(lineDisplayAmount(undefined, 1200, 2)).toBe(2400);
+  });
+
+  it('renders unknown line and order totals as dashes on the receipt', async () => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...ORDER, totalAmount: undefined, paymentAction: null,
+      items: [{ id: 'line-1', name: 'Rice', quantity: 2 }],
+    } as never);
+    render(<OrderDetailPage />);
+    const receipt = (await screen.findByText('Receipt preview')).closest('aside');
+    expect(receipt?.textContent).toMatch(/2× Rice—/);
+    expect(receipt?.textContent).toMatch(/Total—/);
+    expect(receipt?.textContent).not.toContain('GY$0');
+  });
+});
 
 describe('[W-32] the payment that opens is the payment that was shown', () => {
   it('shows a service appointment at the market time on the order page', async () => {
