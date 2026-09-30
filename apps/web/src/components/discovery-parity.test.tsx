@@ -6,6 +6,7 @@ import { CustomerSessionProvider, type CustomerSession } from './customer-sessio
 import { CustomerHome } from './customer-home';
 import BrowsePage from '@/app/(app)/order/browse/page';
 import { FavouriteButton } from './account/favourites';
+import { customerRoute } from '@/lib/customer-routes';
 import { TabBar } from './customer-shell';
 
 const nav = vi.hoisted(() => ({ search: '' }));
@@ -99,6 +100,8 @@ it('keeps Home, Market, Cart and Profile in phone order with a 44px account targ
   expect(links.map((a) => a.textContent)).toEqual(['Home', 'Market', 'Cart', 'Profile']);
   expect(links[3]?.getAttribute('href')).toBe('/account');
   expect(links[3]?.getAttribute('aria-current')).toBe('page');
+  expect(links[3]?.className).toContain('h-14');
+  expect(customerRoute('/account/favourites')).toMatchObject({ public: false, tab: 'profile', parent: '/account' });
 });
 
 it('updates both hearts immediately and rolls back a rejected POST before any refetch', async () => {

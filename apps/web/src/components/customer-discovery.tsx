@@ -17,7 +17,7 @@ type Category = { slug: string; name: string; emoji: string; kind: string; verti
 interface Discovery { enabled: boolean; categories: Category[] }
 const KIND_LABEL: Record<string, string> = { CUISINE: 'Cuisines', DISH: 'Dishes & cravings', DIETARY: 'Dietary', AISLE: 'Grocery aisles', RETAIL: 'Shops' };
 
-function coordinates(near: NearPoint | null) {
+function coordinates(near: NearPoint | null): Record<string, string> {
   return near ? { lat: String(near.lat), lng: String(near.lng) } : {};
 }
 export function categoryPath(c: Pick<Category, 'slug' | 'name' | 'emoji'>) {
@@ -45,12 +45,12 @@ function useDiscoveryPoint() {
 }
 
 function CategoryLink({ category }: { category: Category }) {
-  return <Link href={categoryPath(category)} aria-label={category.name} className={`flex w-20 shrink-0 flex-col items-center gap-2 text-center text-xs font-semibold ${PRESS}`}>
+  return <Link href={categoryPath(category)} aria-label={category.name} className={`flex h-28 w-20 shrink-0 flex-col items-center gap-2 text-center text-xs font-semibold ${PRESS}`}>
     <span aria-hidden className="grid h-16 w-16 place-items-center rounded-2xl bg-[var(--swift-red)]/10 text-3xl">{category.emoji}</span><span>{category.name}</span>
   </Link>;
 }
-function CategorySkeleton() {
-  return <LoadingRegion label="Loading categories"><div className={RAIL}>{[0, 1, 2, 3, 4].map((i) => <div key={i} className="w-20 shrink-0"><Bone className="mx-auto h-16 w-16 rounded-2xl" /><Bone className="mx-auto mt-2 h-4 w-16" /></div>)}</div></LoadingRegion>;
+function CategorySkeleton({ heading = false }: { heading?: boolean }) {
+  return <LoadingRegion label="Loading categories">{heading && <Bone className="h-11 w-44" />}<div className={RAIL}>{[0, 1, 2, 3, 4].map((i) => <div key={i} className="h-28 w-20 shrink-0"><Bone className="mx-auto h-16 w-16 rounded-2xl" /><Bone className="mx-auto mt-2 h-8 w-16" /></div>)}</div></LoadingRegion>;
 }
 
 export function HomeCategories({ near, fallback }: { near: NearPoint | null; fallback: HomeFeed['categories'] | undefined }) {
@@ -63,13 +63,13 @@ export function HomeCategories({ near, fallback }: { near: NearPoint | null; fal
     return true;
   }) ?? [];
   const live = rail.data?.enabled && rail.data.categories.length >= 4;
-  if (rail.isPending) return <CategorySkeleton />;
+  if (rail.isPending) return <CategorySkeleton heading />;
   if (!live && !legacy.length) return null;
   return <section aria-labelledby="home-categories"><div className="flex items-center justify-between gap-3">
     <h2 id="home-categories" className="text-xl font-extrabold">Find by category</h2>
     <Link className="inline-flex min-h-11 items-center text-sm font-semibold text-[var(--swift-red)]" href={live ? '/order/browse?view=categories' : '/order/search'} aria-label="See all categories">See all</Link>
   </div><div className={RAIL}>
-    {live ? rail.data!.categories.map((c) => <CategoryLink key={c.slug} category={c} />) : legacy.map((c) => <Link key={c.id} href={`/order/search?q=${encodeURIComponent(c.name)}`} className={`relative flex h-24 w-28 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-[var(--swift-subtle)] p-3 text-center text-sm font-semibold ${PRESS}`}>{c.imageUrl && <><Image src={c.imageUrl} alt="" fill unoptimized sizes="112px" className="object-cover" /><span className="absolute inset-0 bg-black/50" /></>}<span className={`relative ${c.imageUrl ? 'text-white' : ''}`}>{c.name}</span></Link>)}
+    {live ? rail.data!.categories.map((c) => <CategoryLink key={c.slug} category={c} />) : legacy.map((c) => <Link key={c.id} href={`/order/search?q=${encodeURIComponent(c.name)}`} className={`relative flex h-28 w-28 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-[var(--swift-subtle)] p-3 text-center text-sm font-semibold ${PRESS}`}>{c.imageUrl && <><Image src={c.imageUrl} alt="" fill unoptimized sizes="112px" className="object-cover" /><span className="absolute inset-0 bg-black/50" /></>}<span className={`relative ${c.imageUrl ? 'text-white' : ''}`}>{c.name}</span></Link>)}
   </div></section>;
 }
 
