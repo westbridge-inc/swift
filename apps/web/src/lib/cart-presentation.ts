@@ -19,20 +19,39 @@ export function cartStoreGroups(cart: Cart): Array<{ id: string | null; name: st
   return [...groups.values()];
 }
 
-export type CartStockRefusal = { itemId: string; available: number; message: string };
+export type CartStockRefusal = { itemId: string; available?: number; message: string };
 
-/** Only structured identity can mark a row; never infer it from prose. */
+/** Prefer structured identity. The transaction-time unavailable response only
+ * carries a name, so match its exact API template to one unambiguous item. */
 export function cartStockRefusal(error: unknown, cart?: Cart | null): CartStockRefusal | null {
-  if (!(error instanceof ApiRequestError) || error.code !== 'INSUFFICIENT_STOCK'
-    || !error.details || typeof error.details !== 'object') return null;
-  const { itemId, available } = error.details as Record<string, unknown>;
-  if (typeof itemId !== 'string' || typeof available !== 'number'
-    || !Number.isSafeInteger(available) || available < 0) return null;
-  const item = cart?.items.find((line) => line.itemId === itemId);
+  if (!(error instanceof ApiRequestError)
+    || !['INSUFFICIENT_STOCK', 'ITEM_UNAVAILABLE'].includes(error.code ?? '')) return null;
+  const { itemId, available } = (error.details && typeof error.details === 'object'
+    ? error.details : {}) as Record<string, unknown>;
+  let item = cart?.items.find((line) => line.itemId === itemId);
+  if (itemId === undefined && error.code === 'ITEM_UNAVAILABLE') {
+    const matches = cart?.items.filter((line) => error.message === `${line.name} just became unavailable — remove it and try again.`
+      || error.message === `${line.name} is no longer available — remove it to continue`) ?? [];
+    if (new Set(matches.map((line) => line.itemId)).size === 1) item = matches[0];
+  }
   if (!item) return null;
-  return { itemId, available, message: available === 0
+  if (error.code === 'ITEM_UNAVAILABLE') {
+    return { itemId: item.itemId, message: `${item.name} is no longer available — remove it to continue` };
+  }
+  if (typeof available !== 'number' || !Number.isSafeInteger(available) || available < 0) {
+    return { itemId: item.itemId, message: `Not enough ${item.name} left — reduce the quantity or remove it` };
+  }
+  return { itemId: item.itemId, available, message: available === 0
     ? `${item.name} is sold out — remove it to continue`
     : `Only ${available} ${item.name} left — change the quantity` };
+}
+
+export function isDefiniteCheckoutRefusal(error: unknown): boolean {
+  return error instanceof ApiRequestError && (
+    (error.status >= 400 && error.status < 500 && error.status !== 408 && error.code !== 'DUPLICATE_REQUEST')
+    || (error.status >= 500 && error.status < 600 && Boolean(error.message.trim())
+      && (error.code === 'AUTH_UNAVAILABLE' || error.code === 'MMG_PAY_LINKS_NOT_CONFIGURED'))
+  );
 }
 
 /** Known refusals get customer copy; unmapped definite refusals retain their
@@ -40,6 +59,7 @@ export function cartStockRefusal(error: unknown, cart?: Cart | null): CartStockR
 export function cartErrorMessage(error: unknown, fallback = 'Could not update your cart. Please try again.', cart?: Cart | null): string {
   if (error instanceof ApiRequestError) {
     if (error.status === 401) return 'Please sign in again to continue.';
+    if (error.code === 'AUTH_UNAVAILABLE' && error.message.trim()) return error.message;
     const stock = cartStockRefusal(error, cart);
     if (stock) return stock.message;
     if (error.code === 'VENDOR_AT_CAPACITY') {
@@ -49,6 +69,9 @@ export function cartErrorMessage(error: unknown, fallback = 'Could not update yo
     // Older responses may omit structured stock details, but still carry
     // the item's name and remaining quantity in their customer message.
     if (error.code === 'INSUFFICIENT_STOCK' && /^(Only \d+ of .+ left — reduce the quantity|.+ is sold out)$/.test(error.message)) {
+      return error.message;
+    }
+    if (error.code === 'ITEM_UNAVAILABLE' && /^.+ (is no longer available — remove it to continue|just became unavailable — remove it and try again\.)$/.test(error.message)) {
       return error.message;
     }
     const messages: Record<string, string> = {

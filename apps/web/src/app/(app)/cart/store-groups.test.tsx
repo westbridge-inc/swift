@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiReply, type ApiRequest } from '@/test/test-utils';
 import { clearSession, sessionProbe } from '@/lib/auth';
-import { persistCheckoutAttempt, type Cart } from '@/lib/customer';
+import { persistCheckoutAttempt, readCheckoutAttempt, type Cart } from '@/lib/customer';
 import CartPage from './page';
 
 const navigation = vi.hoisted(() => ({ push: vi.fn() }));
@@ -123,8 +123,9 @@ describe('store cart recovery', () => {
     cart.promoCode = { code: 'FIRSTSTORE' };
     persistCheckoutAttempt({ signature: 'earlier-order', key: 'fixture-replay-key' });
     render(<CartPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove promo code' }));
-    expect(await screen.findByText(/Your last order is still being confirmed/)).toBeTruthy();
+    await screen.findByRole('button', { name: 'Retry check' });
+    expect(screen.queryByRole('button', { name: 'Remove promo code' })).toBeNull();
+    expect(readCheckoutAttempt()?.key).toBe('fixture-replay-key');
     expect(requests.filter((r) => r.method === 'DELETE')).toHaveLength(0);
     expect(cart.promoCode?.code).toBe('FIRSTSTORE');
   });
@@ -166,8 +167,9 @@ describe('store cart recovery', () => {
   it('does not remove a store during an unresolved order', async () => {
     persistCheckoutAttempt({ signature: 'earlier-order', key: 'fixture-replay-key' });
     render(<CartPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove First Store items' }));
-    expect(await screen.findByText(/Your last order is still being confirmed/)).toBeTruthy();
+    await screen.findByRole('button', { name: 'Retry check' });
+    expect(screen.queryByRole('button', { name: 'Remove First Store items' })).toBeNull();
+    expect(readCheckoutAttempt()?.key).toBe('fixture-replay-key');
     expect(requests.filter((r) => r.method === 'DELETE')).toHaveLength(0);
   });
 
@@ -196,9 +198,10 @@ describe('AX341 refusal details and recovery', () => {
     } : null;
     render(<CartPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$900' }));
-    await screen.findByText('Could not confirm your order. Check Your orders before trying again.');
-    fireEvent.click(screen.getByRole('button', { name: 'Remove Second Store items' }));
-    await screen.findByText('Your last order is still being confirmed. Check Your orders or retry it before changing your cart.');
+    await screen.findByRole('button', { name: 'Retry check' });
+    expect(screen.getByRole('heading', { name: "We're checking your last order" })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Remove Second Store items' })).toBeNull();
+    expect(readCheckoutAttempt()).not.toBeNull();
     expect(requests.filter((r) => r.method === 'DELETE')).toHaveLength(0);
     expect(cart.items.map((item) => item.id)).toEqual(['l2']);
   });
@@ -280,5 +283,162 @@ describe('AX341 refusal details and recovery', () => {
     expect(requests.filter((r) => r.path.endsWith('/checkout')).map((r) => r.body)).toEqual([
       { paymentMethod: 'CASH', tipAmount: 0 }, { paymentMethod: 'CASH', tipAmount: 0 },
     ]);
+  });
+});
+
+
+describe('AX348 retained checkout resolution', () => {
+  const receiptPath = '/api/v1/customer/checkout/receipts/';
+
+  it('resolves a 408 with its own key before using a different saved tip on remount', async () => {
+    cart.items = [cart.items[1]!]; cart.subtotalCustomer = 800;
+    let firstKey = '';
+    let receiptStatus = 'in_flight';
+    let submitted = 0;
+    special = ({ url, init }) => {
+      if (url.pathname.startsWith(receiptPath)) {
+        expect(url.pathname).toBe(receiptPath + firstKey);
+        return ok({ status: receiptStatus });
+      }
+      if (url.pathname.endsWith('/checkout')) {
+        submitted++;
+        const key = (init?.headers as Record<string, string>)['Idempotency-Key']!;
+        if (submitted === 1) {
+          firstKey = key;
+          expect(JSON.parse(String(init?.body)).tipAmount).toBe(200);
+          return { status: 408, body: { success: false, error: { code: 'REQUEST_TIMEOUT', message: 'Request timed out' } } };
+        }
+        expect(key).not.toBe(firstKey);
+        expect(JSON.parse(String(init?.body))).toEqual({ paymentMethod: 'CASH', tipAmount: 500 });
+      }
+      return null;
+    };
+    const first = render(<CartPage />);
+    await screen.findByRole('button', { name: 'Place cash order · GY$900' });
+    fireEvent.click(screen.getByRole('button', { name: 'GY$200' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Place cash order · GY$1,100' }));
+    await screen.findByRole('button', { name: 'Retry check' });
+    expect(readCheckoutAttempt()?.key).toBe(firstKey);
+    first.unmount();
+    cart.tipAmount = 500;
+    receiptStatus = 'none';
+    render(<CartPage />);
+    const fresh = await screen.findByRole('button', { name: 'Place cash order · GY$1,400' });
+    expect(readCheckoutAttempt()).toBeNull();
+    expect(screen.getByRole('button', { name: 'GY$500' }).getAttribute('aria-pressed')).toBe('true');
+    expect(cart.items[0]?.selectedOptionNames).toEqual(['Large']);
+    expect(requests.filter((r) => r.path.startsWith(receiptPath))).toHaveLength(2);
+    fireEvent.click(fresh);
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/orders/o1'));
+    expect(submitted).toBe(2);
+  });
+
+  it('shows the committed receipt after a timeout and reload with an empty cart', async () => {
+    cart.items = [cart.items[1]!]; cart.subtotalCustomer = 800;
+    let committed = false;
+    let key = '';
+    special = ({ url, init }) => {
+      if (url.pathname.endsWith('/checkout')) {
+        key = (init?.headers as Record<string, string>)['Idempotency-Key']!;
+        return { status: 504, body: { success: false, error: { message: 'Gateway timeout' } } };
+      }
+      if (url.pathname.startsWith(receiptPath)) {
+        expect(url.pathname).toBe(receiptPath + key);
+        return ok(committed ? { status: 'placed', orderIds: ['receipt-order'] } : { status: 'in_flight' });
+      }
+      return null;
+    };
+    const first = render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$900' }));
+    await screen.findByRole('button', { name: 'Retry check' });
+    expect(readCheckoutAttempt()?.key).toBe(key);
+    first.unmount();
+    committed = true;
+    cart.items = [];
+    render(<CartPage />);
+    await screen.findByRole('heading', { name: 'Order placed' });
+    expect(screen.getByRole('link', { name: 'View order' }).getAttribute('href')).toBe('/orders/receipt-order');
+    expect(screen.queryByText('Your cart is empty')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Browse Swift' })).toBeNull();
+    expect(readCheckoutAttempt()).toBeNull();
+    expect(requests.filter((r) => r.path.endsWith('/checkout'))).toHaveLength(1);
+  });
+
+  it.each(['in_flight', 'unreachable', 'malformed'])('keeps %s receipts unknown until Retry check proves none, even with an empty cart', async (answer) => {
+    cart.items = [];
+    const attempt = { signature: 'old-tip-and-options', key: 'pending-attempt-key' };
+    persistCheckoutAttempt(attempt);
+    let resolved = false;
+    special = ({ url }) => {
+      if (!url.pathname.startsWith(receiptPath)) return null;
+      expect(url.pathname).toBe(receiptPath + attempt.key);
+      if (resolved) return ok({ status: 'none' });
+      if (answer === 'unreachable') throw new TypeError('Failed to fetch');
+      return ok(answer === 'malformed' ? { status: 'placed', orderIds: [] } : { status: 'in_flight' });
+    };
+    render(<CartPage />);
+    const retry = await screen.findByRole('button', { name: 'Retry check' });
+    expect(screen.getByRole('heading', { name: "We're checking your last order" })).toBeTruthy();
+    expect(readCheckoutAttempt()).toEqual(attempt);
+    expect(screen.queryByText('Your cart is empty')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Place cash order/ })).toBeNull();
+    expect(requests.filter((r) => r.method !== 'GET')).toHaveLength(0);
+    resolved = true;
+    fireEvent.click(retry);
+    await screen.findByText('Your cart is empty');
+    expect(readCheckoutAttempt()).toBeNull();
+    expect(requests.filter((r) => r.path.startsWith(receiptPath))).toHaveLength(2);
+  });
+
+  it('shows AUTH_UNAVAILABLE guidance with Retry and starts a fresh attempt', async () => {
+    cart.items = [cart.items[1]!]; cart.subtotalCustomer = 800;
+    const keys: string[] = [];
+    special = ({ url, init }) => {
+      if (!url.pathname.endsWith('/checkout')) return null;
+      keys.push((init?.headers as Record<string, string>)['Idempotency-Key']!);
+      return keys.length === 1 ? { status: 503, body: { success: false, error: {
+        code: 'AUTH_UNAVAILABLE', message: 'Sign-in is temporarily unavailable. Please retry shortly.',
+      } } } : null;
+    };
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$900' }));
+    await screen.findByText('Sign-in is temporarily unavailable. Please retry shortly.');
+    expect(screen.queryByText(/Could not confirm your order/)).toBeNull();
+    expect(readCheckoutAttempt()).toBeNull();
+    expect(requests.filter((r) => r.path.startsWith(receiptPath))).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/orders/o1'));
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it.each([
+    ['INSUFFICIENT_STOCK', 'Rice just sold out — please update your cart.', { itemId: 'i2' }, 'Not enough Rice left — reduce the quantity or remove it'],
+    ['ITEM_UNAVAILABLE', 'Rice is no longer available — remove it to continue', { itemId: 'i2' }, 'Rice is no longer available — remove it to continue'],
+    ['ITEM_UNAVAILABLE', 'Rice just became unavailable — remove it and try again.', undefined, 'Rice is no longer available — remove it to continue'],
+  ])('names and marks the refused row for %s without inventing a count', async (code, message, details, copy) => {
+    cart.items = [
+      { ...cart.items[1]!, name: 'Rice', quantity: 3 },
+      { ...cart.items[1]!, id: 'juice', itemId: 'juice', name: 'Juice' },
+    ];
+    cart.subtotalCustomer = 3200;
+    special = ({ url }) => {
+      if (url.pathname.endsWith('/vendors/s2')) return ok({ ...menu, categories: [{ items: [{ id: 'i2' }, { id: 'juice' }] }] });
+      if (url.pathname.endsWith('/checkout')) return { status: 409, body: { success: false, error: { code, message, ...(details ? { details } : {}) } } };
+      return null;
+    };
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$3,300' }));
+    await screen.findAllByText(String(copy));
+    const rice = screen.getByText('Rice').closest('article')!;
+    const juice = screen.getByText('Juice').closest('article')!;
+    expect(within(rice).getByText(String(copy))).toBeTruthy();
+    expect(rice.getAttribute('aria-describedby')).toBe(within(rice).getByText(String(copy)).id);
+    expect(juice.hasAttribute('aria-describedby')).toBe(false);
+    expect(document.body.textContent).not.toMatch(/Only \d+ Rice/);
+    expect(readCheckoutAttempt()).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Rice from cart' }));
+    await waitFor(() => expect(screen.queryByText('Rice')).toBeNull());
+    expect(screen.queryByText(String(copy))).toBeNull();
   });
 });

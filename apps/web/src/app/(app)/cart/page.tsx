@@ -39,7 +39,8 @@ import {
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '@/lib/app-rules';
-import { cartErrorMessage, cartStockRefusal, cartStoreGroups, type CartStockRefusal } from '@/lib/cart-presentation';
+import { cartErrorMessage, cartStockRefusal, cartStoreGroups, isDefiniteCheckoutRefusal, type CartStockRefusal } from '@/lib/cart-presentation';
+import { resolveCheckoutAttempt, type CheckoutResolution } from '@/lib/checkout-recovery';
 import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
@@ -63,6 +64,9 @@ export default function CartPage() {
   const [error, setError] = useState<string | null>(null);
   const [stockRefusal, setStockRefusal] = useState<CartStockRefusal | null>(null);
   const [noRiders, setNoRiders] = useState(false);
+  const [retryRefusal, setRetryRefusal] = useState(false);
+  const [recovery, setRecovery] = useState<CheckoutResolution | { status: 'loading' | 'checking' | 'ready' }>({ status: 'loading' });
+  const recoverySequence = useRef(0);
   const [addingAddr, setAddingAddr] = useState(false);
   const [newAddr, setNewAddr] = useState({ label: '', addressLine1: '', city: '', region: '' });
   const [addressMatches, setAddressMatches] = useState<Place[]>([]);
@@ -99,7 +103,7 @@ export default function CartPage() {
     const a = addressResult.status === 'fulfilled' ? addressResult.value : [];
     setCart(c); setAddresses(a); setError(null);
     setStockRefusal((current) => current && c.items.some((line) => line.itemId === current.itemId
-      && line.quantity > current.available) ? current : null);
+      && (current.available === undefined || line.quantity > current.available)) ? current : null);
     setAddressError(addressResult.status === 'rejected'
       ? cartErrorMessage(addressResult.reason, 'Could not load your delivery addresses. Please try again.')
       : null);
@@ -108,8 +112,6 @@ export default function CartPage() {
     setAddrId(def?.id ?? null);
 
     if (!c.items.length) {
-      checkoutAttempt.current = null;
-      clearCheckoutAttempt();
       setCartSafety('safe');
       setCartSafetyMessage('');
       return { cart: c, safe: true };
@@ -173,7 +175,42 @@ export default function CartPage() {
       return block('Could not check your items with the store. Please try again before ordering.');
     }
   }
-  useEffect(() => { refresh().catch((e) => setError(cartErrorMessage(e))); }, []);
+  async function recoverPendingAttempt() {
+    const request = ++recoverySequence.current;
+    const attempt = checkoutAttempt.current ?? readCheckoutAttempt();
+    setRecovery({ status: attempt ? 'checking' : 'loading' });
+    setError(null);
+    if (attempt) {
+      checkoutAttempt.current = attempt;
+      const resolution = await resolveCheckoutAttempt(attempt);
+      if (request !== recoverySequence.current) return;
+      if (resolution.status === 'unknown') {
+        setRecovery(resolution);
+        return;
+      }
+      resetCheckoutReplay();
+      if (resolution.status === 'placed') {
+        setRecovery(resolution);
+        // Move to the receipt's order so a later browser reload stays on its
+        // confirmation, after the pending key has been cleared.
+        router.push(resolution.orderIds.length === 1 ? `/orders/${encodeURIComponent(resolution.orderIds[0]!)}` : '/orders');
+        return;
+      }
+    }
+    // The current cart is loaded only after the old attempt is resolved.
+    // On remount its saved tip/options may differ from the attempted order.
+    try { await refresh(); } catch { /* refresh supplies the retryable error. */ }
+    if (request === recoverySequence.current) setRecovery({ status: 'ready' });
+  }
+  const initialRecovery = useRef(recoverPendingAttempt);
+  useEffect(() => {
+    // These stable counters invalidate responses after unmount, including a
+    // Strict Mode effect restart. They are request counters, not DOM refs.
+    const recoveryCounter = recoverySequence;
+    const cartCounter = refreshSequence;
+    void initialRecovery.current();
+    return () => { recoveryCounter.current++; cartCounter.current++; };
+  }, []);
 
   const subtotal = (cart?.items ?? []).reduce((s, l) => s + (l.customerPrice ?? 0) * l.quantity, 0);
   // SWIFT-071: the total must reflect the DELIVERY FEE (and discount), not just
@@ -217,7 +254,7 @@ export default function CartPage() {
     const pending = checkoutAttempt.current ?? readCheckoutAttempt();
     if (!pending) return false;
     checkoutAttempt.current = pending;
-    setError('Your last order is still being confirmed. Check Your orders or retry it before changing your cart.');
+    void recoverPendingAttempt();
     return true;
   }
 
@@ -316,9 +353,11 @@ export default function CartPage() {
   }
 
   async function placeOrder() {
-    if (!cart?.items?.length || checkoutBusy.current || cartSafety !== 'safe' || !addrId || !meetsMinimum) return;
+    if (checkoutBusy.current || recovery.status !== 'ready') return;
+    if (checkoutAttempt.current ?? readCheckoutAttempt()) { await recoverPendingAttempt(); return; }
+    if (!cart?.items?.length || cartSafety !== 'safe' || !addrId || !meetsMinimum) return;
     checkoutBusy.current = true;
-    setBusy(true); setError(null); setNoRiders(false);
+    setBusy(true); setError(null); setNoRiders(false); setRetryRefusal(false);
     try {
       const proof = await refresh({ announceChecking: false });
       if (!proof?.safe) {
@@ -361,36 +400,25 @@ export default function CartPage() {
         ...(liveCart.promoCode?.code ? { promoCode: liveCart.promoCode.code } : {}),
       };
       const signature = checkoutAttemptSignature(liveCart, body);
-      const storedAttempt = checkoutAttempt.current ?? readCheckoutAttempt();
-      if (storedAttempt && storedAttempt.signature !== signature) {
-        checkoutAttempt.current = storedAttempt;
-        setError('Your last order is still being confirmed. Check Your orders before changing your cart or placing another order.');
+      const quotedCart = await setCartAddress(addrId);
+      if (cartQuoteFingerprint(quotedCart) !== cartQuoteFingerprint(liveCart)) {
+        setCart(quotedCart);
+        const refreshedSubtotal = quotedCart.subtotalCustomer
+          ?? quotedCart.subtotal
+          ?? quotedCart.items.reduce((sum, line) => sum + line.customerPrice * line.quantity, 0);
+        const refreshedTotal = money(
+          refreshedSubtotal
+          + Number(quotedCart.deliveryFee ?? 0)
+          - Number(quotedCart.discount ?? 0)
+          + tip,
+        );
+        await refresh({ announceChecking: false });
+        setError(`Your total changed to ${refreshedTotal}. Review the new total, then place the order again.`);
+        window.requestAnimationFrame(() => errorMessage.current?.focus());
         return;
       }
-      const attempt = storedAttempt;
-      checkoutAttempt.current = attempt;
-      const retrying = Boolean(attempt);
-      if (!retrying) {
-        const quotedCart = await setCartAddress(addrId);
-        if (cartQuoteFingerprint(quotedCart) !== cartQuoteFingerprint(liveCart)) {
-          setCart(quotedCart);
-          const refreshedSubtotal = quotedCart.subtotalCustomer
-            ?? quotedCart.subtotal
-            ?? quotedCart.items.reduce((sum, line) => sum + line.customerPrice * line.quantity, 0);
-          const refreshedTotal = money(
-            refreshedSubtotal
-            + Number(quotedCart.deliveryFee ?? 0)
-            - Number(quotedCart.discount ?? 0)
-            + tip,
-          );
-          await refresh({ announceChecking: false });
-          setError(`Your total changed to ${refreshedTotal}. Review the new total, then place the order again.`);
-          window.requestAnimationFrame(() => errorMessage.current?.focus());
-          return;
-        }
-        setCart(quotedCart);
-      }
-      const idempotencyKey = attempt?.key ?? crypto.randomUUID();
+      setCart(quotedCart);
+      const idempotencyKey = crypto.randomUUID();
       checkoutAttempt.current = { signature, key: idempotencyKey };
       persistCheckoutAttempt({ signature, key: idempotencyKey });
       const res = await checkout(body, idempotencyKey);
@@ -404,26 +432,14 @@ export default function CartPage() {
         router.push('/selfie?next=%2Fcart');
         return;
       }
-      const definiteRejection = e instanceof ApiRequestError
-        && e.status >= 400
-        && e.status < 500
-        && e.status !== 408
-        && e.code !== 'DUPLICATE_REQUEST';
-      let cartReconciled = false;
-      try {
-        const reconciledCart = await getCart();
-        if (reconciledCart.items.length === 0) {
-          resetCheckoutReplay();
-          router.push('/orders');
-          return;
-        }
-        await refresh({ announceChecking: false });
-        cartReconciled = true;
-      } catch {
-        // Keep the key if server cart truth is unreachable. It is safer to
-        // replay one attempt than to create a new potentially duplicate order.
+      const definiteRejection = isDefiniteCheckoutRefusal(e);
+      if (!definiteRejection && checkoutAttempt.current) {
+        await recoverPendingAttempt();
+        return;
       }
-      if (definiteRejection && cartReconciled) resetCheckoutReplay();
+      if (definiteRejection) resetCheckoutReplay();
+      try { await refresh({ announceChecking: false }); } catch { /* Keep checkout blocked until the cart refresh succeeds. */ }
+      setRetryRefusal(e instanceof ApiRequestError && e.code === 'AUTH_UNAVAILABLE');
       // The server refused the MMG destination at checkout: this cart goes
       // back to cash for its current scope, as in the phone app.
       if (e instanceof ApiRequestError && e.code?.startsWith('MMG_')) {
@@ -456,6 +472,26 @@ export default function CartPage() {
     }
   }
 
+  if (recovery.status === 'loading') return <CartSkeleton />;
+  if (recovery.status === 'checking' || recovery.status === 'unknown') return (
+    <section className={styles.stateCard} aria-live="polite">
+      <h1 className={styles.stateTitle}>We&apos;re checking your last order</h1>
+      <p className={styles.stateCopy}>Please wait until we can confirm whether it was placed.</p>
+      <button type="button" disabled={recovery.status === 'checking'} onClick={() => void recoverPendingAttempt()} className={`${styles.button} ${styles.buttonPrimary}`}>
+        {recovery.status === 'checking' ? 'Checking…' : 'Retry check'}
+      </button>
+      <Link href="/orders" className={styles.emptyLink}>Check Your orders</Link>
+    </section>
+  );
+  if (recovery.status === 'placed') return (
+    <section className={styles.stateCard} aria-live="polite">
+      <h1 className={styles.stateTitle}>Order placed</h1>
+      <p className={styles.stateCopy}>Your last order was confirmed.</p>
+      {recovery.orderIds.map((id, index) => <Link key={id} href={`/orders/${encodeURIComponent(id)}`} className={styles.emptyLink}>
+        {recovery.orderIds.length === 1 ? 'View order' : `View order ${index + 1}`}
+      </Link>)}
+    </section>
+  );
   if (!cart && error) return (
     <section className={styles.stateCard} role="alert">
       <h1 className={styles.stateTitle}>Swift could not load your cart</h1>
@@ -673,7 +709,7 @@ export default function CartPage() {
             </div>
           ) : (
             <button type="button" onClick={() => void placeOrder()} disabled={busy || !addrId || !meetsMinimum || moneyUnreadable} className={`${styles.button} ${styles.buttonPrimary} ${styles.checkoutButton}`}>
-              {busy ? 'Placing…' : !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : hasDestinationQuote ? (payByMmg ? `Place order · ${money(total)} · pay by MMG` : `Place cash order · ${money(total)}`) : 'Get delivery quote'}
+              {busy ? 'Placing…' : retryRefusal ? 'Retry' : !addrId ? 'Add a delivery address to order' : !meetsMinimum ? `Add ${money(minimumShortfall)} to reach the minimum` : hasDestinationQuote ? (payByMmg ? `Place order · ${money(total)} · pay by MMG` : `Place cash order · ${money(total)}`) : 'Get delivery quote'}
             </button>
           )}
         </section> : null}
