@@ -16,6 +16,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
+import { revokeStoreRoom } from '../notification/store-room';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -801,7 +802,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [AX308 F03] A revocation, not a bare leave: it also stops a subscription
     // already in flight from joining after it (store-room.ts), on every
     // instance. Only after the delete is committed.
-    const { revokeStoreRoom } = await import('../notification/store-room');
+    // [AX317] ...and in the same continuation as the commit: the import is
+    // static, so nothing is awaited between the delete and the revocation.
     revokeStoreRoom(app.io, vendorId, existing.userId);
     return { success: true, data: { deleted: true } };
   });

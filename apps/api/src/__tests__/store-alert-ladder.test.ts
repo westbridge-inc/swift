@@ -6,7 +6,7 @@ import { join, relative } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Prisma, type FulfillmentType, type UserRole, type UserStatus } from '@prisma/client';
-import type { Server } from 'socket.io';
+import type { Server, Socket as ServerSocket } from 'socket.io';
 import type Redis from 'ioredis';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -30,7 +30,7 @@ import {
   type LadderRung,
 } from '../modules/notification/store-alert-ladder';
 import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
-import { STORE_ROOM_REVOKED, revokeStoreRoom, setStoreRoomCluster, storeRoomEpoch } from '../modules/notification/store-room';
+import { STORE_ROOM_REVOKED, revokeStoreRoom, setStoreRoomCluster, storeRoomEpoch, subscribeToStoreRoom } from '../modules/notification/store-room';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
 import { SmsNotSubmittedError, devChannelLog, getChannels, type DevChannelEntry, type PushProvider } from '../providers/notifications/channels';
 import { STORE_ALERT_SMS_DAILY_PREFIX, checkOtpDailyBudget } from '../utils/sms-budget';
@@ -73,6 +73,13 @@ vi.mock('../modules/notification/store-alert-recipients', async (importOriginal)
 
 const DAY = 24 * 60 * 60 * 1000;
 const PHONE_PREFIX = '+5920418';
+// [AX317 F03] The store-room re-validation interval of the one instance that
+// proves it (production default 30 s, never above 60 s; the rest of this file
+// keeps the default, so its removal tests prove the revocation itself), and
+// the bound a member whose revocation never arrived is evicted within: a pass
+// that read just before the removal, the next pass, and its read.
+const STORE_ROOM_RECHECK_MS = 400;
+const STORE_ROOM_EVICTION_BOUND_MS = 2 * STORE_ROOM_RECHECK_MS + 1_500;
 const OTHER_TENANT = `q10b-other-${nanoid(8).toLowerCase().replace(/[^a-z0-9]/g, '0')}`;
 
 let app: FastifyInstance;
@@ -215,9 +222,9 @@ function redisRacingAtClaim(onClaim: () => Promise<void>): Redis {
 const jobCtx = (): JobContext => ({ prisma: app.prisma, io: ioRecorder, redis: app.redis, log: app.log });
 
 /** A real client socket for `token`, ready once the server's authority check has run. */
-function socketFor(token: string, opened: Socket[]): Promise<Socket> {
+function socketFor(token: string, opened: Socket[], at = url): Promise<Socket> {
   return new Promise<Socket>((resolve, reject) => {
-    const socket = ioClient(url, { auth: { token }, transports: ['websocket'], reconnection: false, timeout: 3000 });
+    const socket = ioClient(at, { auth: { token }, transports: ['websocket'], reconnection: false, timeout: 3000 });
     opened.push(socket);
     const timer = setTimeout(() => reject(new Error('socket did not become ready')), 7_500);
     socket.on('auth:ready', () => { clearTimeout(timer); resolve(socket); });
@@ -589,6 +596,7 @@ describe('the whole store hears a new order, and only that store', () => {
     const room = `vendor:${storeA}`;
     const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const membership = await joinTeam(storeA, member, ownerA);
+    const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
     try {
       const memberSocket = await socketFor(member.token, sockets);
       const joined = await new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
@@ -597,36 +605,249 @@ describe('the whole store hears a new order, and only that store', () => {
       });
       expect(joined).toEqual({ joined: true });
       expect(await inRoom(room)).toContain(memberSocket.id);
+      // [AX317 R2-02] A pair's epoch exists only while a subscription for it
+      // is in flight: the member's second phone holds one open (its read is
+      // parked after it said yes), so the step is observable on the epoch too.
+      const secondPhone = await socketFor(member.token, sockets);
+      let resume!: () => void;
+      const parked = new Promise<void>((done) => { resume = done; });
+      let reading!: () => void;
+      const inFlight = new Promise<void>((done) => { reading = done; });
+      vi.mocked(isStoreRoomMember).mockImplementation(async (...args) => {
+        const verdict = await real(...args);
+        if (args[2] === member.userId) {
+          reading();
+          await parked;
+        }
+        return verdict;
+      });
+      const secondDecided = new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        secondPhone.emit('vendor:subscribe', { vendorId: storeA }, resolve);
+        setTimeout(() => resolve('no-answer'), 4_000);
+      });
+      await inFlight;
       const arrive = (payload: unknown) => (app.io.of('/') as unknown as { _onServerSideEmit(args: unknown[]): void })._onServerSideEmit([STORE_ROOM_REVOKED, payload]);
 
-      const before = storeRoomEpoch(storeA, member.userId);
+      const before = storeRoomEpoch(app.io, storeA, member.userId);
+      expect(before).toEqual(expect.any(Number));
       arrive({ vendorId: storeA });
-      expect(storeRoomEpoch(storeA, member.userId)).toBe(before);
+      expect(storeRoomEpoch(app.io, storeA, member.userId)).toBe(before);
       expect(await inRoom(room)).toContain(memberSocket.id);
 
       arrive({ vendorId: storeA, userId: member.userId });
-      expect(storeRoomEpoch(storeA, member.userId)).toBe(before + 1);
+      expect(storeRoomEpoch(app.io, storeA, member.userId)).toBe(before! + 1);
       expect(await inRoom(room)).not.toContain(memberSocket.id);
+      // The subscription in flight saw it: it read once more (AX317 R2-01),
+      // and this simulated event changed nothing in the database.
+      resume();
+      expect(await secondDecided).toEqual({ joined: true });
     } finally {
+      vi.mocked(isStoreRoomMember).mockImplementation(real);
       for (const socket of sockets) socket.disconnect();
       await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
     }
   });
 
-  it('the instance that removes a member tells the other instances, once, and applies it here itself (AX308 F03, across instances)', () => {
+  it('the instance that removes a member tells the other instances, once, and applies it here itself (AX308 F03, across instances)', async () => {
     const vendorId = `q10b-cluster-${nanoid(6)}`;
     const userId = `q10b-cluster-${nanoid(6)}`;
     const told = vi.spyOn(app.io, 'serverSideEmit').mockReturnValue(true);
+    // [AX317 R2-02] The epoch is kept only while a subscription for the pair
+    // is in flight: one is held open (its read never answers until the end).
+    let answer!: (member: boolean) => void;
+    const phone = { id: `q10b-${nanoid(6)}`, connected: true, data: { userId, tenantId: 'swift-default' }, join: vi.fn() };
+    const decided = subscribeToStoreRoom(app.io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => { answer = settle; }));
     try {
+      expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(0);
       revokeStoreRoom(app.io, vendorId, userId);
       expect(told).not.toHaveBeenCalled(); // one process: nobody else to tell
-      setStoreRoomCluster(true);
+      setStoreRoomCluster(app.io, true);
       revokeStoreRoom(app.io, vendorId, userId);
       expect(told.mock.calls).toEqual([[STORE_ROOM_REVOKED, { vendorId, userId }]]);
-      expect(storeRoomEpoch(vendorId, userId)).toBe(2);
+      expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(2);
     } finally {
-      setStoreRoomCluster(false);
+      setStoreRoomCluster(app.io, false);
       told.mockRestore();
+      answer(false);
+      await decided;
+    }
+    expect(phone.join).not.toHaveBeenCalled();
+  });
+
+  it('a member removed and added back while their subscription is being decided is admitted after one fresh read (AX317 R2-01)', async () => {
+    const sockets: Socket[] = [];
+    const room = `vendor:${storeA}`;
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    let membership = await joinTeam(storeA, member, ownerA);
+    const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
+    try {
+      const memberSocket = await socketFor(member.token, sockets);
+      // The subscription's first read is parked right after it said yes.
+      let resume!: () => void;
+      const parked = new Promise<void>((done) => { resume = done; });
+      let readDone!: () => void;
+      const firstRead = new Promise<void>((done) => { readDone = done; });
+      const verdicts: boolean[] = [];
+      vi.mocked(isStoreRoomMember).mockImplementation(async (...args) => {
+        const verdict = await real(...args);
+        if (args[2] !== member.userId) return verdict;
+        verdicts.push(verdict);
+        if (verdicts.length === 1) {
+          readDone();
+          await parked;
+        }
+        return verdict;
+      });
+      const decided = new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        memberSocket.emit('vendor:subscribe', { vendorId: storeA }, resolve);
+        setTimeout(() => resolve('no-answer'), 4_000);
+      });
+      await firstRead;
+      // Removed (the revocation moves this subscription's epoch) and added
+      // back, both committed before that read returns.
+      const removed = await call('DELETE', `/api/v1/vendor/staff/${membership.id}`, ownerA.token);
+      expect(removed.statusCode, removed.body).toBe(200);
+      membership = await joinTeam(storeA, member, ownerA);
+      resume();
+
+      expect(await decided).toEqual({ joined: true });
+      expect(verdicts).toEqual([true, true]); // the stale yes, then one fresh read
+      expect(await inRoom(room)).toContain(memberSocket.id);
+      const heard: string[] = [];
+      memberSocket.on('order:new', (p: { orderId: string }) => heard.push(p.orderId));
+      app.io.to(room).emit('order:new', { orderId: 'q10b-re-added', vendorId: storeA });
+      await vi.waitFor(() => expect(heard).toEqual(['q10b-re-added']), { timeout: 5_000, interval: 25 });
+    } finally {
+      vi.mocked(isStoreRoomMember).mockImplementation(real);
+      for (const socket of sockets) socket.disconnect();
+      await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+
+  it('a subscription whose epoch moves again during its fresh read is refused: one retry, never a loop (AX317 R2-01)', async () => {
+    const sockets: Socket[] = [];
+    const room = `vendor:${storeA}`;
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const membership = await joinTeam(storeA, member, ownerA);
+    const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
+    try {
+      const memberSocket = await socketFor(member.token, sockets);
+      // Every read says yes, and a revocation lands during each of them.
+      let reads = 0;
+      vi.mocked(isStoreRoomMember).mockImplementation(async (...args) => {
+        const verdict = await real(...args);
+        if (args[2] === member.userId) {
+          reads += 1;
+          revokeStoreRoom(app.io, storeA, member.userId);
+        }
+        return verdict;
+      });
+      const decided = await new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        memberSocket.emit('vendor:subscribe', { vendorId: storeA }, resolve);
+        setTimeout(() => resolve('no-answer'), 4_000);
+      });
+      expect(decided).toEqual({ joined: false });
+      expect(reads).toBe(2);
+      expect(await inRoom(room)).not.toContain(memberSocket.id);
+    } finally {
+      vi.mocked(isStoreRoomMember).mockImplementation(real);
+      for (const socket of sockets) socket.disconnect();
+      await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+
+  it('a revocation epoch lives only while a subscription for its pair is in flight, so removals leave nothing behind (AX317 R2-02)', async () => {
+    const vendorId = `q10b-r202-${nanoid(6)}`;
+    const userIds = Array.from({ length: 50 }, () => `q10b-r202-${nanoid(6)}`);
+    // Fifty removals with nothing in flight keep nothing.
+    for (const userId of userIds) revokeStoreRoom(app.io, vendorId, userId);
+    for (const userId of userIds) expect(storeRoomEpoch(app.io, vendorId, userId)).toBeNull();
+
+    // A subscription in flight holds its pair's epoch, and a removal moves it.
+    const userId = userIds[0]!;
+    const phone = { id: `q10b-${nanoid(6)}`, connected: true, data: { userId, tenantId: 'swift-default' }, join: vi.fn() };
+    const answers: Array<(member: boolean) => void> = [];
+    const decided = subscribeToStoreRoom(app.io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => { answers.push(settle); }));
+    expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(0);
+    revokeStoreRoom(app.io, vendorId, userId);
+    expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(1);
+    // Its read says yes, but the epoch moved: the entry of that read goes and
+    // the one fresh read starts a new one.
+    answers[0]!(true);
+    await vi.waitFor(() => expect(answers).toHaveLength(2), { timeout: 2_000, interval: 5 });
+    expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(0);
+    answers[1]!(false);
+    expect(await decided).toBe(false);
+    // Nothing is in flight any more: nothing is kept.
+    expect(storeRoomEpoch(app.io, vendorId, userId)).toBeNull();
+    expect(phone.join).not.toHaveBeenCalled();
+  });
+
+  it('a member whose revocation never reaches this instance is evicted by the store-room re-validation within its bound, and hears nothing after (AX317 F03)', async () => {
+    const sockets: Socket[] = [];
+    const room = `vendor:${storeA}`;
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const membership = await joinTeam(storeA, member, ownerA);
+    // An API instance of its own, with a short re-validation interval.
+    const instance = Fastify({ logger: false });
+    const previous = process.env['SOCKET_STORE_ROOM_RECHECK_MS'];
+    try {
+      process.env['SOCKET_STORE_ROOM_RECHECK_MS'] = String(STORE_ROOM_RECHECK_MS);
+      try {
+        await instance.register(prismaPlugin);
+        await instance.register(redisPlugin);
+        await instance.register(authPlugin);
+        await instance.register(socketPlugin);
+        await instance.listen({ port: 0, host: '127.0.0.1' });
+      } finally {
+        if (previous === undefined) delete process.env['SOCKET_STORE_ROOM_RECHECK_MS'];
+        else process.env['SOCKET_STORE_ROOM_RECHECK_MS'] = previous;
+      }
+      const at = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+      const inInstanceRoom = async () => (await instance.io.in(room).fetchSockets()).map((s) => s.id);
+      const ownerSocket = await socketFor(ownerA.token, sockets, at);
+      const memberSocket = await socketFor(member.token, sockets, at);
+      for (const socket of [ownerSocket, memberSocket]) {
+        const joined = await new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+          socket.emit('vendor:subscribe', { vendorId: storeA }, resolve);
+          setTimeout(() => resolve('no-answer'), 4_000);
+        });
+        expect(joined).toEqual({ joined: true });
+      }
+      const ownerHeard: string[] = [];
+      const heard: string[] = [];
+      ownerSocket.on('order:new', (p: { orderId: string }) => ownerHeard.push(p.orderId));
+      memberSocket.on('order:new', (p: { orderId: string }) => heard.push(p.orderId));
+      const broadcast = (orderId: string) => { instance.io.to(room).emit('order:new', { orderId, vendorId: storeA }); };
+      broadcast('q10b-before-removal');
+      await vi.waitFor(() => expect(heard).toEqual(['q10b-before-removal']), { timeout: 5_000, interval: 25 });
+
+      // The removal commits on another instance and its revocation event is
+      // lost on the way: here the team row is gone and nothing else happened.
+      const removedAt = Date.now();
+      await app.prisma.vendorStaff.delete({ where: { id: membership.id } });
+      await vi.waitFor(
+        async () => expect(await inInstanceRoom()).not.toContain(memberSocket.id),
+        { timeout: STORE_ROOM_EVICTION_BOUND_MS, interval: 25 },
+      );
+      expect(Date.now() - removedAt).toBeLessThanOrEqual(STORE_ROOM_EVICTION_BOUND_MS);
+      // Only who is no longer a member leaves.
+      expect(await inInstanceRoom()).toContain(ownerSocket.id);
+
+      broadcast('q10b-after-eviction');
+      await vi.waitFor(() => expect(ownerHeard).toContain('q10b-after-eviction'), { timeout: 5_000, interval: 25 });
+      // A barrier on the member's own connection: its reply comes after any
+      // broadcast the server had already sent that socket.
+      await new Promise<void>((done) => {
+        memberSocket.emit('vendor:subscribe', {}, () => done());
+        setTimeout(done, 1_000);
+      });
+      expect(heard).toEqual(['q10b-before-removal']);
+      expect(await inInstanceRoom()).not.toContain(memberSocket.id);
+    } finally {
+      for (const socket of sockets) socket.disconnect();
+      await instance.close();
+      await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
     }
   });
 });
