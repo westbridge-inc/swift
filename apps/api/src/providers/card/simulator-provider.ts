@@ -80,11 +80,12 @@ const SIMULATED_CARD: Record<Exclude<SimulatorScenario, 'DECLINE'>, { variant: T
 type TokenVariant = 'ok' | '3ds' | 'timeout';
 const TOKEN_SHAPE = /^simtok_(ok|3ds|timeout)_[0-9a-f]{24}$/;
 
-const key = {
-  session: (ref: string) => `cardsim:s:${ref}`,
-  charge: (account: string, idempotencyKey: string) => `cardsim:c:${account}:${idempotencyKey}`,
-  refund: (account: string, idempotencyKey: string) => `cardsim:r:${account}:${idempotencyKey}`,
-};
+/** Where the simulator keeps its facts in Redis. Every process that must agree
+ *  (the API and the worker) uses the default. [AX297 F3] A test run passes
+ *  its own namespace, cardsim:<run>:, so it can delete exactly what it wrote
+ *  and never another run's sessions or captures. */
+export const SIMULATOR_KEY_PREFIX = 'cardsim:';
+const KEY_PREFIX_SHAPE = /^cardsim:(?:[A-Za-z0-9_-]{1,64}:)?$/;
 
 /** First choice wins, atomically: a second button press cannot rewrite what
  *  the bank "did". Returns 'missing', 'set' or 'chosen:<scenario>'. */
@@ -129,11 +130,18 @@ const hex = (bytes: number) => randomBytes(bytes).toString('hex');
 export class SimulatorCardRailProvider implements CardRailProvider {
   readonly simulator = true;
   readonly binding: CardRailBinding;
+  /** The Redis namespace this simulator reads and writes (SIMULATOR_KEY_PREFIX by default). */
+  readonly keyPrefix: string;
   private readonly publicBaseUrl: string;
+  private readonly key = {
+    session: (ref: string) => `${this.keyPrefix}s:${ref}`,
+    charge: (account: string, idempotencyKey: string) => `${this.keyPrefix}c:${account}:${idempotencyKey}`,
+    refund: (account: string, idempotencyKey: string) => `${this.keyPrefix}r:${account}:${idempotencyKey}`,
+  };
 
   constructor(
     private readonly redis: Redis,
-    opts: { account: string; publicBaseUrl?: string },
+    opts: { account: string; publicBaseUrl?: string; keyPrefix?: string },
     env: Record<string, string | undefined> = process.env,
   ) {
     // [C10] Refused at construction, not only by the factory and the boot
@@ -144,6 +152,11 @@ export class SimulatorCardRailProvider implements CardRailProvider {
     }
     this.binding = { provider: SIMULATOR_PROVIDER, environment: 'sandbox', account: opts.account };
     this.publicBaseUrl = (opts.publicBaseUrl ?? '').replace(/\/+$/, '');
+    const keyPrefix = opts.keyPrefix ?? SIMULATOR_KEY_PREFIX;
+    if (!KEY_PREFIX_SHAPE.test(keyPrefix)) {
+      throw new Error('The card simulator key prefix is cardsim: or cardsim:<name>: (letters, digits, dash, underscore)');
+    }
+    this.keyPrefix = keyPrefix;
   }
 
   /** The address of the scenario page for one session (served in PT-2). */
@@ -157,7 +170,7 @@ export class SimulatorCardRailProvider implements CardRailProvider {
       return { status: 'failed', reason: 'A Pay-now session needs a positive amount in minor units and a currency', rawSha256: rawDigest({ refused: 'amount' }) };
     }
     const providerSessionRef = `sim_${hex(12)}`;
-    const k = key.session(providerSessionRef);
+    const k = this.key.session(providerSessionRef);
     await this.redis.hset(k, {
       sessionRef: input.sessionRef,
       purpose: input.purpose,
@@ -182,7 +195,7 @@ export class SimulatorCardRailProvider implements CardRailProvider {
    */
   async choose(providerSessionRef: string, scenario: unknown, now = new Date()): Promise<{ redirectUrl: string }> {
     if (!isSimulatorScenario(scenario)) throw new SimulatorRefusal('UNKNOWN_SCENARIO');
-    const k = key.session(providerSessionRef);
+    const k = this.key.session(providerSessionRef);
     const facts = await this.redis.hgetall(k);
     if (!facts['sessionRef']) throw new SimulatorRefusal('SESSION_NOT_FOUND');
     if (now.getTime() > Number(facts['expiresAtMs'])) throw new SimulatorRefusal('SESSION_EXPIRED');
@@ -223,7 +236,7 @@ export class SimulatorCardRailProvider implements CardRailProvider {
 
   async confirm(input: { binding: CardRailBinding; providerSessionRef: string; purpose: CardSessionPurpose }): Promise<CardSessionOutcome> {
     assertBinding(this.binding, input.binding);
-    const k = key.session(input.providerSessionRef);
+    const k = this.key.session(input.providerSessionRef);
     const facts = await this.redis.hgetall(k);
     const raw = { ref: input.providerSessionRef, scenario: facts['scenario'] ?? null, purpose: facts['purpose'] ?? null };
     if (!facts['sessionRef']) return { status: 'unknown', reason: 'The simulator holds no such session', rawSha256: rawDigest(raw) };
@@ -288,7 +301,7 @@ export class SimulatorCardRailProvider implements CardRailProvider {
   }
 
   private async answerCharge(idempotencyKey: string, create: ChargeRecord | null, timeouts: number): Promise<{ outcome: CardChargeOutcome; kept: ChargeRecord }> {
-    const k = key.charge(this.binding.account, idempotencyKey);
+    const k = this.key.charge(this.binding.account, idempotencyKey);
     const [json, left] = await this.redis.eval(
       CHARGE_ONCE, 1, k, create ? JSON.stringify(create) : '', String(timeouts), String(RECORD_TTL_SEC), create ? '1' : '0',
     ) as [string, number];
@@ -316,7 +329,7 @@ export class SimulatorCardRailProvider implements CardRailProvider {
     if (!/^sim(pay|ch)_[0-9a-f]{24}$/.test(input.providerRef)) {
       return { status: 'failed', reason: 'The simulator holds no such payment', rawSha256: rawDigest({ refused: input.providerRef }) };
     }
-    const k = key.refund(this.binding.account, input.idempotencyKey);
+    const k = this.key.refund(this.binding.account, input.idempotencyKey);
     await this.redis.hsetnx(k, 'refundRef', `simre_${hex(12)}`);
     await this.redis.expire(k, RECORD_TTL_SEC);
     const calls = await this.redis.hincrby(k, 'calls', 1);

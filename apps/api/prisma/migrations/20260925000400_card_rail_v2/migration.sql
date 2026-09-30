@@ -14,7 +14,10 @@
 --                        Swift decided.
 --   subscription_payments.instrumentId
 --                        which instrument a weekly card intent charges, so
---                        retrieval goes to the provider that minted it.
+--                        retrieval goes to the provider that minted it. Its
+--                        index is built ONLINE in the next migration
+--                        (20260925000410): subscription_payments is an
+--                        existing, busy table [AX297 F4].
 SET lock_timeout = '10s';
 
 -- 1. Prisma-shaped DDL (identical to `prisma migrate diff` for this schema).
@@ -149,9 +152,6 @@ CREATE INDEX "card_observations_sessionId_idx" ON "card_observations"("sessionId
 
 -- CreateIndex
 CREATE INDEX "card_observations_subscriptionId_createdAt_idx" ON "card_observations"("subscriptionId", "createdAt");
-
--- CreateIndex
-CREATE INDEX "subscription_payments_instrumentId_idx" ON "subscription_payments"("instrumentId");
 
 -- AddForeignKey
 ALTER TABLE "payment_instruments" ADD CONSTRAINT "payment_instruments_subscriptionId_fkey" FOREIGN KEY ("subscriptionId") REFERENCES "subscriptions"("id") ON DELETE CASCADE ON UPDATE CASCADE;

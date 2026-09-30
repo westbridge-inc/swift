@@ -36,7 +36,8 @@ export function getCardRailProvider(
     if (isProduction(env)) {
       throw new Error('CARD_RAIL_PROVIDER=simulator is forbidden in production: the simulator is a test page with no real money');
     }
-    const environment = env['CARD_RAIL_ENVIRONMENT'] ?? 'sandbox';
+    // Empty reads as unset, as in the env templates [AX297 F6].
+    const environment = env['CARD_RAIL_ENVIRONMENT'] || 'sandbox';
     if (environment !== 'sandbox') {
       throw new Error('The card simulator runs only in the sandbox environment (CARD_RAIL_ENVIRONMENT=sandbox)');
     }

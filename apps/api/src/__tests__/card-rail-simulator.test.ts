@@ -6,9 +6,10 @@ import {
   type CardRailBinding, type CardRailProvider,
 } from '../providers/card/card-provider';
 import {
-  SIMULATOR_PAGE, SIMULATOR_SCENARIOS, SimulatorCardRailProvider, SimulatorRefusal,
+  SIMULATOR_KEY_PREFIX, SIMULATOR_PAGE, SIMULATOR_SCENARIOS, SimulatorCardRailProvider, SimulatorRefusal,
 } from '../providers/card/simulator-provider';
 import { getCardRailProvider } from '../providers/card/card-rail-factory';
+import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
 
 // ---------------------------------------------------------------------------
 // [PT-1 · C10] The card SIMULATOR's contract. It is the only card rail v2
@@ -22,6 +23,8 @@ import { getCardRailProvider } from '../providers/card/card-rail-factory';
 const REDIS_URL = process.env['REDIS_URL'] || 'redis://localhost:6382/5';
 const RUN = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
 const ACCOUNT = `pt1-sim-${RUN}`;
+/** [AX297 F3] This run's own simulator namespace: the teardown deletes exactly it. */
+const PREFIX = runKeyPrefix(RUN);
 const BINDING: CardRailBinding = { provider: 'simulator', environment: 'sandbox', account: ACCOUNT };
 let api: Redis;
 let worker: Redis;
@@ -50,15 +53,14 @@ beforeAll(() => {
   // session, the worker that confirms and charges): nothing is shared but Redis.
   api = new Redis(REDIS_URL);
   worker = new Redis(REDIS_URL);
-  apiSim = new SimulatorCardRailProvider(api, { account: ACCOUNT });
-  workerSim = new SimulatorCardRailProvider(worker, { account: ACCOUNT });
+  apiSim = new SimulatorCardRailProvider(api, { account: ACCOUNT, keyPrefix: PREFIX });
+  workerSim = new SimulatorCardRailProvider(worker, { account: ACCOUNT, keyPrefix: PREFIX });
 });
 
 afterEach(() => vi.unstubAllEnvs());
 
 afterAll(async () => {
-  const keys = await api.keys(`cardsim:*`);
-  if (keys.length > 0) await api.del(...keys);
+  await deleteRunKeys(api, PREFIX);
   await api.quit();
   await worker.quit();
 });
@@ -79,7 +81,7 @@ describe('[C10] the scenario page is four buttons and nothing to type into', () 
     for (const junk of ['4242424242424242', 'approve', '', null, { cardNumber: '4242424242424242' }]) {
       await expect(apiSim.choose(providerSessionRef, junk)).rejects.toMatchObject({ code: 'UNKNOWN_SCENARIO' });
     }
-    expect(await api.hget(`cardsim:s:${providerSessionRef}`, 'scenario')).toBeNull();
+    expect(await api.hget(`${PREFIX}s:${providerSessionRef}`, 'scenario')).toBeNull();
     expect((await workerSim.confirm({ binding: BINDING, providerSessionRef, purpose: 'ENROLL' })).status).toBe('pending');
   });
 
@@ -135,7 +137,7 @@ describe('sessions: deterministic per button, shared across processes, one choic
     await expect(apiSim.choose(providerSessionRef, 'DECLINE')).resolves.toMatchObject({ redirectUrl: expect.stringContaining('sim_outcome=decline') });
     const outcome = await workerSim.confirm({ binding: BINDING, providerSessionRef, purpose: 'ENROLL' });
     expect(outcome).toMatchObject({ status: 'failed' });
-    expect(await api.hget(`cardsim:s:${providerSessionRef}`, 'vaultToken')).toBeNull();
+    expect(await api.hget(`${PREFIX}s:${providerSessionRef}`, 'vaultToken')).toBeNull();
   });
 
   it('a page past its window, or one that never existed, takes no button press', async () => {
@@ -207,7 +209,7 @@ describe('off-session charges: one capture per key, answers by the token the but
 describe('[C2] a token bound to one provider setup is never acted on for another', () => {
   it('another account, environment or provider is refused BEFORE any effect — not one Redis key is written', async () => {
     const vaultToken = SYNTH_TOKEN;
-    const before = (await api.keys('cardsim:*')).length;
+    const before = (await api.keys(`${PREFIX}*`)).length;
     for (const other of [
       { ...BINDING, account: 'someone-else' },
       { ...BINDING, environment: 'live' as const },
@@ -222,7 +224,7 @@ describe('[C2] a token bound to one provider setup is never acted on for another
       await expect(apiSim.refund({ binding: other, providerRef: SYNTH_CAPTURE, amountMinor: 1, currencyCode: 'GYD', idempotencyKey: 'r' }))
         .rejects.toBeInstanceOf(CardBindingMismatchError);
     }
-    expect((await api.keys('cardsim:*')).length).toBe(before);
+    expect((await api.keys(`${PREFIX}*`)).length).toBe(before);
   });
 });
 
@@ -258,5 +260,49 @@ describe('[C10 · DS285 F8] production can never have a simulator', () => {
     const made: CardRailProvider = getCardRailProvider({ redis: api }, { NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_ACCOUNT: 'staging-sim' });
     expect(made.binding).toEqual({ provider: 'simulator', environment: 'sandbox', account: 'staging-sim' });
     expect(made.simulator).toBe(true);
+  });
+});
+
+describe('[AX297 F3] a test run cleans up only what it wrote', () => {
+  it('teardown deletes this run’s keys and nothing else: another run’s keys, and the shared namespace, survive', async () => {
+    const mine = runKeyPrefix(`${RUN}f3`);
+    const theirs = runKeyPrefix(`${RUN}f3other`); // shares a prefix of the id: the glob must not reach it
+    const ours = new SimulatorCardRailProvider(api, { account: ACCOUNT, keyPrefix: mine });
+    const created = await ours.createSession({ binding: BINDING, sessionRef: `sess_${nanoid(8)}`, purpose: 'ENROLL', returnUrl: '/r', expiresAt: inAnHour() });
+    if (created.status !== 'succeeded') throw new Error('the simulator did not open a session');
+    const theirSession = `${theirs}s:sim_other_run`;
+    const sharedSession = `${SIMULATOR_KEY_PREFIX}s:sim_dev_server_${RUN}`;
+    await api.set(theirSession, 'another run');
+    await api.set(sharedSession, 'a dev server');
+    try {
+      expect(await api.exists(`${mine}s:${created.providerSessionRef}`)).toBe(1);
+      expect(await deleteRunKeys(api, mine)).toBeGreaterThanOrEqual(1);
+      expect(await api.keys(`${mine}*`)).toEqual([]);
+      expect(await api.get(theirSession)).toBe('another run');
+      expect(await api.get(sharedSession)).toBe('a dev server');
+    } finally {
+      await api.del(theirSession, sharedSession);
+    }
+  });
+
+  it('the teardown refuses anything wider than one run: the shared namespace, a glob, another shape', async () => {
+    for (const prefix of ['cardsim:', 'cardsim:*', 'cardsim:t-*:', 'cardsim:s:', '*', `cardsim:t-${RUN}`]) {
+      await expect(deleteRunKeys(api, prefix), prefix).rejects.toThrow(/refusing to delete/);
+    }
+    expect(() => runKeyPrefix('a*b')).toThrow(/not a run id/);
+  });
+
+  it('a simulator’s namespace is cardsim: or cardsim:<name>:, nothing else', () => {
+    expect(new SimulatorCardRailProvider(api, { account: 'x' }).keyPrefix).toBe(SIMULATOR_KEY_PREFIX);
+    for (const keyPrefix of ['other:', 'cardsim:*:', 'cardsim:a b:', 'cardsim:x']) {
+      expect(() => new SimulatorCardRailProvider(api, { account: 'x', keyPrefix }), keyPrefix).toThrow(/key prefix/);
+    }
+  });
+});
+
+describe('[AX297 F6] the templates’ blank settings read as unset', () => {
+  it('an EMPTY CARD_RAIL_ENVIRONMENT (as the templates ship it blank-or-sandbox) means sandbox, and an empty account means "simulator"', () => {
+    const made = getCardRailProvider({ redis: api }, { NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_ENVIRONMENT: '', CARD_RAIL_ACCOUNT: '' });
+    expect(made.binding).toEqual({ provider: 'simulator', environment: 'sandbox', account: 'simulator' });
   });
 });

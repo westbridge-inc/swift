@@ -122,6 +122,16 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (cardRailV2 === '1') {
     throw new Error('FATAL: CARD_RAIL_V2=1 in production, but this build has no production card rail v2 provider (only the simulator, which production refuses). Refusing to start.');
   }
+  // [AX297 F5] Draining v2 after it was switched off is its own switch, held
+  // to the same rules: 1 or 0, and never 1 while production has no v2 provider
+  // (v2 has never run there, so there is nothing to drain).
+  const cardRailV2Drain = env['CARD_RAIL_V2_DRAIN'];
+  if (cardRailV2Drain !== undefined && cardRailV2Drain !== '' && cardRailV2Drain !== '0' && cardRailV2Drain !== '1') {
+    throw new Error('FATAL: CARD_RAIL_V2_DRAIN must be 1 or 0 in production. Refusing to start.');
+  }
+  if (cardRailV2Drain === '1') {
+    throw new Error('FATAL: CARD_RAIL_V2_DRAIN=1 in production, but this build has no production card rail v2 provider, so there is nothing to drain. Refusing to start.');
+  }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
   }

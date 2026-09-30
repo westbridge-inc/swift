@@ -4,7 +4,8 @@ import { join, relative } from 'node:path';
 import { Writable } from 'node:stream';
 import pino from 'pino';
 import { loggerRedactConfig } from '../utils/logger-config';
-import { cardRailV2Enabled } from '../utils/card-rail';
+import { cardRailV2DrainEnabled, cardRailV2Enabled } from '../utils/card-rail';
+import { cardRailWorkerSource } from '../modules/billing/card-rail-worker';
 import { INSTRUMENT_DTO_SELECT } from '../modules/billing/card-rail.service';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ const V2_FILES = [
   'modules/billing/card-rail.service.ts',
   'modules/billing/card-vault.ts',
   'modules/billing/card-observations.ts',
+  'modules/billing/card-rail-worker.ts',
 ];
 
 /** Every line of production source that names paymentToken. */
@@ -119,5 +121,35 @@ describe('CARD_RAIL_V2 defaults OFF', () => {
     expect(cardRailV2Enabled({})).toBe(false);
     for (const v of ['', '0', 'true', 'yes', 'on', ' 1']) expect(cardRailV2Enabled({ CARD_RAIL_V2: v }), v).toBe(false);
     expect(cardRailV2Enabled({ CARD_RAIL_V2: '1' })).toBe(true);
+  });
+});
+
+describe('[AX297 F5] with CARD_RAIL_V2 off the billing worker does no v2 work, unless CARD_RAIL_V2_DRAIN=1 asks it to drain', () => {
+  const redis = {} as never; // never touched: no provider is built here
+
+  it('draining is on only for exactly "1", and it is its own switch', () => {
+    expect(cardRailV2DrainEnabled({})).toBe(false);
+    for (const v of ['', '0', 'true', 'yes', ' 1']) expect(cardRailV2DrainEnabled({ CARD_RAIL_V2_DRAIN: v }), v).toBe(false);
+    expect(cardRailV2DrainEnabled({ CARD_RAIL_V2_DRAIN: '1' })).toBe(true);
+    expect(cardRailV2Enabled({ CARD_RAIL_V2_DRAIN: '1' })).toBe(false);
+  });
+
+  it('the worker wires a v2 provider only for CARD_RAIL_V2=1 or CARD_RAIL_V2_DRAIN=1, and builds none while wiring', () => {
+    for (const env of [{}, { CARD_RAIL_V2: '0' }, { CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '0' }, { CARD_RAIL_V2: 'true', CARD_RAIL_V2_DRAIN: 'yes' }]) {
+      expect(cardRailWorkerSource({ redis }, env), JSON.stringify(env)).toBeUndefined();
+    }
+    // Wired, but lazy: an invalid configuration throws only when v2 work asks for the provider.
+    for (const env of [{ CARD_RAIL_V2: '1' }, { CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1' }]) {
+      const source = cardRailWorkerSource({ redis }, env);
+      expect(typeof source, JSON.stringify(env)).toBe('function');
+      expect(() => source!()).toThrow(/CARD_RAIL_PROVIDER is not set/);
+    }
+  });
+
+  it('queue.ts wires card rail v2 only through those two functions: no provider and no card service of its own', () => {
+    const queue = read('jobs/queue.ts');
+    expect(queue).toContain('const cardRail = cardRailWorkerSource({ redis: ctx.redis });');
+    expect(queue).toMatch(/sweepCardSessions\(\{ prisma: ctx\.prisma, notifications: [^}]+, billing, cardRail \}\)/);
+    expect(queue).not.toMatch(/getCardRailProvider\(|new CardRailService\(/);
   });
 });

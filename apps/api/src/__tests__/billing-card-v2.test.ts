@@ -18,6 +18,7 @@ import {
   type CardSessionOutcome, type CreateCardSessionOutcome,
 } from '../providers/card/card-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
+import { cardRailWorkerSource } from '../modules/billing/card-rail-worker';
 
 // ---------------------------------------------------------------------------
 // [PT-1] The weekly fee on an enrolled card (CARD_RAIL_V2=1). The charge uses
@@ -419,5 +420,29 @@ describe('CARD_RAIL_V2 defaults OFF', () => {
     expect(await bill(p.subId)).toBe('failed');
     expect(fake.charges).toEqual([]);
     expect((await facts(p.subId)).failureNotes).toEqual(['Insufficient prepaid balance']);
+  });
+});
+
+describe('[AX297 F5] CARD_RAIL_V2 off: the worker billing asks no v2 provider about anything', () => {
+  it('a v2 charge already out is not retrieved (it stays UNKNOWN, counted); with a provider wired, as CARD_RAIL_V2_DRAIN=1 wires one, it is retrieved and booked once', async () => {
+    const p = await cardSub();
+    await card(p);
+    fake.mode = 'capture-then-timeout';
+    expect(await bill(p.subId)).toBe('pending'); // captured at the provider; the answer was lost
+    fake.retrieves.length = 0;
+
+    const workerOff = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), legacy, {}, cardRailWorkerSource({ redis: {} as never }, { CARD_RAIL_V2: '0' }));
+    await workerOff.reconcileUnknownCardCharges();
+    expect(fake.retrieves).toEqual([]);
+    let after = await facts(p.subId);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'UNKNOWN' })]);
+    expect(after.successes).toBe(0);
+
+    const workerDraining = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), legacy, {}, () => fake);
+    await workerDraining.reconcileUnknownCardCharges();
+    expect(fake.retrieves).toContain(`card:${p.subId}:${p.periodKey}:a0`);
+    after = await facts(p.subId);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'CAPTURED' })]);
+    expect([after.successes, after.ledger]).toEqual([1, 1]);
   });
 });

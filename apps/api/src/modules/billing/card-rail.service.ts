@@ -33,8 +33,9 @@ import { SIMULATOR_PAGE, SIMULATOR_PROVIDER } from '../../providers/card/simulat
 //   remove / list  the partner's cards, as brand, last 4 and expiry only [C9].
 //
 // The kill switch stops new sessions; returns, confirmations and the sweep
-// keep draining [C7]. The CARD_RAIL_V2 flag gates new sessions only, for the
-// same reason: whatever already exists is always resolved.
+// keep draining [C7]. The CARD_RAIL_V2 flag gates new sessions here, and the
+// billing worker sweeps existing ones only while v2 is on, or under the
+// explicit CARD_RAIL_V2_DRAIN=1 (card-rail-worker.ts) [AX297 F5].
 // ---------------------------------------------------------------------------
 
 /** The off-session consent the partner accepts before enrolling a card: Swift
@@ -103,6 +104,34 @@ function sessionDto(s: CardSession): CardSessionDto {
   };
 }
 
+/** [PT-1 · AX297 F1] Review-only concurrency seams. Production never supplies these. */
+export interface CardRailObserver {
+  /** Inside a card removal's or replacement's transaction, before it takes any lock. */
+  beforeCardLocks?: (subscriptionId: string, tx: Prisma.TransactionClient) => Promise<void>;
+  /** Inside the same transaction, the moment payer -> subscription -> card
+   *  are locked and before the change is written. */
+  afterCardLocked?: (subscriptionId: string, tx: Prisma.TransactionClient) => Promise<void>;
+}
+
+/**
+ * [PT-1 · AX297 F1] payer -> subscription: the locks billing's dispatch
+ * authorization takes (lockPaymentOutcomeAuthority) before it locks the card
+ * it is about to charge. Everything that changes WHICH card a subscription
+ * charges takes the same two, in the same order, and then the card: a
+ * removal or replacement that commits first is seen by the authorization,
+ * and one that arrives while a charge is being authorized waits for it.
+ */
+async function lockCardAuthority(tx: Prisma.TransactionClient, subscriptionId: string): Promise<void> {
+  const owner = await tx.subscription.findUnique({
+    where: { id: subscriptionId },
+    select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
+  });
+  const payerUserId = owner?.rider?.userId ?? owner?.driver?.userId ?? owner?.vendor?.owner.userId;
+  if (!payerUserId) throw new AppError(500, 'ORPHAN_SUBSCRIPTION', `Subscription ${subscriptionId} has no payer`);
+  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${payerUserId} FOR UPDATE`;
+  await tx.$queryRaw`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE`;
+}
+
 export class CardRailService {
   private provider?: CardRailProvider;
 
@@ -111,9 +140,10 @@ export class CardRailService {
     private readonly notifications: NotificationService,
     private readonly billing: BillingService,
     private readonly cardRail: CardRailSource,
-    /** Where the provider sends the browser back: the public API origin
-     *  (defaults to API_PUBLIC_URL; relative when unset). */
-    private readonly opts: { returnUrlBase?: string } = {},
+    /** returnUrlBase: where the provider sends the browser back, the public
+     *  API origin (defaults to API_PUBLIC_URL; relative when unset).
+     *  observer: test-only seams (CardRailObserver). */
+    private readonly opts: { returnUrlBase?: string; observer?: CardRailObserver } = {},
   ) {}
 
   private rail(): CardRailProvider {
@@ -392,9 +422,15 @@ export class CardRailService {
     const result = await this.prisma.$transaction(async (tx) => {
       const fresh = await this.lockSession(tx, session.id);
       if (!fresh || !LIVE.includes(fresh.status)) return { lost: fresh };
-      await tx.$queryRaw`SELECT "id" FROM "subscriptions" WHERE "id" = ${fresh.subscriptionId} FOR UPDATE`;
+      await this.opts.observer?.beforeCardLocks?.(fresh.subscriptionId, tx);
+      // [AX297 F1] payer -> subscription -> the card this replaces: a weekly
+      // charge being authorized on that card finishes first, or sees it REPLACED.
+      await lockCardAuthority(tx, fresh.subscriptionId);
       await recordCardObservation(tx, this.observation(fresh, 'CONFIRM', outcome.rawSha256, 'SUCCEEDED', 'ACCEPTED'));
-      const previous = await tx.paymentInstrument.findFirst({ where: { subscriptionId: fresh.subscriptionId, status: 'ACTIVE' }, select: { id: true } });
+      const [previous] = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "payment_instruments" WHERE "subscriptionId" = ${fresh.subscriptionId} AND "status" = 'ACTIVE' FOR UPDATE
+      `;
+      await this.opts.observer?.afterCardLocked?.(fresh.subscriptionId, tx);
       if (previous) await tx.paymentInstrument.update({ where: { id: previous.id }, data: { status: 'REPLACED', replacedAt: now } });
       const instrument = await tx.paymentInstrument.create({
         data: {
@@ -481,17 +517,18 @@ export class CardRailService {
     });
     if (!paymentId) return this.resultOf(await this.prisma.cardSession.findUniqueOrThrow({ where: { id: session.id } }));
 
-    const disposition = await this.billing.settleHostedCardPayment({
+    const settled = await this.billing.settleHostedCardPayment({
       subscriptionId: session.subscriptionId, paymentId, providerRef: outcome.providerRef, now,
     });
-    if (disposition === 'advanced' || disposition === 'banked') {
+    if (settled.outcome === 'advanced' || settled.outcome === 'banked') {
       await this.prisma.cardSession.updateMany({ where: { id: session.id, status: { in: LIVE } }, data: { status: 'SUCCEEDED', confirmedAt: now, failureCode: null } });
-      if (disposition === 'banked') await this.noticeBanked(session, paymentId);
-      return { sessionId: session.id, purpose: 'PAY_NOW', status: 'SUCCEEDED', settlement: disposition };
+      if (settled.outcome === 'banked') await this.noticeBanked(session, paymentId);
+      return { sessionId: session.id, purpose: 'PAY_NOW', status: 'SUCCEEDED', settlement: settled.outcome };
     }
-    // Captured, but it could not be booked (the wallet's currency differs, or
-    // the payment row can no longer be claimed): a person decides.
-    return this.hold(session, null, disposition === 'held' ? 'WALLET_CURRENCY_MISMATCH' : 'NOT_SETTLED', now);
+    // Captured, but it could not be booked (the wallet holds another currency,
+    // the currency it was issued in cannot be vouched for, or the payment row
+    // can no longer be claimed): a person decides.
+    return this.hold(session, null, settled.outcome === 'held' ? settled.failureCode : 'NOT_SETTLED', now);
   }
 
   // -------------------------------------------------------------------------
@@ -617,7 +654,8 @@ export class CardRailService {
    * (an unused enrolment) or asked about (a Pay now, or an enrolment whose
    * return was accepted in time); an UNKNOWN session is asked again at most
    * every ten minutes, least recently asked first. One session's failure
-   * never stops the sweep. Not stopped by the kill switch or the flag [C7].
+   * never stops the sweep. Not stopped by the kill switch [C7]; the worker
+   * runs it only while v2 is on or draining (card-rail-worker.ts) [AX297 F5].
    */
   async sweepSessions(now = new Date()): Promise<{ checked: number; succeeded: number; failed: number; expired: number; unknown: number; held: number; errors: number }> {
     const out = { checked: 0, succeeded: 0, failed: 0, expired: 0, unknown: 0, held: 0, errors: 0 };
@@ -681,6 +719,14 @@ export class CardRailService {
       throw new NotFoundError('Card', input.instrumentId);
     });
     await this.prisma.$transaction(async (tx) => {
+      await this.opts.observer?.beforeCardLocks?.(found.subscriptionId, tx);
+      // [AX297 F1] payer -> subscription -> card, the order billing's dispatch
+      // authorization takes: a charge being authorized on this card finishes
+      // first (and is reconciled like any other), or it sees the card REVOKED
+      // and sends nothing.
+      await lockCardAuthority(tx, found.subscriptionId);
+      await tx.$queryRaw`SELECT "id" FROM "payment_instruments" WHERE "id" = ${found.id} FOR UPDATE`;
+      await this.opts.observer?.afterCardLocked?.(found.subscriptionId, tx);
       const revoked = await tx.paymentInstrument.updateMany({
         where: { id: found.id, status: 'ACTIVE' },
         data: { status: 'REVOKED', revokedAt: now, revokedBy: input.userId },

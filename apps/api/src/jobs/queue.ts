@@ -477,11 +477,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { SubscriptionService } = await import('../modules/subscription/subscription.service');
       const { NotificationService } = await import('../modules/notification/notification.service');
       const { getPaymentProvider } = await import('../providers/payment/payment-provider');
-      const { getCardRailProvider } = await import('../providers/card/card-rail-factory');
+      const { cardRailWorkerSource, sweepCardSessions } = await import('../modules/billing/card-rail-worker');
 
-      // [PT-1] Card rail v2's provider is resolved lazily — only v2 work asks —
-      // on this worker's own Redis, where the simulator keeps its state.
-      const cardRail = () => getCardRailProvider({ redis: ctx.redis });
+      // [PT-1 · AX297 F5] Card rail v2: nothing at all unless CARD_RAIL_V2=1
+      // (or CARD_RAIL_V2_DRAIN=1 to drain what exists). When wired, the
+      // provider is resolved lazily on this worker's own Redis, where the
+      // simulator keeps its state.
+      const cardRail = cardRailWorkerSource({ redis: ctx.redis });
       const billing = new BillingService(
         ctx.prisma,
         new NotificationService(ctx.prisma, ctx.io),
@@ -594,11 +596,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ctx.log.warn(cards, '[M-01] unknown card charge intents reconciled');
           }
           // [PT-1] Card rail v2 sessions: an unused page past its window closes,
-          // and a Pay now that may have moved money is asked again. Neither the
-          // flag nor the kill switch stops this — what exists always drains [C7].
-          const { CardRailService } = await import('../modules/billing/card-rail.service');
-          const cardSessions = await new CardRailService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), billing, cardRail).sweepSessions();
-          if (cardSessions.checked > 0) ctx.log.info(cardSessions, '[PT-1] card sessions swept');
+          // and a Pay now that may have moved money is asked again. The kill
+          // switch never stops this [C7]; with CARD_RAIL_V2 off it runs only
+          // under the explicit CARD_RAIL_V2_DRAIN=1 [AX297 F5].
+          const cardSessions = await sweepCardSessions({ prisma: ctx.prisma, notifications: new NotificationService(ctx.prisma, ctx.io), billing, cardRail });
+          if (cardSessions && cardSessions.checked > 0) ctx.log.info(cardSessions, '[PT-1] card sessions swept');
           // [M-18] The historical double credits: one provider transaction
           // credited by more than one channel before the identity existed.
           // Reported and paged for human reconciliation, never reversed here.

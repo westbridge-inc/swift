@@ -211,6 +211,13 @@ export interface BillingObserver {
   /** Runs after an intent exists but before the authority transaction that
    *  linearizes permission to send a new provider effect. Test-only. */
   beforeProviderEffectAuthorization?: (subscriptionId: string, paymentId: string, rail: 'CARD' | 'MOBILE_MONEY') => Promise<void>;
+  /** [PT-1 · AX297 F1] Card rail v2 weekly charge. The first runs after the
+   *  cycle has read the card and opened its vault, before the transaction
+   *  that locks payer -> subscription -> card and creates the authorized
+   *  intent; the second runs inside that transaction the moment the card row
+   *  is locked. Test-only. */
+  beforeInstrumentChargeAuthorization?: (subscriptionId: string, instrumentId: string) => Promise<void>;
+  afterInstrumentChargeLocked?: (subscriptionId: string, instrumentId: string, tx: Prisma.TransactionClient) => Promise<void>;
 }
 
 /** [M-08] What a top-up command answers — stored with the command, replayed verbatim. */
@@ -793,11 +800,24 @@ export class BillingService {
     // Opened before anything is reserved: a vault that cannot open leaves no intent behind.
     const vaultToken = await openVaultToken(instrument);
     const intended: ChargedAmount = { amountMinor: toProviderMinor(amount, sub.currencyCode, 'card.v2.weekly'), currencyCode: sub.currencyCode };
-    const reserved = await this.reserveInstrumentIntent(sub, amount, key, instrument.id, now);
-    if (!reserved) return { ok: false, deferred: true }; // a concurrent run holds this attempt
-    if (!await this.authorizeProviderEffect(sub, reserved.id, 'CARD', now)) {
-      return { ok: false, dispatchRevoked: true, intentId: reserved.id, rail: 'CARD' };
+    // [AX297 F1] Everything above read the card WITHOUT a lock. Whether it may
+    // be charged is decided under payer -> subscription -> card, where the
+    // intent is created already authorized.
+    const authorized = await this.authorizeInstrumentCharge(sub, { amount, key, instrumentId: instrument.id, now });
+    switch (authorized.outcome) {
+      case 'authorized': break;
+      case 'busy': return { ok: false, deferred: true }; // a concurrent run holds this attempt
+      case 'revoked': return { ok: false, dispatchRevoked: true, intentId: authorized.intentId, rail: 'CARD' };
+      case 'card_changed':
+        // Removed or replaced after the read above: nothing was sent and
+        // nothing counts against the partner. The attempt has no intent, so
+        // the cycle takes it from the top once it is stale (reclaimStaleAttempt)
+        // and bills whatever card is on file then.
+        log().warn({ subscriptionId: sub.id, instrumentId: instrument.id, cardStatus: authorized.cardStatus }, '[PT-1 AX297-F1] card left service before the charge was authorized — nothing sent, nobody penalised');
+        return { ok: false, deferred: true };
+      default: return assertNever(authorized, 'instrument charge authorization');
     }
+    const reserved = { id: authorized.intentId };
 
     const result = await cardRail.chargeInstrument({ binding, vaultToken, idempotencyKey: key, ...intended });
     await this.observer.afterProviderReturned?.({ status: result.status, providerRef: result.providerRef ?? '' });
@@ -848,12 +868,18 @@ export class BillingService {
       await this.alertCardBindingMismatch(sub, instrument, cardRail.binding);
       return { status: 'unknown', reason: `Bound to ${describeBinding(binding)}, not the configured provider` };
     }
-    // The currency the attempt was issued in (its pinned event), as the charge path sent it.
+    // The currency the attempt was issued in (its pinned event), as the charge
+    // path sent it. [AX297 F2] Never the subscription's current currency: an
+    // attempt with no record of its own cannot be judged, so it is not.
     const attempt = await this.prisma.billingEvent.findUnique({
       where: { idempotencyKey: `charge:${row.clientKey.slice('card:'.length)}` },
       select: { currencyCode: true },
     });
-    const currencyCode = attempt?.currencyCode ?? sub.currencyCode;
+    if (!attempt) {
+      log().error({ paymentId: row.id, subscriptionId: sub.id }, '[PT-1 AX297-F2] card intent has no charge-attempt record — its currency is unknown, so it is not judged');
+      return { status: 'unknown', reason: 'The charge attempt this intent belongs to has no record, so its currency is unknown' };
+    }
+    const currencyCode = attempt.currencyCode;
     const intended: ChargedAmount = { amountMinor: toProviderMinor(Number(row.amount), currencyCode, 'card.v2.retrieve'), currencyCode };
     const answer = await cardRail.retrieve({ binding, idempotencyKey: row.clientKey, ...(row.externalRef ? { providerRef: row.externalRef } : {}) });
     const verdict = await this.judgeInstrumentAnswer(sub, instrument, row.id, 'RETRIEVE', answer, intended, now);
@@ -907,25 +933,84 @@ export class BillingService {
     }
   }
 
-  private async reserveInstrumentIntent(sub: SubWithRelations, amount: number, reference: string, instrumentId: string, now: Date): Promise<{ id: string } | null> {
+  /**
+   * [PT-1 · AX297 F1] The linearization point of a weekly card charge. ONE
+   * transaction locks payer -> subscription -> card (the order a partner
+   * removing a card and an enrolment replacing one also take), re-reads the
+   * card there, and creates this attempt's intent already AUTHORIZED; the
+   * provider is asked only after it commits.
+   *
+   *  - The card is no longer this subscription's ACTIVE card (a removal or
+   *    replacement committed after the unlocked read): no intent at all, no
+   *    effect, no strike. The attempt waits for the next cycle.
+   *  - A removal or replacement arriving while this holds the locks waits for
+   *    it, and follows a charge that was authorized while the card was active
+   *    (reconciled like any other).
+   *  - Cancellation, deletion or a hold won (the lifecycle rule of
+   *    authorizeProviderEffect): the intent is written as terminal NOT_SENT
+   *    evidence, exactly as the legacy path leaves it.
+   *  - Another run already holds this attempt's key: busy, nothing written.
+   *
+   * No intent is ever left NOT_SENT for a card that left service, so an
+   * attempt never waits on one forever.
+   */
+  private async authorizeInstrumentCharge(
+    sub: SubWithRelations,
+    input: { amount: number; key: string; instrumentId: string; now: Date },
+  ): Promise<
+    | { outcome: 'authorized'; intentId: string }
+    | { outcome: 'revoked'; intentId: string }
+    | { outcome: 'card_changed'; cardStatus: string }
+    | { outcome: 'busy' }
+  > {
+    await this.observer.beforeInstrumentChargeAuthorization?.(sub.id, input.instrumentId);
+    const { amount, key, instrumentId, now } = input;
     try {
-      return await this.prisma.subscriptionPayment.create({
-        data: {
-          subscriptionId: sub.id,
-          amount,
-          status: 'UNKNOWN',
-          paymentMethod: 'CARD',
-          clientKey: reference,
-          instrumentId,
-          failureRaw: { providerEffect: 'NOT_SENT', providerRail: 'CARD' },
-          expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
-          periodStart: sub.nextBillingDate,
-          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
-        },
-        select: { id: true },
+      return await this.prisma.$transaction(async (tx) => {
+        const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
+        const [card] = await tx.$queryRaw<Array<{ status: string; subscriptionId: string }>>`
+          SELECT "status", "subscriptionId" FROM "payment_instruments" WHERE "id" = ${instrumentId} FOR UPDATE
+        `;
+        await this.observer.afterInstrumentChargeLocked?.(sub.id, instrumentId, tx);
+        if (!card || card.subscriptionId !== sub.id || card.status !== 'ACTIVE') {
+          return { outcome: 'card_changed' as const, cardStatus: card?.status ?? 'MISSING' };
+        }
+        const maySend = !await this.subscriptionHasMmgApprovalHold(tx, sub.id)
+          && !authority.bankInsteadOfAdvance
+          && !authority.suppressNotice
+          && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
+        const intent = await tx.subscriptionPayment.create({
+          data: {
+            subscriptionId: sub.id,
+            amount,
+            paymentMethod: 'CARD',
+            clientKey: key,
+            instrumentId,
+            expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
+            periodStart: sub.nextBillingDate,
+            periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+            ...(maySend
+              ? { status: 'UNKNOWN' as const, failureRaw: { providerEffect: 'AUTHORIZED', providerRail: 'CARD', authorizedAt: now.toISOString() } }
+              : {
+                  status: 'EXPIRED' as const,
+                  failureCode: 'DISPATCH_REVOKED' satisfies NormalizedFailure,
+                  failureRaw: {
+                    providerEffect: 'NOT_SENT',
+                    providerRail: 'CARD',
+                    revokedAt: now.toISOString(),
+                    subscriptionOutcome: PRESERVED_NO_DUNNING,
+                    subscriptionStatus: authority.status,
+                    recoveryDisposition: 'NO_PROVIDER_EFFECT',
+                  },
+                }),
+          },
+          select: { id: true },
+        });
+        return maySend ? { outcome: 'authorized' as const, intentId: intent.id } : { outcome: 'revoked' as const, intentId: intent.id };
       });
     } catch (error) {
-      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') return null;
+      // The key is unique: a concurrent run created this attempt's intent first.
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') return { outcome: 'busy' };
       throw error;
     }
   }
@@ -1077,7 +1162,9 @@ export class BillingService {
    * row's compare-and-set and the success / bank event keys make a repeat a
    * no-op. Returns what durably happened.
    */
-  async settleHostedCardPayment(input: { subscriptionId: string; paymentId: string; providerRef: string; now?: Date }): Promise<'advanced' | 'banked' | 'held' | 'not_settled'> {
+  async settleHostedCardPayment(input: { subscriptionId: string; paymentId: string; providerRef: string; now?: Date }): Promise<
+    { outcome: 'advanced' | 'banked' | 'not_settled' } | { outcome: 'held'; failureCode: string }
+  > {
     const now = input.now ?? new Date();
     const [sub, payment] = await Promise.all([
       this.prisma.subscription.findUnique({
@@ -1090,17 +1177,22 @@ export class BillingService {
       }),
       this.prisma.subscriptionPayment.findUnique({ where: { id: input.paymentId } }),
     ]);
-    if (!sub || !payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== 'CARD') return 'not_settled';
+    if (!sub || !payment || payment.subscriptionId !== sub.id || payment.paymentMethod !== 'CARD') return { outcome: 'not_settled' };
     const periodKey = payment.periodStart.toISOString().slice(0, 10);
+    // The amount and currency booked are the SESSION's, read inside the
+    // settlement transaction (applySuccessfulChargeInTx) — never this
+    // snapshot's current currency [AX297 F2].
     await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), input.providerRef, now, periodKey, payment.id);
     const [after, banked] = await Promise.all([
       this.prisma.subscriptionPayment.findUnique({ where: { id: payment.id } }),
       this.prisma.billingEvent.findUnique({ where: { idempotencyKey: `bank:${payment.id}` }, select: { id: true } }),
     ]);
-    if (banked) return 'banked';
-    if (after?.status === 'CAPTURED' && after.externalRef === input.providerRef) return 'advanced';
-    if (after?.failureCode === 'WALLET_CURRENCY_MISMATCH') return 'held';
-    return 'not_settled';
+    if (banked) return { outcome: 'banked' };
+    if (after?.status === 'CAPTURED' && after.externalRef === input.providerRef) return { outcome: 'advanced' };
+    if (after?.failureCode === 'WALLET_CURRENCY_MISMATCH' || after?.failureCode === 'CURRENCY_UNPINNED') {
+      return { outcome: 'held', failureCode: after.failureCode };
+    }
+    return { outcome: 'not_settled' };
   }
 
   private amountFor(sub: Subscription): Prisma.Decimal | number {
@@ -1600,18 +1692,44 @@ export class BillingService {
       if (payment?.paymentMethod === 'CARD') {
         if (payment.subscriptionId !== sub.id || !['UNKNOWN', 'CAPTURED'].includes(payment.status)) return 'skipped';
         const originalPeriodKey = payment.periodStart.toISOString().slice(0, 10);
-        const [banked, covered, originalAttempt] = await Promise.all([
+        const payNowSessionId = payment.clientKey?.startsWith(CARD_PAY_NOW_KEY_PREFIX)
+          ? payment.clientKey.slice(CARD_PAY_NOW_KEY_PREFIX.length)
+          : null;
+        const [banked, covered, originalAttempt, payNowSession] = await Promise.all([
           tx.billingEvent.findUnique({ where: { idempotencyKey: `bank:${payment.id}` } }),
           tx.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${originalPeriodKey}` } }),
           payment.clientKey?.startsWith(`card:${sub.id}:`)
             ? tx.billingEvent.findUnique({ where: { idempotencyKey: `charge:${payment.clientKey.slice(5)}` } })
+            : Promise.resolve(null),
+          payNowSessionId
+            ? tx.cardSession.findUnique({ where: { id: payNowSessionId }, select: { subscriptionId: true, paymentId: true, amount: true, currencyCode: true } })
             : Promise.resolve(null),
         ]);
         if (banked || (payment.status === 'CAPTURED' && covered?.paymentRef === payment.externalRef)) return 'skipped';
         if (!paymentRef || (payment.externalRef && payment.externalRef !== paymentRef)) {
           throw new AppError(409, 'CARD_REFERENCE_MISMATCH', 'Card capture does not match the durable intent');
         }
-        const currencyCode = originalAttempt?.currencyCode ?? sub.currencyCode;
+        // [PT-1 · AX297 F2] A capture is booked in the currency it was priced,
+        // sent and checked in, pinned where it was issued: a hosted Pay now's
+        // SESSION (amount and currency frozen at the database), a weekly
+        // attempt's CHARGE_ATTEMPT event. Never the subscription's current
+        // currency, which may have changed since. A v2 capture whose issuing
+        // record cannot vouch for it is held for a person, never guessed.
+        // (Legacy card intents keep their existing reading.)
+        const currencyCode = payNowSessionId
+          ? (payNowSession
+            && payNowSession.subscriptionId === sub.id
+            && payNowSession.paymentId === payment.id
+            && payNowSession.amount?.equals(payment.amount)
+            ? payNowSession.currencyCode
+            : null)
+          : payment.instrumentId
+            ? originalAttempt?.currencyCode ?? null
+            : originalAttempt?.currencyCode ?? sub.currencyCode;
+        if (!currencyCode) {
+          await this.holdUnpinnedCardCapture(tx, payment, paymentRef);
+          return 'held';
+        }
         const bankCapture = mmgHeld || covered || !this.successfulChargeAuthorityAllowsAdvance(authority, sub);
         if (bankCapture && await this.holdWalletCurrencyMismatch(tx, payment, currencyCode, paymentRef)) return 'held';
         const claimed = await tx.subscriptionPayment.updateMany({
@@ -1849,6 +1967,26 @@ export class BillingService {
       });
     }
     return { notify: !existingEvent };
+  }
+
+  /** [PT-1 · AX297 F2] A v2 card capture whose issuing record (its Pay-now
+   * session, or its weekly CHARGE_ATTEMPT) cannot vouch for its currency is
+   * not booked in any currency. The intent keeps the provider reference and
+   * one manual-reconciliation fact; a person decides. Caller owns the payer,
+   * subscription and payment locks. */
+  private async holdUnpinnedCardCapture(tx: Prisma.TransactionClient, payment: SubscriptionPayment, providerRef: string): Promise<void> {
+    const existing = payment.failureRaw && typeof payment.failureRaw === 'object' && !Array.isArray(payment.failureRaw)
+      ? payment.failureRaw : {};
+    await tx.subscriptionPayment.update({
+      where: { id: payment.id },
+      data: {
+        status: 'UNKNOWN',
+        externalRef: providerRef,
+        failureCode: 'CURRENCY_UNPINNED' satisfies NormalizedFailure,
+        failureRaw: { ...existing, providerOutcome: 'CAPTURED', recoveryDisposition: 'MANUAL_RECONCILIATION' },
+      },
+    });
+    log().error({ paymentId: payment.id, subscriptionId: payment.subscriptionId }, '[PT-1 AX297-F2] captured card payment has no record of the currency it was issued in — held, nothing booked');
   }
 
   /** The payment holds the current quarantine; append-only billing events

@@ -704,4 +704,15 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });
+
+  // [AX297 F5] Draining v2 after a switch-off is its own switch, held to the same rules.
+  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and never 1 in production: there is nothing there to drain', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/FATAL: CARD_RAIL_V2_DRAIN=1/);
+    for (const value of ['true', 'yes', '2', ' 1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: value }), value).toThrow(/CARD_RAIL_V2_DRAIN must be 1 or 0/);
+    }
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: undefined })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
+  });
 });

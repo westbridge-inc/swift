@@ -3,14 +3,15 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import Redis from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { nanoid } from 'nanoid';
-import type { SubscriptionStatus, UserRole } from '@prisma/client';
+import type { Prisma, SubscriptionStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { BillingService } from '../modules/billing/billing.service';
+import { BillingService, type BillingObserver } from '../modules/billing/billing.service';
 import { CARD_ON_FILE_CONSENT_VERSION, CARD_SESSION_TTL_MS, CardRailService } from '../modules/billing/card-rail.service';
+import { cardRailWorkerSource, sweepCardSessions } from '../modules/billing/card-rail-worker';
 import { openVaultToken } from '../modules/billing/card-vault';
 import { NotificationService } from '../modules/notification/notification.service';
 import { SandboxPaymentProvider } from '../providers/payment/payment-provider';
@@ -18,6 +19,7 @@ import { SimulatorCardRailProvider, type SimulatorScenario } from '../providers/
 import type { CardRailProvider } from '../providers/card/card-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
+import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
 
 // ---------------------------------------------------------------------------
 // [PT-1] The hosted card loop, end to end, on the real simulator and the real
@@ -31,6 +33,8 @@ const DAY = 24 * 60 * 60 * 1000;
 const RUN = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
 const PHONE = `+59200742${String(Date.now()).slice(-4)}`;
 const OTHER_TENANT = `pt1-card-${RUN.toLowerCase()}`;
+/** [AX297 F3] This run's own simulator namespace: the teardown deletes exactly it. */
+const PREFIX = runKeyPrefix(RUN);
 const WEEKLY = 12000;
 let app: FastifyInstance;
 let redis: Redis;
@@ -113,7 +117,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.ready();
   redis = new Redis(process.env['REDIS_URL']!);
-  sim = new SimulatorCardRailProvider(redis, { account: `pt1-${RUN}` });
+  sim = new SimulatorCardRailProvider(redis, { account: `pt1-${RUN}`, keyPrefix: PREFIX });
   notifications = new NotificationService(app.prisma, app.io);
   billing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), undefined, () => sim);
   card = new CardRailService(app.prisma, notifications, billing, () => sim);
@@ -142,8 +146,7 @@ afterAll(async () => {
     await app.prisma.tenant.updateMany({ where: { id: OTHER_TENANT }, data: { purgeProtected: false } });
     await app.prisma.tenant.deleteMany({ where: { id: OTHER_TENANT } });
   }, 'pt1-card-test');
-  const keys = await redis.keys('cardsim:*');
-  if (keys.length > 0) await redis.del(...keys);
+  await deleteRunKeys(redis, PREFIX);
   await redis.quit();
   await app.close();
 });
@@ -448,11 +451,344 @@ describe('[C2] a session belongs to the provider setup that opened it', () => {
     const p = await partner();
     const session = await start(p, 'ENROLL');
     await returnWith(await press(session.sessionId, 'APPROVE'));
-    const elsewhere = new SimulatorCardRailProvider(redis, { account: `pt1-${RUN}-elsewhere` });
+    const elsewhere = new SimulatorCardRailProvider(redis, { account: `pt1-${RUN}-elsewhere`, keyPrefix: PREFIX });
     expect(await cardWith(elsewhere).confirm(session.sessionId)).toMatchObject({ status: 'OPEN' });
     expect((await money(p.subId)).instruments).toHaveLength(0);
     const paged = await app.prisma.notification.count({ where: { data: { path: ['alert'], equals: 'card-session-binding-mismatch' } } });
     expect(paged).toBeGreaterThan(0);
     expect(await card.confirm(session.sessionId)).toMatchObject({ status: 'SUCCEEDED' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [AX297] Money review of PR #1375. Helpers shared by the race and currency
+// suites below.
+// ---------------------------------------------------------------------------
+
+/** The partner adds a card through the real loop; the ACTIVE row and its token. */
+async function enrolled(p: { userId: string; subId: string }, scenario: SimulatorScenario = 'APPROVE', svc: CardRailService = card) {
+  const s = await svc.startSession({ userId: p.userId, subscriptionId: p.subId, purpose: 'ENROLL', consentVersion: CARD_ON_FILE_CONSENT_VERSION });
+  await returnWith(await press(s.sessionId, scenario));
+  const done = await svc.confirm(s.sessionId);
+  const row = await app.prisma.paymentInstrument.findUniqueOrThrow({ where: { id: done.instrument!.id } });
+  return { id: row.id, token: await openVaultToken(row) };
+}
+
+/** The simulator, watched: every instrument charge that reaches the provider. */
+function watched(inner: CardRailProvider) {
+  const charges: Array<{ vaultToken: string; idempotencyKey: string }> = [];
+  const provider: CardRailProvider = {
+    binding: inner.binding,
+    simulator: inner.simulator,
+    createSession: (i) => inner.createSession(i),
+    parseReturn: (params) => inner.parseReturn(params),
+    confirm: (i) => inner.confirm(i),
+    chargeInstrument: async (i) => {
+      charges.push({ vaultToken: i.vaultToken, idempotencyKey: i.idempotencyKey });
+      return inner.chargeInstrument(i);
+    },
+    retrieve: (i) => inner.retrieve(i),
+    refund: (i) => inner.refund(i),
+  };
+  return { provider, charges };
+}
+
+/** The subscription as the billing cycle loads it. */
+const billable = async (subId: string) => (await app.prisma.subscription.findUniqueOrThrow({
+  where: { id: subId },
+  include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+})) as never;
+
+const failureNotes = async (subId: string) =>
+  (await app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' }, orderBy: { createdAt: 'asc' }, select: { note: true } })).map((e) => e.note);
+
+/** Past the reclaim window: the cycle takes a waiting attempt from the top. */
+const pastReclaim = () => new Date(Date.now() + 31 * 60_000);
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+async function backendPid(tx: Prisma.TransactionClient): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+  if (!row) throw new Error('no backend pid');
+  return row.pid;
+}
+
+/** A barrier with a deadline: an elapsed deadline fails, it never passes. */
+async function reached(barrier: Promise<void>, label: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([barrier, new Promise<never>((_r, reject) => { timer = setTimeout(() => reject(new Error(`${label}: barrier not reached`)), 5000); })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+/** PostgreSQL's own word that one backend waits on another. Polled; an elapsed
+ *  deadline is a failure, never evidence of blocking. */
+async function provenBlocked(waiter: () => number, holder: () => number, label: string) {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    if (waiter() && holder()) {
+      const [row] = await app.prisma.$queryRaw<Array<{ blockers: number[] }>>`SELECT pg_blocking_pids(${waiter()}::integer) AS blockers`;
+      if (row?.blockers.includes(holder())) return;
+    }
+    if (Date.now() > deadline) throw new Error(`${label}: not proven blocked`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+describe('[AX297 F1] a card that leaves service after billing read it is never charged', () => {
+  it('REMOVED between billing reading it ACTIVE and the charge being authorized: never charged, nobody penalised; the attempt waits, and the next cycle bills whatever card is on file then', async () => {
+    const due = new Date(Date.now() - DAY);
+    const p = await partner({ due });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    let removed = false;
+    const removeOnce = async () => {
+      if (removed) return;
+      removed = true;
+      await card.removeInstrument({ userId: p.userId, instrumentId: x.id });
+    };
+    // Both seams sit at the same point of the race: after the cycle read the card
+    // ACTIVE, before the charge was authorized. (The pre-fix code offers the
+    // first; the fixed code the second.)
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
+      beforeProviderEffectAuthorization: removeOnce,
+      beforeInstrumentChargeAuthorization: removeOnce,
+    } as BillingObserver, () => provider);
+
+    const outcome = await racing.billSubscription(await billable(p.subId));
+    expect(removed).toBe(true);
+    expect(charges, 'the REMOVED card was charged').toEqual([]);
+    expect(outcome).toBe('pending');
+    const after = await money(p.subId);
+    expect(after.instruments.map((i) => [i.id, i.status])).toEqual([[x.id, 'REVOKED']]);
+    expect(after.sub).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
+    expect(after.sub.nextBillingDate.getTime()).toBe(due.getTime());
+    // No intent was created for the removed card, and nothing counts against the partner.
+    expect(after.payments).toEqual([]);
+    expect([after.successes, (await failureNotes(p.subId)).length]).toEqual([0, 0]);
+
+    // Not stuck: past the reclaim window the next cycle bills the card on file
+    // then. There is none, which is the ordinary "no card" outcome for a partner
+    // who removed their card; the removed card is still never charged.
+    expect(await racing.billSubscription(await billable(p.subId), pastReclaim())).toBe('failed');
+    expect(charges).toEqual([]);
+    expect(await failureNotes(p.subId)).toEqual([expect.stringMatching(/^There is no card on file/)]);
+  });
+
+  it('REPLACED in the same window: the old card is never charged; the next cycle charges the NEW card, once', async () => {
+    const due = new Date(Date.now() - DAY);
+    const p = await partner({ due });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    let y: { id: string; token: string } | undefined;
+    const replaceOnce = async () => {
+      if (y) return;
+      y = await enrolled(p, 'APPROVE');
+    };
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
+      beforeProviderEffectAuthorization: replaceOnce,
+      beforeInstrumentChargeAuthorization: replaceOnce,
+    } as BillingObserver, () => provider);
+
+    const outcome = await racing.billSubscription(await billable(p.subId));
+    expect(y).toBeDefined();
+    expect(charges.map((c) => c.vaultToken), 'the REPLACED card was charged').not.toContain(x.token);
+    expect(charges).toEqual([]);
+    expect(outcome).toBe('pending');
+    let after = await money(p.subId);
+    expect(after.instruments.map((i) => [i.id, i.status])).toEqual([[x.id, 'REPLACED'], [y!.id, 'ACTIVE']]);
+    expect([after.payments.length, after.successes, (await failureNotes(p.subId)).length]).toEqual([0, 0, 0]);
+
+    expect(await racing.billSubscription(await billable(p.subId), pastReclaim())).toBe('succeeded');
+    expect(charges.map((c) => c.vaultToken)).toEqual([y!.token]);
+    after = await money(p.subId);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'CAPTURED', instrumentId: y!.id })]);
+    expect([after.successes, after.ledger]).toEqual([1, 1]);
+    expect(after.sub.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
+  });
+
+  it('[lock order] the REMOVAL holds payer, subscription and card: the charge authorization waits on it, then sees REVOKED; never charged, no deadlock', async () => {
+    const p = await partner({ due: new Date(Date.now() - DAY) });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    const billingRead = deferred(); const releaseBilling = deferred();
+    const removalHolds = deferred(); const releaseRemoval = deferred();
+    let billingPid = 0; let removalPid = 0;
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
+      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; },
+      beforeLateMmgAuthorityLock: async (subscriptionId, tx) => { if (subscriptionId === p.subId && !billingPid) billingPid = await backendPid(tx); },
+    }, () => provider);
+    const cards = new CardRailService(app.prisma, notifications, racing, () => provider, {
+      observer: { afterCardLocked: async (_s, tx) => { removalPid = await backendPid(tx); removalHolds.resolve(); await releaseRemoval.promise; } },
+    });
+
+    const bill = racing.billSubscription(await billable(p.subId));
+    let removal: Promise<unknown> | undefined;
+    try {
+      await reached(billingRead.promise, 'billing read the card ACTIVE');
+      removal = cards.removeInstrument({ userId: p.userId, instrumentId: x.id });
+      await reached(removalHolds.promise, 'the removal holds its locks');
+      releaseBilling.resolve();
+      await provenBlocked(() => billingPid, () => removalPid, 'the charge authorization');
+    } finally {
+      releaseBilling.resolve();
+      releaseRemoval.resolve();
+      await Promise.allSettled([bill, ...(removal ? [removal] : [])]);
+    }
+    const outcomes = await Promise.allSettled([bill, removal!]);
+    expect(outcomes.map((o) => o.status), JSON.stringify(outcomes.map((o) => (o.status === 'rejected' ? String(o.reason) : 'ok')))).toEqual(['fulfilled', 'fulfilled']);
+    expect(charges, 'the REMOVED card was charged').toEqual([]);
+    expect((outcomes[0] as PromiseFulfilledResult<string>).value).toBe('pending');
+    const after = await money(p.subId);
+    expect(after.instruments.map((i) => i.status)).toEqual(['REVOKED']);
+    expect([after.payments.length, after.successes, (await failureNotes(p.subId)).length, after.sub.failedAttempts]).toEqual([0, 0, 0, 0]);
+  });
+
+  it('[lock order] a REPLACEMENT holds the old card: the authorization waits, then sees REPLACED; only the new card is ever charged', async () => {
+    const due = new Date(Date.now() - DAY);
+    const p = await partner({ due });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    const billingRead = deferred(); const releaseBilling = deferred();
+    const replacementHolds = deferred(); const releaseReplacement = deferred();
+    let billingPid = 0; let replacementPid = 0;
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
+      beforeInstrumentChargeAuthorization: async () => { billingRead.resolve(); await releaseBilling.promise; },
+      beforeLateMmgAuthorityLock: async (subscriptionId, tx) => { if (subscriptionId === p.subId && !billingPid) billingPid = await backendPid(tx); },
+    }, () => provider);
+    const cards = new CardRailService(app.prisma, notifications, racing, () => provider, {
+      observer: { afterCardLocked: async (_s, tx) => { replacementPid = await backendPid(tx); replacementHolds.resolve(); await releaseReplacement.promise; } },
+    });
+    const next = await cards.startSession({ userId: p.userId, subscriptionId: p.subId, purpose: 'ENROLL', consentVersion: CARD_ON_FILE_CONSENT_VERSION });
+    await returnWith(await press(next.sessionId, 'APPROVE'));
+
+    const bill = racing.billSubscription(await billable(p.subId));
+    let replace: Promise<unknown> | undefined;
+    try {
+      await reached(billingRead.promise, 'billing read the card ACTIVE');
+      replace = cards.confirm(next.sessionId);
+      await reached(replacementHolds.promise, 'the replacement holds its locks');
+      releaseBilling.resolve();
+      await provenBlocked(() => billingPid, () => replacementPid, 'the charge authorization');
+    } finally {
+      releaseBilling.resolve();
+      releaseReplacement.resolve();
+      await Promise.allSettled([bill, ...(replace ? [replace] : [])]);
+    }
+    const outcomes = await Promise.allSettled([bill, replace!]);
+    expect(outcomes.map((o) => o.status), JSON.stringify(outcomes.map((o) => (o.status === 'rejected' ? String(o.reason) : 'ok')))).toEqual(['fulfilled', 'fulfilled']);
+    expect(charges, 'the REPLACED card was charged').toEqual([]);
+    const [old, current] = (await money(p.subId)).instruments;
+    expect([old!.id, old!.status, current!.status]).toEqual([x.id, 'REPLACED', 'ACTIVE']);
+
+    expect(await racing.billSubscription(await billable(p.subId), pastReclaim())).toBe('succeeded');
+    expect(charges.map((c) => c.vaultToken)).toEqual([await openVaultToken(current!)]);
+    expect((await money(p.subId)).sub.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
+  });
+
+  it('[lock order] the AUTHORIZATION holds the card: a removal waits for it; the charge authorized while the card was ACTIVE goes out once, and the card is REVOKED after', async () => {
+    const due = new Date(Date.now() - DAY);
+    const p = await partner({ due });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    const billingHolds = deferred(); const releaseBilling = deferred(); const removalArrived = deferred();
+    let billingPid = 0; let removalPid = 0;
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
+      afterInstrumentChargeLocked: async (_s, _i, tx) => { billingPid = await backendPid(tx); billingHolds.resolve(); await releaseBilling.promise; },
+    }, () => provider);
+    const cards = new CardRailService(app.prisma, notifications, racing, () => provider, {
+      observer: { beforeCardLocks: async (_s, tx) => { removalPid = await backendPid(tx); removalArrived.resolve(); } },
+    });
+
+    const bill = racing.billSubscription(await billable(p.subId));
+    let removal: Promise<unknown> | undefined;
+    try {
+      await reached(billingHolds.promise, 'the authorization holds the card');
+      removal = cards.removeInstrument({ userId: p.userId, instrumentId: x.id });
+      await reached(removalArrived.promise, 'the removal arrived');
+      await provenBlocked(() => removalPid, () => billingPid, 'the removal');
+    } finally {
+      releaseBilling.resolve();
+      await Promise.allSettled([bill, ...(removal ? [removal] : [])]);
+    }
+    const outcomes = await Promise.allSettled([bill, removal!]);
+    expect(outcomes.map((o) => o.status), JSON.stringify(outcomes.map((o) => (o.status === 'rejected' ? String(o.reason) : 'ok')))).toEqual(['fulfilled', 'fulfilled']);
+    expect((outcomes[0] as PromiseFulfilledResult<string>).value).toBe('succeeded');
+    expect(charges.map((c) => c.vaultToken)).toEqual([x.token]);
+    const after = await money(p.subId);
+    expect(after.instruments.map((i) => i.status)).toEqual(['REVOKED']);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'CAPTURED', instrumentId: x.id })]);
+    expect([after.successes, after.ledger]).toEqual([1, 1]);
+    expect(after.sub.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
+  });
+});
+
+describe('[AX297 F2] a Pay now is booked in the currency its session was priced in, never the subscription’s current one', () => {
+  it('re-denominated after the page opened: the owed week is booked in the SESSION currency (GYD), not relabelled USD', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const p = await partner({ status: 'SUSPENDED', due, failedAttempts: 3 });
+    const session = await start(p, 'PAY_NOW');
+    expect(session).toMatchObject({ amount: WEEKLY, currencyCode: 'GYD' });
+    await returnWith(await press(session.sessionId, 'APPROVE'));
+    await app.prisma.subscription.update({ where: { id: p.subId }, data: { currencyCode: 'USD' } });
+
+    expect(await card.confirm(session.sessionId)).toMatchObject({ status: 'SUCCEEDED', settlement: 'advanced' });
+    const success = await app.prisma.billingEvent.findFirstOrThrow({ where: { subscriptionId: p.subId, type: 'CHARGE_SUCCESS' } });
+    expect(success.currencyCode, 'the GYD capture was relabelled').toBe('GYD');
+    expect(Number(success.amount)).toBe(WEEKLY);
+    const after = await money(p.subId);
+    expect(after.sub.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
+    expect([after.successes, after.ledger, after.bank]).toEqual([1, 1, 0]);
+  });
+
+  it('closed and re-denominated: the capture is banked in the SESSION currency (a new wallet opens in GYD), never USD', async () => {
+    const p = await partner({ due: new Date(Date.now() - DAY) });
+    const session = await start(p, 'PAY_NOW');
+    await returnWith(await press(session.sessionId, 'APPROVE'));
+    await app.prisma.subscription.update({ where: { id: p.subId }, data: { status: 'CANCELLED', autoRenew: false, currencyCode: 'USD' } });
+
+    expect(await card.confirm(session.sessionId)).toMatchObject({ status: 'SUCCEEDED', settlement: 'banked' });
+    const wallet = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: p.subId } });
+    expect(wallet.currencyCode, 'the GYD capture was banked as USD').toBe('GYD');
+    expect(Number(wallet.balance)).toBe(WEEKLY);
+    const bank = await app.prisma.billingEvent.findFirstOrThrow({ where: { subscriptionId: p.subId, idempotencyKey: { startsWith: 'bank:' } } });
+    expect(bank.currencyCode).toBe('GYD');
+    expect((await money(p.subId)).successes).toBe(0);
+  });
+
+  it('a wallet that already holds another currency HOLDS the capture for a person: nothing banked, nothing relabelled', async () => {
+    const p = await partner({ due: new Date(Date.now() - DAY) });
+    const session = await start(p, 'PAY_NOW');
+    await returnWith(await press(session.sessionId, 'APPROVE'));
+    await app.prisma.subscription.update({ where: { id: p.subId }, data: { status: 'CANCELLED', autoRenew: false, currencyCode: 'USD' } });
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: p.subId, balance: 0, currencyCode: 'USD' } });
+
+    expect(await card.confirm(session.sessionId), 'the GYD capture entered a USD wallet').toMatchObject({ status: 'HELD' });
+    const after = await money(p.subId);
+    expect([after.bank, after.successes]).toEqual([0, 0]);
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: p.subId } })).balance)).toBe(0);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'UNKNOWN', failureCode: 'WALLET_CURRENCY_MISMATCH', externalRef: expect.stringMatching(/^simpay_/) })]);
+    expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).toMatchObject({ status: 'HELD', failureCode: 'WALLET_CURRENCY_MISMATCH' });
+  });
+});
+
+describe('[AX297 F5] CARD_RAIL_V2 off: the worker sweep is a strict no-op; CARD_RAIL_V2_DRAIN=1 drains', () => {
+  it('flag off: an expired page stays exactly as it was (no card service, no provider, no sweep); DRAIN=1 closes it', async () => {
+    const p = await partner();
+    const session = await start(p, 'ENROLL'); // opened while v2 was on
+    const later = new Date(Date.parse(session.expiresAt) + 60_000);
+    const before = await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } });
+    const off = { NODE_ENV: 'development', CARD_RAIL_V2: '0' };
+    expect(await sweepCardSessions({ prisma: app.prisma, notifications, billing, cardRail: cardRailWorkerSource({ redis }, off) }, later)).toBeNull();
+    expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).toEqual(before);
+
+    const drain = { ...off, CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_ACCOUNT: `pt1-${RUN}` };
+    const swept = await sweepCardSessions({ prisma: app.prisma, notifications, billing, cardRail: cardRailWorkerSource({ redis }, drain) }, later);
+    expect(swept?.checked).toBeGreaterThanOrEqual(1);
+    expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).toMatchObject({ status: 'EXPIRED', failureCode: 'EXPIRED_UNUSED' });
   });
 });

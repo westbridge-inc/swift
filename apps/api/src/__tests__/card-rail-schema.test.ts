@@ -17,6 +17,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { nanoid } from 'nanoid';
 import { prismaPlugin, TENANT_MODEL_NAMES } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
@@ -288,5 +290,41 @@ describe('the row laws refuse malformed money and card facts (DS285 F7)', () => 
     await refused('state hash not hex', () => app.prisma.cardSession.create({ data: sessionData(who, { stateHash: 'z'.repeat(64) }) }));
     const s = await system(() => app.prisma.cardSession.create({ data: sessionData(who, { status: 'CANCELLED' }) }));
     await refused('digest not hex', () => app.prisma.cardObservation.create({ data: observationData({ sessionId: s.id, rawSha256: 'Z'.repeat(64) }) }));
+  });
+});
+
+describe('[AX297 F4] the index on the EXISTING subscription_payments table is built online', () => {
+  const MIGRATIONS = join(process.cwd(), 'prisma/migrations');
+  const FOUNDATION = '20260925000400_card_rail_v2';
+  const ONLINE = '20260925000410_card_rail_v2_payment_instrument_index';
+  /** What PostgreSQL executes: the file without its comment lines. */
+  const executable = (dir: string) => readFileSync(join(MIGRATIONS, dir, 'migration.sql'), 'utf8')
+    .split('\n').filter((line) => !line.trimStart().startsWith('--')).join('\n').trim();
+
+  it('its own migration is exactly ONE statement, CREATE INDEX CONCURRENTLY, with nothing that would wrap it in a transaction', () => {
+    const sql = executable(ONLINE);
+    // Prisma sends a multi-statement file as one implicit transaction, where CONCURRENTLY is forbidden.
+    expect(sql.match(/;/g)).toHaveLength(1);
+    expect(sql.match(/CREATE INDEX CONCURRENTLY IF NOT EXISTS/g)).toHaveLength(1);
+    expect(sql).toMatch(/^CREATE INDEX CONCURRENTLY IF NOT EXISTS "subscription_payments_instrumentId_idx"\s+ON "subscription_payments"\("instrumentId"\);$/);
+    expect(sql).not.toMatch(/\b(?:BEGIN|COMMIT|SET|RESET)\b/);
+  });
+
+  it('the foundation migration builds indexes only on its three NEW (empty) tables, and runs before the online one', () => {
+    const creates = executable(FOUNDATION).match(/CREATE (?:UNIQUE )?INDEX[^;]*;/g) ?? [];
+    expect(creates.length).toBeGreaterThan(0);
+    for (const create of creates) expect(create, create).toMatch(/ON "(?:payment_instruments|card_sessions|card_observations)"/);
+    expect(executable(FOUNDATION)).not.toMatch(/INDEX[^;]*ON "subscription_payments"/);
+    const order = readdirSync(MIGRATIONS).filter((d) => d.startsWith('2026')).sort();
+    expect(order.indexOf(FOUNDATION)).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf(ONLINE)).toBeGreaterThan(order.indexOf(FOUNDATION));
+  });
+
+  it('on the migrated database the index exists and is VALID (a failed online build leaves an invalid one)', async () => {
+    const rows = await system(() => app.prisma.$queryRaw<Array<{ valid: boolean; ready: boolean }>>`
+      SELECT i."indisvalid" AS valid, i."indisready" AS ready
+      FROM pg_index i JOIN pg_class c ON c.oid = i."indexrelid"
+      WHERE c.relname = 'subscription_payments_instrumentId_idx'`);
+    expect(rows).toEqual([{ valid: true, ready: true }]);
   });
 });
