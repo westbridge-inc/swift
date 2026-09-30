@@ -1,6 +1,7 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { customAlphabet, nanoid } from 'nanoid';
 import { expect, it, vi } from 'vitest';
+import { proveOwnerDiscovery } from './helpers/cleanup-race';
 import { purgeHoldFixtures } from './helpers/order-hold-cleanup';
 
 it('refuses a post-preflight peer order without detaching its vendor or partially purging the held fixture', async () => {
@@ -55,5 +56,19 @@ it('refuses a post-preflight peer order without detaching its vendor or partiall
     await prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
     await prisma.user.deleteMany({ where: { id: { in: ids } } });
     await prisma.$disconnect(); await peer.$disconnect();
+  }
+});
+
+it('locks the Q12 intermediary owner and discovers vendors absent from the caller list', async () => {
+  const prisma = new PrismaClient();
+  const user = await prisma.user.create({ data: { phone: `+592096${customAlphabet('0123456789', 10)()}`, firstName: 'Fixture', lastName: 'Owner', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
+  const owner = await prisma.vendorOwner.create({ data: { userId: user.id } });
+  const alertIds: string[] = [];
+  const cleanup = () => purgeHoldFixtures(prisma, { userIds: [user.id], vendorIds: [], orderIds: [], alertIds, notificationIds: [] });
+  try {
+    await proveOwnerDiscovery(prisma, cleanup, owner.id, user.id);
+  } finally {
+    await cleanup();
+    await prisma.$disconnect();
   }
 });

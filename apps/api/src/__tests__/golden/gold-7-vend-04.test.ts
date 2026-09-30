@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { createHmac, randomBytes } from 'node:crypto';
 import { customAlphabet, nanoid } from 'nanoid';
-import { Prisma, PrismaClient, type UserRole } from '@prisma/client';
+import { PrismaClient, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
 import { authPlugin } from '../../plugins/auth';
@@ -17,7 +17,9 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { agentCashRoutes } from '../../modules/billing/agent-cash.routes';
 import { SubscriptionService } from '../../modules/subscription/subscription.service';
+import { proveMessageRefusal, provePeerOrderRefusal } from '../helpers/cleanup-race';
 import { trackMessageInserts } from '../helpers/insert-ownership';
+import { assertFixtureReferences, lockFixtureParents } from '../helpers/cleanup-parents';
 import { auditClientInCleanup } from '../helpers/cleanup-transaction';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { startGoldenWorker } from './gold-7-worker';
@@ -164,9 +166,12 @@ async function purgeFixtures() {
     if (ids.length === 0 && vendorIds.length === 0) return;
     const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
     await app.prisma.$transaction(async (tx) => {
-      if (ids.length) await tx.$queryRaw`SELECT id FROM "users" WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
-      const foreignNotices = await tx.notification.findMany({ where: { userId: { in: ids }, id: { notIn: [...messageInserts.notificationIds] } }, select: { id: true } });
-      if (foreignNotices.length) throw new Error('GOLD-7 VEND04: foreign notifications block fixture cleanup');
+      const parents = await lockFixtureParents(tx, ids, vendorIds);
+      const discoveredVendorIds = parents.vendorIds;
+      await assertFixtureReferences(tx, 'GOLD-7 VEND04', ids, parents, [], [...messageInserts.notificationIds]);
+      const discoveredSubIds = (await tx.subscription.findMany({ where: { vendorId: { in: discoveredVendorIds } }, select: { id: true } })).map((s) => s.id);
+      if (discoveredSubIds.some((id) => !subIds.includes(id))) throw new Error('GOLD-7 VEND04: foreign subscriptions block fixture cleanup');
+      const cleanupSubIds = [...subIds];
       await tx.mmgAgentPayment.deleteMany({ where: { externalId: { in: [...txnIds] } } });
       await tx.providerPayment.deleteMany({ where: { providerTxnId: { in: [...txnIds] } } });
       await tx.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: ids } }, { approvedBy: { in: ids } }] } });
@@ -199,12 +204,12 @@ async function purgeFixtures() {
         if (leaves.length === 0) break;
         await tx.identityCluster.deleteMany({ where: { id: { in: leaves } } });
       }
-      await tx.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await tx.subscription.deleteMany({ where: { id: { in: subIds } } });
-      await tx.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+      await tx.feeReceipt.deleteMany({ where: { subscriptionId: { in: cleanupSubIds } } });
+      await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: cleanupSubIds } } });
+      await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: cleanupSubIds } } });
+      await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: cleanupSubIds } } });
+      await tx.subscription.deleteMany({ where: { id: { in: cleanupSubIds } } });
+      await tx.vendor.deleteMany({ where: { id: { in: discoveredVendorIds } } });
       await tx.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
       await tx.session.deleteMany({ where: { userId: { in: ids } } });
       await tx.admin.deleteMany({ where: { userId: { in: ids } } });
@@ -486,4 +491,14 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
     }
   });
 
+});
+
+it('atomically refuses existing and lock-scheduled late peer orders referencing a VEND04 vendor', async () => {
+  const partner = await makePartner('Cleanup');
+  await provePeerOrderRefusal(app.prisma, purgeFixtures, { table: 'vendors', id: partner.vendorId, userId: partner.owner.userId });
+});
+
+it('preserves VEND04 peer messages sharing owned subscriptions and recipients on existing and late refusal', async () => {
+  const partner = await makePartner('Message cleanup');
+  await proveMessageRefusal(app.prisma, purgeFixtures, partner.owner.userId, partner.subId);
 });

@@ -13,6 +13,7 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { authRoutes } from '../../modules/auth/auth.routes';
+import { assertFixtureReferences, discoverFixtureParents, lockFixtureParents } from '../helpers/cleanup-parents';
 import { auditClientInCleanup } from '../helpers/cleanup-transaction';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
 
@@ -103,32 +104,20 @@ export function createGolden(phonePrefix: string, fixture: string) {
         { id: { startsWith: `${fixturePrefix}-` } },
       ] }, select: { id: true } });
       const ids = [...new Set([...createdIds, ...users.map((u) => u.id)])];
-      const vendorIds = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: ids } } }, select: { id: true } })).map((v) => v.id);
-      const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
-      const driverIds = (await app.prisma.driver.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
-      const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+      // The preflight is advisory only; the authoritative census follows all
+      // root/intermediate locks inside the transaction, never a saved list.
+      const preflight = await discoverFixtureParents(app.prisma, ids);
+      let vendorIds: string[] = [];
+      let riderIds: string[] = [];
+      let driverIds: string[] = [];
+      let sessionIds: string[] = [];
       const orderIds = [...createdOrderIds];
-      const assertNoForeignDependents = async (client: Prisma.TransactionClient) => {
-        const foreignOrders = await client.order.findMany({ where: {
-          OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } },
-            { riderId: { in: riderIds } }, { driverId: { in: driverIds } }],
-          id: { notIn: orderIds },
-        }, select: { id: true } });
-        if (foreignOrders.length) throw new Error(`GOLD-7 ${fixture}: foreign orders block fixture cleanup: ${foreignOrders.map((o) => o.id).join(', ')}`);
-        const foreignNotifications = await client.notification.findMany({ where: {
-          userId: { in: ids }, id: { notIn: [...createdNotificationIds] },
-        }, select: { id: true } });
-        if (foreignNotifications.length) throw new Error(`GOLD-7 ${fixture}: untracked notifications block fixture user cleanup: ${foreignNotifications.map((n) => n.id).join(', ')}`);
-      };
-      await assertNoForeignDependents(app.prisma);
-      // No destructive statement precedes the locks and locked recheck. All
-      // dependent and parent deletes roll back together if any step refuses.
+      await assertFixtureReferences(app.prisma, `GOLD-7 ${fixture}`, ids, preflight, orderIds, [...createdNotificationIds]);
       await app.prisma.$transaction(async (tx) => {
-        if (ids.length) await tx.$queryRaw`SELECT id FROM "users" WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
-        if (vendorIds.length) await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(vendorIds)}) ORDER BY id FOR UPDATE`;
-        if (riderIds.length) await tx.$queryRaw`SELECT id FROM "riders" WHERE id IN (${Prisma.join(riderIds)}) ORDER BY id FOR UPDATE`;
-        if (driverIds.length) await tx.$queryRaw`SELECT id FROM "drivers" WHERE id IN (${Prisma.join(driverIds)}) ORDER BY id FOR UPDATE`;
-        await assertNoForeignDependents(tx);
+        const parents = await lockFixtureParents(tx, ids);
+        ({ vendorIds, riderIds, driverIds } = parents);
+        sessionIds = (await tx.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+        await assertFixtureReferences(tx, `GOLD-7 ${fixture}`, ids, parents, orderIds, [...createdNotificationIds]);
         await tx.alertDelivery.deleteMany({ where: { id: { in: [...createdAlertIds] } } });
         await tx.notification.deleteMany({ where: { id: { in: [...createdNotificationIds] } } });
         const docs = (await tx.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);

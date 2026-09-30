@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import { expect, it, vi } from 'vitest';
 import { NotificationService } from '../../modules/notification/notification.service';
 import { PartnerService } from '../../modules/partner/partner.service';
+import { proveOwnerDiscovery } from '../helpers/cleanup-race';
 import { createGolden } from './gold-7-helpers';
 
 // [G7-01] Cleanup isolation, not a journey. A concurrent writer can use the
@@ -263,4 +264,15 @@ it.each(['RIDER', 'DRIVER'] as const)('refuses existing and post-preflight peer 
     await other.user.deleteMany({ where: { id: peerId } });
     await other.$disconnect();
   }
+});
+
+it('locks the GOLD7 intermediary owner before discovering an existing or lock-scheduled new vendor', async () => {
+  const h = createGolden('+5920978', 'gold7-owner-discovery');
+  await h.start();
+  try {
+    const owner = await h.actor(['VENDOR_OWNER']);
+    await h.vendor(owner);
+    const profile = await h.sys(() => h.app.prisma.vendorOwner.findUniqueOrThrow({ where: { userId: owner.userId } }));
+    await proveOwnerDiscovery(h.app.prisma, h.purge, profile.id, owner.userId);
+  } finally { await h.close(); }
 });

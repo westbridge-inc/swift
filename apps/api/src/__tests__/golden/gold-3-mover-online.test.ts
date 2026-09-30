@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { customAlphabet, nanoid } from 'nanoid';
-import { Prisma, PrismaClient, type UserRole } from '@prisma/client';
+import { PrismaClient, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
 import { authPlugin } from '../../plugins/auth';
@@ -12,6 +12,9 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { makeDispatchService } from '../../modules/dispatch/dispatch.service';
 import { riderStackingCapacity } from '../../modules/dispatch/concurrency-policy';
 import * as algoStore from '../../modules/algo/algo-config';
+import { assertFixtureReferences, lockFixtureParents } from '../helpers/cleanup-parents';
+import { trackMessageInserts } from '../helpers/insert-ownership';
+import { proveMessageRefusal, provePeerOrderRefusal } from '../helpers/cleanup-race';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
 
 const { invalidateAlgoConfig } = algoStore;
@@ -63,6 +66,7 @@ const FIX_LATE = { latitude: 6.80111, longitude: -58.14999 };
 const DB_WRITE_WINDOW_MS = 10_000;
 
 let app: FastifyInstance;
+let messageInserts: ReturnType<typeof trackMessageInserts>;
 let jobs: ReturnType<typeof recordDispatchQueue>;
 let seq = 0;
 /** Every mover this file made — each test's supply is retired afterwards so
@@ -192,22 +196,24 @@ async function purgeFixtures() {
   await sys(async () => {
     const ids = [...userIds];
     if (ids.length === 0) return;
-    const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
     const orderIds = [...createdOrderIds];
-    await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
-    await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
-    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
-    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
-    // Ops pages about these orders reach people outside this file's range.
-    if (orderIds.length > 0) {
-      await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
-    }
-    await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    let riderIds: string[] = [];
+    await app.prisma.$transaction(async (tx) => {
+      const parents = await lockFixtureParents(tx, ids);
+      riderIds = parents.riderIds;
+      await assertFixtureReferences(tx, 'GOLD-3', ids, parents, orderIds, [...messageInserts.notificationIds]);
+      if (await tx.subscription.count({ where: { vendorId: { in: parents.vendorIds } } })) throw new Error('Foreign vendor subscriptions block fixture cleanup');
+      await tx.alertDelivery.deleteMany({ where: { id: { in: [...messageInserts.alertIds] } } });
+      await tx.notification.deleteMany({ where: { id: { in: [...messageInserts.notificationIds] } } });
+      await tx.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
+      await tx.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
+      await tx.earning.deleteMany({ where: { orderId: { in: orderIds } } });
+      await tx.order.deleteMany({ where: { id: { in: orderIds } } });
+      await tx.session.deleteMany({ where: { userId: { in: ids } } });
+      await tx.rider.deleteMany({ where: { id: { in: riderIds } } });
+      await tx.customer.deleteMany({ where: { userId: { in: ids } } });
+      await tx.user.deleteMany({ where: { id: { in: ids } } });
+    }, { timeout: 30_000 });
     await purgeRedis([...ids, ...riderIds, ...orderIds]);
   });
 }
@@ -246,6 +252,7 @@ beforeAll(async () => {
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.ready();
+  messageInserts = trackMessageInserts(app.prisma);
   // Intercept only this client's capacity read at the existing config seam.
   // No shared DB version, no cache entry, no dispatch/claim replacement. All
   // other keys, tenants and clients still execute the production reader.
@@ -263,6 +270,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await purgeFixtures();
+  messageInserts.restore();
   restoreCapacityRead?.();
   expect(await sharedCapacityRows()).toEqual(sharedConfigBefore);
   invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
@@ -521,4 +529,19 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     expect(again.json().data).toMatchObject({ orderId, status: 'RIDER_ASSIGNED' });
     expect(await sys(() => app.prisma.orderStatusLog.count({ where: { orderId, status: 'RIDER_ASSIGNED' } }))).toBe(1);
   });
+});
+
+it('atomically refuses existing and lock-scheduled late peer orders referencing a GOLD3 rider', async () => {
+  const mover = await makeMover('Cleanup');
+  await provePeerOrderRefusal(app.prisma, purgeFixtures, { table: 'riders', id: mover.riderId, userId: mover.userId });
+});
+
+it('owns GOLD3 messages only after successful inserts and refuses existing and late peer notices atomically', async () => {
+  const user = await makeUser('Cleanup messages', ['CUSTOMER'], 'CUSTOMER');
+  const order = await sys(() => app.prisma.order.create({ data: { customerId: user.userId, orderNumber: `G3MSG-${nanoid(16)}`, orderType: 'COURIER', fulfillment: 'DELIVERY', status: 'PENDING',
+    deliveryAddress: 'Fixture Lane', deliveryLat: 6.8, deliveryLng: -58.15, subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 1200, totalAmount: 1200, paymentMethod: 'CASH' } }));
+  createdOrderIds.push(order.id);
+  await retireSupply();
+  await proveMessageRefusal(app.prisma, purgeFixtures, user.userId, order.id);
+  movers.length = 0;
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { io as ioClient, type Socket } from 'socket.io-client';
+import { performance } from 'node:perf_hooks';
 import type { AddressInfo } from 'node:net';
 import { customAlphabet, nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
@@ -57,6 +58,7 @@ let seq = 0;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const orderIds: string[] = [];
+const sweepOrderIds = new Set<string>();
 /** [AX289 F8] Fixtures deliberately OUTSIDE this file's release scope — the
  *  stand-in for another suite's orders in the shared database. */
 const foreignUserIds: string[] = [];
@@ -176,6 +178,7 @@ async function placeOrder(buyer: Actor, store: Store, quantity: number, body: Re
   expect(res.statusCode, res.body).toBe(200);
   const order = res.json().data.order as Placed;
   orderIds.push(order.id);
+  if (!foreignUserIds.includes(buyer.userId) && !foreignVendorIds.includes(store.vendorId)) sweepOrderIds.add(order.id);
   return order;
 }
 
@@ -196,7 +199,8 @@ async function travel(orderId: string, ms: number) {
 /** The worker's own release-held-orders job (queue.ts) — the release, the
  *  store's alert, and the immediate publish of the alert ladder the release
  *  wrote — confined to THIS file's orders [AX289 F8]: the job's due-order read
- *  is narrowed to this file's customers and stores, so it never releases,
+ *  is narrowed to explicit successfully placed sweep-owned IDs. Cleanup also
+ *  owns synthetic peer controls, but those IDs never join the sweep. It never releases,
  *  counts or alerts an order another suite left due in the shared database,
  *  and a backlog there cannot keep ours from being reached. Everything else is
  *  the real job on the real client. */
@@ -205,7 +209,7 @@ async function releaseSweep(): Promise<string[]> {
   let scoped = 0;
   const spy = vi.spyOn(app.prisma.order, 'findMany').mockImplementation(((args: Prisma.OrderFindManyArgs = {}) => {
     scoped += 1;
-    return findMany({ ...args, where: { AND: [args.where ?? {}, { OR: [{ customerId: { in: userIds } }, { vendorId: { in: vendorIds } }] }] } });
+    return findMany({ ...args, where: { AND: [args.where ?? {}, { id: { in: [...sweepOrderIds] } }] } });
   }) as never);
   try {
     const released = await releaseHeldOrdersJob(ctx(), queues as never);
@@ -370,9 +374,9 @@ function watchSubscribeDecisions() {
 }
 
 async function waitFor(what: string, predicate: () => boolean, ms = 5_000) {
-  const deadline = Date.now() + ms;
+  const deadline = performance.now() + ms;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    if (performance.now() >= deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
@@ -1132,4 +1136,41 @@ it.each([
   } finally {
     vi.useRealTimers(); vi.unstubAllGlobals();
   }
+});
+
+it('bounds a never-true wait with real monotonic time while business Date stays frozen', async () => {
+  const businessTime = Date.now();
+  const start = performance.now();
+  let reached = false;
+  const bound = new Promise((resolve) => setTimeout(() => resolve('outer deadline'), 250));
+  const result = waitFor('never true', () => reached, 40).then(() => 'unexpected success', (error: Error) => error.message);
+  try {
+    expect(await Promise.race([result, bound])).toBe('timed out waiting for never true');
+    expect(performance.now() - start).toBeLessThan(250);
+    expect(Date.now()).toBe(businessTime);
+  } finally { reached = true; await result; }
+  let ready = false;
+  setTimeout(() => { ready = true; }, 20);
+  await waitFor('real timer succeeds', () => ready, 200);
+  expect(ready).toBe(true);
+  expect(Date.now()).toBe(businessTime);
+});
+
+it('leaves a due peer order sharing an owned vendor wholly unchanged by the real release job', async () => {
+  const store = await makeStore('RESTAURANT');
+  const buyer = await makeCustomer('Peer', { foreign: true });
+  const order = await placeOrder(buyer, store, 1);
+  await travel(order.id, HOLD_MS + 1_000);
+  const snapshot = async () => ({
+    order: await orderRow(order.id),
+    outbox: await app.prisma.orderOutbox.findMany({ where: { orderId: order.id }, orderBy: { id: 'asc' } }),
+    notices: await app.prisma.notification.findMany({ where: { data: { path: ['orderId'], equals: order.id } }, orderBy: { id: 'asc' } }),
+    alerts: await app.prisma.alertDelivery.findMany({ where: { subjectId: order.id }, orderBy: { id: 'asc' } }),
+    heard: await storeHeard(store, order), dashboard: await storeDashboard(store), jobs: [...jobsFor(order.id)],
+  });
+  const before = await snapshot();
+  try {
+    expect(await releaseSweep()).not.toContain(order.id);
+    expect(await snapshot()).toEqual(before);
+  } finally { await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, buyer.token, {}); }
 });
