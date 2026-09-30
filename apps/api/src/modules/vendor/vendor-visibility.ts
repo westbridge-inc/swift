@@ -1,6 +1,7 @@
 import type { Prisma, SubscriptionStatus } from '@prisma/client';
 import { inoperableSubscriptionWhere, subscriptionOperability } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
+import { PRODUCTION_TENANT } from '../../lib/production-only';
 // ---------------------------------------------------------------------------
 // THE customer-facing vendor-visibility predicate — ONE implementation
 // [B2/#790]. A store is visible to customers only when all of these hold:
@@ -40,6 +41,24 @@ export const VISIBLE_VENDOR = {
 /** Spread into an ITEM query's `vendor:` relation filter. */
 export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
 
+/** The tenant part of guest visibility, also used by public slug lookups. */
+export const PUBLIC_VENDOR_TENANT = {
+  tenant: { ...VISIBLE_VENDOR.tenant, ...PRODUCTION_TENANT.tenant },
+} as const;
+
+/**
+ * DL-7: direct links retain their existing paused-store behavior, but never
+ * bypass the tenant wall. Reuse the browse rule without its store-status or
+ * subscription conditions. Pin a bound caller explicitly so nested relation
+ * reads (favorites and item slots) have the same wall as top-level vendors.
+ */
+export function vendorTenantForCaller(): Prisma.VendorWhereInput {
+  const tenantId = getTenantId();
+  return tenantId
+    ? { tenantId, tenant: VISIBLE_VENDOR.tenant }
+    : PUBLIC_VENDOR_TENANT;
+}
+
 /**
  * [STA-1 RLS-N3 / DL-7] The visible-vendor relation filter, pinned to the
  * CALLER's tenant. Child tables without a tenantId column (items, categories)
@@ -62,9 +81,7 @@ export function visibleVendorRelForCaller(): Prisma.VendorWhereInput {
  * not cross-kind.
  */
 export function visibleVendorForCaller(): Prisma.VendorWhereInput {
-  return getTenantId()
-    ? VISIBLE_VENDOR
-    : { ...VISIBLE_VENDOR, tenant: { isActive: true, kind: 'PRODUCTION' } };
+  return { ...VISIBLE_VENDOR, ...vendorTenantForCaller() };
 }
 
 /**
