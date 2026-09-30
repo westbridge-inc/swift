@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
-import { PUBLICATION_LEASE_MS } from '../modules/billing/settlement-publication-lease';
+import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
@@ -382,7 +382,18 @@ describe('[AX352] the settlement publication lease override is test and drill on
   it('allows the short lease in the test, drill and development postures', () => {
     for (const mode of ['test', 'loadtest', 'development']) {
       expect(() => assertSafeBootConfig({ NODE_ENV: mode, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }), mode).not.toThrow();
+      expect(publicationLeaseMs({ NODE_ENV: mode, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }), mode).toBe(1000);
     }
+  });
+
+  it('[AX355] in production the lease read at call time ignores the override: an environment changed after boot never shortens it', () => {
+    const env: Record<string, string | undefined> = { ...good };
+    expect(() => assertSafeBootConfig(env)).not.toThrow(); // booted clean
+    env['SETTLEMENT_PUBLICATION_LEASE_MS'] = '1000'; // changed after boot
+    expect(publicationLeaseMs(env)).toBe(PUBLICATION_LEASE_MS);
+    expect(publicationHeartbeatMs(env)).toBe(15_000);
+    env['SETTLEMENT_PUBLICATION_LEASE_MS'] = '600000'; // even a longer one: production runs the default
+    expect(publicationLeaseMs(env)).toBe(PUBLICATION_LEASE_MS);
   });
 });
 

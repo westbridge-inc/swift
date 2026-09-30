@@ -18,8 +18,19 @@ export const PUBLICATION_HEARTBEAT_MS = 15_000;
  *  settlement file. */
 export const PUBLICATION_LEASE_ENV = 'SETTLEMENT_PUBLICATION_LEASE_MS';
 
-/** The lease in force, read at call time like the hold, never under a second. */
+/** The lease in force, read at call time like the hold, never under a second.
+ *  [AX355] In production the override is IGNORED: the lease is always the
+ *  default, so the boot guard and the running process cannot disagree, and an
+ *  environment changed after boot cannot shorten it. A posture that cannot be
+ *  read counts as production. */
 export function publicationLeaseMs(env: Record<string, string | undefined> = process.env): number {
+  let production: boolean;
+  try {
+    production = isProduction(env);
+  } catch {
+    production = true;
+  }
+  if (production) return PUBLICATION_LEASE_MS;
   return Math.max(1_000, positiveDurationMs(env[PUBLICATION_LEASE_ENV], PUBLICATION_LEASE_MS));
 }
 
