@@ -34,7 +34,7 @@ const MAY_END_A_SESSION: Record<string, string> = {
 
 /** Every sign-out control this census must find (a floor, so a broken walker
  *  cannot pass by finding nothing). */
-const KNOWN_CONTROLS = ['app/dashboard/layout.tsx', 'app/portal/layout.tsx', 'app/(app)/account/page.tsx'];
+const KNOWN_CONTROLS = ['app/dashboard/dashboard-shell.tsx', 'app/portal/portal-shell.tsx', 'app/(app)/account/page.tsx'];
 
 const LABEL = /^\s*(log|sign)[\s-]?out\b/i;
 const LABEL_PROPS = new Set(['label', 'title', 'aria-label']);

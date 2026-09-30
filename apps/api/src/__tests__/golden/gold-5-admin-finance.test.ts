@@ -538,6 +538,10 @@ describe('GOLD-5 · ADMIN-04 — G5-F6', () => {
     retry = (await withApproval(ops, approver, importFile(csv, source('stuck-retry')))).res;
   }, 60_000);
 
+  // GOLD-7 re-measure: settlement-import.ts replayed PUBLISHING without
+  // resuming, and claimed only STAGED. A guarded resume must replay row
+  // ingest idempotently, credit the missing row and close PUBLISHED.
+  // [G5-F6 · #1382] It now does, so this defining pin is green.
   it('[G5-F6] after a publication dies mid-file, importing the file again credits the missing row once and closes the import', async () => {
     expect(retry.statusCode, retry.body).toBe(200);
     expect(retry.json().data).toMatchObject({ importId: stuckImport, status: 'PUBLISHED', fileRows: 2, credited: 2, duplicates: 0, unmatched: 0, replayed: false });
