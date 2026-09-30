@@ -1,3 +1,0 @@
-Command: df -k worktree
-Filesystem   1024-blocks      Used Available Capacity iused     ifree %iused  Mounted on
-/dev/disk3s5   239362496 194268724  15519396    93% 3411038 155193960    2%   /System/Volumes/Data

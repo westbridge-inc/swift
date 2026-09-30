@@ -1,1 +1,0 @@
-Full local golden suite HELD: available disk below 15 GiB. Full CI required; no files deleted.
