@@ -1,51 +1,60 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
-import Redis from 'ioredis';
-import { Server } from 'socket.io';
-import { pino } from 'pino';
 import { scopedPrisma } from '../plugins/prisma';
-import { runAsSystem } from '../plugins/tenant-context';
-import { drillFixturesMain, type DrillIo } from '../modules/ops/drills/cli';
-import { runDrillJobs } from '../modules/ops/drills/jobs';
-import { assertDrillTarget } from '../modules/ops/drills/guard';
-import { DRILL_TENANT_ID, drillMarker, type DrillManifest, type DrillCleanupReport } from '../modules/ops/drills/fixtures';
+import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
+import { drillFixturesMain, drillRunJobMain, drillEvidenceMain, type DrillIo } from '../modules/ops/drills/cli';
+import { DRILL_TENANT_ID, drillMarker, drillSlug, type DrillManifest, type DrillCleanupReport } from '../modules/ops/drills/fixtures';
+import type { CrashEvidence } from '../modules/ops/drills/evidence';
 import { clusterMemberIds } from '../modules/integrity/identity.service';
-import { AgentCashService } from '../modules/billing/agent-cash.service';
-import { BillingService } from '../modules/billing/billing.service';
-import { NotificationService } from '../modules/notification/notification.service';
-import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
-// [STG-DRILLS D2/D3/D5/D6] The staging drill fixtures, against a real
-// database, built the way the app builds them — and removed through their
-// parents. The premise of each skipped journey is proven here, with the REAL
-// job functions the worker runs:
+// [STG-DRILLS D5/D6] The staging drill fixtures, against a real database,
+// built the way the app builds them — and removed through their parents:
 //
-//   D2/D3  a store whose trial ended 15 days ago: the real conversion and
-//          billing cycle bill it (PAST_DUE, one failed charge), and one agent
-//          receipt settles it once — the replay moves nothing;
 //   D5     the applicant sits in the admin's identity cluster (recusal);
 //   D6     a second tenant, CRAWLER-kind, with a store, a customer, an order
 //          and a partner that inherit its tenant through the lineage wall.
 //
+// And what AX324 found, proven on the same database:
+//   R1     a system login on another database refuses the whole entry; the
+//          fixtures run through two live connections to one database;
+//   R2     no drill path touches a non-DRILL subscription: the billing jobs are
+//          refused at the entry, and eligible foreign subscriptions are
+//          byte-identical after every drill entry has run;
+//   R5     run ids that differ only in punctuation never share a store, and a
+//          store under the slug that this run's owner did not make is refused,
+//          never adopted — nor removed by the cleanup;
+//   R7     the crash drill's evidence read returns the order's durable rows.
+//
 // Phones: fixtures use +592048xxxx (nothing else in the repository does);
-// this file's admin uses +5920418xxx (grep of apps/, scripts/, packages/:
-// unused elsewhere).
+// this file's admin uses +5920418xxx and its non-DRILL accounts +5920416xxx
+// (grep of apps/, scripts/, packages/: unused elsewhere).
 // ---------------------------------------------------------------------------
 
 const db = scopedPrisma as unknown as PrismaClient;
 const sys = <T>(fn: () => Promise<T>) => runAsSystem('staging-drills-test', fn);
 const RUN = `vt-${Date.now().toString(36)}`;
 const MARKER = drillMarker(RUN);
+const RUN_DOT = `${RUN}.r5`;
+const RUN_UNDER = `${RUN}_r5`;
+const RUN_SQUAT = `${RUN}-sq`;
+const RUN_R1 = `${RUN}-r1`;
 const ADMIN_PHONE = `+5920418${String(Math.floor(Math.random() * 900) + 100)}`;
-const DRILL_ENV = { ...process.env, SWIFT_STAGING_DRILLS: '1' };
+const OTHER_BASE = Math.floor(Math.random() * 990);
+const OTHER = (n: number) => `+5920416${String(OTHER_BASE + n).padStart(3, '0')}`;
+// The harness posture, with no system login or RLS binding leaked in from elsewhere.
+const { SYSTEM_DATABASE_URL: _leakedSys, TENANT_RLS_BIND: _leakedBind, ...BASE_ENV } = process.env;
+const DRILL_ENV: Record<string, string | undefined> = { ...BASE_ENV, SWIFT_STAGING_DRILLS: '1' };
 const DAY = 86_400_000;
 
 let adminId = '';
 let priorIdentity: { deploymentId: string; environment: string } | null = null;
 let manifest: DrillManifest;
+/** Non-DRILL accounts this file made: eligible subscriptions (R2) and a squatter (R5). */
+const foreign = { userIds: [] as string[], vendorIds: [] as string[], subscriptionIds: [] as string[] };
+let foreignBefore = '';
 
 function captureIo(): DrillIo & { lines: string[]; errors: string[] } {
   const lines: string[] = [];
@@ -54,8 +63,33 @@ function captureIo(): DrillIo & { lines: string[]; errors: string[] } {
 }
 const appClient = { client: async () => db };
 
-async function markerUsers() {
-  return sys(() => db.user.findMany({ where: { syntheticRunId: MARKER }, select: { id: true, tenantId: true, isSynthetic: true, phone: true } }));
+async function markerUsers(marker = MARKER) {
+  return sys(() => db.user.findMany({ where: { syntheticRunId: marker }, select: { id: true, tenantId: true, isSynthetic: true, phone: true } }));
+}
+
+const GEORGETOWN = { city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8013, longitude: -58.1551 };
+
+/** A non-DRILL store owner and store, the way an ordinary partner has them. */
+async function foreignStore(n: number, slug: string, tenantId: string) {
+  return runWithTenant(tenantId, async () => {
+    const user = await db.user.create({
+      data: { phone: OTHER(n), firstName: 'Real', lastName: `Partner ${n}`, roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER', countryCode: 'GY', isPhoneVerified: true, customer: { create: {} }, vendorOwner: { create: {} } },
+      select: { id: true, vendorOwner: { select: { id: true } } },
+    });
+    foreign.userIds.push(user.id);
+    const vendor = await db.vendor.create({
+      data: { ownerId: user.vendorOwner!.id, name: `Real partner store ${n}`, slug, vendorType: 'RESTAURANT', phone: OTHER(n), addressLine1: `${n} Real Street`, ...GEORGETOWN, status: 'ACTIVE', isVerified: true, isCurrentlyOpen: false, acceptingOrders: false },
+      select: { id: true, ownerId: true, name: true, slug: true, tenantId: true },
+    });
+    foreign.vendorIds.push(vendor.id);
+    return vendor;
+  });
+}
+
+async function foreignSnapshot(): Promise<string> {
+  const subs = await sys(() => db.subscription.findMany({ where: { id: { in: foreign.subscriptionIds } }, orderBy: { id: 'asc' } }));
+  const events = await sys(() => db.billingEvent.count({ where: { subscriptionId: { in: foreign.subscriptionIds } } }));
+  return JSON.stringify({ subs, events });
 }
 
 beforeAll(async () => {
@@ -72,12 +106,30 @@ beforeAll(async () => {
     select: { id: true },
   }));
   adminId = admin.id;
+
+  // [AX324 R2] Two ordinary (non-DRILL) partners whose subscriptions the billing
+  // sweeps WOULD act on: a trial that has ended (the conversion flips it) and an
+  // active plan that is due (the cycle charges it).
+  const now = Date.now();
+  const expired = await foreignStore(1, `vt-real-${RUN}-1`, 'swift-default');
+  const due = await foreignStore(2, `vt-real-${RUN}-2`, 'swift-default');
+  const trial = await sys(() => db.subscription.create({ data: { vendorId: expired.id, type: 'RESTAURANT', weeklyRate: 1500, status: 'TRIAL', isTrialActive: true, trialEndDate: new Date(now - DAY), currentPeriodStart: new Date(now - 15 * DAY), currentPeriodEnd: new Date(now - DAY), nextBillingDate: new Date(now - DAY), billingMethod: 'CASH' }, select: { id: true } }));
+  const active = await sys(() => db.subscription.create({ data: { vendorId: due.id, type: 'RESTAURANT', weeklyRate: 1500, status: 'ACTIVE', autoRenew: true, currentPeriodStart: new Date(now - 8 * DAY), currentPeriodEnd: new Date(now - 3_600_000), nextBillingDate: new Date(now - 3_600_000), billingMethod: 'CASH' }, select: { id: true } }));
+  foreign.subscriptionIds.push(trial.id, active.id);
+  foreignBefore = await foreignSnapshot();
 });
 
 afterAll(async () => {
   // A failed assertion must not strand fixtures: cleanup is idempotent.
-  await drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, captureIo(), appClient).catch(() => undefined);
+  for (const run of [RUN_R1, RUN_DOT, RUN_UNDER, RUN_SQUAT, RUN]) {
+    await drillFixturesMain(['cleanup', '--run-id', run], DRILL_ENV, captureIo(), appClient).catch(() => undefined);
+  }
   await sys(async () => {
+    await db.billingEvent.deleteMany({ where: { subscriptionId: { in: foreign.subscriptionIds } } }).catch(() => undefined);
+    await db.subscription.deleteMany({ where: { id: { in: foreign.subscriptionIds } } });
+    await db.vendor.deleteMany({ where: { id: { in: foreign.vendorIds } } });
+    await db.session.deleteMany({ where: { userId: { in: foreign.userIds } } });
+    await db.user.deleteMany({ where: { id: { in: foreign.userIds } } });
     const memberships = await db.identityClusterMember.findMany({ where: { accountId: adminId }, select: { clusterId: true } });
     await db.identityKey.deleteMany({ where: { accountId: adminId } });
     await db.identityClusterMember.deleteMany({ where: { accountId: adminId } });
@@ -89,6 +141,8 @@ afterAll(async () => {
     await db.session.deleteMany({ where: { userId: adminId } });
     await db.user.deleteMany({ where: { id: adminId } });
   });
+  // The drill tenant goes once nothing of any run (or this file's squatter) lives in it.
+  await drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, captureIo(), appClient).catch(() => undefined);
   if (!priorIdentity) await db.deploymentIdentity.deleteMany({ where: { id: 'singleton', deploymentId: 'staging-drills-test' } });
 });
 
@@ -106,7 +160,7 @@ describe('[STG-DRILLS] the drill tenant is minted the way every tenant-creating 
 describe('[STG-DRILLS] the fixtures refuse before they touch anything', () => {
   it('without the staging marker nothing is created and the refusal is exit 3', async () => {
     const io = captureIo();
-    const code = await drillFixturesMain(['create', '--run-id', RUN, '--admin-phone', ADMIN_PHONE], { ...process.env, SWIFT_STAGING_DRILLS: undefined }, io, appClient);
+    const code = await drillFixturesMain(['create', '--run-id', RUN, '--admin-phone', ADMIN_PHONE], { ...BASE_ENV, SWIFT_STAGING_DRILLS: undefined }, io, appClient);
     expect(code).toBe(3);
     expect(io.errors.join('\n')).toContain('MARKER_MISSING');
     expect(io.lines).toEqual([]);
@@ -118,23 +172,44 @@ describe('[STG-DRILLS] the fixtures refuse before they touch anything', () => {
     expect(await drillFixturesMain(['create', '--run-id', RUN, '--admin-phone', '+5926001000'], DRILL_ENV, io, appClient)).toBe(2);
     expect(await markerUsers()).toEqual([]);
   });
+
+  it('[AX324 R1] a system connection that answers another deployment refuses the whole entry: nothing is created', async () => {
+    const io = captureIo();
+    const production = { $queryRaw: async () => [{ db: new URL(process.env['DATABASE_URL'] as string).pathname.slice(1) }], deploymentIdentity: { findUnique: async () => ({ deploymentId: 'swift-prod', environment: 'production' }) } };
+    const env = { ...DRILL_ENV, TENANT_RLS_BIND: '1', SYSTEM_DATABASE_URL: process.env['DATABASE_URL'] };
+    const code = await drillFixturesMain(['create', '--run-id', RUN_R1, '--admin-phone', ADMIN_PHONE], env, io, { client: async () => db, systemClient: async () => production as never });
+    expect(code, io.errors.join('\n')).toBe(3);
+    expect(io.errors.join('\n')).toContain('PRODUCTION_MARKER');
+    expect(io.lines).toEqual([]);
+    expect(await markerUsers(drillMarker(RUN_R1))).toEqual([]);
+  });
+
+  it('[AX324 R1] a system connection the environment names but no client answers for is refused too', async () => {
+    const io = captureIo();
+    const env = { ...DRILL_ENV, TENANT_RLS_BIND: '1', SYSTEM_DATABASE_URL: process.env['DATABASE_URL'] };
+    expect(await drillFixturesMain(['cleanup', '--run-id', RUN_R1], env, io, { client: async () => db, systemClient: async () => null })).toBe(3);
+    expect(io.errors.join('\n')).toContain('SYSTEM_DB_UNVERIFIED');
+  });
 });
 
 describe('[STG-DRILLS] creating the fixtures', () => {
-  it('prints one manifest line and builds every fixture through the app', async () => {
+  it('prints one manifest line and builds every fixture through the app — guarded through two live connections to one database', async () => {
     const io = captureIo();
-    const code = await drillFixturesMain(['create', '--run-id', RUN, '--admin-phone', ADMIN_PHONE], DRILL_ENV, io, appClient);
+    const second = new PrismaClient({ datasourceUrl: process.env['DATABASE_URL'] });
+    const env = { ...DRILL_ENV, TENANT_RLS_BIND: '1', SYSTEM_DATABASE_URL: process.env['DATABASE_URL'] };
+    const code = await drillFixturesMain(['create', '--run-id', RUN, '--admin-phone', ADMIN_PHONE], env, io, { client: async () => db, systemClient: async () => second });
     expect(code, io.errors.join('\n')).toBe(0);
     expect(io.lines).toHaveLength(1);
     manifest = JSON.parse(io.lines[0]!) as DrillManifest;
-    expect(manifest).toMatchObject({ version: 1, runId: RUN, marker: MARKER, target: { environment: expect.any(String) } });
+    expect(manifest).toMatchObject({ version: 2, runId: RUN, marker: MARKER, target: { environment: expect.any(String) } });
+    expect(manifest).not.toHaveProperty('billing');
 
     // Recognisable: named DRILL-<run>, marked, and on never-a-subscriber phones.
     const users = await markerUsers();
-    expect(users).toHaveLength(6);
+    expect(users).toHaveLength(4);
     for (const u of users) expect(u.phone).toMatch(/^\+592048\d{4}$/);
-    const phones = [manifest.billing.vend04, manifest.billing.money03, manifest.recusal, manifest.tenant.customer, manifest.tenant.storeOwner, manifest.tenant.partner].map((a) => a.phone);
-    expect(new Set(phones).size).toBe(6);
+    const phones = [manifest.recusal, manifest.tenant.customer, manifest.tenant.storeOwner, manifest.tenant.partner].map((a) => a.phone);
+    expect(new Set(phones).size).toBe(4);
   });
 
   it('the journey runner accepts the manifest exactly as the fixtures print it (the server-to-runner contract)', async () => {
@@ -144,23 +219,12 @@ describe('[STG-DRILLS] creating the fixtures', () => {
     expect(() => runner.refuseForeignManifest(parsed, { deploymentId: manifest.target.deploymentId, environment: manifest.target.environment })).not.toThrow();
   });
 
-  it('D2/D3: two approved stores whose trial ended 15 days ago, born through the real subscription path', async () => {
-    for (const store of [manifest.billing.vend04, manifest.billing.money03]) {
-      const sub = await sys(() => db.subscription.findUniqueOrThrow({ where: { id: store.subscriptionId } }));
-      expect({ status: sub.status, type: sub.type, billingMethod: sub.billingMethod, vendorId: sub.vendorId }).toEqual({ status: 'TRIAL', type: 'RESTAURANT', billingMethod: 'CASH', vendorId: store.vendorId });
-      expect(Number(sub.weeklyRate)).toBeGreaterThan(0);
-      expect(sub.san).toMatch(/^[1-9]\d{9}$/);
-      expect(store.san).toBe(sub.san);
-      expect(store.bornAs).toBe('TRIAL');
-      const ended = sub.trialEndDate!.getTime();
-      expect(Math.abs(ended - (Date.now() - 15 * DAY))).toBeLessThan(5 * 60_000);
-      expect(sub.nextBillingDate.getTime()).toBe(ended);
-      const grant = await sys(() => db.trialGrant.findFirstOrThrow({ where: { accountId: store.userId, role: 'VENDOR' } }));
-      expect(grant.endsAt.getTime()).toBe(ended);
-      const vendor = await sys(() => db.vendor.findUniqueOrThrow({ where: { id: store.vendorId }, select: { status: true, isVerified: true, isCurrentlyOpen: true, acceptingOrders: true, tenantId: true, name: true } }));
-      expect(vendor).toMatchObject({ status: 'ACTIVE', isVerified: true, isCurrentlyOpen: false, acceptingOrders: false, tenantId: 'swift-default' });
-      expect(vendor.name.startsWith(MARKER)).toBe(true);
-    }
+  it('[AX324 R2] the fixtures create no subscription and no backdated store', async () => {
+    const users = await markerUsers();
+    const owners = await sys(() => db.vendorOwner.findMany({ where: { userId: { in: users.map((u) => u.id) } }, select: { id: true } }));
+    const vendors = await sys(() => db.vendor.findMany({ where: { ownerId: { in: owners.map((o) => o.id) } }, select: { id: true } }));
+    expect(vendors.map((v) => v.id)).toEqual([manifest.tenant.store.vendorId]);
+    expect(await sys(() => db.subscription.count({ where: { vendorId: { in: vendors.map((v) => v.id) } } }))).toBe(0);
   });
 
   it('D5: the applicant is in the admin identity cluster, through a phone edge the identity engine drew', async () => {
@@ -178,12 +242,12 @@ describe('[STG-DRILLS] creating the fixtures', () => {
     expect(users).toHaveLength(3);
     for (const u of users) expect(u).toEqual({ tenantId: DRILL_TENANT_ID, isSynthetic: true });
     const [vendor, item, order, rider] = await sys(() => Promise.all([
-      db.vendor.findUniqueOrThrow({ where: { id: t.store.vendorId }, select: { tenantId: true, isSynthetic: true, status: true } }),
+      db.vendor.findUniqueOrThrow({ where: { id: t.store.vendorId }, select: { tenantId: true, isSynthetic: true, status: true, slug: true } }),
       db.item.findUniqueOrThrow({ where: { id: t.store.itemId }, select: { tenantId: true } }),
       db.order.findUniqueOrThrow({ where: { id: t.order.orderId }, select: { tenantId: true, status: true, customerId: true, vendorId: true, statusHistory: { select: { status: true } } } }),
       db.rider.findUniqueOrThrow({ where: { id: t.partner.riderId }, select: { userId: true } }),
     ]));
-    expect(vendor).toEqual({ tenantId: DRILL_TENANT_ID, isSynthetic: true, status: 'ACTIVE' });
+    expect(vendor).toEqual({ tenantId: DRILL_TENANT_ID, isSynthetic: true, status: 'ACTIVE', slug: drillSlug(RUN, 'plat01-store') });
     expect(item).toEqual({ tenantId: DRILL_TENANT_ID });
     expect(order).toEqual({ tenantId: DRILL_TENANT_ID, status: 'PENDING', customerId: t.customer.userId, vendorId: t.store.vendorId, statusHistory: [{ status: 'PENDING' }] });
     expect(rider.userId).toBe(t.partner.userId);
@@ -194,78 +258,148 @@ describe('[STG-DRILLS] creating the fixtures', () => {
     expect(await drillFixturesMain(['create', '--run-id', RUN, '--admin-phone', ADMIN_PHONE], DRILL_ENV, io, appClient)).toBe(0);
     const again = JSON.parse(io.lines[0]!) as DrillManifest;
     expect({ ...again, createdAt: 'x' }).toEqual({ ...manifest, createdAt: 'x' });
-    expect(await markerUsers()).toHaveLength(6);
+    expect(await markerUsers()).toHaveLength(4);
     const orders = await sys(() => db.order.count({ where: { tenantId: DRILL_TENANT_ID, customerId: manifest.tenant.customer.userId } }));
     expect(orders).toBe(1);
   });
 });
 
-describe('[STG-DRILLS] the real jobs act on the fixtures', () => {
-  const plain = new PrismaClient({ datasourceUrl: process.env['DATABASE_URL'] });
-  const openContext = async () => {
-    const redis = new Redis(process.env['REDIS_URL'] as string, { maxRetriesPerRequest: null });
-    // Unattached, like the worker's own broadcast-only server: nothing to close.
-    return { ctx: { prisma: plain, io: new Server(), redis, log: pino({ level: 'silent' }) }, close: async () => { await redis.quit(); } };
-  };
-  afterAll(async () => { await plain.$disconnect(); });
-
-  it('D2/D3: the daily conversion then the hourly billing cycle bill both stores (one failed cash charge each)', async () => {
-    const { runs } = await runDrillJobs(['convert-trials', 'billing-cycle'], { assertTarget: () => assertDrillTarget(plain, DRILL_ENV), openContext });
-    expect(runs.map((r) => r.job)).toEqual(['convert-trials', 'billing-cycle']);
-    for (const store of [manifest.billing.vend04, manifest.billing.money03]) {
-      const sub = await sys(() => db.subscription.findUniqueOrThrow({ where: { id: store.subscriptionId } }));
-      expect({ status: sub.status, failedAttempts: sub.failedAttempts, isTrialActive: sub.isTrialActive }).toEqual({ status: 'PAST_DUE', failedAttempts: 1, isTrialActive: false });
-      const events = await sys(() => db.billingEvent.findMany({ where: { subscriptionId: store.subscriptionId }, select: { type: true }, orderBy: { createdAt: 'asc' } }));
-      expect(events.map((e) => e.type)).toEqual(['CHARGE_ATTEMPT', 'CHARGE_FAILED']);
+describe('[AX324 R5] a run adopts only what its own run made', () => {
+  it('run ids that differ only in punctuation get their own stores; one run’s cleanup leaves the other’s', async () => {
+    expect(drillSlug(RUN_DOT, 'plat01-store')).not.toBe(drillSlug(RUN_UNDER, 'plat01-store'));
+    expect(drillSlug('A-b', 'plat01-store')).not.toBe(drillSlug('a-b', 'plat01-store'));
+    const made: Record<string, DrillManifest> = {};
+    for (const run of [RUN_DOT, RUN_UNDER]) {
+      const io = captureIo();
+      expect(await drillFixturesMain(['create', '--run-id', run, '--admin-phone', ADMIN_PHONE], DRILL_ENV, io, appClient), io.errors.join('\n')).toBe(0);
+      made[run] = JSON.parse(io.lines[0]!) as DrillManifest;
     }
+    const dot = made[RUN_DOT]!;
+    const under = made[RUN_UNDER]!;
+    expect(dot.tenant.store.vendorId).not.toBe(under.tenant.store.vendorId);
+    expect(dot.tenant.order.orderId).not.toBe(under.tenant.order.orderId);
+    const owners = await sys(() => db.vendor.findMany({ where: { id: { in: [dot.tenant.store.vendorId, under.tenant.store.vendorId] } }, select: { id: true, owner: { select: { userId: true } } } }));
+    const ownerOf = new Map(owners.map((v) => [v.id, v.owner.userId]));
+    expect(ownerOf.get(dot.tenant.store.vendorId)).toBe(dot.tenant.storeOwner.userId);
+    expect(ownerOf.get(under.tenant.store.vendorId)).toBe(under.tenant.storeOwner.userId);
+
+    const io = captureIo();
+    expect(await drillFixturesMain(['cleanup', '--run-id', RUN_DOT], DRILL_ENV, io, appClient)).toBe(0);
+    expect(await sys(() => db.vendor.count({ where: { id: dot.tenant.store.vendorId } }))).toBe(0);
+    expect(await sys(() => db.vendor.count({ where: { id: under.tenant.store.vendorId } }))).toBe(1);
+    expect(await sys(() => db.order.count({ where: { id: under.tenant.order.orderId } }))).toBe(1);
+    expect(await drillFixturesMain(['cleanup', '--run-id', RUN_UNDER], DRILL_ENV, captureIo(), appClient)).toBe(0);
   });
 
-  it('D3: one agent receipt settles the billed week, and its replay credits nothing', async () => {
-    const store = manifest.billing.money03;
-    const sub = await sys(() => db.subscription.findUniqueOrThrow({ where: { id: store.subscriptionId } }));
-    const billing = new BillingService(db, new NotificationService(db, new Server()), getPaymentProvider());
-    const receipt = {
-      externalId: `MANUAL:${MARKER}-M03`, channel: 'MANUAL_ADMIN' as const, sanRaw: store.san!, amount: Number(sub.weeklyRate),
-      currencyCode: 'GYD', paidAt: new Date(), raw: { drill: MARKER }, recordedBy: adminId,
-    };
-    const agent = new AgentCashService(db, billing);
-    expect((await sys(() => agent.ingest(receipt))).status).toBe('accepted');
-    const paid = await sys(() => db.subscription.findUniqueOrThrow({ where: { id: store.subscriptionId } }));
-    expect({ status: paid.status, failedAttempts: paid.failedAttempts }).toEqual({ status: 'ACTIVE', failedAttempts: 0 });
-    expect(paid.nextBillingDate.getTime()).toBe(sub.nextBillingDate.getTime() + 7 * DAY);
-    expect((await sys(() => agent.ingest(receipt))).status).toBe('duplicate');
-    const successes = await sys(() => db.billingEvent.count({ where: { subscriptionId: store.subscriptionId, type: 'CHARGE_SUCCESS' } }));
-    expect(successes).toBe(1);
+  it('a store under this run’s slug that its DRILL owner did not make is refused, left untouched, and never removed by the cleanup', async () => {
+    const squatter = await foreignStore(3, drillSlug(RUN_SQUAT, 'plat01-store'), DRILL_TENANT_ID);
+    const io = captureIo();
+    const code = await drillFixturesMain(['create', '--run-id', RUN_SQUAT, '--admin-phone', ADMIN_PHONE], DRILL_ENV, io, appClient);
+    expect(code).toBe(1);
+    expect(io.errors.join('\n')).toContain('FIXTURE_CONFLICT');
+    expect(io.lines).toEqual([]);
+    const after = await sys(() => db.vendor.findUniqueOrThrow({ where: { id: squatter.id }, select: { id: true, ownerId: true, name: true, slug: true, tenantId: true } }));
+    expect(after).toEqual(squatter);
+    const [items, orders] = await sys(() => Promise.all([db.item.count({ where: { vendorId: squatter.id } }), db.order.count({ where: { vendorId: squatter.id } })]));
+    expect({ items, orders }).toEqual({ items: 0, orders: 0 });
+
+    expect(await drillFixturesMain(['cleanup', '--run-id', RUN_SQUAT], DRILL_ENV, captureIo(), appClient)).toBe(0);
+    expect(await markerUsers(drillMarker(RUN_SQUAT))).toEqual([]);
+    expect(await sys(() => db.vendor.count({ where: { id: squatter.id } }))).toBe(1);
+  });
+});
+
+describe('[AX324 R7] the crash drill’s evidence read', () => {
+  it('returns the order’s offer publications, offer pushes, dispatch journal and status log — ids and times only', async () => {
+    const orderId = manifest.tenant.order.orderId;
+    const rider = manifest.tenant.partner.userId;
+    const sentAt = new Date();
+    await sys(async () => {
+      await db.alertDelivery.createMany({ data: [
+        { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: rider, offerAttemptId: `ev-${RUN}-a1`, sentAt },
+        { kind: 'MOVER_OFFER', subjectId: orderId, recipientId: rider, offerAttemptId: `ev-${RUN}-a2`, sentAt: new Date(sentAt.getTime() + 1_000) },
+        { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: rider, sentAt },
+      ] });
+      await db.notification.create({ data: { userId: rider, type: 'ORDER_UPDATE', title: 'Order available nearby', body: 'b', data: { kind: 'dispatch_offer', orderId, offerAttemptId: `ev-${RUN}-a1` } } });
+      await db.dispatchSearch.create({ data: { vertical: 'DELIVERY', subjectId: orderId, status: 'SEARCHING', radiusKm: 3 } });
+    });
+    try {
+      const io = captureIo();
+      expect(await drillEvidenceMain(['crash', '--order', orderId], DRILL_ENV, io, appClient), io.errors.join('\n')).toBe(0);
+      expect(io.lines).toHaveLength(1);
+      const e = JSON.parse(io.lines[0]!) as CrashEvidence;
+      expect(e).toMatchObject({ version: 1, orderId, order: { status: 'PENDING', riderId: null } });
+      expect(e.offers.map((o) => o.attemptId)).toEqual([`ev-${RUN}-a1`, `ev-${RUN}-a2`]);
+      expect(e.offerPushes).toEqual([expect.objectContaining({ attemptId: `ev-${RUN}-a1`, userId: rider })]);
+      expect(e.searches).toEqual([expect.objectContaining({ status: 'SEARCHING', assignedTo: null })]);
+      expect(e.statusLog.map((l) => l.status)).toEqual(['PENDING']);
+      expect(io.lines[0]).not.toContain('Order available nearby');
+
+      const refused = captureIo();
+      expect(await drillEvidenceMain(['crash', '--order', orderId], { ...BASE_ENV }, refused, appClient)).toBe(3);
+      expect(refused.lines).toEqual([]);
+    } finally {
+      await sys(async () => {
+        await db.alertDelivery.deleteMany({ where: { subjectId: orderId } });
+        await db.dispatchSearch.deleteMany({ where: { subjectId: orderId } });
+        await db.notification.deleteMany({ where: { userId: rider } });
+      });
+    }
+  });
+});
+
+describe('[AX324 R2] no drill path touches a non-DRILL subscription', () => {
+  it('the billing jobs are refused at the entry, before any connection (exit 2) — the eligible foreign subscriptions do not move', async () => {
+    for (const jobs of [['convert-trials', 'billing-cycle'], ['billing-cycle'], ['convert-trials']]) {
+      const io = captureIo();
+      expect(await drillRunJobMain(jobs, DRILL_ENV, io), jobs.join(' ')).toBe(2);
+      expect(io.errors.join('\n')).toContain('not an allowlisted drill job');
+      expect(io.lines).toEqual([]);
+    }
+    expect(await foreignSnapshot()).toBe(foreignBefore);
+  });
+
+  it('every fixture entry run so far (creates, conflicts, cleanups, the evidence read) left them byte-identical', async () => {
+    const [trial, active] = await sys(() => Promise.all(foreign.subscriptionIds.map((id) => db.subscription.findUniqueOrThrow({ where: { id }, select: { status: true } }))));
+    expect([trial!.status, active!.status]).toEqual(['TRIAL', 'ACTIVE']);
+    expect(await foreignSnapshot()).toBe(foreignBefore);
   });
 });
 
 describe('[STG-DRILLS] cleanup', () => {
-  it('removes every fixture through its parents, retires the SANs, keeps the evidence, and is idempotent', async () => {
-    const sans = [manifest.billing.vend04.san!, manifest.billing.money03.san!];
-    const receiptsBefore = await sys(() => db.feeReceipt.count({ where: { subscriptionId: manifest.billing.money03.subscriptionId } }));
+  it('removes every fixture through its parents, keeps the evidence rules, and is idempotent', async () => {
     const io = captureIo();
     const code = await drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, io, appClient);
     const report = JSON.parse(io.lines[0]!) as DrillCleanupReport;
     expect(code, JSON.stringify(report)).toBe(0);
     expect(report.kept).toEqual([]);
-    expect(report.tenant).toBe('removed');
-    expect(report.removed).toMatchObject({ users: 6, vendors: 3, subscriptions: 2, orders: 1 });
+    expect(report.removed).toMatchObject({ users: 4, vendors: 1, orders: 1 });
+    expect(report.removed).not.toHaveProperty('subscriptions');
 
     expect(await markerUsers()).toEqual([]);
-    const ids = [manifest.billing.vend04.vendorId, manifest.billing.money03.vendorId, manifest.tenant.store.vendorId];
-    expect(await sys(() => db.vendor.count({ where: { id: { in: ids } } }))).toBe(0);
+    expect(await sys(() => db.vendor.count({ where: { id: manifest.tenant.store.vendorId } }))).toBe(0);
     expect(await sys(() => db.order.count({ where: { id: manifest.tenant.order.orderId } }))).toBe(0);
-    expect(await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID } })).toBeNull();
-    // A SAN is never re-issued: both went to the tombstone registry.
-    expect(await sys(() => db.sanTombstone.count({ where: { san: { in: sans } } }))).toBe(2);
-    // Evidence stays: the fee receipt of the settled week is still on the books.
-    expect(receiptsBefore).toBe(1);
-    expect(await sys(() => db.feeReceipt.count({ where: { subscriptionId: manifest.billing.money03.subscriptionId } }))).toBe(1);
     // The admin keeps an identity of its own, alone again.
     expect(await clusterMemberIds(db, adminId)).toEqual([adminId]);
+    // A non-DRILL store in the drill tenant (the R5 squatter) keeps the tenant: it is never deleted by a drill.
+    expect(report.tenant).toBe('kept');
+    expect(await foreignSnapshot()).toBe(foreignBefore);
 
     const again = captureIo();
     expect(await drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, again, appClient)).toBe(0);
-    expect(JSON.parse(again.lines[0]!)).toMatchObject({ removed: {}, kept: [], tenant: 'absent' });
+    expect(JSON.parse(again.lines[0]!)).toMatchObject({ removed: {}, kept: [] });
+  });
+
+  it('the drill tenant is removed once nothing of any run — nor anyone else — lives in it', async () => {
+    await sys(async () => {
+      await db.vendor.deleteMany({ where: { id: { in: foreign.vendorIds }, tenantId: DRILL_TENANT_ID } });
+      const squatters = await db.user.findMany({ where: { id: { in: foreign.userIds }, tenantId: DRILL_TENANT_ID }, select: { id: true } });
+      await db.session.deleteMany({ where: { userId: { in: squatters.map((u) => u.id) } } });
+      await db.user.deleteMany({ where: { id: { in: squatters.map((u) => u.id) } } });
+    });
+    const io = captureIo();
+    expect(await drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, io, appClient)).toBe(0);
+    expect(JSON.parse(io.lines[0]!)).toMatchObject({ kept: [], tenant: 'removed' });
+    expect(await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID } })).toBeNull();
   });
 });

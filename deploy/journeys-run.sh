@@ -16,9 +16,8 @@
 # are reported SKIP with the reason.
 # Optional: LIVETEST_DRILL_MANIFEST, the path of a drill-manifest.json written
 # by deploy/drill-fixtures.sh create (STG-DRILLS). It is copied into the run's
-# results and handed to the runner, whose drill journeys (VEND-04, MONEY-03,
-# ADMIN-01, PLAT-01) then use those fixtures. Without it the run is exactly as
-# before.
+# results and handed to the runner, whose drill journeys (ADMIN-01, PLAT-01)
+# then use those fixtures. Without it the run is exactly as before.
 #
 # Safety model (deploy/docker-compose.journeys.yml):
 #   * The PUBLIC api behind Caddy never carries DEV_OTP_BYPASS or
@@ -62,7 +61,7 @@ if [ -n "$DRILL_MANIFEST" ]; then
   python3 -c '
 import json, sys
 m = json.load(open(sys.argv[1], encoding="utf-8"))
-if m.get("version") != 1 or not isinstance(m.get("runId"), str):
+if m.get("version") != 2 or not isinstance(m.get("runId"), str):
     sys.exit(1)
 ' "$DRILL_MANIFEST" || die "LIVETEST_DRILL_MANIFEST is not a drill manifest (deploy/drill-fixtures.sh create writes one)"
 fi

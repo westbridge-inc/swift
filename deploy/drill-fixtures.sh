@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# STAGING-ONLY: create or remove the staging drill fixtures (STG-DRILLS D2, D3,
-# D5, D6) that let seven skipped journeys run. Run as the deploy user, after
+# STAGING-ONLY: create or remove the staging drill fixtures (STG-DRILLS D5, D6)
+# that let the recusal and cross-tenant journeys run. Run as the deploy user, after
 # pilot-up.sh has deployed the checked-out SHA with SWIFT_STAGING_DRILLS=1 in
 # deploy/.env:
 #
@@ -9,10 +9,11 @@
 #
 # create builds, inside the worker container (node dist/boot/drill-fixtures.js),
 # the fixtures the journeys need, named DRILL-<run-id>:
-#   D2/D3  two stores whose trial ended 15 days ago (VEND-04, MONEY-03);
 #   D5     a partner applicant in the test admin's identity cluster (ADMIN-01);
 #   D6     a second tenant, swift-drill, with a store, a customer, an order and
 #          a partner (PLAT-01).
+# (There are no billing fixtures: the billing jobs are platform-wide and no
+# drill may run them — AX324 R2; VEND-04's billing path is automated-only.)
 # It writes the manifest to $JOURNEYS_RESULTS_DIR (default ~/swift-journeys)
 # /drills/<run-id>/drill-manifest.json; hand that path to journeys-run.sh as
 # LIVETEST_DRILL_MANIFEST. Re-running create with the same run id returns the
@@ -57,7 +58,7 @@ if [ "$MODE" = create ]; then
   printf '%s\n' "$document" | python3 -c '
 import json, sys
 m = json.load(sys.stdin)
-if m.get("version") != 1 or m.get("runId") != sys.argv[1]:
+if m.get("version") != 2 or m.get("runId") != sys.argv[1]:
     sys.exit("the manifest does not describe run " + sys.argv[1])
 ' "$RUN_ID" || die "the drill fixture manifest is not valid"
   printf '%s\n' "$document" > "$OUT/drill-manifest.json"

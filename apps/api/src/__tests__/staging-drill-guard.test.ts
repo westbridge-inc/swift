@@ -212,3 +212,87 @@ describe('[STG-DRILLS] the facts come from the live connection', () => {
     expect(facts.identity).toEqual(identity ?? null);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [AX324 R1] Every connection the drills use is judged — not just DATABASE_URL.
+// Under TENANT_RLS_BIND=1 the app re-issues system work (cleanup's runAsSystem
+// deletes) on SYSTEM_DATABASE_URL. A staging primary with a production system
+// login passed the old guard; each case below is refused now.
+// ---------------------------------------------------------------------------
+describe('[AX324 R1] the system connection is held to the same database and identity', () => {
+  const SYS_SAME = 'postgresql://swift_sys:pw@postgres:5432/swift';
+  const sameDb = { serverDatabase: 'swift', identity: { deploymentId: 'swift-staging-1', environment: 'staging' } };
+  const withSystem = (f: DrillFacts, system: DrillFacts['system'], url = SYS_SAME): DrillFacts => ({ ...withEnv(f, { TENANT_RLS_BIND: '1', SYSTEM_DATABASE_URL: url }), system });
+
+  it('env: a SYSTEM_DATABASE_URL naming another host, port or database is refused before any socket', () => {
+    for (const url of [
+      'postgresql://sys:pw@swift-prod.abc.rds.amazonaws.com:5432/swift',
+      'postgresql://sys:pw@db.internal:5432/swift',
+      'postgresql://sys:pw@postgres:5433/swift',
+      'postgresql://sys:pw@postgres:5432/swift_live',
+      'mysql://sys:pw@postgres:5432/swift',
+      'not a url',
+    ]) {
+      expect(judgeDrillEnv({ ...staging().env, TENANT_RLS_BIND: '1', SYSTEM_DATABASE_URL: url }), url).toMatchObject({ ok: false, code: 'SYSTEM_DB_MISMATCH' });
+    }
+    expect(judgeDrillEnv({ ...harness().env, SYSTEM_DATABASE_URL: 'postgresql://sys:pw@localhost:5434/swift_test_other' })).toMatchObject({ ok: false, code: 'SYSTEM_DB_MISMATCH' });
+  });
+
+  it('env: a system login on the very same database is accepted, and flagged for the live read', () => {
+    expect(judgeDrillEnv({ ...staging().env, TENANT_RLS_BIND: '1', SYSTEM_DATABASE_URL: SYS_SAME })).toMatchObject({ ok: true, target: { system: true } });
+    expect(judgeDrillEnv(staging().env)).toMatchObject({ ok: true, target: { system: false } });
+  });
+
+  it('live: the AX324 scenario — a system connection that reaches production is refused', () => {
+    expect(code(withSystem(staging(), { serverDatabase: 'swift', identity: { deploymentId: 'swift-prod', environment: 'production' } }))).toBe('PRODUCTION_MARKER');
+  });
+
+  it('live: a system connection answering another database, another deployment, or no identity is refused', () => {
+    expect(code(withSystem(staging(), { ...sameDb, serverDatabase: 'swift_restore' }))).toBe('SYSTEM_DB_MISMATCH');
+    expect(code(withSystem(staging(), { ...sameDb, identity: { deploymentId: 'swift-staging-2', environment: 'staging' } }))).toBe('SYSTEM_DB_MISMATCH');
+    expect(code(withSystem(staging(), { ...sameDb, identity: { deploymentId: 'swift-staging-1', environment: 'test' } }))).toBe('SYSTEM_DB_MISMATCH');
+    expect(code(withSystem(staging(), { ...sameDb, identity: null }))).toBe('SYSTEM_DB_MISMATCH');
+  });
+
+  it('live: a system connection the environment names but the guard never read is refused', () => {
+    expect(code(withSystem(staging(), undefined))).toBe('SYSTEM_DB_UNVERIFIED');
+    expect(code(withSystem(staging(), null))).toBe('SYSTEM_DB_UNVERIFIED');
+  });
+
+  it('live: the same database and identity through both logins passes', () => {
+    expect(code(withSystem(staging(), sameDb))).toBe('OK');
+    expect(code({ ...withSystem(harness(), { serverDatabase: 'swift_test_stgd', identity: { deploymentId: 'local-local', environment: 'test' } }, 'postgresql://sys:x@localhost:5434/swift_test_stgd') })).toBe('OK');
+  });
+
+  it('assertDrillTarget reads through the system client it is handed, and refuses on what it answers', async () => {
+    const client = (db: string, identity: DrillFacts['identity']) => ({
+      $queryRaw: async () => [{ db }],
+      deploymentIdentity: { findUnique: async () => identity },
+    }) as unknown as PrismaClient;
+    const env = { ...staging().env, TENANT_RLS_BIND: '1', SYSTEM_DATABASE_URL: SYS_SAME };
+    const primary = client('swift', { deploymentId: 'swift-staging-1', environment: 'staging' });
+    const refused = await assertDrillTarget(primary, env, client('swift', { deploymentId: 'swift-prod', environment: 'production' })).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(DrillRefused);
+    expect((refused as DrillRefused).code).toBe('PRODUCTION_MARKER');
+    const unread = await assertDrillTarget(primary, env).catch((e: unknown) => e);
+    expect((unread as DrillRefused).code).toBe('SYSTEM_DB_UNVERIFIED');
+    await expect(assertDrillTarget(primary, env, client('swift', { deploymentId: 'swift-staging-1', environment: 'staging' }))).resolves.toMatchObject({ posture: 'staging', deploymentId: 'swift-staging-1' });
+  });
+});
+
+describe('[AX324 R1] Redis, the job context’s other socket, is the stack’s own', () => {
+  it('staging: only the compose redis service; the harness: loopback; a managed host never', () => {
+    expect(code(withEnv(staging(), { REDIS_URL: 'redis://redis:6379' }))).toBe('OK');
+    expect(code(withEnv(staging(), { REDIS_URL: 'redis://cache.internal:6379' }))).toBe('WRONG_REDIS_HOST');
+    expect(code(withEnv(staging(), { REDIS_URL: 'redis://localhost:6379' }))).toBe('WRONG_REDIS_HOST');
+    expect(code(withEnv(staging(), { REDIS_URL: 'rediss://swift-prod.cache.amazonaws.com:6380' }))).toBe('WRONG_REDIS_HOST');
+    expect(code(withEnv(staging(), { REDIS_URL: 'http://redis:6379' }))).toBe('WRONG_REDIS_HOST');
+    expect(code(withEnv(harness(), { REDIS_URL: 'redis://localhost:6382/2' }))).toBe('OK');
+    expect(code(withEnv(harness(), { REDIS_URL: 'redis://redis:6379' }))).toBe('WRONG_REDIS_HOST');
+  });
+
+  it('the staging expectation is deploy/docker-compose.yml, not a guess: the worker reaches redis://redis:6379', () => {
+    const block = serviceBlock(readFileSync(join(process.cwd(), '../../deploy/docker-compose.yml'), 'utf8'), 'worker');
+    expect(block).toContain('REDIS_URL: redis://redis:6379');
+  });
+});

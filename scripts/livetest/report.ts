@@ -32,7 +32,7 @@ export function summaryMarkdown(meta: RunMeta, results: JourneyResult[]): string
   for (const r of results) {
     const ok = r.steps.filter((s) => s.ok).length;
     const note = r.status === 'PASS'
-      ? r.skippedCases.map((s) => `${s.gate === 'automated' ? 'automated-only: ' : ''}${s.case}: ${s.reason}`).join('; ')
+      ? r.skippedCases.map((s) => `${s.case}: ${s.reason}`).join('; ')
       : (r.reason ?? '');
     lines.push(`| ${r.journeyId} ${esc(r.title)} | ${r.status} | ${ok}/${r.steps.length} | ${esc(note)} |`);
   }
@@ -41,7 +41,17 @@ export function summaryMarkdown(meta: RunMeta, results: JourneyResult[]): string
     lines.push(`## ${r.journeyId} — ${r.status}`);
     if (r.reason) lines.push(`Reason: ${r.reason}`);
     for (const s of r.steps) lines.push(`- ${s.ok ? 'ok  ' : s.cleanup ? 'warn' : 'FAIL'} ${s.name} — ${s.detail}`);
-    for (const s of r.skippedCases) lines.push(`- ${s.gate === 'automated' ? 'AUTOMATED-ONLY' : 'SKIP'} ${s.case} — ${s.reason}`);
+    for (const s of r.skippedCases) lines.push(`- ${s.gate === 'automated' ? 'NOT RUN HERE' : 'SKIP'} ${s.case} — ${s.reason}`);
+    lines.push('');
+  }
+  // [AX324 R6] Automated evidence stands apart from the staging verdicts: a
+  // case proven only by an automated gate did not run on this target, and its
+  // journey is SKIP above — this section is where that evidence is reported.
+  const automated = results.flatMap((r) => r.skippedCases.filter((s) => s.gate === 'automated').map((s) => ({ r, s })));
+  if (automated.length > 0) {
+    lines.push('## Automated evidence (reported separately — never a PASS on this target)');
+    lines.push('');
+    for (const { r, s } of automated) lines.push(`- ${r.journeyId} (${r.status}) · ${s.case} — ${s.reason}`);
     lines.push('');
   }
   return lines.join('\n');

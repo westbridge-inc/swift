@@ -10,13 +10,18 @@ import { join } from 'node:path';
 // deploy/tests/*.py, held here where CI runs it. Each refuses, before any
 // container is touched, unless it is the staging pilot with the drill marker
 // set in deploy/.env AND in the running worker; the job trigger names only its
-// allowlist; the fixture script files the manifest the entry printed.
+// allowlist (never a billing job, AX324 R2); the fixture script files the
+// manifest the entry printed; the crash drill runs the FULL guard inside the
+// worker it will kill, and a refusal there stops it before anything is set up
+// or killed (AX324 R3).
 // ---------------------------------------------------------------------------
 
 const DEPLOY = join(process.cwd(), '../../deploy');
 const SHA = 'a'.repeat(40);
 const STAGING_ENV = 'PILOT_ENV=staging\nNODE_ENV=loadtest\nSWIFT_STAGING_DRILLS=1\nAPI_HOST=api-staging.example.org\n';
 const WORKER_ENV = 'NODE_ENV=loadtest\nPILOT_ENV=staging\nSWIFT_STAGING_DRILLS=1';
+/** What drill-guard.js prints inside a staging worker (apps/api/src/boot/drill-guard.ts). */
+const STAGING_VERDICT = JSON.stringify({ ok: true, target: { posture: 'staging', host: 'postgres', port: '5432', database: 'swift', deploymentId: 'swift-staging-1', environment: 'staging' } });
 const python = spawnSync('python3', ['--version']);
 
 let tmp = '';
@@ -52,6 +57,8 @@ beforeEach(() => {
     '  *"drill-fixtures.js create"*) echo "a log line"; printf "%s\\n" "$MANIFEST_LINE"; exit "${EXEC_STATUS:-0}" ;;',
     '  *"drill-fixtures.js cleanup"*) echo "a log line"; echo \'{"removed":{"users":6},"kept":[],"tenant":"removed"}\'; exit "${EXEC_STATUS:-0}" ;;',
     '  *"drill-run-job.js"*) echo \'{"runs":[]}\'; exit "${EXEC_STATUS:-0}" ;;',
+    '  *"drill-guard.js"*) [ -n "${GUARD_REASON:-}" ] && echo "REFUSED: [STG-DRILLS $GUARD_REASON]" >&2; printf "%s\\n" "${GUARD_LINE:-}"; exit "${GUARD_STATUS:-0}" ;;',
+    '  *"drill-evidence.js"*) echo \'{"version":1}\'; exit "${EVIDENCE_STATUS:-0}" ;;',
     'esac',
     'exit 0',
   ].join('\n'));
@@ -66,23 +73,24 @@ function run(script: string, args: string[], extra: Record<string, string> = {})
     GIT_HEAD: SHA,
     WORKER_IMAGE: `swift-api:${SHA}`,
     WORKER_ENV,
+    GUARD_LINE: STAGING_VERDICT,
     JOURNEYS_RESULTS_DIR: results,
     ...extra,
   };
   return spawnSync('bash', [join(tmp, 'deploy', script), ...args], { env, encoding: 'utf8', timeout: 30_000 });
 }
 const calls = () => readFileSync(log, 'utf8');
-const manifestLine = (runId: string) => JSON.stringify({ version: 1, runId, marker: `DRILL-${runId}` });
+const manifestLine = (runId: string) => JSON.stringify({ version: 2, runId, marker: `DRILL-${runId}` });
 
 describe.skipIf(python.status !== 0)('[STG-DRILLS] drill-run-job.sh', () => {
-  it('runs the allowlisted jobs, in order, inside the worker container', () => {
-    const r = run('drill-run-job.sh', ['convert-trials', 'billing-cycle']);
+  it('runs the allowlisted job inside the worker container', () => {
+    const r = run('drill-run-job.sh', ['settlement-digest']);
     expect(r.status, r.stderr).toBe(0);
-    expect(calls()).toMatch(/exec -T worker node dist\/boot\/drill-run-job\.js convert-trials billing-cycle/);
+    expect(calls()).toMatch(/exec -T worker node dist\/boot\/drill-run-job\.js settlement-digest/);
   });
 
-  it('a job outside the allowlist, or none, is a usage error before anything is touched', () => {
-    for (const args of [['process-billing'], [], ['billing-cycle', 'rm -rf /']]) {
+  it('a job outside the allowlist — the billing jobs included (AX324 R2) — or none, is a usage error before anything is touched', () => {
+    for (const args of [['process-billing'], [], ['billing-cycle'], ['convert-trials'], ['convert-trials', 'billing-cycle'], ['settlement-digest', 'billing-cycle'], ['settlement-digest', 'rm -rf /']]) {
       const r = run('drill-run-job.sh', args);
       expect(r.status, JSON.stringify(args)).toBe(2);
     }
@@ -129,7 +137,7 @@ describe.skipIf(python.status !== 0)('[STG-DRILLS] drill-fixtures.sh', () => {
     const r = run('drill-fixtures.sh', ['create', 'stg-1'], { LIVETEST_ADMIN_PHONE: '+5920400000', MANIFEST_LINE: manifestLine('stg-1') });
     expect(r.status, r.stderr).toBe(0);
     const file = join(results, 'drills', 'stg-1', 'drill-manifest.json');
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ version: 1, runId: 'stg-1', marker: 'DRILL-stg-1' });
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ version: 2, runId: 'stg-1', marker: 'DRILL-stg-1' });
     expect(calls()).toMatch(/exec -T worker node dist\/boot\/drill-fixtures\.js create --run-id stg-1 --admin-phone \+5920400000/);
     expect(r.stdout).toContain(`LIVETEST_DRILL_MANIFEST=${file}`);
   });
@@ -176,6 +184,71 @@ describe.skipIf(python.status !== 0)('[STG-DRILLS D7] drill-crash.sh', () => {
     writeFileSync(join(tmp, 'deploy', '.env'), 'PILOT_ENV=staging\nNODE_ENV=loadtest\n');
     expect(run('drill-crash.sh', [], { LIVETEST_RUN_ID: 'stg-1', LIVETEST_ADMIN_PHONE: '+5920400000' }).status).toBe(1);
     expect(calls()).not.toMatch(/kill|start|up -d/);
+  });
+
+  it('[AX324 R3] the full guard runs INSIDE the selected worker first; a production or wrong-database refusal there stops everything — no setup, no kill', () => {
+    for (const reason of ['PRODUCTION_ENV', 'WRONG_DB_NAME', 'SYSTEM_DB_MISMATCH', 'WRONG_IDENTITY']) {
+      writeFileSync(log, '');
+      const r = run('drill-crash.sh', [], { LIVETEST_RUN_ID: 'stg-1', LIVETEST_ADMIN_PHONE: '+5920400000', GUARD_STATUS: '3', GUARD_REASON: reason, GUARD_LINE: '' });
+      expect(r.status, reason).toBe(1);
+      expect(r.stderr).toContain(reason);
+      expect(r.stderr).toContain('the drill guard inside the worker (wid123) refused or failed (exit 3); nothing was touched');
+      expect(calls()).toContain('docker exec wid123 node dist/boot/drill-guard.js');
+      expect(calls()).not.toMatch(/ kill |up -d|run --rm|docker start/);
+    }
+  });
+
+  it('[AX324 R3] a guard that answers anything but a staging verdict is refused the same way', () => {
+    for (const line of [
+      JSON.stringify({ ok: true, target: { posture: 'test', deploymentId: 'local', environment: 'test' } }),
+      JSON.stringify({ ok: true, target: { posture: 'staging', deploymentId: 'swift-prod', environment: 'production' } }),
+      JSON.stringify({ ok: true, target: { posture: 'staging', environment: 'staging' } }),
+      'not json',
+    ]) {
+      writeFileSync(log, '');
+      const r = run('drill-crash.sh', [], { LIVETEST_RUN_ID: 'stg-1', LIVETEST_ADMIN_PHONE: '+5920400000', GUARD_LINE: line });
+      expect(r.status, line).toBe(1);
+      expect(r.stderr).toContain('did not return a staging verdict');
+      expect(calls()).not.toMatch(/ kill |up -d|run --rm/);
+    }
+  });
+
+  it('[AX324 R3] a clean staging verdict lets it past the guard (it stops later here, at the isolation proof this sandbox lacks)', () => {
+    const r = run('drill-crash.sh', [], { LIVETEST_RUN_ID: 'stg-1', LIVETEST_ADMIN_PHONE: '+5920400000' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).not.toContain('drill guard inside the worker');
+    expect(r.stderr).toContain('journeys isolation check failed');
+    expect(calls()).not.toMatch(/ kill |run --rm/);
+  });
+
+  it('[AX324 R3] the guard runs before the setup AND again right before the kill; the runner is pinned to the identity it judged', () => {
+    const s = readFileSync(join(DEPLOY, 'drill-crash.sh'), 'utf8');
+    const first = s.indexOf('\ndrill_guard_in_worker\n');
+    const second = s.indexOf('\ndrill_guard_in_worker\n', first + 1);
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+    expect(first).toBeLessThan(s.indexOf('up -d --no-deps --no-build --pull never api-journeys'));
+    expect(first).toBeLessThan(s.indexOf('"${RUNNER[@]}" --phase=setup'));
+    expect(s.indexOf('"${RUNNER[@]}" --phase=setup')).toBeLessThan(second);
+    expect(second).toBeLessThan(s.indexOf('docker kill "$WORKER_ID"'));
+    expect(s).toContain('export LIVETEST_EXPECT_DEPLOYMENT_ID="$GUARDED_DEPLOYMENT_ID" LIVETEST_EXPECT_ENVIRONMENT=staging');
+    const common = readFileSync(join(DEPLOY, 'drill-common.sh'), 'utf8');
+    expect(common).toContain('docker exec "$WORKER_ID" node dist/boot/drill-guard.js');
+    const compose = readFileSync(join(DEPLOY, 'docker-compose.journeys.yml'), 'utf8');
+    expect(compose).toMatch(/^ {6}LIVETEST_EXPECT_DEPLOYMENT_ID: \$\{LIVETEST_EXPECT_DEPLOYMENT_ID:-\}$/m);
+    expect(compose).toMatch(/^ {6}LIVETEST_EXPECT_ENVIRONMENT: \$\{LIVETEST_EXPECT_ENVIRONMENT:-\}$/m);
+  });
+
+  it('[AX324 R7] after the verify phase, the durable evidence is read inside the worker, then the finalize phase judges it', () => {
+    const s = readFileSync(join(DEPLOY, 'drill-crash.sh'), 'utf8');
+    const verify = s.indexOf('"${RUNNER[@]}" --phase=verify');
+    const evidence = s.indexOf('docker exec "$WORKER_ID" node dist/boot/drill-evidence.js crash --order "$ORDER_ID"');
+    const finalize = s.indexOf('"${RUNNER[@]}" --phase=finalize');
+    expect(verify).toBeGreaterThan(-1);
+    expect(evidence).toBeGreaterThan(verify);
+    expect(finalize).toBeGreaterThan(evidence);
+    expect(s).toContain('> "$RESULTS/crash-drill-evidence.json"');
+    expect(s.slice(finalize)).toContain('exit "$STATUS"');
   });
 
   it('kills with SIGKILL only after the setup reached mid-offer, waits 15 s, starts the same container, then verifies', () => {

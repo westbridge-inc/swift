@@ -19,9 +19,11 @@
 // Every phone the suite uses is +5920… (never a subscriber); the run is refused
 // before its first request otherwise (guard.ts gate p).
 //
-// [STG-DRILLS D7] `--suite=crash-drill --phase=setup|verify` is the runner half
-// of the PLAT-02 worker crash drill; deploy/drill-crash.sh kills and restarts
-// the worker between the two phases (the runner has no Docker socket).
+// [STG-DRILLS D7] `--suite=crash-drill --phase=setup|verify|finalize` is the
+// runner half of the PLAT-02 worker crash drill; deploy/drill-crash.sh kills
+// and restarts the worker between setup and verify, and reads the order's
+// durable evidence inside the worker before finalize (the runner has no Docker
+// socket and no database).
 //
 // Exit: 0 no journey failed · 1 a journey failed · 2 harness error · 3 target refused.
 

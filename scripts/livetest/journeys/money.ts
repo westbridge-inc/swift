@@ -4,10 +4,9 @@
 
 import { createHmac } from 'node:crypto';
 import type { Journey } from '../journey.js';
-import { GET, POST, PUT, req, brief, pick, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf } from './common.js';
+import { GET, POST, PUT, req, brief, pick, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf, runReceipt } from './common.js';
 import type { Ctx } from './context.js';
 import { twoPerson } from './admin-util.js';
-import { settleDrillBill } from './drill-billing.js';
 
 export const MONEY_01: Journey<Ctx> = {
   id: 'MONEY-01',
@@ -71,8 +70,7 @@ export const MONEY_03: Journey<Ctx> = {
     const R1 = ctx.roster.vendors.R1!;
     const sub = (await GET('/vendor/subscription', R1.session.token)).json?.data;
     rec.check('the store has a weekly-fee account (SAN) and rate', !!sub?.san && Number(sub?.weeklyFeeGyd ?? sub?.weeklyRate) > 0, `status=${sub?.status} san=${sub?.sanFormatted ?? sub?.san} weekly=${sub?.weeklyFeeGyd ?? sub?.weeklyRate}`);
-    const drill = ctx.drill?.billing.money03;
-    const body = JSON.stringify({ transactionId: `SYN-${ctx.runId}`, accountNumber: String(drill?.san ?? sub?.san ?? ''), amount: 1000, currency: 'GYD' });
+    const body = JSON.stringify({ transactionId: `SYN-${ctx.runId}`, accountNumber: String(sub?.san ?? ''), amount: 1000, currency: 'GYD' });
     const unsigned = await req('POST', '/billing/mmg/agent-notification', { body: JSON.parse(body) });
     const dark = unsigned.status === 503;
     rec.check('an unsigned agent-cash notification is refused', dark || unsigned.status === 401, `→ ${unsigned.status} ${unsigned.text.slice(0, 120)}`);
@@ -84,32 +82,27 @@ export const MONEY_03: Journey<Ctx> = {
     const stale = await req('POST', '/billing/mmg/agent-notification', { body: JSON.parse(body), headers: { 'x-swift-timestamp': String(Date.now() - 3_600_000), 'x-swift-signature': forged } });
     rec.deny('a notification with a stale timestamp', stale, dark ? [503] : [401]);
     if (dark) rec.step('disabled channel: the agent-cash webhooks answer 503 channel_disabled', true, 'AGENT_CASH_WEBHOOK_SECRET is not configured on this target, so the channel is dark by design');
-    const inq = await req('POST', '/billing/mmg/inquiry', { body: { accountNumber: String(drill?.san ?? sub?.san ?? '') } });
+    const inq = await req('POST', '/billing/mmg/inquiry', { body: { accountNumber: String(sub?.san ?? '') } });
     rec.check('the agent inquiry is gated the same way', inq.status === (dark ? 503 : 401), `→ ${inq.status}`);
 
-    if (drill) {
-      // [STG-DRILLS D3] The defining case, for real: the drill store's week was
-      // billed by the real job, and a signed-off (two-operator) agent receipt
-      // settles it; its replay credits once.
-      await settleDrillBill(rec, ctx, drill, 'M03');
-      void pick; void codeOf;
-      return;
-    }
-
-    // A manual agent receipt recorded by operators (two people), then the same receipt again.
-    const receipt = { san: String(sub?.san ?? ''), amount: 1000, paidAt: new Date().toISOString(), receiptNumber: `SYN-${ctx.runId}`.slice(0, 60), verifiedInPortal: true };
+    // [STG-DRILLS D3 · owner ruling 2026-09-29] Partners pay the weekly fee ONLY
+    // on the MMG checkout page. The operator-recorded agent receipt below is the
+    // DORMANT back-office rail, and this case proves only that it stays safe:
+    // two operators, credited once, a replay credits nothing. It is evidence,
+    // never MONEY-03's pass — that needs the MMG sandbox (skipAll below).
+    const receipt = { san: String(sub?.san ?? ''), amount: 1000, paidAt: new Date().toISOString(), receiptNumber: runReceipt(ctx.runId, 'M03'), verifiedInPortal: true };
     const before = Number(sub?.walletBalanceGyd ?? 0);
-    const first = await twoPerson(rec, ctx, 'record a synthetic agent-cash receipt', 'POST', '/admin/billing/agent-payments', receipt);
+    const first = await twoPerson(rec, ctx, 'dormant back-office rail: record a synthetic agent-cash receipt', 'POST', '/admin/billing/agent-payments', receipt);
     if (first.done) {
       const after = Number((await GET('/vendor/subscription', R1.session.token)).json?.data?.walletBalanceGyd ?? 0);
-      rec.check('the receipt credits the store’s fee wallet once', after === before + 1000, `wallet ${before} → ${after}`);
-      const dup = await twoPerson(rec, ctx, 'record the same synthetic receipt again', 'POST', '/admin/billing/agent-payments', receipt);
+      rec.check('dormant back-office rail: the receipt credits the store’s fee wallet once', after === before + 1000, `wallet ${before} → ${after}`);
+      const dup = await twoPerson(rec, ctx, 'dormant back-office rail: record the same synthetic receipt again', 'POST', '/admin/billing/agent-payments', receipt);
       const afterDup = Number((await GET('/vendor/subscription', R1.session.token)).json?.data?.walletBalanceGyd ?? 0);
       const dupData = dup.final?.json?.data;
-      rec.check('the same receipt is not credited twice (the wallet does not move; the answer names the duplicate)', afterDup === after && (!dup.done || dupData?.status === 'duplicate' || dupData?.duplicate === true || !!dupData?.duplicateOf),
+      rec.check('dormant back-office rail: the same receipt is not credited twice (the wallet does not move; the answer names the duplicate)', afterDup === after && (!dup.done || dupData?.status === 'duplicate' || dupData?.duplicate === true || !!dupData?.duplicateOf),
         `→ ${dup.final ? brief(dup.final) : 'held'} status=${dupData?.status ?? '-'} wallet ${after} → ${afterDup}`);
     }
-    rec.skipAll(`no drill fixtures on this run: the defining case — a weekly bill settled by a signed agent receipt — needs a billed store, and the bill is produced by the hourly billing job only after the 14-day trial${dark ? ' (the agent-cash webhook is dark on this target: no secret)' : ''}. deploy/drill-fixtures.sh makes one (LIVETEST_DRILL_MANIFEST); the runner never holds the webhook secret`);
+    rec.skipAll(`MONEY-03 passes only when a partner pays the weekly fee on the MMG checkout page (owner ruling 2026-09-29: the only way partners pay), which needs the MMG sandbox; this target has none${dark ? ' (and its agent-cash webhook is dark: no secret)' : ''}. The steps above are the dormant back-office rail's safety check — evidence, never a MONEY-03 PASS`);
     void pick; void codeOf;
   },
 };

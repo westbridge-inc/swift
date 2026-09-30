@@ -1,20 +1,27 @@
 import type { PrismaClient } from '@prisma/client';
 import { pino, destination } from 'pino';
 import { setAppLogger } from '../../../utils/logger';
-import { assertDrillEnv, assertDrillTarget, DrillRefused } from './guard';
+import { assertDrillEnv, assertDrillTarget, DrillRefused, type FactsDb } from './guard';
 import { parseDrillJobs, runDrillJobs, DrillUsageError } from './jobs';
 import { createDrillFixtures, cleanupDrillFixtures, validateRunId, DrillFixtureError } from './fixtures';
+import { readCrashEvidence, ORDER_ID } from './evidence';
 
 /**
- * [STG-DRILLS] The two run-once entry points, as functions (the boot files in
- * src/boot only call these). Order is the safety property:
+ * [STG-DRILLS] The run-once entry points, as functions (the boot files in
+ * src/boot only call these): fixtures, the job trigger, the guard alone
+ * (drill-crash.sh asks it inside the worker before it kills anything) and the
+ * crash drill's read-only evidence. Order is the safety property:
  *
  *   1. arguments        — a usage error before anything else (exit 2);
- *   2. the environment  — the marker, the posture and the configured database,
+ *   2. the environment  — the marker, the posture and EVERY configured
+ *                         connection (DATABASE_URL, SYSTEM_DATABASE_URL, Redis),
  *                         before any client exists: a process without the
  *                         marker never opens a socket (exit 3);
- *   3. the database     — the server's own name and deployment identity (exit 3);
- *   4. the work         — fixtures or the allowlisted jobs (exit 1 on failure).
+ *   3. the databases    — the server's own name and deployment identity, read
+ *                         through every database connection the work can use,
+ *                         and one database behind all of them (exit 3);
+ *   4. the work         — fixtures, the allowlisted job, or the evidence read
+ *                         (exit 1 on failure).
  *
  * stdout carries exactly ONE line: the JSON result (manifest, cleanup report,
  * or job runs). Every log line goes to stderr, so deploy/drill-*.sh can take
@@ -57,10 +64,37 @@ function exitFor(err: unknown, io: DrillIo): number {
 export interface FixturesDeps {
   /** The app's own client (tenant scoping and its guards); opened only after the environment passed. */
   client: () => Promise<PrismaClient>;
+  /**
+   * [AX324 R1] The client the app re-issues system work on under
+   * TENANT_RLS_BIND=1 (SYSTEM_DATABASE_URL), or null when none is configured.
+   * Asked only when the environment names a system connection; the guard
+   * reads it and refuses unless it is the same database.
+   */
+  systemClient?: () => Promise<FactsDb | null>;
 }
-const appClient: FixturesDeps = {
+const appClient: Required<FixturesDeps> = {
   client: async () => (await import('../../../plugins/prisma')).scopedPrisma as unknown as PrismaClient,
+  systemClient: async () => (await import('../../../plugins/prisma')).systemPrismaClient(),
 };
+
+type Disconnectable = { $disconnect?: () => Promise<void> };
+const disconnect = async (c: unknown): Promise<void> => {
+  await (c as Disconnectable | null)?.$disconnect?.().catch(() => undefined);
+};
+
+/** Steps 2 and 3 over the app's clients: the environment, then every connection. */
+async function openGuarded(env: Record<string, string | undefined>, deps: FixturesDeps) {
+  const envTarget = assertDrillEnv(env);
+  const db = await deps.client();
+  const system = envTarget.system ? await (deps.systemClient ?? appClient.systemClient)() : null;
+  const close = async () => { await disconnect(db); await disconnect(system); };
+  try {
+    return { db, target: await assertDrillTarget(db, env, system), close };
+  } catch (err) {
+    await close();
+    throw err;
+  }
+}
 
 /** drill-fixtures create --run-id <id> --admin-phone <+5920…> | cleanup --run-id <id> */
 export async function drillFixturesMain(
@@ -84,10 +118,8 @@ export async function drillFixturesMain(
     if (mode === 'create' && !FICTIONAL_GY.test(adminPhone)) {
       throw new DrillUsageError('--admin-phone must be the seed admin, a never-a-subscriber +5920 number (staging: +5920400000)');
     }
-    assertDrillEnv(env);
-    const db = await deps.client();
+    const { db, target, close } = await openGuarded(env, deps);
     try {
-      const target = await assertDrillTarget(db, env);
       setAppLogger(stderrLogger());
       if (mode === 'create') {
         const manifest = await createDrillFixtures(db, { runId, adminPhone, target });
@@ -99,14 +131,14 @@ export async function drillFixturesMain(
       if (report.kept.length > 0) io.err(`FAILED: ${report.kept.length} fixture row(s) could not be removed; see "kept" in the report`);
       return report.kept.length > 0 ? DRILL_EXIT.FAILED : DRILL_EXIT.OK;
     } finally {
-      await db.$disconnect().catch(() => undefined);
+      await close();
     }
   } catch (err) {
     return exitFor(err, io);
   }
 }
 
-/** drill-run-job <settlement-digest|convert-trials|billing-cycle> [...] — each allowlisted job once, in order. */
+/** drill-run-job settlement-digest — the allowlisted job, once (jobs.ts says why it is the only one). */
 export async function drillRunJobMain(
   argv: readonly string[],
   env: Record<string, string | undefined> = process.env,
@@ -114,15 +146,18 @@ export async function drillRunJobMain(
 ): Promise<number> {
   try {
     parseDrillJobs(argv);
-    assertDrillEnv(env);
+    const envTarget = assertDrillEnv(env);
     // The job context the worker builds for itself (worker.ts): a plain client
     // sized for the worker, Redis, a broadcast-only Socket.IO server, a logger.
     const { PrismaClient: Client } = await import('@prisma/client');
     const { resolveDatabaseUrl } = await import('../../../utils/db-pool');
     const prisma = new Client({ datasourceUrl: resolveDatabaseUrl(env['DATABASE_URL'], 'worker') });
+    // [AX324 R1] A configured system login is judged too, though the job's
+    // plain client never routes to it: every connection this process could use.
+    const system = envTarget.system ? new Client({ datasourceUrl: env['SYSTEM_DATABASE_URL'] }) : null;
     try {
       const result = await runDrillJobs(argv, {
-        assertTarget: () => assertDrillTarget(prisma, env),
+        assertTarget: () => assertDrillTarget(prisma, env, system),
         openContext: async () => {
           const { default: Redis } = await import('ioredis');
           const { Server } = await import('socket.io');
@@ -145,6 +180,53 @@ export async function drillRunJobMain(
       return DRILL_EXIT.OK;
     } finally {
       await prisma.$disconnect().catch(() => undefined);
+      await disconnect(system);
+    }
+  } catch (err) {
+    return exitFor(err, io);
+  }
+}
+
+/**
+ * drill-guard — the guard ALONE, no work [AX324 R3]. deploy/drill-crash.sh runs
+ * it inside the very worker container it is about to kill, before the setup
+ * and again right before the kill, and pins the journeys runner to the
+ * deployment identity it prints: the worker's own posture, databases and
+ * identity are judged, not just its image and marker.
+ */
+export async function drillGuardMain(
+  argv: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+  io: DrillIo = stdio,
+  deps: FixturesDeps = appClient,
+): Promise<number> {
+  try {
+    if (argv.length > 0) throw new DrillUsageError('drill-guard takes no arguments');
+    const { target, close } = await openGuarded(env, deps);
+    await close();
+    io.out(JSON.stringify({ ok: true, target }));
+    return DRILL_EXIT.OK;
+  } catch (err) {
+    return exitFor(err, io);
+  }
+}
+
+/** drill-evidence crash --order <id> — the crash drill's durable evidence, read-only [AX324 R7]. */
+export async function drillEvidenceMain(
+  argv: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+  io: DrillIo = stdio,
+  deps: FixturesDeps = appClient,
+): Promise<number> {
+  try {
+    const orderId = flag(argv, 'order') ?? '';
+    if (argv[0] !== 'crash' || !ORDER_ID.test(orderId)) throw new DrillUsageError('drill-evidence crash --order <order id>');
+    const { db, close } = await openGuarded(env, deps);
+    try {
+      io.out(JSON.stringify(await readCrashEvidence(db, orderId)));
+      return DRILL_EXIT.OK;
+    } finally {
+      await close();
     }
   } catch (err) {
     return exitFor(err, io);

@@ -41,6 +41,20 @@ export function freshPhone(runId: string, slot: string, attempt = 0): string {
 /** A per-run reference usable as an Idempotency-Key (8–128 chars). */
 export const idemKey = (runId: string, label: string) => `${runId}-${label}`.slice(0, 120).padEnd(8, '0');
 
+/**
+ * [AX324 R9] A receipt or transaction id for one run and one case. The run id
+ * is HASHED (64 bits), never truncated: a run id may be 64 characters and the
+ * receipt field holds 64 (POST /admin/billing/agent-payments), so truncation
+ * cut off the case suffix and two cases of one run collided — the second
+ * receipt was a "duplicate" and its bill stayed unpaid. The suffix always
+ * survives, and runs whose ids share any prefix never share a receipt.
+ */
+export function runReceipt(runId: string, tag: string, max = 64): string {
+  const id = `SYN-${createHash('sha256').update(runId).digest('hex').slice(0, 16)}-${tag}`;
+  if (id.length > max) throw new Error(`the receipt id for ${tag} is ${id.length} characters; the field holds ${max}`);
+  return id;
+}
+
 export async function ensureAddress(c: Session, lat: number, lng: number): Promise<string | null> {
   const list = await GET('/customer/addresses', c.token);
   const existing = (list.json?.data ?? []).find?.((a: any) => a.isDefault)?.id ?? list.json?.data?.[0]?.id;

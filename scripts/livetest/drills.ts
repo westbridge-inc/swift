@@ -1,7 +1,10 @@
 // The staging drill manifest [STG-DRILLS]. deploy/drill-fixtures.sh builds,
-// ON THE SERVER, the fixtures seven journeys need and staging cannot produce
-// by itself (apps/api/src/modules/ops/drills/fixtures.ts), and writes their
-// ids to a manifest. deploy/journeys-run.sh copies it into the run's results
+// ON THE SERVER, the fixtures ADMIN-01 (recusal) and PLAT-01 (a second tenant)
+// need and staging cannot produce by itself
+// (apps/api/src/modules/ops/drills/fixtures.ts), and writes their ids to a
+// manifest. Version 2: no billing fixtures (AX324 R2 — the billing jobs are
+// platform-wide, so no drill runs them; VEND-04's billing path is
+// automated-only and MONEY-03's agent-receipt case needs no bill). deploy/journeys-run.sh copies it into the run's results
 // and names it in LIVETEST_DRILL_MANIFEST. The runner stays an HTTP client: it
 // never builds a fixture and never touches the database; it only reads ids
 // and signs the fixture accounts in through the private instance's dev code.
@@ -15,21 +18,12 @@ import { readFileSync } from 'node:fs';
 import { FICTIONAL_GY, TargetRefused, type TargetIdentity } from './guard.js';
 
 export interface DrillAccount { slot: string; userId: string; phone: string }
-export interface DrillBillingStore extends DrillAccount {
-  vendorId: string;
-  vendorName: string;
-  subscriptionId: string;
-  san: string | null;
-  bornAs: 'TRIAL' | 'BILLED_FROM_DAY_1';
-  trialEndedAt: string | null;
-}
 export interface DrillManifest {
-  version: 1;
+  version: 2;
   runId: string;
   marker: string;
   createdAt: string;
   target: { deploymentId: string; environment: string; database: string };
-  billing: { vend04: DrillBillingStore; money03: DrillBillingStore };
   recusal: DrillAccount & { adminPhone: string; linkedBy: 'PHONE' };
   tenant: {
     tenantId: string;
@@ -51,36 +45,22 @@ function account(v: unknown, where: string): DrillAccount {
   if (!isObj(v)) throw new Error(`drill manifest: ${where} is missing`);
   return { slot: str(v['slot'], `${where}.slot`), userId: str(v['userId'], `${where}.userId`), phone: str(v['phone'], `${where}.phone`) };
 }
-function billingStore(v: unknown, where: string): DrillBillingStore {
-  if (!isObj(v)) throw new Error(`drill manifest: ${where} is missing`);
-  return {
-    ...account(v, where),
-    vendorId: str(v['vendorId'], `${where}.vendorId`),
-    vendorName: str(v['vendorName'], `${where}.vendorName`),
-    subscriptionId: str(v['subscriptionId'], `${where}.subscriptionId`),
-    san: typeof v['san'] === 'string' ? v['san'] : null,
-    bornAs: v['bornAs'] === 'BILLED_FROM_DAY_1' ? 'BILLED_FROM_DAY_1' : 'TRIAL',
-    trialEndedAt: typeof v['trialEndedAt'] === 'string' ? v['trialEndedAt'] : null,
-  };
-}
 
 /** Parse and validate a manifest (throws on any malformed field; refuses a live phone, gate p). */
 export function parseDrillManifest(raw: unknown): DrillManifest {
-  if (!isObj(raw) || raw['version'] !== 1) throw new Error('drill manifest: not a version-1 manifest');
+  if (!isObj(raw) || raw['version'] !== 2) throw new Error('drill manifest: not a version-2 manifest (deploy/drill-fixtures.sh create writes one)');
   const target = isObj(raw['target']) ? raw['target'] : {};
-  const billing = isObj(raw['billing']) ? raw['billing'] : {};
   const recusal = isObj(raw['recusal']) ? raw['recusal'] : {};
   const tenant = isObj(raw['tenant']) ? raw['tenant'] : {};
   const store = isObj(tenant['store']) ? tenant['store'] : {};
   const order = isObj(tenant['order']) ? tenant['order'] : {};
   const partner = isObj(tenant['partner']) ? tenant['partner'] : {};
   const m: DrillManifest = {
-    version: 1,
+    version: 2,
     runId: str(raw['runId'], 'runId'),
     marker: str(raw['marker'], 'marker'),
     createdAt: str(raw['createdAt'], 'createdAt'),
     target: { deploymentId: str(target['deploymentId'], 'target.deploymentId'), environment: str(target['environment'], 'target.environment'), database: str(target['database'], 'target.database') },
-    billing: { vend04: billingStore(billing['vend04'], 'billing.vend04'), money03: billingStore(billing['money03'], 'billing.money03') },
     recusal: { ...account(recusal, 'recusal'), adminPhone: str(recusal['adminPhone'], 'recusal.adminPhone'), linkedBy: 'PHONE' },
     tenant: {
       tenantId: str(tenant['tenantId'], 'tenant.tenantId'),
@@ -99,7 +79,7 @@ export function parseDrillManifest(raw: unknown): DrillManifest {
 
 /** Every phone the manifest hands the runner (all signed in or filed by the drill journeys). */
 export function drillPhones(m: DrillManifest): string[] {
-  return [m.billing.vend04.phone, m.billing.money03.phone, m.recusal.phone, m.recusal.adminPhone, m.tenant.customer.phone, m.tenant.storeOwner.phone, m.tenant.partner.phone];
+  return [m.recusal.phone, m.recusal.adminPhone, m.tenant.customer.phone, m.tenant.storeOwner.phone, m.tenant.partner.phone];
 }
 
 /** LIVETEST_DRILL_MANIFEST (a file path), or null when no drill fixtures were made for this run. */

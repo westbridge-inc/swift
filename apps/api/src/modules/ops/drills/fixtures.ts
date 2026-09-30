@@ -3,35 +3,44 @@ import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
 import { runAsSystem, runWithTenant } from '../../../plugins/tenant-context';
 import { assertTenantWall, attestationOf, readRlsFacts } from '../../../lib/rls-attestation';
 import { generateOrderNumber } from '../../../utils/markup';
-import { SubscriptionService } from '../../subscription/subscription.service';
 import { IdentityService, clusterMemberIds } from '../../integrity/identity.service';
 import { normalizePhone } from '../../integrity/normalize';
 import { releaseSan } from '../../billing/san.service';
 import type { DrillTarget } from './guard';
 
 /**
- * [STG-DRILLS D2/D3/D5/D6] The staging drill fixtures.
+ * [STG-DRILLS D5/D6] The staging drill fixtures.
  *
  * Each fixture is the condition one skipped journey needs and staging cannot
  * produce by itself, built the way the app builds it — the app's own client
  * (tenant scoping, lineage and synthetic-derivation triggers all apply), the
- * real subscription birth (trial law, SAN), the real identity engine, and the
- * tenant-wall assertion every tenant-creating path must make:
+ * real identity engine, and the tenant-wall assertion every tenant-creating
+ * path must make:
  *
- *   D2/D3  two stores whose 14-day trial ended 15 days ago (backdated here,
- *          nowhere else), one for VEND-04 and one for MONEY-03 so neither
- *          journey settles the bill the other one needs. The REAL daily
- *          conversion and hourly billing jobs then bill them;
  *   D5     a partner applicant in the test admin's own identity cluster
  *          (a STRONG phone edge through IdentityService.capture), so ADMIN-01
  *          can prove the admin is recused and the second admin decides;
  *   D6     a second tenant `swift-drill` with a store, a customer, an order
  *          and a partner, for PLAT-01's cross-tenant denial matrix.
  *
+ * [AX324 R2] There are no billing fixtures. D2/D3 made two stores whose trial
+ * had ended 15 days ago for the billing jobs to bill — but those jobs are
+ * platform-wide sweeps that cannot be scoped to DRILL accounts without a new
+ * production parameter (jobs.ts), so no drill may run them and a backdated
+ * store would serve nothing. VEND-04's billing path is automated-only on
+ * staging (GOLD-7), and MONEY-03's agent-receipt case is the dormant
+ * back-office rail check, which needs no bill (the journey runs it on its own
+ * roster store).
+ *
  * Recognisable: every account is named DRILL-<run id> and carries
  * users.syntheticRunId = DRILL-<run id>; every phone is in +592048…, a block
  * no subscriber can hold (+5920…) and nothing else in the repository uses.
- * Idempotent: a re-run with the same run id finds and returns what exists.
+ * Idempotent: a re-run with the same run id finds and returns what exists —
+ * and adopts ONLY what this run provably made [AX324 R5]: a store must belong
+ * to this run's own DRILL owner, and the drill tenant must be the drill's own
+ * (kind, slug and name). Anything else in the way is a conflict, refused.
+ * Collision-resistant: run ids that differ only in case or punctuation
+ * (`a.b`, `a_b`, `A-B`) share no slug — slugs carry a hash of the exact run id.
  * Removable: cleanupDrillFixtures() deletes through the PARENT rows. The
  * append-only evidence (audit, consent, deletion receipts, order status logs,
  * the ledger, receipts, agent-payment observations) is never deleted — it
@@ -45,9 +54,9 @@ import type { DrillTarget } from './guard';
  */
 
 export const DRILL_TENANT_ID = 'swift-drill';
+export const DRILL_TENANT_NAME = 'DRILL tenant (staging drills, synthetic)';
 export const DRILL_PHONE_BLOCK = '+592048';
 const DEFAULT_TENANT = 'swift-default';
-const DAY_MS = 86_400_000;
 const RUN_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const ADMIN_ROLES: readonly UserRole[] = ['ADMIN', 'SUPER_ADMIN'];
 const CAPABILITY = 'staging-drills';
@@ -73,25 +82,21 @@ export function drillPhone(runId: string, slot: string, attempt = 0): string {
   return `${DRILL_PHONE_BLOCK}${String(h.readUInt32BE(0) % 10_000).padStart(4, '0')}`;
 }
 
-const slugOf = (runId: string, slot: string) => `drill-${runId.toLowerCase().replace(/[^a-z0-9-]/g, '-')}-${slot}`;
+/**
+ * [AX324 R5] One slot's store slug: the EXACT run id, hashed (64 bits), so run
+ * ids that differ only in case or punctuation never share a slug.
+ */
+export function drillSlug(runId: string, slot: string): string {
+  return `drill-${createHash('sha256').update(validateRunId(runId)).digest('hex').slice(0, 16)}-${slot}`;
+}
 
 export interface DrillAccount { slot: string; userId: string; phone: string }
-export interface DrillBillingStore extends DrillAccount {
-  vendorId: string;
-  vendorName: string;
-  subscriptionId: string;
-  san: string | null;
-  /** TRIAL (the trial law granted one) or BILLED_FROM_DAY_1 (it did not). Either way the next cycle bills it. */
-  bornAs: 'TRIAL' | 'BILLED_FROM_DAY_1';
-  trialEndedAt: string | null;
-}
 export interface DrillManifest {
-  version: 1;
+  version: 2;
   runId: string;
   marker: string;
   createdAt: string;
   target: { deploymentId: string; environment: string; database: string };
-  billing: { vend04: DrillBillingStore; money03: DrillBillingStore };
   recusal: DrillAccount & { adminPhone: string; linkedBy: 'PHONE' };
   tenant: {
     tenantId: string;
@@ -151,59 +156,6 @@ async function ensureAccount(db: Db, runId: string, spec: AccountSpec): Promise<
 const OWNER: Omit<AccountSpec, 'slot'> = { roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER', vendorOwner: true };
 const GEORGETOWN = { city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8013, longitude: -58.1551 };
 
-/** D2/D3: an approved store whose trial ended 15 days ago, born through the real subscription path. */
-async function ensureBillingStore(db: Db, runId: string, journey: 'vend04' | 'money03', now: Date): Promise<DrillBillingStore> {
-  const marker = drillMarker(runId);
-  const slot = `${journey}-billing`;
-  const account = await ensureAccount(db, runId, { slot, ...OWNER });
-  const owner = await db.vendorOwner.findUniqueOrThrow({ where: { userId: account.userId }, select: { id: true } });
-  const name = `${marker} ${journey === 'vend04' ? 'VEND-04' : 'MONEY-03'} billing store`;
-  const slug = slugOf(runId, slot);
-  const vendor = await db.vendor.findUnique({ where: { slug }, select: { id: true } })
-    // Approved and verified like an activated store, but closed and not
-    // accepting: it has no menu and must never take an order.
-    ?? await db.vendor.create({
-      data: {
-        ownerId: owner.id, name, slug, vendorType: 'RESTAURANT', phone: account.phone,
-        addressLine1: `1 ${marker} Street`, ...GEORGETOWN,
-        status: 'ACTIVE', isVerified: true, isCurrentlyOpen: false, acceptingOrders: false,
-      },
-      select: { id: true },
-    });
-
-  let sub = await db.subscription.findUnique({ where: { vendorId: vendor.id } });
-  if (!sub) {
-    // The ONE birth path (activation calls the same): trial law, rate, SAN.
-    const born = await new SubscriptionService(db).startTrialForVendor(vendor.id);
-    sub = await db.subscription.findUniqueOrThrow({ where: { id: born.id } });
-    if (sub.status === 'TRIAL') {
-      // THE BACKDATE — the only one in the drills: joined 29 days ago, trial
-      // over 15 days ago. The daily conversion and the hourly cycle do the rest.
-      const joined = new Date(now.getTime() - 29 * DAY_MS);
-      const ended = new Date(now.getTime() - 15 * DAY_MS);
-      sub = await db.subscription.update({
-        where: { id: sub.id },
-        data: { createdAt: joined, currentPeriodStart: joined, currentPeriodEnd: ended, trialEndDate: ended, nextBillingDate: ended },
-      });
-      await db.trialGrant.updateMany({ where: { accountId: account.userId, role: 'VENDOR', status: 'ACTIVE' }, data: { startedAt: joined, endsAt: ended } });
-      await db.vendor.update({ where: { id: vendor.id }, data: { createdAt: joined } });
-      await db.user.update({ where: { id: account.userId }, data: { createdAt: joined } });
-    }
-  }
-  // A granted trial spans days between birth and its end; a subscription the
-  // trial law billed from day 1 ends its "trial" the moment it is born.
-  const hadTrial = !!sub.trialEndDate && sub.trialEndDate.getTime() - sub.createdAt.getTime() > DAY_MS;
-  return {
-    ...account,
-    vendorId: vendor.id,
-    vendorName: name,
-    subscriptionId: sub.id,
-    san: sub.san,
-    bornAs: hadTrial ? 'TRIAL' : 'BILLED_FROM_DAY_1',
-    trialEndedAt: sub.trialEndDate ? sub.trialEndDate.toISOString() : null,
-  };
-}
-
 /** D5: an applicant who shares the admin's phone — one STRONG identity edge, through the real engine. */
 async function ensureRecusalApplicant(db: Db, runId: string, adminPhone: string): Promise<DrillManifest['recusal']> {
   const admin = await runAsSystem(CAPABILITY, () => db.user.findUnique({ where: { phone: adminPhone }, select: { id: true, roles: true, tenantId: true } }));
@@ -230,9 +182,13 @@ async function ensureRecusalApplicant(db: Db, runId: string, adminPhone: string)
 /** D6: the second tenant and its four objects. */
 async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['tenant']> {
   const marker = drillMarker(runId);
-  const existing = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: { kind: true, isActive: true } });
+  const existing = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: { kind: true, isActive: true, slug: true, name: true } });
   if (existing && existing.kind !== 'CRAWLER') {
     throw new DrillFixtureError('DRILL_TENANT_CONFLICT', `${DRILL_TENANT_ID} exists as a ${existing.kind} tenant; a drill never changes a tenant's kind`);
+  }
+  // [AX324 R5] Provenance: only the drill's own tenant is adopted (or re-activated).
+  if (existing && (existing.slug !== DRILL_TENANT_ID || existing.name !== DRILL_TENANT_NAME)) {
+    throw new DrillFixtureError('DRILL_TENANT_CONFLICT', `${DRILL_TENANT_ID} exists but is not the drill's tenant (slug ${existing.slug}, name ${JSON.stringify(existing.name)}); a drill adopts only its own`);
   }
   if (!existing?.isActive) {
     // [TA-S0-003] Minting (or re-activating) a tenant at runtime is the path the
@@ -242,7 +198,7 @@ async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['
   }
   await db.tenant.upsert({
     where: { id: DRILL_TENANT_ID },
-    create: { id: DRILL_TENANT_ID, slug: DRILL_TENANT_ID, name: 'DRILL tenant (staging drills, synthetic)', kind: 'CRAWLER', purgeProtected: false, isActive: true },
+    create: { id: DRILL_TENANT_ID, slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, kind: 'CRAWLER', purgeProtected: false, isActive: true },
     update: { isActive: true },
   });
 
@@ -255,9 +211,14 @@ async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['
 
     const owner = await db.vendorOwner.findUniqueOrThrow({ where: { userId: storeOwner.userId }, select: { id: true } });
     const name = `${marker} cross-tenant store`;
-    const slug = slugOf(runId, 'plat01-store');
-    const vendor = await db.vendor.findUnique({ where: { slug }, select: { id: true } })
-      ?? await db.vendor.create({
+    const slug = drillSlug(runId, 'plat01-store');
+    // [AX324 R5] Adopt only this run's own store: the slug's owner must be this
+    // run's DRILL owner. Anything else under that slug is a conflict, refused.
+    const found = await db.vendor.findUnique({ where: { slug }, select: { id: true, ownerId: true } });
+    if (found && found.ownerId !== owner.id) {
+      throw new DrillFixtureError('FIXTURE_CONFLICT', `the store slug ${slug} belongs to an owner that is not this run's DRILL owner; a drill adopts only what its own run made`);
+    }
+    const vendor = found ?? await db.vendor.create({
         data: {
           ownerId: owner.id, name, slug, vendorType: 'RESTAURANT', phone: storeOwner.phone,
           addressLine1: `2 ${marker} Street`, ...GEORGETOWN,
@@ -315,19 +276,14 @@ async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['
 export async function createDrillFixtures(db: Db, input: CreateDrillFixturesInput): Promise<DrillManifest> {
   const now = input.now ?? new Date();
   const marker = drillMarker(input.runId);
-  const [vend04, money03, recusal] = await runWithTenant(DEFAULT_TENANT, async () => [
-    await ensureBillingStore(db, input.runId, 'vend04', now),
-    await ensureBillingStore(db, input.runId, 'money03', now),
-    await ensureRecusalApplicant(db, input.runId, input.adminPhone),
-  ] as const);
+  const recusal = await runWithTenant(DEFAULT_TENANT, () => ensureRecusalApplicant(db, input.runId, input.adminPhone));
   const tenant = await ensureDrillTenant(db, input.runId);
   return {
-    version: 1,
+    version: 2,
     runId: input.runId,
     marker,
     createdAt: now.toISOString(),
     target: { deploymentId: input.target.deploymentId, environment: input.target.environment, database: input.target.database },
-    billing: { vend04, money03 },
     recusal,
     tenant,
   };

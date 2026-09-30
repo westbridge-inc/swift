@@ -12,8 +12,10 @@
 #   * the running worker is the checked-out revision's image.
 # Inside the container the drill code checks again for itself
 # (apps/api/src/modules/ops/drills/guard.ts): the marker, the posture, the
-# stack's own Postgres and the database's staging identity. Two layers; either
-# one alone refuses production.
+# stack's own Postgres (every connection to it) and the database's staging
+# identity. Two layers; either one alone refuses production. A drill that acts
+# on the worker CONTAINER itself (drill-crash.sh kills it) asks that second
+# layer first, inside that container: drill_guard_in_worker.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -46,6 +48,34 @@ drill_preconditions() {
   worker_env="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$WORKER_ID")"
   grep -qx 'SWIFT_STAGING_DRILLS=1' <<< "$worker_env" ||
     die "the running worker does not carry SWIFT_STAGING_DRILLS=1; recreate it (./deploy/pilot-up.sh $SHA) after setting it in deploy/.env"
+}
+
+# [AX324 R3] The FULL drill guard, run inside the very worker container
+# drill_preconditions selected ($WORKER_ID): its own marker, posture, every
+# database connection and Redis, and the database's deployment identity
+# (apps/api/src/boot/drill-guard.js, no work). The image and the env marker
+# above say what the container IS; this says what it is CONNECTED to. Anything
+# but a clean staging verdict is fatal before the caller touches anything.
+# Sets and exports DRILL_DEPLOYMENT_ID (the database's own deployment id).
+drill_guard_in_worker() {
+  local out status
+  set +e
+  out="$(docker exec "$WORKER_ID" node dist/boot/drill-guard.js)"
+  status=$?
+  set -e
+  [ "$status" -eq 0 ] || die "the drill guard inside the worker ($WORKER_ID) refused or failed (exit $status); nothing was touched"
+  DRILL_DEPLOYMENT_ID="$(printf '%s\n' "$out" | tail -n 1 | python3 -c '
+import json, sys
+try:
+    v = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+t = v.get("target") or {}
+if v.get("ok") is not True or t.get("posture") != "staging" or t.get("environment") != "staging" or not t.get("deploymentId"):
+    sys.exit(1)
+print(t["deploymentId"])
+')" || die "the drill guard inside the worker did not return a staging verdict; nothing was touched"
+  export DRILL_DEPLOYMENT_ID
 }
 
 # The run id every drill artefact of one staging run is filed under (the same

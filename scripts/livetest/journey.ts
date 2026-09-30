@@ -12,14 +12,16 @@
 //         physical phones, OS backgrounding — the ledger's separate device
 //         gate) may remain unproven under a PASS; they are listed in
 //         `skippedCases` with gate 'device' and named in `reason`.
-//         [STG-DRILLS] So may an AUTOMATED-ONLY case: one a live target can
-//         never stage because it is days of clock (three failed charges 24 h
-//         apart), which the automated gate proves instead by driving the real
-//         job with a controllable clock. Gate 'automated', named in `reason`
-//         with the test that proves it — never silently counted as run here.
-//   A case this target cannot run for any other reason (no second admin, a
-//   clock-driven job, a dark feature flag, a provider secret the runner must
-//   not hold) is a 'target' skip, and it makes the journey SKIP.
+//   A case this target cannot run (no second admin, a clock-driven job, a
+//   dark feature flag, a provider secret the runner must not hold) is a
+//   'target' skip, and it makes the journey SKIP.
+//   [AX324 R6] So does an AUTOMATED-ONLY case (gate 'automated'): a server
+//   case that did not run HERE, whose proof is an automated gate elsewhere
+//   (e.g. the real worker driven with a controllable clock). Naming that test
+//   establishes neither that this target's case ran nor that the test passed
+//   on this head, so the journey is SKIP, and the automated evidence is
+//   reported separately (its own lines in `reason` and its own section of
+//   the summary) — never a PASS.
 //   Cleanup steps (`rec.cleanup`) are recorded and shown, but a failed cleanup
 //   never fails the journey — the product assertions decide the status.
 
@@ -118,9 +120,9 @@ export class Recorder {
   }
 
   /**
-   * [STG-DRILLS] A case no live target can stage (days of clock), proven
-   * instead by the automated gate that drives the real job with a
-   * controllable clock. `reason` must name that proof. Does not block a PASS.
+   * [STG-DRILLS · AX324 R6] A server case that did not run on this target,
+   * whose proof is an automated gate elsewhere. `reason` names that evidence.
+   * It makes the journey SKIP (never PASS); the evidence is reported apart.
    */
   automatedCase(caseName: string, reason: string): void {
     this.skipped.push({ case: caseName, reason, gate: 'automated' });
@@ -207,9 +209,13 @@ function finalize<C>(j: Journey<C>, rec: Recorder, startedAt: string, target: Ta
     // The defining case cannot run here; any steps that did run stay as evidence.
     status = 'SKIP';
     reason = rec.wholeSkip;
-  } else if (rec.skipped.some((c) => c.gate === 'target')) {
+  } else if (rec.skipped.some((c) => c.gate === 'target' || c.gate === 'automated')) {
     status = 'SKIP';
-    reason = `every executed step passed, but these cases cannot run on this target: ${rec.skipped.filter((c) => c.gate === 'target').map((c) => `${c.case} (${c.reason})`).join('; ')}`;
+    const listed = (gate: SkippedCase['gate']) => rec.skipped.filter((c) => c.gate === gate).map((c) => `${c.case} (${c.reason})`).join('; ');
+    reason = [
+      rec.skipped.some((c) => c.gate === 'target') ? `every executed step passed, but these cases cannot run on this target: ${listed('target')}` : '',
+      rec.skipped.some((c) => c.gate === 'automated') ? `server cases NOT executed on this target — automated evidence, reported separately and never a PASS here: ${listed('automated')}` : '',
+    ].filter(Boolean).join(' · ');
   } else if (steps.length === 0) {
     status = 'SKIP';
     reason = rec.wholeSkip ?? 'no step could run on this target';
@@ -219,12 +225,9 @@ function finalize<C>(j: Journey<C>, rec: Recorder, startedAt: string, target: Ta
     reason = 'runner coverage: no negative check executed';
   } else {
     status = 'PASS';
-    const left = (gate: SkippedCase['gate']) => rec.skipped.filter((s) => s.gate === gate).map((s) => `${s.case} (${s.reason})`).join('; ');
-    const parts = [
-      rec.skipped.some((s) => s.gate === 'device') ? `left to the device gate: ${left('device')}` : '',
-      rec.skipped.some((s) => s.gate === 'automated') ? `automated-only (clock), proven by the automated gate: ${left('automated')}` : '',
-    ].filter(Boolean);
-    if (parts.length > 0) reason = `every server-side case passed; ${parts.join('; ')}`;
+    if (rec.skipped.length > 0) {
+      reason = `every server-side case passed; left to the device gate: ${rec.skipped.map((s) => `${s.case} (${s.reason})`).join('; ')}`;
+    }
   }
   return {
     journeyId: j.id,

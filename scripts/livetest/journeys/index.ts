@@ -96,7 +96,7 @@ export async function runJourneySuite(o: SuiteOpts): Promise<number> {
   const selected = LEDGER_ORDER.filter((id) => !wanted || wanted.has(id)).map((id) => byId.get(id)!);
 
   o.log(o.drill
-    ? `Drill fixtures: ${o.drill.marker} (made ${o.drill.createdAt}) — VEND-04, MONEY-03, ADMIN-01 and PLAT-01 run their drill cases`
+    ? `Drill fixtures: ${o.drill.marker} (made ${o.drill.createdAt}) — ADMIN-01 and PLAT-01 run their drill cases`
     : 'Drill fixtures: none (LIVETEST_DRILL_MANIFEST unset) — the drill cases SKIP as before');
   o.log('Phase 1 — roster (real signup path) and world (vendors orderable, movers online)');
   const roster = await seedJourneyRoster(o.log);
@@ -174,10 +174,7 @@ export async function runJourneySuite(o: SuiteOpts): Promise<number> {
   const count = (s: string) => results.filter((r) => r.status === s).length;
   o.log('\n──────────────────────────────────────────');
   for (const r of results) {
-    const gated = (gate: string) => r.skippedCases.filter((s) => s.gate === gate).length;
-    const extra = r.status === 'PASS' && r.skippedCases.length
-      ? ` (${[gated('device') ? `${gated('device')} device-gate` : '', gated('automated') ? `${gated('automated')} automated-only` : ''].filter(Boolean).join(', ')} case(s) left)`
-      : r.reason ? ` — ${r.reason.slice(0, 160)}` : '';
+    const extra = r.status === 'PASS' && r.skippedCases.length ? ` (${r.skippedCases.length} device-gate case(s) left)` : r.reason ? ` — ${r.reason.slice(0, 160)}` : '';
     o.log(`  ${r.status.padEnd(4)} ${r.journeyId} ${r.title}${extra}`);
   }
   o.log('──────────────────────────────────────────');

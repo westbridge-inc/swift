@@ -1,16 +1,27 @@
-import { runWeeklySettlement, runBillingCycleJob, runConvertTrialsJob, type JobContext } from '../../../jobs/queue';
+import { runWeeklySettlement, type JobContext } from '../../../jobs/queue';
 import type { DrillTarget } from './guard';
 
 /**
- * [STG-DRILLS D2/D4] The run-once job trigger's allowlist.
+ * [STG-DRILLS D4] The run-once job trigger's allowlist.
  *
- * Staging cannot wait for Sunday 00:00 (the settlement digest), 03:00 (the
- * trial conversion) or the top of the hour (the billing cycle) to prove what
- * those jobs do, so deploy/drill-run-job.sh runs them ONCE, on demand, inside
- * the worker container — and runs exactly these functions: the ones the
- * worker's own processors call (jobs/queue.ts). Each entry is the imported
- * function itself, never a copy; staging-drill-jobs.test.ts pins both the
- * identity and the worker's delegation, so the two can never drift apart.
+ * Staging cannot wait for Sunday 00:00 to prove what the settlement digest
+ * does, so deploy/drill-run-job.sh runs it ONCE, on demand, inside the worker
+ * container — and runs exactly the function the worker's own processor calls
+ * (jobs/queue.ts runWeeklySettlement), never a copy; staging-drill-jobs.test.ts
+ * pins the identity and the worker's delegation. It is safe to run off
+ * schedule: one digest row per vendor and calendar week, enforced by the
+ * database, so a run writes only the rows the Sunday job writes, never a second.
+ *
+ * [AX324 R2] The billing jobs are NOT here, and may never be. The hourly cycle
+ * (runBillingCycle, lapseStoppedSubscriptions, sendUpcomingReminders,
+ * sweepSuspended, drainPendingNotices, sweepTrialFeeEducation) and the daily
+ * conversion (convertExpiredTrials, one bare updateMany) are platform-wide
+ * sweeps: every due subscription on the database, with no account parameter.
+ * Scoping them to DRILL accounts would add a production parameter for a
+ * drill, which is ruled out, so on staging they could charge, suspend, pause
+ * or notify a real subscription. VEND-04's bill → dun → suspend → reinstate is
+ * automated-only: GOLD-7 (apps/api/src/__tests__/golden/gold-7-vend-04.test.ts)
+ * drives the real subscription worker with a controllable clock.
  *
  * Nothing outside this map can be named. There is no route and no queue entry:
  * the only way in is `docker compose exec` on the staging host, behind the
@@ -19,10 +30,6 @@ import type { DrillTarget } from './guard';
 export const DRILL_JOBS = {
   /** The Sunday 00:00 `process-settlements` job: weekly sales digests. */
   'settlement-digest': runWeeklySettlement,
-  /** The daily 03:00 `convert-trials` job: trials past day 14 become due. */
-  'convert-trials': runConvertTrialsJob,
-  /** The hourly `process-billing` job: the subscription billing cycle. */
-  'billing-cycle': runBillingCycleJob,
 } as const satisfies Record<string, (ctx: JobContext) => Promise<unknown>>;
 
 export type DrillJobName = keyof typeof DRILL_JOBS;

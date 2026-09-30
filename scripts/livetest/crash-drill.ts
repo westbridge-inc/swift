@@ -1,25 +1,37 @@
 // PLAT-02 — the worker crash drill, the runner's half [STG-DRILLS D7].
 //
-// deploy/drill-crash.sh owns the crash (docker kill, 15 s, docker start); the
-// runner has no Docker socket by design. Two phases, each a one-shot run of
-// this module in the private journeys runner, HTTP only:
+// deploy/drill-crash.sh owns the crash (the in-worker guard, docker kill, 15 s,
+// docker start) and the durable evidence read; the runner has no Docker socket
+// and no database by design. Three phases, each a one-shot run of this module
+// in the private journeys runner, HTTP only:
 //
-//   setup   a roster customer places an express cash delivery at R1, R1
-//           accepts it (dispatch starts on accept), and the runner waits until
-//           a roster rider holds a live offer for it — mid-offer. It records
-//           the offer, the dead-letter baseline and its own steps in
-//           crash-drill-state.json, and exits; the host kills the worker now.
-//   verify  after the restart: within 120 s the offer cascade must have
-//           resumed (a fresh offer attempt) or been reconciled (the order
-//           assigned); at no moment may two riders hold a live offer for the
-//           order; no job may have died in the drill window. The live offer
-//           is then accepted and the order walked to the door exactly once.
-//           The PLAT-02 row (journeys-result.json format) is written to
-//           plat02-crash-drill.json and replaces the run's own PLAT-02 row.
+//   setup     the dead-letter page must be valid and EMPTY [AX324 R8] — a
+//             drill that could never PASS kills nothing — then a roster
+//             customer places an express cash delivery at R1, R1 accepts it
+//             (dispatch starts on accept), and the runner waits until a roster
+//             rider holds a live offer for it — mid-offer. It records the
+//             offer and its own steps in crash-drill-state.json, and exits; the
+//             host kills the worker now.
+//   verify    after the restart: within 120 s the offer cascade must have
+//             resumed (a fresh offer attempt) or been reconciled (the order
+//             assigned). The live offer is accepted and the order walked to
+//             the door exactly once. EVERY rider's live offers and legs are
+//             watched the whole way, through completion and a tail after it
+//             [AX324 R7]: never two live offers at once, no replaced attempt
+//             back, no live offer once assigned, and exactly one rider ever
+//             holding the order. The record goes to crash-drill-verify.json.
+//   finalize  the host has read the order's durable rows inside the worker
+//             (crash-drill-evidence.json: offer publications, offer pushes,
+//             the dispatch journal, the status log). They are judged here
+//             (durableOnceOnly) — what ran twice between two polls leaves rows
+//             — together with the verify record; the PLAT-02 row
+//             (journeys-result.json format) is written to plat02-crash-drill.json
+//             and replaces the run's own PLAT-02 row. No durable evidence, no PASS.
 //
 // The target is refused exactly as the journeys suite refuses it (guard.ts:
-// private address, /test-control identity not production, synthetic data,
-// +5920… phones only), before the first write of either phase.
+// private address, /test-control identity not production — and pinned by the
+// host to the identity the worker's own guard judged — synthetic data, +5920…
+// phones only), before the first write of every phase.
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -38,9 +50,13 @@ const STORE = 'R1';
 const RIDERS = ['DR1', 'DR2', 'DR3'];
 const STATE = 'crash-drill-state.json';
 const HOST = 'crash-drill-host.json';
+const VERIFY = 'crash-drill-verify.json';
+const EVIDENCE = 'crash-drill-evidence.json';
 const ROW = 'plat02-crash-drill.json';
 /** The drill's promise: the cascade resumes (or is reconciled) within this long of the restart. */
 export const RESUME_WINDOW_MS = 120_000;
+/** Observation continues this many polls (2 s apart) after the order is delivered. */
+const TAIL_POLLS = 3;
 const FORGED = 'cl0000000000000000000forged';
 
 export interface CrashState {
@@ -48,13 +64,36 @@ export interface CrashState {
   setupStartedAt: string;
   orderId: string;
   offer: { moverId: string; offerAttemptId: string; seenAt: string };
-  dlqBaseline: { count: number; newestFinishedOn: number };
   steps: Step[];
+  negatives: number;
 }
 export interface CrashHost { worker: string; signal: string; killedAt: string; restartedAt: string; downRightAfterKill: boolean; downAfterTheWait: boolean; waitSeconds: number }
 
 /** One sighting of a live offer for the drill order, by rider. */
 export interface Sighting { at: number; moverId: string; offerAttemptId: string }
+
+/** What the verify phase saw and did, for the finalize phase to judge with the durable rows. */
+export interface CrashVerify {
+  runId: string;
+  orderId: string;
+  steps: Step[];
+  negatives: number;
+  /** The attempt the drill's rider accepted after the restart (null: reconciled without one). */
+  acceptedAttemptId: string | null;
+  finishedAt: string;
+}
+
+/** The server's durable rows for the drill order (apps/api/src/modules/ops/drills/evidence.ts). */
+export interface CrashEvidence {
+  version: 1;
+  orderId: string;
+  readAt: string;
+  order: { status: string; riderId: string | null } | null;
+  offers: Array<{ attemptId: string | null; recipientId: string; sentAt: string; acknowledgedAt: string | null }>;
+  offerPushes: Array<{ attemptId: string | null; userId: string; createdAt: string }>;
+  searches: Array<{ id: string; status: string; wave: number; startedAt: string; assignedAt: string | null; assignedTo: string | null; deliveryAuthorityVersion: number | null }>;
+  statusLog: Array<{ status: string; createdAt: string }>;
+}
 
 /**
  * The once-only verdict over every poll: never two riders holding a live offer
@@ -79,6 +118,104 @@ export function onceOnly(polls: Sighting[][]): { ok: boolean; detail: string } {
   return { ok: problems.length === 0, detail: problems.length ? problems.join('; ') : `${polls.filter((p) => p.length).length} poll(s) with a live offer, one holder at a time` };
 }
 
+/** [AX324 R7] Once the order is assigned, no rider may see a live offer for it — through completion. */
+export function noOfferAfterAssignment(polls: Sighting[][]): { ok: boolean; detail: string } {
+  const seen = polls.flat();
+  return seen.length === 0
+    ? { ok: true, detail: `${polls.length} poll(s) after the assignment, through completion: no live offer` }
+    : { ok: false, detail: `a live offer for the assigned order: ${seen.map((s) => `${s.moverId}/${s.offerAttemptId}`).join('; ')}` };
+}
+
+/**
+ * [AX324 R7] Every holder, every poll: never two riders holding the order's
+ * leg at once, and exactly one rider ever holding it across the whole window.
+ */
+export function holdersVerdict(polls: string[][]): { ok: boolean; detail: string } {
+  const problems: string[] = [];
+  for (const poll of polls) {
+    const at = [...new Set(poll)];
+    if (at.length > 1) problems.push(`${at.join(' and ')} held the order at the same moment`);
+  }
+  const ever = [...new Set(polls.flat())];
+  if (ever.length === 0) problems.push('no roster rider was ever seen holding the order');
+  if (ever.length > 1) problems.push(`the order passed through ${ever.length} riders (${ever.join(', ')}); it was handed out more than once`);
+  return { ok: problems.length === 0, detail: problems.length ? problems.join('; ') : `${polls.length} poll(s) of every rider's legs: only ${ever[0]} ever held it` };
+}
+
+/** [AX324 R8] A PASS needs a VALID, EMPTY dead-letter page — nothing filtered away. */
+export function dlqVerdict(r: { ok: boolean; json: any }): { ok: boolean; count: number | null; detail: string } {
+  const rows = r.json?.data;
+  if (!r.ok || r.json?.success !== true || !Array.isArray(rows)) {
+    return { ok: false, count: null, detail: `not a valid dead-letter page (ok=${r.ok}, data is ${Array.isArray(rows) ? 'a list' : typeof rows})` };
+  }
+  if (rows.length > 0) {
+    return { ok: false, count: rows.length, detail: `${rows.length} dead letter(s): ${rows.slice(0, 5).map((x: any) => `${x.queue}/${x.name} ${String(x.failedReason ?? '').slice(0, 80)}`).join('; ')}` };
+  }
+  return { ok: true, count: 0, detail: 'valid and empty' };
+}
+
+const countBy = <T>(xs: T[], key: (x: T) => string): Map<string, number> => {
+  const m = new Map<string, number>();
+  for (const x of xs) m.set(key(x), (m.get(key(x)) ?? 0) + 1);
+  return m;
+};
+const twice = (m: Map<string, number>): string[] => [...m.entries()].filter(([, n]) => n > 1).map(([k, n]) => `${k} ×${n}`);
+
+/**
+ * [AX324 R7] The durable once-only verdict: what the server WROTE about the
+ * order across the whole crash window. A job that ran twice between two live
+ * polls still leaves a second row. Pure, so each rule is proven without a host.
+ */
+export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | null): Array<{ name: string; ok: boolean; detail: string }> {
+  const out: Array<{ name: string; ok: boolean; detail: string }> = [];
+  const statuses = countBy(e.statusLog, (l) => l.status);
+  const assignedAt = e.statusLog.find((l) => l.status === 'RIDER_ASSIGNED')?.createdAt ?? null;
+
+  const unattributed = e.offers.filter((o) => !o.attemptId).length;
+  const published = twice(countBy(e.offers.filter((o) => o.attemptId), (o) => o.attemptId!));
+  out.push({
+    name: 'durable: every offer attempt was published once (alert deliveries)',
+    ok: e.offers.length > 0 && published.length === 0 && unattributed === 0,
+    detail: `${e.offers.length} publication(s) of ${new Set(e.offers.map((o) => o.attemptId)).size} attempt(s)${published.length ? `; published twice: ${published.join(', ')}` : ''}${unattributed ? `; ${unattributed} without an attempt id (cannot be proven once)` : ''}`,
+  });
+
+  const late = assignedAt ? e.offers.filter((o) => o.attemptId !== acceptedAttemptId && Date.parse(o.sentAt) > Date.parse(assignedAt)) : [];
+  out.push({
+    name: 'durable: no new offer was published after the order was assigned',
+    ok: !!assignedAt && late.length === 0,
+    detail: assignedAt ? (late.length ? `published after ${assignedAt}: ${late.map((o) => `${o.attemptId}@${o.sentAt}`).join('; ')}` : `none after ${assignedAt}`) : 'the order was never assigned',
+  });
+
+  const pushedTwice = twice(countBy(e.offerPushes.filter((p) => p.attemptId), (p) => p.attemptId!));
+  const pushUnattributed = e.offerPushes.filter((p) => !p.attemptId).length;
+  out.push({
+    name: 'durable: every offer attempt was pushed at most once (dispatch_offer notifications)',
+    ok: pushedTwice.length === 0 && pushUnattributed === 0,
+    detail: `${e.offerPushes.length} offer push(es)${pushedTwice.length ? `; pushed twice: ${pushedTwice.join(', ')}` : ''}${pushUnattributed ? `; ${pushUnattributed} without an attempt id` : ''}`,
+  });
+
+  const loggedTwice = twice(statuses);
+  out.push({
+    name: 'durable: every order status was logged once — one assignment, one delivery',
+    ok: loggedTwice.length === 0 && statuses.get('RIDER_ASSIGNED') === 1 && statuses.get('DELIVERED') === 1,
+    detail: `${e.statusLog.map((l) => l.status).join(' → ')}${loggedTwice.length ? `; logged twice: ${loggedTwice.join(', ')}` : ''}`,
+  });
+
+  const assignedSearches = e.searches.filter((s) => s.status === 'ASSIGNED');
+  out.push({
+    name: 'durable: the dispatch journal assigned the order at most once',
+    ok: assignedSearches.length <= 1,
+    detail: `${e.searches.length} search(es): ${e.searches.map((s) => `${s.status}${s.assignedTo ? `→${s.assignedTo}` : ''}`).join(', ') || 'none'}`,
+  });
+
+  out.push({
+    name: 'durable: the order ends delivered, with its one rider',
+    ok: !!e.order && ['DELIVERED', 'COMPLETED'].includes(e.order.status) && !!e.order.riderId,
+    detail: e.order ? `status=${e.order.status} rider=${e.order.riderId ?? 'none'}` : 'the order is missing',
+  });
+  return out;
+}
+
 interface CrashCtx extends Ctx { outDir: string }
 
 async function signIn(id: string): Promise<{ id: string; phone: string; session: Session; lat: number; lng: number; kind?: 'rider' | 'driver'; vendorType?: string }> {
@@ -87,8 +224,10 @@ async function signIn(id: string): Promise<{ id: string; phone: string; session:
   return { ...e, session: await login(e.phone) };
 }
 
+type PhaseOpts = { runId: string; identity: TargetIdentity; admin: Session; adminPhone: string; outDir: string; log: (s: string) => void };
+
 /** The accounts this drill needs, signed in (they exist once a journeys run has provisioned the roster). */
-async function world(o: { runId: string; identity: TargetIdentity; admin: Session; adminPhone: string; outDir: string; log: (s: string) => void }): Promise<CrashCtx> {
+async function world(o: PhaseOpts): Promise<CrashCtx> {
   const customer = await signIn(CUSTOMER);
   const store = await signIn(STORE);
   const riders = await Promise.all(RIDERS.map(signIn));
@@ -133,11 +272,6 @@ async function ridersOnline(rec: Recorder, ctx: CrashCtx, free: boolean): Promis
   rec.require('roster riders are online near the store', ctx.world.onlineMovers.length > 0, `online: ${ctx.world.onlineMovers.join(' ') || 'none'}`);
 }
 
-async function dlq(admin: Session): Promise<{ ok: boolean; rows: any[] }> {
-  const r = await GET('/admin/dlq', admin.token);
-  return { ok: r.ok, rows: Array.isArray(r.json?.data) ? r.json.data : [] };
-}
-
 /** Every rider's live offer for the order, right now. */
 async function sightings(ctx: CrashCtx, orderId: string): Promise<Sighting[]> {
   const out: Sighting[] = [];
@@ -150,28 +284,29 @@ async function sightings(ctx: CrashCtx, orderId: string): Promise<Sighting[]> {
   return out;
 }
 
-/** The roster rider whose active legs include the order, if any. */
-async function holderOf(ctx: CrashCtx, orderId: string): Promise<string | null> {
+/** [AX324 R7] EVERY roster rider whose active legs include the order — never just the first. */
+async function holdersOf(ctx: CrashCtx, orderId: string): Promise<string[]> {
+  const out: string[] = [];
   for (const id of RIDERS) {
     const legs = activeLegsOf((await GET('/rider/orders/active-legs', mover(ctx, id).session.token)).json);
-    if (legs.some((l) => (l.id ?? l.orderId) === orderId)) return id;
+    if (legs.some((l) => (l.id ?? l.orderId) === orderId)) out.push(id);
   }
-  return null;
+  return out;
 }
 
-/** Phase 1: reach mid-offer, record it, exit. */
-export async function crashSetup(o: { runId: string; identity: TargetIdentity; admin: Session; adminPhone: string; outDir: string; log: (s: string) => void }): Promise<number> {
+/** Phase 1: prove the dead-letter page empty, reach mid-offer, record it, exit. */
+export async function crashSetup(o: PhaseOpts): Promise<number> {
   const ctx = await world(o);
   const run = new JourneyRun<CrashCtx>({ id: 'PLAT-02', title: 'setup', cases: '', run: async () => undefined });
   const rec = run.rec;
   const setupStartedAt = new Date().toISOString();
   let stop = () => {};
   try {
+    const base = dlqVerdict(await GET('/admin/dlq', ctx.admin.token));
+    rec.require('the dead-letter page is valid and empty before the crash (PLAT-02 can pass only on an empty page; drain it first)', base.ok, base.detail);
     await storeReady(rec, ctx);
     await ridersOnline(rec, ctx, true);
     stop = startHeartbeat(ctx.roster, ctx.world, {});
-    const base = await dlq(ctx.admin);
-    rec.check('the dead-letter queues are readable before the crash', base.ok, `${base.rows.length} failed job(s) listed`);
     const placed = await placeExpress(ctx, CUSTOMER, STORE, STORE, `crash-${o.runId}`);
     rec.require('an express cash delivery (no hold)', !!placed.id, brief(placed.res));
     rec.expect('the store accepts it (dispatch starts on accept)', await storeAccepts(ctx, STORE, placed.id!), 200);
@@ -181,14 +316,14 @@ export async function crashSetup(o: { runId: string; identity: TargetIdentity; a
       got = await sightings(ctx, placed.id!);
       if (!got.length) await sleep(1_000);
     }
-    rec.require('mid-offer: a rider holds a live offer for the order', got.length === 1, got.length ? `${got[0]!.moverId} holds ${got[0]!.offerAttemptId}` : 'no offer within 60 s');
+    rec.require('mid-offer: a rider holds a live offer for the order', got.length === 1, got.length ? `${got.map((g) => `${g.moverId} holds ${g.offerAttemptId}`).join('; ')}` : 'no offer within 60 s');
     const state: CrashState = {
       runId: o.runId,
       setupStartedAt,
       orderId: placed.id!,
       offer: { moverId: got[0]!.moverId, offerAttemptId: got[0]!.offerAttemptId, seenAt: new Date(got[0]!.at).toISOString() },
-      dlqBaseline: { count: base.rows.length, newestFinishedOn: Math.max(0, ...base.rows.map((r) => Number(r.finishedOn ?? 0))) },
       steps: [...rec.steps],
+      negatives: rec.negatives,
     };
     writeFileSync(join(o.outDir, STATE), JSON.stringify(state, null, 2) + '\n');
     o.log(`  mid-offer: order ${state.orderId} offered to ${state.offer.moverId} (${state.offer.offerAttemptId}); the host kills the worker now`);
@@ -202,22 +337,140 @@ export async function crashSetup(o: { runId: string; identity: TargetIdentity; a
   }
 }
 
-/** Phase 3: after the restart — resumed, once-only, one completion; write the PLAT-02 row. */
-export async function crashVerify(o: { runId: string; identity: TargetIdentity; admin: Session; adminPhone: string; outDir: string; log: (s: string) => void }): Promise<number> {
-  const statePath = join(o.outDir, STATE);
-  if (!existsSync(statePath)) throw new Error(`${STATE} is missing in ${o.outDir}: run the setup phase first (deploy/drill-crash.sh does)`);
-  const state = JSON.parse(readFileSync(statePath, 'utf8')) as CrashState;
-  const host = existsSync(join(o.outDir, HOST)) ? JSON.parse(readFileSync(join(o.outDir, HOST), 'utf8')) as CrashHost : null;
+const readJson = <T>(path: string): T | null => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as T : null);
+
+function loadState(outDir: string): CrashState {
+  const state = readJson<CrashState>(join(outDir, STATE));
+  if (!state) throw new Error(`${STATE} is missing in ${outDir}: run the setup phase first (deploy/drill-crash.sh does)`);
+  return state;
+}
+
+/** Phase 3: after the restart — resumed, one completion, every rider watched throughout; the record for finalize. */
+export async function crashVerify(o: PhaseOpts): Promise<number> {
+  const state = loadState(o.outDir);
+  const host = readJson<CrashHost>(join(o.outDir, HOST));
   const ctx = await world(o);
-  const journey: Journey<CrashCtx> = {
+  const record: CrashVerify = { runId: o.runId, orderId: state.orderId, steps: [], negatives: 0, acceptedAttemptId: null, finishedAt: '' };
+  const run = new JourneyRun<CrashCtx>({ id: 'PLAT-02', title: 'verify', cases: '', run: (rec, c) => verifyRun(rec, c, state, host, record) });
+  await run.run(ctx);
+  record.steps = [...run.rec.steps];
+  record.negatives = run.rec.negatives;
+  record.finishedAt = new Date().toISOString();
+  writeFileSync(join(o.outDir, VERIFY), JSON.stringify(record, null, 2) + '\n');
+  for (const s of record.steps) if (!s.ok) o.log(`    ✗ ${s.name} — ${s.detail.slice(0, 240)}`);
+  o.log(`  verify recorded ${record.steps.length} step(s); the host reads the durable evidence next`);
+  return record.steps.some((s) => !s.ok) ? 1 : 0;
+}
+
+async function verifyRun(rec: Recorder, ctx: CrashCtx, state: CrashState, host: CrashHost | null, record: CrashVerify): Promise<void> {
+  rec.check('the host killed the worker mid-offer (SIGKILL, no drain) and started it again after the wait',
+    !!host && host.signal === 'SIGKILL' && host.downRightAfterKill,
+    host ? `${host.worker}: killed ${host.killedAt}, down=${host.downRightAfterKill}, still down after ${host.waitSeconds}s=${host.downAfterTheWait}, started ${host.restartedAt}` : `${HOST} missing: the host step did not record the crash`);
+  const restartedAt = host ? Date.parse(host.restartedAt) : Date.now();
+  const offerPolls: Sighting[][] = [[{ at: Date.parse(state.offer.seenAt), moverId: state.offer.moverId, offerAttemptId: state.offer.offerAttemptId }]];
+  const assignedPolls: Sighting[][] = [];
+  const holderPolls: string[][] = [];
+  let assigned = false;
+  // [AX324 R7] One observation = every rider's live offers AND legs; it never stops until the tail after completion.
+  const observe = async (): Promise<Sighting[]> => {
+    const now = await sightings(ctx, state.orderId);
+    (assigned ? assignedPolls : offerPolls).push(now);
+    holderPolls.push(await holdersOf(ctx, state.orderId));
+    return now;
+  };
+  let stop = () => {};
+  try {
+    await ridersOnline(rec, ctx, false);
+    stop = startHeartbeat(ctx.roster, ctx.world, {});
+    const C = ctx.roster.customers[CUSTOMER]!.session;
+
+    // 1. Resumed or reconciled, within the window.
+    let live: Sighting | null = null;
+    const deadline = restartedAt + RESUME_WINDOW_MS;
+    while (Date.now() < deadline) {
+      const now = await observe();
+      const fresh = now.find((s) => s.offerAttemptId !== state.offer.offerAttemptId);
+      const order = await customerOrder(C, state.orderId);
+      if (order?.riderId || ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP'].includes(order?.status)) { assigned = true; break; }
+      if (fresh) { live = fresh; break; }
+      if (order && TERMINAL.includes(order.status)) break;
+      await sleep(2_000);
+    }
+    const tookMs = Date.now() - restartedAt;
+    rec.check(`the offer cascade resumed within ${RESUME_WINDOW_MS / 1000} s of the restart (a fresh offer attempt, or the order assigned)`, !!live || assigned,
+      live ? `${live.moverId} holds fresh attempt ${live.offerAttemptId} ${Math.round(tookMs / 1000)} s after the restart (before the crash: ${state.offer.moverId}/${state.offer.offerAttemptId})`
+        : assigned ? `the order was assigned ${Math.round(tookMs / 1000)} s after the restart` : `no fresh offer and no assignment within ${RESUME_WINDOW_MS / 1000} s`);
+
+    // 2. One completion, observed at every step: the live offer is taken and the order walked to the door.
+    if (live) {
+      const m = mover(ctx, live.moverId);
+      const took = await POST('/rider/offers/accept', { orderId: state.orderId, offerAttemptId: live.offerAttemptId }, m.session.token);
+      rec.expect('the rider takes the resumed offer', took, 200);
+      if (took.ok) { assigned = true; record.acceptedAttemptId = live.offerAttemptId; }
+    }
+    await observe();
+    const holders = await holdersOf(ctx, state.orderId);
+    rec.check('exactly one rider holds the order (every roster rider asked)', holders.length === 1, holders.length ? holders.join(', ') : 'no roster rider holds it');
+    if (holders.length === 1) {
+      const m = mover(ctx, holders[0]!);
+      await storeReadies(ctx, STORE, state.orderId);
+      await observe();
+      const walked = await riderToDoor(m.session, state.orderId);
+      rec.expect('the rider carries it to the door', walked, 200);
+      await observe();
+      const handed = await handoverPaid(m.session, state.orderId, { lat: ctx.roster.customers[CUSTOMER]!.lat, lng: ctx.roster.customers[CUSTOMER]!.lng }, await doorPin(C, state.orderId));
+      rec.expect('the cash is handed over at the door', handed, [200, 201]);
+    }
+    // The tail: observation continues after completion.
+    for (let i = 0; i < TAIL_POLLS; i += 1) { await sleep(2_000); await observe(); }
+
+    const once = onceOnly(offerPolls);
+    rec.check('nothing ran twice before the assignment: never two live offers for the order at once, and no replaced attempt came back', once.ok, once.detail);
+    const after = noOfferAfterAssignment(assignedPolls);
+    rec.check('nothing ran twice after it: no live offer for the order once assigned, through completion', assigned && after.ok, assigned ? after.detail : 'the order was never assigned');
+    const held = holdersVerdict(holderPolls);
+    rec.check('one holder for the whole window: never two riders at once, and only one ever', held.ok, held.detail);
+
+    const detail = await GET(`/admin/orders/${state.orderId}`, ctx.admin.token);
+    const history: any[] = Array.isArray(detail.json?.data?.statusHistory) ? detail.json.data.statusHistory : [];
+    const count = (s: string) => history.filter((h) => h.status === s).length;
+    const final = detail.json?.data?.status;
+    rec.check('the order ends in a sane state, completed exactly once', detail.ok && ['DELIVERED', 'COMPLETED'].includes(final) && count('DELIVERED') === 1 && count('RIDER_ASSIGNED') === 1,
+      `status=${final} · DELIVERED logged ${count('DELIVERED')}× · RIDER_ASSIGNED logged ${count('RIDER_ASSIGNED')}× · ${history.length} status rows`);
+
+    // 3. [AX324 R8] The dead-letter page: valid and EMPTY — it was empty before the crash, so nothing is filtered away.
+    const dead = await GET('/admin/dlq', ctx.admin.token);
+    const dl = dlqVerdict(dead);
+    rec.check('the dead-letter page is valid and empty: no job failed for good', dl.ok, dl.detail);
+    const rows: any[] = Array.isArray(dead.json?.data) ? dead.json.data : [];
+    rec.check('every listed dead letter states its recovery class', rows.every((r) => r.recovery != null), `${rows.length} row(s)`);
+    rec.deny('a non-founder cannot read the DLQ', await GET('/admin/dlq', C.token), [403]);
+    rec.deny('requeue of a job that does not exist', await POST(`/admin/dlq/dispatch/${FORGED}/requeue`, {}, ctx.admin.token), [400, 404]);
+  } finally {
+    stop();
+    for (const id of RIDERS) {
+      await freeRider(ctx, id).catch(() => []);
+      await goOffline(mover(ctx, id)).catch(() => undefined);
+    }
+  }
+}
+
+/** Phase 5: the durable evidence judged with the live record; the PLAT-02 row. */
+export async function crashFinalize(o: PhaseOpts): Promise<number> {
+  const state = loadState(o.outDir);
+  const verify = readJson<CrashVerify>(join(o.outDir, VERIFY));
+  const evidence = readJson<CrashEvidence>(join(o.outDir, EVIDENCE));
+  const journey: Journey<null> = {
     id: 'PLAT-02',
     title: 'Worker restart / job recovery mid-flow',
     cases: 'worker crash mid-offer/hold; DLQ; retry; once-only completion',
-    run: (rec, c) => verifyRun(rec, c, state, host),
+    run: async (rec) => finalizeRun(rec, state, verify, evidence),
   };
   const run = new JourneyRun(journey);
   run.rec.steps.push(...state.steps.map((s) => ({ ...s, name: `setup: ${s.name}` })));
-  await run.run(ctx);
+  run.rec.steps.push(...(verify?.steps ?? []));
+  run.rec.negatives = (state.negatives ?? 0) + (verify?.negatives ?? 0);
+  await run.run(null);
   const target = { deploymentId: o.identity.deploymentId, environment: o.identity.environment, buildSha: o.identity.buildSha };
   const row = run.result(target, o.runId);
   const written = writeReplacedRow(o.outDir, ROW, row, {
@@ -231,82 +484,18 @@ export async function crashVerify(o: { runId: string; identity: TargetIdentity; 
   return row.status === 'FAIL' ? 1 : 0;
 }
 
-async function verifyRun(rec: Recorder, ctx: CrashCtx, state: CrashState, host: CrashHost | null): Promise<void> {
-  rec.check('the host killed the worker mid-offer (SIGKILL, no drain) and started it again after the wait',
-    !!host && host.signal === 'SIGKILL' && host.downRightAfterKill,
-    host ? `${host.worker}: killed ${host.killedAt}, down=${host.downRightAfterKill}, still down after ${host.waitSeconds}s=${host.downAfterTheWait}, started ${host.restartedAt}` : `${HOST} missing: the host step did not record the crash`);
-  const restartedAt = host ? Date.parse(host.restartedAt) : Date.now();
-  let stop = () => {};
-  try {
-    await ridersOnline(rec, ctx, false);
-    stop = startHeartbeat(ctx.roster, ctx.world, {});
-    const C = ctx.roster.customers[CUSTOMER]!.session;
-
-    // 1. Resumed or reconciled, within the window.
-    const polls: Sighting[][] = [[{ at: Date.parse(state.offer.seenAt), moverId: state.offer.moverId, offerAttemptId: state.offer.offerAttemptId }]];
-    let live: Sighting | null = null;
-    let assigned = false;
-    const deadline = restartedAt + RESUME_WINDOW_MS;
-    while (Date.now() < deadline) {
-      const now = await sightings(ctx, state.orderId);
-      polls.push(now);
-      const fresh = now.find((s) => s.offerAttemptId !== state.offer.offerAttemptId);
-      const order = await customerOrder(C, state.orderId);
-      if (order?.riderId || ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP'].includes(order?.status)) { assigned = true; break; }
-      if (fresh) { live = fresh; break; }
-      if (order && TERMINAL.includes(order.status)) break;
-      await sleep(2_000);
-    }
-    const tookMs = Date.now() - restartedAt;
-    rec.check(`the offer cascade resumed within ${RESUME_WINDOW_MS / 1000} s of the restart (a fresh offer attempt, or the order assigned)`, !!live || assigned,
-      live ? `${live.moverId} holds fresh attempt ${live.offerAttemptId} ${Math.round(tookMs / 1000)} s after the restart (before the crash: ${state.offer.moverId}/${state.offer.offerAttemptId})`
-        : assigned ? `the order was assigned ${Math.round(tookMs / 1000)} s after the restart` : `no fresh offer and no assignment within ${RESUME_WINDOW_MS / 1000} s`);
-    const once = onceOnly(polls);
-    rec.check('nothing ran twice: never two live offers for the order at once, and no replaced attempt came back', once.ok, once.detail);
-
-    // 2. One completion: the live offer is taken and the order walked to the door.
-    if (live) {
-      const m = mover(ctx, live.moverId);
-      rec.expect('the rider takes the resumed offer', await POST('/rider/offers/accept', { orderId: state.orderId, offerAttemptId: live.offerAttemptId }, m.session.token), 200);
-    }
-    const holder = await holderOf(ctx, state.orderId);
-    rec.check('exactly one rider holds the order', !!holder, holder ? `${holder}` : 'no roster rider holds it');
-    if (holder) {
-      const m = mover(ctx, holder);
-      await storeReadies(ctx, STORE, state.orderId);
-      const walked = await riderToDoor(m.session, state.orderId);
-      rec.expect('the rider carries it to the door', walked, 200);
-      const handed = await handoverPaid(m.session, state.orderId, { lat: ctx.roster.customers[CUSTOMER]!.lat, lng: ctx.roster.customers[CUSTOMER]!.lng }, await doorPin(C, state.orderId));
-      rec.expect('the cash is handed over at the door', handed, [200, 201]);
-    }
-    const detail = await GET(`/admin/orders/${state.orderId}`, ctx.admin.token);
-    const history: any[] = Array.isArray(detail.json?.data?.statusHistory) ? detail.json.data.statusHistory : [];
-    const count = (s: string) => history.filter((h) => h.status === s).length;
-    const final = detail.json?.data?.status;
-    rec.check('the order ends in a sane state, completed exactly once', detail.ok && ['DELIVERED', 'COMPLETED'].includes(final) && count('DELIVERED') === 1 && count('RIDER_ASSIGNED') <= 1,
-      `status=${final} · DELIVERED logged ${count('DELIVERED')}× · RIDER_ASSIGNED logged ${count('RIDER_ASSIGNED')}× · ${history.length} status rows`);
-
-    // 3. The dead-letter page: nothing died in the drill window.
-    const after = await dlq(ctx.admin);
-    const since = Date.parse(state.setupStartedAt);
-    const fresh = after.rows.filter((r) => Number(r.finishedOn ?? 0) >= since || String(r.data ?? '').includes(state.orderId));
-    rec.check('the dead-letter page is clean: no job failed for good in the drill window', after.ok && fresh.length === 0,
-      after.ok ? `${fresh.length} new dead letter(s)${fresh.length ? `: ${fresh.slice(0, 5).map((r) => `${r.queue}/${r.name} ${String(r.failedReason ?? '').slice(0, 80)}`).join('; ')}` : ''} · ${after.rows.length} listed in total (baseline ${state.dlqBaseline.count})` : 'unreadable');
-    rec.check('every listed dead letter states its recovery class', after.rows.every((r) => r.recovery != null), `${after.rows.length} row(s)`);
-    rec.deny('a non-founder cannot read the DLQ', await GET('/admin/dlq', C.token), [403]);
-    rec.deny('requeue of a job that does not exist', await POST(`/admin/dlq/dispatch/${FORGED}/requeue`, {}, ctx.admin.token), [400, 404]);
-  } finally {
-    stop();
-    for (const id of RIDERS) {
-      await freeRider(ctx, id).catch(() => []);
-      await goOffline(mover(ctx, id)).catch(() => undefined);
-    }
-  }
+function finalizeRun(rec: Recorder, state: CrashState, verify: CrashVerify | null, evidence: CrashEvidence | null): void {
+  rec.check('the verify phase recorded what it saw', !!verify && verify.orderId === state.orderId, verify ? `${verify.steps.length} step(s), finished ${verify.finishedAt}` : `${VERIFY} missing: the verify phase did not finish`);
+  const ok = !!evidence && evidence.version === 1 && evidence.orderId === state.orderId;
+  rec.check('the durable evidence was read on the server for this order (host, inside the worker)', ok,
+    evidence ? `order ${evidence.orderId}, read ${evidence.readAt}` : `${EVIDENCE} missing: without the order's rows nothing proves once-only`);
+  if (!ok) return;
+  for (const c of durableOnceOnly(evidence!, verify?.acceptedAttemptId ?? null)) rec.check(c.name, c.ok, c.detail);
 }
 
-/** Entry for run.ts --suite=crash-drill --phase=setup|verify: the same refusals as the journeys suite, then the phase. */
+/** Entry for run.ts --suite=crash-drill --phase=setup|verify|finalize: the same refusals as the journeys suite, then the phase. */
 export async function crashDrill(phase: string | undefined, log: (s: string) => void): Promise<number> {
-  if (phase !== 'setup' && phase !== 'verify') throw new Error('--phase=setup|verify is required');
+  if (phase !== 'setup' && phase !== 'verify' && phase !== 'finalize') throw new Error('--phase=setup|verify|finalize is required');
   const runId = process.env.LIVETEST_RUN_ID || '';
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(runId)) throw new Error('LIVETEST_RUN_ID must name the journeys run the PLAT-02 row belongs to');
   const outDir = process.env.LIVETEST_OUT_DIR || '';
@@ -322,5 +511,5 @@ export async function crashDrill(phase: string | undefined, log: (s: string) => 
   );
   log(`\nPLAT-02 crash drill (${phase}) → ${ORIGIN} · deployment ${identity.deploymentId} · run ${runId}\n`);
   const o = { runId, identity, admin: admin!, adminPhone, outDir, log };
-  return phase === 'setup' ? crashSetup(o) : crashVerify(o);
+  return phase === 'setup' ? crashSetup(o) : phase === 'verify' ? crashVerify(o) : crashFinalize(o);
 }

@@ -5,7 +5,7 @@
 import type { Journey, Recorder } from '../journey.js';
 import { login, type Session } from '../client.js';
 import type { DrillManifest } from '../drills.js';
-import { GET, POST, PUT, req, sleep, brief, pick, waitFor, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf } from './common.js';
+import { GET, POST, PUT, req, sleep, brief, pick, waitFor, placeOrder, orderIdsOf, customerOrder, idemKey, codeOf, runReceipt } from './common.js';
 import type { Ctx } from './context.js';
 import { asAdmin, submitDoc, approveDoc, vendorOf } from '../provision.js';
 import { freshVendor } from './vendor.js';
@@ -220,8 +220,9 @@ export const ADMIN_04: Journey<Ctx> = {
     const san = String(sub?.san ?? '');
     const now = new Date().toISOString();
     // A reference of this journey's own: a provider transaction id that matches another channel's
-    // receipt (MONEY-03 records SYN-<run>) is refused as PROVIDER_ID_CONFLICT, by design.
-    const tx = `SYN-A04-${ctx.runId}`.slice(0, 60);
+    // receipt (MONEY-03 records its own) is refused as PROVIDER_ID_CONFLICT, by design. [AX324 R9]
+    // The run id is hashed, never truncated, so the case suffix always survives.
+    const tx = runReceipt(ctx.runId, 'A04');
     const good = `transaction_id,account_number,amount,paid_at\n${tx},${san},1500,${now}\nTOTAL,1500\n`;
     const bad = `transaction_id,account_number,amount,paid_at\n${tx}-bad,${san},1500,${now}\nTOTAL,9999\n`;
     const before = Number(sub?.walletBalanceGyd ?? 0);
@@ -242,20 +243,37 @@ export const ADMIN_04: Journey<Ctx> = {
 };
 
 /**
- * [STG-DRILLS D4] Process a weekly sales digest. The digest is written by the
- * Sunday 00:00 job; on staging, deploy/drill-run-job.sh settlement-digest runs
- * that SAME job now, and it digests the most recent complete calendar week —
- * any week in which a journeys run completed an order. Acknowledging is a
- * money-class action (two operators); a second acknowledgement is refused; a
- * correction is a new immutable ADJUSTMENT row recomputed from the ledger
- * (which the next run can process in turn).
+ * [STG-DRILLS D4 · AX324 R4] Process a weekly sales digest — only a digest of a
+ * store THIS RUN owns. The digest is written by the Sunday 00:00 job; on
+ * staging, deploy/drill-run-job.sh settlement-digest runs that SAME job now,
+ * and it digests the most recent complete calendar week — any week in which a
+ * journeys run completed an order at a roster store. Staging also holds the
+ * owner's own stores, and acknowledging or adjusting one of THEIR digests
+ * would write to a real financial record: so a digest qualifies only if its
+ * store is a roster store (the runner's own +5920… account made it) whose id
+ * that store's owner confirms from its OWN profile, and the list is asked for
+ * that store id alone. No such digest → SKIP; the first row of a shared list
+ * is never taken. Acknowledging is a money-class action (two operators); a
+ * second acknowledgement is refused; a correction is a new immutable
+ * ADJUSTMENT row recomputed from the ledger (which the next run can process in
+ * turn).
  */
-async function processDigest(rec: Recorder, ctx: Ctx): Promise<void> {
-  const list = await GET('/admin/finance/settlements?status=PENDING&limit=50', ctx.admin.token);
-  const rows: any[] = Array.isArray(list.json?.data) ? list.json.data : [];
-  const digest = rows.find((r) => r.kind === 'DIGEST') ?? rows[0];
+export async function processDigest(rec: Recorder, ctx: Ctx): Promise<void> {
+  const owned: Array<{ key: string; vendorId: string }> = [];
+  for (const [key, v] of Object.entries(ctx.roster.vendors)) {
+    if (!v?.vendorId) continue;
+    const mine = vendorOf((await GET('/vendor/profile', v.session.token)).json, v.vendorId);
+    if (mine?.id === v.vendorId) owned.push({ key, vendorId: v.vendorId });
+  }
+  let digest: any = null;
+  for (const o of owned) {
+    const list = await GET(`/admin/finance/settlements?status=PENDING&vendorId=${encodeURIComponent(o.vendorId)}&limit=50`, ctx.admin.token);
+    const rows: any[] = Array.isArray(list.json?.data) ? list.json.data : [];
+    digest = rows.find((r) => r.vendorId === o.vendorId && r.kind === 'DIGEST') ?? rows.find((r) => r.vendorId === o.vendorId) ?? null;
+    if (digest) break;
+  }
   if (!digest) {
-    rec.skipCase('process a weekly settlement digest', `no unacknowledged digest on this target (→ ${brief(list)}): run ./deploy/drill-run-job.sh settlement-digest — the Sunday job itself — after a calendar week in which the journeys completed an order; an earlier run may already have acknowledged the last one`);
+    rec.skipCase('process a weekly settlement digest', `no unacknowledged digest of a store this run owns (checked ${owned.map((o) => o.key).join(', ') || 'no verified roster store'}): run ./deploy/drill-run-job.sh settlement-digest — the Sunday job itself — after a calendar week in which the journeys completed an order; an earlier run may already have acknowledged the last one. A digest of any other store (the owner's own staging stores included) is never touched`);
     return;
   }
   const path = `/admin/finance/settlements/${digest.id}/process`;
