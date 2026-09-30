@@ -59,7 +59,19 @@ RESTORED: company address rendering e4fdffebdd10b1e452723ff65f1c200fdb8058a00b0d
 
 - Account/signup correction rerun: `vitest run --config vitest.comb.config.ts --maxWorkers=2 src/components/account/account.test.tsx src/app/signup/store-pin.test.tsx`: **2 files / 61 tests passed**, exit 0.
 
-Final full-suite, final build and exact-head review results follow when complete.
+- Final `SWIFT_WEB_CHANNEL=staging NEXT_PUBLIC_API_URL=https://api-staging.swiftgy.com API_URL=https://api-staging.swiftgy.com heavy.sh ./node_modules/.bin/next build`: **exit 0**. Actual output: `[heavy.sh] slot 1 acquired after 530s`; `Compiled successfully in 7.4s`; `Linting and checking validity of types`; `Generating static pages (53/53)`. Only the pre-existing workspace-root/multiple-lockfile warning remains. `apps/web/.next` was removed after completion as requested.
+- Exact implementation commit `75f9a298dbde73693433a3dc211750d498aea704`: **3/3 independent bounded source/proof reviews APPROVE**, 0 unresolved findings. Cart reviewer confirmed unchanged money formulas/payload/replay protection; docs reviewer confirmed agreement, owner scope and provisioning fixes; proof reviewer confirmed both mutation runner/config are committed.
+
+- Final `heavy.sh ./node_modules/.bin/vitest run --config vitest.comb.config.ts --maxWorkers=2`: **exit 0; 59/59 files, 683/683 tests passed**. Actual output:
+
+```text
+[heavy.sh] slot 0 acquired after 585s
+Test Files  59 passed (59)
+     Tests  683 passed (683)
+  Duration  19.91s
+```
+
+Local gates: full web suite, standalone typecheck, final build (including lint/type validation), targeted lint, 4/4 mutation proofs, diff hygiene and 3/3 independent reviews passed. No migration or database change; no database integration run required. GitHub required checks are recorded on the PR after push; the builder never merges.
 
 ## Review reconciliation
 
