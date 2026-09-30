@@ -783,7 +783,15 @@ function invalidateCart(qc: ReturnType<typeof useQueryClient>, principal: Checko
   checkoutAttempt.invalidateCart(principal);
 }
 
-interface CartOperation<T> { principal: CheckoutPrincipal; payload: T }
+interface CartOperation<T> { readonly principal: CheckoutPrincipal | null; readonly generation: number; readonly payload: T }
+
+function cartOwnerCurrent(operation: CartOperation<unknown>): boolean {
+  return operation.principal ? checkoutCurrent(operation.principal)
+    : getAuthSessionSnapshot() === null && useAuthStore.getState().sessionGeneration === operation.generation;
+}
+function requireCartOwner(operation: CartOperation<unknown>): void {
+  if (!cartOwnerCurrent(operation)) throw new AuthSessionBoundaryError();
+}
 
 /** Capture before React Query can await onMutate or queue this operation. Each
  * invocation owns its principal; callbacks and results cannot follow a login. */
@@ -791,9 +799,10 @@ function useCartMutation<T>(send: (payload: T, session: AuthSessionSnapshot) => 
   const qc = useQueryClient();
   useAuthStore((state) => state.sessionGeneration);
   const latest = useRef<CartOperation<T> | null>(null);
-  const current = (operation: CartOperation<T>) => latest.current === operation && checkoutCurrent(operation.principal);
+  const current = (operation: CartOperation<T>) => latest.current === operation && cartOwnerCurrent(operation);
   const m = useMutation<any, unknown, CartOperation<T>>({
     mutationFn: async (operation) => {
+      if (!operation.principal) throw new AuthSessionBoundaryError();
       const session = requireAuthSessionForPrincipal(operation.principal);
       try {
         const data = await send(operation.payload, session);
@@ -804,7 +813,7 @@ function useCartMutation<T>(send: (payload: T, session: AuthSessionSnapshot) => 
         throw error;
       }
     },
-    onSuccess: (_data, operation) => { invalidateCart(qc, operation.principal); },
+    onSuccess: (_data, operation) => { if (operation.principal) invalidateCart(qc, operation.principal); },
   });
   type Options = MutateOptions<any, unknown, T>;
   const callbacks = (operation: CartOperation<T>, options?: Options): MutateOptions<any, unknown, CartOperation<T>> => ({
@@ -813,7 +822,11 @@ function useCartMutation<T>(send: (payload: T, session: AuthSessionSnapshot) => 
     onSettled: (data, error, _variables, ...context) => { if (current(operation)) options?.onSettled?.(data, error, operation.payload, ...context); },
   });
   const capture = (payload: T): CartOperation<T> => {
-    const operation = { payload, principal: checkoutPrincipal() };
+    const session = getAuthSessionSnapshot();
+    // A guest refusal belongs to this anonymous generation. Queue it through
+    // React Query so mutate retains its callback/state contract without throwing.
+    const operation = { payload, principal: session ? { userId: session.userId, generation: session.generation } : null,
+      generation: session?.generation ?? useAuthStore.getState().sessionGeneration };
     latest.current = operation;
     return operation;
   };
@@ -825,10 +838,10 @@ function useCartMutation<T>(send: (payload: T, session: AuthSessionSnapshot) => 
     const operation = capture(payload);
     try {
       const data = await m.mutateAsync(operation, callbacks(operation, options));
-      requireAuthSessionForPrincipal(operation.principal);
+      requireCartOwner(operation);
       return data;
     } catch (error) {
-      requireAuthSessionForPrincipal(operation.principal);
+      requireCartOwner(operation);
       throw error;
     }
   };

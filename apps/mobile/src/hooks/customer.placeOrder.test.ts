@@ -160,7 +160,8 @@ describe('the cart seam', () => {
     expect(direct).toHaveLength(0);
     expect((cartHooks.match(/return useCartMutation\(/g) ?? []).length).toBe(8);
     expect(seam).toContain('invalidateCart(qc, operation.principal)');
-    expect(seam).toContain('const operation = { payload, principal: checkoutPrincipal() };');
+    expect(seam).toContain('const session = getAuthSessionSnapshot();');
+    expect(seam).toContain('principal: session ? { userId: session.userId, generation: session.generation } : null');
     expect(seam).toContain('const session = requireAuthSessionForPrincipal(operation.principal);');
     expect(seam).toContain('await send(operation.payload, session)');
     expect(seam).not.toContain('onMutate: checkoutPrincipal');

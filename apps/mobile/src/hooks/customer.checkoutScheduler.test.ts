@@ -10,7 +10,7 @@ const env = vi.hoisted(() => {
   const previousApiUrl = process.env['EXPO_PUBLIC_API_URL'];
   process.env['EXPO_PUBLIC_API_URL'] = 'https://api.test';
   return {
-    previousApiUrl, session: null as AuthSessionSnapshot | null,
+    previousApiUrl, session: null as AuthSessionSnapshot | null, anonymousGeneration: 0,
     client: null as any, frame: null as any, resetAttempt: () => {},
     barrier: null as null | (() => Promise<void>), disposers: [] as Array<() => void>,
   };
@@ -52,8 +52,9 @@ vi.mock('../stores/authStore', async () => {
       return { ...env.session };
     },
     isAuthSessionSnapshotCurrent: current,
-    useAuthStore: Object.assign((select: any) => select({ user: { id: env.session?.userId }, sessionGeneration: env.session?.generation }), {
+    useAuthStore: Object.assign((select: any) => select({ user: { id: env.session?.userId }, sessionGeneration: env.session?.generation ?? env.anonymousGeneration }), {
       getState: () => ({
+        sessionGeneration: env.session?.generation ?? env.anonymousGeneration,
         rotateTokensIfCurrent: (s: AuthSessionSnapshot, tokens: { accessToken: string; refreshToken: string }) => {
           if (!current(s)) return null;
           env.session = { ...s, ...tokens }; return { ...env.session };
@@ -117,7 +118,7 @@ function assertBIntact(key: string | null) {
   expect(requests.filter((r) => !r.url?.includes('/auth/')).map((r) => r.headers.get('Authorization'))).not.toContain('Bearer access-b');
 }
 beforeEach(() => {
-  env.session = { ...A }; env.resetAttempt(); env.barrier = null; requests = [];
+  env.session = { ...A }; env.anonymousGeneration = 0; env.resetAttempt(); env.barrier = null; requests = [];
   env.client = new QueryClient({ mutationCache: new MutationCache({ onMutate: async () => { await env.barrier?.(); } }), defaultOptions: { mutations: { retry: false, gcTime: Infinity }, queries: { retry: false, gcTime: Infinity } } });
   invalidate = vi.spyOn(env.client, 'invalidateQueries');
   const adapter: AxiosAdapter = async (config) => { requests.push(config); return response(config); };
@@ -140,6 +141,58 @@ const changes: Array<[string, () => any, unknown]> = [
 ];
 
 describe('[SX401] real mutation scheduling through cart transport', () => {
+  it.each(changes)('%s routes guest capture refusal through mutation state and callbacks', async (_name, hook, payload) => {
+    env.session = null;
+    const render = mount(hook); const error = vi.fn(); const settled = vi.fn();
+    expect(() => render().mutate(payload, { onError: error, onSettled: settled })).not.toThrow();
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(error.mock.calls[0]![0]).toMatchObject({ name: 'AuthSessionBoundaryError' });
+    expect(settled).toHaveBeenCalledTimes(1); expect(requests).toEqual([]);
+    expect(render()).toMatchObject({ isError: true, error: { name: 'AuthSessionBoundaryError' } });
+  });
+
+  it.each(changes)('%s suppresses queued guest failure callbacks after B signs in', async (_name, hook, payload) => {
+    env.session = null; const entered = deferred(); const release = deferred();
+    env.barrier = () => { entered.resolve(); return release.promise; };
+    const render = mount(hook); const callback = vi.fn();
+    expect(() => render().mutate(payload, { onError: callback, onSettled: callback })).not.toThrow();
+    await entered.promise; const key = switchToB(); release.resolve();
+    await vi.waitFor(() => expect(env.client.getMutationCache().getAll()[0].state.status).toBe('error'));
+    expect(callback).not.toHaveBeenCalled(); expect(requests).toEqual([]); assertBIntact(key);
+    expect(render()).toMatchObject({ error: null, isIdle: true, variables: undefined });
+  });
+
+  it('a queued guest refusal cannot publish into a later anonymous generation', async () => {
+    env.session = null; const entered = deferred(); const release = deferred();
+    env.barrier = () => { entered.resolve(); return release.promise; };
+    const render = mount(useClearCart); const callback = vi.fn();
+    render().mutate(undefined, { onError: callback, onSettled: callback });
+    await entered.promise; env.anonymousGeneration++; release.resolve();
+    await vi.waitFor(() => expect(env.client.getMutationCache().getAll()[0].state.status).toBe('error'));
+    expect(callback).not.toHaveBeenCalled(); expect(requests).toEqual([]);
+    expect(render()).toMatchObject({ error: null, isIdle: true });
+  });
+
+  it('an old A error cannot replace the same observer pending B operation', async () => {
+    const aEntered = deferred(); const aRelease = deferred(); const bEntered = deferred(); const bRelease = deferred();
+    api.defaults.adapter = async (config) => {
+      requests.push(config);
+      if (authOwner(config) === 'a') { aEntered.resolve(); await aRelease.promise; return reject(config, 400); }
+      bEntered.resolve(); await bRelease.promise; return response(config, 200, { owner: 'b' });
+    };
+    const render = mount(useSetCartTip); const hook = render(); const stale = vi.fn(); const fresh = vi.fn();
+    const a = hook.mutateAsync(10, { onError: stale, onSettled: stale }).catch((e: unknown) => e);
+    await aEntered.promise; const key = switchToB();
+    const b = hook.mutateAsync(20, { onSuccess: fresh });
+    await bEntered.promise; aRelease.resolve();
+    expect(await a).toMatchObject({ name: 'AuthSessionBoundaryError' });
+    expect(render()).toMatchObject({ isPending: true, status: 'pending', variables: 20, data: undefined, error: null });
+    expect(stale).not.toHaveBeenCalled(); expect(invalidate).not.toHaveBeenCalled();
+    expect(checkoutAttempt.currentFor(B)?.key).toBe(key);
+    bRelease.resolve(); expect(await b).toEqual({ owner: 'b' }); expect(fresh).toHaveBeenCalledTimes(1);
+    expect(render()).toMatchObject({ isSuccess: true, data: { owner: 'b' }, variables: 20 });
+  });
+
   it.each(changes)('%s captures before the awaited MutationCache onMutate boundary', async (_name, hook, payload) => {
     const entered = deferred(); const release = deferred();
     env.barrier = () => { entered.resolve(); return release.promise; };
