@@ -192,8 +192,13 @@ api.interceptors.response.use(
       error.response?.status === 401
       && originalRequest
       && captured
-      && !authRefreshRetries.has(originalRequest)
     ) {
+      if (authRefreshRetries.has(originalRequest)) {
+        // A refreshed credential was authoritatively rejected. End only the
+        // exact replay session; a newer login/rotation must remain untouched.
+        useAuthStore.getState().logoutIfCurrent(captured);
+        return Promise.reject(error);
+      }
       const outcome = await refreshCoordinator.resolve(captured);
       // Re-check after awaiting: logout or account B may have won while the
       // refresh POST was in flight. A stale request is rejected, never retried.
