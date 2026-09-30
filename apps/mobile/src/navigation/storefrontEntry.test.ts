@@ -61,7 +61,8 @@ describe('item Add continuation', () => {
     const state = router.getRehydratedState(route.params.state, options);
     expect(state.routes[state.index]).toMatchObject({ name: 'MenuItem', params: { vendorId: 'scanned-store', itemId: 'roti', addDraft: destination.addDraft, addAfterSignIn: true } });
     const back = router.getStateForAction(state, { type: 'GO_BACK' }, options)!;
-    expect(back.routes[back.index]).toMatchObject({ name: 'Restaurant', params: { vendorId: 'scanned-store' } });
+    expect(back.index).toBe(0);
+    expect(back.routes[0]).toMatchObject({ name: 'Restaurant', params: { vendorId: 'scanned-store' } });
     expect(flushAuthContinuation({ isAuthenticated: true, entryGate: 'main', intent }, deliver)).toBe('none');
   });
 
