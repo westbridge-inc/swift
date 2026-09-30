@@ -1,6 +1,6 @@
 'use client';
 
-import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
+import { clearStorefrontContinuation, invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { clearPrivateBrowserState, listenForSessionInvalidation, publishSessionInvalidation } from './session-events';
 
@@ -72,12 +72,14 @@ function invalidatePrivateCaches(): void {
 }
 function ensureSessionEvents(): void {
   listenForSessionInvalidation(() => {
-    // A sibling can invalidate proof, but cannot supply identity. No echo.
-    forgetSession();
+    // A sibling can invalidate proof, but cannot supply identity. No echo
+    // on either epoch: the sender may be preserving its own guest Add.
+    forgetSession(false);
   });
 }
-function forgetSession(): void {
-  invalidateStorefrontContinuations();
+function forgetSession(advanceContinuation = true): void {
+  if (advanceContinuation) invalidateStorefrontContinuations();
+  else clearStorefrontContinuation();
   authGeneration += 1;
   sessionPrincipal = null;
   invalidatePrivateCaches();
@@ -153,7 +155,16 @@ export function getSessionPrincipal(): string | null {
  * refreshes the locally tracked principal, which the mid-request account-change
  * guards below compare against.
  */
-export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+let pendingProbe: Promise<SessionAnswer> | undefined;
+export function sessionProbe(): Promise<SessionAnswer> {
+  const promise = probeSession().finally(() => {
+    if (pendingProbe === promise) pendingProbe = undefined;
+  });
+  pendingProbe = promise;
+  return promise;
+}
+
+async function probeSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   ensureSessionEvents();
   const generation = authGeneration;
@@ -176,17 +187,15 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     const user = json?.data?.user as { id?: unknown } | undefined;
     if (!user || typeof user.id !== 'string' || !user.id) return forget();
     if (sessionPrincipal !== user.id) {
-      // LEARNING the principal (null -> id) is not an account change: the
-      // request that discovered it carried the very same cookies, so nothing
-      // in flight can be another account's. Bumping the generation here would
-      // fail every concurrent request with a spurious SESSION_CHANGED. Only a
-      // switch between two KNOWN people is a change.
-      if (sessionPrincipal !== null) {
-        invalidateStorefrontContinuations();
-        authGeneration += 1;
-        invalidatePrivateCaches();
-        publishSessionInvalidation();
-      }
+      // A probe may discover cookies changed in a suspended tab. Even a
+      // guest draft belongs to the old epoch; only our own adoptSession may
+      // preserve a deliberate guest-to-account storefront continuation.
+      const known = sessionPrincipal !== null;
+      if (known) invalidateStorefrontContinuations();
+      else clearStorefrontContinuation();
+      authGeneration += 1;
+      invalidatePrivateCaches();
+      if (known) publishSessionInvalidation();
       sessionPrincipal = user.id;
       announceSessionChange();
     }
@@ -202,15 +211,16 @@ type SessionAnswer = { ok: boolean; user?: Record<string, unknown> };
 let verification: { epoch: number; promise: Promise<SessionAnswer> } | undefined;
 
 /** Force server proof; concurrent callers in this epoch share one request.
+ * A resume requires fresh proof: it cannot join work started before that event.
  * Resume throttling belongs to the caller, never to an explicit verification.
  * Unknown/offline proof invalidates local private state without broadcasting
  * an unproven sign-out to other tabs. */
-export function verifySessionNow(): Promise<SessionAnswer> {
+export function verifySessionNow({ fresh = false }: { fresh?: boolean } = {}): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return Promise.resolve({ ok: false });
   const epoch = currentSessionEpoch();
-  if (verification?.epoch === epoch) return verification.promise;
+  if (!fresh && verification?.epoch === epoch) return verification.promise;
   const promise = sessionProbe().then((answer) => {
-    if (!answer.ok && currentSessionEpoch() === epoch) forgetSession();
+    if (!answer.ok && currentSessionEpoch() === epoch && sessionPrincipal !== null) forgetSession();
     return answer;
   }).finally(() => {
     if (verification?.promise === promise) verification = undefined;
@@ -336,6 +346,9 @@ export async function apiFetch(
   options?: RequestInit,
   policy: { redirectOnExpired?: boolean; storeId?: string | null } = {},
 ) {
+  // Bootstrap reads started alongside a probe wait for its identity before
+  // capturing an epoch. They remain usable without retaining guest drafts.
+  if (sessionPrincipal === null && pendingProbe && (!options?.method || options.method === 'GET')) await pendingProbe;
   const requestSession = authSnapshot();
   const requestStore = 'storeId' in policy ? policy.storeId ?? null : getSelectedStore();
   const doFetch = () => {
@@ -425,6 +438,9 @@ export async function verifyPartnerLogin(phone: string, code: string): Promise<{
   if (data.isNewUser || !data.user?.id) {
     throw new Error('No Swift account is registered to that number.');
   }
+  // The server has already issued these cookies, even if this account has
+  // no partner profile. Invalidate every tab before reporting that mismatch.
+  adoptSession(data.user.id);
   const roles: string[] = data.user?.roles ?? [];
   // Same vendor-ness rule as the mobile app's authStore: role string or the
   // vendorOwner relation on the login payload.
@@ -433,7 +449,6 @@ export async function verifyPartnerLogin(phone: string, code: string): Promise<{
   if (!isVendor && !isMover) {
     throw new Error('No business or earner profile on this account yet — sign up in the Swift app first.');
   }
-  adoptSession(data.user.id);
   // An account with both keeps the store dashboard as home; /portal stays a link away.
   return { user: data.user, home: isVendor ? '/dashboard' : '/portal' };
 }

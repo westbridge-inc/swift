@@ -74,7 +74,7 @@ export function Providers({ children, preserveShell = false }: { children: React
     let cancelled = false;
     const verify = () => {
       lastResume.current = Date.now();
-      void verifySessionNow().then(() => {
+      void verifySessionNow({ fresh: true }).then(() => {
         if (cancelled) return;
         // A newer resume owns its own proof; an older result cannot unmask it.
         setProof((current) => current === proof ? { ...current, ready: true } : current);

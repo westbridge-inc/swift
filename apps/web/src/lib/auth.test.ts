@@ -336,14 +336,13 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
     await expect(auth.apiFetch('/api/v1/vendor/orders')).rejects.toMatchObject({ status: 409, code: 'SESSION_CHANGED' });
   });
 
-  it('LEARNING who the session belongs to is not an account change — a page that loads while the probe runs is not killed', async () => {
+  it('a bootstrap read queued behind the first identity probe succeeds in the new epoch', async () => {
     const auth = await loadAuth();
     // the shape every page has: a probe and a data read start together, and the
-    // probe answers first. Nothing changed accounts — the app just found out.
+    // probe answers first. The read must start under the proven epoch.
     mockApi(({ url }) => (url.pathname.endsWith('/auth/me') ? signedInAs('u1') : { body: { success: true, data: { ok: true } } }));
-    const [probe, data] = await Promise.all([auth.sessionProbe(), auth.apiFetch('/api/v1/customer/home')]);
-    expect(probe.ok).toBe(true);
-    expect(data).toMatchObject({ data: { ok: true } });
+    await expect(Promise.all([auth.sessionProbe(), auth.apiFetch('/api/v1/customer/home')]))
+      .resolves.toMatchObject([{ ok: true }, { data: { ok: true } }]);
   });
 
   it('a signed-OUT answer does not render under a session that began while it was in flight', async () => {
@@ -375,9 +374,11 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
 
   it('signing out and back in as someone else clears what was keyed to the first person', async () => {
     const auth = await loadAuth();
-    sessionStorage.setItem('swift_web_checkout_attempt:store-a', 'sig-1');
     mockApi(() => signedInAs('u1'));
     await auth.sessionProbe();
+    // Create the attempt under a proven identity, as checkout does. A draft
+    // made before the first probe now belongs to the previous guest epoch.
+    sessionStorage.setItem('swift_web_checkout_attempt:store-a', 'sig-1');
     expect(sessionStorage.getItem('swift_web_checkout_attempt:store-a')).toBe('sig-1');
     auth.adoptSession('u2');
     expect(sessionStorage.getItem('swift_web_checkout_attempt:store-a')).toBeNull();

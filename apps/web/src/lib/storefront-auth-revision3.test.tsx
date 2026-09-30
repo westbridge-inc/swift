@@ -8,9 +8,10 @@ import * as customer from './customer';
 import { queueStorefrontContinuation, readStorefrontContinuation, takeStorefrontContinuation } from './storefront-continuation';
 
 const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), query: '' }));
-vi.mock('next/navigation', () => ({ useRouter: () => nav, useSearchParams: () => new URLSearchParams(nav.query) }));
+vi.mock('next/navigation', () => ({ usePathname: () => window.location.pathname, useRouter: () => nav, useSearchParams: () => new URLSearchParams(nav.query) }));
 const intent = { storeSlug: 'garden-kitchen', itemId: 'roti', selectedOptions: { filling: ['chickpea'] }, returnPath: '/store/garden-kitchen?src=qr' };
 beforeEach(() => {
+  vi.stubGlobal('BroadcastChannel', class { postMessage() {} });
   auth.clearSession();
   sessionStorage.clear();
   localStorage.clear();

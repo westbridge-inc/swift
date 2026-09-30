@@ -3,10 +3,11 @@
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
+import { currentSessionEpoch, sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
+import { Providers, useCacheIdentityReady, usePrivateCacheEpoch } from '@/components/providers';
 import { SwiftLogo } from '@/components/swift-logo';
 import styles from '../auth-flow.module.css';
 
@@ -19,9 +20,19 @@ function isCustomerReturn(next: string): boolean {
   return path === '/' || CUSTOMER_ROUTES.some((route) => path.startsWith(route));
 }
 
+function LoginSession() {
+  const ready = useCacheIdentityReady();
+  return <>
+    {!ready && <p role="status">Checking your account…</p>}
+    <div hidden={!ready} inert={!ready}><LoginInner /></div>
+  </>;
+}
+
 function LoginInner() {
   const router = useRouter();
   const continueJourney = useStorefrontAuthJourney();
+  const epoch = usePrivateCacheEpoch();
+  const [formEpoch, setFormEpoch] = useState(currentSessionEpoch);
   const params = useSearchParams();
   // Only ever honour a clean in-app path as the post-login redirect. Reject
   // absolute/protocol-relative URLs and any '..' traversal so ?next= can't be an
@@ -42,17 +53,31 @@ function LoginInner() {
   const [busy, setBusy] = useState(false);
   const busyNow = useRef(false);
 
+  // Keep the journey hook mounted across our own sign-in, while discarding
+  // personal fields before the new epoch commits.
+  if (formEpoch !== epoch) {
+    setFormEpoch(epoch);
+    setStep('phone');
+    setPhone('+592');
+    setCode('');
+    setError(null);
+    setBusy(false);
+    busyNow.current = false;
+  }
+
   async function handleSend() {
-    if (busyNow.current) return;
+    if (busyNow.current || currentSessionEpoch() !== formEpoch) return;
     busyNow.current = true;
     setError(null); setBusy(true);
-    try { await sendOtp(phone.trim()); setStep('code'); }
-    catch (e) { setError((e as Error).message); }
-    finally { busyNow.current = false; setBusy(false); }
+    try {
+      await sendOtp(phone.trim());
+      if (currentSessionEpoch() === formEpoch) setStep('code');
+    } catch (e) { if (currentSessionEpoch() === formEpoch) setError((e as Error).message); }
+    finally { if (currentSessionEpoch() === formEpoch) { busyNow.current = false; setBusy(false); } }
   }
 
   async function handleVerify() {
-    if (busyNow.current) return;
+    if (busyNow.current || currentSessionEpoch() !== formEpoch) return;
     busyNow.current = true;
     setError(null); setBusy(true);
     try {
@@ -129,5 +154,5 @@ function LoginInner() {
 }
 
 export default function LoginPage() {
-  return <Suspense fallback={<main className={styles.loading}>Loading…</main>}><LoginInner /></Suspense>;
+  return <Suspense fallback={<main className={styles.loading}>Loading…</main>}><Providers preserveShell><LoginSession /></Providers></Suspense>;
 }
