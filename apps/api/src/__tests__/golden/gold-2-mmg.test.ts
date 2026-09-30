@@ -16,7 +16,6 @@ import { riderRoutes } from '../../modules/rider/rider.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { startGoldenWorker } from './gold-7-worker';
 import { hashVelocityId } from '../../modules/integrity/velocity';
-import { autoCancelUnresponsiveOrder } from '../../jobs/queue';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { grantStepUp } from '../helpers/step-up';
 
@@ -32,7 +31,7 @@ import { grantStepUp } from '../helpers/step-up';
 // JSON parser, the vendor-header scope) with the real customer, vendor, rider
 // and admin route modules, real sessions and a real database. The cool-off
 // executor is the worker's own `mmg-link-apply` function and the no-response
-// expiry is the order worker's own `autoCancelUnresponsiveOrder`. Asserted on
+// expiry consumes `auto-cancel` through the production order worker. Asserted on
 // durable rows:
 //   · the pay link: owner-only, step-up first, staged behind the cool-off;
 //     nothing is payable until the cool-off job applies it
@@ -688,14 +687,17 @@ describe('GOLD-2 · VEND-03 / CUST-02 — a disputed payment holds the order unt
 
 describe('GOLD-2 · MONEY-02 — expiry and recovery', () => {
   it('an unpaid order the store never answers expires with honest notices; an attested one does not; the customer’s next order goes through', async () => {
-    const jobs = { prisma: app.prisma, io: app.io, redis: app.redis, log: app.log };
     const unpaid = (await dinerOrder()).order;
     const attested = (await dinerOrder()).order;
     expect((await attest(attested.id, newRef())).statusCode).toBe(200);
 
-    // The order worker's no-response expiry reaches both.
-    expect(await autoCancelUnresponsiveOrder(jobs, unpaid.id)).toBe(true);
-    expect(await autoCancelUnresponsiveOrder(jobs, attested.id)).toBe(false);
+    // [G7-R3] Real BullMQ dispatch reaches the production auto-cancel branch;
+    // completing a no-op job cannot satisfy the durable assertions below.
+    const expiryWorker = await startGoldenWorker(app, 'order', 'gold7-mmg-expiry');
+    try {
+      await expiryWorker.tick('auto-cancel', { orderId: unpaid.id });
+      await expiryWorker.tick('auto-cancel', { orderId: attested.id });
+    } finally { await expiryWorker.close(); }
 
     const expired = await orderRow(unpaid.id);
     expect({ status: expired.status, paymentStatus: expired.paymentStatus, cancelledBy: expired.cancelledBy, reason: expired.cancellationReason })

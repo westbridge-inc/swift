@@ -2,14 +2,14 @@ import { expect } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { QueueEvents, type Job } from 'bullmq';
 import { nanoid } from 'nanoid';
-import { bullConnectionOpts, createQueues, createWorkers, QUEUE_NAMES } from '../../jobs/queue';
+import { bullConnectionOpts, createQueues, createWorkers } from '../../jobs/queue';
 import { closeResourcesBounded, withTimeout } from '../../utils/async-lifecycle';
 
 // Production consumers, real Redis, real timers. Only the named consumer runs;
 // no recurring schedules are installed and cleanup removes only our job IDs.
-export async function startGoldenWorker(app: FastifyInstance, consumer: 'subscription' | 'dispatch', prefix: string) {
+export async function startGoldenWorker(app: FastifyInstance, consumer: 'subscription' | 'dispatch' | 'order' | 'settlement', prefix: string) {
   const queues = createQueues(app.redis);
-  const queue = consumer === 'subscription' ? queues.subscriptionQueue : queues.dispatchQueue;
+  const queue = queues[`${consumer}Queue`];
   let events: QueueEvents | undefined;
   let workers: Awaited<ReturnType<typeof createWorkers>> | undefined;
   let loop: Promise<void> | undefined;
@@ -34,12 +34,12 @@ export async function startGoldenWorker(app: FastifyInstance, consumer: 'subscri
     expect(await queue.getRepeatableJobs()).toHaveLength(0);
     expect(await queue.getJobCounts('waiting', 'active', 'delayed', 'paused', 'prioritized', 'waiting-children'))
       .toEqual({ waiting: 0, active: 0, delayed: 0, paused: 0, prioritized: 0, 'waiting-children': 0 });
-    events = new QueueEvents(consumer === 'subscription' ? QUEUE_NAMES.SUBSCRIPTION : QUEUE_NAMES.DISPATCH, { connection: bullConnectionOpts(app.redis) });
+    events = new QueueEvents(queue.name, { connection: bullConnectionOpts(app.redis) });
     events.on('error', (error: unknown) => { failure ??= error; });
     await events.waitUntilReady();
     workers = await createWorkers({ prisma: app.prisma, redis: app.redis, io: app.io, log: app.log }, queues);
     await workers.waitUntilReady();
-    const worker = consumer === 'subscription' ? workers.subscriptionWorker : workers.dispatchWorker;
+    const worker = workers[`${consumer}Worker`];
     worker.on('error', (error: unknown) => { failure ??= error; });
     loop = worker.run().catch((error: unknown) => { failure ??= error; });
   } catch (error) {
@@ -49,9 +49,9 @@ export async function startGoldenWorker(app: FastifyInstance, consumer: 'subscri
 
   return {
     close,
-    async tick(name: string) {
+    async tick(name: string, data: Record<string, unknown> = {}) {
       expect(failure).toBeUndefined();
-      const job = await queue.add(name, {}, { jobId: `${prefix}-${nanoid(12)}`, removeOnComplete: false, removeOnFail: false });
+      const job = await queue.add(name, data, { jobId: `${prefix}-${nanoid(12)}`, removeOnComplete: false, removeOnFail: false });
       jobs.push(job);
       await job.waitUntilFinished(events!, 30_000);
       expect(await job.getState()).toBe('completed');

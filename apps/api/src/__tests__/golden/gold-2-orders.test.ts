@@ -492,3 +492,38 @@ describe('GOLD-2 · CUST-02 — [E01] the two-vendor quote equals what checkout 
     expect(quote.totalAmount).toBe(grandTotal);
   });
 });
+
+describe('GOLD-7 · CUST-02 — quote drift [G7-R2]', () => {
+  it('refreshes a quote after a mounted vendor price update and charges the new amount in both the answer and durable order', async () => {
+    const customer = await makeCustomer('Drift');
+    await fillTwoVendorCart(customer);
+    const before = await call('GET', '/api/v1/customer/cart', customer.token);
+    expect(before.statusCode).toBe(200);
+    expect(before.json().data).toMatchObject({ subtotalCustomer: 3700, totalAmount: 3700 + FEE_A + FEE_B });
+    try {
+      const updated = await call('PUT', `/api/v1/vendor/items/${itemAId}`, ownerA.token,
+        { basePrice: 3100 }, { 'x-vendor-id': vendorAId });
+      expect(updated.statusCode, updated.body).toBe(200);
+      const refreshed = await call('GET', '/api/v1/customer/cart', customer.token);
+      expect(refreshed.statusCode).toBe(200);
+      expect(refreshed.json().data).toMatchObject({ subtotalCustomer: 4300, totalAmount: 4300 + FEE_A + FEE_B });
+      const placed = await checkout(customer, { paymentMethod: 'CASH' }, `cust02-drift-${nanoid(10)}`);
+      expect(placed.statusCode, placed.body).toBe(200);
+      expect(placed.json().data.grandTotal).toBe(4300 + FEE_A + FEE_B);
+      const answer = placed.json().data.orders as Array<{ id: string; subtotal: number; total: number }>;
+      const rows = await ordersOf(customer.userId);
+      expect(rows).toHaveLength(2);
+      const changed = rows.find((row) => row.vendorId === vendorAId)!;
+      expect(answer.find((row) => row.id === changed.id)).toMatchObject({ subtotal: 3100, total: 3100 + FEE_A });
+      expect([Number(changed.subtotalBase), Number(changed.subtotalCustomer), Number(changed.totalAmount)])
+        .toEqual([3100, 3100, 3100 + FEE_A]);
+      expect(changed.items.map((line) => [Number(line.basePrice), Number(line.totalCustomer)]))
+        .toEqual([[3100, 3100]]);
+      expect(rows.reduce((sum, row) => sum + Number(row.totalAmount), 0)).toBe(4300 + FEE_A + FEE_B);
+    } finally {
+      const restored = await call('PUT', `/api/v1/vendor/items/${itemAId}`, ownerA.token,
+        { basePrice: 2500 }, { 'x-vendor-id': vendorAId });
+      expect(restored.statusCode).toBe(200);
+    }
+  });
+});
