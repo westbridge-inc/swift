@@ -114,8 +114,8 @@ describe('[W-01] nothing a script can read', () => {
   });
 
   it('no page in the app reads a credential out of storage or attaches a bearer', () => {
-    const pages = readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'layout.tsx'), 'utf8')
-      + readFileSync(join(process.cwd(), 'src', 'app', 'portal', 'layout.tsx'), 'utf8')
+    const pages = readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'dashboard-shell.tsx'), 'utf8')
+      + readFileSync(join(process.cwd(), 'src', 'app', 'portal', 'portal-shell.tsx'), 'utf8')
       + readFileSync(join(process.cwd(), 'src', 'app', '(app)', 'layout.tsx'), 'utf8')
       + readFileSync(join(process.cwd(), 'src', 'app', 'selfie', 'page.tsx'), 'utf8')
       + readFileSync(join(process.cwd(), 'src', 'app', 'dashboard', 'inventory', 'import', 'page.tsx'), 'utf8')
@@ -275,8 +275,8 @@ describe('[W-01] signing out is a server act, because only the server can expire
     expect(code(confirm), 'components/sign-out-button.tsx').toMatch(/logout\(\)/);
     expect(code(confirm), 'components/sign-out-button.tsx').not.toMatch(/clearSession/);
     for (const file of [
-      ['src', 'app', 'portal', 'layout.tsx'],
-      ['src', 'app', 'dashboard', 'layout.tsx'],
+      ['src', 'app', 'portal', 'portal-shell.tsx'],
+      ['src', 'app', 'dashboard', 'dashboard-shell.tsx'],
       ['src', 'app', '(app)', 'account', 'page.tsx'],
     ]) {
       const source = readFileSync(join(process.cwd(), ...file), 'utf8');
