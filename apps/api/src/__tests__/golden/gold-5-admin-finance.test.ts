@@ -149,6 +149,29 @@ async function approvedBy(requester: Actor, approver: Actor, options: InjectOpti
   return approvalId;
 }
 
+/** A barrier in the database: hold the import row lock until `waiters` other
+ *  sessions are blocked on it, then let go. Every request `start` sends has
+ *  read the import before any of them can change it. */
+async function holdingImportRow<T>(importId: string, waiters: number, start: () => Array<Promise<T>>): Promise<T[]> {
+  let sent: Array<Promise<T>> = [];
+  await sys(() => app.prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "settlement_imports" WHERE "id" = ${importId} FOR UPDATE`;
+    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    sent = start();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      // A second waiter queues behind the first one, not behind this lock.
+      const [{ blocked }] = await app.prisma.$queryRaw<Array<{ blocked: number }>>`SELECT count(*)::int AS blocked FROM pg_stat_activity a
+        WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
+           OR EXISTS (SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS b(p) WHERE ${pid}::int = ANY(pg_blocking_pids(b.p)))`;
+      if (blocked >= waiters) return;
+      if (Date.now() > deadline) throw new Error(`only ${blocked} of ${waiters} requests reached the import row`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }, { timeout: 30_000 }));
+  return Promise.all(sent);
+}
+
 const realIngest = AgentCashService.prototype.ingest;
 const realCredit = AgentCashService.prototype.credit;
 type Stage = 'before' | 'inside' | 'after';
@@ -542,10 +565,12 @@ describe('GOLD-5 · ADMIN-04 — G5-F6: two retries at once', () => {
     const stopped = await sys(() => app.prisma.settlementImport.findFirstOrThrow({ where: { source: `${SOURCE_PREFIX}-twice` } }));
     expect(stopped.status).toBe('INTERRUPTED');
 
-    // Both retries are approved first, then land at the same moment.
+    // Both retries are approved first, then land together. The test holds the
+    // import row until BOTH are blocked on it, so both read the stopped import
+    // before either can take it over: their compare-and-sets really race.
     const retries = [importFile(csv, source('twice-a')), importFile(csv, source('twice-b'))];
     const approvals = [await approvedBy(ops, approver, retries[0]!), await approvedBy(ops, approver, retries[1]!)];
-    const answers = await Promise.all(retries.map((r, i) => admin({ ...r, token: ops.token, headers: { 'x-swift-approval': approvals[i]! } })));
+    const answers = await holdingImportRow(stopped.id, 2, () => retries.map((r, i) => admin({ ...r, token: ops.token, headers: { 'x-swift-approval': approvals[i]! } })));
     expect(answers.map((a) => a.statusCode), answers.map((a) => a.body).join('\n')).toEqual([200, 200]);
     const data = answers.map((a) => a.json().data as { importId: string; status: string; credited: number; duplicates: number; replayed: boolean });
     const resumed = data.filter((d) => !d.replayed);

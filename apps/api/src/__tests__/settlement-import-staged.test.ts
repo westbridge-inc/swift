@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -9,7 +9,7 @@ import { AgentCashService } from '../modules/billing/agent-cash.service';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
-import { importSettlementCsv, publishSettlementImport, parseSettlementCsv, scanSettlementImports, settlementFileHash, DEFAULT_HEADER_MAP, resumeInterruptedSettlementImports, PUBLICATION_LEASE_MS } from '../modules/billing/settlement-import';
+import { importSettlementCsv, publishSettlementImport, parseSettlementCsv, scanSettlementImports, settlementFileHash, DEFAULT_HEADER_MAP, resumeInterruptedSettlementImports, PUBLICATION_LEASE_MS, PUBLICATION_RETRY_BACKOFF_MS } from '../modules/billing/settlement-import';
 import { ensureSan } from '../modules/billing/san.service';
 
 // ---------------------------------------------------------------------------
@@ -218,14 +218,23 @@ describe('[G5-F6 · operations] the repair pass finishes a publication that stop
     }
     return (await prisma.settlementImport.findUniqueOrThrow({ where: { tenantId_fileHash: { tenantId: 'swift-default', fileHash: settlementFileHash(csv) } } })).id;
   }
-  const silentPastTheLease = () => new Date(Date.now() - PUBLICATION_LEASE_MS - 60_000);
+  /** The lease runs on the database clock [AX314-F2], so a test ages it there. */
+  const dbNow = async () => (await prisma.$queryRaw<Array<{ now: Date }>>`SELECT now() AS now`)[0]!.now;
+  const quietFor = async (id: string, ms: number, status?: 'PUBLISHING' | 'INTERRUPTED') => {
+    const now = await dbNow();
+    await prisma.settlementImport.update({ where: { id }, data: { updatedAt: new Date(now.getTime() - ms), ...(status ? { status } : {}) } });
+  };
+  /** Time passes for these imports, their order kept. */
+  const shiftBack = (ids: string[], ms: number) =>
+    prisma.$executeRaw`UPDATE "settlement_imports" SET "updatedAt" = "updatedAt" - (${ms} * INTERVAL '1 millisecond') WHERE "id" IN (${Prisma.join(ids)})`;
+  const SILENT = PUBLICATION_LEASE_MS + 60_000;
 
   it('a publisher killed mid-file says nothing and falls silent: once its lease lapses the pass finishes it, every row once, and the scan stops naming it', async () => {
     const { sub, san } = await makeVendorSub();
     const csv = file([`${txn()},${san},2100,2026-08-01T10:00:00Z`, `${txn()},${san},1000,2026-08-01T11:00:00Z`, 'TOTAL,3100', 'ROWCOUNT,2']);
     const id = await interrupted(csv, 'staged-test-g5f6-killed');
     // What a killed process leaves: no word, PUBLISHING, a heartbeat gone quiet.
-    await prisma.settlementImport.update({ where: { id }, data: { status: 'PUBLISHING', updatedAt: silentPastTheLease() } });
+    await quietFor(id, SILENT, 'PUBLISHING');
     expect(await money(sub.id)).toEqual({ credits: 1, ledger: 1, observations: 1 });
     expect((await scanSettlementImports(prisma)).stuck).toContain(id);
 
@@ -256,7 +265,7 @@ describe('[G5-F6 · operations] the repair pass finishes a publication that stop
     expect((await scanSettlementImports(prisma)).stuck).not.toContain(held.importId);
 
     // Silent past the lease, it has died: now the pass finishes it.
-    await prisma.settlementImport.update({ where: { id: held.importId }, data: { updatedAt: silentPastTheLease() } });
+    await quietFor(held.importId, SILENT);
     expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [held.importId] })).toEqual({ resumed: [held.importId], failed: [] });
     expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id: held.importId } })).status).toBe('PUBLISHED');
     expect(await money(sub.id)).toEqual({ credits: 1, ledger: 1, observations: 1 });
@@ -267,6 +276,8 @@ describe('[G5-F6 · operations] the repair pass finishes a publication that stop
     const csv = file([`${txn()},${san},2100,2026-08-01T10:00:00Z`, `${txn()},${san},1000,2026-08-01T11:00:00Z`, 'TOTAL,3100']);
     const id = await interrupted(csv, 'staged-test-g5f6-held');
     expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id } })).status).toBe('INTERRUPTED');
+    // Past its retry backoff, so only the hold keeps the pass away.
+    await quietFor(id, PUBLICATION_RETRY_BACKOFF_MS + 60_000);
 
     process.env['SETTLEMENT_PUBLISH_KILL'] = '1';
     expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [id] })).toEqual({ resumed: [], failed: [] });
@@ -278,5 +289,162 @@ describe('[G5-F6 · operations] the repair pass finishes a publication that stop
     expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [id] })).toEqual({ resumed: [id], failed: [] });
     expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id } })).status).toBe('PUBLISHED');
     expect(await money(sub.id)).toEqual({ credits: 2, ledger: 2, observations: 2 });
+  });
+
+  // ── AX314: fencing, the database clock, fair repair ──────────────────────
+  const realCredit = AgentCashService.prototype.credit;
+  /** A door a row's credit waits at, until the test opens it. */
+  const door = () => {
+    let reached!: () => void;
+    let open!: () => void;
+    const isReached = new Promise<void>((r) => { reached = r; });
+    const opened = new Promise<void>((r) => { open = r; });
+    return { reached, isReached, open, opened };
+  };
+  /** Wait for `p`, but fail the test instead of hanging it. */
+  const within = async <T>(p: Promise<T>, ms = 15_000): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`still waiting after ${ms} ms`)), ms); })]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  /** Stage (held) a three-row file; publication starts when the test says. */
+  async function stagedThreeRows(label: string) {
+    const { sub, san } = await makeVendorSub();
+    const csv = file([`${txn()},${san},2100,2026-08-01T10:00:00Z`, `${txn()},${san},1000,2026-08-01T11:00:00Z`, `${txn()},${san},700,2026-08-01T12:00:00Z`, 'TOTAL,3800', 'ROWCOUNT,3']);
+    process.env['SETTLEMENT_PUBLISH_KILL'] = '1';
+    const held = await importSettlementCsv(prisma, svc, csv, { source: `staged-test-g5f6-${label}` });
+    delete process.env['SETTLEMENT_PUBLISH_KILL'];
+    return { sub, importId: held.importId };
+  }
+
+  // Publisher A stops at row 2's credit, its observation persisted; it stays
+  // silent past its lease and B takes the import over; then A wakes. The
+  // credit calls, in order: A row 1 (1), A row 2 (2), then B's rows.
+  const interleavings = [
+    { name: 'A wakes while B is about to credit the same row', aDoor: 2, bDoor: 3 },
+    { name: 'A wakes after B credited that row, while B is still at work', aDoor: 2, bDoor: 4 },
+  ];
+  for (const { name, aDoor, bDoor } of interleavings) {
+    it(`[AX314-F1] a publisher paused past its lease is fenced out when it wakes (${name}): it stops cleanly and marks nothing, the owner finishes, every row once`, async () => {
+      const { sub, importId } = await stagedThreeRows(`fenced-${bDoor}`);
+      const doors = new Map([[aDoor, door()], [bDoor, door()]]);
+      let calls = 0;
+      const paused = vi.spyOn(AgentCashService.prototype, 'credit').mockImplementation(async function (this: AgentCashService, ...args: Parameters<AgentCashService['credit']>) {
+        const d = doors.get((calls += 1));
+        if (d) { d.reached(); await d.opened; }
+        return realCredit.apply(this, args);
+      });
+      try {
+        const a = publishSettlementImport(prisma, svc, importId);
+        a.catch(() => undefined); // awaited below; a failed run must not leave it unhandled
+        await within(doors.get(aDoor)!.isReached);
+        await quietFor(importId, SILENT); // A is silent past its lease
+        const b = publishSettlementImport(prisma, svc, importId);
+        b.catch(() => undefined);
+        await within(doors.get(bDoor)!.isReached);
+        doors.get(aDoor)!.open(); // A wakes
+        const aDone = await within(a);
+        expect(aDone).toMatchObject({ importId, replayed: true, credited: 0 });
+        // B still owns it: A marked nothing.
+        expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } })).status).toBe('PUBLISHING');
+        doors.get(bDoor)!.open();
+        expect(await within(b)).toMatchObject({ importId, status: 'PUBLISHED', replayed: false, credited: 3 });
+      } finally {
+        // Nothing left paused and nothing left spied on, even when it failed.
+        for (const d of doors.values()) d.open();
+        paused.mockRestore();
+      }
+      const done = await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } });
+      expect({ status: done.status, credited: done.credited, results: (done.results as Array<{ status: string }>).map((r) => r.status) })
+        .toEqual({ status: 'PUBLISHED', credited: 3, results: ['accepted', 'accepted', 'accepted'] });
+      expect(await money(sub.id)).toEqual({ credits: 3, ledger: 3, observations: 3 });
+    });
+  }
+
+  it('[AX314-F2] the lease is read on the database clock: this server 10 minutes AHEAD still leaves a live publication alone; 10 minutes BEHIND, it still takes over a dead one', async () => {
+    const { sub, san } = await makeVendorSub();
+    const liveCsv = file([`${txn()},${san},2100,2026-08-01T10:00:00Z`, 'TOTAL,2100']);
+    const deadCsv = file([`${txn()},${san},1000,2026-08-01T11:00:00Z`, 'TOTAL,1000']);
+    process.env['SETTLEMENT_PUBLISH_KILL'] = '1';
+    const live = await importSettlementCsv(prisma, svc, liveCsv, { source: 'staged-test-g5f6-skew-live' });
+    const dead = await importSettlementCsv(prisma, svc, deadCsv, { source: 'staged-test-g5f6-skew-dead' });
+    delete process.env['SETTLEMENT_PUBLISH_KILL'];
+    await quietFor(live.importId, 0, 'PUBLISHING'); // its publisher wrote its heartbeat just now
+    await quietFor(dead.importId, SILENT, 'PUBLISHING'); // its publisher went quiet six minutes ago
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [live.importId] })).toEqual({ resumed: [], failed: [] });
+      expect(await importSettlementCsv(prisma, svc, liveCsv, { source: 'staged-test-g5f6-skew-live-again' })).toMatchObject({ importId: live.importId, status: 'PUBLISHING', replayed: true, credited: 0 });
+      vi.setSystemTime(Date.now() - 20 * 60_000);
+      expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [dead.importId] })).toEqual({ resumed: [dead.importId], failed: [] });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id: live.importId } })).status).toBe('PUBLISHING');
+    expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id: dead.importId } })).status).toBe('PUBLISHED');
+    expect(await money(sub.id)).toEqual({ credits: 1, ledger: 1, observations: 1 });
+  });
+
+  /** Interrupt one-row files, oldest first; the rows listed in `broken` fail
+   *  on every later attempt too. */
+  async function interruptedOneRowFiles(label: string, san: string, count: number, broken: Set<string>) {
+    let outage = true;
+    const failing = vi.spyOn(AgentCashService.prototype, 'ingest').mockImplementation(async function (this: AgentCashService, ...args: Parameters<AgentCashService['ingest']>) {
+      if (outage || broken.has(args[0].externalId)) throw new Error('WALLET_CURRENCY_MISMATCH');
+      return realIngest.apply(this, args);
+    });
+    const ids: string[] = [];
+    const txns: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const t = txn();
+      txns.push(t);
+      const csv = file([`${t},${san},${1000 + i},2026-08-01T10:00:00Z`, `TOTAL,${1000 + i}`]);
+      await expect(importSettlementCsv(prisma, svc, csv, { source: `staged-test-g5f6-${label}-${i}` })).rejects.toThrow('WALLET_CURRENCY_MISMATCH');
+      ids.push((await prisma.settlementImport.findUniqueOrThrow({ where: { tenantId_fileHash: { tenantId: 'swift-default', fileHash: settlementFileHash(csv) } } })).id);
+    }
+    outage = false;
+    return { ids, txns, failing };
+  }
+
+  it('[AX314-F3] the repair pass is fair: twenty imports that fail every time cannot starve the twenty-first — least recently attempted goes first', async () => {
+    const { sub, san } = await makeVendorSub();
+    const broken = new Set<string>();
+    const { ids, txns, failing } = await interruptedOneRowFiles('fair', san, 21, broken);
+    try {
+      txns.slice(0, 20).forEach((t) => broken.add(t)); // twenty of them fail on every attempt
+      // All stopped long enough ago; the twenty before the twenty-first.
+      for (const [i, id] of ids.entries()) await quietFor(id, PUBLICATION_RETRY_BACKOFF_MS + (ids.length - i) * 60_000);
+      const first = await resumeInterruptedSettlementImports(prisma, svc, { importIds: ids, limit: 20 });
+      expect({ resumed: first.resumed, failed: [...first.failed].sort() }).toEqual({ resumed: [], failed: ids.slice(0, 20).sort() });
+      // Time passes for all of them, beyond the backoff; the twenty-first is now the least recently attempted.
+      await shiftBack(ids, PUBLICATION_RETRY_BACKOFF_MS + 60_000);
+      const second = await resumeInterruptedSettlementImports(prisma, svc, { importIds: ids, limit: 20 });
+      expect(second.resumed).toEqual([ids[20]]);
+    } finally {
+      failing.mockRestore();
+    }
+    expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id: ids[20]! } })).status).toBe('PUBLISHED');
+    expect(await money(sub.id)).toEqual({ credits: 1, ledger: 1, observations: 1 });
+  });
+
+  it('[AX314-F3] an import whose resume just failed is left alone for the backoff, then tried again', async () => {
+    const { san } = await makeVendorSub();
+    const broken = new Set<string>();
+    const { ids: [id], txns, failing } = await interruptedOneRowFiles('backoff', san, 1, broken);
+    try {
+      broken.add(txns[0]!);
+      await quietFor(id!, PUBLICATION_RETRY_BACKOFF_MS + 60_000);
+      expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [id!] })).toEqual({ resumed: [], failed: [id] });
+      expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [id!] })).toEqual({ resumed: [], failed: [] });
+      await shiftBack([id!], PUBLICATION_RETRY_BACKOFF_MS + 60_000);
+      expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [id!] })).toEqual({ resumed: [], failed: [id] });
+    } finally {
+      failing.mockRestore();
+    }
+    expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id: id! } })).status).toBe('INTERRUPTED');
   });
 });
