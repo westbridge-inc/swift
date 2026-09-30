@@ -72,6 +72,11 @@ describe('the trial fee-education sweep', () => {
     expect(first.day10).toBeGreaterThanOrEqual(1);
     expect(first.day13).toBeGreaterThanOrEqual(1);
 
+    // The owner, 29 Sep: partners pay the weekly fee on the checkout page, with
+    // MMG, in the app. Its MMG action is not live yet, so the notice says it
+    // opens soon; it never names an agent, cash or the Swift Number, and never
+    // prints the number (`123 456 7890`) for a counter.
+    const closedDoors = /\bagents?\b|swift number|\bcash\b|\d{3}\D\d{3}\D\d{4}/i;
     const earlyNotif = await prisma.notification.findFirst({ where: { userId: early.userId }, orderBy: { createdAt: 'desc' } });
     // The checkout is off here (MMG_CHECKOUT_ENABLED unset): the amount and when
     // it is due, and no way to pay promised.
@@ -81,6 +86,7 @@ describe('the trial fee-education sweep', () => {
     for (const body of [earlyNotif?.body, lateNotif?.body]) {
       expect(body).not.toMatch(/MMG agent|any agent|Swift Number|account number|pay cash|coming soon|with MMG in the Swift app/i);
       expect(body, 'the SAN no longer rides in a message').not.toMatch(/\d{3} \d{3} \d{4}/);
+      expect(body).not.toMatch(closedDoors);
     }
 
     // Idempotent: a second sweep sends nothing new for these subs.

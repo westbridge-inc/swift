@@ -231,20 +231,24 @@ describe('§11 stages 6..N — suspended nudges and the CHURNED terminal', () =>
 const FORBIDDEN = [
   /tap pay/i, /open the app to pay/i, /pay (?:your weekly fee )?in the app/i, /balance in the app/i, /update your card/i,
   /MMG agent|any agent|Swift Number|account number|pay cash|coming soon/i, /MMG request/i,
+  // The doors the owner closed for partners (29 Sep), by word (#1389).
+  /\bagents?\b/i, /swift number/i, /\bcash\b/i,
 ];
 const INSTANT = /instantly|the moment you pay/i;
 /** The makeBrokeVendorSub week: GY$20,000, nothing in the wallet. */
 const DUE_NOW = 'The weekly fee of GY$20,000 is due now.';
 const PAY_MMG = 'Pay GY$20,000 with MMG in the Swift app.';
+/** [AX349 · #1389] The suspended nudge states what is owed (amountDueNow), not the weekly fee. */
+const NUDGE_OWED = 'You owe $20,000 GYD.';
 
-function expectTruthful(text: string | null | undefined, label: string, mode: 'off' | 'live') {
+function expectTruthful(text: string | null | undefined, label: string, mode: 'off' | 'live', due: string = DUE_NOW) {
   expect(text, label).toBeTruthy();
   for (const door of FORBIDDEN) expect(text, `${label} names a way to pay that does not exist: ${door}`).not.toMatch(door);
   expect(text, `${label} promises an instant restore`).not.toMatch(INSTANT);
   if (mode === 'live') {
     expect(text, label).toContain(PAY_MMG);
   } else {
-    expect(text, label).toContain(DUE_NOW);
+    expect(text, label).toContain(due);
     expect(text, `${label} points to a checkout that is off`).not.toMatch(/with MMG in the Swift app/);
   }
 }
@@ -344,10 +348,25 @@ describe('fee notices name only the way to pay that exists', () => {
     for (const [label, v] of [['MOBILE_MONEY', mmg], ['MOBILE_MONEY without a payer number', mmgNoPayer], ['CARD', card]] as const) {
       const notice = await committedNotice(v.subId, 'nudge:');
       for (const [channel, text] of [['push', notice.body], ['SMS', notice.sms]] as const) {
-        expectTruthful(text, `${label} nudge ${channel}`, 'off');
+        expectTruthful(text, `${label} nudge ${channel}`, 'off', NUDGE_OWED);
       }
       expectDeliveredHonestly(v.phone, `${label} nudge as delivered`);
     }
+  });
+
+  it('with the MMG checkout live, the nudge names what is owed and the checkout for exactly that', async () => {
+    await withCheckoutLive(async () => {
+      const now = new Date();
+      const v = await makeSuspendedVendorSub({ billingMethod: 'CARD' }, new Date(now.getTime() - 2 * DAY));
+      resetDevChannelLog();
+      await billing.sweepSuspended(now);
+      const notice = await committedNotice(v.subId, 'nudge:');
+      for (const [channel, text] of [['push', notice.body], ['SMS', notice.sms]] as const) {
+        expectTruthful(text, `nudge ${channel} (checkout live)`, 'live');
+        expect(text, `nudge ${channel} (checkout live)`).toContain(NUDGE_OWED);
+      }
+      expectDeliveredHonestly(v.phone, 'nudge as delivered (checkout live)');
+    });
   });
 
   it('the churn notice: the amount due while the checkout is off, the checkout to rejoin while it is live', async () => {

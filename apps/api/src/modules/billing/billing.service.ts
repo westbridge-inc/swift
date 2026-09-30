@@ -14,10 +14,11 @@ import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure
 import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
-import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
+import { weeklyFeeFor } from './subscription-fee';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice, type BillingNoticeLeaseGuard } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
+import { amountDueNow } from './amount-due';
 import { payInfo } from './agent-cash.service';
 import { claimProviderPaymentInTx, ProviderIdentityError, subscriptionTenantInTx } from './provider-identity';
 import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';
@@ -94,6 +95,17 @@ const POLL_BACKOFF_CAP_SEC = 300;
 const nextBackoff = (current: number) => Math.min(POLL_BACKOFF_CAP_SEC, Math.max(30, current * 2));
 const jitter = (sec: number) => Math.round(sec * (0.8 + Math.random() * 0.4));
 const PRESERVED_NO_DUNNING = 'PRESERVED_NO_DUNNING';
+/**
+ * [AX332 F1] The plans the weekly re-tier moves, movers and vendors alike. A
+ * DORMANT plan (PAUSED: billing stopped and its paid period over; SUSPENDED:
+ * behind on the fee) is charged again at resume or at the next dunning retry,
+ * so its FUTURE rate follows the rate card like any other plan's. Leaving it
+ * out charged a rider paused on 8,000 exactly 8,000 the moment they resumed.
+ * Only the rate moves: a negotiated or waived rate is still skipped, and a
+ * charge already issued keeps its amount (the re-tier never writes a payment
+ * row). CANCELLED and CHURNED are closed and never re-tiered.
+ */
+const RETIER_STATUSES: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE', 'TRIAL', 'PAUSED', 'SUSPENDED'];
 /** [AX318 R1] A v2 intent still AUTHORIZED this long after it was created
  *  belongs to a run that died between authorization and handoff (the two are
  *  milliseconds apart in a live run). */
@@ -3717,9 +3729,10 @@ export class BillingService {
     const out = { nudged: 0, churned: 0 };
     for (const candidate of suspended) {
       try {
-        // The paying sentence for either notice below, read before the
+        // The paying sentences for the notices below, read before the
         // transaction: the committed note is the audit record of the decision.
         const payLine = await this.feePayLine(candidate, null);
+        const mmgLine = await this.mmgLineIfOwed(candidate);
         // The selection is only a candidate. MMG hold creation takes these
         // same payer -> subscription locks, so a hold committed first must be
         // visible before either the churn CAS or daily nudge event is written.
@@ -3770,11 +3783,18 @@ export class BillingService {
           // transaction and is handled as an idempotent loser below.
           const dayKey = now.toISOString().slice(0, 10);
           const noticeKey = `nudge:${sub.id}:${dayKey}`;
+          // [AX349] What is owed is what the fee screen says is due, from the
+          // same helper: a request already issued at 8,000 is owed at 8,000
+          // after the rate moves to 6,000. The weekly fee is not named here.
+          // [owner rule 2026-09-29] The MMG checkout sentence only while it is
+          // live; never an agent, cash or a Swift Number.
+          const owed = await amountDueNow(tx, sub);
+          const nudgeLines = [`You owe $${owed.toLocaleString()} ${sub.currencyCode}.`, mmgLine, FEE_RESTORE_LINE].filter(Boolean).join(' ');
           const notice: BillingNotice = {
             noticeVersion: 1, target: 'payer', userId: this.payerUserId(sub), audience: this.payerAudience(sub),
             title: 'Suspended — pay to restore access',
-            body: `Your access is suspended until the weekly fee is paid. ${payLine} ${FEE_RESTORE_LINE}`,
-            sms: `Swift: your account is still suspended. ${payLine} ${FEE_RESTORE_LINE}`,
+            body: nudgeLines,
+            sms: `Swift: your account is still suspended. ${nudgeLines}`,
             data: { kind: 'billing_suspended_nudge', subscriptionId: sub.id },
           };
           await tx.billingEvent.create({
@@ -4190,7 +4210,7 @@ export class BillingService {
     const moverSubs = await this.prisma.subscription.findMany({
       where: {
         OR: [{ riderId: { not: null } }, { driverId: { not: null } }],
-        status: { in: ['ACTIVE', 'PAST_DUE', 'TRIAL'] },
+        status: { in: RETIER_STATUSES },
       },
       include: {
         rider: { select: { vehicleType: true, user: { select: { countryCode: true } } } },
@@ -4288,7 +4308,7 @@ export class BillingService {
    */
   async recalculateVendorTiers(): Promise<number> {
     const vendorSubs = await this.prisma.subscription.findMany({
-      where: { vendorId: { not: null }, status: { in: ['ACTIVE', 'PAST_DUE', 'TRIAL'] } },
+      where: { vendorId: { not: null }, status: { in: RETIER_STATUSES } },
       include: {
         vendor: {
           select: {

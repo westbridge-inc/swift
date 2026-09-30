@@ -292,6 +292,7 @@ describe('[C4] requires_action (off-session 3-D Secure) is not a decline', () =>
     // no way to pay; never an MMG agent, cash, a Swift Number or an account number.
     expect(notice.body).toMatch(/The weekly fee of \S+ is due now\./);
     expect(notice.body).not.toMatch(/MMG agent|any agent|Swift Number|account number|pay cash|coming soon/i);
+    expect(notice.body).not.toMatch(/\bagents?\b|swift number|\bcash\b/i);
 
     // The cycle comes back (hours later, the attempt reclaimed): still no charge, no strike, no second notice.
     expect(await bill(p.subId, new Date(Date.now() + 2 * 60 * 60 * 1000))).toBe('pending');

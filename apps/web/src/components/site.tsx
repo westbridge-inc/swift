@@ -1,49 +1,9 @@
 import Link from 'next/link';
 import { SwiftLogo } from './swift-logo';
 import { site, showAppStoreBadges } from '@/site.config';
+export { SiteNav } from './site-nav';
 
 /** Shared marketing chrome: nav + footer, Swift red on a light canvas. */
-
-const NAV = [
-  { href: '/how-it-works', label: 'How it works' },
-  { href: '/vendors', label: 'For businesses' },
-  { href: '/drivers', label: 'For drivers' },
-  { href: '/pricing', label: 'Pricing' },
-  { href: '/faq', label: 'Questions' },
-];
-
-export function SiteNav() {
-  return (
-    <header className="sticky top-0 z-50 border-b border-black/5 bg-white/85 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5">
-        <Link href="/" aria-label="Swift home">
-          <SwiftLogo />
-        </Link>
-        <nav aria-label="Main" className="hidden gap-7 text-sm font-medium text-[var(--swift-muted)] md:flex">
-          {NAV.map((n) => (
-            <Link key={n.href} href={n.href} className="transition-colors hover:text-[var(--swift-ink)]">
-              {n.label}
-            </Link>
-          ))}
-        </nav>
-        <div className="flex items-center gap-4">
-          <Link
-            href="/login?next=/"
-            className="text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)]"
-          >
-            Sign in
-          </Link>
-          <Link
-            href="/signup"
-            className="rounded-full bg-[var(--swift-red)] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
-          >
-            Join Swift
-          </Link>
-        </div>
-      </div>
-    </header>
-  );
-}
 
 export function SiteFooter() {
   return (
