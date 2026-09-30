@@ -12,9 +12,10 @@
 #              every database connection and the database's staging identity.
 #              The runner is then pinned to that deployment identity
 #              (LIVETEST_EXPECT_DEPLOYMENT_ID), so the private API it drives and
-#              the worker killed here serve one database;
+#              the worker killed here serve one database. Mint and attest a
+#              protected, synthetic tenant containing only this run’s actors;
 #   1. setup   the runner (scripts/livetest, --suite=crash-drill) signs in a
-#              roster customer, store and riders on the private api-journeys
+#              isolated run customer, store and riders on the private api-journeys
 #              instance, checks the dead-letter page is valid and EMPTY (else
 #              PLAT-02 could never pass; nothing is killed), places an express
 #              cash delivery, has the store accept it, and waits until a rider
@@ -88,6 +89,27 @@ export LIVETEST_EXPECT_DEPLOYMENT_ID="$GUARDED_DEPLOYMENT_ID" LIVETEST_EXPECT_EN
 export JOURNEYS_UID="$(id -u)" JOURNEYS_GID="$(id -g)"
 rm -f "$RESULTS/crash-drill-state.json" "$RESULTS/crash-drill-host.json" "$RESULTS/crash-drill-verify.json" "$RESULTS/crash-drill-evidence.json"
 
+# The crash order belongs to a protected tenant minted for this exact run.
+# Public signup/partner activation cannot join it; dispatch and recovery use
+# the order's tenant for their candidate query even after this script exits.
+# The fixture command refuses an existing tenant whose actors/provenance differ.
+scope="$(docker exec "$WORKER_ID" node dist/boot/drill-fixtures.js crash-create --run-id "$RUN_ID")" ||
+  die "an isolated crash fixture tenant could not be established; no order was placed"
+printf '%s\n' "$scope" | tail -n 1 > "$RESULTS/crash-drill-scope.json"
+refresh_crash_scope() {
+  local current
+  current="$(docker exec "$WORKER_ID" node dist/boot/drill-fixtures.js crash-read --run-id "$RUN_ID")" ||
+    die "the isolated crash fixture scope could not be proven"
+  printf '%s\n' "$current" | tail -n 1 | python3 -c '
+import json, sys
+current = json.load(sys.stdin)
+prior = json.load(open(sys.argv[1]))
+if current != prior or current.get("runId") != sys.argv[2] or current.get("target", {}).get("deploymentId") != sys.argv[3]:
+    sys.exit("isolated crash scope changed")
+' "$RESULTS/crash-drill-scope.json" "$RUN_ID" "$GUARDED_DEPLOYMENT_ID" || die "isolated crash scope is invalid"
+}
+refresh_crash_scope
+
 worker_running() { [ "$(docker inspect -f '{{.State.Running}}' "$WORKER_ID" 2>/dev/null)" = true ]; }
 cleanup() {
   # Never leave staging without its worker, whatever stopped this script.
@@ -120,6 +142,7 @@ RUNNER=("${JOURNEYS[@]}" run --rm --no-deps --pull never --entrypoint apps/api/n
 drill_guard_in_worker
 [ "$DRILL_DEPLOYMENT_ID" = "$GUARDED_DEPLOYMENT_ID" ] ||
   die "the worker's database identity changed during setup ($GUARDED_DEPLOYMENT_ID → $DRILL_DEPLOYMENT_ID); nothing was killed"
+refresh_crash_scope
 KILLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 docker kill "$WORKER_ID" >/dev/null
 DOWN=false
@@ -148,6 +171,8 @@ json.dump({
 PY
 echo "worker $WORKER_ID killed at $KILLED_AT, started again at $RESTARTED_AT"
 
+refresh_crash_scope
+
 # 3. verify: the cascade resumed; the order is walked to the door once, watched throughout.
 set +e
 "${RUNNER[@]}" --phase=verify
@@ -173,5 +198,12 @@ set +e
 "${RUNNER[@]}" --phase=finalize
 STATUS=$?
 set -e
+# Preserve the protected tenant while any order remains live. Terminal-only
+# cleanup is atomic; a retained fixture is reported separately from PLAT-02.
+if cleanup_report="$(docker exec "$WORKER_ID" node dist/boot/drill-fixtures.js crash-cleanup --run-id "$RUN_ID")"; then
+  printf '%s\n' "$cleanup_report" | tail -n 1 > "$RESULTS/crash-drill-cleanup.json"
+else
+  echo "WARNING: isolated crash fixtures retained; cleanup could not complete" >&2
+fi
 echo "crash drill for run $RUN_ID finished with status $STATUS; PLAT-02 row in $RESULTS/plat02-crash-drill.json"
 exit "$STATUS"

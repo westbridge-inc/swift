@@ -29,7 +29,7 @@ export interface CrashEvidence {
   version: 1;
   orderId: string;
   readAt: string;
-  order: { status: string; riderId: string | null } | null;
+  order: { tenantId: string; status: string; riderId: string | null } | null;
   offers: Array<{ attemptId: string | null; recipientId: string; sentAt: string; acknowledgedAt: string | null }>;
   offerPushes: Array<{ attemptId: string | null; userId: string; createdAt: string }>;
   searches: Array<{ id: string; status: string; wave: number; startedAt: string; assignedAt: string | null; assignedTo: string | null; deliveryAuthorityVersion: number | null }>;
@@ -43,7 +43,7 @@ export const ORDER_ID = /^[a-z0-9]{20,40}$/;
 
 export async function readCrashEvidence(db: PrismaClient, orderId: string): Promise<CrashEvidence> {
   return runAsSystem(CAPABILITY, async () => {
-    const order = await db.order.findUnique({ where: { id: orderId }, select: { status: true, riderId: true } });
+    const order = await db.order.findUnique({ where: { id: orderId }, select: { tenantId: true, status: true, riderId: true } });
     const offers = await db.alertDelivery.findMany({
       where: { kind: 'MOVER_OFFER', subjectId: orderId },
       select: { offerAttemptId: true, recipientId: true, sentAt: true, acknowledgedAt: true },
@@ -64,7 +64,7 @@ export async function readCrashEvidence(db: PrismaClient, orderId: string): Prom
       version: 1,
       orderId,
       readAt: new Date().toISOString(),
-      order: order ? { status: order.status, riderId: order.riderId } : null,
+      order: order ? { tenantId: order.tenantId, status: order.status, riderId: order.riderId } : null,
       offers: offers.map((o) => ({ attemptId: o.offerAttemptId, recipientId: o.recipientId, sentAt: o.sentAt.toISOString(), acknowledgedAt: iso(o.acknowledgedAt) })),
       offerPushes: notices
         .filter((n) => (n.data as Record<string, unknown> | null)?.['kind'] === 'dispatch_offer')

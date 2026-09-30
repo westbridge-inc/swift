@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -293,7 +294,7 @@ describe('[AX324 R7] the durable once-only verdict', () => {
   const t = (s: number) => new Date(Date.UTC(2026, 8, 30, 10, 0, s)).toISOString();
   const clean = () => ({
     version: 1, orderId: 'o1', readAt: t(59),
-    order: { status: 'DELIVERED', riderId: 'r-dr2' },
+    order: { tenantId: `drill-crash-${createHash('sha256').update('r-a3').digest('hex').slice(0, 32)}`, status: 'DELIVERED', riderId: 'r-dr2' },
     offers: [
       { attemptId: 'a1', recipientId: 'u-dr1', sentAt: t(1), acknowledgedAt: null },
       { attemptId: 'a2', recipientId: 'u-dr2', sentAt: t(20), acknowledgedAt: t(21) },
@@ -397,11 +398,11 @@ describe('[AX324 R7] the durable once-only verdict', () => {
 
   it('[AX370 A3] finalize: the reviewer’s case makes the PLAT-02 row INCONCLUSIVE (SKIP, never PASS); the clean evidence is a PASS', async () => {
     const identity = { deploymentId: 'd', environment: 'staging', buildSha: 'b', dataClassification: 'synthetic', testTenant: 't' };
-    const rowFor = async (evidence: any, observed = ['a1', 'a2']) => {
+    const rowFor = async (evidence: any, observed = ['a1', 'a2'], writeVerify = true) => {
       const dir = mkdtempSync(join(tmpdir(), 'crash-final-'));
       try {
-        writeFileSync(join(dir, 'crash-drill-state.json'), JSON.stringify({ runId: 'r-a3', setupStartedAt: t(0), orderId: 'o1', offer: { moverId: 'DR1', offerAttemptId: 'a1', seenAt: t(1) }, steps: [{ name: 'mid-offer', ok: true, detail: '' }], negatives: 0 }));
-        writeFileSync(join(dir, 'crash-drill-verify.json'), JSON.stringify({ runId: 'r-a3', orderId: 'o1', steps: [{ name: 'resumed', ok: true, detail: '' }], negatives: 1, acceptedAttemptId: 'a2', observedAttemptIds: observed, finishedAt: t(58) }));
+        writeFileSync(join(dir, 'crash-drill-state.json'), JSON.stringify({ runId: 'r-a3', setupStartedAt: t(0), tenantId: `drill-crash-${createHash('sha256').update('r-a3').digest('hex').slice(0, 32)}`, riderUsers: ['u-dr1', 'u-dr2', 'u-dr3'], orderId: 'o1', offer: { moverId: 'DR1', offerAttemptId: 'a1', seenAt: t(1) }, steps: [{ name: 'mid-offer', ok: true, detail: '' }], negatives: 0 }));
+        if (writeVerify) writeFileSync(join(dir, 'crash-drill-verify.json'), JSON.stringify({ runId: 'r-a3', orderId: 'o1', steps: [{ name: 'resumed', ok: true, detail: '' }], negatives: 1, acceptedAttemptId: 'a2', observedAttemptIds: observed, finishedAt: t(58) }));
         writeFileSync(join(dir, 'crash-drill-evidence.json'), JSON.stringify(evidence));
         await crash.crashFinalize({ runId: 'r-a3', identity, admin: { token: 'x', userId: 'x' }, adminPhone: '+5920400000', outDir: dir, log: () => undefined });
         return JSON.parse(readFileSync(join(dir, 'plat02-crash-drill.json'), 'utf8'));
@@ -421,13 +422,33 @@ describe('[AX324 R7] the durable once-only verdict', () => {
     const unseen = await rowFor(clean(), ['a1', 'a2', 'a9']);
     expect(unseen.status).toBe('SKIP');
     expect(unseen.reason).toContain('a9');
+    // [AX387] Every persisted push is evidence too, even when polling missed it.
+    const uncorrelated = clean();
+    uncorrelated.offerPushes.push({ attemptId: 'a9', userId: 'u-dr3', createdAt: t(19) });
+    const pushGap = await rowFor(uncorrelated);
+    expect(pushGap.status).toBe('SKIP');
+    expect(pushGap.reason).toMatch(/^INCONCLUSIVE/);
+    expect(pushGap.reason).toContain('a9');
+    for (const missing of [null, { ...clean(), offers: [] }, { ...clean(), statusLog: [] }, { ...clean(), order: null }]) {
+      const absent = await rowFor(missing);
+      expect(absent.status, JSON.stringify(missing)).toBe('SKIP');
+      expect(absent.reason).toMatch(/^INCONCLUSIVE/);
+    }
+    expect((await rowFor(clean(), ['a1', 'a2'], false)).status).toBe('SKIP');
+    const duplicateWithGap = clean();
+    duplicateWithGap.offerPushes.push({ ...duplicateWithGap.offerPushes[0]! });
+    duplicateWithGap.offers = [];
+    expect((await rowFor(duplicateWithGap)).status).toBe('FAIL');
+    const outside = clean(); outside.offerPushes[0]!.userId = 'u-outside';
+    expect((await rowFor(outside)).status).toBe('FAIL');
+    expect((await rowFor({ ...clean(), order: { ...clean().order, tenantId: 'swift-default' } })).status).toBe('FAIL');
   });
 });
 
 describe('[AX370 A1] the crash drill touches only this run’s own jobs — anything else refuses it before setup', () => {
   type Call = { method: string; path: string; who: string };
   const RUN_A1 = 'r-a1';
-  const PHONES: Record<string, string> = { '+5920401005': 'C5', '+5920402011': 'R1', '+5920403051': 'DR1', '+5920403052': 'DR2', '+5920403053': 'DR3' };
+  const PHONES: Record<string, string> = { '+5920401005': 'C5', '+5920402011': 'R1', '+5920403051': 'DR1', '+5920403052': 'DR2', '+5920403053': 'DR3', '+5920400000': 'admin' };
   const ROSTER_ONLINE = ['DR1', 'DR2', 'DR3'].map((id, i) => ({ id: `r-${id}`, user: { id: `u-${id}`, phone: `+592040305${i + 1}` } }));
   /** The owner's own order, held by roster rider DR2 — never the drill's to touch. */
   const FOREIGN = () => ({ id: 'o-owner', status: 'RIDER_EN_ROUTE_PICKUP', orderType: 'FOOD_DELIVERY', paymentMethod: 'CASH', customerId: 'u-owner', vendorId: 'v-owner', customer: { id: 'u-owner' }, vendor: { id: 'v-owner' }, deliveryLat: 6.8, deliveryLng: -58.15 });
@@ -436,11 +457,11 @@ describe('[AX370 A1] the crash drill touches only this run’s own jobs — anyt
   const origFetch = globalThis.fetch;
   let dir = '';
   let lines: string[] = [];
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'crash-a1-')); lines = []; });
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'crash-a1-')); lines = []; writeFileSync(join(dir, 'crash-drill-scope.json'), JSON.stringify(scope())); });
   afterEach(() => { globalThis.fetch = origFetch; rmSync(dir, { recursive: true, force: true }); });
 
   /** A stand-in staging API: the roster signs in, the store is ready, riders hold `legs`, `online` are the tenant's online riders. */
-  function crashApi(legs: Record<string, any[]>, online: any[]) {
+  function crashApi(legs: Record<string, any[]>, online: any[], morePages: any[][] = []) {
     const calls: Call[] = [];
     const orders = new Map<string, any>();
     const holder = new Map<string, string>();
@@ -457,7 +478,11 @@ describe('[AX370 A1] the crash drill touches only this run’s own jobs — anyt
         return ok({ user: { id: `u-${id}` }, tokens: { accessToken: `tok-${id}`, expiresIn: 900 } });
       }
       if (path === '/admin/dlq') return ok([]);
-      if (path === '/admin/riders') return ok(online, { pagination: { page: 1, hasNext: false } });
+      if (path === '/admin/riders') {
+        const page = Number(url.searchParams.get('page') ?? 1);
+        const pages = [online, ...morePages];
+        return ok(pages[page - 1], { meta: { page, hasNext: page < pages.length } });
+      }
       if (path === '/vendor/profile') return ok({ vendors: [{ id: 'v-R1', status: 'ACTIVE' }] });
       if (path === '/vendor/vendor/toggle-open') return ok({ isCurrentlyOpen: true });
       if (path === '/vendor/vendor/toggle-orders') return ok({ acceptingOrders: true });
@@ -480,8 +505,30 @@ describe('[AX370 A1] the crash drill touches only this run’s own jobs — anyt
   /** Every request that could change anything (the roster's own sign-ins aside). */
   const writes = (calls: Call[]) => calls.filter((c) => c.method !== 'GET' && c.path !== '/auth/verify-otp').map((c) => `${c.method} ${c.path}`);
   const identity = { deploymentId: 'd', environment: 'staging', buildSha: 'b', dataClassification: 'synthetic', testTenant: 't' };
+  const scope = () => ({ version: 1, runId: RUN_A1, tenantId: `drill-crash-${createHash('sha256').update(RUN_A1).digest('hex').slice(0, 32)}`, target: { deploymentId: 'd', environment: 'staging', database: 'test' }, admin: { userId: 'u-admin', phone: '+5920400000' }, customer: { userId: 'u-C5', phone: '+5920401005' }, storeOwner: { userId: 'u-R1', phone: '+5920402011' }, riders: ROSTER_ONLINE.map((r) => ({ userId: r.user.id, phone: r.user.phone, riderId: r.id })), store: { vendorId: 'v-R1', itemId: 'i-R1' } });
   const opts = () => ({ runId: RUN_A1, identity, admin: { token: 'tok-admin', userId: 'u-admin' }, adminPhone: '+5920400000', outDir: dir, log: (s: string) => lines.push(s) });
   const ledger = (orders: string[]) => writeFileSync(join(dir, 'crash-drill-orders.json'), JSON.stringify({ runId: RUN_A1, orders }));
+
+  it('[AX387] rejects a shared tenant, another run or deployment, and ambiguous isolated actors', async () => {
+    const parser = await import(pathToFileURL(join(process.cwd(), '../../scripts/livetest/crash-scope.ts')).href);
+    const valid = scope();
+    expect(parser.parseCrashScope(valid, RUN_A1, identity)).toEqual(valid);
+    const shared = { ...valid, tenantId: 'swift-default' };
+    const anotherRun = { ...valid, runId: 'another-run' };
+    const anotherTarget = { ...valid, target: { ...valid.target, deploymentId: 'another-deployment' } };
+    const ambiguous = { ...valid, customer: valid.admin };
+    for (const invalid of [shared, anotherRun, anotherTarget, ambiguous]) {
+      expect(() => parser.parseCrashScope(invalid, RUN_A1, identity)).toThrow(/isolated/);
+    }
+  });
+
+  it('[AX387] missing lifetime isolation refuses before any request, including sign-in', async () => {
+    const api = crashApi({}, ROSTER_ONLINE);
+    writeFileSync(join(dir, 'crash-drill-scope.json'), 'null');
+    expect(await crash.crashSetup(opts())).toBe(1);
+    expect(api.calls).toEqual([]);
+    expect(lines.join(' ')).toContain('isolated');
+  });
 
   it('a roster rider holding a job this run cannot prove its own: refused before setup — the job byte-identical, nothing written, the order named', async () => {
     const api = crashApi({ DR2: [FOREIGN()] }, ROSTER_ONLINE);
@@ -514,6 +561,14 @@ describe('[AX370 A1] the crash drill touches only this run’s own jobs — anyt
     expect(writes(unread.calls)).toEqual([]);
   });
 
+  it('[AX387] reads meta.hasNext through all online-rider pages before any setup write', async () => {
+    const api = crashApi({}, ROSTER_ONLINE, [[{ id: 'r-next-page', user: { phone: '+5926001234' } }]]);
+    expect(await crash.crashSetup(opts())).toBe(1);
+    expect(writes(api.calls)).toEqual([]);
+    expect(lines.join(' ')).toContain('r-next-page');
+    expect(api.calls.filter((c) => c.path === '/admin/riders')).toHaveLength(2);
+  });
+
   it('this run’s own leftover job (in its ledger, C5 at R1) is released; the run then reaches mid-offer and records the order it placed', async () => {
     ledger(['o-run']);
     const api = crashApi({ DR1: [OWN()] }, ROSTER_ONLINE);
@@ -526,7 +581,7 @@ describe('[AX370 A1] the crash drill touches only this run’s own jobs — anyt
   it('the verify phase’s final cleanup releases only this run’s jobs: a foreign job a roster rider holds stays byte-identical, and is named', async () => {
     const past = '2020-01-01T00:00:00.000Z';
     ledger(['o-run', 'o-run-2']);
-    writeFileSync(join(dir, 'crash-drill-state.json'), JSON.stringify({ runId: RUN_A1, setupStartedAt: past, orderId: 'o-run', offer: { moverId: 'DR1', offerAttemptId: 'a1', seenAt: past }, steps: [], negatives: 0 }));
+    writeFileSync(join(dir, 'crash-drill-state.json'), JSON.stringify({ runId: RUN_A1, tenantId: scope().tenantId, setupStartedAt: past, orderId: 'o-run', offer: { moverId: 'DR1', offerAttemptId: 'a1', seenAt: past }, steps: [], negatives: 0 }));
     writeFileSync(join(dir, 'crash-drill-host.json'), JSON.stringify({ worker: 'w', signal: 'SIGKILL', killedAt: past, restartedAt: past, downRightAfterKill: true, downAfterTheWait: true, waitSeconds: 15 }));
     const api = crashApi({ DR1: [OWN()], DR2: [FOREIGN()], DR3: [OWN('o-run-2')] }, ROSTER_ONLINE);
     const before = JSON.stringify(api.orders.get('o-owner'));

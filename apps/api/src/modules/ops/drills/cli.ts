@@ -4,6 +4,7 @@ import { setAppLogger } from '../../../utils/logger';
 import { assertDrillEnv, assertDrillTarget, DrillRefused, type FactsDb } from './guard';
 import { parseDrillJobs, runDrillJobs, DrillUsageError } from './jobs';
 import { createDrillFixtures, cleanupDrillFixtures, validateRunId, DrillFixtureError } from './fixtures';
+import { createCrashFixtures, readCrashFixtures, cleanupCrashFixtures } from './crash-fixtures';
 import { readCrashEvidence, ORDER_ID } from './evidence';
 
 /**
@@ -89,7 +90,7 @@ async function openGuarded(env: Record<string, string | undefined>, deps: Fixtur
   const system = envTarget.system ? await (deps.systemClient ?? appClient.systemClient)() : null;
   const close = async () => { await disconnect(db); await disconnect(system); };
   try {
-    return { db, target: await assertDrillTarget(db, env, system), close };
+    return { db, fixtureDb: (system ?? db) as PrismaClient, target: await assertDrillTarget(db, env, system), close };
   } catch (err) {
     await close();
     throw err;
@@ -105,8 +106,8 @@ export async function drillFixturesMain(
 ): Promise<number> {
   try {
     const [mode] = argv;
-    if (mode !== 'create' && mode !== 'cleanup') {
-      throw new DrillUsageError('drill-fixtures create --run-id <id> --admin-phone <+5920xxxxxx> | cleanup --run-id <id>');
+    if (!['create', 'cleanup', 'crash-create', 'crash-read', 'crash-cleanup'].includes(mode ?? '')) {
+      throw new DrillUsageError('drill-fixtures create --run-id <id> --admin-phone <+5920xxxxxx> | cleanup --run-id <id> | crash-create --run-id <id> | crash-read --run-id <id> | crash-cleanup --run-id <id>');
     }
     let runId: string;
     try {
@@ -118,15 +119,20 @@ export async function drillFixturesMain(
     if (mode === 'create' && !FICTIONAL_GY.test(adminPhone)) {
       throw new DrillUsageError('--admin-phone must be the seed admin, a never-a-subscriber +5920 number (staging: +5920400000)');
     }
-    const { db, target, close } = await openGuarded(env, deps);
+    const { db, fixtureDb, target, close } = await openGuarded(env, deps);
     try {
       setAppLogger(stderrLogger());
+      if (mode === 'crash-create' || mode === 'crash-read' || mode === 'crash-cleanup') {
+        const scope = mode === 'crash-cleanup' ? await cleanupCrashFixtures(fixtureDb, runId, target) : mode === 'crash-create' ? await createCrashFixtures(fixtureDb, runId, target, db) : await readCrashFixtures(fixtureDb, runId, target);
+        io.out(JSON.stringify(scope));
+        return DRILL_EXIT.OK;
+      }
       if (mode === 'create') {
-        const manifest = await createDrillFixtures(db, { runId, adminPhone, target });
+        const manifest = await createDrillFixtures(fixtureDb, { runId, adminPhone, target }, db);
         io.out(JSON.stringify(manifest));
         return DRILL_EXIT.OK;
       }
-      const report = await cleanupDrillFixtures(db, { runId });
+      const report = await cleanupDrillFixtures(fixtureDb, { runId });
       io.out(JSON.stringify(report));
       if (report.kept.length > 0) io.err(`FAILED: ${report.kept.length} fixture row(s) could not be removed; see "kept" in the report`);
       return report.kept.length > 0 ? DRILL_EXIT.FAILED : DRILL_EXIT.OK;

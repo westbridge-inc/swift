@@ -221,6 +221,18 @@ describe.skipIf(python.status !== 0)('[STG-DRILLS D7] drill-crash.sh', () => {
     expect(calls()).not.toMatch(/ kill |run --rm/);
   });
 
+  it('[AX387] a failed lifetime-scope command stops before runner startup and worker kill', () => {
+    writeFileSync(join(tmp, 'deploy', 'verify-journeys-isolation.py'), 'import sys\nsys.exit(0)\n');
+    shim('curl', `case "$*" in *"test-control/identity"*) echo 404 ;; *) echo '{"error":{"code":"INVALID_OTP"}}' ;; esac`);
+    const original = readFileSync(join(tmp, 'bin', 'docker'), 'utf8');
+    writeFileSync(join(tmp, 'bin', 'docker'), original.replace('case "$*" in', 'case "$*" in\n *"drill-fixtures.js crash-create"*) echo "isolated tenant unavailable" >&2; exit 1 ;;'));
+    const result = run('drill-crash.sh', [], { LIVETEST_RUN_ID: 'stg-1', LIVETEST_ADMIN_PHONE: '+5920400000' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('isolated crash fixture tenant could not be established');
+    expect(calls()).toContain('drill-fixtures.js crash-create --run-id stg-1');
+    expect(calls()).not.toMatch(/ kill |up -d|run --rm/);
+  });
+
   it('[AX324 R3] the guard runs before the setup AND again right before the kill; the runner is pinned to the identity it judged', () => {
     const s = readFileSync(join(DEPLOY, 'drill-crash.sh'), 'utf8');
     const first = s.indexOf('\ndrill_guard_in_worker\n');

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
-import { runAsSystem, runWithTenant } from '../../../plugins/tenant-context';
+import { runAsSystem, runWithTenant, getTenantId } from '../../../plugins/tenant-context';
 import { assertTenantWall, attestationOf, readRlsFacts } from '../../../lib/rls-attestation';
 import { generateOrderNumber } from '../../../utils/markup';
 import { IdentityService, clusterMemberIds } from '../../integrity/identity.service';
@@ -125,12 +125,28 @@ export interface CreateDrillFixturesInput {
 
 type Db = PrismaClient;
 
+/** One connection owns the provenance lock and EVERY fixture mutation. Nested
+ * identity/SAN helpers join this transaction instead of committing separately. */
+export async function fixtureTransaction<T>(db: Db, work: (tx: Db) => Promise<T>, tenantId = DRILL_TENANT_ID): Promise<T> {
+  return runAsSystem(CAPABILITY, () => db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('staging-drill-fixtures', 0))`;
+    await tx.$queryRaw`SELECT id FROM tenants WHERE id = ${tenantId} FOR UPDATE`;
+    const joined = new Proxy(tx, {
+      get(target, key) {
+        if (key === '$transaction') return async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx);
+        return Reflect.get(target, key);
+      },
+    }) as Db;
+    return work(joined);
+  }, { timeout: 60_000, maxWait: 10_000 }));
+}
+
 interface AccountSpec { slot: string; roles: UserRole[]; activeRole: UserRole; vendorOwner?: boolean }
 
 /** One DRILL account: found by its marker and slot, else created the way signup shapes it. */
-async function ensureAccount(db: Db, runId: string, spec: AccountSpec): Promise<DrillAccount> {
+export async function ensureAccount(db: Db, runId: string, spec: AccountSpec): Promise<DrillAccount> {
   const marker = drillMarker(runId);
-  const existing = await db.user.findFirst({ where: { syntheticRunId: marker, lastName: spec.slot }, select: { id: true, phone: true } });
+  const existing = await db.user.findFirst({ where: { syntheticRunId: marker, lastName: spec.slot, tenantId: getTenantId() ?? DEFAULT_TENANT }, select: { id: true, phone: true } });
   if (existing) return { slot: spec.slot, userId: existing.id, phone: existing.phone };
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const phone = drillPhone(runId, spec.slot, attempt);
@@ -142,6 +158,7 @@ async function ensureAccount(db: Db, runId: string, spec: AccountSpec): Promise<
     const user = await db.user.create({
       data: {
         phone,
+        tenantId: getTenantId() ?? DEFAULT_TENANT,
         firstName: marker,
         lastName: spec.slot,
         roles: spec.roles,
@@ -207,7 +224,7 @@ export function drillTenantRuns(config: unknown): string[] {
 const TENANT_PROVENANCE = { kind: true, isActive: true, slug: true, name: true, purgeProtected: true, config: true } as const;
 
 /** D6: the second tenant and its four objects. */
-async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['tenant']> {
+async function ensureDrillTenant(db: Db, runId: string, wallDb: Db): Promise<DrillManifest['tenant']> {
   const marker = drillMarker(runId);
   const existing = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: TENANT_PROVENANCE });
   // [AX324 R5] Provenance: only the drill's own tenant is adopted (or re-activated).
@@ -217,7 +234,7 @@ async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['
     // [TA-S0-003] Minting (or re-activating) a tenant at runtime is the path the
     // boot-only wall gate cannot see: assert the wall for the count this makes.
     const activeAfter = (await db.tenant.count({ where: { isActive: true, NOT: { id: DRILL_TENANT_ID } } })) + 1;
-    assertTenantWall(attestationOf(await readRlsFacts(db)), activeAfter);
+    { const db = wallDb; assertTenantWall(attestationOf(await readRlsFacts(db)), activeAfter); }
   }
   // [AX370 A2] The tenant records this run: the provenance its cleanup requires.
   const prior = existing?.config && typeof existing.config === 'object' && !Array.isArray(existing.config) ? existing.config as Prisma.JsonObject : {};
@@ -247,7 +264,7 @@ async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['
     }
     const vendor = found ?? await db.vendor.create({
         data: {
-          ownerId: owner.id, name, slug, vendorType: 'RESTAURANT', phone: storeOwner.phone,
+          tenantId: DRILL_TENANT_ID, ownerId: owner.id, name, slug, vendorType: 'RESTAURANT', phone: storeOwner.phone,
           addressLine1: `2 ${marker} Street`, ...GEORGETOWN,
           status: 'ACTIVE', isVerified: true, isCurrentlyOpen: true, acceptingOrders: true,
         },
@@ -267,6 +284,7 @@ async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['
       const price = new Prisma.Decimal(item.basePrice);
       order = await db.order.create({
         data: {
+          tenantId: DRILL_TENANT_ID,
           orderNumber: generateOrderNumber(0),
           orderType: 'FOOD_DELIVERY',
           customerId: customer.userId,
@@ -300,20 +318,22 @@ async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['
 }
 
 /** Create (or find) every drill fixture of one run and return the manifest the runner reads. */
-export async function createDrillFixtures(db: Db, input: CreateDrillFixturesInput): Promise<DrillManifest> {
-  const now = input.now ?? new Date();
-  const marker = drillMarker(input.runId);
-  const recusal = await runWithTenant(DEFAULT_TENANT, () => ensureRecusalApplicant(db, input.runId, input.adminPhone));
-  const tenant = await ensureDrillTenant(db, input.runId);
-  return {
-    version: 2,
-    runId: input.runId,
-    marker,
-    createdAt: now.toISOString(),
-    target: { deploymentId: input.target.deploymentId, environment: input.target.environment, database: input.target.database },
-    recusal,
-    tenant,
-  };
+export async function createDrillFixtures(client: Db, input: CreateDrillFixturesInput, wallDb: Db = client): Promise<DrillManifest> {
+  return fixtureTransaction(client, async (db) => {
+    const now = input.now ?? new Date();
+    const marker = drillMarker(input.runId);
+    const tenant = await ensureDrillTenant(db, input.runId, wallDb);
+    const recusal = await runWithTenant(DEFAULT_TENANT, () => ensureRecusalApplicant(db, input.runId, input.adminPhone));
+    return {
+      version: 2,
+      runId: input.runId,
+      marker,
+      createdAt: now.toISOString(),
+      target: { deploymentId: input.target.deploymentId, environment: input.target.environment, database: input.target.database },
+      recusal,
+      tenant,
+    };
+  });
 }
 
 export interface DrillCleanupReport {
@@ -335,23 +355,44 @@ export interface DrillCleanupReport {
  * not touched: audit, consent, deletion receipts and the ledger refuse
  * DELETE by design, and order status logs go only with their order.
  */
-export async function cleanupDrillFixtures(db: Db, input: { runId: string }): Promise<DrillCleanupReport> {
+export async function cleanupDrillFixtures(client: Db, input: { runId: string }): Promise<DrillCleanupReport> {
   const marker = drillMarker(input.runId);
   const removed: Record<string, number> = {};
   const kept: string[] = [];
   const count = (what: string, n: number) => { if (n > 0) removed[what] = (removed[what] ?? 0) + n; };
+  let transaction: Db;
   const attempt = async (what: string, fn: () => Promise<number>): Promise<void> => {
+    await transaction.$executeRawUnsafe('SAVEPOINT drill_cleanup_row');
     try {
       count(what, await fn());
+      await transaction.$executeRawUnsafe('RELEASE SAVEPOINT drill_cleanup_row');
     } catch (err) {
+      await transaction.$executeRawUnsafe('ROLLBACK TO SAVEPOINT drill_cleanup_row');
       const e = err as { code?: string; meta?: { field_name?: string; constraint?: string }; message?: string };
       kept.push(`${what}: ${e.code ?? 'error'} ${e.meta?.field_name ?? e.meta?.constraint ?? (e.message ?? '').split('\n')[0]?.slice(0, 160)}`);
     }
   };
 
-  return runAsSystem(CAPABILITY, async () => {
+  return fixtureTransaction(client, async (db) => {
+    transaction = db;
+    const drillTenant = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: TENANT_PROVENANCE });
+    const foreign = drillTenant ? foreignDrillTenant(drillTenant) : null;
+    if (foreign) return { runId: input.runId, marker, removed, kept: [foreign], tenant: 'refused', tenantReason: foreign };
+    if (drillTenant && !drillTenantRuns(drillTenant.config).includes(marker)) {
+      return { runId: input.runId, marker, removed, kept, tenant: 'kept', tenantReason: `${marker} is not on the tenant's record of drill runs` };
+    }
+    // Row locks protect root ownership and block new FK references until every
+    // child and root has been handled. Tenant replacement/protection/run edits
+    // also wait for the transaction's tenant row lock.
+    await db.$queryRaw`SELECT id FROM users WHERE "syntheticRunId" = ${marker} ORDER BY id FOR UPDATE`;
     const users = await db.user.findMany({ where: { syntheticRunId: marker }, select: { id: true, tenantId: true } });
     const userIds = users.map((u) => u.id);
+    if (users.some((u) => ![DEFAULT_TENANT, DRILL_TENANT_ID].includes(u.tenantId))) {
+      return { runId: input.runId, marker, removed, kept: ['fixture account is outside the authorized tenants'], tenant: 'refused' };
+    }
+    await db.$queryRaw`SELECT v.id FROM vendors v JOIN vendor_owners o ON o.id = v."ownerId" WHERE o."userId" = ANY(${userIds}) ORDER BY v.id FOR UPDATE OF v, o`;
+    await db.$queryRaw`SELECT id FROM riders WHERE "userId" = ANY(${userIds}) ORDER BY id FOR UPDATE`;
+
     const owners = await db.vendorOwner.findMany({ where: { userId: { in: userIds } }, select: { id: true } });
     const vendors = await db.vendor.findMany({ where: { ownerId: { in: owners.map((o) => o.id) } }, select: { id: true } });
     const vendorIds = vendors.map((v) => v.id);
@@ -362,6 +403,7 @@ export async function cleanupDrillFixtures(db: Db, input: { runId: string }): Pr
     const memberships = await db.identityClusterMember.findMany({ where: { accountId: { in: userIds } }, select: { clusterId: true } });
     const touchedClusters = [...new Set(memberships.map((m) => m.clusterId))];
 
+    await db.$queryRaw`SELECT id FROM orders WHERE "customerId" = ANY(${userIds}) OR "vendorId" = ANY(${vendorIds}) ORDER BY id FOR UPDATE`;
     // 1. The order graph: carts that point at a drill store or belong to a drill
     //    account, then the orders (items and status logs cascade with them).
     await attempt('carts', async () => (await db.cart.deleteMany({ where: { OR: [{ vendorId: { in: vendorIds } }, { customerId: { in: userIds } }] } })).count);
@@ -413,8 +455,6 @@ export async function cleanupDrillFixtures(db: Db, input: { runId: string }): Pr
     //    it is provably the drill's own and this run is on its record [AX370 A2].
     let tenant: DrillCleanupReport['tenant'] = 'absent';
     let tenantReason: string | undefined;
-    const drillTenant = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: TENANT_PROVENANCE });
-    const foreign = drillTenant ? foreignDrillTenant(drillTenant) : null;
     if (drillTenant && foreign) {
       tenant = 'refused';
       tenantReason = foreign;
@@ -429,17 +469,19 @@ export async function cleanupDrillFixtures(db: Db, input: { runId: string }): Pr
         db.order.count({ where: { tenantId: DRILL_TENANT_ID } }),
       ]);
       // Each mutation re-states the provenance, so a row changed since the read is never touched.
-      const own = { id: DRILL_TENANT_ID, kind: 'CRAWLER' as const, slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, purgeProtected: false };
+      const own = { id: DRILL_TENANT_ID, kind: 'CRAWLER' as const, slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, purgeProtected: false, config: { path: ['stagingDrill', 'runs'], array_contains: [marker] } };
       if (u + v + o > 0) {
         tenant = 'kept';
         tenantReason = `${u} user(s), ${v} store(s), ${o} order(s) still live in it`;
       } else {
+        await db.$executeRawUnsafe('SAVEPOINT drill_cleanup_tenant');
         try {
           const gone = (await db.tenant.deleteMany({ where: own })).count;
           tenant = gone === 1 ? 'removed' : 'refused';
           if (gone === 1) count('tenants', 1);
           else kept.push(`tenant ${DRILL_TENANT_ID}: refused, untouched — it changed before the delete`);
         } catch (err) {
+          await db.$executeRawUnsafe('ROLLBACK TO SAVEPOINT drill_cleanup_tenant');
           // Evidence that refuses deletion (a deletion receipt) keeps the row;
           // the tenant is switched off so staging is back to one live operator.
           const off = (await db.tenant.updateMany({ where: own, data: { isActive: false } })).count;

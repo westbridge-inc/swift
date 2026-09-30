@@ -11,8 +11,11 @@
 //             must be PROVEN this run's own (an order in this run's ledger,
 //             crash-drill-orders.json, placed by C5 at R1) — any other job
 //             refuses the drill, named, with nothing touched — and no rider
-//             but DR1–DR3 may be online in the tenant (the drill order's
-//             dispatch pool, read through GET /admin/riders). Only then are
+//             but the run riders may be online in the tenant. The host first
+//             mints a protected per-run CRAWLER tenant with six synthetic
+//             actors; public signup and partner activation cannot join it.
+//             This tenant boundary survives setup failure, restart and handback.
+//             The online list is an additional sanity check. Only then are
 //             the run's own leftovers released, a roster customer places an
 //             express cash delivery at R1 (recorded in the ledger at once), R1
 //             accepts it (dispatch starts on accept), and the runner waits
@@ -52,6 +55,7 @@ import { ORIGIN, GET, POST, login, type Session } from './client.js';
 import { refusePublicTarget, refuseUnsafeIdentity, refuseLivePhones, type TargetIdentity } from './guard.js';
 import { JourneyRun, type Journey, type Recorder, type Step } from './journey.js';
 import { writeReplacedRow } from './report.js';
+import { crashTenantId, parseCrashScope, type CrashScope } from './crash-scope.js';
 import { rosterEntry, type Roster } from './roster.js';
 import { ensureFlag, goOnline, goOffline, ping, startHeartbeat, requireAdminPhone } from './provision.js';
 import { placeExpress, storeAccepts, storeReadies, riderToDoor, handoverPaid, doorPin, releaseLeg, mover } from './journeys/dispatch.js';
@@ -77,6 +81,8 @@ const FORGED = 'cl0000000000000000000forged';
 export interface CrashState {
   runId: string;
   setupStartedAt: string;
+  tenantId: string;
+  riderUsers: string[];
   orderId: string;
   offer: { moverId: string; offerAttemptId: string; seenAt: string };
   steps: Step[];
@@ -105,7 +111,7 @@ export interface CrashEvidence {
   version: 1;
   orderId: string;
   readAt: string;
-  order: { status: string; riderId: string | null } | null;
+  order: { tenantId?: string; status: string; riderId: string | null } | null;
   offers: Array<{ attemptId: string | null; recipientId: string; sentAt: string; acknowledgedAt: string | null }>;
   offerPushes: Array<{ attemptId: string | null; userId: string; createdAt: string }>;
   searches: Array<{ id: string; status: string; wave: number; startedAt: string; assignedAt: string | null; assignedTo: string | null; deliveryAuthorityVersion: number | null }>;
@@ -203,6 +209,7 @@ export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | nu
   out.push({
     name: 'durable: every offer attempt was published once (alert deliveries)',
     ok: e.offers.length > 0 && published.length === 0 && unattributed === 0,
+    ...(published.length === 0 && (e.offers.length === 0 || unattributed > 0) ? { inconclusive: true } : {}),
     detail: `${e.offers.length} publication(s) of ${new Set(e.offers.map((o) => o.attemptId)).size} attempt(s)${published.length ? `; published twice: ${published.join(', ')}` : ''}${unattributed ? `; ${unattributed} without an attempt id (cannot be proven once)` : ''}`,
   });
 
@@ -210,6 +217,7 @@ export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | nu
   out.push({
     name: 'durable: no new offer was published after the order was assigned',
     ok: !!assignedAt && late.length === 0,
+    ...(!assignedAt ? { inconclusive: true } : {}),
     detail: assignedAt ? (late.length ? `published after ${assignedAt}: ${late.map((o) => `${o.attemptId}@${o.sentAt}`).join('; ')}` : `none after ${assignedAt}`) : 'the order was never assigned',
   });
 
@@ -218,6 +226,7 @@ export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | nu
   out.push({
     name: 'durable: every offer attempt was pushed at most once (dispatch_offer notifications)',
     ok: pushedTwice.length === 0 && pushUnattributed === 0,
+    ...(pushedTwice.length === 0 && pushUnattributed > 0 ? { inconclusive: true } : {}),
     detail: `${e.offerPushes.length} offer push(es)${pushedTwice.length ? `; pushed twice: ${pushedTwice.join(', ')}` : ''}${pushUnattributed ? `; ${pushUnattributed} without an attempt id` : ''}`,
   });
 
@@ -225,6 +234,7 @@ export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | nu
   out.push({
     name: 'durable: every order status was logged once — one assignment, one delivery',
     ok: loggedTwice.length === 0 && statuses.get('RIDER_ASSIGNED') === 1 && statuses.get('DELIVERED') === 1,
+    ...(loggedTwice.length === 0 && (!statuses.has('RIDER_ASSIGNED') || !statuses.has('DELIVERED')) ? { inconclusive: true } : {}),
     detail: `${e.statusLog.map((l) => l.status).join(' → ')}${loggedTwice.length ? `; logged twice: ${loggedTwice.join(', ')}` : ''}`,
   });
 
@@ -238,6 +248,7 @@ export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | nu
   out.push({
     name: 'durable: the order ends delivered, with its one rider',
     ok: !!e.order && ['DELIVERED', 'COMPLETED'].includes(e.order.status) && !!e.order.riderId,
+    ...(!e.order ? { inconclusive: true } : {}),
     detail: e.order ? `status=${e.order.status} rider=${e.order.riderId ?? 'none'}` : 'the order is missing',
   });
 
@@ -246,6 +257,8 @@ export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | nu
   if (acceptedAttemptId && !recorded.has(acceptedAttemptId)) gaps.push(`the accepted attempt ${acceptedAttemptId} has no publication record`);
   const unrecorded = [...new Set(observedAttemptIds)].filter((a) => a !== acceptedAttemptId && !recorded.has(a));
   if (unrecorded.length) gaps.push(`attempt(s) a rider was seen holding have no publication record: ${unrecorded.join(', ')}`);
+  const pushGaps = [...new Set(e.offerPushes.map((p) => p.attemptId).filter((a): a is string => !!a))].filter((a) => !recorded.has(a));
+  if (pushGaps.length) gaps.push(`persisted notification attempt(s) have no publication record: ${pushGaps.join(', ')}`);
   if (e.searches.length === 0) gaps.push('the dispatch journal has no search for the order');
   if (assignedSearches.length === 0) gaps.push('the dispatch journal records no assignment');
   out.push({
@@ -291,9 +304,9 @@ export function splitLegs(held: Array<{ riderId: string; legs: any[] }>, owner: 
 /**
  * Pure: the drill order's dispatch candidates are ONLINE riders of its tenant
  * (dispatch.service.ts; distance, freshness and capacity only narrow that), so
- * the pool is roster-only when every online rider is one of the drill's — the
- * whole online list is judged, answering "could include" conservatively. An
- * unreadable list proves nothing.
+ * list is an additional sanity check within the protected run tenant. This
+ * snapshot alone is never lifetime isolation; the fixture tenant is what
+ * excludes outside accounts during subsequent activation and recovery.
  */
 export function poolVerdict(read: OnlineRiders, rosterPhones: string[]): { ok: boolean; detail: string } {
   if (!read.ok) return { ok: false, detail: `${read.detail ?? 'the online-rider list could not be read'}: the pool cannot be proven roster-only` };
@@ -344,7 +357,7 @@ async function onlineRiders(ctx: CrashCtx): Promise<OnlineRiders> {
     const rows = r.json?.data;
     if (!r.ok || r.json?.success !== true || !Array.isArray(rows)) return { ok: false, riders, detail: `the online-rider list could not be read (${r.status})` };
     for (const x of rows) riders.push({ id: String(x?.id ?? ''), phone: String(x?.user?.phone ?? '') });
-    if (r.json?.pagination?.hasNext !== true) return { ok: true, riders };
+    if (r.json?.meta?.hasNext !== true) return { ok: true, riders };
   }
   return { ok: false, riders, detail: 'over 2,000 riders online: the list was not read to its end' };
 }
@@ -371,19 +384,29 @@ async function releaseOwnAtEnd(ctx: CrashCtx, orderId: string): Promise<void> {
   }
 }
 
-async function signIn(id: string): Promise<{ id: string; phone: string; session: Session; lat: number; lng: number; kind?: 'rider' | 'driver'; vendorType?: string }> {
+async function signIn(id: string, scope: CrashScope): Promise<{ id: string; phone: string; session: Session; lat: number; lng: number; kind?: 'rider' | 'driver'; vendorType?: string }> {
   const e = rosterEntry(id);
   if (!e) throw new Error(`no roster account ${id}`);
-  return { ...e, session: await login(e.phone) };
+  const actor = id === CUSTOMER ? scope.customer : id === STORE ? scope.storeOwner : scope.riders[RIDERS.indexOf(id)]!;
+  const session = await login(actor.phone);
+  if (session.userId !== actor.userId) throw new Error(`isolated ${id} account identity changed`);
+  return { ...e, phone: actor.phone, session, lat: 6.8013, lng: -58.1551 };
 }
 
 type PhaseOpts = { runId: string; identity: TargetIdentity; admin: Session; adminPhone: string; outDir: string; log: (s: string) => void };
 
-/** The accounts this drill needs, signed in (they exist once a journeys run has provisioned the roster). */
+/** Sign in only the actors named by the host-attested run fixture. */
+function scopeFor(o: PhaseOpts): CrashScope {
+  return parseCrashScope(readJson<CrashScope>(join(o.outDir, 'crash-drill-scope.json')), o.runId, o.identity);
+}
+
 async function world(o: PhaseOpts): Promise<CrashCtx> {
-  const customer = await signIn(CUSTOMER);
-  const store = await signIn(STORE);
-  const riders = await Promise.all(RIDERS.map(signIn));
+  const scope = scopeFor(o);
+  const customer = await signIn(CUSTOMER, scope);
+  const store = await signIn(STORE, scope);
+  const riders = await Promise.all(RIDERS.map((id) => signIn(id, scope)));
+  const admin = await login(scope.admin.phone);
+  if (admin.userId !== scope.admin.userId) throw new Error('isolated admin identity changed');
   const roster: Roster = {
     customers: { [CUSTOMER]: customer },
     vendors: { [STORE]: { ...store, vendorType: store.vendorType ?? 'RESTAURANT' } },
@@ -391,7 +414,7 @@ async function world(o: PhaseOpts): Promise<CrashCtx> {
     admin2: null,
   };
   const w: World = { items: {}, liveVendors: [], readyMovers: [], onlineMovers: [], notReady: {}, providers: {} };
-  return { runId: o.runId, log: o.log, identity: o.identity, admin: o.admin, adminPhone: o.adminPhone, roster, world: w, stash: { heartbeatOverrides: {} }, drill: null, outDir: o.outDir };
+  return { runId: o.runId, log: o.log, identity: o.identity, admin, adminPhone: scope.admin.phone, roster, world: w, stash: { heartbeatOverrides: {} }, drill: null, outDir: o.outDir };
 }
 
 async function storeReady(rec: Recorder, ctx: CrashCtx): Promise<void> {
@@ -405,7 +428,7 @@ async function storeReady(rec: Recorder, ctx: CrashCtx): Promise<void> {
   const list: any[] = Array.isArray(items.json?.data) ? items.json.data : items.json?.data?.items ?? [];
   const plate = list.find((i) => i.name === `${STORE} Plate` && i.isAvailable !== false) ?? list.find((i) => i.isAvailable !== false);
   if (plate) ctx.world.items[STORE] = { itemId: plate.id, categoryId: plate.categoryId, price: Number(plate.basePrice), name: plate.name };
-  rec.require(`${STORE} is open, accepting and has an item (provisioned by an earlier journeys run)`, row?.status === 'ACTIVE' && open && accepting && !!plate,
+  rec.require(`${STORE} is open, accepting and has an item (provisioned in this run’s isolated fixture tenant)`, row?.status === 'ACTIVE' && open && accepting && !!plate,
     `status=${row?.status} open=${open} accepting=${accepting} item=${plate?.name ?? 'none'}`);
 }
 
@@ -447,6 +470,7 @@ async function holdersOf(ctx: CrashCtx, orderId: string): Promise<string[]> {
 
 /** Phase 1: prove the dead-letter page empty, reach mid-offer, record it, exit. */
 export async function crashSetup(o: PhaseOpts): Promise<number> {
+  try { scopeFor(o); } catch (e) { o.log(String(e)); return 1; }
   const ctx = await world(o);
   const run = new JourneyRun<CrashCtx>({ id: 'PLAT-02', title: 'setup', cases: '', run: async () => undefined });
   const rec = run.rec;
@@ -463,7 +487,7 @@ export async function crashSetup(o: PhaseOpts): Promise<number> {
     rec.require('no roster rider holds a job this run cannot prove its own (in its ledger, placed by C5 at R1) — refused before setup, nothing touched',
       legs.other.length === 0,
       legs.other.length ? `not this run's: ${legs.other.map((h) => `order ${h.orderId} (${h.status}) held by ${h.riderId}`).join('; ')}` : `${legs.own.length} job(s) of this run to release`);
-    const pool = poolVerdict(await onlineRiders(ctx), RIDERS.map((id) => rosterEntry(id)?.phone ?? ''));
+    const pool = poolVerdict(await onlineRiders(ctx), RIDERS.map((id) => mover(ctx, id).phone));
     rec.require('the drill order can be offered only to the drill’s riders: no other rider is online in the tenant — refused before setup', pool.ok, pool.detail);
 
     await storeReady(rec, ctx);
@@ -486,6 +510,8 @@ export async function crashSetup(o: PhaseOpts): Promise<number> {
     const state: CrashState = {
       runId: o.runId,
       setupStartedAt,
+      tenantId: scopeFor(o).tenantId,
+      riderUsers: scopeFor(o).riders.map((r) => r.userId),
       orderId: placed.id!,
       offer: { moverId: got[0]!.moverId, offerAttemptId: got[0]!.offerAttemptId, seenAt: new Date(got[0]!.at).toISOString() },
       steps: [...rec.steps],
@@ -515,7 +541,9 @@ function loadState(outDir: string, runId: string): CrashState {
 
 /** Phase 3: after the restart — resumed, one completion, every rider watched throughout; the record for finalize. */
 export async function crashVerify(o: PhaseOpts): Promise<number> {
+  try { scopeFor(o); } catch (e) { o.log(String(e)); return 1; }
   const state = loadState(o.outDir, o.runId);
+  if (state.tenantId !== scopeFor(o).tenantId) { o.log('isolated crash state tenant changed'); return 1; }
   const host = readJson<CrashHost>(join(o.outDir, HOST));
   const ctx = await world(o);
   const record: CrashVerify = { runId: o.runId, orderId: state.orderId, steps: [], negatives: 0, acceptedAttemptId: null, observedAttemptIds: [], finishedAt: '' };
@@ -652,18 +680,30 @@ export async function crashFinalize(o: PhaseOpts): Promise<number> {
 }
 
 function finalizeRun(rec: Recorder, state: CrashState, verify: CrashVerify | null, evidence: CrashEvidence | null): void {
-  rec.check('the verify phase recorded what it saw', !!verify && verify.orderId === state.orderId, verify ? `${verify.steps.length} step(s), finished ${verify.finishedAt}` : `${VERIFY} missing: the verify phase did not finish`);
+  const gaps: string[] = [];
+  if (!state.tenantId || state.tenantId !== crashTenantId(state.runId)) gaps.push('isolated tenant provenance is absent from setup');
+  if (!verify || verify.orderId !== state.orderId || verify.runId !== state.runId) {
+    gaps.push(`${VERIFY} is absent or does not identify this run and order`);
+  }
   const ok = !!evidence && evidence.version === 1 && evidence.orderId === state.orderId;
-  rec.check('the durable evidence was read on the server for this order (host, inside the worker)', ok,
-    evidence ? `order ${evidence.orderId}, read ${evidence.readAt}` : `${EVIDENCE} missing: without the order's rows nothing proves once-only`);
-  if (!ok) return;
-  // [AX370 A3] Every attempt the riders were seen holding (the setup's offer
-  // included) must be on record. A gap is INCONCLUSIVE: the row cannot PASS,
-  // and it claims no duplicate either — a failed rule still makes it FAIL.
-  const checks = durableOnceOnly(evidence!, verify?.acceptedAttemptId ?? null, [state.offer.offerAttemptId, ...(verify?.observedAttemptIds ?? [])]);
-  for (const c of checks) if (!c.inconclusive) rec.check(c.name, c.ok, c.detail);
-  const gaps = checks.filter((c) => c.inconclusive);
-  if (gaps.length) rec.skipAll(`INCONCLUSIVE — the durable evidence is incomplete, so nothing proves the crash window ran once: ${gaps.map((c) => c.detail).join('; ')}`);
+  if (!ok) gaps.push(`${EVIDENCE} is absent or does not identify this order`);
+  if (ok) {
+    if (!evidence!.order?.tenantId) gaps.push('the durable order tenant is absent');
+    else rec.check('durable: the order stayed in the isolated run tenant', evidence!.order.tenantId === state.tenantId, evidence!.order.tenantId);
+    if (!state.riderUsers?.length) gaps.push('the isolated rider identities are absent from setup');
+    else {
+      const outside = [...evidence!.offers.map((a) => a.recipientId), ...evidence!.offerPushes.map((p) => p.userId)].filter((u) => !state.riderUsers.includes(u));
+      rec.check('durable: every offer recipient is an isolated run rider', outside.length === 0, outside.length ? `outside run: ${[...new Set(outside)].join(', ')}` : 'all recorded offer recipients belong to this run');
+    }
+    const checks = durableOnceOnly(evidence!, verify?.acceptedAttemptId ?? null, [state.offer.offerAttemptId, ...(verify?.observedAttemptIds ?? [])]);
+    // A demonstrated duplicate still fails even beside missing evidence.
+    for (const c of checks) {
+      if (c.inconclusive) gaps.push(c.detail);
+      else rec.check(c.name, c.ok, c.detail);
+    }
+  }
+  if (gaps.length) rec.skipAll(`INCONCLUSIVE — the durable evidence is incomplete, so nothing proves the crash window ran once: ${gaps.join('; ')}`);
+
 }
 
 /** Entry for run.ts --suite=crash-drill --phase=setup|verify|finalize: the same refusals as the journeys suite, then the phase. */
@@ -673,7 +713,8 @@ export async function crashDrill(phase: string | undefined, log: (s: string) => 
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(runId)) throw new Error('LIVETEST_RUN_ID must name the journeys run the PLAT-02 row belongs to');
   const outDir = process.env.LIVETEST_OUT_DIR || '';
   if (!outDir) throw new Error('LIVETEST_OUT_DIR is required (deploy/drill-crash.sh mounts the run results at /results)');
-  const phones = [CUSTOMER, STORE, ...RIDERS].map((id) => rosterEntry(id)?.phone ?? '');
+  const scope = parseCrashScope(readJson<CrashScope>(join(outDir, 'crash-drill-scope.json')), runId, { deploymentId: process.env.LIVETEST_EXPECT_DEPLOYMENT_ID ?? '', environment: process.env.LIVETEST_EXPECT_ENVIRONMENT ?? '' });
+  const phones = [scope.customer, scope.storeOwner, ...scope.riders].map((a) => a.phone);
   const adminPhone = requireAdminPhone(process.env.LIVETEST_ADMIN_PHONE);
   refuseLivePhones([...phones, adminPhone]);
   await refusePublicTarget(ORIGIN);
@@ -682,6 +723,7 @@ export async function crashDrill(phase: string | undefined, log: (s: string) => 
     { get: async (p, token) => { const r = await GET(p, token); return { status: r.status, json: r.json }; } },
     async () => { admin = await login(adminPhone); return admin.token; },
   );
+  parseCrashScope(scope, runId, identity);
   log(`\nPLAT-02 crash drill (${phase}) → ${ORIGIN} · deployment ${identity.deploymentId} · run ${runId}\n`);
   const o = { runId, identity, admin: admin!, adminPhone, outDir, log };
   return phase === 'setup' ? crashSetup(o) : phase === 'verify' ? crashVerify(o) : crashFinalize(o);

@@ -122,8 +122,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // A mutation may deliberately drop this suite's authorization append. Restore
+  // only these test runs for teardown AFTER their assertions have been judged.
+  const ownRuns = [RUN_R1, RUN_DOT, RUN_UNDER, RUN_SQUAT, `${RUN}-append-a`, `${RUN}-append-b`, RUN];
+  const ownTenant = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID } });
+  if (ownTenant && !foreignDrillTenant(ownTenant)) await db.tenant.update({ where: { id: DRILL_TENANT_ID }, data: {
+    config: { stagingDrill: { runs: [...new Set([...drillTenantRuns(ownTenant.config), ...ownRuns.map(drillMarker)])] } },
+  } });
   // A failed assertion must not strand fixtures: cleanup is idempotent.
-  for (const run of [RUN_R1, RUN_DOT, RUN_UNDER, RUN_SQUAT, RUN]) {
+  for (const run of ownRuns) {
     await drillFixturesMain(['cleanup', '--run-id', run], DRILL_ENV, captureIo(), appClient).catch(() => undefined);
   }
   await sys(async () => {
@@ -370,6 +377,89 @@ describe('[AX324 R2] no drill path touches a non-DRILL subscription', () => {
   });
 });
 
+describe('[AX387] populated fixture provenance before cleanup', () => {
+  const graph = async () => sys(async () => JSON.stringify({
+    tenant: await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID } }),
+    users: await db.user.findMany({ where: { syntheticRunId: MARKER }, orderBy: { id: 'asc' } }),
+    orders: await db.order.findMany({ where: { id: manifest.tenant.order.orderId } }),
+    stores: await db.vendor.findMany({ where: { id: manifest.tenant.store.vendorId } }),
+    keys: await db.identityKey.findMany({ where: { source: MARKER }, orderBy: { id: 'asc' } }),
+  }));
+  for (const change of ['protection', 'name', 'authorization'] as const) {
+    it(`refuses the entire populated graph after ${change} changes`, async () => {
+      const original = await db.tenant.findUniqueOrThrow({ where: { id: DRILL_TENANT_ID } });
+      const data = change === 'protection' ? { purgeProtected: true }
+        : change === 'name' ? { name: 'A different tenant owner' }
+        : { config: { stagingDrill: { runs: ['DRILL-another-run'] } } };
+      await db.tenant.update({ where: { id: DRILL_TENANT_ID }, data });
+      try {
+        const before = await graph();
+        const io = captureIo();
+        await drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, io, appClient);
+        expect(await graph()).toBe(before);
+        expect(JSON.parse(io.lines[0]!).removed).toEqual({});
+      } finally {
+        await db.tenant.update({ where: { id: DRILL_TENANT_ID }, data: {
+          name: original.name, purgeProtected: original.purgeProtected, config: original.config!,
+        } });
+      }
+    });
+  }
+  for (const change of ['protection', 'authorization'] as const) {
+    it(`holds all roots untouched while a concurrent ${change} change commits`, async () => {
+      const original = await db.tenant.findUniqueOrThrow({ where: { id: DRILL_TENANT_ID } });
+      const locker = new PrismaClient({ datasourceUrl: process.env['DATABASE_URL'] });
+      let acquired!: () => void, release!: () => void;
+      const locked = new Promise<void>((resolve) => { acquired = resolve; });
+      const proceed = new Promise<void>((resolve) => { release = resolve; });
+      const edit = locker.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM tenants WHERE id = ${DRILL_TENANT_ID} FOR UPDATE`;
+        await tx.tenant.update({ where: { id: DRILL_TENANT_ID }, data: change === 'protection'
+          ? { purgeProtected: true } : { config: { stagingDrill: { runs: ['DRILL-replacement-run'] } } } });
+        acquired();
+        await proceed;
+      }, { timeout: 10_000 });
+      await locked;
+      const before = await graph();
+      const io = captureIo();
+      const cleanup = drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, io, appClient);
+      try {
+        let waiting = false;
+        for (let attempt = 0; attempt < 200 && !waiting; attempt += 1) {
+          const rows = await locker.$queryRaw<Array<{ pid: number }>>`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%tenants%'`;
+          waiting = rows.length > 0;
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(waiting).toBe(true);
+        expect(await graph()).toBe(before);
+      } finally {
+        release(); await edit; await cleanup;
+        await db.tenant.update({ where: { id: DRILL_TENANT_ID }, data: { purgeProtected: original.purgeProtected, config: original.config!, updatedAt: original.updatedAt } });
+        await locker.$disconnect();
+      }
+      expect(await graph()).toBe(before);
+      expect(JSON.parse(io.lines[0]!).removed).toEqual({});
+    });
+  }
+
+  it('two creators append run authorization without losing either run, serialized with cleanup', async () => {
+    const runs = [`${RUN}-append-a`, `${RUN}-append-b`];
+    const results = await Promise.all(runs.map(async (run) => {
+      const io = captureIo();
+      const isolatedClient = new PrismaClient({ datasourceUrl: process.env['DATABASE_URL'] });
+      const code = await drillFixturesMain(['create', '--run-id', run, '--admin-phone', ADMIN_PHONE], DRILL_ENV, io, { client: async () => isolatedClient });
+      return { code, errors: io.errors };
+    }));
+    try {
+      for (const r of results) expect(r.code, r.errors.join('\n')).toBe(0);
+      const current = await db.tenant.findUniqueOrThrow({ where: { id: DRILL_TENANT_ID } });
+      for (const run of runs) expect(drillTenantRuns(current.config)).toContain(drillMarker(run));
+    } finally {
+      for (const run of runs) await drillFixturesMain(['cleanup', '--run-id', run], DRILL_ENV, captureIo(), appClient);
+    }
+  });
+});
+
 describe('[STG-DRILLS] cleanup', () => {
   it('removes every fixture through its parents, keeps the evidence rules, and is idempotent', async () => {
     const io = captureIo();
@@ -474,6 +564,36 @@ describe('[AX370 A2] the cleanup removes only the drill’s own tenant, and only
     } finally {
       await drop();
     }
+  });
+
+  it('[AX387] cleanup waiting on an empty tenant replacement cannot delete the replacement run', async () => {
+    await plant({ slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, config: { stagingDrill: { runs: [MARKER] } } });
+    const locker = new PrismaClient({ datasourceUrl: process.env['DATABASE_URL'] });
+    let acquired!: () => void, release!: () => void;
+    const locked = new Promise<void>((resolve) => { acquired = resolve; });
+    const proceed = new Promise<void>((resolve) => { release = resolve; });
+    const replacement = locker.$transaction(async (tx) => {
+      await tx.tenant.delete({ where: { id: DRILL_TENANT_ID } });
+      const row = await tx.tenant.create({ data: { id: DRILL_TENANT_ID, slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, kind: 'CRAWLER', purgeProtected: false, config: { stagingDrill: { runs: [drillMarker(RUN_OTHER)] } } } });
+      acquired(); await proceed; return row;
+    }, { timeout: 10_000 });
+    await locked;
+    const pending = cleanup(RUN);
+    try {
+      let waiting = false;
+      for (let i = 0; i < 200 && !waiting; i += 1) {
+        const rows = await locker.$queryRaw<Array<{ pid: number }>>`SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%tenants%'`;
+        waiting = rows.length > 0;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+    } finally { release(); }
+    const changed = await replacement;
+    const result = await pending;
+    try {
+      expect(result.report.removed).toEqual({});
+      expect(await snapshot()).toBe(JSON.stringify(changed));
+    } finally { await locker.$disconnect(); await drop(); }
   });
 
   it('the one provenance rule (kind, slug, name, protection) and the run record it reads — pure', () => {
