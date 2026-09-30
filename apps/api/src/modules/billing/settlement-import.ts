@@ -139,7 +139,7 @@ function splitCsvLine(line: string): { cells: string[]; malformed: boolean } {
     else cur += c;
   }
   out.push(cur);
-  return { cells: out.map((s) => s.trim()), malformed: quoted };
+  return { cells: out, malformed: quoted };
 }
 
 export const settlementFileHash = (csvText: string) => createHash('sha256').update(csvText).digest('hex');
@@ -157,7 +157,7 @@ export function parseSettlementCsv(csvText: string, map: SettlementHeaderMap): {
   const lines = csvText.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length < 2) return { rows: [], rejections: [{ line: 0, reason: 'EMPTY_FILE' }], totalGyd: 0, trailerTotalGyd: null, trailerRowCount: null };
   const header = splitCsvLine(lines[0]!);
-  const headers = header.cells.map((h) => h.toLowerCase());
+  const headers = header.cells.map((h) => h.trim().toLowerCase());
   const col = (name: string) => headers.indexOf(name.toLowerCase());
   const idx = {
     txnId: col(map.txnId),
@@ -177,7 +177,7 @@ export function parseSettlementCsv(csvText: string, map: SettlementHeaderMap): {
   let trailerRowCount: number | null = null;
   for (let line = 1; line < lines.length; line += 1) {
     const parsed = splitCsvLine(lines[line]!);
-    const cells = parsed.cells;
+    const cells = parsed.cells.map((s) => s.trim());
     const first = (cells[0] ?? '').toUpperCase();
     // Trailer rows: "TOTAL,<sum>" (the file's claimed total) and, when the
     // provider sends one, "ROWCOUNT,<n>".
@@ -193,16 +193,18 @@ export function parseSettlementCsv(csvText: string, map: SettlementHeaderMap): {
     }
     if (parsed.malformed) { rejections.push({ line: line + 1, reason: 'MALFORMED_QUOTING' }); continue; }
     if (cells.length !== headers.length) { rejections.push({ line: line + 1, reason: `COLUMN_COUNT: expected ${headers.length}, got ${cells.length}` }); continue; }
-    const txnId = cells[idx.txnId] ?? '';
+    // Keep the provider's raw spelling. Only SQL decides its equivalence to
+    // another reference; the parser's exact duplicate check is a safe subset.
+    const txnId = parsed.cells[idx.txnId] ?? '';
     const sanRaw = cells[idx.san] ?? '';
     const amountText = cells[idx.amount] ?? '';
     const amount = Number(amountText.replace(/[^0-9.-]/g, ''));
-    if (!txnId) { rejections.push({ line: line + 1, reason: 'MISSING_TXN_ID' }); continue; }
+    if (!txnId.trim()) { rejections.push({ line: line + 1, reason: 'MISSING_TXN_ID' }); continue; }
     if (!sanRaw) { rejections.push({ line: line + 1, reason: 'MISSING_SAN' }); continue; }
     if (!amountText || !Number.isFinite(amount) || amount <= 0) { rejections.push({ line: line + 1, reason: 'AMOUNT_NOT_POSITIVE' }); continue; }
     const paidAtRaw = cells[idx.paidAt] ?? '';
     if (!paidAtRaw || Number.isNaN(Date.parse(paidAtRaw))) { rejections.push({ line: line + 1, reason: 'DATE_UNREADABLE' }); continue; }
-    const key = txnId.trim().toUpperCase();
+    const key = txnId;
     const dup = seen.get(key);
     if (dup !== undefined) { rejections.push({ line: line + 1, reason: `DUPLICATE_TXN_ID_IN_FILE: also on line ${dup}` }); continue; }
     seen.set(key, line + 1);
@@ -256,6 +258,14 @@ export async function importSettlementCsv(
   // 2. Parse and validate the whole file. Nothing below touches money until
   //    every check passed.
   const parsed = parseSettlementCsv(csvText, map);
+  // [SX394] The file and the shared minter use exactly the same identity
+  // relation. One batch query, before staging/publication; never JS case fold.
+  const duplicateLines = await prisma.$queryRaw<Array<{ line: number; firstLine: number }>>`
+    SELECT line, "firstLine" FROM (
+      SELECT line, min(line) OVER (PARTITION BY mmg_txn_canon("txnId")) AS "firstLine"
+      FROM jsonb_to_recordset(${JSON.stringify(parsed.rows)}::jsonb) AS row(line integer, "txnId" text)
+    ) ranked WHERE line <> "firstLine" ORDER BY line`;
+  for (const duplicate of duplicateLines) parsed.rejections.push({ line: duplicate.line, reason: `DUPLICATE_TXN_ID_IN_FILE: also on line ${duplicate.firstLine}` });
   const rejected = parsed.rejections.length > 0;
   // [ADM-002] Staging the file IS the admin action; its audit row commits with
   // the import row (the per-row credits at publication are their own
