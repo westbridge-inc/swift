@@ -161,12 +161,28 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
       await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
       await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-      await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-      await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+      // Lock the parent rows through the final check and delete. A peer can
+      // fan out after the earlier preflight; its FK insert then waits for
+      // these locks instead of being silently removed by the user cascade.
+      await app.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "users" WHERE id IN (${Prisma.join(ids)}) FOR UPDATE`;
+        if (vendorIds.length) await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(vendorIds)}) FOR UPDATE`;
+        const lateOrders = await tx.order.findMany({ where: {
+          OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } }],
+          id: { notIn: orderIds },
+        }, select: { id: true } });
+        if (lateOrders.length) throw new Error(`GOLD-7 ${fixture}: foreign orders block fixture cleanup: ${lateOrders.map((o) => o.id).join(', ')}`);
+        const lateNotifications = await tx.notification.findMany({ where: {
+          userId: { in: ids }, id: { notIn: [...createdNotificationIds] },
+        }, select: { id: true } });
+        if (lateNotifications.length) throw new Error(`GOLD-7 ${fixture}: untracked notifications block fixture user cleanup: ${lateNotifications.map((n) => n.id).join(', ')}`);
+        await tx.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+        await tx.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
+        await tx.session.deleteMany({ where: { userId: { in: ids } } });
+        await tx.admin.deleteMany({ where: { userId: { in: ids } } });
+        await tx.customer.deleteMany({ where: { userId: { in: ids } } });
+        await tx.user.deleteMany({ where: { id: { in: ids } } });
+      });
       const wanted = new Set([...ids, ...vendorIds, ...orderIds, ...riderIds, ...sessionIds]);
       let cursor = '0';
       do {

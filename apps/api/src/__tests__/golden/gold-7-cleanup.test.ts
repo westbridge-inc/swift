@@ -113,8 +113,25 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     await expect(h.close()).rejects.toThrow(/untracked notifications block fixture user cleanup/);
     expect(await other.notification.findUnique({ where: { id: peerAdminNotice.id } })).toEqual(peerAdminNotice);
     expect(await other.user.findUnique({ where: { id: admin.userId } })).not.toBeNull();
-    // The peer owns its notice and removes it. Only then may our user cascade.
+    // The peer owns its notice and removes it. Insert another peer notice
+    // after the first preflight, while cleanup is already in progress.
     await other.notification.delete({ where: { id: peerAdminNotice.id } });
+    const deleteOrders = h.app.prisma.order.deleteMany.bind(h.app.prisma.order);
+    let lateNoticeId: string | undefined;
+    const interleave = vi.spyOn(h.app.prisma.order, 'deleteMany').mockImplementation((async (args: Prisma.OrderDeleteManyArgs) => {
+      const late = await other.notification.create({ data: {
+        userId: admin.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Late peer notice', body: 'Fixture only',
+      } });
+      lateNoticeId = late.id;
+      return deleteOrders(args);
+    }) as typeof deleteOrders);
+    try {
+      await expect(h.close()).rejects.toThrow(/untracked notifications block fixture user cleanup/);
+      expect(lateNoticeId).toBeDefined();
+      expect(await other.notification.findUnique({ where: { id: lateNoticeId! } })).not.toBeNull();
+      expect(await other.user.findUnique({ where: { id: admin.userId } })).not.toBeNull();
+    } finally { interleave.mockRestore(); }
+    await other.notification.delete({ where: { id: lateNoticeId! } });
     await h.close(); closed = true;
     expect(await other.alertDelivery.findUnique({ where: { id: peerOfferId } })).toEqual(peerOffer);
     expect(await other.alertDelivery.findUnique({ where: { id: fanout[0]!.id } })).toEqual(fanout[0]);

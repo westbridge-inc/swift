@@ -36,6 +36,7 @@ let foreignDecisionId: string;
 const userIds: string[] = [];
 const riderIds: string[] = [];
 const orderIds: string[] = [];
+const configIds: string[] = [];
 let seq = 0;
 
 async function purge() {
@@ -46,7 +47,7 @@ async function purge() {
   for (const id of orderIds) await app.redis.del(`dispatch:declined:${id}`, `dispatch:offer:${id}`);
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
+  if (vendorId) await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
@@ -88,7 +89,8 @@ async function makeOrder() {
 
 async function setFairness(enabled: boolean) {
   const latest = await app.prisma.algoConfig.findFirst({ where: { tenantId: 'swift-default', key: 'fairness.enabled' }, orderBy: { version: 'desc' } });
-  await app.prisma.algoConfig.create({ data: { tenantId: 'swift-default', key: 'fairness.enabled', value: enabled, version: (latest?.version ?? 0) + 1, updatedBy: 'fairness-band.test' } });
+  const config = await app.prisma.algoConfig.create({ data: { tenantId: 'swift-default', key: 'fairness.enabled', value: enabled, version: (latest?.version ?? 0) + 1, updatedBy: 'fairness-band.test' } });
+  configIds.push(config.id);
   invalidateAlgoConfig();
 }
 
@@ -142,10 +144,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.algoConfig.deleteMany({ where: { key: 'fairness.enabled', updatedBy: 'fairness-band.test' } });
+  await app.prisma.algoConfig.deleteMany({ where: { id: { in: configIds } } });
   invalidateAlgoConfig();
   await purge();
-  await app.prisma.algoDecision.deleteMany({ where: { id: foreignDecisionId } });
+  if (foreignDecisionId) await app.prisma.algoDecision.deleteMany({ where: { id: foreignDecisionId } });
   await app.close();
 });
 
