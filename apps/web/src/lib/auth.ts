@@ -59,13 +59,15 @@ export function currentSessionEpoch(): number {
 
 function announceSessionChange(): void {
   for (const listener of [...sessionListeners]) listener();
+  // Store subscribers must see the settled principal/epoch as well as the
+  // cleared store, including adoption and a missed cross-tab transition.
+  announceStoreChange();
 }
 
 function invalidatePrivateCaches(): void {
   clearStoredCheckoutAttempts();
   clearPrivateBrowserState();
   try { localStorage.removeItem(STORE_KEY); } catch { /* Storage disabled. */ }
-  announceStoreChange();
 }
 function ensureSessionEvents(): void {
   listenForSessionInvalidation(() => {

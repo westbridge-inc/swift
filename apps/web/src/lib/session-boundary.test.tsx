@@ -284,6 +284,19 @@ describe('AX350 A–D: one session boundary for state and pending work', () => {
     expect(epochs).toEqual([initial + 1]);
   });
 
+  it('notifies billing store subscribers only after the new session identity and epoch are settled', async () => {
+    const { auth } = await browser();
+    auth.setSelectedStore('store-a');
+    const epoch = auth.currentSessionEpoch();
+    const heard: unknown[] = [];
+    const stop = auth.subscribeSelectedStore(() => heard.push({
+      principal: auth.getSessionPrincipal(), epoch: auth.currentSessionEpoch(), store: auth.getSelectedStore(),
+    }));
+    auth.adoptSession('b');
+    expect(heard).toEqual([{ principal: 'b', epoch: epoch + 1, store: null }]);
+    stop();
+  });
+
   it('rejects a profile write that resolves after reauthentication as the same principal', async () => {
     const { auth } = await browser();
     const { writeSessionProfile } = await import('./session-profile-cache');
