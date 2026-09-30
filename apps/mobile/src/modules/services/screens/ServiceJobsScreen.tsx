@@ -12,7 +12,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { money } from '../../../lib/money';
-import { formatAppointmentSlot, serviceJobScheduleSelection, upcomingAppointmentDays } from '../../../lib/appointmentTime';
+import { formatAppointmentDate, formatAppointmentSlot, serviceJobScheduleSelection, upcomingAppointmentDays } from '../../../lib/appointmentTime';
 import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
@@ -204,7 +204,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
             {job.description}
           </T>
           <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-            {new Date(job.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+            {formatAppointmentDate(job.createdAt)}
             {job.scheduledFor
               ? ` · booked ${formatAppointmentSlot(job.scheduledFor)}`
               : ''}
