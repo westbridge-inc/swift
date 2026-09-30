@@ -712,11 +712,26 @@ describe('Appointments — booked at acceptance, never double-held', () => {
   });
 
   it('a second order on the same slot fails at acceptance and stays PENDING', async () => {
+    // [Q12] The slot above is CONFIRMED: a rival asking for it now is refused
+    // at checkout (it used to be accepted, then wait up to a day for a
+    // decline the provider could never avoid).
     const rival = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const res = await checkoutAppointment(rival, slot);
+    const refused = await checkoutAppointment(rival, slot);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe('SLOT_TAKEN');
+    await app.prisma.cart.deleteMany({ where: { customerId: rival.userId } });
+
+    // Acceptance stays the judge between OPEN requests: two customers asked
+    // for the same free slot before either was confirmed.
+    const open = new Date(slot.getTime() + 5 * 60 * 60_000); // 16:00 — inside 09:00–17:00
+    const first = await checkoutAppointment(await makeUserWithSession(['CUSTOMER'], 'CUSTOMER'), open);
+    const res = await checkoutAppointment(rival, open);
+    expect(first.statusCode).toBe(200);
     expect(res.statusCode).toBe(200);
+    createdOrderIds.push(first.json().data.order.id);
     const order = res.json().data.order;
     createdOrderIds.push(order.id);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${first.json().data.order.id}/accept`, {}, service.token)).statusCode).toBe(200);
 
     const accept = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, {}, service.token);
     expect(accept.statusCode).toBe(409);
