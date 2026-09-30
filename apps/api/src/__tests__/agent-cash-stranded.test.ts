@@ -717,6 +717,39 @@ describe('[AX369] one MMG transaction, one credit authority, whatever the key no
     expect(await money(sub.id, [tabbed, spaced])).toEqual({ credits: 1, ledger: 1, observations: 2 });
   });
 
+  it('the concurrent mint race: two unlinked observations of one legacy transaction (tab and space-tab forms) arriving together mint exactly ONE identity, one credit', async () => {
+    const { sub, san } = await makeVendorSub();
+    const { core, tabbed, spaced } = legacyPair();
+    externalIds.push(tabbed, spaced);
+    // Hold an uncommitted identity under today's key until BOTH deliveries
+    // have looked every key form up, found nothing, and are blocked on the
+    // same unique key; then roll it back so they really race to mint.
+    const HOLD = new Error('hold released');
+    let sent: Array<Promise<IngestResult>> = [];
+    await prisma.$transaction(async (tx) => {
+      await tx.providerPayment.create({ data: { provider: 'MMG', providerTxnId: core, amount: 2100, currencyCode: 'GYD' } });
+      const pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
+      sent = [svc.ingest(webhookPayment(tabbed, san)), svc.ingest(webhookPayment(spaced, san))];
+      sent.forEach((p) => p.catch(() => undefined));
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const blocked = (await prisma.$queryRaw<Array<{ blocked: number }>>`SELECT count(*)::int AS blocked FROM pg_stat_activity a
+          WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
+             OR EXISTS (SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS b(p) WHERE ${pid}::int = ANY(pg_blocking_pids(b.p)))`)[0]!.blocked;
+        if (blocked >= 2) throw HOLD;
+        if (Date.now() > deadline) throw new Error(`only ${blocked} of 2 deliveries reached the identity key`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }, { timeout: 20_000, maxWait: 5_000 }).catch((e: unknown) => { if (e !== HOLD) throw e; });
+    const answers = (await within(Promise.all(sent))).map((a) => a.status).sort();
+    expect(answers).toEqual(['accepted', 'reconciled']);
+    const identities = await prisma.providerPayment.findMany({ where: { providerTxnId: { in: [`\t${core}\t`, core] } } });
+    expect(identities.map((i) => i.providerTxnId)).toEqual([core]);
+    const links = await prisma.mmgAgentPayment.findMany({ where: { externalId: { in: [tabbed, spaced] } }, select: { providerPaymentId: true } });
+    expect(links.map((l) => l.providerPaymentId)).toEqual([identities[0]!.id, identities[0]!.id]);
+    expect(await money(sub.id, [tabbed, spaced])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
   it('two identities already standing for one transaction (both normalisations) hold a new observation for a person, unlinked: nothing credited', async () => {
     const { sub, san } = await makeVendorSub();
     const { core, spaced } = legacyPair();
