@@ -258,8 +258,8 @@ export function SosCeremony({
         <>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             {graceLeft != null && graceLeft > 0
-              ? `Swift pages its safety team in ${graceLeft}s unless you cancel.`
-              : 'Swift is paging its safety team now.'}
+              ? `Swift alerts its safety team in ${graceLeft}s unless you cancel.`
+              : 'The countdown has ended. Swift is alerting its safety team.'}
           </T>
           {outcome ? (
             <View style={{ alignSelf: 'stretch', borderRadius: 12, backgroundColor: withAlpha(color.error, 0.1), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md, marginTop: space.md }}>
@@ -267,18 +267,18 @@ export function SosCeremony({
                 {outcome === 'offline'
                   ? 'You appear to be offline — Swift could not be reached.'
                   : outcome === 'confirm-unknown'
-                    ? 'We could not confirm Swift was paged.'
+                    ? 'We could not confirm Swift’s safety team was alerted.'
                     : 'We could not confirm the alert was cancelled.'}
               </T>
               <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                 {outcome === 'cancel-unknown'
-                  ? 'The alert may still page Swift when the countdown ends. Try cancelling again.'
-                  : 'The countdown above is the server’s clock: Swift pages its team when it ends. Your emergency call is unaffected — try again.'}
+                  ? 'The alert may still reach Swift’s safety team when the countdown ends. Try cancelling again.'
+                  : 'When the countdown ends, Swift alerts its safety team. Your emergency call is separate. Try alerting Swift now.'}
               </T>
             </View>
           ) : null}
           <PillButton
-            label={confirm.isPending ? 'Paging…' : 'Page Swift NOW'}
+            label={confirm.isPending ? 'Alerting…' : 'Alert Swift now'}
             loading={confirm.isPending}
             style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
             onPress={pageNow}
