@@ -535,7 +535,12 @@ The order, as swift-deploy, when the owner is not testing:
 
 5. The crash drill (D7), same run id, with the dead-letter page drained first
    (PLAT-02 can pass only on an empty page; the setup refuses otherwise and
-   kills nothing):
+   kills nothing). [AX370] The setup also refuses, before its first write and
+   with nothing killed, when a roster rider (DR1–DR3) holds any job the run
+   cannot prove its own (an order in the run's `crash-drill-orders.json`,
+   placed by C5 at R1; the refusal names the order), or when any rider other
+   than DR1–DR3 is online in the tenant (the drill order's candidate pool).
+   Take those riders offline, or finish those jobs, and run it again:
 
        LIVETEST_ADMIN_PHONE=+5920400000 LIVETEST_RUN_ID="$RUN_ID" ./deploy/drill-crash.sh
 
@@ -545,7 +550,11 @@ The order, as swift-deploy, when the owner is not testing:
    worker, waits 15 s, `docker start`s it, and verifies: every rider's offers
    and legs are watched through completion, then the order's durable rows are
    read inside the worker (`drill-evidence.js`) and judged. Expect `worker …
-   killed at …, started again at …` and `PLAT-02 PASS`; it writes
+   killed at …, started again at …` and `PLAT-02 PASS`. Incomplete durable
+   evidence (the accepted attempt or an attempt a rider was seen holding has
+   no publication record, or the journal has no search or no assignment) is
+   `PLAT-02 SKIP — INCONCLUSIVE …`, never a PASS. The final cleanup releases
+   only the run's own jobs and names any other job a roster rider holds. It writes
    `plat02-crash-drill.json`, replaces the PLAT-02 row of the run's
    journeys-result.json (the original is kept as
    `journeys-result.before-plat02-crash-drill.json`) and rewrites
@@ -558,7 +567,11 @@ The order, as swift-deploy, when the owner is not testing:
 
    Expect a report with `"kept":[]` and `"tenant":"removed"`, filed as
    drill-cleanup.json beside the manifest; the exit status is 1 if anything
-   was kept, with the reason. Removal goes through parent rows; append-only
+   was kept, with the reason. [AX370] The tenant goes only when the row at
+   `swift-drill` is the drill's own (CRAWLER, its slug and name, not
+   purge-protected) and names this run in its record of drill runs: another
+   tenant there is `"tenant":"refused"` (exit 1) and is never deleted or
+   deactivated; a run that never used it leaves it `"kept"`. Removal goes through parent rows; append-only
    evidence (audit, consent, deletion receipts, order status logs, the ledger,
    receipts, agent-payment observations) is never deleted, and any SAN a
    fixture store was given goes to the tombstone registry, never reused.

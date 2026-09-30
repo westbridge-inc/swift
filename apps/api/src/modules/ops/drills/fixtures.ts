@@ -41,6 +41,12 @@ import type { DrillTarget } from './guard';
  * (kind, slug and name). Anything else in the way is a conflict, refused.
  * Collision-resistant: run ids that differ only in case or punctuation
  * (`a.b`, `a_b`, `A-B`) share no slug — slugs carry a hash of the exact run id.
+ * [AX370 A2] The drill tenant records every run that made or adopted it
+ * (tenants.config.stagingDrill.runs). The cleanup applies creation's own
+ * provenance rule (foreignDrillTenant: kind, slug, name, not purge-protected)
+ * AND requires the run to be on that record before it deletes or deactivates
+ * the tenant: a foreign or protected tenant is refused with no mutation, and a
+ * run that never used the tenant leaves it as it is.
  * Removable: cleanupDrillFixtures() deletes through the PARENT rows. The
  * append-only evidence (audit, consent, deletion receipts, order status logs,
  * the ledger, receipts, agent-payment observations) is never deleted — it
@@ -179,27 +185,48 @@ async function ensureRecusalApplicant(db: Db, runId: string, adminPhone: string)
   return { ...account, adminPhone, linkedBy: 'PHONE' };
 }
 
+/**
+ * [AX324 R5 · AX370 A2] Creation's and cleanup's ONE provenance rule for the
+ * row at `swift-drill`: why it is NOT the drill's own tenant, or null.
+ */
+export function foreignDrillTenant(t: { kind: string; slug: string; name: string; purgeProtected: boolean }): string | null {
+  if (t.kind !== 'CRAWLER') return `${DRILL_TENANT_ID} exists as a ${t.kind} tenant; a drill never changes a tenant's kind`;
+  if (t.slug !== DRILL_TENANT_ID || t.name !== DRILL_TENANT_NAME) {
+    return `${DRILL_TENANT_ID} exists but is not the drill's tenant (slug ${t.slug}, name ${JSON.stringify(t.name)})`;
+  }
+  if (t.purgeProtected) return `${DRILL_TENANT_ID} is purge-protected; a drill never adopts, deletes or deactivates a protected tenant`;
+  return null;
+}
+
+/** [AX370 A2] The drill runs (markers) recorded on the drill tenant: tenants.config.stagingDrill.runs. */
+export function drillTenantRuns(config: unknown): string[] {
+  const runs = (config as { stagingDrill?: { runs?: unknown } } | null)?.stagingDrill?.runs;
+  return Array.isArray(runs) ? runs.filter((r): r is string => typeof r === 'string') : [];
+}
+
+const TENANT_PROVENANCE = { kind: true, isActive: true, slug: true, name: true, purgeProtected: true, config: true } as const;
+
 /** D6: the second tenant and its four objects. */
 async function ensureDrillTenant(db: Db, runId: string): Promise<DrillManifest['tenant']> {
   const marker = drillMarker(runId);
-  const existing = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: { kind: true, isActive: true, slug: true, name: true } });
-  if (existing && existing.kind !== 'CRAWLER') {
-    throw new DrillFixtureError('DRILL_TENANT_CONFLICT', `${DRILL_TENANT_ID} exists as a ${existing.kind} tenant; a drill never changes a tenant's kind`);
-  }
+  const existing = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: TENANT_PROVENANCE });
   // [AX324 R5] Provenance: only the drill's own tenant is adopted (or re-activated).
-  if (existing && (existing.slug !== DRILL_TENANT_ID || existing.name !== DRILL_TENANT_NAME)) {
-    throw new DrillFixtureError('DRILL_TENANT_CONFLICT', `${DRILL_TENANT_ID} exists but is not the drill's tenant (slug ${existing.slug}, name ${JSON.stringify(existing.name)}); a drill adopts only its own`);
-  }
+  const foreign = existing ? foreignDrillTenant(existing) : null;
+  if (foreign) throw new DrillFixtureError('DRILL_TENANT_CONFLICT', `${foreign}; a drill adopts only its own`);
   if (!existing?.isActive) {
     // [TA-S0-003] Minting (or re-activating) a tenant at runtime is the path the
     // boot-only wall gate cannot see: assert the wall for the count this makes.
     const activeAfter = (await db.tenant.count({ where: { isActive: true, NOT: { id: DRILL_TENANT_ID } } })) + 1;
     assertTenantWall(attestationOf(await readRlsFacts(db)), activeAfter);
   }
+  // [AX370 A2] The tenant records this run: the provenance its cleanup requires.
+  const prior = existing?.config && typeof existing.config === 'object' && !Array.isArray(existing.config) ? existing.config as Prisma.JsonObject : {};
+  const runs = drillTenantRuns(prior);
+  const config = { ...prior, stagingDrill: { runs: runs.includes(marker) ? runs : [...runs, marker] } } as Prisma.InputJsonObject;
   await db.tenant.upsert({
     where: { id: DRILL_TENANT_ID },
-    create: { id: DRILL_TENANT_ID, slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, kind: 'CRAWLER', purgeProtected: false, isActive: true },
-    update: { isActive: true },
+    create: { id: DRILL_TENANT_ID, slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, kind: 'CRAWLER', purgeProtected: false, isActive: true, config },
+    update: { isActive: true, config },
   });
 
   return runWithTenant(DRILL_TENANT_ID, async () => {
@@ -295,7 +322,10 @@ export interface DrillCleanupReport {
   removed: Record<string, number>;
   /** What could not be removed, and why — never silently left behind. */
   kept: string[];
-  tenant: 'removed' | 'deactivated' | 'kept' | 'absent';
+  /** [AX370 A2] 'refused': the row at swift-drill is not the drill's own (or is protected) — never mutated. */
+  tenant: 'removed' | 'deactivated' | 'kept' | 'absent' | 'refused';
+  /** Why the tenant was kept or refused. */
+  tenantReason?: string;
 }
 
 /**
@@ -379,31 +409,45 @@ export async function cleanupDrillFixtures(db: Db, input: { runId: string }): Pr
     // 5. The accounts (sessions, profiles, riders, notifications and documents cascade).
     for (const u of userIds) await attempt('users', async () => (await db.user.deleteMany({ where: { id: u } })).count);
 
-    // 6. The drill tenant, once nothing of any run lives in it.
+    // 6. The drill tenant, once nothing of any run lives in it — and only when
+    //    it is provably the drill's own and this run is on its record [AX370 A2].
     let tenant: DrillCleanupReport['tenant'] = 'absent';
-    const drillTenant = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: { id: true } });
-    if (drillTenant) {
+    let tenantReason: string | undefined;
+    const drillTenant = await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID }, select: TENANT_PROVENANCE });
+    const foreign = drillTenant ? foreignDrillTenant(drillTenant) : null;
+    if (drillTenant && foreign) {
+      tenant = 'refused';
+      tenantReason = foreign;
+      kept.push(`tenant ${DRILL_TENANT_ID}: refused, untouched — ${foreign}`);
+    } else if (drillTenant && !drillTenantRuns(drillTenant.config).includes(marker)) {
+      tenant = 'kept';
+      tenantReason = `${marker} is not on the tenant's record of drill runs; only a run that used it removes it`;
+    } else if (drillTenant) {
       const [u, v, o] = await Promise.all([
         db.user.count({ where: { tenantId: DRILL_TENANT_ID } }),
         db.vendor.count({ where: { tenantId: DRILL_TENANT_ID } }),
         db.order.count({ where: { tenantId: DRILL_TENANT_ID } }),
       ]);
+      // Each mutation re-states the provenance, so a row changed since the read is never touched.
+      const own = { id: DRILL_TENANT_ID, kind: 'CRAWLER' as const, slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, purgeProtected: false };
       if (u + v + o > 0) {
         tenant = 'kept';
+        tenantReason = `${u} user(s), ${v} store(s), ${o} order(s) still live in it`;
       } else {
         try {
-          await db.tenant.delete({ where: { id: DRILL_TENANT_ID } });
-          tenant = 'removed';
-          count('tenants', 1);
+          const gone = (await db.tenant.deleteMany({ where: own })).count;
+          tenant = gone === 1 ? 'removed' : 'refused';
+          if (gone === 1) count('tenants', 1);
+          else kept.push(`tenant ${DRILL_TENANT_ID}: refused, untouched — it changed before the delete`);
         } catch (err) {
           // Evidence that refuses deletion (a deletion receipt) keeps the row;
           // the tenant is switched off so staging is back to one live operator.
-          await db.tenant.update({ where: { id: DRILL_TENANT_ID }, data: { isActive: false } });
-          tenant = 'deactivated';
-          kept.push(`tenant ${DRILL_TENANT_ID}: ${(err as { code?: string }).code ?? 'error'} (deactivated instead)`);
+          const off = (await db.tenant.updateMany({ where: own, data: { isActive: false } })).count;
+          tenant = off === 1 ? 'deactivated' : 'refused';
+          kept.push(`tenant ${DRILL_TENANT_ID}: ${(err as { code?: string }).code ?? 'error'} (${off === 1 ? 'deactivated instead' : 'refused, untouched — it changed before the deactivation'})`);
         }
       }
     }
-    return { runId: input.runId, marker, removed, kept, tenant };
+    return { runId: input.runId, marker, removed, kept, tenant, ...(tenantReason ? { tenantReason } : {}) };
   });
 }

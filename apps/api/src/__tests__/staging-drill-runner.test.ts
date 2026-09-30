@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -350,6 +350,217 @@ describe('[AX324 R7] the durable once-only verdict', () => {
     anon.offers.push({ attemptId: null as any, recipientId: 'u-dr1', sentAt: t(2), acknowledgedAt: null });
     expect(failing(anon)).toContain('durable: every offer attempt was published once (alert deliveries)');
     expect(failing({ ...clean(), order: { status: 'EN_ROUTE_DELIVERY', riderId: 'r-dr2' } })).toEqual(['durable: the order ends delivered, with its one rider']);
+  });
+
+  // [AX370 A3] Publication is tracked AFTER the socket emit and a failed write
+  // is swallowed, so a MISSING row proves nothing: incomplete evidence is
+  // INCONCLUSIVE, never a PASS — and never dressed up as a found duplicate.
+  const gaps = (e: any, accepted: string | null, observed: string[]) =>
+    crash.durableOnceOnly(e, accepted, observed).filter((c: any) => !c.ok);
+
+  it('[AX370 A3] the reviewer’s case — accepted attempt a2 and every search dropped from the clean evidence — is not a pass: INCONCLUSIVE', () => {
+    const e = clean();
+    e.offers = e.offers.filter((o) => o.attemptId !== 'a2');
+    e.searches = [];
+    const open = gaps(e, 'a2', ['a1', 'a2']);
+    expect(open.length).toBeGreaterThan(0);
+    expect(open.every((c: any) => c.inconclusive === true)).toBe(true);
+    const said = open.map((c: any) => c.detail).join(' | ');
+    expect(said).toContain('a2');
+    expect(said).toContain('no search');
+    expect(said).toContain('no assignment');
+  });
+
+  it('[AX370 A3] each gap alone is INCONCLUSIVE: the accepted attempt unpublished; no search; a search that never assigned; an attempt a rider saw without a record', () => {
+    const unpublished = clean();
+    unpublished.offers = unpublished.offers.filter((o) => o.attemptId !== 'a2');
+    unpublished.offerPushes = unpublished.offerPushes.filter((p) => p.attemptId !== 'a2');
+    const noSearch = { ...clean(), searches: [] };
+    const neverAssigned = clean();
+    neverAssigned.searches = [{ ...neverAssigned.searches[0]!, status: 'EXHAUSTED', assignedAt: null as any, assignedTo: null as any }];
+    for (const [label, e, observed] of [['unpublished', unpublished, ['a1']], ['no search', noSearch, ['a1', 'a2']], ['never assigned', neverAssigned, ['a1', 'a2']], ['unseen', clean(), ['a1', 'a2', 'a9']]] as const) {
+      const open = gaps(e, 'a2', [...observed]);
+      expect(open.length, label).toBeGreaterThan(0);
+      expect(open.every((c: any) => c.inconclusive === true), label).toBe(true);
+    }
+    expect(gaps(clean(), 'a2', ['a1', 'a2', 'a9']).map((c: any) => c.detail).join(' ')).toContain('a9');
+  });
+
+  it('[AX370 A3] complete evidence — exactly one assignment, every attempt seen or accepted on record — passes; two assignments stay a FAIL, not a gap', () => {
+    expect(gaps(clean(), 'a2', ['a1', 'a2'])).toEqual([]);
+    const twiceAssigned = clean();
+    twiceAssigned.searches.push({ ...twiceAssigned.searches[0]!, id: 's2' });
+    const open = gaps(twiceAssigned, 'a2', ['a1', 'a2']);
+    expect(open.map((c: any) => c.name)).toEqual(['durable: the dispatch journal assigned the order at most once']);
+    expect(open[0].inconclusive).toBeFalsy();
+  });
+
+  it('[AX370 A3] finalize: the reviewer’s case makes the PLAT-02 row INCONCLUSIVE (SKIP, never PASS); the clean evidence is a PASS', async () => {
+    const identity = { deploymentId: 'd', environment: 'staging', buildSha: 'b', dataClassification: 'synthetic', testTenant: 't' };
+    const rowFor = async (evidence: any, observed = ['a1', 'a2']) => {
+      const dir = mkdtempSync(join(tmpdir(), 'crash-final-'));
+      try {
+        writeFileSync(join(dir, 'crash-drill-state.json'), JSON.stringify({ runId: 'r-a3', setupStartedAt: t(0), orderId: 'o1', offer: { moverId: 'DR1', offerAttemptId: 'a1', seenAt: t(1) }, steps: [{ name: 'mid-offer', ok: true, detail: '' }], negatives: 0 }));
+        writeFileSync(join(dir, 'crash-drill-verify.json'), JSON.stringify({ runId: 'r-a3', orderId: 'o1', steps: [{ name: 'resumed', ok: true, detail: '' }], negatives: 1, acceptedAttemptId: 'a2', observedAttemptIds: observed, finishedAt: t(58) }));
+        writeFileSync(join(dir, 'crash-drill-evidence.json'), JSON.stringify(evidence));
+        await crash.crashFinalize({ runId: 'r-a3', identity, admin: { token: 'x', userId: 'x' }, adminPhone: '+5920400000', outDir: dir, log: () => undefined });
+        return JSON.parse(readFileSync(join(dir, 'plat02-crash-drill.json'), 'utf8'));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    expect((await rowFor(clean())).status).toBe('PASS');
+    const reviewer = clean();
+    reviewer.offers = reviewer.offers.filter((o) => o.attemptId !== 'a2');
+    reviewer.searches = [];
+    const row = await rowFor(reviewer);
+    expect(row.status).toBe('SKIP');
+    expect(row.reason).toMatch(/^INCONCLUSIVE/);
+    expect(row.reason).toContain('a2');
+    // An attempt the verify phase saw, with no publication record, is a gap too.
+    const unseen = await rowFor(clean(), ['a1', 'a2', 'a9']);
+    expect(unseen.status).toBe('SKIP');
+    expect(unseen.reason).toContain('a9');
+  });
+});
+
+describe('[AX370 A1] the crash drill touches only this run’s own jobs — anything else refuses it before setup', () => {
+  type Call = { method: string; path: string; who: string };
+  const RUN_A1 = 'r-a1';
+  const PHONES: Record<string, string> = { '+5920401005': 'C5', '+5920402011': 'R1', '+5920403051': 'DR1', '+5920403052': 'DR2', '+5920403053': 'DR3' };
+  const ROSTER_ONLINE = ['DR1', 'DR2', 'DR3'].map((id, i) => ({ id: `r-${id}`, user: { id: `u-${id}`, phone: `+592040305${i + 1}` } }));
+  /** The owner's own order, held by roster rider DR2 — never the drill's to touch. */
+  const FOREIGN = () => ({ id: 'o-owner', status: 'RIDER_EN_ROUTE_PICKUP', orderType: 'FOOD_DELIVERY', paymentMethod: 'CASH', customerId: 'u-owner', vendorId: 'v-owner', customer: { id: 'u-owner' }, vendor: { id: 'v-owner' }, deliveryLat: 6.8, deliveryLng: -58.15 });
+  /** A job this run placed (its ledger names it): the plan's customer C5 at the plan's store R1. */
+  const OWN = (id = 'o-run') => ({ id, status: 'RIDER_ASSIGNED', orderType: 'FOOD_DELIVERY', paymentMethod: 'CASH', customerId: 'u-C5', vendorId: 'v-R1', customer: { id: 'u-C5' }, vendor: { id: 'v-R1' } });
+  const origFetch = globalThis.fetch;
+  let dir = '';
+  let lines: string[] = [];
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'crash-a1-')); lines = []; });
+  afterEach(() => { globalThis.fetch = origFetch; rmSync(dir, { recursive: true, force: true }); });
+
+  /** A stand-in staging API: the roster signs in, the store is ready, riders hold `legs`, `online` are the tenant's online riders. */
+  function crashApi(legs: Record<string, any[]>, online: any[]) {
+    const calls: Call[] = [];
+    const orders = new Map<string, any>();
+    const holder = new Map<string, string>();
+    for (const [rider, list] of Object.entries(legs)) for (const l of list) { orders.set(l.id, l); holder.set(l.id, rider); }
+    globalThis.fetch = vi.fn(async (input: any, init: any) => {
+      const url = new URL(String(input));
+      const path = url.pathname.replace(/^\/api\/v1/, '');
+      const method = String(init?.method ?? 'GET');
+      const who = String(init?.headers?.authorization ?? '').replace(/^Bearer tok-/, '');
+      calls.push({ method, path, who });
+      const ok = (data: unknown, extra: object = {}) => ({ status: 200, text: async () => JSON.stringify({ success: true, data, ...extra }) }) as unknown as Response;
+      if (path === '/auth/verify-otp') {
+        const id = PHONES[JSON.parse(String(init.body)).phone];
+        return ok({ user: { id: `u-${id}` }, tokens: { accessToken: `tok-${id}`, expiresIn: 900 } });
+      }
+      if (path === '/admin/dlq') return ok([]);
+      if (path === '/admin/riders') return ok(online, { pagination: { page: 1, hasNext: false } });
+      if (path === '/vendor/profile') return ok({ vendors: [{ id: 'v-R1', status: 'ACTIVE' }] });
+      if (path === '/vendor/vendor/toggle-open') return ok({ isCurrentlyOpen: true });
+      if (path === '/vendor/vendor/toggle-orders') return ok({ acceptingOrders: true });
+      if (path === '/vendor/items') return ok([{ id: 'i-R1', name: 'R1 Plate', categoryId: 'c-R1', basePrice: 1500, isAvailable: true }]);
+      if (path === '/customer/addresses' && method === 'GET') return ok([{ id: 'addr-C5', isDefault: true }]);
+      if (path === '/customer/checkout') {
+        orders.set('o-new', { id: 'o-new', status: 'PENDING', customerId: 'u-C5', vendorId: 'v-R1' });
+        return ok({ orders: [{ id: 'o-new' }] });
+      }
+      if (path === '/rider/offers/current') return ok(who === 'DR1' && orders.has('o-new') ? { offer: { orderId: 'o-new', offerAttemptId: 'a-new' } } : null);
+      if (path === '/rider/orders/active-legs') {
+        return ok([...orders.values()].filter((o) => holder.get(o.id) === who && !String(o.status).startsWith('moved:')));
+      }
+      const leg = path.match(/^\/rider\/orders\/([^/]+)\/([a-z-]+)$/);
+      if (leg && method !== 'GET' && orders.has(leg[1]!)) orders.set(leg[1]!, { ...orders.get(leg[1]!), status: `moved:${leg[2]}` });
+      return ok({});
+    }) as unknown as typeof fetch;
+    return { calls, orders };
+  }
+  /** Every request that could change anything (the roster's own sign-ins aside). */
+  const writes = (calls: Call[]) => calls.filter((c) => c.method !== 'GET' && c.path !== '/auth/verify-otp').map((c) => `${c.method} ${c.path}`);
+  const identity = { deploymentId: 'd', environment: 'staging', buildSha: 'b', dataClassification: 'synthetic', testTenant: 't' };
+  const opts = () => ({ runId: RUN_A1, identity, admin: { token: 'tok-admin', userId: 'u-admin' }, adminPhone: '+5920400000', outDir: dir, log: (s: string) => lines.push(s) });
+  const ledger = (orders: string[]) => writeFileSync(join(dir, 'crash-drill-orders.json'), JSON.stringify({ runId: RUN_A1, orders }));
+
+  it('a roster rider holding a job this run cannot prove its own: refused before setup — the job byte-identical, nothing written, the order named', async () => {
+    const api = crashApi({ DR2: [FOREIGN()] }, ROSTER_ONLINE);
+    const before = JSON.stringify(api.orders.get('o-owner'));
+    expect(await crash.crashSetup(opts())).toBe(1);
+    expect(JSON.stringify(api.orders.get('o-owner'))).toBe(before);
+    expect(writes(api.calls)).toEqual([]);
+    expect(lines.join('\n')).toContain('o-owner');
+    expect(existsSync(join(dir, 'crash-drill-state.json'))).toBe(false);
+  });
+
+  it('C5 at R1 is not proof enough: a job this run’s ledger does not name (another run’s, a journey’s) is refused the same way', async () => {
+    ledger(['o-run']);
+    const api = crashApi({ DR1: [OWN('o-earlier-run')] }, ROSTER_ONLINE);
+    const before = JSON.stringify(api.orders.get('o-earlier-run'));
+    expect(await crash.crashSetup(opts())).toBe(1);
+    expect(JSON.stringify(api.orders.get('o-earlier-run'))).toBe(before);
+    expect(writes(api.calls)).toEqual([]);
+    expect(lines.join('\n')).toContain('o-earlier-run');
+  });
+
+  it('a rider outside the drill’s three online in the tenant (the order’s candidate pool): refused before any write; an unreadable pool too', async () => {
+    const api = crashApi({}, [...ROSTER_ONLINE, { id: 'r-real', user: { id: 'u-real', phone: '+5926001234' } }]);
+    expect(await crash.crashSetup(opts())).toBe(1);
+    expect(writes(api.calls)).toEqual([]);
+    expect(lines.join('\n')).toContain('r-real');
+    lines = [];
+    const unread = crashApi({}, null as any);
+    expect(await crash.crashSetup(opts())).toBe(1);
+    expect(writes(unread.calls)).toEqual([]);
+  });
+
+  it('this run’s own leftover job (in its ledger, C5 at R1) is released; the run then reaches mid-offer and records the order it placed', async () => {
+    ledger(['o-run']);
+    const api = crashApi({ DR1: [OWN()] }, ROSTER_ONLINE);
+    expect(await crash.crashSetup(opts()), lines.join('\n')).toBe(0);
+    expect(api.orders.get('o-run').status).toBe('moved:handback');
+    expect(JSON.parse(readFileSync(join(dir, 'crash-drill-orders.json'), 'utf8'))).toEqual({ runId: RUN_A1, orders: ['o-run', 'o-new'] });
+    expect(JSON.parse(readFileSync(join(dir, 'crash-drill-state.json'), 'utf8'))).toMatchObject({ runId: RUN_A1, orderId: 'o-new' });
+  });
+
+  it('the verify phase’s final cleanup releases only this run’s jobs: a foreign job a roster rider holds stays byte-identical, and is named', async () => {
+    const past = '2020-01-01T00:00:00.000Z';
+    ledger(['o-run', 'o-run-2']);
+    writeFileSync(join(dir, 'crash-drill-state.json'), JSON.stringify({ runId: RUN_A1, setupStartedAt: past, orderId: 'o-run', offer: { moverId: 'DR1', offerAttemptId: 'a1', seenAt: past }, steps: [], negatives: 0 }));
+    writeFileSync(join(dir, 'crash-drill-host.json'), JSON.stringify({ worker: 'w', signal: 'SIGKILL', killedAt: past, restartedAt: past, downRightAfterKill: true, downAfterTheWait: true, waitSeconds: 15 }));
+    const api = crashApi({ DR1: [OWN()], DR2: [FOREIGN()], DR3: [OWN('o-run-2')] }, ROSTER_ONLINE);
+    const before = JSON.stringify(api.orders.get('o-owner'));
+    await crash.crashVerify(opts());
+    expect(JSON.stringify(api.orders.get('o-owner'))).toBe(before);
+    expect(api.calls.filter((c) => c.method !== 'GET' && c.path.includes('o-owner'))).toEqual([]);
+    expect(api.orders.get('o-run-2').status).toBe('moved:handback');
+    expect(lines.join('\n')).toContain('o-owner');
+    // [AX370 A3] The verify record names every attempt a rider was seen holding (here, the setup's own).
+    expect(JSON.parse(readFileSync(join(dir, 'crash-drill-verify.json'), 'utf8')).observedAttemptIds).toEqual(['a1']);
+  });
+});
+
+describe('[AX370 A1] which job is the drill’s: pure', () => {
+  const owner = { orders: ['o-run'], customerUserId: 'u-C5', storeVendorId: 'v-R1' };
+  const leg = (over: object = {}) => ({ id: 'o-run', status: 'RIDER_ASSIGNED', customerId: 'u-C5', vendorId: 'v-R1', ...over });
+
+  it('only the run’s own order, of the plan’s customer at the plan’s store, is the drill’s', () => {
+    expect(crash.isDrillLeg(leg(), owner)).toBe(true);
+    expect(crash.isDrillLeg({ orderId: 'o-run', status: 'PICKED_UP', customer: { id: 'u-C5' }, vendor: { id: 'v-R1' } }, owner)).toBe(true);
+    expect(crash.isDrillLeg(leg({ id: 'o-other' }), owner)).toBe(false);
+    expect(crash.isDrillLeg(leg({ customerId: 'u-owner' }), owner)).toBe(false);
+    expect(crash.isDrillLeg(leg({ vendorId: 'v-owner' }), owner)).toBe(false);
+    expect(crash.isDrillLeg(leg(), { ...owner, storeVendorId: '' })).toBe(false);
+    expect(crash.isDrillLeg(leg({ customerId: '' }), { ...owner, customerUserId: '' })).toBe(false);
+  });
+
+  it('the pool is roster-only when every online rider is one of the drill’s; an unreadable list proves nothing', () => {
+    const roster = ['+5920403051', '+5920403052', '+5920403053'];
+    expect(crash.poolVerdict({ ok: true, riders: [{ id: 'r1', phone: '+5920403051' }] }, roster).ok).toBe(true);
+    const mixed = crash.poolVerdict({ ok: true, riders: [{ id: 'r1', phone: '+5920403051' }, { id: 'r-x', phone: '' }] }, roster);
+    expect(mixed.ok).toBe(false);
+    expect(mixed.detail).toContain('r-x');
+    expect(crash.poolVerdict({ ok: false, riders: [], detail: 'the online-rider list could not be read (500)' }, roster).ok).toBe(false);
   });
 });
 

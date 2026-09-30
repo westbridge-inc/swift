@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { scopedPrisma } from '../plugins/prisma';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { drillFixturesMain, drillRunJobMain, drillEvidenceMain, type DrillIo } from '../modules/ops/drills/cli';
-import { DRILL_TENANT_ID, drillMarker, drillSlug, type DrillManifest, type DrillCleanupReport } from '../modules/ops/drills/fixtures';
+import { DRILL_TENANT_ID, DRILL_TENANT_NAME, drillMarker, drillSlug, drillTenantRuns, foreignDrillTenant, type DrillManifest, type DrillCleanupReport } from '../modules/ops/drills/fixtures';
 import type { CrashEvidence } from '../modules/ops/drills/evidence';
 import { clusterMemberIds } from '../modules/integrity/identity.service';
 import { join } from 'node:path';
@@ -240,6 +240,8 @@ describe('[STG-DRILLS] creating the fixtures', () => {
     const t = manifest.tenant;
     const tenant = await db.tenant.findUniqueOrThrow({ where: { id: DRILL_TENANT_ID } });
     expect({ kind: tenant.kind, isActive: tenant.isActive, purgeProtected: tenant.purgeProtected }).toEqual({ kind: 'CRAWLER', isActive: true, purgeProtected: false });
+    // [AX370 A2] The tenant records the run that made it: the provenance its cleanup requires.
+    expect(drillTenantRuns(tenant.config)).toEqual([MARKER]);
     const users = await sys(() => db.user.findMany({ where: { id: { in: [t.customer.userId, t.storeOwner.userId, t.partner.userId] } }, select: { tenantId: true, isSynthetic: true } }));
     expect(users).toHaveLength(3);
     for (const u of users) expect(u).toEqual({ tenantId: DRILL_TENANT_ID, isSynthetic: true });
@@ -403,5 +405,84 @@ describe('[STG-DRILLS] cleanup', () => {
     expect(await drillFixturesMain(['cleanup', '--run-id', RUN], DRILL_ENV, io, appClient)).toBe(0);
     expect(JSON.parse(io.lines[0]!)).toMatchObject({ kept: [], tenant: 'removed' });
     expect(await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID } })).toBeNull();
+  });
+});
+
+describe('[AX370 A2] the cleanup removes only the drill’s own tenant, and only for a run that used it', () => {
+  // Runs after the drill tenant is gone: each case plants a `swift-drill` row with NO users, stores or orders.
+  const RUN_OTHER = `${RUN}-ot`;
+  const snapshot = async () => JSON.stringify(await sys(() => db.tenant.findUnique({ where: { id: DRILL_TENANT_ID } })));
+  const plant = (data: { slug: string; name: string; purgeProtected?: boolean; config?: object }) =>
+    sys(() => db.tenant.create({ data: { id: DRILL_TENANT_ID, kind: 'CRAWLER', isActive: true, ...data } }));
+  const drop = () => sys(async () => {
+    await db.tenant.updateMany({ where: { id: DRILL_TENANT_ID }, data: { purgeProtected: false } });
+    await db.tenant.deleteMany({ where: { id: DRILL_TENANT_ID } });
+  });
+  const cleanup = async (run: string) => {
+    const io = captureIo();
+    const code = await drillFixturesMain(['cleanup', '--run-id', run], DRILL_ENV, io, appClient);
+    return { code, report: JSON.parse(io.lines[0]!) as DrillCleanupReport };
+  };
+
+  it('a conflicting swift-drill tenant (another slug, another name) with no rows is refused and left byte-identical', async () => {
+    for (const other of [{ slug: `vt-other-${RUN}`, name: DRILL_TENANT_NAME }, { slug: DRILL_TENANT_ID, name: 'Another operator' }]) {
+      await plant(other);
+      try {
+        const before = await snapshot();
+        const { code, report } = await cleanup(RUN);
+        expect(await snapshot(), JSON.stringify(other)).toBe(before);
+        expect(report.tenant).toBe('refused');
+        expect(report.kept.join(' ')).toContain('not the drill');
+        expect(code).toBe(1);
+      } finally {
+        await drop();
+      }
+    }
+  });
+
+  it('a purge-protected tenant is refused untouched — never deactivated because its delete was refused', async () => {
+    await plant({ slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, purgeProtected: true, config: { stagingDrill: { runs: [MARKER] } } });
+    try {
+      const before = await snapshot();
+      const { code, report } = await cleanup(RUN);
+      expect(await snapshot()).toBe(before);
+      expect(report.tenant).toBe('refused');
+      expect(report.kept.join(' ')).toContain('purge-protected');
+      expect(code).toBe(1);
+      // Creation applies the same rule: a protected tenant is never adopted.
+      const io = captureIo();
+      expect(await drillFixturesMain(['create', '--run-id', RUN_OTHER, '--admin-phone', ADMIN_PHONE], DRILL_ENV, io, appClient)).toBe(1);
+      expect(io.errors.join('\n')).toContain('DRILL_TENANT_CONFLICT');
+      expect(await snapshot()).toBe(before);
+    } finally {
+      await drop();
+      await drillFixturesMain(['cleanup', '--run-id', RUN_OTHER], DRILL_ENV, captureIo(), appClient).catch(() => undefined);
+    }
+  });
+
+  it('the drill’s own tenant is removed only by a run that used it: another run’s cleanup leaves it byte-identical', async () => {
+    await plant({ slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, config: { stagingDrill: { runs: [drillMarker(RUN_OTHER)] } } });
+    try {
+      const before = await snapshot();
+      const { code, report } = await cleanup(RUN);
+      expect(await snapshot()).toBe(before);
+      expect(report.tenant).toBe('kept');
+      expect(code).toBe(0);
+      const own = await cleanup(RUN_OTHER);
+      expect(own.report).toMatchObject({ tenant: 'removed', kept: [] });
+      expect(await db.tenant.findUnique({ where: { id: DRILL_TENANT_ID } })).toBeNull();
+    } finally {
+      await drop();
+    }
+  });
+
+  it('the one provenance rule (kind, slug, name, protection) and the run record it reads — pure', () => {
+    expect(drillTenantRuns({ stagingDrill: { runs: ['DRILL-a', 7, 'DRILL-b'] } })).toEqual(['DRILL-a', 'DRILL-b']);
+    expect(drillTenantRuns(null)).toEqual([]);
+    expect(drillTenantRuns({ stagingDrill: 'DRILL-a' })).toEqual([]);
+    expect(foreignDrillTenant({ kind: 'REVIEW', slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, purgeProtected: false })).toContain('REVIEW');
+    expect(foreignDrillTenant({ kind: 'CRAWLER', slug: 'x', name: DRILL_TENANT_NAME, purgeProtected: false })).toContain('not the drill');
+    expect(foreignDrillTenant({ kind: 'CRAWLER', slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, purgeProtected: true })).toContain('purge-protected');
+    expect(foreignDrillTenant({ kind: 'CRAWLER', slug: DRILL_TENANT_ID, name: DRILL_TENANT_NAME, purgeProtected: false })).toBeNull();
   });
 });

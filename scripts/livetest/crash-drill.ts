@@ -6,12 +6,19 @@
 // in the private journeys runner, HTTP only:
 //
 //   setup     the dead-letter page must be valid and EMPTY [AX324 R8] — a
-//             drill that could never PASS kills nothing — then a roster
-//             customer places an express cash delivery at R1, R1 accepts it
-//             (dispatch starts on accept), and the runner waits until a roster
-//             rider holds a live offer for it — mid-offer. It records the
-//             offer and its own steps in crash-drill-state.json, and exits; the
-//             host kills the worker now.
+//             drill that could never PASS kills nothing. Then, still before
+//             its first write [AX370 A1]: every job the roster riders hold
+//             must be PROVEN this run's own (an order in this run's ledger,
+//             crash-drill-orders.json, placed by C5 at R1) — any other job
+//             refuses the drill, named, with nothing touched — and no rider
+//             but DR1–DR3 may be online in the tenant (the drill order's
+//             dispatch pool, read through GET /admin/riders). Only then are
+//             the run's own leftovers released, a roster customer places an
+//             express cash delivery at R1 (recorded in the ledger at once), R1
+//             accepts it (dispatch starts on accept), and the runner waits
+//             until a roster rider holds a live offer for it — mid-offer. It
+//             records the offer and its own steps in crash-drill-state.json,
+//             and exits; the host kills the worker now.
 //   verify    after the restart: within 120 s the offer cascade must have
 //             resumed (a fresh offer attempt) or been reconciled (the order
 //             assigned). The live offer is accepted and the order walked to
@@ -19,14 +26,20 @@
 //             watched the whole way, through completion and a tail after it
 //             [AX324 R7]: never two live offers at once, no replaced attempt
 //             back, no live offer once assigned, and exactly one rider ever
-//             holding the order. The record goes to crash-drill-verify.json.
+//             holding the order. The record goes to crash-drill-verify.json,
+//             with every attempt a rider saw. The final cleanup releases only
+//             this run's own jobs; anything else a rider holds is named and
+//             left exactly as it is [AX370 A1].
 //   finalize  the host has read the order's durable rows inside the worker
 //             (crash-drill-evidence.json: offer publications, offer pushes,
 //             the dispatch journal, the status log). They are judged here
 //             (durableOnceOnly) — what ran twice between two polls leaves rows
 //             — together with the verify record; the PLAT-02 row
 //             (journeys-result.json format) is written to plat02-crash-drill.json
-//             and replaces the run's own PLAT-02 row. No durable evidence, no PASS.
+//             and replaces the run's own PLAT-02 row. No durable evidence, no PASS;
+//             INCOMPLETE evidence (the accepted attempt or an attempt a rider
+//             saw has no publication record, no search, no assignment) is
+//             INCONCLUSIVE — the row says so and is never a PASS [AX370 A3].
 //
 // The target is refused exactly as the journeys suite refuses it (guard.ts:
 // private address, /test-control identity not production — and pinned by the
@@ -41,7 +54,7 @@ import { JourneyRun, type Journey, type Recorder, type Step } from './journey.js
 import { writeReplacedRow } from './report.js';
 import { rosterEntry, type Roster } from './roster.js';
 import { ensureFlag, goOnline, goOffline, ping, startHeartbeat, requireAdminPhone } from './provision.js';
-import { placeExpress, storeAccepts, storeReadies, riderToDoor, handoverPaid, doorPin, freeRider, mover } from './journeys/dispatch.js';
+import { placeExpress, storeAccepts, storeReadies, riderToDoor, handoverPaid, doorPin, releaseLeg, mover } from './journeys/dispatch.js';
 import { brief, codeOf, customerOrder, sleep, activeLegsOf, TERMINAL } from './journeys/common.js';
 import type { Ctx, World } from './journeys/context.js';
 
@@ -53,6 +66,8 @@ const HOST = 'crash-drill-host.json';
 const VERIFY = 'crash-drill-verify.json';
 const EVIDENCE = 'crash-drill-evidence.json';
 const ROW = 'plat02-crash-drill.json';
+/** [AX370 A1] Every order this run placed, written the moment checkout answers: the run's provenance. */
+const LEDGER = 'crash-drill-orders.json';
 /** The drill's promise: the cascade resumes (or is reconciled) within this long of the restart. */
 export const RESUME_WINDOW_MS = 120_000;
 /** Observation continues this many polls (2 s apart) after the order is delivered. */
@@ -80,6 +95,8 @@ export interface CrashVerify {
   negatives: number;
   /** The attempt the drill's rider accepted after the restart (null: reconciled without one). */
   acceptedAttemptId: string | null;
+  /** [AX370 A3] Every offer attempt a rider was seen holding, before and after the assignment. */
+  observedAttemptIds: string[];
   finishedAt: string;
 }
 
@@ -161,13 +178,23 @@ const countBy = <T>(xs: T[], key: (x: T) => string): Map<string, number> => {
 };
 const twice = (m: Map<string, number>): string[] => [...m.entries()].filter(([, n]) => n > 1).map(([k, n]) => `${k} ×${n}`);
 
+/** One durable rule's outcome. `inconclusive`: the rows needed to judge are MISSING — never a PASS, never a found duplicate. */
+export interface DurableCheck { name: string; ok: boolean; detail: string; inconclusive?: boolean }
+
 /**
  * [AX324 R7] The durable once-only verdict: what the server WROTE about the
  * order across the whole crash window. A job that ran twice between two live
  * polls still leaves a second row. Pure, so each rule is proven without a host.
+ *
+ * [AX370 A3] Absent rows prove nothing: publication is recorded AFTER the
+ * socket emit, and a failed write is swallowed (dispatch.service.ts). So the
+ * evidence must be COMPLETE — the accepted attempt and every attempt a rider
+ * was seen holding each have a publication record, and the dispatch journal
+ * holds the order's search with exactly one assignment (the rule below still
+ * FAILS a second one). A gap is INCONCLUSIVE.
  */
-export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | null): Array<{ name: string; ok: boolean; detail: string }> {
-  const out: Array<{ name: string; ok: boolean; detail: string }> = [];
+export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | null, observedAttemptIds: string[] = []): DurableCheck[] {
+  const out: DurableCheck[] = [];
   const statuses = countBy(e.statusLog, (l) => l.status);
   const assignedAt = e.statusLog.find((l) => l.status === 'RIDER_ASSIGNED')?.createdAt ?? null;
 
@@ -213,10 +240,136 @@ export function durableOnceOnly(e: CrashEvidence, acceptedAttemptId: string | nu
     ok: !!e.order && ['DELIVERED', 'COMPLETED'].includes(e.order.status) && !!e.order.riderId,
     detail: e.order ? `status=${e.order.status} rider=${e.order.riderId ?? 'none'}` : 'the order is missing',
   });
+
+  const recorded = new Set(e.offers.map((o) => o.attemptId).filter((a): a is string => !!a));
+  const gaps: string[] = [];
+  if (acceptedAttemptId && !recorded.has(acceptedAttemptId)) gaps.push(`the accepted attempt ${acceptedAttemptId} has no publication record`);
+  const unrecorded = [...new Set(observedAttemptIds)].filter((a) => a !== acceptedAttemptId && !recorded.has(a));
+  if (unrecorded.length) gaps.push(`attempt(s) a rider was seen holding have no publication record: ${unrecorded.join(', ')}`);
+  if (e.searches.length === 0) gaps.push('the dispatch journal has no search for the order');
+  if (assignedSearches.length === 0) gaps.push('the dispatch journal records no assignment');
+  out.push({
+    name: 'durable: the evidence is complete — every attempt seen or accepted is on record, and the journal assigned the order',
+    ok: gaps.length === 0,
+    ...(gaps.length ? { inconclusive: true } : {}),
+    detail: gaps.length ? gaps.join('; ') : `${recorded.size} attempt(s) on record, covering the ${new Set([...observedAttemptIds, ...(acceptedAttemptId ? [acceptedAttemptId] : [])]).size} seen or accepted; ${assignedSearches.length} assignment in ${e.searches.length} search(es)`,
+  });
   return out;
 }
 
 interface CrashCtx extends Ctx { outDir: string }
+
+// ── [AX370 A1] whose job a leg is, and who could be offered the drill order ──
+
+/** What makes a job the drill's: an order THIS run placed (its ledger), by the plan's customer C5, at the plan's store R1. */
+export interface DrillOwner { orders: string[]; customerUserId: string; storeVendorId: string }
+export interface HeldLeg { riderId: string; orderId: string; status: string; leg: any }
+export interface OnlineRiders { ok: boolean; riders: Array<{ id: string; phone: string }>; detail?: string }
+
+const legIdOf = (leg: any): string => String(leg?.id ?? leg?.orderId ?? '');
+
+/** Pure: a leg is the drill's to release only when ALL THREE hold; anything else is someone else's job. */
+export function isDrillLeg(leg: any, owner: DrillOwner): boolean {
+  const id = legIdOf(leg);
+  const customer = String(leg?.customerId ?? leg?.customer?.id ?? '');
+  const store = String(leg?.vendorId ?? leg?.vendor?.id ?? '');
+  return id !== '' && owner.orders.includes(id)
+    && owner.customerUserId !== '' && customer === owner.customerUserId
+    && owner.storeVendorId !== '' && store === owner.storeVendorId;
+}
+
+/** Pure: every roster rider's legs, split into this run's own and everyone else's. */
+export function splitLegs(held: Array<{ riderId: string; legs: any[] }>, owner: DrillOwner): { own: HeldLeg[]; other: HeldLeg[] } {
+  const own: HeldLeg[] = [];
+  const other: HeldLeg[] = [];
+  for (const { riderId, legs } of held) {
+    for (const leg of legs) (isDrillLeg(leg, owner) ? own : other).push({ riderId, orderId: legIdOf(leg), status: String(leg?.status ?? ''), leg });
+  }
+  return { own, other };
+}
+
+/**
+ * Pure: the drill order's dispatch candidates are ONLINE riders of its tenant
+ * (dispatch.service.ts; distance, freshness and capacity only narrow that), so
+ * the pool is roster-only when every online rider is one of the drill's — the
+ * whole online list is judged, answering "could include" conservatively. An
+ * unreadable list proves nothing.
+ */
+export function poolVerdict(read: OnlineRiders, rosterPhones: string[]): { ok: boolean; detail: string } {
+  if (!read.ok) return { ok: false, detail: `${read.detail ?? 'the online-rider list could not be read'}: the pool cannot be proven roster-only` };
+  const others = read.riders.filter((r) => !r.phone || !rosterPhones.includes(r.phone));
+  return others.length
+    ? { ok: false, detail: `${others.length} online rider(s) outside ${RIDERS.join('/')} could be offered the drill order: rider ${others.map((r) => r.id || '(no id)').join(', ')}` }
+    : { ok: true, detail: `${read.riders.length} rider(s) online in the tenant, every one of them the drill's` };
+}
+
+/** The orders this run's ledger names — a ledger another run wrote proves nothing. */
+function runOrders(outDir: string, runId: string): string[] {
+  const l = readJson<{ runId?: string; orders?: unknown }>(join(outDir, LEDGER));
+  return l?.runId === runId && Array.isArray(l.orders) ? l.orders.filter((x): x is string => typeof x === 'string') : [];
+}
+
+function recordPlaced(outDir: string, runId: string, orderId: string): void {
+  writeFileSync(join(outDir, LEDGER), JSON.stringify({ runId, orders: [...new Set([...runOrders(outDir, runId), orderId])] }, null, 2) + '\n');
+}
+
+/** Read-only: this run's orders (plus `also`, the state's own), the plan's customer, and R1 as its own owner sees it. */
+async function drillOwner(ctx: CrashCtx, also: string[] = []): Promise<DrillOwner> {
+  const prof = (await GET('/vendor/profile', ctx.roster.vendors[STORE]!.session.token)).json?.data;
+  const row = (Array.isArray(prof?.vendors) ? prof.vendors : [prof]).find((v: any) => v?.id) ?? null;
+  return {
+    orders: [...new Set([...runOrders(ctx.outDir, ctx.runId), ...also])],
+    customerUserId: ctx.roster.customers[CUSTOMER]!.session.userId,
+    storeVendorId: String(row?.id ?? ''),
+  };
+}
+
+/** Read-only: every roster rider's live legs. A list that cannot be read proves nothing. */
+async function rosterLegs(ctx: CrashCtx): Promise<{ ok: boolean; held: Array<{ riderId: string; legs: any[] }>; detail: string }> {
+  const held: Array<{ riderId: string; legs: any[] }> = [];
+  const unread: string[] = [];
+  for (const id of RIDERS) {
+    const r = await GET('/rider/orders/active-legs', mover(ctx, id).session.token);
+    if (!r.ok) unread.push(`${id} (${r.status})`);
+    held.push({ riderId: id, legs: activeLegsOf(r.json) });
+  }
+  return { ok: unread.length === 0, held, detail: unread.length ? `could not read the jobs of ${unread.join(', ')}` : `${held.reduce((n, h) => n + h.legs.length, 0)} job(s) across ${RIDERS.join('/')}` };
+}
+
+/** Read-only: every rider online in the admin's tenant, every page (GET /admin/riders?status=online). */
+async function onlineRiders(ctx: CrashCtx): Promise<OnlineRiders> {
+  const riders: OnlineRiders['riders'] = [];
+  for (let page = 1; page <= 40; page += 1) {
+    const r = await GET(`/admin/riders?status=online&limit=50&page=${page}`, ctx.admin.token);
+    const rows = r.json?.data;
+    if (!r.ok || r.json?.success !== true || !Array.isArray(rows)) return { ok: false, riders, detail: `the online-rider list could not be read (${r.status})` };
+    for (const x of rows) riders.push({ id: String(x?.id ?? ''), phone: String(x?.user?.phone ?? '') });
+    if (r.json?.pagination?.hasNext !== true) return { ok: true, riders };
+  }
+  return { ok: false, riders, detail: 'over 2,000 riders online: the list was not read to its end' };
+}
+
+/** Release ONLY the given legs (each proven this run's); returns what could not be released. */
+async function releaseOwn(ctx: CrashCtx, own: HeldLeg[]): Promise<string[]> {
+  const left: string[] = [];
+  for (const h of own) {
+    const r = await releaseLeg(ctx, h.riderId, h.leg);
+    if (!r.ok) left.push(`${h.riderId}: ${h.orderId} (${h.status}) → ${r.status} ${codeOf(r)}`);
+  }
+  return left;
+}
+
+/** The verify phase's last step: this run's own jobs are released; any other job a roster rider holds is named and left exactly as it is. */
+async function releaseOwnAtEnd(ctx: CrashCtx, orderId: string): Promise<void> {
+  try {
+    const legs = splitLegs((await rosterLegs(ctx)).held, await drillOwner(ctx, [orderId]));
+    for (const h of legs.other) ctx.log(`    ${h.riderId} holds order ${h.orderId} (${h.status}), not this run's: left untouched`);
+    const left = await releaseOwn(ctx, legs.own);
+    if (left.length) ctx.log(`    this run's own job(s) still held: ${left.join('; ')}`);
+  } catch (e: any) {
+    ctx.log(`    the riders' jobs could not be read (${e?.message ?? e}); nothing was released`);
+  }
+}
 
 async function signIn(id: string): Promise<{ id: string; phone: string; session: Session; lat: number; lng: number; kind?: 'rider' | 'driver'; vendorType?: string }> {
   const e = rosterEntry(id);
@@ -256,18 +409,16 @@ async function storeReady(rec: Recorder, ctx: CrashCtx): Promise<void> {
     `status=${row?.status} open=${open} accepting=${accepting} item=${plate?.name ?? 'none'}`);
 }
 
-/** Riders online at their roster homes. Setup first frees them of leftovers; verify must not touch what they hold. */
-async function ridersOnline(rec: Recorder, ctx: CrashCtx, free: boolean): Promise<void> {
+/** Riders online at their roster homes. What they hold was settled before (setup) or is not the drill's to touch (verify). */
+async function ridersOnline(rec: Recorder, ctx: CrashCtx): Promise<void> {
   for (const id of RIDERS) {
     const m = mover(ctx, id);
-    const left = free ? await freeRider(ctx, id) : [];
     const on = await goOnline(m);
     if (on.ok || codeOf(on) === 'ALREADY_ONLINE') {
       await ping(m);
       ctx.world.onlineMovers.push(id);
       ctx.world.readyMovers.push(id);
     }
-    if (left.length) ctx.log(`    ${id} still holds ${left.join('; ')}`);
   }
   rec.require('roster riders are online near the store', ctx.world.onlineMovers.length > 0, `online: ${ctx.world.onlineMovers.join(' ') || 'none'}`);
 }
@@ -304,10 +455,25 @@ export async function crashSetup(o: PhaseOpts): Promise<number> {
   try {
     const base = dlqVerdict(await GET('/admin/dlq', ctx.admin.token));
     rec.require('the dead-letter page is valid and empty before the crash (PLAT-02 can pass only on an empty page; drain it first)', base.ok, base.detail);
+    // [AX370 A1] Read-only, before the first write: every job a roster rider
+    // holds is PROVEN this run's own, and no other rider could be offered the order.
+    const held = await rosterLegs(ctx);
+    rec.require(`the jobs of ${RIDERS.join('/')} were read`, held.ok, held.detail);
+    const legs = splitLegs(held.held, await drillOwner(ctx));
+    rec.require('no roster rider holds a job this run cannot prove its own (in its ledger, placed by C5 at R1) — refused before setup, nothing touched',
+      legs.other.length === 0,
+      legs.other.length ? `not this run's: ${legs.other.map((h) => `order ${h.orderId} (${h.status}) held by ${h.riderId}`).join('; ')}` : `${legs.own.length} job(s) of this run to release`);
+    const pool = poolVerdict(await onlineRiders(ctx), RIDERS.map((id) => rosterEntry(id)?.phone ?? ''));
+    rec.require('the drill order can be offered only to the drill’s riders: no other rider is online in the tenant — refused before setup', pool.ok, pool.detail);
+
     await storeReady(rec, ctx);
-    await ridersOnline(rec, ctx, true);
+    const left = await releaseOwn(ctx, legs.own);
+    if (left.length) o.log(`    this run's own job(s) still held: ${left.join('; ')}`);
+    await ridersOnline(rec, ctx);
     stop = startHeartbeat(ctx.roster, ctx.world, {});
     const placed = await placeExpress(ctx, CUSTOMER, STORE, STORE, `crash-${o.runId}`);
+    // [AX370 A1] Recorded before anything else can fail: the run's provenance for every later cleanup.
+    if (placed.id) recordPlaced(o.outDir, o.runId, placed.id);
     rec.require('an express cash delivery (no hold)', !!placed.id, brief(placed.res));
     rec.expect('the store accepts it (dispatch starts on accept)', await storeAccepts(ctx, STORE, placed.id!), 200);
     let got: Sighting[] = [];
@@ -339,18 +505,20 @@ export async function crashSetup(o: PhaseOpts): Promise<number> {
 
 const readJson = <T>(path: string): T | null => (existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as T : null);
 
-function loadState(outDir: string): CrashState {
+function loadState(outDir: string, runId: string): CrashState {
   const state = readJson<CrashState>(join(outDir, STATE));
   if (!state) throw new Error(`${STATE} is missing in ${outDir}: run the setup phase first (deploy/drill-crash.sh does)`);
+  // [AX370 A1] Run provenance: an order another run recorded is not this run's to walk, judge or release.
+  if (state.runId !== runId) throw new Error(`${STATE} in ${outDir} was written by run ${state.runId}, not ${runId}: its order is not this run's`);
   return state;
 }
 
 /** Phase 3: after the restart — resumed, one completion, every rider watched throughout; the record for finalize. */
 export async function crashVerify(o: PhaseOpts): Promise<number> {
-  const state = loadState(o.outDir);
+  const state = loadState(o.outDir, o.runId);
   const host = readJson<CrashHost>(join(o.outDir, HOST));
   const ctx = await world(o);
-  const record: CrashVerify = { runId: o.runId, orderId: state.orderId, steps: [], negatives: 0, acceptedAttemptId: null, finishedAt: '' };
+  const record: CrashVerify = { runId: o.runId, orderId: state.orderId, steps: [], negatives: 0, acceptedAttemptId: null, observedAttemptIds: [], finishedAt: '' };
   const run = new JourneyRun<CrashCtx>({ id: 'PLAT-02', title: 'verify', cases: '', run: (rec, c) => verifyRun(rec, c, state, host, record) });
   await run.run(ctx);
   record.steps = [...run.rec.steps];
@@ -380,7 +548,7 @@ async function verifyRun(rec: Recorder, ctx: CrashCtx, state: CrashState, host: 
   };
   let stop = () => {};
   try {
-    await ridersOnline(rec, ctx, false);
+    await ridersOnline(rec, ctx);
     stop = startHeartbeat(ctx.roster, ctx.world, {});
     const C = ctx.roster.customers[CUSTOMER]!.session;
 
@@ -448,16 +616,15 @@ async function verifyRun(rec: Recorder, ctx: CrashCtx, state: CrashState, host: 
     rec.deny('requeue of a job that does not exist', await POST(`/admin/dlq/dispatch/${FORGED}/requeue`, {}, ctx.admin.token), [400, 404]);
   } finally {
     stop();
-    for (const id of RIDERS) {
-      await freeRider(ctx, id).catch(() => []);
-      await goOffline(mover(ctx, id)).catch(() => undefined);
-    }
+    record.observedAttemptIds = [...new Set([...offerPolls, ...assignedPolls].flat().map((s) => s.offerAttemptId))];
+    await releaseOwnAtEnd(ctx, state.orderId);
+    for (const id of RIDERS) await goOffline(mover(ctx, id)).catch(() => undefined);
   }
 }
 
 /** Phase 5: the durable evidence judged with the live record; the PLAT-02 row. */
 export async function crashFinalize(o: PhaseOpts): Promise<number> {
-  const state = loadState(o.outDir);
+  const state = loadState(o.outDir, o.runId);
   const verify = readJson<CrashVerify>(join(o.outDir, VERIFY));
   const evidence = readJson<CrashEvidence>(join(o.outDir, EVIDENCE));
   const journey: Journey<null> = {
@@ -490,7 +657,13 @@ function finalizeRun(rec: Recorder, state: CrashState, verify: CrashVerify | nul
   rec.check('the durable evidence was read on the server for this order (host, inside the worker)', ok,
     evidence ? `order ${evidence.orderId}, read ${evidence.readAt}` : `${EVIDENCE} missing: without the order's rows nothing proves once-only`);
   if (!ok) return;
-  for (const c of durableOnceOnly(evidence!, verify?.acceptedAttemptId ?? null)) rec.check(c.name, c.ok, c.detail);
+  // [AX370 A3] Every attempt the riders were seen holding (the setup's offer
+  // included) must be on record. A gap is INCONCLUSIVE: the row cannot PASS,
+  // and it claims no duplicate either — a failed rule still makes it FAIL.
+  const checks = durableOnceOnly(evidence!, verify?.acceptedAttemptId ?? null, [state.offer.offerAttemptId, ...(verify?.observedAttemptIds ?? [])]);
+  for (const c of checks) if (!c.inconclusive) rec.check(c.name, c.ok, c.detail);
+  const gaps = checks.filter((c) => c.inconclusive);
+  if (gaps.length) rec.skipAll(`INCONCLUSIVE — the durable evidence is incomplete, so nothing proves the crash window ran once: ${gaps.map((c) => c.detail).join('; ')}`);
 }
 
 /** Entry for run.ts --suite=crash-drill --phase=setup|verify|finalize: the same refusals as the journeys suite, then the phase. */
