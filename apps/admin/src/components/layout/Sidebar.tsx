@@ -27,7 +27,6 @@ import {
   Megaphone,
   Radar,
   Globe,
-  Bot,
   Scale,
   ListRestart, Compass,
 } from 'lucide-react';
@@ -41,7 +40,6 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
       { label: 'Live map', href: '/ops', icon: Radar },
       { label: 'Orders', href: '/orders', icon: ShoppingCart },
-      { label: 'Ops agent', href: '/agent', icon: Bot },
     ],
   },
   {

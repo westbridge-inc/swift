@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { Prisma, type PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient, type FulfillmentType } from '@prisma/client';
 import type { Queue } from 'bullmq';
 import type { FastifyBaseLogger } from 'fastify';
-import { vendorResponseSlaMinutes } from './response-sla';
+import { appointmentAutoCancelDelayMs, vendorResponseSlaMinutes } from './response-sla';
 
 /**
  * [M-11] The checkout command's durable tail and result.
@@ -38,11 +38,21 @@ const DEFAULT_RETRY_MAX_MS = 5 * 60_000;
 export type CheckoutOutboxKind = 'vendor-alert-escalate' | 'auto-cancel';
 export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
 
+/** [ORDER-SPINE S1-6 · R2] Outbox kinds this publisher must never claim. A
+ *  published row is consumed the moment its queue accepts the job, so a kind
+ *  whose delivery must be CONFIRMED before the row may close (a direct-MMG
+ *  claim notice stays owed until its recipients hold inbox rows) is drained in
+ *  process by the same sweep instead — see `drainMmgClaimNotices`. */
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice'];
+
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */
   alertDelayMs: number;
   /** Hold window (LIFECYCLE_V2) plus the vendor response SLA. */
   autoCancelDelayMs: number;
+  /** The vendor response SLA in minutes — the floor a booking's slot-relative
+   *  auto-cancel delay must never cut through [E20]. */
+  vendorResponseSlaMinutes: number;
 }
 
 export interface CheckoutOutboxRuntime {
@@ -103,7 +113,18 @@ export async function checkoutQueueTiming(prisma: PrismaClient): Promise<Checkou
   return {
     alertDelayMs: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
     autoCancelDelayMs: (holdMin + slaMin) * 60_000,
+    vendorResponseSlaMinutes: slaMin,
   };
+}
+
+/** The order facts the auto-cancel delay is computed from — passed by the
+ *  checkout caller, never re-read inside the transaction [E20]. */
+export interface CheckoutOutboxOrder {
+  id: string;
+  tenantId: string;
+  fulfillment: FulfillmentType;
+  appointmentSlot: Date | null;
+  placedAt: Date;
 }
 
 /**
@@ -114,14 +135,20 @@ export async function checkoutQueueTiming(prisma: PrismaClient): Promise<Checkou
  */
 export async function persistCheckoutOutboxInTransaction(
   tx: Prisma.TransactionClient,
-  input: { orders: Array<{ id: string; tenantId: string }>; timing: CheckoutQueueTiming; now?: Date },
+  input: { orders: CheckoutOutboxOrder[]; timing: CheckoutQueueTiming; now?: Date },
 ): Promise<string[]> {
   const now = input.now ?? new Date();
   const rows: Prisma.OrderOutboxCreateManyInput[] = [];
   for (const order of input.orders) {
+    // [E20] A booking's no-response clock is slot-relative (earlier of 24h and
+    // slot − 60min, floored at the SLA); every other fulfillment keeps the
+    // hold + SLA delay it always had.
+    const autoCancelDelayMs = order.fulfillment === 'APPOINTMENT'
+      ? appointmentAutoCancelDelayMs(order.placedAt, order.appointmentSlot, input.timing.vendorResponseSlaMinutes)
+      : input.timing.autoCancelDelayMs;
     const effects: Array<{ kind: CheckoutOutboxKind; queue: CheckoutOutboxQueue; payload: Prisma.InputJsonValue; delayMs: number }> = [
       { kind: 'vendor-alert-escalate', queue: 'notification', payload: { orderId: order.id, level: 0 }, delayMs: input.timing.alertDelayMs },
-      { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: input.timing.autoCancelDelayMs },
+      { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: autoCancelDelayMs },
     ];
     for (const e of effects) {
       const dedupeKey = checkoutOutboxDedupeKey(order.id, e.kind);
@@ -205,7 +232,8 @@ function retryDelayMs(attempts: number): number {
 
 /** Claim one due row with a lease: a crashed drainer's row becomes
  *  claimable again when its lease lapses; two drainers never hold one row
- *  (FOR UPDATE SKIP LOCKED). Same shape as the mover-revocation outbox. */
+ *  (FOR UPDATE SKIP LOCKED). Same shape as the mover-revocation outbox. Rows
+ *  of an in-process kind are never this publisher's to claim. */
 async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]; leaseMs: number }): Promise<ClaimedRow | null> {
   const orderFilter = options.orderIds?.length ? Prisma.sql`AND "orderId" = ANY(${options.orderIds})` : Prisma.empty;
   const rows = await prisma.$queryRaw<ClaimedRow[]>(Prisma.sql`
@@ -218,6 +246,7 @@ async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]
           "claimedAt" IS NULL
           OR "claimedAt" < CURRENT_TIMESTAMP - (${options.leaseMs} * INTERVAL '1 millisecond')
         )
+        AND NOT ("kind" = ANY(${[...IN_PROCESS_OUTBOX_KINDS]}))
         ${orderFilter}
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED

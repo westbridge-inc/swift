@@ -9,6 +9,7 @@
  * type that still needs a specimen is not (FD-DOC-15).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { Server } from 'socket.io';
@@ -66,6 +67,7 @@ async function user(roles: string[], activeRole: string) {
     ...(roles.includes('CUSTOMER') ? { customer: { create: {} } } : {}),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 async function shop() {
@@ -197,8 +199,8 @@ describe('[DOC-1 P18-2] documents control what can be sold', () => {
     const submittable = await system(() => submittableGateDocTypes(app.prisma, 'GY'));
     expect(submittable).toContain('liquor_licence');
     expect(submittable).not.toContain('pharmacy_authorisation');
-    await expect(runWithTenant(TENANT, () => verification.submitDocument(s.ownerUserId, 'STORE', 'pharmacy_authorisation', `/uploads/verification/${RUN}/p.enc`, 'v1'))).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
-    const submitted = await runWithTenant(TENANT, () => verification.submitDocument(s.ownerUserId, 'STORE', 'liquor_licence', `/uploads/verification/${RUN}/l.enc`, 'v1'));
+    await expect(runWithTenant(TENANT, async () => verification.submitDocument(s.ownerUserId, 'STORE', 'pharmacy_authorisation', await ownedVerificationFixture(app.prisma, s.ownerUserId), 'v1'))).rejects.toMatchObject({ code: 'INVALID_DOC_TYPE' });
+    const submitted = await runWithTenant(TENANT, async () => verification.submitDocument(s.ownerUserId, 'STORE', 'liquor_licence', await ownedVerificationFixture(app.prisma, s.ownerUserId), 'v1'));
     expect(submitted.status).toBe('PENDING');
   });
 });

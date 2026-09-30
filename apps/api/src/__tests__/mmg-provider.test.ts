@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SandboxMmgProvider, LiveMmgProvider, getMmgProvider, MMG_UAT_URL, type LiveMmgConfig } from '../providers/mmg/mmg-provider';
+import { SandboxMmgProvider, LiveMmgProvider, getMmgProvider, MMG_REFERENCE_WIRE_CONTRACT, MMG_UAT_URL, type LiveMmgConfig } from '../providers/mmg/mmg-provider';
 
 // MMG Merchant-Initiated sandbox: exercises the whole loop (initiate → the
 // payer approves on their phone → lookup) deterministically, so billing/agent
@@ -18,6 +18,7 @@ describe('MMG sandbox provider — merchant-initiated loop', () => {
     expect(init.transactionId).toBeTruthy();
     const look = await mmg.transactionLookup({ transactionId: init.transactionId });
     expect(look.status).toBe('approved');
+    expect(look).toMatchObject({ amountMinor: 130000, currencyCode: 'GYD', reference: 'order-123' });
   });
 
   it('a reference marked "pending" stays pending on lookup', async () => {
@@ -72,6 +73,22 @@ describe('MMG sandbox provider — merchant-initiated loop', () => {
     expect(() => getMmgProvider()).toThrow(/missing: merchantMsisdn, password, mkey, msecret/);
     process.env = prev;
   });
+
+  it('the live factory is fail-closed until the exact reference round-trip is UAT-verified', () => {
+    const prev = { ...process.env };
+    Object.assign(process.env, {
+      MMG_DRIVER: 'live', MMG_API_KEY: 'k', MMG_MERCHANT_ID: '9991161', MMG_PASSWORD: 'p',
+      MMG_MKEY: 'mk', MMG_MSECRET: 'ms',
+    });
+    delete process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'];
+    try {
+      expect(() => getMmgProvider()).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] = '1';
+      expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
+    } finally {
+      process.env = prev;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -95,6 +112,15 @@ function jsonRes(status: number, body: unknown) {
 }
 
 describe('MMG live adapter — merchant-initiated wire format', () => {
+  it('exports the exact asymmetric reference contract that sandbox UAT must prove', () => {
+    expect(MMG_REFERENCE_WIRE_CONTRACT).toEqual({
+      outbound: { carrier: 'header', field: 'x-wss-correlationid' },
+      lookup: { carrier: 'json', field: 'metadata[].description' },
+      history: { carrier: 'json', field: 'TransactionList[].external_id' },
+      activationEnv: 'MMG_REFERENCE_ROUNDTRIP_VERIFIED',
+    });
+  });
+
   it('authenticates form-encoded against /e-commerce-login/mer and caches the 120s token', async () => {
     const fetchMock = vi.fn().mockResolvedValue(AUTH_OK);
     const mmg = new LiveMmgProvider(CFG, fetchMock as any);
@@ -148,6 +174,28 @@ describe('MMG live adapter — merchant-initiated wire format', () => {
     });
   });
 
+  it.each([
+    ['missing', { status: 'successful' }],
+    ['empty', { status: 'successful', executionId: '' }],
+    ['whitespace', { status: 'successful', executionId: '   ' }],
+    ['object', { status: 'successful', executionId: { bad: 'shape' } }],
+  ])('R5 approved initiate with %s reference exposes no usable transaction id', async (_label, body) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(200, body));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    const result = await mmg.initiatePayment({ payerId: '6983238', amountMinor: 210000, currencyCode: 'GYD', reference: 'sub-week-29' });
+    expect(result.status).toBe('approved');
+    expect(result.transactionId).toBe('');
+  });
+
+  it('R5 uses a valid objectReference when executionId is unusable', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(200, {
+      status: 'successful', executionId: '', objectReference: '20373216452995',
+    }));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    expect(await mmg.initiatePayment({ payerId: '6983238', amountMinor: 210000, currencyCode: 'GYD', reference: 'sub-week-29' }))
+      .toMatchObject({ status: 'approved', transactionId: '20373216452995' });
+  });
+
   it('initiate maps a 422 business rejection to declined with MMG\'s message', async () => {
     const fetchMock = vi
       .fn()
@@ -171,12 +219,32 @@ describe('MMG live adapter — merchant-initiated wire format', () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(AUTH_OK)
-      .mockResolvedValueOnce(jsonRes(200, { amount: '500', currency: 'GYD', transactionStatus: 'successful', transactionReference: '20373216965979', creationDate: '2025-11-01T22:52:21.253Z' }));
+      .mockResolvedValueOnce(jsonRes(200, {
+        amount: '500', currency: 'GYD', transactionStatus: 'successful', transactionReference: '20373216965979',
+        metadata: [{ key: 'description', value: 'sub-week-29' }], creationDate: '2025-11-01T22:52:21.253Z',
+      }));
     const mmg = new LiveMmgProvider(CFG, fetchMock as any);
     const tx = await mmg.transactionLookup({ transactionId: '20373216965979' });
     expect(tx.status).toBe('approved');
     expect(tx.amountMinor).toBe(50000);
     expect(tx.transactionId).toBe('20373216965979');
+    expect(tx.reference).toBe('sub-week-29');
+  });
+
+  it.each([
+    ['currency', { amount: '500', transactionStatus: 'successful', transactionReference: '20373216965979', metadata: [{ key: 'description', value: 'sub-week-29' }] }, 'currencyCode'],
+    ['transaction reference', { amount: '500', currency: 'GYD', transactionStatus: 'successful', metadata: [{ key: 'description', value: 'sub-week-29' }] }, 'transactionId'],
+  ] as const)('does not manufacture omitted lookup %s as settlement evidence', async (_label, body, field) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(AUTH_OK)
+      .mockResolvedValueOnce(jsonRes(200, body));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+
+    const tx = await mmg.transactionLookup({ transactionId: '20373216965979' });
+
+    expect(tx.status).toBe('approved');
+    expect(tx[field]).toBe('');
   });
 
   it('an unknown lookup status stays pending (a poller must never guess approval)', async () => {

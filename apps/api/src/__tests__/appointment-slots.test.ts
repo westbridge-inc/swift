@@ -6,6 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { guyanaDayKey } from '../utils/guyana-day';
 
 // Bookable time slots for a SERVICE appointment listing, generated from
 // Item.bookingConfig. Slots must align to the duration, sit in a day-window,
@@ -20,12 +21,12 @@ let regularItemId: string;
 let config: { durationMinutes: number; slots: Array<{ dayOfWeek: number; start: string; end: string }> };
 
 function nextDateForDow(dow: number): string {
-  const d = new Date();
+  const [year, month, day] = guyanaDayKey(new Date()).split('-').map(Number);
   for (let i = 1; i <= 7; i++) {
-    const c = new Date(d.getTime() + i * DAY);
+    const c = new Date(Date.UTC(year!, month! - 1, day! + i));
     if (c.getUTCDay() === dow) return c.toISOString().slice(0, 10);
   }
-  return d.toISOString().slice(0, 10);
+  return new Date(Date.UTC(year!, month! - 1, day!)).toISOString().slice(0, 10);
 }
 
 const get = (url: string) => app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });

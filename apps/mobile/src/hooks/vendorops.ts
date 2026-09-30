@@ -5,14 +5,25 @@ import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { useVendorPreview } from '../stores/vendorPreview';
-import { vendorPreviewDataset, previewQuery, previewMutation, type VendorPreviewDataset } from '../lib/vendorPreviewData';
+import {
+  vendorPreviewDataset,
+  vendorPreviewSubscription,
+  previewQuery,
+  previewMutation,
+  VENDOR_PREVIEW_MARKET,
+  type VendorPreviewDataset,
+} from '../lib/vendorPreviewData';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
+  useAuthStore,
 } from '../stores/authStore';
+import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
+import { confirmVendorCashSettlement } from './cashSettlement';
+import { usePartnerPricing } from './partnerPricing';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -55,13 +66,20 @@ function usePreviewSafeMutation<TData = unknown, TError = unknown, TVars = void,
  *  `myRole` is OWNER / MANAGER / STAFF (drives which tools the UI shows). */
 export function useVendorProfile() {
   const pv = usePreviewDataset();
+  // A customer who tapped "Swift Business" to list a first store holds no
+  // vendor role yet. The server's 403 on their own profile read is then the
+  // confirmation of "no business" that routes them to the setup wizard (the
+  // JOIN flow), not a permission error. The same predicate decides "Join" in
+  // the switcher, so the two screens can never disagree.
+  const outsider = useAuthStore((s) => !accountHoldsRole(s.user as Parameters<typeof accountHoldsRole>[0], 'vendor'));
   const q = useQuery({
-    // [MOB-038] Absence is a 404 and nothing else. This used to run through a
-    // helper that turned EVERY failure into null, and the shell read null as
+    // [MOB-038] Absence is a 404 and nothing else — or a 403 for an account
+    // that holds no vendor role (lib/vendorProfile). This used to run through
+    // a helper that turned EVERY failure into null, and the shell read null as
     // "you have no business" — so an outage offered a working restaurant the
     // setup wizard while its orders were live.
     queryKey: ['vendor', 'profile'],
-    queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile()),
+    queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile(), { outsider }),
     retry: false,
     refetchInterval: 20000,
     enabled: !pv,
@@ -350,7 +368,33 @@ export function useVendorSubscription(enabled = true) {
   // Billing is owner-only (staff & roles §4.1) — staff sessions skip the call.
   const pv = usePreviewDataset();
   const q = useQuery({ queryKey: ['vendor', 'subscription'], queryFn: () => unwrap(vendorApi.subscription()), enabled: enabled && !pv });
-  return pv ? previewQuery(pv.subscription) : q;
+  // Preview bills the sample store the live quote for its business type — the
+  // public price list, read only in preview — never a number frozen in the app.
+  const pricing = usePartnerPricing(VENDOR_PREVIEW_MARKET, !!pv);
+  const sample = useMemo(() => (pv ? vendorPreviewSubscription(pv, pricing.data) : null), [pv, pricing.data]);
+  if (!pv) return q;
+  // [H7] While the price list is still loading or has failed, the preview
+  // query says so and the screen shows its own loading or error state — never
+  // a sample store with no fee, which read as "nothing due, you are covered".
+  return {
+    ...previewQuery(sample),
+    isLoading: sample == null && pricing.isPending === true,
+    isError: sample == null && pricing.isError === true,
+    refetch: pricing.refetch,
+  };
+}
+
+/** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee, then
+ *  re-read the subscription so the screen's autoRenew state is server truth. */
+export function useSetVendorBillingMethod() {
+  const qc = useQueryClient();
+  // [DS198 D4] Preview-safe like every other vendor write: in the sample
+  // preview, "Stop weekly billing" must never fire a real PUT.
+  return usePreviewSafeMutation({
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
+      unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'subscription'] }),
+  });
 }
 
 /** "Find a mover again" after dispatch exhausted — clears the cascade's
@@ -360,6 +404,18 @@ export function useRetryDispatch() {
   return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.retryDispatch(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+  });
+}
+
+/** The server owns custody. This only records the eligible store's requested
+ * delivery owner and immediately re-reads both its detail and every order list
+ * after a success or a race refusal. */
+export function useSetOrderFulfillmentMode() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: ({ id, mode }: { id: string; mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY' }) =>
+      unwrap(vendorApi.setFulfillmentMode(id, mode)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
 }
 
@@ -391,7 +447,7 @@ export function useOrderAction() {
       reason,
     }: {
       id: string;
-      action: 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
       code?: string;
       /** reject only — the server records it and tells the customer why. */
       reason?: string;
@@ -400,8 +456,12 @@ export function useOrderAction() {
       if (action === 'confirm-payment') return unwrap(vendorApi.confirmPayment(id, code ?? ''));
       if (action === 'preparing') return unwrap(vendorApi.preparing(id));
       if (action === 'ready') return unwrap(vendorApi.ready(id));
+      if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
+      // [E10] Never send a bare rejection: the API refuses it, and the customer
+      // must be told why. Every screen collects a preset before it gets here.
+      if (!reason?.trim()) throw new Error('Pick a reason before rejecting.');
       return unwrap(vendorApi.reject(id, reason));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
@@ -423,7 +483,7 @@ export function useVendorCashSettlements(enabled = true) {
 export function useConfirmVendorCashSettlement() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: (id: string) => unwrap(vendorApi.confirmCashSettlement(id)),
+    mutationFn: confirmVendorCashSettlement,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'cash-settlements'] }),
   });
 }
@@ -903,4 +963,3 @@ export function useVendorTier<T = any>() {
     refetchInterval: 60000,
   });
 }
-

@@ -2,7 +2,7 @@ import type { FastifyRequest } from 'fastify';
 import { createHash } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
-// SWIFT-AUD-D1-01 — rate-limit key.
+// SWIFT-AUD-D1-01 — rate-limit key (hardened).
 //
 // The global ceiling used to key purely off the client IP. Two problems at
 // launch scale:
@@ -11,23 +11,50 @@ import { createHash } from 'node:crypto';
 //   • an authenticated abuser could rotate IPs to multiply their effective
 //     allowance.
 //
-// So: bucket authenticated callers by their session token instead of their IP.
-// The token is HASHED — never the raw bearer value in a Redis key (that would
-// put a live credential into the store and any key-dump/log). Anonymous
-// requests still fall back to the proxy-resolved IP (never the spoofable
-// X-Forwarded-For, which fastify's trustProxy resolves for us).
+// The original fix bucketed authenticated callers by their raw session token,
+// hashed. That closed the rotation but opened a worse hole: `onRequest` (where
+// the limiter's hook runs) precedes `authenticate`, so ANY string after
+// `Bearer ` minted its own bucket — an anonymous attacker rotated fake tokens
+// to strip every route-level and global ceiling at zero cost (audit High #1).
 //
-// Keying by token, not decoded userId, is deliberate: it needs no JWT verify in
-// the hot path and can't be spoofed to attack a victim's bucket — you'd need
-// the victim's actual token. A user's separate sessions get separate buckets,
-// which only ever loosens the limit for a real multi-device user.
+// So: the bucket now derives from a VERIFIED principal. The key generator
+// HMAC-verifies the HS256 access token (algorithm pinned by the auth plugin,
+// expiry included) and keys on `u:` + hash(payload.userId). Every token that
+// fails verification — malformed, expired, wrong signature, garbage — and
+// every request with no token falls back to the proxy-resolved `req.ip`
+// (never the spoofable X-Forwarded-For: fastify's trustProxy resolves it and
+// TRUST_PROXY decides who may set it). Cookie-carried browser sessions key by
+// IP here because the cookie is only adopted later in `authenticate` — a real
+// user behind their own IP still gets the normal ceiling, and this key is only
+// a rate-limit bucket, never an authorization decision.
 // ---------------------------------------------------------------------------
 
-export function rateLimitKey(req: Pick<FastifyRequest, 'headers' | 'ip'>): string {
-  const authz = req.headers['authorization'];
-  if (typeof authz === 'string' && authz.startsWith('Bearer ') && authz.length > 'Bearer '.length + 4) {
-    const token = authz.slice('Bearer '.length);
-    return 'u:' + createHash('sha256').update(token).digest('hex').slice(0, 32);
-  }
-  return req.ip;
+/** The verified token payload shape this key generator needs. */
+export interface RateLimitPrincipal {
+  userId: string;
+}
+
+type TokenVerifier = (token: string) => RateLimitPrincipal | Promise<RateLimitPrincipal>;
+
+export function rateLimitKey(
+  verifyToken: TokenVerifier,
+): (req: Pick<FastifyRequest, 'headers' | 'ip'>) => Promise<string> {
+  return async (req) => {
+    const authz = req.headers['authorization'];
+    if (typeof authz === 'string' && authz.startsWith('Bearer ')) {
+      const token = authz.slice('Bearer '.length);
+      if (token.length > 0) {
+        try {
+          const payload = await verifyToken(token);
+          const userId = payload?.userId;
+          if (typeof userId === 'string' && userId.length > 0) {
+            return 'u:' + createHash('sha256').update(userId).digest('hex').slice(0, 32);
+          }
+        } catch {
+          // Invalid / expired / malformed token: anonymous IP bucket.
+        }
+      }
+    }
+    return req.ip;
+  };
 }

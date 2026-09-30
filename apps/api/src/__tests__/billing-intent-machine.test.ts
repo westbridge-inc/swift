@@ -1,20 +1,22 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import type { Prisma } from '@prisma/client';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
-import { BillingService } from '../modules/billing/billing.service';
+import { BillingService, type BillingObserver } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { sandboxSetTxStatus, sandboxAddHistory, sandboxResetMmg } from '../providers/mmg/mmg-provider';
+import { windDownPartner } from '../modules/user/partner-wind-down';
 
 // ---------------------------------------------------------------------------
 // TOLLGATE A2 — the intent machine. UNKNOWN is a first-class state [LAW M-5]:
 // an initiate that dies transport-shaped becomes an UNKNOWN intent that is
 // never auto-failed, adopts the provider's id from history when the request
-// actually landed, and expires into dunning only when the provider provably
-// has no record past TTL [6.6c]. Approved settles claim+advance in ONE
+// actually landed; an empty history past TTL cannot revoke a dispatched
+// instruction. Confirmed provider terminals dun; approval settles in ONE
 // transaction (SWIFT-004 closed); a late approval for an already-covered week
 // BANKS as wallet balance [BE-08] — a payer's money is never dropped.
 // ---------------------------------------------------------------------------
@@ -31,6 +33,12 @@ const createdVendorIds: string[] = [];
 const createdSubIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_009_300_000 + Math.floor(Math.random() * 800_000);
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 async function makeVendorMmgSub(opts: { due: Date; msisdn?: string; rate?: number }) {
   seq += 1;
@@ -159,7 +167,7 @@ describe('LAW M-5 — UNKNOWN is a first-class state', () => {
     expect(after.nextBillingDate.getTime()).toBe(due.getTime() + WEEK);
   });
 
-  it('an UNKNOWN the provider has no record of expires at TTL into dunning [6.6c]', async () => {
+  it('an authorized UNKNOWN stays pollable past TTL when history has no record', async () => {
     const due = new Date(Date.now() - HOUR);
     const { sub } = await makeVendorMmgSub({ due, msisdn: 'initerror-5926094' });
     await billing.billSubscription(await subWithRelations(sub.id));
@@ -171,14 +179,15 @@ describe('LAW M-5 — UNKNOWN is a first-class state', () => {
     const held = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
     expect(held.status).toBe('UNKNOWN');
 
-    // Past TTL: closes EXPIRED with the normalized code, duns normally
+    // Past TTL: absence is not proof that the dispatched request cannot capture.
     await billing.pollPendingMmgCharges(new Date(Date.now() + 25 * HOUR));
     const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
-    expect(intent.status).toBe('EXPIRED');
-    expect(intent.failureCode).toBe('REQUEST_EXPIRED');
+    expect(intent.status).toBe('UNKNOWN');
+    expect(intent.failureRaw).toMatchObject({ providerEffect: 'AUTHORIZED' });
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(after.status).toBe('PAST_DUE');
-    expect(after.failedAttempts).toBe(1);
+    expect(after.status).toBe('ACTIVE');
+    expect(after.failedAttempts).toBe(0);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_FAILED' } })).toBe(0);
   });
 });
 
@@ -227,18 +236,15 @@ describe('BE-08 / BE-07 — a payer approval is NEVER dropped', () => {
     const due = new Date(Date.now() - HOUR);
     const { sub } = await makeVendorMmgSub({ due, msisdn: '5926095002' });
 
-    // a0 request goes out, payer ignores it past TTL → EXPIRED, dunning.
+    // a0 request goes out; MMG itself confirms expiry before dunning.
     await billing.billSubscription(await subWithRelations(sub.id));
     const a0 = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
-    sandboxSetTxStatus(a0.externalRef!, 'pending');
+    sandboxSetTxStatus(a0.externalRef!, 'expired');
     const t1 = new Date(Date.now() + 25 * HOUR);
     await billing.pollPendingMmgCharges(t1);
     expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: a0.id } })).status).toBe('EXPIRED');
 
-    // MMG's own view of a0 moves to expired too — SWIFT-004 lets a real
-    // retry through only over a provably-dead prior (a 'pending' answer
-    // would correctly defer it; that safety is its own test above).
-    sandboxSetTxStatus(a0.externalRef!, 'expired');
+    // SWIFT-004 lets a retry through only over that provider-confirmed terminal.
 
     // The a1 retry goes out and the payer approves IT → the week is paid.
     await app.prisma.subscription.update({ where: { id: sub.id }, data: { nextRetryAt: null } });
@@ -315,7 +321,7 @@ describe('atomic claim+advance and the poll ladder', () => {
     expect(r.stillPending).toBe(1);
     const row = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
     expect(row.status).toBe('PENDING');
-    expect(row.failureCode).toBe('AMOUNT_MISMATCH');
+    expect(row.failureCode).toBe('SETTLEMENT_MISMATCH');
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, idempotencyKey: { startsWith: 'mismatch:' } } })).toBe(1);
   });
 
@@ -331,7 +337,7 @@ describe('atomic claim+advance and the poll ladder', () => {
     await billing.pollPendingMmgCharges(new Date());
     const row = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
     expect(row.status).toBe('PENDING');
-    expect(row.failureCode).toBe('AMOUNT_MISMATCH');
+    expect(row.failureCode).toBe('SETTLEMENT_MISMATCH');
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).nextBillingDate.getTime()).toBe(due.getTime());
   });
 
@@ -348,6 +354,366 @@ describe('atomic claim+advance and the poll ladder', () => {
     await billing.pollPendingMmgCharges(new Date());
     const row = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
     expect(row.status).toBe('PENDING');
-    expect(row.failureCode).toBe('AMOUNT_MISMATCH');
+    expect(row.failureCode).toBe('SETTLEMENT_MISMATCH');
+  });
+});
+
+describe('late MMG outcomes preserve stopped subscription authority', () => {
+  it.each(['before-lock', 'after-commit'] as const)('vendor deletion %s cannot be followed by stale MMG reinstatement', async (ordering) => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub, userId } = await makeVendorMmgSub({ due });
+    await billing.billSubscription(await subWithRelations(sub.id));
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+    await app.prisma.subscription.update({ where: { id: sub.id }, data: { status: 'SUSPENDED' } });
+    await app.prisma.vendor.update({ where: { id: sub.vendorId! }, data: {
+      status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false,
+    } });
+    sandboxSetTxStatus(intent.externalRef!, 'approved');
+    const atBoundary = deferred();
+    const release = deferred();
+    const concurrent = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider(), {
+      beforeLateMmgAuthorityLock: async (id) => {
+        if (id === sub.id && ordering === 'before-lock') { atBoundary.resolve(); await release.promise; }
+      },
+    });
+    const internals = concurrent as unknown as {
+      afterSuccessfulCharge(snapshot: Awaited<ReturnType<typeof subWithRelations>>, amount: number, periodKey: string, mmgSettlementCommitted?: boolean): Promise<void>;
+    };
+    if (ordering === 'after-commit') {
+      const afterCharge = internals.afterSuccessfulCharge.bind(concurrent);
+      vi.spyOn(internals, 'afterSuccessfulCharge').mockImplementation(async (...args) => {
+        atBoundary.resolve();
+        await release.promise;
+        return afterCharge(...args);
+      });
+    }
+    const polling = concurrent.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+    try {
+      await atBoundary.promise;
+      if (ordering === 'after-commit') {
+        expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: sub.vendorId! } }))
+          .toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
+      }
+      await app.prisma.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED' } });
+      await windDownPartner(app.prisma, userId);
+    } finally {
+      release.resolve();
+    }
+    const result = await polling;
+    expect(result.banked).toBe(ordering === 'before-lock' ? 1 : 0);
+    expect(result.settled).toBe(ordering === 'after-commit' ? 1 : 0);
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).toMatchObject({ status: 'CANCELLED' });
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: sub.vendorId! } }))
+      .toMatchObject({ status: 'SUSPENDED', acceptingOrders: false });
+    vi.restoreAllMocks();
+  });
+
+  it('poller restores the vendor when suspension committed after its ACTIVE snapshot', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub } = await makeVendorMmgSub({ due });
+    await billing.billSubscription(await subWithRelations(sub.id));
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+    sandboxSetTxStatus(intent.externalRef!, 'approved');
+    const arrived = deferred();
+    const release = deferred();
+    const concurrent = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider(), {
+      beforeLateMmgAuthorityLock: async (id) => {
+        if (id === sub.id) { arrived.resolve(); await release.promise; }
+      },
+    });
+    const polling = concurrent.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+    try {
+      await arrived.promise;
+      await app.prisma.$transaction(async (tx) => {
+        await tx.subscription.update({ where: { id: sub.id }, data: { status: 'SUSPENDED' } });
+        await tx.vendor.update({ where: { id: sub.vendorId! }, data: {
+          status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false,
+        } });
+      });
+    } finally {
+      release.resolve();
+    }
+    expect((await polling).settled).toBe(1);
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).toMatchObject({ status: 'ACTIVE' });
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: sub.vendorId! } }))
+      .toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
+  });
+
+  it('banks an approval after cancellation exactly once without reactivation or period advance', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub, userId } = await makeVendorMmgSub({ due, msisdn: '5926095101' });
+    expect(await billing.billSubscription(await subWithRelations(sub.id))).toBe('pending');
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+
+    const wound = await windDownPartner(app.prisma, userId);
+    expect(wound.subscriptionsCancelled).toBe(1);
+    const cancelled = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(cancelled).toMatchObject({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null });
+
+    sandboxSetTxStatus(intent.externalRef!, 'approved');
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 20 * 60_000)); // retry is a no-op
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(after.status).toBe('CANCELLED');
+    expect(after.autoRenew).toBe(false);
+    expect(after.nextRetryAt).toBeNull();
+    expect(after.currentPeriodStart.getTime()).toBe(sub.currentPeriodStart.getTime());
+    expect(after.currentPeriodEnd.getTime()).toBe(sub.currentPeriodEnd.getTime());
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime());
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('CAPTURED');
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `bank:${intent.id}` } })).toBe(1);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: `ledger:bank:${intent.id}` } })).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS' } })).toBe(0);
+  });
+
+  it('honours the account-deletion cutoff even if partner wind-down has not reached the subscription yet', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub, userId } = await makeVendorMmgSub({ due, msisdn: '5926095107' });
+    expect(await billing.billSubscription(await subWithRelations(sub.id))).toBe('pending');
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+
+    // deleteAccount commits this authority cut-off before its best-effort
+    // partner wind-down. Reproduce that real gap: the subscription is stale
+    // ACTIVE when the old MMG prompt approves.
+    await app.prisma.user.update({ where: { id: userId }, data: { status: 'DEACTIVATED' } });
+    sandboxSetTxStatus(intent.externalRef!, 'approved');
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(after).toMatchObject({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null });
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime());
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('CAPTURED');
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `bank:${intent.id}` } })).toBe(1);
+    expect(await app.prisma.notification.count({ where: { userId, data: { path: ['kind'], equals: 'billing_banked' } } })).toBe(0);
+  });
+
+  it('honours the durable deletion tombstone after an admin changes DEACTIVATED to BANNED', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub, userId } = await makeVendorMmgSub({ due, msisdn: '5926095108' });
+    expect(await billing.billSubscription(await subWithRelations(sub.id))).toBe('pending');
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+
+    await app.prisma.user.update({
+      where: { id: userId },
+      data: { status: 'BANNED', phone: `deleted:${userId}` },
+    });
+    sandboxSetTxStatus(intent.externalRef!, 'approved');
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(after).toMatchObject({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null });
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime());
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('CAPTURED');
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS' } })).toBe(0);
+    expect(await app.prisma.notification.count({ where: { userId, data: { path: ['kind'], equals: 'billing_success' } } })).toBe(0);
+  });
+
+  it.each([false, true])('proves PostgreSQL lock ordering against an arrived poller (remove prepaid lock: %s)', async (removePrepaidLock) => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub } = await makeVendorMmgSub({ due, msisdn: '5926095109' });
+    const prepaidDebited = deferred();
+    const releasePrepaid = deferred();
+    const lateArrived = deferred();
+    const releaseLate = deferred();
+    let lateAuthorityLocked = false;
+    let prepaidPid = 0;
+    let latePid = 0;
+    const observer: BillingObserver = {
+      afterSuccessfulChargePrepaidDebit: async (subscriptionId, tx) => {
+        if (subscriptionId !== sub.id) return;
+        const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+        if (!backend) throw new Error('Missing prepaid backend identity');
+        prepaidPid = backend.pid;
+        prepaidDebited.resolve();
+        await releasePrepaid.promise;
+      },
+      beforeLateMmgAuthorityLock: async (subscriptionId, tx) => {
+        if (subscriptionId !== sub.id) return;
+        const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+        if (!backend) throw new Error('Missing poller backend identity');
+        latePid = backend.pid;
+        lateArrived.resolve();
+      },
+      afterLateMmgAuthorityLocked: async (subscriptionId) => {
+        if (subscriptionId !== sub.id) return;
+        lateAuthorityLocked = true;
+        await releaseLate.promise;
+        // The mutation is diagnostic: stop after proving it took the lock,
+        // before it can form the actual wallet/subscription deadlock.
+        if (removePrepaidLock) throw new Error('LOCK_ORDER_MUTATION_DETECTED');
+      },
+    };
+    // Fixture dispatch itself takes the authority lock. Only arm the barriers
+    // after it has committed, so they observe the intended prepaid/poller race.
+    expect(await billing.billSubscription(await subWithRelations(sub.id))).toBe('pending');
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+    sandboxSetTxStatus(intent.externalRef!, 'approved');
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 2100 } });
+
+    const concurrent = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider(), observer);
+    const cashSnapshot = { ...await subWithRelations(sub.id), billingMethod: 'CASH' as const };
+    const internals = concurrent as unknown as {
+      lockSubscriptionMoneyAuthority(tx: Prisma.TransactionClient, snapshot: typeof cashSnapshot): Promise<{
+        payerStatus: string; payerPhone: string; status: typeof cashSnapshot.status; autoRenew: boolean;
+      }>;
+      applySuccessfulCharge(
+        snapshot: typeof cashSnapshot, amount: number, ref: string, now: Date, periodKey: string,
+        settlePaymentId?: string, usdTrio?: undefined, spendPrepaid?: number,
+      ): Promise<boolean>;
+    };
+    if (removePrepaidLock) {
+      // One-call mutation: prepaid skips its authority locks. MMG still takes
+      // the real PostgreSQL locks, so the same oracle must detect the defect.
+      vi.spyOn(internals, 'lockSubscriptionMoneyAuthority').mockResolvedValueOnce({
+        payerStatus: 'ACTIVE', payerPhone: '', status: cashSnapshot.status, autoRenew: cashSnapshot.autoRenew,
+      });
+    }
+    const prepaid = internals.applySuccessfulCharge(
+      cashSnapshot, 2100, 'prepaid', new Date(), due.toISOString().slice(0, 10), undefined, undefined, 2100,
+    );
+    let late: ReturnType<BillingService['pollPendingMmgCharges']> | undefined;
+    const awaitBarrier = async (barrier: Promise<void>, operation: Promise<unknown>, label: string) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          barrier,
+          operation.then(() => { throw new Error(`${label}: operation completed before its barrier`); }),
+          new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(`${label}: barrier timed out`)), 4000); }),
+        ]);
+      } finally { if (timer) clearTimeout(timer); }
+    };
+    let blockedByPrepaid = false;
+    try {
+      await awaitBarrier(prepaidDebited.promise, prepaid, 'prepaid debit');
+      late = concurrent.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+      await awaitBarrier(lateArrived.promise, late, 'late poller arrival');
+      const deadline = Date.now() + 4000;
+      // An elapsed deadline is a failure, never evidence of blocking. The
+      // positive oracle is PostgreSQL naming the exact prepaid backend.
+      while (!blockedByPrepaid && !lateAuthorityLocked) {
+        const [row] = await app.prisma.$queryRaw<Array<{ blockers: number[] }>>`
+          SELECT pg_blocking_pids(${latePid}::integer) AS blockers
+        `;
+        if (!row) throw new Error('Missing PostgreSQL blocking proof');
+        blockedByPrepaid = row.blockers.includes(prepaidPid);
+        if (Date.now() > deadline) throw new Error('Poller neither acquired authority nor proved blocked by prepaid');
+        if (!blockedByPrepaid && !lateAuthorityLocked) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    } finally {
+      releasePrepaid.resolve();
+      releaseLate.resolve();
+      await Promise.allSettled([prepaid, ...(late ? [late] : [])]);
+    }
+    const outcomes = await Promise.allSettled([prepaid, late!]);
+
+    expect(blockedByPrepaid).toBe(!removePrepaidLock);
+    vi.restoreAllMocks();
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'fulfilled']);
+    if (removePrepaidLock) {
+      expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('PENDING');
+      return;
+    }
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime() + WEEK);
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `success:${sub.id}:${due.toISOString().slice(0, 10)}` } })).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `bank:${intent.id}` } })).toBe(1);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: `ledger:success:${sub.id}:${due.toISOString().slice(0, 10)}` } })).toBe(1);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: `ledger:bank:${intent.id}` } })).toBe(1);
+  });
+
+  it('banks an approval while PAUSED without treating the old prompt as resume authority', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const { sub } = await makeVendorMmgSub({ due, msisdn: '5926095102' });
+    expect(await billing.billSubscription(await subWithRelations(sub.id))).toBe('pending');
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+    await app.prisma.subscription.update({ where: { id: sub.id }, data: { status: 'PAUSED' } });
+
+    sandboxSetTxStatus(intent.externalRef!, 'approved');
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(after.status).toBe('PAUSED');
+    expect(after.autoRenew).toBe(true); // pause is preserved, not rewritten as cancellation
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime());
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('CAPTURED');
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS' } })).toBe(0);
+  });
+
+  it('records declined payment evidence without dunning CANCELLED or PAUSED subscriptions', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const cancelledFixture = await makeVendorMmgSub({ due, msisdn: '5926095103' });
+    const pausedFixture = await makeVendorMmgSub({ due, msisdn: '5926095104' });
+    await billing.billSubscription(await subWithRelations(cancelledFixture.sub.id));
+    await billing.billSubscription(await subWithRelations(pausedFixture.sub.id));
+    const cancelledIntent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: cancelledFixture.sub.id } });
+    const pausedIntent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: pausedFixture.sub.id } });
+    await windDownPartner(app.prisma, cancelledFixture.userId);
+    await app.prisma.subscription.update({ where: { id: pausedFixture.sub.id }, data: { status: 'PAUSED' } });
+    sandboxSetTxStatus(cancelledIntent.externalRef!, 'declined');
+    sandboxSetTxStatus(pausedIntent.externalRef!, 'declined');
+
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+
+    const cancelled = await app.prisma.subscription.findUniqueOrThrow({ where: { id: cancelledFixture.sub.id } });
+    const paused = await app.prisma.subscription.findUniqueOrThrow({ where: { id: pausedFixture.sub.id } });
+    expect(cancelled).toMatchObject({ status: 'CANCELLED', autoRenew: false, failedAttempts: 0, nextRetryAt: null });
+    expect(paused.status).toBe('PAUSED');
+    expect(paused.autoRenew).toBe(true);
+    expect(paused.failedAttempts).toBe(0);
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: cancelledIntent.id } })).status).toBe('FAILED');
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: pausedIntent.id } })).status).toBe('FAILED');
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: cancelledIntent.id } })).failureRaw)
+      .toMatchObject({ subscriptionOutcome: 'PRESERVED_NO_DUNNING', subscriptionStatus: 'CANCELLED' });
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: pausedIntent.id } })).failureRaw)
+      .toMatchObject({ subscriptionOutcome: 'PRESERVED_NO_DUNNING', subscriptionStatus: 'PAUSED' });
+    expect(await app.prisma.billingEvent.count({
+      where: { subscriptionId: { in: [cancelledFixture.sub.id, pausedFixture.sub.id] }, type: 'CHARGE_FAILED' },
+    })).toBe(0);
+  });
+
+  it('records a provider-confirmed expiry without dunning cancellation', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const fixture = await makeVendorMmgSub({ due, msisdn: '5926095110' });
+    await billing.billSubscription(await subWithRelations(fixture.sub.id));
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: fixture.sub.id } });
+    await windDownPartner(app.prisma, fixture.userId);
+    sandboxSetTxStatus(intent.externalRef!, 'expired');
+
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 25 * HOUR));
+
+    const payment = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } });
+    expect(payment.status).toBe('EXPIRED');
+    expect(payment.failureRaw).toMatchObject({ subscriptionOutcome: 'PRESERVED_NO_DUNNING', subscriptionStatus: 'CANCELLED' });
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.sub.id }, select: { status: true, failedAttempts: true } }))
+      .toEqual({ status: 'CANCELLED', failedAttempts: 0 });
+  });
+
+  it('leaves pending provider truth pending without mutating CANCELLED or PAUSED state', async () => {
+    const due = new Date(Date.now() - HOUR);
+    const cancelledFixture = await makeVendorMmgSub({ due, msisdn: '5926095105' });
+    const pausedFixture = await makeVendorMmgSub({ due, msisdn: '5926095106' });
+    await billing.billSubscription(await subWithRelations(cancelledFixture.sub.id));
+    await billing.billSubscription(await subWithRelations(pausedFixture.sub.id));
+    const cancelledIntent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: cancelledFixture.sub.id } });
+    const pausedIntent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: pausedFixture.sub.id } });
+    await windDownPartner(app.prisma, cancelledFixture.userId);
+    await app.prisma.subscription.update({ where: { id: pausedFixture.sub.id }, data: { status: 'PAUSED' } });
+    sandboxSetTxStatus(cancelledIntent.externalRef!, 'pending');
+    sandboxSetTxStatus(pausedIntent.externalRef!, 'pending');
+
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: cancelledFixture.sub.id }, select: { status: true, autoRenew: true, failedAttempts: true } }))
+      .toEqual({ status: 'CANCELLED', autoRenew: false, failedAttempts: 0 });
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: pausedFixture.sub.id }, select: { status: true, autoRenew: true, failedAttempts: true } }))
+      .toEqual({ status: 'PAUSED', autoRenew: true, failedAttempts: 0 });
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: cancelledIntent.id } })).status).toBe('PENDING');
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: pausedIntent.id } })).status).toBe('PENDING');
   });
 });

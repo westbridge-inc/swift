@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics, fetchRlpReserve, adjustRlpReserve } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
 import { MutationError } from '@/components/MutationError';
+import { askReason } from '@/lib/ask-reason';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
@@ -23,21 +24,24 @@ export default function ClaimsPage() {
     qc.invalidateQueries({ queryKey: ['claims'] });
     qc.invalidateQueries({ queryKey: ['cash-metrics'] });
   };
-  const approve = useMutation({ mutationFn: (id: string) => approveClaim(id), onSuccess: invalidate });
+  const approve = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => approveClaim(id, reason),
+    onSuccess: invalidate,
+  });
   const reject = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) => rejectClaim(id, reason),
     onSuccess: invalidate,
   });
   const pay = useMutation({
-    mutationFn: ({ id, reference, amount }: { id: string; reference: string; amount: string | number }) =>
-      payClaim(id, reference, amount),
+    mutationFn: ({ id, reference, amount, reason }: { id: string; reference: string; amount: string | number; reason: string }) =>
+      payClaim(id, reference, amount, reason),
     onSuccess: invalidate,
   });
 
   // [DOC-1 §31.4 · P31-1] The reserve line every payout is drawn from: balance, floor, this month's provisioning.
   const reserveQ = useQuery({ queryKey: ['rlp-reserve'], queryFn: () => fetchRlpReserve('GY') });
   const adjust = useMutation({
-    mutationFn: ({ amount, note }: { amount: number; note: string }) => adjustRlpReserve('GY', amount, note),
+    mutationFn: ({ amount, note, reason }: { amount: number; note: string; reason: string }) => adjustRlpReserve('GY', amount, note, reason),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['rlp-reserve'] }); },
   });
   const reserve: any = reserveQ.data?.data ?? null;
@@ -103,7 +107,10 @@ export default function ClaimsPage() {
               if (!raw || !Number.isFinite(amount) || amount === 0) return;
               const note = window.prompt('Why (recorded with the entry):')?.trim();
               if (!note || note.length < 3) return;
-              if (window.confirm(`Record a ${gyd(amount)} entry on the GY reserve line?`)) adjust.mutate({ amount, note });
+              if (window.confirm(`Record a ${gyd(amount)} entry on the GY reserve line?`)) {
+                const reason = askReason({ action: `adjust the GY reserve line by ${gyd(amount)}`, subject: 'the loss-protection reserve' });
+                if (reason) adjust.mutate({ amount, note, reason });
+              }
             }}
             disabled={adjust.isPending}
             className="ml-auto px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -195,7 +202,10 @@ export default function ClaimsPage() {
                     <>
                       <button
                         onClick={() => {
-                          if (window.confirm(`Approve this ${gyd(c.amount)} claim?`)) approve.mutate(c.id);
+                          if (window.confirm(`Approve this ${gyd(c.amount)} claim?`)) {
+                            const reason = askReason({ action: `approve this ${gyd(c.amount)} claim`, subject: `order ${c.orderId}` });
+                            if (reason) approve.mutate({ id: c.id, reason });
+                          }
                         }}
                         disabled={busy}
                         className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -204,8 +214,8 @@ export default function ClaimsPage() {
                       </button>
                       <button
                         onClick={() => {
-                          const reason = window.prompt('Rejection reason (the rider sees this):');
-                          if (reason && reason.trim().length >= 3) reject.mutate({ id: c.id, reason: reason.trim() });
+                          const reason = askReason({ action: 'reject this claim', subject: `order ${c.orderId}` });
+                          if (reason) reject.mutate({ id: c.id, reason });
                         }}
                         disabled={busy}
                         className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -226,7 +236,8 @@ export default function ClaimsPage() {
                         const sent = window.prompt(`Amount you actually transferred, in GYD (this claim is ${gyd(c.amount)}):`)?.trim();
                         if (!sent) return;
                         if (window.confirm(`Mark this ${gyd(c.amount)} claim for order ${c.orderId} as PAID? Reference ${ref}, amount sent ${sent}.`)) {
-                          pay.mutate({ id: c.id, reference: ref, amount: sent });
+                          const reason = askReason({ action: 'mark this claim as paid', subject: `order ${c.orderId}` });
+                          if (reason) pay.mutate({ id: c.id, reference: ref, amount: sent, reason });
                         }
                       }}
                       disabled={busy}

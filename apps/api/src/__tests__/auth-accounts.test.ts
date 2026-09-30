@@ -9,7 +9,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { requestOtp, loginWithOtp } from './helpers/otp';
+import { requestOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
 import { nanoid } from 'nanoid';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
@@ -32,6 +32,7 @@ const ROLE_AUTHORITY_PHONE = '+5920003344';
 const PASSWORD = 'correct-horse-battery';
 
 let app: FastifyInstance;
+const signupProofs = new Map<string, string>();
 
 async function cleanupUsers() {
   await app.prisma.user.deleteMany({
@@ -138,9 +139,11 @@ async function ensureMoverProfiles(userId: string) {
 
 /** Full signup: OTP flow then register with role + country. */
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR', countryCode = 'GY') {
-  await loginWithOtp(app, phone); // unknown phone -> isNewUser + registration window
+  const registrationProof = await registrationProofFor(app, phone);
+  signupProofs.set(phone, registrationProof);
   return inject('POST', '/api/v1/auth/register', { acceptTerms: true,
     phone,
+    registrationProof,
     firstName: 'Step3',
     lastName: role,
     role,
@@ -149,11 +152,11 @@ async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR', coun
 }
 
 describe('Country picker', () => {
-  it('lists Guyana as an active country before signup (public)', async () => {
+  it('publishes only Guyana before signup', async () => {
     const res = await inject('GET', '/api/v1/auth/countries');
     expect(res.statusCode).toBe(200);
     const codes = res.json().data.map((c: { code: string }) => c.code);
-    expect(codes).toContain('GY');
+    expect(codes).toEqual(['GY']);
   });
 });
 
@@ -166,13 +169,23 @@ describe('Signup — OTP mandatory, role + country aware', () => {
       role: 'MOVER',
     });
     expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe('OTP_REQUIRED');
+    expect(res.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
   });
 
-  it('rejects signup for a market Swift is not in (whole Caribbean IS live)', async () => {
-    await loginWithOtp(app, WAITLIST_PHONE);
+  it('rejects signup for a market outside the Guyana launch — at the front door, and again at register', async () => {
+    // Audit High #2: the GY-only rule (#1259) now runs FIRST in send-otp, so a
+    // foreign number never spends a budget counter, never triggers an SMS and
+    // can never complete the OTP ceremony that issues a registration proof.
+    const front = await inject('POST', '/api/v1/auth/send-otp', { phone: WAITLIST_PHONE });
+    expect(front.statusCode).toBe(400);
+    expect(front.json().error.code).toBe('COUNTRY_NOT_ACTIVE');
+
+    // Defence in depth: register refuses the same number with the same code
+    // even when handed a proof minted directly — the only way one can exist.
+    const registrationProof = await mintedRegistrationProofFor(app, WAITLIST_PHONE);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone: WAITLIST_PHONE, // UK prefix — derives no Caribbean market
+      registrationProof,
       firstName: 'Wait',
       lastName: 'List',
       role: 'CUSTOMER',
@@ -207,13 +220,15 @@ describe('Signup — OTP mandatory, role + country aware', () => {
   });
 
   it('the registration window is single-use', async () => {
-    // MOVER_PHONE's window was consumed by the successful signup
+    // MOVER_PHONE's capability was consumed by the successful signup.
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone: MOVER_PHONE,
+      registrationProof: signupProofs.get(MOVER_PHONE),
       firstName: 'Replay',
       lastName: 'Attempt',
     });
-    expect(res.statusCode).toBe(409); // duplicate phone — and no window either
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
   });
 });
 

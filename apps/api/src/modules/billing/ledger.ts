@@ -107,9 +107,9 @@ export async function postLedger(
 // ---------------------------------------------------------------------------
 
 /** Money arrived from outside and credited a payer's wallet. */
-export function topupPostings(subscriptionId: string, amount: number): LedgerPosting[] {
+export function topupPostings(subscriptionId: string, amount: number, rail: 'EXTERNAL' | 'CARD' = 'EXTERNAL'): LedgerPosting[] {
   return [
-    { account: 'CLEARING_MMG', debit: amount },
+    { account: rail === 'CARD' ? 'CLEARING_CARD' : 'CLEARING_MMG', debit: amount },
     { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
   ];
 }

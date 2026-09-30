@@ -37,3 +37,19 @@ export function moneyIn(n: number | null | undefined, currency: string = 'GYD'):
 export function moneyOrDash(n: number | null | undefined, currency: string = 'GYD'): string {
   return n == null ? '—' : moneyIn(n, currency);
 }
+
+/**
+ * Preserve a server-authoritative amount exactly to its stored two-decimal
+ * precision. Most Swift money is whole GYD and should continue to use
+ * `money()`; attestations are different because the number shown to a person
+ * must be the number they submit. Callers must validate the value first.
+ */
+export function moneyExact(n: number, currency: string = 'GYD'): string {
+  if (!Number.isFinite(n)) throw new TypeError('moneyExact requires a finite amount');
+  const fractionDigits = Number.isInteger(n) ? 0 : 2;
+  const formatted = n.toLocaleString(undefined, {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: 2,
+  });
+  return currency === 'GYD' ? `$${formatted}` : `${currency} ${formatted}`;
+}

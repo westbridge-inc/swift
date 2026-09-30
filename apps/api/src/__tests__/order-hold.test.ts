@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { OrderStatus, UserRole } from '@prisma/client';
@@ -181,6 +181,39 @@ describe('the vendor response deadline', () => {
     }
   });
 
+  it('[E20] a booking\'s deadline is slot-relative — earlier of 24h and slot − 60min, floored at the SLA', () => {
+    const placedAt = new Date('2026-08-30T12:00:00Z');
+    const base = { status: 'PENDING', placedAt, createdAt: placedAt, fulfillment: 'APPOINTMENT' };
+    // 3 days out: the 24-hour cap, not slot − 60min.
+    expect(
+      vendorRespondBy(
+        { ...base, appointmentSlot: new Date('2026-09-02T12:00:00Z') },
+        { slaMinutes: 10, holdMs: 5 * 60_000 },
+      )?.toISOString(),
+    ).toBe('2026-08-31T12:00:00.000Z');
+    // 5 hours out: slot − 60min.
+    expect(
+      vendorRespondBy(
+        { ...base, appointmentSlot: new Date('2026-08-30T17:00:00Z') },
+        { slaMinutes: 10, holdMs: 5 * 60_000 },
+      )?.toISOString(),
+    ).toBe('2026-08-30T16:00:00.000Z');
+    // 30 minutes out: floored at the ordinary SLA.
+    expect(
+      vendorRespondBy(
+        { ...base, appointmentSlot: new Date('2026-08-30T12:30:00Z') },
+        { slaMinutes: 10, holdMs: 5 * 60_000 },
+      )?.toISOString(),
+    ).toBe('2026-08-30T12:10:00.000Z');
+    // A booking that is no longer PENDING reads null, like every other order.
+    expect(
+      vendorRespondBy(
+        { ...base, status: 'ACCEPTED', appointmentSlot: new Date('2026-09-02T12:00:00Z') },
+        { slaMinutes: 10, holdMs: 0 },
+      ),
+    ).toBeNull();
+  });
+
   it('an accepted order reads null on the detail — a clock on an accepted order would be a lie', async () => {
     const accepted = await makeHeldOrder({ holdMsFromNow: -60_000, status: 'PREPARING' });
     const byId = await inject('GET', `/api/v1/vendor/orders/${accepted.id}`, vendorOwner.token);
@@ -282,6 +315,27 @@ describe('release worker', () => {
     });
     expect(released).toContain(courier.id);
     expect(enqueued).toContain(courier.id);
+  });
+
+  it('[E36] a redelivered release sweep dispatches a due COURIER order exactly once', async () => {
+    const courier = await makeHeldOrder({ holdMsFromNow: -5_000, orderType: 'COURIER' });
+    const enqueueDispatch = vi.fn(async (_orderId: string) => {});
+
+    const first = await orders.releaseDueHeldOrders(enqueueDispatch);
+    expect(first.released).toContain(courier.id);
+    expect(enqueueDispatch).toHaveBeenCalledTimes(1);
+
+    // A crash after the first sweep redelivers the job. The release is a CAS
+    // on holdExpiresAt: the second sweep's findMany no longer matches the
+    // released row, so the courier cascade is not armed a second time.
+    const second = await orders.releaseDueHeldOrders(enqueueDispatch);
+    expect(second.released).not.toContain(courier.id);
+    expect(enqueueDispatch).toHaveBeenCalledTimes(1);
+
+    const row = await app.prisma.order.findUnique({ where: { id: courier.id } });
+    expect(row!.holdExpiresAt).toBeNull();
+    expect(row!.releasedToVendorAt).not.toBeNull();
+    expect(row!.status).toBe('READY_FOR_PICKUP'); // release is visibility, not a transition
   });
 });
 

@@ -17,7 +17,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     qc.invalidateQueries({ queryKey: ['vendor', id] });
     qc.invalidateQueries({ queryKey: ['vendors'] });
   };
-  const approve = useMutation({ mutationFn: () => approveVendor(id), onSuccess: invalidate });
+  const approve = useMutation({ mutationFn: (reason: string) => approveVendor(id, reason), onSuccess: invalidate });
   // [ADM-006] a business losing its storefront is owed the real reason
   const suspend = useMutation({ mutationFn: (reason: string) => suspendVendor(id, reason), onSuccess: invalidate });
   const feature = useMutation({ mutationFn: (featured: boolean) => featureVendor(id, featured), onSuccess: invalidate });
@@ -61,7 +61,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
         )}
         <div className="ml-auto flex gap-2">
           {v.status === 'PENDING_APPROVAL' && (
-            <ActionButton label="Approve" confirm={`Approve ${v.name}? Their 14-day trial starts now.`} onClick={() => approve.mutate()} disabled={busy} />
+            <ActionButton label="Approve" confirm={`Approve ${v.name}? Their 14-day trial starts now.`} onClick={() => { const reason = askReason({ action: 'approve this business', subject: v.name }); if (reason) approve.mutate(reason); }} disabled={busy} />
           )}
           <ActionButton
             label={v.isFeatured ? 'Unfeature' : 'Feature'}

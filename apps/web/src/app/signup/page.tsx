@@ -1,13 +1,14 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
 import { sendOtp } from '@/lib/auth';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
 import { SwiftLogo } from '@/components/swift-logo';
-import { currentCoords } from '@/lib/geolocate';
+import { StoreLocationPicker } from '@/components/store-location-picker';
+import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
 
 type Role = 'CUSTOMER' | 'VENDOR' | 'MOVER';
@@ -35,6 +36,17 @@ export default function SignupPage() {
   const [first, setFirst] = useState('');
   const [last, setLast] = useState('');
   const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
+  const [storePin, setStorePin] = useState<StorePin | null>(null);
+  const [placingStore, setPlacingStore] = useState(false);
+  const storePinButton = useRef<HTMLButtonElement>(null);
+  const restorePinFocus = useRef(false);
+  useEffect(() => {
+    if (!placingStore && restorePinFocus.current) {
+      storePinButton.current?.focus();
+      restorePinFocus.current = false;
+    }
+  }, [placingStore]);
+  const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
   const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +71,7 @@ export default function SignupPage() {
       const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
       const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
-      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/order'));
+      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
       return;
     }
     setStep('name');
@@ -67,22 +79,37 @@ export default function SignupPage() {
   const doRegister = () => wrap(async () => {
     // Consent is explicit clickwrap: the agreement line sits directly above
     // the button that triggers this. Recorded server-side [SWIFT-AUD-D9-03].
-    await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role, acceptTerms: true });
+    try {
+      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role, acceptTerms: true });
+    } catch (cause) {
+      // Registration consumes its HttpOnly continuation before account reads
+      // and writes. A transport or server error is therefore ambiguous: never
+      // encourage replay of the old code/cookie. Keep the entered profile data
+      // but return to the step that starts a completely fresh ceremony.
+      setCode('');
+      setStep('phone');
+      const detail = cause instanceof Error ? cause.message : 'Could not create your account.';
+      throw new Error(`${detail} Request a new verification code to try again.`);
+    }
     if (role === 'CUSTOMER') {
-      const next = safeReturnPath();
-      router.replace(`/selfie${next ? `?next=${encodeURIComponent(next)}` : ''}`);
+      // [E27] No profile selfie merely to browse or order: a new customer goes
+      // where they were headed (else to ordering), not to the camera.
+      router.replace(safeReturnPath() || '/');
     }
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
   const doBusiness = () => wrap(async () => {
-    // [F-027-02] A business's coordinates are where customers are sent and
-    // where dispatch measures from. Registering a shop at the Georgetown city
-    // centre because a browser prompt was denied puts a real storefront on
-    // the map in the wrong place, durably. wrap() surfaces the refusal.
-    const c = await currentCoords('put your business on the map');
-    await becomePartner({ role: 'VENDOR', business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: c.lat, longitude: c.lng } });
+    if (!storePin || placingStore) throw new Error('Place your store on the map');
+    if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
+    await becomePartner({ role: 'VENDOR', business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } });
     router.replace('/dashboard');
   });
+  const editBusinessAddress = (patch: Partial<typeof biz>) => {
+    setBiz({ ...biz, ...patch });
+    setStorePin(null);
+    setPlacingStore(false);
+    setError(null);
+  };
   const doVehicle = () => wrap(async () => {
     await becomePartner({ role: 'MOVER', vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } });
     router.replace('/portal');
@@ -113,7 +140,7 @@ export default function SignupPage() {
               </button>
             ))}
             <p className={styles.inlineText}>Already on Swift? <Link
-              href="/login?next=/order"
+              href="/login?next=/"
               onClick={(event) => {
                 const next = safeReturnPath();
                 if (!next) return;
@@ -174,10 +201,18 @@ export default function SignupPage() {
             <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
               <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
             </select></div>
-            <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" value={biz.addressLine1} onChange={(e) => setBiz({ ...biz, addressLine1: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" value={biz.city} onChange={(e) => setBiz({ ...biz, city: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" value={biz.region} onChange={(e) => setBiz({ ...biz, region: e.target.value })} className={styles.input} /></div>
-            <button type="button" onClick={() => void doBusiness()} disabled={busy || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business (uses your location)'}</button>
+            <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
+            {placingStore ? (
+              <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
+            ) : (
+              <>
+                <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
+                {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed. {storePin.address ?? biz.addressLine1} — Latitude {storePin.latitude.toFixed(6)}, Longitude {storePin.longitude.toFixed(6)}</p>}
+              </>
+            )}
+            <button type="button" onClick={() => void doBusiness()} disabled={busy || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
             <p className={styles.smallCopy}>You’ll finish verification (documents) in your dashboard before going live.</p>
           </div>
         )}

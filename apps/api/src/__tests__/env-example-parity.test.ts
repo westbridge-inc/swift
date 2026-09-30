@@ -44,13 +44,22 @@ function declared(file: string, name: string): string | undefined {
  * omitted from the other is only a finding when the two EFFECTIVELY differ.
  */
 const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> = [
-  { name: 'LIFECYCLE_V2', whenUnset: '1', what: 'orders are born HELD — the five-minute free-cancel window' },
+  // [DS214 D3] Unset reads as OFF in the code (holdWindowMs, checkoutQueueTiming),
+  // and production now refuses to boot without an explicit value (E08).
+  { name: 'LIFECYCLE_V2', whenUnset: '0', what: 'orders are born HELD — the five-minute free-cancel window' },
   { name: 'ORDER_HOLD_MINUTES', whenUnset: '5', what: 'how long that window lasts' },
   { name: 'DELIVERY_BLOCK_ON_NONE', whenUnset: '1', what: 'whether a no-rider delivery checkout is blocked' },
   { name: 'TAXI_ALLOW_REQUEST_ON_NONE', whenUnset: '1', what: 'whether a passenger may request with no drivers near' },
   { name: 'DISPATCH_EXHAUSTION', whenUnset: '0', what: 'the terminal exhausted state and pickup conversion' },
   { name: 'PREVIEW_MODE', whenUnset: '0', what: 'whether never-live vendors may draft listings' },
-  { name: 'ALERTS_LOUD', whenUnset: '0', what: 'whether ops paging is push+in-app or log-only' },
+  // [Q10] ALERTS_LOUD was described as ops paging; the code only ever used it
+  // for the store alert ladder timing and, until loud alerts 1/4, to gate the
+  // mover offer push. The offer push now has its own kill switch.
+  { name: 'ALERTS_LOUD', whenUnset: '0', what: 'how soon the store new-order ladder re-alerts and falls back to SMS' },
+  { name: 'OFFER_PUSH', whenUnset: '1', what: 'whether every mover offer is also pushed (0 = kill switch)' },
+  // Only exactly '1' turns it on (providers/mmg/mmg-checkout.ts); the boot
+  // guard refuses any other non-zero spelling.
+  { name: 'MMG_CHECKOUT_ENABLED', whenUnset: '0', what: 'whether partners may pay the weekly fee on the MMG hosted checkout page' },
 ];
 
 /**

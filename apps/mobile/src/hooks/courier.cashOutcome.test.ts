@@ -118,7 +118,7 @@ describe('the screen', () => {
     expect(courierDoor).toBeGreaterThan(-1);
     expect(mmgDoor).toBeGreaterThan(courierDoor);
     // The generic cash door's tap is the rider's handover; it lives after the courier branch.
-    const cashTap = SCREEN.indexOf("riderAct.mutate({ id: job.id, action: 'handover' })");
+    const cashTap = SCREEN.indexOf("riderAct.mutate({ id: job.id, action: 'handover', pin }");
     expect(cashTap).toBeGreaterThan(mmgDoor);
     // The already-paid courier door sends the photo alone.
     expect(SCREEN).toContain("bigButton('Capture proof & deliver', () => captureCourierProof(), { loading: courierProof.isPending, disabled: busy })");

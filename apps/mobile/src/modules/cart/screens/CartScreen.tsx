@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
-import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, AppState, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
+import { createHomeRefreshGate, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { customerApi } from '../../../services/api';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -14,6 +15,7 @@ import {
   CheckoutAlreadyPlacedError,
   CheckoutInFlightError,
   useRemoveCartItem,
+  useRemoveCartPromo,
   useSetCartTip,
   useUpdateCartItem,
 } from '../../../hooks/customer';
@@ -23,6 +25,7 @@ import { useBookingStore } from '../../../stores/bookingStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { openMmgPaymentAction } from '../../../lib/payLink';
 import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../kit/toast';
@@ -48,6 +51,19 @@ import { BrandSwitch } from '../../../kit/controls';
 import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
+import {
+  cartStaleCheckoutCode,
+  cartPricingChoices,
+  checkoutErrorMessage,
+  deliveryFeeRows,
+  isBookingsOnly,
+  pickupRetryChoices,
+  pickupStoreNames,
+  pricedTip,
+  quoteStoreIds,
+  quotedRiderTip,
+  shortStores,
+} from '../cartQuote';
 import {
   checkoutPaymentMethod,
   normalizeCartPaymentCapabilities,
@@ -124,11 +140,11 @@ export function CartScreen() {
   const { isAuthenticated, promptLogin } = useAuthStore();
   const { latitude, longitude } = useLocationStore();
 
-  const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined);
   const updateItem = useUpdateCartItem();
   const removeItem = useRemoveCartItem();
   const clearCart = useClearCart();
   const setTip = useSetCartTip();
+  const removePromo = useRemoveCartPromo();
   const placeOrder = usePlaceOrder<any>();
   // [MOB-020] An intent this account sent and never heard back about (the app
   // died mid-request) is resolved against the server before the button is
@@ -174,6 +190,13 @@ export function CartScreen() {
   const [paySelection, setPaySelection] = useState<CartPaymentSelection>({ method: 'CASH', scope: '' });
   // Pickup spec 2.1: the FIRST decision — it reshapes everything below.
   const [fulfillment, setFulfillment] = useState<'DELIVERY' | 'PICKUP'>('DELIVERY');
+  // [E01-B] The no-riders retry is no longer one tap: armed only once the
+  // customer asks to switch, and the pickup quote it fetches is shown in a
+  // confirm step BEFORE anything is placed.
+  const [confirmPickup, setConfirmPickup] = useState(false);
+  // Re-arms the confirm effect on every tap of the retry button (a dismissed
+  // Alert must not leave the retry dead).
+  const [pickupAttempt, setPickupAttempt] = useState(0);
   const [placedPickup, setPlacedPickup] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
@@ -189,7 +212,73 @@ export function CartScreen() {
   const canGoBack = navigation.canGoBack();
   const appointments = useBookingStore((s) => s.appointments);
   const clearAppointments = useBookingStore((s) => s.clear);
+  // [E01] What the quote is asked to price: the stores in the cart and whether
+  // it is bookings only — read from the quote's own lines and kept here, so the
+  // next quote request can carry them while it is in flight.
+  const [quoteBasis, setQuoteBasis] = useState<{ storeIds: string[]; bookingsOnly: boolean }>({ storeIds: [], bookingsOnly: false });
+  // [E01-B] The applied promo code — read from the quote's own echo of the
+  // stored promo (the same state+effect pattern as quoteBasis), so it is
+  // exactly present while a code is applied and gone the moment one is removed.
+  const [appliedPromo, setAppliedPromo] = useState<string | null>(null);
+  // [E01] ONE set of pricing choices — the quote is requested with it and the
+  // order button submits it, so the server prices exactly what is charged.
+  const pricing = useMemo(
+    // [E01-B] The applied promo rides this SAME object to the order body: it
+    // is read from the quote's own echo of the stored promo, so it appears
+    // exactly while a code is applied and drops the moment one is removed.
+    () => cartPricingChoices({ mode: fulfillment, express, storeIds: quoteBasis.storeIds, bookingsOnly: quoteBasis.bookingsOnly, selectedTip, promoCode: appliedPromo }),
+    [fulfillment, express, quoteBasis, selectedTip, appliedPromo],
+  );
+  const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined, pricing);
   const c = cart.data; // null = empty cart
+  // [E01-B] The retry's own quote, requested only once the customer asked to
+  // switch (no riders): every store collects, no express, no tip, promo kept.
+  // Its total is shown in the confirm step; it is never requested otherwise.
+  const retryPricing = useMemo(
+    () => (confirmPickup
+      ? pickupRetryChoices({ storeIds: quoteBasis.storeIds, bookingsOnly: quoteBasis.bookingsOnly, promoCode: appliedPromo })
+      : undefined),
+    [confirmPickup, quoteBasis, appliedPromo],
+  );
+  const pickupQuote = useCart<any>(latitude ?? undefined, longitude ?? undefined, retryPricing, confirmPickup);
+  // [E07] A line that went dark while the phone sat in the background stays
+  // "available" until the quote is re-fetched. Re-quote when the Cart tab
+  // regains focus AND when the app returns to the foreground with the Cart
+  // already open — backgrounding changes no navigation state, so focus alone
+  // never fires there (DS216 D1). This is Home's attention seam, with its
+  // gate: focus and foreground arriving together refresh once, and a quote
+  // already in flight is never cancelled and restarted (DS216 D6). The latest
+  // refetch/isFetching are held in refs (the useEvent pattern onOrder uses
+  // below) so the subscription never re-arms on an ordinary render.
+  const cartRefetchLatest = useRef(cart.refetch);
+  const cartFetchingLatest = useRef(cart.isFetching);
+  useEffect(() => {
+    cartRefetchLatest.current = cart.refetch;
+    cartFetchingLatest.current = cart.isFetching;
+  });
+  const cartAttentionGate = useMemo(
+    () => createHomeRefreshGate(() => { void cartRefetchLatest.current({ cancelRefetch: false }); }, 750),
+    [],
+  );
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!isAuthenticated) return undefined;
+      return subscribeToHomeAttention(
+        AppState.currentState,
+        (callback) => AppState.addEventListener('change', callback),
+        () => cartAttentionGate(Date.now(), cartFetchingLatest.current),
+      );
+    }, [isAuthenticated, cartAttentionGate]),
+  );
+  useEffect(() => {
+    const next = { storeIds: quoteStoreIds(c?.items), bookingsOnly: isBookingsOnly(c?.items) };
+    setQuoteBasis((prev) =>
+      prev.bookingsOnly === next.bookingsOnly && prev.storeIds.join('|') === next.storeIds.join('|') ? prev : next);
+  }, [c?.items]);
+  useEffect(() => {
+    const next = c?.promoCode?.code ?? null;
+    setAppliedPromo((prev) => (prev === next ? prev : next));
+  }, [c?.promoCode?.code]);
   const paymentCapabilities = useMemo(
     () => normalizeCartPaymentCapabilities(c?.paymentCapabilities),
     [c?.paymentCapabilities],
@@ -228,20 +317,12 @@ export function CartScreen() {
     },
   });
 
-  if (!isAuthenticated) {
-    return (
-      <Screen>
-        <CartHeader onBack={canGoBack ? () => navigation.goBack() : undefined} />
-        <EmptyState
-          picto="groceries"
-          title="Sign in to start a cart"
-          body="Your basket lives on your account so it follows you between devices."
-          actionLabel="Sign in"
-          onAction={promptLogin}
-        />
-      </Screen>
-    );
-  }
+  // [E01] The screen may only commit money against a SETTLED quote: one priced
+  // for the current choices (not the previous choice's, kept on screen while
+  // the new one loads) and not being refreshed after a cart change — including
+  // while a promo apply/remove is in flight, so the code in the body is the
+  // code the quote on screen was priced with.
+  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removePromo.isPending && !applyPromo.isPending;
 
   const items: any[] = c?.items ?? [];
 
@@ -263,18 +344,16 @@ export function CartScreen() {
     selectedTip,
     cartTip: c?.tipAmount,
   });
-  const displayedTotal = c
-    ? Math.max(
-        0,
-        (pickup
-          ? c.totalAmount - c.deliveryFee
-          : express && c.deliveryFee > 0
-            ? c.expressTotal
-            : c.totalAmount)
-          - Number(c.tipAmount ?? 0)
-          + displayedTip,
-      )
-    : 0;
+  // [E01] The total is the SERVER's, priced for the choices on screen (the
+  // quote is requested with them) — never derived here. The old screen
+  // subtracted ONE store's fee for pickup and swapped the tip itself: a third
+  // calculator, wrong as soon as a second store joined the cart.
+  const displayedTotal = c ? Number(c.totalAmount) : 0;
+  // The summary's rows come from the same quote as the total.
+  const feeRows = deliveryFeeRows(c);
+  const riderTip = quotedRiderTip(c, displayedTip);
+  // [E09] Every store below its own minimum, named, with the amount to add.
+  const short = shortStores(c);
   const choosePickup = () => {
     setFulfillment('PICKUP');
     setExpress(false); // express is a delivery speed
@@ -287,31 +366,30 @@ export function CartScreen() {
   // at the counter — it must NEVER demand a delivery address. Address is for
   // delivery carts and home-visit bookings only.
   const needsAddress = (!apptOnly && !pickup) || homeVisit;
-  // Slot ISOs carry local wall-clock time on their UTC face (same convention
-  // as the slot picker) — format in UTC or the time shifts by the device TZ.
-  const fmtSlot = (iso: string) => {
-    const d = new Date(iso);
-    const day = d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
-    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
-    return `${day}, ${time}`;
-  };
 
   const onOrder = (extra?: Record<string, unknown>) => {
-    const asPickup = pickup && !!c?.vendor?.id;
-    const submittingPickup = pickup || (extra as any)?.fulfillmentSelections != null;
-    const submittedTip = checkoutTipAmount({
-      pickupOrApptOnly: apptOnly || submittingPickup,
-      selectedTip,
-      cartTip: c?.tipAmount,
-    });
+    // A pickup retry (no riders online) arrives as `extra.fulfillmentSelections`.
+    const pickupRetry = (extra as any)?.fulfillmentSelections != null;
+    const submittingPickup = pickup || pickupRetry;
+    // [E01 · F-013-01] The tip the quote on screen was priced with: the
+    // customer's own choice when made (it outranks the persisted cart tip), none
+    // for a basket with no rider, else the cart's tip the server priced. A
+    // pickup retry has no rider either.
+    const submittedTip = pickupRetry ? 0 : pricedTip(pricing, c);
     const submittedMethod = checkoutPaymentMethod(effectivePaySelection, paymentCapabilities);
     placeOrder.mutate(
       {
         paymentMethod: submittedMethod,
-        ...(express && !pickup ? { express: true } : {}),
+        // [E01-B] The applied promo code — the charge must carry the code the
+        // quote discounted with, and only while one is applied (removal drops
+        // it from this same `pricing` object).
+        ...(pricing.promoCode ? { promoCode: pricing.promoCode } : {}),
+        // [E01] Exactly the choices the quote was priced with: the speed, and
+        // the pickup choice for EVERY store in the basket.
+        ...(pricing.express ? { express: true } : {}),
+        ...(pricing.fulfillmentSelections ? { fulfillmentSelections: pricing.fulfillmentSelections } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
-        ...(asPickup ? { fulfillmentSelections: { [c.vendor.id]: 'PICKUP' } } : {}),
         ...(extra ?? {}),
         tipAmount: submittedTip,
       },
@@ -349,10 +427,90 @@ export function CartScreen() {
           if (code.startsWith('MMG_')) {
             setPaySelection(selectCartPaymentMethod('CASH', paymentCapabilities));
           }
+          // [E07] A refusal because the cart went stale — an item was 86'd or
+          // its stock ran out after the last quote. Re-quote now so the
+          // unavailable line marks itself immediately; the order button stays
+          // blocked until it is removed (that guard reads the quote's own
+          // `unavailableItemIds`).
+          if (cartStaleCheckoutCode(err)) void cart.refetch();
         },
       },
     );
   };
+
+  // The confirm effect lives with the hooks above the auth gate, but the order
+  // placement it confirms is defined below the gate's data. Keep the latest
+  // callback in a ref (the useEvent pattern) so the Alert never calls a stale
+  // closure and the effect's deps stay stable.
+  const onOrderLatest = useRef(onOrder);
+  useEffect(() => {
+    onOrderLatest.current = onOrder;
+  });
+  // [E01-B] The retry's confirm step shows the NEW pickup total before
+  // anything is placed: the pickup quote (requested when the customer asked to
+  // switch) settles, the Alert shows its server total, and only the Alert's
+  // confirm button places the order.
+  const pickupConfirmShown = useRef(false);
+  useEffect(() => {
+    if (!confirmPickup) {
+      pickupConfirmShown.current = false;
+      return;
+    }
+    // The retry may only place through the confirm step, so a quote that
+    // cannot be priced must say so instead of silently dead-ending the
+    // customer's only escape.
+    if (pickupQuote.isError) {
+      setConfirmPickup(false);
+      Alert.alert('Couldn’t price pickup', 'Try again in a moment.');
+      return;
+    }
+    if (pickupQuote.isFetching || pickupQuote.isPlaceholderData || !pickupQuote.data || pickupConfirmShown.current) return;
+    const pickupTotal = Number(pickupQuote.data.totalAmount);
+    if (!Number.isFinite(pickupTotal)) return;
+    pickupConfirmShown.current = true;
+    Alert.alert(
+      'Order for pickup instead?',
+      `Your pickup total is ${money(pickupTotal)}. The order is only placed when you confirm.`,
+      [
+        { text: 'Not now', style: 'cancel', onPress: () => setConfirmPickup(false) },
+        {
+          text: 'Confirm pickup order',
+          onPress: () => {
+            setConfirmPickup(false);
+            // [E01] Every store in the basket collects — not just the one
+            // `cart.vendor` happens to track (the rest would still wait for a
+            // rider).
+            const storeIds = quoteStoreIds(c?.items);
+            if (storeIds.length === 0) return;
+            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
+          },
+        },
+      ],
+    );
+  }, [confirmPickup, pickupAttempt, pickupQuote.isFetching, pickupQuote.isPlaceholderData, pickupQuote.isError, pickupQuote.data, c?.items]);
+  const retryAsPickup = () => {
+    if (quoteStoreIds(c?.items).length === 0) return;
+    // Re-arm on every tap: a dismissed (rather than cancelled) Alert must not
+    // leave the retry dead — the attempt counter forces the effect to re-run.
+    pickupConfirmShown.current = false;
+    setConfirmPickup(true);
+    setPickupAttempt((n) => n + 1);
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <Screen>
+        <CartHeader onBack={canGoBack ? () => navigation.goBack() : undefined} />
+        <EmptyState
+          picto="groceries"
+          title="Sign in to start a cart"
+          body="Your basket lives on your account so it follows you between devices."
+          actionLabel="Sign in"
+          onAction={promptLogin}
+        />
+      </Screen>
+    );
+  }
 
   // [MOB-020] The two answers that are NOT failures: the order already exists
   // (a replayed key under a changed body, or a resolved earlier intent) and
@@ -364,16 +522,13 @@ export function CartScreen() {
     : stillPlacing
       ? 'This order is already being placed — hold on a moment.'
       : placeOrder.isError
-        ? ((placeOrder.error as any)?.response?.data?.error?.message ?? 'Could not place the order. Try again.')
+        // [E01-B] A refusal at CHECKOUT (promo refusals included) is shown as
+        // the message checkout returned — exactly what the web cart shows.
+        ? checkoutErrorMessage(placeOrder.error)
         : undefined;
   // Availability spec §2: zero riders online → the server refuses delivery
   // honestly; pickup is the same food without the wait for a rider.
   const noRiders = (placeOrder.error as any)?.response?.data?.error?.code === 'DELIVERY_NO_RIDERS';
-  const retryAsPickup = () => {
-    const vendorId = c?.vendor?.id;
-    if (!vendorId) return;
-    onOrder({ fulfillmentSelections: { [vendorId]: 'PICKUP' } });
-  };
 
   return (
     <Screen>
@@ -386,7 +541,11 @@ export function CartScreen() {
 
       {cart.isLoading ? (
         <LoadingBlock />
-      ) : cart.isError ? (
+      ) : cart.isError && cart.data === undefined ? (
+        // [E07 · DS222 R1] Only a cart that never loaded is an error screen. A
+        // failed background re-quote (back from the background while offline)
+        // keeps the cart it already has — lines, Remove pills and all — and
+        // the next focus or foreground tries again. (null data = an empty cart.)
         <ErrorState onRetry={() => cart.refetch()} />
       ) : !c || items.length === 0 ? (
         <EmptyState
@@ -445,7 +604,8 @@ export function CartScreen() {
               <View style={{ flex: 1 }}>
                 <T variant="label" tone="muted">Pick up from</T>
                 <T variant="body" weight="semibold" style={{ marginTop: 2 }} numberOfLines={1}>
-                  {c.vendor?.name ?? 'The store'}
+                  {/* [E01] Every store the pickup quote collects from. */}
+                  {pickupStoreNames(c).join(' · ') || (c.vendor?.name ?? 'The store')}
                 </T>
               </View>
             </View>
@@ -510,9 +670,22 @@ export function CartScreen() {
             {c.promoCode ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.lg }}>
                 <Feather name="check-circle" size={13} color={color.success} />
-                <T variant="caption" tone="success">
+                <T variant="caption" tone="success" style={{ flex: 1 }}>
                   {c.promoCode.code} — {c.promoCode.description}
                 </T>
+                {/* [E01-B] The customer can remove an applied code: the quote
+                    re-prices without it and checkout stops sending it (the
+                    web cart cannot remove a promotion yet). */}
+                <PillButton
+                  label="Remove"
+                  variant="soft"
+                  size="sm"
+                  loading={removePromo.isPending}
+                  onPress={() => {
+                    setPromoMsg(null);
+                    removePromo.mutate();
+                  }}
+                />
               </View>
             ) : null}
           </View>
@@ -591,46 +764,62 @@ export function CartScreen() {
                       </T>
                     ) : null}
                     {!it.isAvailable ? (
-                      <T variant="caption" tone="error" style={{ marginTop: 2 }}>
-                        No longer available — remove to continue
-                      </T>
-                    ) : null}
-                    <View
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        marginTop: space.sm,
-                      }}
-                    >
-                      {/* A quantity stepper is one of the four things allowed
-                          to wear maroon. */}
-                      <AddMorph
-                        qty={it.quantity}
-                        busy={updateItem.isPending}
-                        onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                        onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                        onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
-                      />
-                      {/* Removing a line is an ordinary action, not an error —
-                          it stops being red. hitSlop holds the 44pt target. */}
-                      <Pressable
-                        onPress={() => removeItem.mutate(it.id)}
-                        hitSlop={14}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Remove ${it.name}`}
+                      <>
+                        <T variant="caption" tone="error" style={{ marginTop: 2 }}>
+                          No longer available — remove to continue
+                        </T>
+                        {/* [E07] One tap to recover: the SAME remove-line
+                            mutation as the trash glyph, labelled so the path
+                            out is not hidden behind an icon. A successful
+                            removal clears the refusal that named this line —
+                            the message described a cart that no longer exists. */}
+                        <PillButton
+                          label="Remove"
+                          variant="outline"
+                          size="sm"
+                          style={{ alignSelf: 'flex-start', marginTop: space.sm }}
+                          loading={removeItem.isPending}
+                          onPress={() => removeItem.mutate(it.id, { onSuccess: () => placeOrder.reset() })}
+                        />
+                      </>
+                    ) : (
+                      <View
+                        style={{
+                          flexDirection: 'row',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          marginTop: space.sm,
+                        }}
                       >
-                        {({ pressed }) => (
-                          <View style={{ opacity: pressed ? 0.6 : 1 }}>
-                            <Feather
-                              name="trash-2"
-                              size={18}
-                              color={pressed ? color.text.primary : color.text.muted}
-                            />
-                          </View>
-                        )}
-                      </Pressable>
-                    </View>
+                        {/* A quantity stepper is one of the four things allowed
+                            to wear maroon. */}
+                        <AddMorph
+                          qty={it.quantity}
+                          busy={updateItem.isPending}
+                          onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                          onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
+                          onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
+                        />
+                        {/* Removing a line is an ordinary action, not an error —
+                            it stops being red. hitSlop holds the 44pt target. */}
+                        <Pressable
+                          onPress={() => removeItem.mutate(it.id)}
+                          hitSlop={14}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Remove ${it.name}`}
+                        >
+                          {({ pressed }) => (
+                            <View style={{ opacity: pressed ? 0.6 : 1 }}>
+                              <Feather
+                                name="trash-2"
+                                size={18}
+                                color={pressed ? color.text.primary : color.text.muted}
+                              />
+                            </View>
+                          )}
+                        </Pressable>
+                      </View>
+                    )}
                   </View>
                 </View>
               </View>
@@ -732,17 +921,28 @@ export function CartScreen() {
             <T variant="heading">{apptOnly ? 'Booking summary' : 'Order summary'}</T>
             <View style={{ marginTop: space.md }}>
               <InfoRow label={`Items (${c.itemCount})`} value={money(c.subtotalCustomer)} />
-              {!apptOnly && !pickup ? <InfoRow label="Delivery fee" value={c.deliveryFee === 0 ? 'Free' : money(c.deliveryFee)} /> : null}
+              {/* [E01] A multi-store basket is several orders, so several fees:
+                  one row per delivered store, from the server's per-store plans.
+                  Fees are shown before the express premium (its own row). */}
+              {!apptOnly && !pickup && feeRows?.kind === 'single' ? (
+                <InfoRow label="Delivery fee" value={feeRows.fee === 0 ? 'Free' : money(feeRows.fee)} />
+              ) : null}
+              {!apptOnly && !pickup && feeRows?.kind === 'perStore'
+                ? feeRows.rows.map((row) => (
+                    <InfoRow key={row.vendorId} label={`${row.name} delivery`} value={row.fee === 0 ? 'Free' : money(row.fee)} />
+                  ))
+                : null}
               {pickup ? <InfoRow label="Pickup" value="No delivery fee" /> : null}
-              {!pickup && express && c.deliveryFee > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
+              {!pickup && c.express && c.expressSurcharge > 0 ? <InfoRow label="Express" value={money(c.expressSurcharge)} /> : null}
               {c.discount > 0 ? <InfoRow label="Discount" value={`-${money(c.discount)}`} /> : null}
-              {!apptOnly && !pickup && displayedTip > 0 ? <InfoRow label="Rider tip" value={money(displayedTip)} /> : null}
+              {!apptOnly && !pickup && riderTip > 0 ? <InfoRow label="Rider tip" value={money(riderTip)} /> : null}
               <View style={[RULE, { marginVertical: space.sm }]} />
-              {/* Pickup preview = the same server numbers minus the delivery
-                  leg; the server prices the real order at place time. */}
+              {/* [E01] The server's total for exactly the choices above. While
+                  a changed choice is being re-priced the previous quote is
+                  still on screen, so the total says so instead of a number. */}
               <InfoRow
                 label={pickup ? 'Total at the counter' : 'Total'}
-                value={money(displayedTotal)}
+                value={cart.isPlaceholderData ? 'Updating…' : money(displayedTotal)}
                 strong
               />
             </View>
@@ -753,7 +953,7 @@ export function CartScreen() {
                     <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Feather name="calendar" size={13} color={color.text.muted} />
                       <T variant="caption" tone="muted">
-                        {i.name} — {fmtSlot(appointments[i.itemId]!.slotStart)}
+                        {i.name} — {formatAppointmentSlot(appointments[i.itemId]!.slotStart)}
                         {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
                       </T>
                     </View>
@@ -774,7 +974,20 @@ export function CartScreen() {
             ) : null}
           </View>
 
-          {!c.meetsMinimum ? (
+          {!c.meetsMinimum && short.length > 0
+            ? /* [E09] One warning per store below ITS OWN minimum, naming the
+                 store and the amount still to add — checkout refuses the whole
+                 basket while any store is short. */
+              short.map((store) => (
+                <View key={store.vendorId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
+                  <Feather name="alert-circle" size={14} color={color.warning} />
+                  <T variant="label" tone="warning" style={{ flex: 1 }}>
+                    {store.name} has a minimum order of {money(store.minOrderAmount)} — add {money(store.amountToAdd)} more to order.
+                  </T>
+                </View>
+              ))
+            : null}
+          {!c.meetsMinimum && short.length === 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.warning} />
               <T variant="label" tone="warning">
@@ -804,8 +1017,10 @@ export function CartScreen() {
               variant="outline"
               size="md"
               style={{ marginTop: space.md }}
-              loading={placeOrder.isPending || recovery.recovering}
-              disabled={recovery.recovering || alreadyPlaced || stillPlacing}
+              // [E01-B] Tapping asks for the pickup quote whose total the
+              // confirm step then shows — the button waits for that quote.
+              loading={placeOrder.isPending || recovery.recovering || (confirmPickup && pickupQuote.isFetching)}
+              disabled={recovery.recovering || alreadyPlaced || stillPlacing || !quoteSettled || (confirmPickup && pickupQuote.isFetching)}
               onPress={retryAsPickup}
             />
           ) : null}
@@ -822,7 +1037,9 @@ export function CartScreen() {
             onPress={() => onOrder()}
             size="xl"
             loading={placeOrder.isPending || recovery.recovering}
-            disabled={!c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0 || recovery.recovering || alreadyPlaced || stillPlacing}
+            // [E01] Never commit money against a quote that is not the settled
+            // price of what this button submits.
+            disabled={!quoteSettled || !c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0 || recovery.recovering || alreadyPlaced || stillPlacing}
             style={{ marginTop: space.xl }}
           />
           {needsAddress && !c.deliveryAddress ? (

@@ -23,8 +23,15 @@ const DAY = 86_400_000;
 
 describe('subscriptionOperability — the truth table', () => {
   const at = new Date('2026-08-01T12:00:00Z');
-  const sub = (status: string, graceOffsetMs?: number) =>
-    ({ status, gracePeriodEnd: graceOffsetMs === undefined ? null : new Date(at.getTime() + graceOffsetMs) }) as never;
+  // An auto-renewing row inside its period — the ordinary shape; the E12 case
+  // below overrides autoRenew and the period end.
+  const sub = (status: string, graceOffsetMs?: number, over: { autoRenew?: boolean; periodEndOffsetMs?: number } = {}) =>
+    ({
+      status,
+      gracePeriodEnd: graceOffsetMs === undefined ? null : new Date(at.getTime() + graceOffsetMs),
+      autoRenew: over.autoRenew ?? true,
+      currentPeriodEnd: new Date(at.getTime() + (over.periodEndOffsetMs ?? 7 * 24 * 60 * 60 * 1000)),
+    }) as never;
 
   it('missing row: caller policy decides', () => {
     expect(subscriptionOperability(null, { missingRow: 'BLOCK' }, at)).toEqual({ operable: false, why: 'MISSING' });
@@ -38,6 +45,19 @@ describe('subscriptionOperability — the truth table', () => {
     expect(subscriptionOperability(sub('PAST_DUE'), { missingRow: 'BLOCK' }, at).operable).toBe(true); // no deadline set → the sweep owns it
     const lapsed = subscriptionOperability(sub('PAST_DUE', -DAY), { missingRow: 'BLOCK' }, at);
     expect(lapsed).toEqual({ operable: false, why: 'GRACE_LAPSED', status: 'PAST_DUE' });
+  });
+
+  it('[E12] billing stopped: work continues exactly until the paid period (or trial) ends, then the gate refuses', () => {
+    const hour = 60 * 60 * 1000;
+    for (const status of ['ACTIVE', 'TRIAL'] as const) {
+      expect(subscriptionOperability(sub(status, undefined, { autoRenew: false, periodEndOffsetMs: hour }), { missingRow: 'BLOCK' }, at))
+        .toEqual({ operable: true });
+      expect(subscriptionOperability(sub(status, undefined, { autoRenew: false, periodEndOffsetMs: -1 }), { missingRow: 'BLOCK' }, at))
+        .toEqual({ operable: false, why: 'BILLING_STOPPED', status });
+    }
+    // an auto-renewing row past its period end is a renewal in flight, not a stop
+    expect(subscriptionOperability(sub('ACTIVE', undefined, { periodEndOffsetMs: -hour }), { missingRow: 'BLOCK' }, at))
+      .toEqual({ operable: true });
   });
 
   it('every non-operating status blocks with the status verdict', () => {

@@ -2,7 +2,8 @@
  * [STA-1 4.1 / DL-7] Deny-readiness — every public GET survives
  * TENANT_UNSCOPED_ACCESS=deny.
  *
- * assertTenantWall requires `deny` in production once a second tenant exists.
+ * assertTenantWall requires `deny` in production wherever the database wall
+ * actually binds — at any tenant count, one included (REPORT-111 P0.3).
  * Under deny, an unauthenticated GET that touches a tenant model without
  * binding a tenant is a 500 (TENANT_CONTEXT_REQUIRED) — measured on /home
  * before the public-browse hook. This suite builds the whole app, calls every

@@ -210,13 +210,14 @@ describe('[M-04] the poller: terminal status and dunning outcome land together o
     expect(await failedEvents(subId)).toBe(1);
   });
 
-  it('an UNKNOWN request past its TTL expires and duns in one transition as well', async () => {
+  it('a never-authorized UNKNOWN reservation past TTL expires and duns atomically', async () => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due });
     const unknown = await app.prisma.subscriptionPayment.create({
       data: {
         subscriptionId: subId, amount: 12000, status: 'UNKNOWN', paymentMethod: 'MOBILE_MONEY',
         clientKey: `sub:${subId}:${due.toISOString().slice(0, 10)}:a0`, externalRef: null,
+        failureRaw: { providerEffect: 'NOT_SENT', providerRail: 'MOBILE_MONEY' },
         periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
         createdAt: new Date(Date.now() - 26 * HOUR), expiresAt: new Date(Date.now() - HOUR),
       },
@@ -237,7 +238,7 @@ describe('[M-04] the poller: terminal status and dunning outcome land together o
 });
 
 describe('[M-04] the biller: a synchronous MMG decline is the same one transition', () => {
-  it('a crash after the intent is marked FAILED rolls it back to UNKNOWN; the poller then expires it with exactly one outcome', async () => {
+  it('a crash after FAILED rolls back to UNKNOWN; confirmed provider recovery then duns exactly once', async () => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due });
     vi.spyOn(SandboxMmgProvider.prototype, 'initiatePayment').mockResolvedValue({ status: 'declined', transactionId: '', reason: 'Payer declined (test)' });
@@ -255,13 +256,20 @@ describe('[M-04] the biller: a synchronous MMG decline is the same one transitio
       expect(await billing.billSubscription(await subWithRelations(subId))).toBe('pending');
       expect(await failedEvents(subId)).toBe(0);
 
-      // Reconciliation owns the uncertainty: past the TTL the poller expires
-      // the intent and applies the one outcome, atomically.
-      const polled = await billing.pollPendingMmgCharges(tick(25));
-      expect(polled.failed).toBeGreaterThanOrEqual(1); // this intent, plus any other row this file left due
+      // The rollback lost the terminal result, not its dispatch authority.
+      // Empty history after TTL cannot stand in for another terminal answer.
+      await billing.pollPendingMmgCharges(tick(25));
+      expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('UNKNOWN');
+      expect(await failedEvents(subId)).toBe(0);
+      const evidence = { status: 'declined' as const, transactionId: `synthetic-declined-${subId}`, amountMinor: 1200000, currencyCode: 'GYD', reference: intent.clientKey! };
+      vi.spyOn(SandboxMmgProvider.prototype, 'transactionHistory').mockResolvedValue([evidence]);
+      vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockResolvedValue(evidence);
+      await billing.pollPendingMmgCharges(tick(26)); // adopt the provider id
+      const polled = await billing.pollPendingMmgCharges(tick(27));
+      expect(polled.failed).toBeGreaterThanOrEqual(1);
       const p = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } });
       const s2 = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-      expect({ payment: p.status, sub: s2.status, attempts: s2.failedAttempts }).toEqual({ payment: 'EXPIRED', sub: 'PAST_DUE', attempts: 1 });
+      expect({ payment: p.status, sub: s2.status, attempts: s2.failedAttempts }).toEqual({ payment: 'FAILED', sub: 'PAST_DUE', attempts: 1 });
       expect(await failedEvents(subId)).toBe(1);
     } finally {
       vi.restoreAllMocks();
@@ -327,15 +335,88 @@ describe('[M-04 · operations clause] the repair pass: a terminal payment withou
     expect(await failedEvents(withSuccess.subId)).toBe(0);
   });
 
-  it('a gap on a subscription that has since left the live states is counted, never re-dunned', async () => {
+  it('a gap on a subscription that has since left the live states is marked closed, never re-dunned', async () => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due });
     await terminalPayment(subId, due, 'EXPIRED');
     await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'CANCELLED' } });
     const r = await billing.reconcileTerminalWithoutOutcome();
-    expect(r.stillOpen).toBeGreaterThanOrEqual(1);
+    expect(r.repaired).toBeGreaterThanOrEqual(1);
     const s = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
     expect({ status: s.status, attempts: s.failedAttempts }).toEqual({ status: 'CANCELLED', attempts: 0 });
     expect(await failedEvents(subId)).toBe(0);
+    expect((await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } })).failureRaw)
+      .toMatchObject({ subscriptionOutcome: 'PRESERVED_NO_DUNNING', subscriptionStatus: 'CANCELLED' });
+  });
+
+  it('preserved terminal markers are excluded before the 500-row repair cap', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const closed = await makeMoverWithMmgSub({ due });
+    await app.prisma.subscription.update({ where: { id: closed.subId }, data: { status: 'CANCELLED' } });
+    const old = new Date(Date.now() - 20 * DAY);
+    await app.prisma.subscriptionPayment.createMany({
+      data: Array.from({ length: 501 }, (_, i) => ({
+        subscriptionId: closed.subId,
+        amount: 12000,
+        status: 'FAILED' as const,
+        paymentMethod: 'MOBILE_MONEY' as const,
+        failureCode: 'REQUEST_EXPIRED',
+        failureRaw: { subscriptionOutcome: 'PRESERVED_NO_DUNNING', subscriptionStatus: 'CANCELLED' },
+        periodStart: new Date(due.getTime() - i * 1000),
+        periodEnd: new Date(due.getTime() + 7 * DAY),
+        createdAt: new Date(old.getTime() + i),
+      })),
+    });
+    const live = await makeMoverWithMmgSub({ due });
+    await terminalPayment(live.subId, due, 'EXPIRED');
+
+    const result = await billing.reconcileTerminalWithoutOutcome();
+
+    expect(result.repaired).toBeGreaterThanOrEqual(1);
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: live.subId }, select: { status: true, failedAttempts: true } }))
+      .toEqual({ status: 'PAST_DUE', failedAttempts: 1 });
+    expect(await failedEvents(live.subId)).toBe(1);
+  });
+
+  it('ordinary failure/success outcomes are excluded before the cap, including equal-createdAt rows', async () => {
+    const handledDue = new Date(Date.now() - 5 * DAY);
+    const failed = await makeMoverWithMmgSub({ due: handledDue });
+    const paid = await makeMoverWithMmgSub({ due: handledDue });
+    const old = new Date(Date.now() - 20 * DAY);
+    const handledPayments = (subscriptionId: string, prefix: string) => Array.from({ length: 250 }, (_, i) => ({
+      subscriptionId,
+      amount: 12000,
+      status: 'FAILED' as const,
+      paymentMethod: 'MOBILE_MONEY' as const,
+      failureCode: 'REQUEST_EXPIRED',
+      externalRef: `${prefix}-${i}`,
+      periodStart: handledDue,
+      periodEnd: new Date(handledDue.getTime() + 7 * DAY),
+      createdAt: old,
+    }));
+    await app.prisma.subscriptionPayment.createMany({
+      data: [...handledPayments(failed.subId, 'handled-failure'), ...handledPayments(paid.subId, 'handled-success')],
+    });
+    const periodKey = handledDue.toISOString().slice(0, 10);
+    await app.prisma.billingEvent.createMany({ data: [
+      {
+        subscriptionId: failed.subId, type: 'CHARGE_FAILED', amount: 12000, currencyCode: 'GYD',
+        idempotencyKey: `failed:${failed.subId}:${periodKey}:a0`, note: 'already handled',
+      },
+      {
+        subscriptionId: paid.subId, type: 'CHARGE_SUCCESS', amount: 12000, currencyCode: 'GYD',
+        idempotencyKey: `success:${paid.subId}:${periodKey}`, note: 'already covered',
+      },
+    ] });
+    const liveDue = new Date(Date.now() - 60_000);
+    const live = await makeMoverWithMmgSub({ due: liveDue });
+    await terminalPayment(live.subId, liveDue, 'EXPIRED');
+
+    const result = await billing.reconcileTerminalWithoutOutcome();
+
+    expect(result.repaired).toBeGreaterThanOrEqual(1);
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: live.subId }, select: { status: true, failedAttempts: true } }))
+      .toEqual({ status: 'PAST_DUE', failedAttempts: 1 });
+    expect(await failedEvents(live.subId)).toBe(1);
   });
 });

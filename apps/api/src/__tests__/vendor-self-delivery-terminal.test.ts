@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -9,9 +9,10 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { reconcileStuckDispatch } from '../modules/dispatch/dispatch.service';
+import { DispatchService, makeDispatchService, reconcileStuckDispatch } from '../modules/dispatch/dispatch.service';
 import { scanStrugglingDeliveries } from '../modules/dispatch/supply-watch.service';
 import { NotificationService } from '../modules/notification/notification.service';
+import { OrderService } from '../modules/order/order.service';
 
 // ---------------------------------------------------------------------------
 // [F-0026] A vendor-self-delivery order must have a terminal state.
@@ -43,8 +44,13 @@ let vendorId = '';
 let customerId = '';
 let riderToken = '';
 let riderId = '';
+let riderUserId = '';
 
-async function makeOrder(mode: 'VENDOR_DELIVERY' | 'PLATFORM_RIDER', status: 'PREPARING' | 'READY_FOR_PICKUP', readyAt?: Date) {
+async function makeOrder(
+  mode: 'VENDOR_DELIVERY' | 'PLATFORM_RIDER' | null,
+  status: 'PENDING' | 'ACCEPTED' | 'PREPARING' | 'READY_FOR_PICKUP',
+  readyAt?: Date,
+) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `SD-${nanoid(10)}`,
@@ -70,8 +76,35 @@ async function makeOrder(mode: 'VENDOR_DELIVERY' | 'PLATFORM_RIDER', status: 'PR
   return order;
 }
 
+/** Stop exactly one canonical transition after its route pre-read but before
+ * the Order row lock. Tests can then commit the competing authority choice and
+ * prove that the locked-row implementation, not the stale route object, wins. */
+function pauseNextTransition() {
+  const original = OrderService.prototype.transitionOrderAtomically;
+  let markEntered!: () => void;
+  let resume!: () => void;
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  const released = new Promise<void>((resolve) => { resume = resolve; });
+  const spy = vi.spyOn(OrderService.prototype, 'transitionOrderAtomically').mockImplementationOnce(async function (this: OrderService, input) {
+    markEntered();
+    await released;
+    return original.call(this, input);
+  });
+  return { entered, resume, restore: () => spy.mockRestore() };
+}
+
 const vendorPut = (url: string, body: unknown = {}) =>
   app.inject({ method: 'PUT', url, headers: { authorization: `Bearer ${vendorToken}`, 'content-type': 'application/json' }, payload: body as Record<string, unknown> });
+
+async function releaseTestRider(orderId: string) {
+  await app.prisma.$transaction([
+    app.prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED', riderId: null } }),
+    app.prisma.rider.update({
+      where: { id: riderId },
+      data: { currentOrderId: null, isAvailable: true, committedFloat: 0 },
+    }),
+  ]);
+}
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -120,12 +153,27 @@ beforeAll(async () => {
   // Online, located at the vendor — the board requires both, and filters by a
   // 15 km radius, so the control order must actually be visible to this rider.
   const rider = await app.prisma.rider.create({
-    data: { userId: ru.id, riderType: 'BOTH', vehicleType: 'MOTORCYCLE', isOnline: true, isAvailable: true, currentLat: 6.8, currentLng: -58.15, lastLocationUpdate: new Date(), locationSessionId: riderSession.id },
+    data: {
+      userId: ru.id,
+      riderType: 'BOTH',
+      vehicleType: 'MOTORCYCLE',
+      isOnline: true,
+      isAvailable: true,
+      currentLat: 6.8,
+      currentLng: -58.15,
+      lastLocationUpdate: new Date(),
+      locationSessionId: riderSession.id,
+      // The conflict tests below must reach the assignment boundary rather
+      // than stopping at the unrelated CASH-float gate.
+      floatLimit: 1_000_000,
+    },
   });
   riderId = rider.id;
+  riderUserId = ru.id;
 });
 
 afterAll(async () => {
+  await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.rider.deleteMany({ where: { id: riderId } });
   await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
@@ -137,6 +185,39 @@ afterAll(async () => {
 });
 
 describe('[F-0026] the self-delivery lane has a terminal', () => {
+  it('runs the complete vendor-owned order journey from acceptance through delivery', async () => {
+    const order = await makeOrder('VENDOR_DELIVERY', 'PENDING');
+
+    for (const [path, expected] of [
+      ['accept', 'ACCEPTED'],
+      ['preparing', 'PREPARING'],
+      ['ready', 'READY_FOR_PICKUP'],
+      ['delivered', 'DELIVERED'],
+    ] as const) {
+      const response = await vendorPut(`/api/v1/vendor/orders/${order.id}/${path}`);
+      expect(response.statusCode, `${path}: ${response.body}`).toBe(200);
+      expect(response.json().data.status).toBe(expected);
+    }
+
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.fulfillmentMode).toBe('VENDOR_DELIVERY');
+    expect(after.riderId).toBeNull();
+    expect(after.status).toBe('DELIVERED');
+    expect((await app.prisma.orderStatusLog.findMany({
+      where: { orderId: order.id },
+      orderBy: { createdAt: 'asc' },
+      select: { status: true },
+    })).map((row) => row.status)).toEqual([
+      'ACCEPTED',
+      'PREPARING',
+      'READY_FOR_PICKUP',
+      'DELIVERED',
+    ]);
+    expect(await app.prisma.notification.count({
+      where: { userId: customerId, data: { path: ['orderId'], equals: order.id } },
+    })).toBeGreaterThanOrEqual(1);
+  });
+
   it('the vendor can mark its own delivery DELIVERED from READY_FOR_PICKUP', async () => {
     const order = await makeOrder('VENDOR_DELIVERY', 'READY_FOR_PICKUP');
 
@@ -268,5 +349,467 @@ describe('[F-0026] rider-side subsystems leave self-delivered orders alone', () 
       select: { id: true },
     });
     expect(nagged).toBeNull();
+  });
+});
+
+describe('[LAUNCH-SD-01] exactly one delivery authority owns an order', () => {
+  const riderAccept = (orderId: string) => app.inject({
+    method: 'POST',
+    url: `/api/v1/rider/orders/${orderId}/accept`,
+    headers: { authorization: `Bearer ${riderToken}`, 'content-type': 'application/json' },
+    payload: {},
+  });
+
+  it('a Swift rider cannot claim an order already committed to vendor self-delivery', async () => {
+    const order = await makeOrder('VENDOR_DELIVERY', 'READY_FOR_PICKUP');
+
+    const response = await riderAccept(order.id);
+
+    expect(response.statusCode).toBe(409);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.fulfillmentMode).toBe('VENDOR_DELIVERY');
+    expect(after.riderId).toBeNull();
+    expect(after.status).toBe('READY_FOR_PICKUP');
+  });
+
+  it('a vendor cannot switch to self-delivery after a Swift rider owns the order', async () => {
+    const order = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
+    const accepted = await riderAccept(order.id);
+    expect(accepted.statusCode).toBe(200);
+
+    const response = await vendorPut(`/api/v1/vendor/orders/${order.id}/fulfillment-mode`, {
+      mode: 'VENDOR_DELIVERY',
+    });
+
+    expect(response.statusCode).toBe(409);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.fulfillmentMode).toBe('PLATFORM_RIDER');
+    expect(after.riderId).toBe(riderId);
+    expect(after.status).toBe('RIDER_ASSIGNED');
+    await releaseTestRider(order.id);
+  });
+
+  it('a simultaneous rider claim and vendor-delivery choice has exactly one winner', async () => {
+    const order = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
+
+    const [claim, selfDelivery] = await Promise.all([
+      riderAccept(order.id),
+      vendorPut(`/api/v1/vendor/orders/${order.id}/fulfillment-mode`, { mode: 'VENDOR_DELIVERY' }),
+    ]);
+
+    expect([claim.statusCode, selfDelivery.statusCode].sort()).toEqual([200, 409]);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    const riderWon = after.status === 'RIDER_ASSIGNED'
+      && after.riderId === riderId
+      && after.fulfillmentMode === 'PLATFORM_RIDER';
+    const vendorWon = after.status === 'READY_FOR_PICKUP'
+      && after.riderId === null
+      && after.fulfillmentMode === 'VENDOR_DELIVERY';
+    expect(Number(riderWon) + Number(vendorWon)).toBe(1);
+
+    if (riderWon) await releaseTestRider(order.id);
+  });
+
+  it('choosing vendor delivery retires the live rider offer and search journal', async () => {
+    const order = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
+    const attempt = 'self-delivery-choice';
+    await app.redis.set(`dispatch:offer:${order.id}`, `${riderId}:${attempt}`, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${riderId}`, `${order.id}:${attempt}`, 'EX', 40);
+    await app.prisma.dispatchSearch.create({
+      data: {
+        subjectId: order.id,
+        subjectType: 'ORDER',
+        status: 'SEARCHING',
+        vertical: 'DELIVERY',
+        radiusKm: 3,
+      },
+    });
+
+    const response = await vendorPut(`/api/v1/vendor/orders/${order.id}/fulfillment-mode`, {
+      mode: 'VENDOR_DELIVERY',
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:mover-offer:${riderId}`)).toBeNull();
+    const search = await app.prisma.dispatchSearch.findFirstOrThrow({ where: { subjectId: order.id } });
+    expect(search.status).toBe('CANCELLED');
+    expect(search.resolution).toBe('VENDOR_DELIVERY');
+    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: order.id } });
+  });
+
+  it('a stale offer acceptance after vendor delivery is neutral, not a rider decline', async () => {
+    const order = await makeOrder('VENDOR_DELIVERY', 'READY_FOR_PICKUP');
+    const attempt = 'stale-self-delivery';
+    await app.redis.set(`dispatch:offer:${order.id}`, `${riderId}:${attempt}`, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${riderId}`, `${order.id}:${attempt}`, 'EX', 40);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/rider/offers/accept',
+      headers: { authorization: `Bearer ${riderToken}`, 'content-type': 'application/json' },
+      payload: { orderId: order.id, offerAttemptId: attempt },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error.code).toBe('VENDOR_DELIVERY_SELECTED');
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:mover-offer:${riderId}`)).toBeNull();
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, riderId)).toBe(0);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.riderId).toBeNull();
+    expect(after.status).toBe('READY_FOR_PICKUP');
+  });
+
+  it('a stale offer timeout after vendor delivery is neutral, not a rider expiry', async () => {
+    const order = await makeOrder('VENDOR_DELIVERY', 'READY_FOR_PICKUP');
+    const attempt = 'stale-timeout-self-delivery';
+    await app.redis.set(`dispatch:offer:${order.id}`, `${riderId}:${attempt}`, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${riderId}`, `${order.id}:${attempt}`, 'EX', 40);
+
+    await makeDispatchService(app).handleOfferTimeout(order.id, riderId, attempt);
+
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:mover-offer:${riderId}`)).toBeNull();
+    expect(await app.redis.sismember(`dispatch:declined:${order.id}`, riderId)).toBe(0);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.riderId).toBeNull();
+    expect(after.status).toBe('READY_FOR_PICKUP');
+  });
+});
+
+describe('[DA-01/02/03] locked delivery authority survives adversarial timing', () => {
+  it('accept preserves a platform-rider choice committed after the route pre-read', async () => {
+    const order = await makeOrder(null, 'PENDING');
+    const barrier = pauseNextTransition();
+
+    try {
+      const accepting = vendorPut(`/api/v1/vendor/orders/${order.id}/accept`);
+      await barrier.entered;
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: { increment: 1 } },
+      });
+      barrier.resume();
+
+      const response = await accepting;
+      expect(response.statusCode).toBe(200);
+      const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(after.status).toBe('ACCEPTED');
+      expect(after.fulfillmentMode).toBe('PLATFORM_RIDER');
+      expect(after.fulfillmentModeVersion).toBe(1);
+    } finally {
+      barrier.resume();
+      barrier.restore();
+    }
+  });
+
+  it('ready preserves a vendor-delivery choice committed after the route pre-read', async () => {
+    const order = await makeOrder(null, 'PREPARING');
+    const barrier = pauseNextTransition();
+
+    try {
+      const readying = vendorPut(`/api/v1/vendor/orders/${order.id}/ready`);
+      await barrier.entered;
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'VENDOR_DELIVERY', fulfillmentModeVersion: { increment: 1 } },
+      });
+      barrier.resume();
+
+      const response = await readying;
+      expect(response.statusCode).toBe(200);
+      const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(after.status).toBe('READY_FOR_PICKUP');
+      expect(after.fulfillmentMode).toBe('VENDOR_DELIVERY');
+      expect(after.fulfillmentModeVersion).toBe(1);
+    } finally {
+      barrier.resume();
+      barrier.restore();
+    }
+  });
+
+  it('vendor-delivered rechecks custody on the locked row and loses to a platform switch', async () => {
+    const order = await makeOrder('VENDOR_DELIVERY', 'READY_FOR_PICKUP');
+    const barrier = pauseNextTransition();
+
+    try {
+      const delivering = vendorPut(`/api/v1/vendor/orders/${order.id}/delivered`);
+      await barrier.entered;
+      await app.prisma.order.update({
+        where: { id: order.id },
+        data: { fulfillmentMode: 'PLATFORM_RIDER', fulfillmentModeVersion: { increment: 1 } },
+      });
+      barrier.resume();
+
+      const response = await delivering;
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe('DELIVERY_AUTHORITY_CHANGED');
+      const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(after.status).toBe('READY_FOR_PICKUP');
+      expect(after.fulfillmentMode).toBe('PLATFORM_RIDER');
+      expect(await app.prisma.orderStatusLog.count({
+        where: { orderId: order.id, status: 'DELIVERED' },
+      })).toBe(0);
+    } finally {
+      barrier.resume();
+      barrier.restore();
+    }
+  });
+
+  it('a delayed vendor cleanup cannot erase a newer rider-search generation', async () => {
+    const order = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { fulfillmentModeVersion: 2 },
+    });
+    const oldSearch = await app.prisma.dispatchSearch.create({
+      data: {
+        subjectId: order.id,
+        subjectType: 'ORDER',
+        status: 'SEARCHING',
+        vertical: 'DELIVERY',
+        radiusKm: 3,
+        deliveryAuthorityVersion: 1,
+      },
+    });
+    const currentSearch = await app.prisma.dispatchSearch.create({
+      data: {
+        subjectId: order.id,
+        subjectType: 'ORDER',
+        status: 'SEARCHING',
+        vertical: 'DELIVERY',
+        radiusKm: 3,
+        deliveryAuthorityVersion: 2,
+      },
+    });
+    const currentAttempt = 'current-platform-offer~fv2';
+    const currentDeclined = `dispatch:declined:${order.id}:fv2`;
+    const currentRound = `dispatch:round:${order.id}:fv2`;
+    const currentExhaust = `dispatch:exhausts:${order.id}:fv2`;
+    const dispatch = makeDispatchService(app);
+    expect(await dispatch.prepareForPlatformDelivery(order.id, 2)).toBe(true);
+    await app.redis.set(`dispatch:offer:${order.id}`, `${riderId}:${currentAttempt}`, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${riderId}`, `${order.id}:${currentAttempt}`, 'EX', 40);
+    await app.redis.sadd(currentDeclined, 'already-declined-rider');
+    await app.redis.set(currentRound, '2', 'EX', 3600);
+    await app.redis.set(currentExhaust, '3', 'EX', 3600);
+
+    try {
+      await dispatch.retireForVendorDelivery(order.id, 1);
+      // A retried same-mode command is also idempotent for search memory.
+      expect(await dispatch.prepareForPlatformDelivery(order.id, 2)).toBe(true);
+
+      expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(`${riderId}:${currentAttempt}`);
+      expect(await app.redis.get(`dispatch:mover-offer:${riderId}`)).toBe(`${order.id}:${currentAttempt}`);
+      expect(await app.redis.smembers(currentDeclined)).toEqual(['already-declined-rider']);
+      expect(await app.redis.get(currentRound)).toBe('2');
+      expect(await app.redis.get(currentExhaust)).toBe('3');
+      expect((await app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: oldSearch.id } })).status).toBe('CANCELLED');
+      expect((await app.prisma.dispatchSearch.findUniqueOrThrow({ where: { id: currentSearch.id } })).status).toBe('SEARCHING');
+    } finally {
+      await app.redis.del(
+        `dispatch:offer:${order.id}`,
+        `dispatch:mover-offer:${riderId}`,
+        currentDeclined,
+        currentRound,
+        currentExhaust,
+        `dispatch:generation-init:${order.id}:fv2`,
+      );
+    }
+  });
+
+  it.each([
+    { label: 'authority lookup', suppliedVersion: false },
+    { label: 'final repair lookup', suppliedVersion: true },
+  ])('keeps committed vendor custody successful when the $label fails', async ({ suppliedVersion }) => {
+    const order = await makeOrder('VENDOR_DELIVERY', 'READY_FOR_PICKUP');
+    const dispatch = makeDispatchService(app);
+    const read = vi.spyOn(app.prisma.order, 'findUnique').mockRejectedValueOnce(new Error('simulated database read outage'));
+
+    try {
+      await expect(dispatch.retireForVendorDelivery(
+        order.id,
+        suppliedVersion ? order.fulfillmentModeVersion : undefined,
+      )).resolves.toBeUndefined();
+      expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).fulfillmentMode).toBe('VENDOR_DELIVERY');
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it.each(['generation initialization', 'queue enqueue'] as const)(
+    'returns the committed platform choice when immediate $label fails',
+    async (failure) => {
+      const order = await makeOrder('VENDOR_DELIVERY', 'READY_FOR_PICKUP');
+      const prepare = failure === 'generation initialization'
+        ? vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery').mockRejectedValueOnce(new Error('simulated Redis outage'))
+        : vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery').mockResolvedValueOnce(true);
+      const priorQueue = (app as any).dispatchQueue;
+      if (failure === 'queue enqueue') {
+        (app as any).dispatchQueue = { add: vi.fn().mockRejectedValueOnce(new Error('simulated queue outage')) };
+      }
+
+      try {
+        const response = await vendorPut(`/api/v1/vendor/orders/${order.id}/fulfillment-mode`, {
+          mode: 'PLATFORM_RIDER',
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json()).toMatchObject({
+          success: true,
+          data: { orderId: order.id, fulfillmentMode: 'PLATFORM_RIDER' },
+        });
+        const committed = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+        expect(committed.fulfillmentMode).toBe('PLATFORM_RIDER');
+        expect(committed.fulfillmentModeVersion).toBe(order.fulfillmentModeVersion + 1);
+      } finally {
+        prepare.mockRestore();
+        (app as any).dispatchQueue = priorQueue;
+      }
+    },
+  );
+
+  it.each([
+    { shape: 'marked fv0', staleAttempt: 'before-switch-marked~fv0', echoAttempt: true },
+    { shape: 'marked fv0 / old client', staleAttempt: 'before-switch-marked-old~fv0', echoAttempt: false },
+    { shape: 'unmarked rollout', staleAttempt: 'before-switch-unmarked', echoAttempt: true },
+    { shape: 'unmarked rollout / old client', staleAttempt: 'before-switch-unmarked-old', echoAttempt: false },
+    { shape: 'bare pre-attempt value', staleAttempt: undefined, echoAttempt: false },
+  ])(
+    'a $shape offer cannot claim fv2 after Redis consumption',
+    async ({ shape, staleAttempt, echoAttempt }) => {
+      const order = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
+      const staleForward = staleAttempt ? `${riderId}:${staleAttempt}` : riderId;
+      const staleReverse = staleAttempt ? `${order.id}:${staleAttempt}` : order.id;
+      await app.redis.set(`dispatch:offer:${order.id}`, staleForward, 'EX', 40);
+      await app.redis.set(`dispatch:mover-offer:${riderId}`, staleReverse, 'EX', 40);
+
+      const dispatch = makeDispatchService(app);
+      const internal = dispatch as any;
+      const originalRemove = internal.removeOfferIfOwned.bind(dispatch);
+      let entered!: () => void;
+      let resume!: () => void;
+      const consumed = new Promise<void>((resolve) => { entered = resolve; });
+      const released = new Promise<void>((resolve) => { resume = resolve; });
+      const removeSpy = vi.spyOn(internal, 'removeOfferIfOwned').mockImplementationOnce(async (...args: any[]) => {
+        const removed = await originalRemove(...args);
+        entered();
+        await released;
+        return removed;
+      });
+
+      try {
+        const accepting = dispatch.acceptOffer(
+          order.id,
+          riderUserId,
+          undefined,
+          echoAttempt ? staleAttempt : undefined,
+        ).then(
+          (value) => ({ value, error: null as unknown }),
+          (error: unknown) => ({ value: null, error }),
+        );
+        await consumed;
+
+        const vendor = await vendorPut(`/api/v1/vendor/orders/${order.id}/fulfillment-mode`, {
+          mode: 'VENDOR_DELIVERY',
+        });
+        expect(vendor.statusCode).toBe(200);
+        const platform = await vendorPut(`/api/v1/vendor/orders/${order.id}/fulfillment-mode`, {
+          mode: 'PLATFORM_RIDER',
+        });
+        expect(platform.statusCode).toBe(200);
+
+        // Tests run without a BullMQ worker. Install exactly the fv2 card that
+        // the queued dispatch job would own in production.
+        const currentAttempt = `current-after-switch-${shape.replaceAll(' ', '-')}~fv2`;
+        await app.redis.set(`dispatch:offer:${order.id}`, `${riderId}:${currentAttempt}`, 'EX', 40);
+        await app.redis.set(`dispatch:mover-offer:${riderId}`, `${order.id}:${currentAttempt}`, 'EX', 40);
+        const currentOffer = await app.redis.get(`dispatch:offer:${order.id}`);
+        expect(currentOffer).toMatch(new RegExp(`^${riderId}:.+~fv2$`));
+        resume();
+
+        const outcome = await accepting;
+        expect(outcome.value).toBeNull();
+        expect(outcome.error).toMatchObject({ code: 'OFFER_EXPIRED' });
+        const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+        expect(after.fulfillmentMode).toBe('PLATFORM_RIDER');
+        expect(after.fulfillmentModeVersion).toBe(2);
+        expect(after.riderId).toBeNull();
+        expect(after.status).toBe('READY_FOR_PICKUP');
+        expect(await app.prisma.orderStatusLog.count({
+          where: { orderId: order.id, status: 'RIDER_ASSIGNED' },
+        })).toBe(0);
+        expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBe(currentOffer);
+      } finally {
+        resume();
+        removeSpy.mockRestore();
+        await app.redis.del(
+          `dispatch:offer:${order.id}`,
+          `dispatch:mover-offer:${riderId}`,
+          `dispatch:declined:${order.id}:fv2`,
+          `dispatch:round:${order.id}:fv2`,
+          `dispatch:exhausts:${order.id}:fv2`,
+          `dispatch:rescue-incentive:${order.id}:fv2`,
+          `dispatch:generation-init:${order.id}:fv2`,
+        );
+      }
+    },
+  );
+
+  it.each([
+    { shape: 'unmarked rollout with echo', attempt: 'pre-rollout-uuid', echo: true },
+    { shape: 'unmarked rollout with old client', attempt: 'pre-rollout-old-client', echo: false },
+    { shape: 'bare pre-attempt value', attempt: undefined, echo: false },
+  ])('still accepts a $shape while the order is genuinely generation zero', async ({ attempt, echo }) => {
+    const order = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
+    const forward = attempt ? `${riderId}:${attempt}` : riderId;
+    const reverse = attempt ? `${order.id}:${attempt}` : order.id;
+    await app.redis.set(`dispatch:offer:${order.id}`, forward, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${riderId}`, reverse, 'EX', 40);
+
+    try {
+      const claimed = await makeDispatchService(app).acceptOffer(
+        order.id,
+        riderUserId,
+        undefined,
+        echo ? attempt : undefined,
+      );
+      expect(claimed.riderId).toBe(riderId);
+      expect(claimed.fulfillmentModeVersion).toBe(0);
+      expect(claimed.status).toBe('RIDER_ASSIGNED');
+    } finally {
+      await releaseTestRider(order.id);
+      await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${riderId}`);
+    }
+  });
+
+  it('a legacy client without an echoed attempt cannot claim a stale authority generation', async () => {
+    const order = await makeOrder('PLATFORM_RIDER', 'READY_FOR_PICKUP');
+    await app.prisma.order.update({
+      where: { id: order.id },
+      data: { fulfillmentModeVersion: 2 },
+    });
+    const staleAttempt = 'pre-switch-card~fv1';
+    await app.redis.set(`dispatch:offer:${order.id}`, `${riderId}:${staleAttempt}`, 'EX', 40);
+    await app.redis.set(`dispatch:mover-offer:${riderId}`, `${order.id}:${staleAttempt}`, 'EX', 40);
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/rider/offers/accept',
+        headers: { authorization: `Bearer ${riderToken}`, 'content-type': 'application/json' },
+        // Deliberately omit offerAttemptId: this is an older app build.
+        payload: { orderId: order.id },
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe('OFFER_EXPIRED');
+      const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(after.riderId).toBeNull();
+      expect(after.status).toBe('READY_FOR_PICKUP');
+      expect(await app.redis.get(`dispatch:offer:${order.id}`)).not.toBe(`${riderId}:${staleAttempt}`);
+    } finally {
+      await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${riderId}`);
+    }
   });
 });

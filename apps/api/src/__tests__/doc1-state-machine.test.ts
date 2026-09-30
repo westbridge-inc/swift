@@ -9,6 +9,7 @@
  * real path; claim / release / approve (implicit claim) / revoke move the state.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
@@ -51,6 +52,7 @@ async function owner(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 /** A row a LEGACY writer would insert (status only) or a row planted at a machine state (state only). */
@@ -63,7 +65,7 @@ const move = (id: string, state: DocState) => system(() => app.prisma.$executeRa
 const setStatus = (id: string, status: string) => system(() => app.prisma.$executeRawUnsafe('UPDATE verification_documents SET status = $1::"VerificationDocumentStatus" WHERE id = $2', status, id));
 const read = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { state: true, status: true, purgedAt: true, reviewNote: true } }));
 const submit = (userId: string, url = `/uploads/verification/${RUN}/${nanoid(5)}.enc`) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', url, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', await ownedVerificationFixture(app.prisma, userId, url), 'v1'));
 const decideApprove = (docId: string, reviewerId: string, outcome: 'APPROVE' | 'REJECT' = 'APPROVE') => system(async () => {
   const kase = await app.prisma.reviewCase.create({ data: { submissionId: docId, tenantId: 'swift-default', queue: 'STANDARD', slaDueAt: new Date() } });
   await app.prisma.reviewDecision.create({ data: { caseId: kase.id, tenantId: 'swift-default', reviewerId, outcome, reasonCode: outcome === 'APPROVE' ? 'APPROVED' : 'UNSPECIFIED', actorFacingCategory: outcome === 'APPROVE' ? 'APPROVED' : 'OTHER' } });

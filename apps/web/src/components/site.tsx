@@ -28,7 +28,7 @@ export function SiteNav() {
         </nav>
         <div className="flex items-center gap-4">
           <Link
-            href="/login?next=/order"
+            href="/login?next=/"
             className="text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)]"
           >
             Sign in
@@ -60,7 +60,7 @@ export function SiteFooter() {
               only switch, and it is driven by the launch config. */}
           {showAppStoreBadges ? null : (
             <p className="mt-4 text-xs text-[var(--swift-muted)]">
-              Swift runs in your browser today. Apps are on the way.
+              Store ordering works in your browser. Taxi rides require the Swift mobile app.
             </p>
           )}
         </div>

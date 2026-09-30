@@ -13,7 +13,7 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -33,6 +33,9 @@ import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../.
 import { useAuthStore } from '../../../stores/authStore';
 import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
+import { taxiDoorFor } from '../../../lib/taxiDoors';
+import { TaxiSignedOut } from '../TaxiSignedOut';
+import { signInForTaxi } from '../taxiEntry';
 
 /**
  * The ride's status, in words — from `lib/orderStatus.ts`, the one authority.
@@ -237,7 +240,22 @@ function SearchingCard() {
   );
 }
 
-export function TaxiScreen({ navigation }: any) {
+/**
+ * [Q4] Taxi needs an account. Every ride read behind this door (active ride,
+ * supply, availability, presence, queue) is authenticated, so a visitor with
+ * no session — a guest, or someone whose session just ended — used to sit on
+ * a booking screen polling five endpoints into 401s: "loading forever". The
+ * door is checked BEFORE any ride hook mounts, so a signed-out visitor fires
+ * no ride request at all and is shown the one way in.
+ */
+export function TaxiScreen(props: any) {
+  const isAuthenticated = useAuthStore((st) => st.isAuthenticated);
+  const promptLogin = useAuthStore((st) => st.promptLogin);
+  if (!isAuthenticated) return <TaxiSignedOut navigation={props.navigation} onSignIn={() => signInForTaxi(promptLogin)} />;
+  return <TaxiBooking {...props} />;
+}
+
+function TaxiBooking({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
@@ -247,6 +265,8 @@ export function TaxiScreen({ navigation }: any) {
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
   const cancelRide = useCancelRide();
+  // [E19] The passenger's own eyes override the driver-arrival GPS gate.
+  const confirmDriverArrival = useConfirmDriverArrival();
   const qc = useQueryClient();
 
   // Post-trip closure: the ride that just completed, held so we can show the
@@ -344,6 +364,7 @@ export function TaxiScreen({ navigation }: any) {
         navigation={navigation}
         ride={activeRide}
         cancelRide={cancelRide}
+        confirmDriverArrival={confirmDriverArrival}
         insets={insets}
         rematching={rematching}
       />
@@ -374,7 +395,16 @@ export function TaxiScreen({ navigation }: any) {
   const errBody = errorMatchesCurrentTrip ? (requestRide.error as any)?.response?.data : undefined;
   const errMsg = errBody?.error?.message ?? errBody?.message;
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  const needsL2 = (errBody?.error?.code ?? errBody?.code) === 'ID_VERIFICATION_REQUIRED';
+  // [E27] The profile photo is asked for here, not at sign-in: the same door.
+  const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
+  const needsL2 = door === 'identity';
+  const needsSelfie = door === 'selfie';
+  // Joining the queue passes the same account gates as a request (the route
+  // and the queue share one authority boundary), so its refusal must show,
+  // with the same doors — never a silent tap.
+  const queueErrBody = (joinQueue.error as any)?.response?.data;
+  const queueErrMsg = queueErrBody?.error?.message ?? queueErrBody?.message;
+  const queueDoor = taxiDoorFor(queueErrBody?.error?.code ?? queueErrBody?.code);
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -585,6 +615,14 @@ export function TaxiScreen({ navigation }: any) {
               onPress={() => navigation?.navigate?.('IdentityVerification')}
             />
           ) : null}
+          {needsSelfie ? (
+            <PillButton
+              label="Add your photo — your driver sees it"
+              variant="outline"
+              style={{ marginTop: space.md }}
+              onPress={() => navigation?.navigate?.('Selfie')}
+            />
+          ) : null}
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
@@ -642,6 +680,27 @@ export function TaxiScreen({ navigation }: any) {
                 <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                   Set your destination first — we hold your whole trip in line.
                 </T>
+              ) : null}
+              {queueErrMsg ? (
+                <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
+                  {queueErrMsg}
+                </T>
+              ) : null}
+              {queueDoor === 'selfie' ? (
+                <PillButton
+                  label="Add your photo — your driver sees it"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('Selfie')}
+                />
+              ) : null}
+              {queueDoor === 'identity' ? (
+                <PillButton
+                  label="Verify your ID — takes a minute"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('IdentityVerification')}
+                />
               ) : null}
               <PillButton
                 label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}
@@ -928,7 +987,7 @@ function AssignedRideCard({
   );
 }
 
-function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
+function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets, rematching }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
@@ -1344,6 +1403,26 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                 showStartCode={showStartCode}
                 onWrongDriver={() => setConfirmNotMyDriver(true)}
               />
+              {/* [E19] The passenger can see the car: one tap overrides the
+                  driver-arrival GPS gate, so a driver with a stale or missing
+                  fix is never stranded at the door. */}
+              {status === 'DRIVER_EN_ROUTE' ? (
+                <PillButton
+                  label="My driver is here"
+                  variant="soft"
+                  icon="map-pin"
+                  style={{ marginTop: space.md, alignSelf: 'stretch' }}
+                  loading={confirmDriverArrival.isPending}
+                  onPress={() => confirmDriverArrival.mutate(
+                    { id: ride.id },
+                    {
+                      onError: (error: any) => {
+                        toast.show(error?.response?.data?.error?.message ?? "Couldn't confirm your driver's arrival — try again.");
+                      },
+                    },
+                  )}
+                />
+              ) : null}
             </>
           ) : (
             <>

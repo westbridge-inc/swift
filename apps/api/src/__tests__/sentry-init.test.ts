@@ -53,7 +53,7 @@ describe('event scrubbing [REPORT-013 F-013-04]', () => {
     const { scrubSentryEvent } = await import('../plugins/observability');
     const event = scrubSentryEvent({
       request: {
-        url: 'https://api.swift.gy/api/v1/courier/track/SEKRET123abc?sig=deadbeef&x=1',
+        url: 'https://api.swiftgy.com/api/v1/courier/track/SEKRET123abc?sig=deadbeef&x=1',
         query_string: 'sig=deadbeef',
         headers: { authorization: 'Bearer topsecret' },
         cookies: 'session=abc',
@@ -82,7 +82,7 @@ describe('event scrubbing [REPORT-013 F-013-04]', () => {
       exception: { values: [{ value: 'token=' + fake }] },
       extra: { nested: { url: '/public/trip/' + fake } },
       breadcrumbs: [{ data: { payload: 'sig=' + fake } }],
-      request: { url: 'https://api.swift.gy/api/v1/search?q=private-search&x=1', query_string: 'q=private-search' },
+      request: { url: 'https://api.swiftgy.com/api/v1/search?q=private-search&x=1', query_string: 'q=private-search' },
     } as never) as {
       message: string;
       exception: { values: { value: string }[] };

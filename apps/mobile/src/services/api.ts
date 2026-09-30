@@ -36,7 +36,7 @@ export const API_URL = resolveApiOrigin({
  *  is typeof-guarded: unlike API_URL's, this line actually evaluates in the
  *  node test env, where the RN global does not exist.) */
 // eslint-disable-next-line no-undef
-export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swift.gy');
+export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swiftgy.com');
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
@@ -244,6 +244,7 @@ export const authApi = {
   pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
   register: (data: {
     phone: string;
+    registrationProof: string;
     firstName: string;
     lastName: string;
     email?: string;
@@ -303,6 +304,40 @@ export const marketApi = {
   depth: () => api.get('/market/depth'),
 };
 
+/**
+ * [E01] The checkout choices a cart quote is priced for — the same meaning as
+ * the checkout body's fields of these names. The cart screen requests the quote
+ * with ONE of these and submits the same one, so the total shown is the total
+ * charged. Absent = checkout's default (standard speed, every store delivered,
+ * the cart's persisted tip).
+ */
+export interface CartQuoteChoices {
+  express?: true;
+  fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+  tipAmount?: number;
+  /**
+   * [E01-B] The applied promo code. Carried on the ONE choices object so the
+   * order body submits exactly what the customer applied; the quote prices the
+   * cart's STORED promo (cart.promoCodeId), so `cartQuoteParams` deliberately
+   * does not serialize this field into the GET /cart query.
+   */
+  promoCode?: string;
+}
+
+/** [E01] GET /cart query params for a quote's choices. `express` travels only
+ *  as "true" (the API refuses anything but "true"/"false"); the store-by-store
+ *  selection travels as checkout's own record in JSON, because the API's query
+ *  parser has no bracket syntax for nested objects. */
+export function cartQuoteParams(choices?: CartQuoteChoices): Record<string, string | number> {
+  const params: Record<string, string | number> = {};
+  if (choices?.express) params['express'] = 'true';
+  if (choices?.fulfillmentSelections && Object.keys(choices.fulfillmentSelections).length > 0) {
+    params['fulfillmentSelections'] = JSON.stringify(choices.fulfillmentSelections);
+  }
+  if (choices?.tipAmount != null) params['tipAmount'] = choices.tipAmount;
+  return params;
+}
+
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   myRating: () => api.get('/customer/rating'),
@@ -332,6 +367,13 @@ export const customerApi = {
   // Live verdict on an out-of-stock substitution the store proposed (§5.3).
   decideSubstitution: (orderId: string, lineId: string, approve: boolean) =>
     api.post(`/customer/orders/${orderId}/items/${lineId}/substitution`, { approve }),
+  // [ORDER-SPINE S1-6] The customer's own words about a direct-MMG payment:
+  // "I paid" (optionally with the wallet's reference) or "I didn't pay". The
+  // server records them beside the store's claim and holds the order when the
+  // two disagree. Unwrapped at the seam; a reference travels only with "I paid".
+  claimOrderPayment: (id: string, claim: { paid: boolean; reference?: string }) =>
+    api.post(`/customer/orders/${id}/payment-claim`, claim.paid && claim.reference ? { paid: true, reference: claim.reference } : { paid: claim.paid })
+      .then((res) => (res.data?.data ?? {}) as { orderId?: string; paymentStatus?: string; mismatch?: boolean; replayed?: boolean; mmgClaim?: unknown }),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
   redeemReferral: (code: string, token?: string) =>
@@ -343,7 +385,7 @@ export const customerApi = {
   updateAddress: (id: string, data: Partial<AddressInput>) => api.put(`/customer/addresses/${id}`, data),
   deleteAddress: (id: string) => api.delete(`/customer/addresses/${id}`),
   setDefaultAddress: (id: string) => api.put(`/customer/addresses/${id}/default`),
-  getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
+  getHome: (lat?: number, lng?: number, signal?: AbortSignal) => api.get('/customer/home', { params: { lat, lng }, signal }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   // [B15] Flag a public review for the moderation queue (R7). One report per
   // (rating, reporter) — the server answers calm idempotence, never an error.
@@ -357,7 +399,11 @@ export const customerApi = {
   searchTrending: () => api.get('/search/trending'),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
-  getItemSlots: (itemId: string, date: string) => api.get(`/customer/items/${itemId}/slots`, { params: { date } }),
+  getItemSlots: (itemId: string, date: string, config?: AxiosRequestConfig) =>
+    api.get(`/customer/items/${itemId}/slots`, {
+      ...config,
+      params: { ...config?.params, date },
+    }),
   getFavorites: () => api.get('/customer/favorites'),
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),
@@ -371,6 +417,10 @@ export const customerApi = {
     return api.get('/customer/orders', Object.keys(params).length > 0 ? { params } : undefined);
   },
   validatePromo: (code: string) => api.post('/customer/promo/validate', { code }),
+  // [E01-B] Remove the applied promo from the cart: the quote re-prices
+  // without it and checkout stops sending it. (The web cart cannot remove a
+  // promotion yet; the phone can.)
+  removeCartPromo: () => api.delete('/customer/cart/promo'),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message, cancellationFee } } inside the axios
@@ -422,7 +472,8 @@ export const customerApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/customer/orders/${id}/rate`, body, capturedAuthConfig(session)),
   // Cart
-  getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
+  getCart: (lat?: number, lng?: number, choices?: CartQuoteChoices) =>
+    api.get('/customer/cart', { params: { lat, lng, ...cartQuoteParams(choices) } }),
   addToCart: (data: {
     vendorId: string;
     itemId: string;
@@ -605,6 +656,8 @@ export const rideApi = {
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
+  /** [E19] The passenger's own eyes override the driver-arrival GPS gate. */
+  confirmDriverArrival: (id: string) => api.post(`/rides/${id}/confirm-driver-arrival`, {}),
   sos: (id: string, coords?: { lat: number; lng: number }) =>
     api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}),
 };
@@ -670,6 +723,28 @@ export const courierApi = {
     body: { outcome: 'paid' | 'refused'; gps: { lat: number; lng: number } },
     session?: AuthSessionSnapshot,
   ) => api.post(`/courier/order/${id}/collect`, body, capturedAuthConfig(session)),
+  // [E17] The mover can't deliver: start a return with a reason + GPS, then
+  // close it with the return photo (lat/lng ride the multipart form fields).
+  return: (
+    id: string,
+    body: { reason: string; gps?: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/return`, body, capturedAuthConfig(session)),
+  returnProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/courier/order/${id}/return-proof`, form, capturedAuthConfig(session, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })),
+  // E16: pickup custody proof — upload the captured pickup photo, then confirm
+  // pickup with the returned URL + GPS. The server refuses the bare pickup tap.
+  uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })),
+  pickupProof: (
+    id: string,
+    body: { proofPhotoUrl: string; gps: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/pickup-proof`, body, capturedAuthConfig(session)),
 };
 
 // Services (mounted at /api/v1/services)
@@ -766,6 +841,12 @@ export const partnerApi = {
     };
   }, session?: AuthSessionSnapshot) =>
     api.post('/partner/become', data, capturedAuthConfig(session)),
+  /** [VEHICLES] Change the vehicle a mover works with: offline until its documents are approved. */
+  changeVehicle: (data: {
+    vehicleType: VehicleKind;
+    vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+  }, session?: AuthSessionSnapshot) =>
+    api.put('/partner/vehicle', data, capturedAuthConfig(session)),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
@@ -792,7 +873,7 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (
     id: string,
-    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
+    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   // Intermediate delivery-leg transitions. The state machine walks
@@ -805,7 +886,7 @@ export const riderApi = {
   enRouteDelivery: (id: string) => api.put(`/rider/orders/${id}/en-route-delivery`),
   arrivedAtCustomer: (id: string) => api.put(`/rider/orders/${id}/arrived`),
   /** [MOB-023] Echoes the handover authority version the screen rendered; the server refuses a stale one. */
-  delivered: (id: string, body?: { handoverVersion?: string }) => api.put(`/rider/orders/${id}/delivered`, body ?? {}),
+  delivered: (id: string, body?: { handoverVersion?: string; ridePin?: string }) => api.put(`/rider/orders/${id}/delivered`, body ?? {}),
   // G14: pre-pickup only — the server refuses with CUSTODY after pickup.
   handback: (id: string, reason: string) => api.post(`/rider/orders/${id}/handback`, { reason }),
   earningsToday: () => api.get('/rider/earnings/today'),
@@ -819,10 +900,14 @@ export const riderApi = {
   demand: (p: Point) => api.get(`/rider/demand?lat=${p.lat}&lng=${p.lng}`),
   // MMG cash ledger — delivery fees stores owe me (customer paid the store)
   cashSettlements: () => api.get('/rider/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/rider/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (id: string, amount: number, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/cash-settlements/${id}/confirm`, { amount }, capturedAuthConfig(session)),
   history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
+    api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -846,6 +931,9 @@ export const driverApi = {
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
   accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
+   * passenger's ride alive, frees this driver, and matches another driver. */
+  handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
   acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
@@ -876,6 +964,9 @@ export const driverApi = {
   rateCustomer: (id: string, score: number, comment?: string) =>
     api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
   subscription: () => api.get('/driver/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
+    api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -923,15 +1014,31 @@ export const vendorApi = {
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/vendor/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (
+    id: string,
+    amount: number,
+    session?: AuthSessionSnapshot,
+    storeId?: string | null,
+  ) => api.post(
+    `/vendor/cash-settlements/${id}/confirm`,
+    { amount },
+    capturedVendorAuthConfig(session, storeId),
+  ),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
+  delivered: (id: string) => api.put(`/vendor/orders/${id}/delivered`),
+  setFulfillmentMode: (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
+    api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
-  reject: (id: string, reason?: string) => api.put(`/vendor/orders/${id}/reject`, reason ? { reason } : {}),
+  // [E10] The API refuses a rejection without a reason; every caller passes one.
+  reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
   items: () => api.get('/vendor/items'),
   subscription: () => api.get('/vendor/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
+    api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
   // Menu management
   categories: () => api.get('/vendor/categories'),
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
@@ -996,7 +1103,8 @@ export const vendorApi = {
   deleteBookingException: (id: string) => api.delete(`/vendor/bookings/exceptions/${id}`),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean }) =>
+  // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),

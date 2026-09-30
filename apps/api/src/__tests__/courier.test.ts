@@ -45,7 +45,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       deviceId: 'step19', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, phone: user.phone };
 }
 
 function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: string) {
@@ -478,5 +478,37 @@ describe('Courier — priority dispatch is REAL [SWIFT-061]', () => {
     expect((await mk('RUSH')).isExpress).toBe(true);
     expect((await mk('EXPRESS')).isExpress).toBe(true);
     expect((await mk('STANDARD')).isExpress).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] The sender's own past parcel is not a licence to keep
+// the courier's personal phone. The number is a handover convenience while the
+// parcel is in flight; a closed job returns null — the identity still reads.
+// Fails on main: the detail returned `rider.user.phone` for every status.
+// ---------------------------------------------------------------------------
+
+describe("Courier — a closed parcel does not keep the courier's phone", () => {
+  it('shows the phone while in flight and nulls it once delivered', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
+    const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
+    });
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP' } });
+
+    const inFlight = await inject('GET', `/api/v1/courier/order/${created.orderId}`, undefined, sender.token);
+    expect(inFlight.statusCode).toBe(200);
+    expect(inFlight.json().data.rider.user.phone).toBe(moverUser.phone);
+
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { status: 'DELIVERED' } });
+    const closed = await inject('GET', `/api/v1/courier/order/${created.orderId}`, undefined, sender.token);
+    expect(closed.statusCode).toBe(200);
+    expect(closed.json().data.rider.user.phone).toBeNull();
+    // Who carried it still reads — only the contact detail goes.
+    expect(closed.json().data.rider.user.firstName).toBe('Courier');
+    // [F-028-11] and the live position went with it.
+    expect(closed.json().data.rider.currentLat).toBeNull();
   });
 });

@@ -34,7 +34,7 @@ services:
       - -c
       - |
         superset db upgrade &&
-        superset fab create-admin --username admin --firstname Swift --lastname Admin --email admin@swift.gy --password "$${SUPERSET_ADMIN_PASSWORD}" || true &&
+        superset fab create-admin --username admin --firstname Swift --lastname Admin --email admin@swiftgy.com --password "$${SUPERSET_ADMIN_PASSWORD}" || true &&
         superset init &&
         /usr/bin/run-server.sh
     healthcheck:

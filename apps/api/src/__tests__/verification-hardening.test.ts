@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -165,7 +166,7 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
       mason.id,
       'SERVICE_PROVIDER',
       'national_id',
-      `test/${marker}/duplicate-national-id`,
+      await ownedVerificationFixture(app.prisma, mason.id),
       'v1',
     )).rejects.toMatchObject({ code: 'ALREADY_APPROVED' });
 

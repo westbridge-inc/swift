@@ -36,6 +36,21 @@ let authGeneration = 0;
 /** Who the SERVER says this browser is. Null until probed or signed in. */
 let sessionPrincipal: string | null = null;
 
+/** [Q7b] The customer shell asks the server once per page load, then keeps
+ *  its chrome mounted. It learns of every later change here instead: a
+ *  sign-in, a sign-out, or a session the server ended mid-visit. Memory only —
+ *  nothing about the session is ever written to storage. */
+const sessionListeners = new Set<() => void>();
+
+export function subscribeSession(listener: () => void): () => void {
+  sessionListeners.add(listener);
+  return () => { sessionListeners.delete(listener); };
+}
+
+function announceSessionChange(): void {
+  for (const listener of [...sessionListeners]) listener();
+}
+
 type AuthSnapshot = { principal: string | null; generation: number };
 
 function clearStoredCheckoutAttempts(): void {
@@ -104,12 +119,18 @@ export function getSessionPrincipal(): string | null {
  */
 export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
   if (typeof window === 'undefined') return { ok: false };
+  const forget = () => {
+    const known = sessionPrincipal !== null;
+    sessionPrincipal = null;
+    if (known) announceSessionChange();
+    return { ok: false };
+  };
   try {
     const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', headers: { ...clientHeaders } });
-    if (!res.ok) { sessionPrincipal = null; return { ok: false }; }
+    if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;
-    if (!user || typeof user.id !== 'string') { sessionPrincipal = null; return { ok: false }; }
+    if (!user || typeof user.id !== 'string') return forget();
     if (sessionPrincipal !== user.id) {
       // LEARNING the principal (null -> id) is not an account change: the
       // request that discovered it carried the very same cookies, so nothing
@@ -121,6 +142,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
         authGeneration += 1;
       }
       sessionPrincipal = user.id;
+      announceSessionChange();
     }
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
@@ -135,6 +157,24 @@ export function adoptSession(principal: string | null) {
   if (!sessionPrincipal || !principal || sessionPrincipal !== principal) clearStoredCheckoutAttempts();
   authGeneration += 1;
   sessionPrincipal = principal;
+  announceSessionChange();
+}
+
+/**
+ * [Q7b] The access cookie lives fifteen minutes and the refresh cookie thirty
+ * days, so a customer reopening the app after a quarter of an hour fails the
+ * probe while their session is alive. This spends the refresh cookie — through
+ * the same single flight apiFetch uses — and asks the server again.
+ *
+ * It is deliberately NOT part of sessionProbe: refreshes share a per-address
+ * rate limit, and a guest (who has no refresh cookie) must not spend one on
+ * every page load. The shell calls this only when a signed-in answer is
+ * actually needed — a private page, or an action like adding to the cart.
+ */
+export async function restoreSession(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+  if (typeof window === 'undefined') return { ok: false };
+  if (!(await tryRefresh())) return { ok: false };
+  return sessionProbe();
 }
 
 /**
@@ -166,6 +206,7 @@ export function clearSession() {
   sessionPrincipal = null;
   clearStoredCheckoutAttempts();
   localStorage.removeItem(STORE_KEY);
+  announceSessionChange();
 }
 
 export function getSelectedStore() {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from './otp';
+import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown, OTP_RESEND_WINDOW_S } from './otp';
 
 // ---------------------------------------------------------------------------
 // Mock Redis
@@ -198,5 +198,38 @@ describe('checkOtpRateLimit', () => {
     redis.store.set('otp_rate:+5926003000', '1');
     const allowed = await checkOtpRateLimit(redis as never, '+5926003000');
     expect(allowed).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cooldown refusal: the delivery marker and the read behind it
+// ---------------------------------------------------------------------------
+
+describe('markOtpCooldownDelivered', () => {
+  it('marks the live claim delivered, keeping its expiry and never recreating an expired one', async () => {
+    const redis = createMockRedis();
+    await markOtpCooldownDelivered(redis as never, '+5926003000', Date.now() - 58_000);
+    expect(redis.set).toHaveBeenCalledWith('otp_rate:+5926003000', 'sent', 'KEEPTTL', 'XX');
+  });
+
+  it('leaves a claim alone once it is as old as the window: the key may already be a later caller claim', async () => {
+    const redis = createMockRedis();
+    await markOtpCooldownDelivered(redis as never, '+5926003000', Date.now() - 59_000);
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+});
+
+describe('readOtpCooldown', () => {
+  it('a failed read still refuses for the whole window and claims no code', async () => {
+    const chain = {
+      pttl: () => chain,
+      get: () => chain,
+      exec: async () => { throw new Error('redis down'); },
+    };
+    const redis = { multi: () => chain };
+    await expect(readOtpCooldown(redis as never, '+5926003000')).resolves.toEqual({
+      retryAfterSeconds: OTP_RESEND_WINDOW_S,
+      codeAlreadySent: false,
+    });
   });
 });

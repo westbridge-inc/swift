@@ -11,6 +11,10 @@ import {
   hoursUntil,
   daysUntil,
   sanQrPayload,
+  isBillingStopped,
+  isPlanPaused,
+  billingStoppedLine,
+  resumeBillingMethod,
 } from './billing';
 
 describe('billingPhase', () => {
@@ -54,6 +58,44 @@ describe('isBlocked / isBehind', () => {
     expect(isBehind({ status: 'PAST_DUE' })).toBe(true);
     expect(isBehind({ status: 'ACTIVE' })).toBe(false);
     expect(isBehind({ status: 'SUSPENDED' })).toBe(false);
+  });
+});
+
+describe('[E12] a paused plan says how to come back, not a date already past', () => {
+  const now = Date.parse('2026-09-24T12:00:00Z');
+  it('the server PAUSED status is paused', () => {
+    expect(isPlanPaused({ status: 'PAUSED', autoRenew: false, currentPeriodEnd: '2026-09-20T00:00:00Z' }, now)).toBe(true);
+  });
+  it('stopped and past the period end reads paused before the sweep catches up', () => {
+    expect(isPlanPaused({ status: 'ACTIVE', autoRenew: false, currentPeriodEnd: '2026-09-24T11:00:00Z' }, now)).toBe(true);
+  });
+  it('stopped inside the paid period is not paused yet; auto-renewing never is', () => {
+    expect(isPlanPaused({ status: 'ACTIVE', autoRenew: false, currentPeriodEnd: '2026-09-27T00:00:00Z' }, now)).toBe(false);
+    expect(isPlanPaused({ status: 'ACTIVE', autoRenew: true, currentPeriodEnd: '2026-09-20T00:00:00Z' }, now)).toBe(false);
+    expect(isPlanPaused(null, now)).toBe(false);
+  });
+  it('the strip line: paused → resume copy; inside the period → until when', () => {
+    expect(billingStoppedLine({ status: 'PAUSED', autoRenew: false }, 'store', now)).toMatch(/paused .* Resume to start again/);
+    expect(billingStoppedLine({ status: 'ACTIVE', autoRenew: false, currentPeriodEnd: '2026-09-27T00:00:00Z' }, 'driver', now))
+      .toMatch(/^You keep working until /);
+  });
+});
+
+describe('isBillingStopped / resumeBillingMethod [E12]', () => {
+  it('reads the server autoRenew flag and never invents a stop', () => {
+    expect(isBillingStopped({ autoRenew: false, status: 'ACTIVE' })).toBe(true);
+    expect(isBillingStopped({ autoRenew: true, status: 'ACTIVE' })).toBe(false);
+    expect(isBillingStopped({ status: 'ACTIVE' })).toBe(false);
+    expect(isBillingStopped(null)).toBe(false);
+    expect(isBillingStopped(undefined)).toBe(false);
+  });
+
+  it('resumes on the rail billing was stopped on; a legacy card falls back to cash', () => {
+    expect(resumeBillingMethod({ billingMethod: 'MOBILE_MONEY' })).toBe('MOBILE_MONEY');
+    expect(resumeBillingMethod({ billingMethod: 'CASH' })).toBe('CASH');
+    expect(resumeBillingMethod({ billingMethod: 'CARD' })).toBe('CASH');
+    expect(resumeBillingMethod({})).toBe('CASH');
+    expect(resumeBillingMethod(null)).toBe('CASH');
   });
 });
 
@@ -212,12 +254,20 @@ describe('payScreenState — the four bands', () => {
     expect(s.body).not.toMatch(/Invalid|NaN|undefined/);
   });
 
-  it('survives a null subscription without inventing anything', () => {
-    const s = payScreenState(null, NOW);
-    expect(s.band).toBe('active');
-    expect(s.amountGyd).toBe(0);
-    expect(s.covers).toBe('');
-    expect(JSON.stringify(s)).not.toMatch(/NaN|Invalid|undefined/);
+  it('survives a null subscription without inventing anything — not a $0, not "covered" [H7]', () => {
+    // The sample store in preview has no subscription while the price list is
+    // unavailable, and a pending store has none yet. Neither is paid up: the
+    // screen must say the fee is unavailable, never reward them with a zero.
+    for (const missing of [null, undefined]) {
+      const s = payScreenState(missing, NOW);
+      expect(s.band).toBe('unavailable');
+      expect(s.tone).toBe('unknown');
+      expect(s.amountGyd).toBeNull();
+      expect(s.covers).toBe('');
+      expect(s.eyebrow).not.toBe('NOTHING DUE NOW');
+      expect(`${s.eyebrow} ${s.title} ${s.body}`).not.toMatch(/\$0|covered|paid/i);
+      expect(JSON.stringify(s)).not.toMatch(/NaN|Invalid|undefined/);
+    }
   });
 });
 

@@ -10,6 +10,7 @@
  * decision, so every decision has a case.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import crypto from 'node:crypto';
@@ -51,10 +52,11 @@ async function owner(n: number) {
     phone: `+59270${NUM}${n}`, firstName: 'Rev', lastName: `Case${n}`, activeRole: 'VENDOR_OWNER', countryCode: 'GY', avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
-const submit = (userId: string, docType = 'business_registration', fileKey = `/uploads/verification/${RUN}/${nanoid(5)}.enc`) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, fileKey, 'v1'));
+const submit = (userId: string, docType = 'business_registration', fileKey?: string) =>
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, fileKey ?? await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const openCase = (docId: string) => system(() => app.prisma.reviewCase.findFirst({ where: { submissionId: docId }, orderBy: { createdAt: 'desc' }, include: { decisions: true } }));
 
 beforeAll(async () => {
@@ -101,8 +103,8 @@ describe('[DOC-1 P4-5] review cases and decisions', () => {
     const a = await owner(2);
     const b = await owner(3);
     const sha = crypto.createHash('sha256').update(`dup-${RUN}`).digest('hex');
-    const keyA = `/uploads/verification/${RUN}/a.enc`;
-    const keyB = `/uploads/verification/${RUN}/b.enc`;
+    const keyA = `/uploads/verification/${a}/${nanoid(16)}.enc`;
+    const keyB = `/uploads/verification/${b}/${nanoid(16)}.enc`;
     for (const [k, who] of [[keyA, a], [keyB, b]] as const) {
       await app.prisma.encryptedObject.create({ data: { fileKey: k, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(40, 3), mimeType: 'image/jpeg', sizeBytes: 10, sha256: sha, createdBy: who } });
     }

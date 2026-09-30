@@ -10,6 +10,7 @@ import {
   processSettlement,
   type CashSettlementRow,
 } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 import { MutationError } from '@/components/MutationError';
 
 /**
@@ -168,7 +169,7 @@ function SettlementsSection() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
   const process = useMutation({
-    mutationFn: ({ id, reference }: { id: string; reference?: string }) => processSettlement(id, reference),
+    mutationFn: ({ id, reference, reason }: { id: string; reference?: string; reason: string }) => processSettlement(id, reference, reason),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settlements'] }),
   });
   const rows: any[] = data?.data ?? [];
@@ -200,7 +201,10 @@ function SettlementsSection() {
               <button
                 onClick={() => {
                   const ref = window.prompt(`Note for ${s.vendor?.name ?? 'this digest'} (optional):`) ?? undefined;
-                  if (window.confirm(`Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.`)) process.mutate({ id: s.id, reference: ref || undefined });
+                  if (window.confirm(`Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.`)) {
+                    const reason = askReason({ action: 'acknowledge this sales digest', subject: s.vendor?.name ?? 'this digest' });
+                    if (reason) process.mutate({ id: s.id, reference: ref || undefined, reason });
+                  }
                 }}
                 disabled={process.isPending}
                 className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"

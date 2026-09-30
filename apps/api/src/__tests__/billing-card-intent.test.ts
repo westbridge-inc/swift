@@ -219,7 +219,7 @@ describe('[M-02] an ambiguous result is not a decline', () => {
     expect((await facts(subId, periodKey)).successes).toBe(1);
   });
 
-  it('an instruction the processor never received is re-sent under the SAME key by the reconciler, and captured once', async () => {
+  it('an authorized card instruction remains pollable past TTL and banks a late capture under cancellation', async () => {
     const due = new Date(Date.now() - DAY); const periodKey = due.toISOString().slice(0, 10);
     const subId = await makeCardSub(due);
     fake.mode = 'timeout-no-capture';
@@ -227,11 +227,23 @@ describe('[M-02] an ambiguous result is not a decline', () => {
     expect(fake.captures.size).toBe(0);
     fake.mode = 'ok';
     const tick = await billing.reconcileUnknownCardCharges();
-    expect(tick.settled).toBeGreaterThanOrEqual(1);
-    expect(fake.keysSeen).toHaveLength(2);
-    expect(fake.keysSeen[0]).toBe(fake.keysSeen[1]); // the same key: the processor's idempotency makes it one capture
-    expect(fake.captures.size).toBe(1);
-    expect(await facts(subId, periodKey)).toMatchObject({ successes: 1, failures: 0, ledger: 1, failedAttempts: 0, nextBillingDate: due.getTime() + 7 * DAY });
+    expect(tick.stillUnknown).toBeGreaterThanOrEqual(1);
+    expect(fake.keysSeen).toHaveLength(1);
+    expect(fake.captures.size).toBe(0);
+    expect(await facts(subId, periodKey)).toMatchObject({ successes: 0, failures: 0, ledger: 0, failedAttempts: 0, nextBillingDate: due.getTime() });
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
+    await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'CANCELLED', autoRenew: false, nextRetryAt: null } });
+    const waiting = await billing.reconcileUnknownCardCharges(new Date(intent.expiresAt!.getTime() + 1));
+    expect(waiting.stillUnknown).toBeGreaterThanOrEqual(1);
+    expect(fake.keysSeen).toHaveLength(1);
+    expect(fake.captures.size).toBe(0);
+    expect(await facts(subId, periodKey)).toMatchObject({ status: 'CANCELLED', successes: 0, failures: 0, ledger: 0, failedAttempts: 0, nextBillingDate: due.getTime() });
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('UNKNOWN');
+    fake.captures.set(intent.clientKey!, { status: 'succeeded', providerRef: `ch_late_${nanoid(6)}` });
+    await billing.reconcileUnknownCardCharges(new Date(intent.expiresAt!.getTime() + 2));
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('CAPTURED');
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance)).toBe(Number(intent.amount));
+    expect(await facts(subId, periodKey)).toMatchObject({ status: 'CANCELLED', successes: 0, failures: 0, failedAttempts: 0, nextBillingDate: due.getTime() });
   });
 });
 

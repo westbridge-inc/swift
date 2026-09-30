@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyOwedLedger, markPaidPrompt } from './riderFeesOwed';
+import { cashSettlementAmount, classifyOwedLedger, markPaidPrompt } from './riderFeesOwed';
 
 // ---------------------------------------------------------------------------
 // [MOB-046] A DEBT TO A RIDER DOES NOT DISAPPEAR BECAUSE A QUERY FAILED.
@@ -77,6 +77,38 @@ describe('[MOB-046] the card never disappears because a read failed', () => {
 });
 
 describe('[MOB-046] marking cash paid says who, and how much', () => {
+  it('binds the exact displayed amount to the submitted amount', () => {
+    expect(cashSettlementAmount(417.25)).toEqual({ amount: 417.25, formatted: '$417.25' });
+    expect(cashSettlementAmount(417.75)).toEqual({ amount: 417.75, formatted: '$417.75' });
+    expect(cashSettlementAmount(417.29)).toEqual({ amount: 417.29, formatted: '$417.29' });
+    expect(cashSettlementAmount('417.20')).toEqual({ amount: 417.2, formatted: '$417.20' });
+    expect(cashSettlementAmount(417)).toEqual({ amount: 417, formatted: '$417' });
+    expect(cashSettlementAmount(99_999_999.99)).toEqual({ amount: 99_999_999.99, formatted: '$99,999,999.99' });
+  });
+
+  it('refuses malformed, non-positive, and over-precise settlement rows', () => {
+    for (const amount of [
+      null,
+      undefined,
+      '',
+      ' ',
+      true,
+      false,
+      [],
+      [417.25],
+      {},
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      0,
+      -1,
+      1.234,
+      100_000_000,
+    ]) {
+      expect(cashSettlementAmount(amount), String(amount)).toBeNull();
+    }
+  });
+
   it('names the rider, the amount and the order — a mis-tap on the wrong row is the same mistake as not paying', () => {
     const prompt = markPaidPrompt(row('s1'), '$400');
     expect(prompt.title).toContain('Deon');

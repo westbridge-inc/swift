@@ -33,12 +33,22 @@ export function PhotoPlaceholder({
   glyph = 'food',
   tint,
   style,
+  showLabel = true,
 }: {
   /** The real name of the thing — the one honest signal available. */
   label?: string;
   glyph?: PictogramName;
   tint?: { bg: string; ink: string };
   style?: ViewStyle;
+  /**
+   * false when the caller already draws the name ON the photo — the white
+   * scrim label on a category tile, the title on a store's cover. The
+   * placeholder then stays a picture (ground and pictogram) and the name is
+   * drawn once. Drawing it here as well put a centred "MENU" behind the
+   * tile's own "Menu": two labels, overlapping, on an 84pt tile [Q3]. The
+   * screen reader still hears `label`.
+   */
+  showLabel?: boolean;
 }) {
   const bg = tint?.bg ?? color.brand[50];
   const ink = tint?.ink ?? color.brand[600];
@@ -58,7 +68,7 @@ export function PhotoPlaceholder({
       accessibilityLabel={label ? `${label}. No photo yet` : 'No photo yet'}
     >
       <Pictogram name={glyph} size={30} color={ink} />
-      {label ? (
+      {label && showLabel ? (
         <T variant="micro" weight="semibold" numberOfLines={2} style={{ color: ink, textAlign: 'center', opacity: 0.85 }}>
           {label}
         </T>
@@ -89,6 +99,7 @@ export function Photo({
   style,
   contentFit = 'cover',
   transition = 150,
+  showLabel,
 }: {
   uri: string | null | undefined;
   label?: string;
@@ -97,8 +108,10 @@ export function Photo({
   style?: ViewStyle;
   contentFit?: 'cover' | 'contain';
   transition?: number;
+  /** Passed to the placeholder: false when the caller draws the name on top. */
+  showLabel?: boolean;
 }) {
-  if (!uri) return <PhotoPlaceholder label={label} glyph={glyph} tint={tint} style={style} />;
+  if (!uri) return <PhotoPlaceholder label={label} glyph={glyph} tint={tint} style={style} showLabel={showLabel} />;
   return (
     <Image
       source={{ uri }}

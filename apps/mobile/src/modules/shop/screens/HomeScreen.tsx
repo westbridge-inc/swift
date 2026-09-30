@@ -1,21 +1,24 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
-import { Dimensions, FlatList, Linking, Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { AppState, Dimensions, FlatList, Linking, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useQueryClient } from '@tanstack/react-query';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
-import { useDiscoveryCategories, useHome, useToggleFavorite } from '../../../hooks/customer';
+import { customerKeys, useDiscoveryCategories, useHome, useToggleFavorite, type HomeFeed, type LiveOrderProjection } from '../../../hooks/customer';
+import { createHomeRefreshGate, homeFeedState, homeQueryKey, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
 import { PressableScale } from '../../../kit/pressable-scale';
-import { Scrim } from '../../../kit/scrim';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { distanceLabel } from '../../../lib/geo';
 import { locationPrimer } from '../../../lib/location-primer';
 import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { haptic } from '../../../lib/haptics';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -24,18 +27,19 @@ import { CategoryRail, CAT_RAIL_MIN_CHIPS } from '../CategoryRail';
 // photo. `itemImage` used to hand "Mauby" a picture of a cheeseburger.
 import { categoryPhoto, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
-import { orderStatusLabel, orderSubtitle } from '../../../lib/orderStatus';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
+import { orderRecipientNoun, orderStatusLabel, orderSubtitle, presentedVertical } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
 import { holdRingActive, holdRingWindow } from '../../../kit/hold-window';
 import {
   Card,
+  CategoryTile,
   ErrorState,
   FoodCard,
   LoadingBlock,
   MerchantCard,
-  Photo,
   Pictogram,
   type PictogramName,
   PillButton,
@@ -92,11 +96,9 @@ const SERVICES: {
 // the enum value is READY_FOR_PICKUP — and it described a taxi ride as
 // "Waiting for the store".
 
-function kmLabel(km: unknown): string | undefined {
-  const n = Number(km);
-  if (!Number.isFinite(n)) return undefined;
-  return n < 1 ? '<1 km' : `${n} km`;
-}
+// Store distances are written by lib/geo `distanceLabel`, the one formatter
+// the rest of the app uses too. Home's own `kmLabel` said "<1 km" where every
+// other screen said "0.4 km", and read a null distance as "<1 km" [Q3].
 
 /** The one display-face moment on Home [DESIGN_NOTES 2026-08-18]: a
  *  time-aware greeting — Guyana is a single timezone, the device clock is
@@ -172,13 +174,17 @@ function ServiceTile({ item, index, navigation }: { item: (typeof SERVICES)[numb
  * The live order, as Home shows it.
  *
  * Two things it must never do. It must never describe the order with the wrong
- * vertical's words — `orderStatusLabel` needs `orderType`, and Home's feed did
- * not send it, so every order read as a food order. And it must never invent
- * the hold: the countdown comes from `holdRingWindow`, the same seam the
- * tracking screen uses, which returns null unless BOTH ends of the window
+ * vertical's words — `orderStatusLabel` needs the vertical, and Home's feed did
+ * not send it, so every order read as a food order; then it sent `orderType`,
+ * which has no SERVICE member, so a barbershop booking STILL read as a food
+ * order ("Waiting for the store", "The store hasn't been told yet"). The
+ * server now declares `vertical` beside `orderType`; `presentedVertical` reads
+ * it and falls back to the persisted type for an older API. And it must never
+ * invent the hold: the countdown comes from `holdRingWindow`, the same seam
+ * the tracking screen uses, which returns null unless BOTH ends of the window
  * arrived from the server. No local five-minute assumption, one authority.
  */
-function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
+function LiveOrderCard({ order, navigation }: { order: LiveOrderProjection; navigation: any }) {
   // Tick ONLY while a hold is actually running. `holdRingWindow` is pure, so
   // re-evaluating it against a fresh `now` is the whole animation; when the
   // window closes the interval clears itself and the card goes quiet.
@@ -197,6 +203,10 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
   // range is an absolute window and stays true out of the cache); a passed
   // window is never shown as still coming.
   const promise = promiseLine(order.promise, now);
+  // The server's declared vertical decides every word below: SERVICE for a
+  // booking with a service business, otherwise the persisted type.
+  const vertical = presentedVertical(order);
+  const recipient = orderRecipientNoun(vertical);
 
   return (
     <View style={{ paddingHorizontal: GUTTER, marginTop: space.lg }}>
@@ -217,8 +227,8 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
               />
               <T variant="body" weight="semibold">
                 {hold
-                  ? `Held — goes to ${order.vendor?.name ?? 'the store'} in ${mmss}`
-                  : orderStatusLabel(order.status, order.orderType)}
+                  ? `Held — goes to ${order.vendor?.name ?? recipient} in ${mmss}`
+                  : orderStatusLabel(order.status, vertical)}
               </T>
             </View>
             <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
@@ -227,11 +237,21 @@ function LiveOrderCard({ order, navigation }: { order: any; navigation: any }) {
                   // server owns the timer, a skewed device clock can keep this
                   // card alive past the real window, and promising "free" from
                   // that clock is the app making a money claim it cannot keep.
-                  // What stays true on any clock is that the store has not been
-                  // told yet — the cost, if any, is shown before confirming.
-                  `The store hasn’t been told yet · ${orderSubtitle(null, order.orderNumber)}`
+                  // What stays true on any clock is that the recipient — the
+                  // store, or the provider for a booking — has not been told
+                  // yet; the cost, if any, is shown before confirming.
+                  // Joined like every other separator on Home, never
+                  // interpolated: an empty part gets no dot [Q3].
+                  [`${recipient.charAt(0).toUpperCase()}${recipient.slice(1)} hasn’t been told yet`, orderSubtitle(null, order.orderNumber)]
+                    .filter(Boolean)
+                    .join(' · ')
                 : orderSubtitle(order.vendor?.name, order.orderNumber)}
             </T>
+            {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? (
+              <T variant="caption" style={{ marginTop: 4 }}>
+                Appointment: {formatAppointmentSlot(order.appointmentSlot)}
+              </T>
+            ) : null}
             {promise && !hold ? (
               <T variant="caption" style={{ marginTop: 4 }}>
                 {promise.label}
@@ -293,7 +313,8 @@ export function HomeScreen() {
   const [avatarBroken, setAvatarBroken] = useState(false);
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
-  const { user, isAuthenticated, promptLogin } = useAuthStore();
+  const { user, isAuthenticated, promptLogin, adEventScopeId: scope } = useAuthStore();
+  const qc = useQueryClient();
   // [REPORT-022 F-022-18] clear the failure latch when the URL changes.
   React.useEffect(() => { setAvatarBroken(false); }, [user?.avatar]);
   const { latitude, longitude, address, status } = useLocationStore();
@@ -302,7 +323,27 @@ export function HomeScreen() {
   const { resolve: requestLocation } = useDeviceLocation({ refreshOnMount: false });
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
-  const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
+  const home = useHome<HomeFeed>(locationFix?.latitude, locationFix?.longitude);
+  // STALE-WHILE-REVALIDATE. The skeleton is for the very first load with
+  // nothing cached (homeFeedState → 'loading'); every later focus, foreground
+  // or invalidation refresh keeps the feed on screen and is silent. The pull
+  // spinner is the person's own gesture, so it is NOT bound to the query's
+  // isRefetching — that flag is true during those silent refreshes too, and
+  // on iOS it scrolled the whole feed down behind a spinner on every tab
+  // switch (lib/pullToRefresh).
+  const pull = usePullToRefresh(home.refetch);
+  const attentionGate = React.useMemo(
+    () => createHomeRefreshGate(() => { void qc.invalidateQueries({ queryKey: customerKeys.homeAll, refetchType: 'active' }); }, 750),
+    [qc],
+  );
+  const refreshForAttention = React.useCallback(() => {
+    const current = qc.getQueryState(homeQueryKey(locationFix?.latitude, locationFix?.longitude, scope));
+    attentionGate(Date.now(), current?.fetchStatus === 'fetching');
+  }, [attentionGate, qc, locationFix?.latitude, locationFix?.longitude, scope]);
+  useFocusEffect(React.useCallback(
+    () => subscribeToHomeAttention(AppState.currentState, (callback) => AppState.addEventListener('change', callback), refreshForAttention),
+    [refreshForAttention],
+  ));
   const toggleFav = useToggleFavorite();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
@@ -333,6 +374,7 @@ export function HomeScreen() {
   };
 
   const feed = home.data;
+  const feedState = homeFeedState({ ...home, data: feed });
   const featured: any[] = feed?.featured ?? [];
   const popularItems: any[] = feed?.popularItems ?? [];
   const nearby: any[] = locationFix ? (feed?.nearby ?? []) : [];
@@ -486,7 +528,7 @@ export function HomeScreen() {
         refreshControl={
           // The pull now happens on paper, not on the maroon wash, so the
           // spinner has to be brand — white on white is an invisible spinner.
-          <RefreshControl refreshing={home.isRefetching} onRefresh={() => home.refetch()} tintColor={color.brand[500]} />
+          <RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />
         }
       >
         {/* THE LIVE ORDER, FIRST — and it used to say so while rendering fourth.
@@ -505,6 +547,16 @@ export function HomeScreen() {
             order this renders nothing and the food is still the first thing on
             Home. An order in flight is not a launcher tile — it is transient,
             it is timed, and while it exists it outranks browsing. */}
+        {/* A failed refresh over retained content says so — honestly, with the
+            way to retry. A refresh that is merely in flight says nothing: the
+            "Updating Home…" line that used to sit here pushed the live-order
+            card down on every tab switch, which read as a reload. */}
+        {home.isError && feed ? (
+          <Card style={{ marginHorizontal: GUTTER, marginTop: space.lg }}>
+            <T variant="label">Couldn’t update Home. Showing the last loaded feed, including its order status.</T>
+            <PillButton size="sm" label="Try again" onPress={() => { void home.refetch(); }} />
+          </Card>
+        ) : null}
         {activeOrder ? <LiveOrderCard order={activeOrder} navigation={navigation} /> : null}
 
         {/* THE services grid — 4x2, drawn icons, ON OPEN PAPER.
@@ -607,10 +659,12 @@ export function HomeScreen() {
           </View>
         ) : null}
 
-        {home.isLoading ? (
+        {feedState === 'offline' ? (
+          <ErrorState message="You're offline. Connect to load Home, then try again." onRetry={() => { void home.refetch(); }} style={{ paddingTop: 48 }} />
+        ) : feedState === 'loading' ? (
           <LoadingBlock style={{ paddingTop: 96 }} />
-        ) : home.isError ? (
-          <ErrorState onRetry={() => home.refetch()} style={{ paddingTop: 48 }} />
+        ) : feedState === 'error' ? (
+          <ErrorState onRetry={() => { void home.refetch(); }} style={{ paddingTop: 48 }} />
         ) : (
           <>
             {/* Order again — the fastest path to the next order */}
@@ -656,7 +710,11 @@ export function HomeScreen() {
                   a CTA, which made Swift's most credible claim look like an ad
                   — and an ad is the one thing nobody believes. Stated plainly
                   on paper, in ink, it reads as a fact about how Swift works,
-                  which is what it is. No CTA: it is not selling anything. */}
+                  which is what it is. No CTA: it is not selling anything.
+
+                  The body WRAPS inside the band [Q3]: the text column is
+                  `flex: 1` beside the icon, so it is exactly as wide as the row
+                  has left, and neither line carries a numberOfLines. */}
               <View style={{ paddingHorizontal: GUTTER, flexDirection: 'row', alignItems: 'flex-start', gap: space.sm }}>
                 <Feather name="check-circle" size={16} color={color.success} style={{ marginTop: 2 }} />
                 <View style={{ flex: 1 }}>
@@ -697,33 +755,21 @@ export function HomeScreen() {
                   keyExtractor={(c) => c.id}
                   contentContainerStyle={{ paddingHorizontal: GUTTER, gap: space.md, paddingTop: space.lg }}
                   renderItem={({ item }) => (
-                    // [Founder 08-22] Bare outlined text pills were the last
-                    // clean-minimal islands on the screen. Categories are FOOD
-                    // — they get photography with a scrim and white label,
-                    // like every other band. Real menu categories from the
-                    // live feed; the merchant's own imagery via categoryPhoto.
-                    <Pressable
+                    // A kit tile: photography under a scrim, the name drawn
+                    // exactly ONCE — with no photo the placeholder used to add
+                    // its own caps "MENU" behind the tile's "Menu" [Q3].
+                    //
+                    // The merchant's own picture. This passed
+                    // categoryImage(name), which looked the name up in a map
+                    // keyed by VERTICAL — food, grocery, taxi — and returned a
+                    // stock photo when it missed. Menu categories never match,
+                    // so every chip on Home was the same photograph. The tile's
+                    // Photo draws an honest placeholder for null.
+                    <CategoryTile
+                      name={item.name}
+                      image={categoryPhoto(item)}
                       onPress={() => navigation.navigate('Search', { q: item.name })}
-                      accessibilityRole="button"
-                      accessibilityLabel={item.name}
-                    >
-                      {({ pressed }) => (
-                        <View style={{ width: 132, height: 84, borderRadius: radius.lg, overflow: 'hidden', opacity: pressed ? 0.85 : 1 }}>
-                          {/* The merchant's own picture. This passed
-                              categoryImage(name), which looked the name up in a
-                              map keyed by VERTICAL — food, grocery, taxi — and
-                              returned a stock photo when it missed. Menu
-                              categories never match, so every chip on Home was
-                              the same photograph. Photo already draws an honest
-                              placeholder for null; it was simply never given one. */}
-                          <Photo uri={categoryPhoto(item)} label={item.name} style={{ width: '100%', height: '100%' }} />
-                          <Scrim height={84} cover />
-                          <View style={{ position: 'absolute', left: space.md, right: space.md, bottom: space.sm }}>
-                            <T variant="label" weight="semibold" tone="onBrand" numberOfLines={1}>{item.name}</T>
-                          </View>
-                        </View>
-                      )}
-                    </Pressable>
+                    />
                   )}
                 />
               </>
@@ -772,7 +818,7 @@ export function HomeScreen() {
                     topRated={v.topRated}
                     meta={[
                       v.etaMin ? `${v.etaMin} min` : null,
-                      locationFix ? kmLabel(v.distanceKm) : null,
+                      locationFix ? distanceLabel(v.distanceKm) : null,
                     ].filter(Boolean).join(' · ') || undefined}
                     favorite={v.isFavorite}
                     onToggleFavorite={() => onFavorite(v.id, !!v.isFavorite)}
@@ -841,7 +887,7 @@ export function HomeScreen() {
                           topRated={v.topRated}
                           extra={[
                             v.etaMin ? `${v.etaMin} min` : null,
-                            locationFix ? kmLabel(v.distanceKm) : null,
+                            locationFix ? distanceLabel(v.distanceKm) : null,
                           ].filter(Boolean).join(' · ') || undefined}
                         />
                       }
@@ -923,7 +969,7 @@ export function HomeScreen() {
                             rating={v.displayRating ?? null}
                             bucket={v.ratingBucket}
                             topRated={v.topRated}
-                            extra={locationFix ? kmLabel(v.distanceKm) : undefined}
+                            extra={locationFix ? distanceLabel(v.distanceKm) : undefined}
                           />
                         }
                         onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}

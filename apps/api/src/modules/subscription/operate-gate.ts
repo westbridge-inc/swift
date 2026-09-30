@@ -1,4 +1,4 @@
-import type { SubscriptionStatus } from '@prisma/client';
+import type { Prisma, SubscriptionStatus } from '@prisma/client';
 
 // THE canOperate predicate (lifecycle/billing spec §14, G-BILL-03) — the ONE
 // place that answers "may this subscription state operate right now?". Before
@@ -22,10 +22,10 @@ export const OPERABLE_STATUSES: readonly SubscriptionStatus[] = ['TRIAL', 'ACTIV
 
 export type SubscriptionOperability =
   | { operable: true }
-  | { operable: false; why: 'MISSING' | 'STATUS' | 'GRACE_LAPSED'; status?: SubscriptionStatus };
+  | { operable: false; why: 'MISSING' | 'STATUS' | 'GRACE_LAPSED' | 'BILLING_STOPPED'; status?: SubscriptionStatus };
 
 export function subscriptionOperability(
-  sub: { status: SubscriptionStatus; gracePeriodEnd: Date | null } | null | undefined,
+  sub: { status: SubscriptionStatus; gracePeriodEnd: Date | null; autoRenew: boolean; currentPeriodEnd: Date } | null | undefined,
   opts: { missingRow: 'BLOCK' | 'GRANDFATHER' },
   now = new Date(),
 ): SubscriptionOperability {
@@ -38,5 +38,26 @@ export function subscriptionOperability(
   if (sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < now) {
     return { operable: false, why: 'GRACE_LAPSED', status: sub.status };
   }
+  // [E12] A partner who stopped weekly billing works exactly until the period
+  // they already paid for (or their trial) ends — at the gate, not an hour
+  // later when the billing job's lapse sweep turns the row PAUSED.
+  if (!sub.autoRenew && sub.currentPeriodEnd <= now) {
+    return { operable: false, why: 'BILLING_STOPPED', status: sub.status };
+  }
   return { operable: true };
+}
+
+/** DB form of the same refusal rule. A nullable relation may use `isNot` with
+ * this filter to preserve the vendor gate's legacy missing-row policy. */
+export function inoperableSubscriptionWhere(now = new Date()): Prisma.SubscriptionWhereInput {
+  return {
+    OR: [
+      { status: { notIn: [...OPERABLE_STATUSES] } },
+      { status: 'PAST_DUE', gracePeriodEnd: { lt: now } },
+      // [E12] Billing stopped and the paid period (or trial) over — the same
+      // refusal subscriptionOperability makes, so a catalogue read never shows
+      // a store the gate would refuse.
+      { autoRenew: false, currentPeriodEnd: { lte: now } },
+    ],
+  };
 }

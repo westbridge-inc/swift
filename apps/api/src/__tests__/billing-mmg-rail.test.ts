@@ -171,18 +171,18 @@ describe('MMG charge lifecycle', () => {
     expect(payments[0]!.status).toBe('CAPTURED');
   });
 
-  it('a request ignored for >24h expires into the normal dunning path', async () => {
+  it.each(['pending', 'expired'] as const)('an aged request obeys provider %s truth instead of local TTL', async outcome => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091162' });
 
-    // A stale pending row whose sandbox lookup stays pending forever.
+    // Local age does not settle provider authority in either direction.
     await app.prisma.subscriptionPayment.create({
       data: {
         subscriptionId: subId,
         amount: 12000,
         status: 'PENDING',
         paymentMethod: 'MOBILE_MONEY',
-        externalRef: `mmgtx_pending_${nanoid(8)}`,
+        externalRef: `mmgtx_${outcome}_${nanoid(8)}`,
         periodStart: due,
         periodEnd: new Date(due.getTime() + 7 * DAY),
         createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
@@ -190,17 +190,15 @@ describe('MMG charge lifecycle', () => {
     });
 
     const polled = await billing.pollPendingMmgCharges();
-    expect(polled.failed).toBeGreaterThanOrEqual(1);
+    if (outcome === 'expired') expect(polled.failed).toBeGreaterThanOrEqual(1);
+    else expect(polled.stillPending).toBeGreaterThanOrEqual(1);
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect(after.status).toBe('PAST_DUE'); // dunning, not silence
-    expect(after.failedAttempts).toBe(1);
+    expect(after.status).toBe(outcome === 'expired' ? 'PAST_DUE' : 'ACTIVE');
+    expect(after.failedAttempts).toBe(outcome === 'expired' ? 1 : 0);
     const payment = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
-    // The intent machine labels a timed-out request EXPIRED (distinct from a
-    // provider decline's FAILED) — same dunning consequences, sharper truth,
-    // and a normalized code the ladder can branch on.
-    expect(payment.status).toBe('EXPIRED');
-    expect(payment.failureCode).toBe('REQUEST_EXPIRED');
+    expect(payment.status).toBe(outcome === 'expired' ? 'EXPIRED' : 'PENDING');
+    expect(payment.failureCode).toBe(outcome === 'expired' ? 'REQUEST_EXPIRED' : null);
   });
 
   it('a fresh still-pending request is left alone', async () => {
@@ -261,18 +259,19 @@ describe('MMG double-charge guard [SWIFT-004]', () => {
   it('heals a late approval — settles off the original request instead of charging again', async () => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091165' });
+    // [R13] The request is issued by the real intent machine, so its row carries
+    // our merchant reference and the issued attempt's amount and currency: the
+    // evidence R13 settles an approval against. (A hand-written row without it is
+    // held for a person instead; see the next case.)
+    expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
+    const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
+    const approvedRef = issued.externalRef!;
+    // The payer approved AFTER we synthetically gave up: the row is FAILED, but
+    // its MMG lookup now reports approved (no "pending" marker → sandbox approves).
+    await app.prisma.subscriptionPayment.update({ where: { id: issued.id }, data: { status: 'FAILED' } });
     await app.prisma.subscription.update({
       where: { id: subId },
       data: { status: 'PAST_DUE', failedAttempts: 1, nextRetryAt: new Date(Date.now() - 1000) },
-    });
-    // The payer approved AFTER we synthetically gave up: the row is FAILED, but
-    // its MMG lookup now reports approved (no "pending" marker → sandbox approves).
-    const approvedRef = `mmgtx_heal_amt1200000_${nanoid(8)}`;
-    await app.prisma.subscriptionPayment.create({
-      data: {
-        subscriptionId: subId, amount: 12000, status: 'FAILED', paymentMethod: 'MOBILE_MONEY',
-        externalRef: approvedRef, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
-      },
     });
 
     const outcome = await billing.billSubscription((await subWithRelations(subId)) as any);
@@ -288,6 +287,37 @@ describe('MMG double-charge guard [SWIFT-004]', () => {
     expect(payments.filter((p) => p.status === 'CAPTURED')).toHaveLength(1); // settled in place
     const successes = await app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' } });
     expect(successes).toHaveLength(1);
+  });
+
+  it('[R13] a late approval that cannot be tied to our request is held for a person — never settled, never charged again', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091166' });
+    await app.prisma.subscription.update({
+      where: { id: subId },
+      data: { status: 'PAST_DUE', failedAttempts: 1, nextRetryAt: new Date(Date.now() - 1000) },
+    });
+    // The hand-written legacy shape: a FAILED row with no merchant reference and
+    // a provider id this system never issued. MMG's lookup says approved, but
+    // nothing proves the approval belongs to this request.
+    const approvedRef = `mmgtx_heal_amt1200000_${nanoid(8)}`;
+    await app.prisma.subscriptionPayment.create({
+      data: {
+        subscriptionId: subId, amount: 12000, status: 'FAILED', paymentMethod: 'MOBILE_MONEY',
+        externalRef: approvedRef, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+      },
+    });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
+    }
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    expect(after.status).toBe('PAST_DUE');
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime()); // no week granted
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    expect(payments).toHaveLength(1); // no second MMG request, on either attempt
+    expect(payments[0]).toMatchObject({ externalRef: approvedRef, status: 'PENDING', failureCode: 'SETTLEMENT_MISMATCH' });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' } })).toBe(0);
   });
 });
 

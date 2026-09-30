@@ -72,6 +72,13 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // renders. The generic orderId branch below would have dropped them on the
   // CUSTOMER Delivery screen — a dead end with the clock running.
   if (kind === 'dispatch_offer') return { screen: 'Main' };
+  // [Q10] "Order ready for pickup" goes to the RIDER who holds the job, never
+  // to the customer (the API sends it only from the kitchen's Mark-ready to
+  // the assigned rider, tagged audience earner). Its orderId sent it down the
+  // generic branch to Delivery, the CUSTOMER screen MoverStack never mounts,
+  // so the tap opened nothing. ActiveJob is the rider's live job; it takes no
+  // params because it resolves the active job itself.
+  if (kind === 'prep_ready') return { screen: 'ActiveJob' };
   // A store told "a cancelled order may hold an MMG payment" runs a business:
   // their Main is the vendor dashboard, not a customer tracking screen.
   if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };
@@ -90,12 +97,18 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
 
   // An appointment MOVED (booking_rescheduled) is a Booking on a STORE's
   // calendar — it carries bookingId, never jobId — so it takes its own branch
-  // before the service-job family below: the vendor's Schedule agenda is the
-  // screen that shows that slot. The other recipient of the same kind is the
-  // customer whose appointment the store moved, and the app has no
-  // customer-side appointments screen at all — that tap opens the app
-  // normally, exactly as it does today, until one exists [reported].
-  if (kind === 'booking_rescheduled') return { screen: 'Schedule' };
+  // before the service-job family below. It has TWO recipients, told apart
+  // by the audience the API tags [E28]. business = the STORE whose calendar
+  // owns the slot; their Schedule agenda shows it. customer = the person whose
+  // appointment moved. Schedule is mounted ONLY by VendorStack, so a customer
+  // tap aimed there opened nothing. The customer copy returns null (the app
+  // opens normally) because no customer screen shows the moved time: the
+  // order screen renders Order.appointmentSlot, which a reschedule does not
+  // update, so a Delivery deep link would show the OLD time. An untagged row
+  // cannot say whose it is, so it also opens the app normally.
+  if (kind === 'booking_rescheduled') {
+    return audience === 'business' ? { screen: 'Schedule' } : null;
+  }
 
   // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
   // booking_* kind is a service JOB event carrying jobId/refId and no orderId
@@ -141,6 +154,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (kind === 'mmg_link_change_staged' || kind === 'mmg_link_change_applied' || kind === 'mmg_link_change_cancelled') {
     return { screen: 'Account' };
   }
+  // [Q8 · DS269 F1] Someone on the team moved the store's map pin. The owner
+  // lands on Account, where the Store location card shows it and moves it back.
+  if (kind === 'store_pin_moved') return { screen: 'Account' };
 
   if (kind === 'liveness_locked') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
@@ -188,7 +204,7 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (audience === 'business' && orderId) return { screen: 'VendorOrderDetail', params: { orderId } };
 
   // Orders: any payload carrying an orderId lands on that order's tracking
-  // screen — covers status updates, prep_ready, substitutions, pickup READY.
+  // screen — covers status updates, substitutions, pickup READY.
   if (orderId) return { screen: 'Delivery', params: { orderId } };
 
   return null; // unknown → the app opens normally

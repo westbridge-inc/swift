@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
@@ -10,9 +10,20 @@ import { openPayLink } from '../../../lib/payLink';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
+import { usePartnerPricing } from '../../../hooks/partnerPricing';
+import { vendorQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { useLocationStore } from '../../../stores/locationStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
+import {
+  businessSetupDraftFor,
+  editBusinessSetupDraft,
+  useBusinessSetupDraft,
+  type BusinessSetupDraft,
+} from '../../../stores/businessSetupDraft';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { STORE_PIN_COPY, businessSetupBlocker, storeCreateErrorCopy, vendorBusinessPayload } from '../../../lib/storePin';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { TYPES, TabHeader } from '../shared';
 
 function BizValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.glyphMap; label: string }) {
@@ -76,51 +87,80 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
 export function BusinessSetup() {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [pinPickerOpen, setPinPickerOpen] = useState(false);
   const { latitude, longitude, status: locationStatus } = useLocationStore();
-  const [name, setName] = useState('');
-  const [type, setType] = useState<'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE'>('RESTAURANT');
-  const [phone, setPhone] = useState('');
-  const [addr, setAddr] = useState('');
-  const [city, setCity] = useState('Georgetown');
-  // [F-027-02] A store's coordinates are where customers are sent and where
-  // dispatch measures from. This used to submit `latitude ?? 6.8013` — pinning
-  // the shop at the Georgetown city centre whenever the device location was
-  // unknown, while the caption below told the owner we had used their current
-  // location. A fabricated pin AND a false statement about it. No location
-  // now means no submission, said out loud.
-  // [F-028-08] Persisted numbers are only a last-known map centre; they are a
-  // STORE PIN — where customers are sent, where dispatch measures from — only
-  // when the grant is live. The old existence check submitted a pin while
-  // status was resolving/denied/unavailable, so a revoked permission could
-  // register a business at wherever the phone last was.
-  const pinFix = grantedLocationFix(latitude, longitude, locationStatus);
-  const hasPin = pinFix !== null;
-  // [DCR-1] The Business Agreement consent — recorded in the ledger with the
-  // exact version at store creation, the same way signup records the Terms.
-  const [agree, setAgree] = useState(false);
-  const valid = hasPin && name.trim().length >= 2 && phone.trim().length >= 5 && addr.trim().length >= 3 && city.trim().length >= 2;
+  // The form outlives this screen (stores/businessSetupDraft): a failed
+  // background profile read or a trip to Swift and back remounts it, and each
+  // remount used to start blank. It belongs to exactly this signed-in account.
+  const userId = useAuthStore((s) => (s.isAuthenticated ? s.user?.id ?? null : null));
+  const generation = useAuthStore((s) => s.sessionGeneration);
+  const owner = userId ? { userId, generation } : null;
+  // [DCR-1] `agree` is the Business Agreement consent — recorded in the ledger
+  // with the exact version at store creation, the same way signup records the Terms.
+  const { name, type, phone, addr, city, agree, pin } = useBusinessSetupDraft((s) => businessSetupDraftFor(s, owner));
+  const edit = (patch: Partial<BusinessSetupDraft> | ((draft: BusinessSetupDraft) => Partial<BusinessSetupDraft>)) => {
+    editBusinessSetupDraft(getAuthSessionSnapshot(), owner, patch);
+  };
+  // A store's coordinates are where customers are sent and where dispatch
+  // measures from. [F-027-02] They were once `latitude ?? 6.8013`, a
+  // fabricated Georgetown centre; [F-028-08] then any last-known fix, even with
+  // the grant revoked; then the phone's live fix. [Q8] That is still the wrong
+  // place whenever the owner signs up from home, an office or a car (owner:
+  // "they can't just use the location they're registering from"). The pin is
+  // now only what the owner confirms on the store map. The phone's live
+  // position goes to that map as a place to START, and is never submitted.
+  const deviceSuggestion = grantedLocationFix(latitude, longitude, locationStatus);
+  const hasPin = pin !== null;
+  const form = { name, type, phone, addr, city, agree, pin };
+  const blocker = businessSetupBlocker(form);
+  // [PR1270-S2-04] The price on the door is a condition of the door: the store
+  // is created only against a weekly fee that was fetched successfully, is the
+  // one the card above shows for THIS business type, and is current. The list
+  // is read fresh here, never from an hour-old cache. Loading, a failed fetch,
+  // no quote for the type, or a stale quote disables the button and says so.
+  const countryCode = useAuthStore((s) => (s.user as { countryCode?: string } | null)?.countryCode);
+  const pricing = usePartnerPricing(countryCode, true, { fresh: true });
+  const gate = quoteGate(pricing, (p) => vendorQuote(p, type));
+  const stale = !gate.ok && gate.why === 'stale';
+  const { refetch: refetchPricing } = pricing;
+  useEffect(() => {
+    if (stale) void refetchPricing();
+  }, [stale, refetchPricing]);
 
   const submit = () => {
-    if (!hasPin) return; // guarded by `valid`, restated so the call site cannot fabricate
+    if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
+    // Guarded by `blocker`, restated so the call site cannot fabricate a pin:
+    // no confirmed pin, no payload.
+    const business = vendorBusinessPayload(form);
+    if (!business) return;
     become.mutate({
       role: 'VENDOR',
-      business: {
-        name: name.trim(),
-        vendorType: type,
-        phone: phone.trim(),
-        addressLine1: addr.trim(),
-        city: city.trim(),
-        latitude: pinFix!.latitude,
-        longitude: pinFix!.longitude,
-      },
+      business,
       acceptAgreement: agree,
     });
   };
 
   return (
     <Screen>
-      <TabHeader title="Sell on Swift" onSwitch={() => setSwitcherOpen(true)} />
+      {/* The draft lives in memory and the auth store clears it at logout, so
+          the ask says so: nothing here reaches Swift until it is submitted. */}
+      <TabHeader
+        title="Sell on Swift"
+        onSwitch={() => setSwitcherOpen(true)}
+        logoutBody="Nothing on this form has been sent yet, so what you’ve typed is cleared from this device."
+      />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
+      <StoreLocationPicker
+        visible={pinPickerOpen}
+        current={pin}
+        address={{ line: addr, city }}
+        device={deviceSuggestion}
+        onClose={() => setPinPickerOpen(false)}
+        onConfirm={(confirmed) => {
+          edit({ pin: confirmed });
+          setPinPickerOpen(false);
+        }}
+      />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title">List your business</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
@@ -132,33 +172,74 @@ export function BusinessSetup() {
           <BizValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
-        {/* The price on the door — what the flat weekly fee actually is. */}
-        <PricingCard kind="vendor" />
+        {/* The price on the door — what the flat weekly fee actually is for the
+            business type picked below. */}
+        <PricingCard kind="vendor" vendorType={type} />
 
         <T variant="heading" style={{ marginBottom: space.md }}>
           Business type
         </T>
         <View style={{ flexDirection: 'row', gap: space.md }}>
           {TYPES.map((t) => (
-            <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => setType(t.key)} />
+            <BizTypeTile key={t.key} t={t} active={t.key === type} onPress={() => edit({ type: t.key })} />
           ))}
         </View>
 
         <Card style={{ marginTop: space.xl, gap: space.md }}>
-          <LabeledInput value={name} onChangeText={setName} placeholder="Business name" />
-          <LabeledInput value={phone} onChangeText={setPhone} placeholder="Business phone" keyboardType="phone-pad" />
-          <LabeledInput value={addr} onChangeText={setAddr} placeholder="Street address" />
-          <LabeledInput value={city} onChangeText={setCity} placeholder="City" />
+          <LabeledInput value={name} onChangeText={(value) => edit({ name: value })} placeholder="Business name" />
+          <LabeledInput value={phone} onChangeText={(value) => edit({ phone: value })} placeholder="Business phone" keyboardType="phone-pad" />
+          <LabeledInput value={addr} onChangeText={(value) => edit({ addr: value })} placeholder="Street address" />
+          <LabeledInput value={city} onChangeText={(value) => edit({ city: value })} placeholder="City" />
+          {/* [Q8] The store pin: placed on a map and confirmed by the owner,
+              never taken from where the phone happens to be. */}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={hasPin ? 'Move the store pin' : 'Place your store on the map'}
+            onPress={() => setPinPickerOpen(true)}
+          >
+            {({ pressed }) => (
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: space.md,
+                  padding: space.md,
+                  borderRadius: radius.md,
+                  borderWidth: 1,
+                  borderColor: hasPin ? color.border.subtle : color.brand[500],
+                  backgroundColor: color.surface.base,
+                  opacity: pressed ? 0.75 : 1,
+                }}
+              >
+                <MaterialCommunityIcons
+                  name={hasPin ? 'map-marker-check' : 'map-marker-plus'}
+                  size={22}
+                  color={hasPin ? color.success : color.brand[500]}
+                />
+                <View style={{ flex: 1 }}>
+                  <T variant="label" weight="semibold">
+                    {hasPin ? 'Store pin placed' : 'Place your store on the map'}
+                  </T>
+                  <T variant="caption" tone="muted" numberOfLines={2}>
+                    {pin
+                      ? pin.address ?? `${pin.latitude.toFixed(5)}, ${pin.longitude.toFixed(5)}`
+                      : STORE_PIN_COPY.instruction}
+                  </T>
+                </View>
+                <MaterialCommunityIcons name="chevron-right" size={20} color={color.text.muted} />
+              </View>
+            )}
+          </Pressable>
           {/* [two-reds law] `error` is reserved for genuine failure — the palette
               says so, and brand is already red, so a second red must mean
-              something. Nothing has failed here: the app is asking for a
-              permission it has not been given yet. That is `warning` (burnt
-              amber, "cautions"), and the sentence carries the meaning anyway,
-              which is the other half of the law — colour never carries it alone. */}
+              something. Nothing has failed here: the store has not been put
+              on the map yet. That is `warning` (burnt amber, "cautions"), and
+              the sentence carries the meaning anyway, which is the other half
+              of the law — colour never carries it alone. */}
           <T variant="caption" tone={hasPin ? 'muted' : 'warning'}>
             {hasPin
-              ? 'We\u2019ll use your current location as the store pin.'
-              : 'We need your location to pin your store on the map \u2014 turn location on for Swift, then come back. Customers are sent to this pin.'}
+              ? 'Riders and customers will come to this pin. Tap it to move it.'
+              : 'Riders and customers will come to this pin, so put it where your store is — not where you are now.'}
           </T>
         </Card>
 
@@ -166,7 +247,7 @@ export function BusinessSetup() {
           accessibilityRole="checkbox"
           accessibilityState={{ checked: agree }}
           accessibilityLabel="I agree to the Business Agreement"
-          onPress={() => setAgree((v) => !v)}
+          onPress={() => edit((draft) => ({ agree: !draft.agree }))}
           style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
         >
           <MaterialCommunityIcons
@@ -183,30 +264,18 @@ export function BusinessSetup() {
         </Pressable>
         {become.isError ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
-            Couldn&apos;t create your store. Try again.
+            {storeCreateErrorCopy(become.error)}
           </T>
         ) : null}
-        {/* [#947's grammar] Disabled names the first missing thing, in the
-            order the form asks for them — the pin first, because without it
-            nothing else matters. */}
+        {/* [#947's grammar] Disabled names the first missing thing — the fee
+            first, because without a fee on the door there is nothing to agree
+            to; then the form's own fields in the order it asks for them, the
+            store pin after the address because its map starts from the address
+            (lib/storePin businessSetupBlocker). */}
         <PillButton
-          label={
-            !hasPin
-              ? 'Turn location on first'
-              : name.trim().length < 2
-                ? 'Name your business'
-                : phone.trim().length < 5
-                  ? 'Add the business phone'
-                  : addr.trim().length < 3
-                    ? 'Add the street address'
-                    : city.trim().length < 2
-                      ? 'Add the city'
-                      : !agree
-                        ? 'Agree to the Business Agreement first'
-                        : 'Create store'
-          }
+          label={!gate.ok ? QUOTE_GATE_COPY[gate.why] : blocker ?? 'Create store'}
           loading={become.isPending}
-          disabled={!valid || !agree}
+          disabled={!gate.ok || blocker !== null}
           style={{ marginTop: space.lg }}
           onPress={submit}
         />
@@ -223,13 +292,16 @@ export function BusinessSetup() {
 }
 
 export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => void }) {
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
   return (
     <Screen>
-      <TabHeader title={store.name} />
+      {/* Waiting for approval is not a reason to be kept out of Swift. */}
+      <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} />
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        <PricingCard kind="vendor" />
+        <PricingCard kind="vendor" vendorType={store.vendorType} />
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}

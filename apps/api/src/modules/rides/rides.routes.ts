@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
 import { z } from 'zod';
 import { FareService } from './fare.service';
@@ -63,6 +63,13 @@ async function authenticatedTenantId(app: FastifyInstance, userId: string): Prom
 
 export async function ridesRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
+  const creationAuth = { preHandler: [app.authenticate, async (request: FastifyRequest) => {
+    // Cookie provenance is set only after JWT and live-session verification.
+    // A bearer is not proof of a mobile app; do not trust a client-name header.
+    if (request.authCredentialSource === 'cookie') {
+      throw new AppError(403, 'TAXI_MOBILE_APP_REQUIRED', 'Book taxi rides in the Swift mobile app for your safety PIN and SOS.');
+    }
+  }] };
   const fareService = new FareService(app.prisma);
   const orderService = new OrderService(app.prisma, app.io);
   const dispatch = makeDispatchService(app);
@@ -133,7 +140,7 @@ export async function ridesRoutes(app: FastifyInstance) {
   /** POST /request — create the ride at the quoted fare and start dispatch.
    *  The core lives in rides.service createRideRequest (one source of truth
    *  with the 5.5B queue's auto-request); this handler is HTTP only. */
-  app.post('/request', auth, async (request, reply) => {
+  app.post('/request', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
     const { order, estimate, ridePin } = await createRideRequest(app, fareService, dispatch, request.user.userId, body);
 
@@ -170,7 +177,7 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  from the request path (no availability pre-check: the queue exists FOR
    *  the no-supply case). Replaces any prior WAITING entry (newest trip wins,
    *  same semantic as the supply watch). */
-  app.post('/queue/join', auth, async (request, reply) => {
+  app.post('/queue/join', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);
@@ -349,6 +356,39 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  /** POST /:id/confirm-driver-arrival — the passenger's own eyes override the
+   *  arrival GPS gate [E19]. Ownership and the status CAS are one `updateMany`,
+   *  so the confirm itself IS the override transaction: no new column, no
+   *  migration, and nobody but this ride's customer can start the clock. */
+  app.post<{ Params: { id: string } }>('/:id/confirm-driver-arrival', auth, async (request) => {
+    const now = new Date();
+    const claimed = await app.prisma.order.updateMany({
+      where: {
+        id: request.params.id,
+        customerId: request.user.userId,
+        orderType: 'TAXI',
+        status: 'DRIVER_EN_ROUTE',
+        driverId: { not: null },
+      },
+      data: { status: 'DRIVER_ARRIVED', driverArrivedAt: now },
+    });
+    if (claimed.count === 0) {
+      throw new AppError(409, 'INVALID_STATUS',
+        'The driver has not started this ride, or it is no longer waiting for pickup.');
+    }
+    await app.prisma.orderStatusLog.create({
+      data: {
+        orderId: request.params.id,
+        status: 'DRIVER_ARRIVED',
+        changedBy: request.user.userId,
+        note: 'Driver arrival confirmed by the passenger — GPS gate overridden',
+      },
+    });
+    app.io.to(`order:${request.params.id}`).emit('order:status_changed',
+      { orderId: request.params.id, status: 'DRIVER_ARRIVED' });
+    return { success: true, data: { orderId: request.params.id, status: 'DRIVER_ARRIVED' } };
+  });
+
   /** POST /:id/sos — passenger or driver raises an emergency on an active ride.
    *  The app also dials the local emergency number; this raises a first-class
    *  alert in the ONE SOS engine (safety §4) so ops get paged, the war-room
@@ -400,13 +440,17 @@ export async function ridesRoutes(app: FastifyInstance) {
       immediate: true,
       lat: body.lat ?? null,
       lng: body.lng ?? null,
+      // [PRIV2-S1] The free-text reason is recorded by the engine, ops-only:
+      // the alert (and so the evidence bundle), or a repeat press's own row.
+      note: body.note ?? null,
     });
 
-    // Keep the free-text reason + coords on the order's immutable timeline (the
-    // SosAlert carries no free-text trigger field; ops correlate via orderId).
-    await app.prisma.orderStatusLog.create({
-      data: { orderId: ride.id, status: ride.status, changedBy: request.user.userId, note: `SOS raised by ${raisedBy}${body.note ? `: ${body.note}` : ''} ${body.lat != null ? `@${body.lat},${body.lng}` : ''}`.trim() },
-    });
+    // [PRIV2-S1] Nothing about the SOS goes on the order timeline: not the
+    // note, not the position, not even a neutral "SOS raised" marker. Both
+    // people on the ride read order_status_logs verbatim (the driver's
+    // /driver/rides/active, the passenger's /rides/:id and /customer/orders/:id),
+    // so any row here tells the person the SOS is about that it was raised.
+    // The engine never notifies the other party either — same doctrine.
 
     return { success: true, data: { acknowledged: true, orderId: ride.id, sosAlertId: alert.id, status: alert.status } };
   });

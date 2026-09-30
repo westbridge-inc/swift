@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { PrismaClient } from '@prisma/client';
+import { adminAuditCounter } from '../plugins/observability';
 import { adminAuditRow, RESERVED_CHANGE_KEYS, verifyInlineRow, type AuditRequestLike } from '../modules/admin/audit-within';
 import { ABSENT } from '../modules/admin/audit-change';
 
@@ -39,9 +40,27 @@ describe('[ADM-002] adminAuditRow', () => {
     expect(row['entityId']).toBe('broadcast');
   });
 
-  it.each([...RESERVED_CHANGE_KEYS])('refuses an extra that would redefine %s', (key) => {
-    expect(() => adminAuditRow(request(), 'u1', { ...base, extra: { [key]: 'rewritten' } }))
-      .toThrow(/may not redefine the canonical field/);
+  // [independent review] The INVARIANT is unchanged — a canonical field is never
+  // overwritten by an audit "fact". The MECHANISM changed: this used to throw,
+  // and the throw lands inside the action's transaction, so a collision took the
+  // whole privileged action down with a 500. That is exactly the defect C-01b
+  // removed from two live admin routes. The key is dropped and counted instead:
+  // the trail loses one extra fact, never a canonical field and never the action.
+  it.each([...RESERVED_CHANGE_KEYS])('drops — and does not throw on — an extra that would redefine %s', (key) => {
+    const row = adminAuditRow(request(), 'u1', { ...base, extra: { [key]: 'rewritten' } as never });
+    const changes = row['changes'] as Record<string, unknown>;
+    expect(changes[key], `${key} keeps its canonical value`).not.toBe('rewritten');
+    expect(row['action'], 'and the row itself is still written').toContain('ADMIN');
+  });
+
+  it('a colliding extra is COUNTED, so the drop is never silent', async () => {
+    const readDrop = async (key: string) => {
+      const m = await adminAuditCounter.get();
+      return m.values.find((v) => v.labels['writer'] === `extra_collision:${key}`)?.value ?? 0;
+    };
+    const before = await readDrop('subject');
+    adminAuditRow(request(), 'u1', { ...base, extra: { subject: 'rewritten' } as never });
+    expect(await readDrop('subject')).toBe(before + 1);
   });
 
   it('the stated reason survives even a colliding extra that slipped past the guard', () => {

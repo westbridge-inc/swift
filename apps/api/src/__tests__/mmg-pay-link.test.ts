@@ -10,7 +10,10 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantStepUp } from './helpers/step-up';
+import { stepUpKey } from '../modules/auth/step-up';
 import { applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
+import { runWithoutTenant } from '../plugins/tenant-context';
+import { syntheticLocationOwner } from './helpers/online-mover';
 
 // [W-25] A store's attestation now carries the provider reference from its own
 // wallet message — a bare tap is refused (REFERENCE_REQUIRED), and one reference
@@ -214,6 +217,64 @@ describe('MMG pay link — taxi driver', () => {
     const profile = await inject('GET', '/api/v1/driver/profile', driver.token);
     expect(profile.json().data.mmgPayUrl).toBeNull();
     await app.prisma.driver.update({ where: { userId: driver.userId }, data: { mmgPayUrl: null } });
+  });
+});
+
+describe('[High #9 · DS109] a plate change needs step-up and closes the driver\'s vehicle links', () => {
+  it('refuses without step-up; with it the plate changes, live supply retires and the old vehicle links close', async () => {
+    const before = await app.prisma.driver.findUniqueOrThrow({ where: { userId: driver.userId } });
+    const currentPlate = before.licensePlate ?? 'PLATE-DEFAULT';
+    const formatted = currentPlate.replace(/(\D)(\d)/, '$1 $2'); // same plate, different spacing
+    const nextPlate = `PMG${String(Date.now()).slice(-6)}`;
+    // The MMG link tests above stepped this session up (grantStepUp). Start without a live
+    // step-up, so the refusal below is the plate rule itself, not a stale grant, and the
+    // formatting-only edit proves it needs none.
+    const session = await app.prisma.session.findUniqueOrThrow({ where: { token: driver.token }, select: { id: true } });
+    await app.redis.del(stepUpKey(session.id));
+
+    await runWithoutTenant(async () => {
+      const subject = await app.prisma.subject.create({ data: { kind: 'VEHICLE', countryCode: 'GY', createdById: driver.userId } });
+      await app.prisma.vehicleProfile.create({
+        data: { subjectId: subject.id, registrationMark: currentPlate.toUpperCase().replace(/[\s-]+/g, ''), countryCode: 'GY', vehicleKind: 'CAR', registeredById: driver.userId },
+      });
+      await app.prisma.subjectLink.create({ data: { accountId: driver.userId, subjectId: subject.id, relation: 'ASSIGNED_DRIVER' } });
+      // An online, verified driver switches vehicles: the change must retire the supply
+      // atomically (the exact shape the admin reject path uses) — not leave a dispatchable
+      // driver with an unverified vehicle.
+      await app.prisma.driver.update({
+        where: { userId: driver.userId },
+        data: { isOnline: true, locationSessionId: syntheticLocationOwner('mmg-plate-change'), documentsVerified: true },
+      });
+    }, 'mmg-plate-change-test');
+
+    // A formatting-only edit of the SAME plate is not a plate change: no step-up, no invalidation.
+    const same = await inject('PUT', '/api/v1/driver/profile', driver.token, { licensePlate: formatted });
+    expect(same.statusCode).toBe(200);
+    const untouched = await app.prisma.driver.findUniqueOrThrow({ where: { userId: driver.userId } });
+    expect(untouched.isOnline).toBe(true);
+    expect(untouched.documentsVerified).toBe(true);
+
+    // A real plate change is a security-relevant re-identification: step-up first.
+    const refused = await inject('PUT', '/api/v1/driver/profile', driver.token, { licensePlate: nextPlate });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().error.code).toBe('STEP_UP_REQUIRED');
+    expect((await app.prisma.driver.findUniqueOrThrow({ where: { userId: driver.userId } })).licensePlate).toBe(formatted);
+
+    await grantStepUp(app, driver.token);
+    const ok = await inject('PUT', '/api/v1/driver/profile', driver.token, { licensePlate: nextPlate });
+    expect(ok.statusCode).toBe(200);
+    const after = await app.prisma.driver.findUniqueOrThrow({ where: { userId: driver.userId } });
+    expect(after.licensePlate).toBe(nextPlate);
+    expect(after.isOnline).toBe(false);
+    expect(after.locationSessionId).toBeNull();
+    expect(after.documentsVerified).toBe(false);
+
+    // The old vehicle links close: the old vehicle's evidence stops counting at GO.
+    const link = await runWithoutTenant(() => app.prisma.subjectLink.findFirst({
+      where: { accountId: driver.userId, relation: 'ASSIGNED_DRIVER' },
+    }), 'mmg-plate-change-test');
+    expect(link).not.toBeNull();
+    expect(link!.validTo).not.toBeNull();
   });
 });
 

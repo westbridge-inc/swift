@@ -1,9 +1,10 @@
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
 import type { FastifyInstance } from 'fastify';
+import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { z } from 'zod';
-import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, AgentActionStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
+import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
@@ -18,16 +19,20 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { CashRulesService } from '../cash/cash-rules.service';
-import { AgentService } from '../agent/agent.service';
-import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
-import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
-import { APPROVAL_HEADER, approvalRefusalMessage, decideApproval, requiresApproval, resolveApproval } from './admin-approval';
+import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
+import {
+  APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
+  fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
+  type ApprovalSnapshotRow,
+} from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
-import { adminAuditRow, auditWithin, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
+import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
+import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -35,8 +40,9 @@ import { mintRenderPath } from '../../providers/storage/envelope';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
-import { revealPickupCode, rotatePickupCode, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
+import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
@@ -515,22 +521,6 @@ export async function adminRoutes(app: FastifyInstance) {
           OR: [{ rateeId: null }, { ratee: { tenantId } }],
         };
       }),
-      // Agent request/audit subjects are loose order ids in the legacy schema.
-      // Derive their allowed set through the tenant-owned Order root.
-      agentActionRequest: childScope(async (tenantId) => {
-        const orderIds = (await app.prisma.order.findMany({
-          where: { tenantId },
-          select: { id: true },
-        })).map((order) => order.id);
-        return { orderId: { in: orderIds } };
-      }),
-      agentAuditEvent: childScope(async (tenantId) => {
-        const orderIds = (await app.prisma.order.findMany({
-          where: { tenantId },
-          select: { id: true },
-        })).map((order) => order.id);
-        return { subjectId: { in: orderIds } };
-      }),
       alertDelivery: childScope(async (tenantId) => {
         const [orders, recipients] = await Promise.all([
           app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
@@ -545,18 +535,28 @@ export async function adminRoutes(app: FastifyInstance) {
       complianceViolation: childScope((tenantId) => ({ user: { tenantId } })),
       complianceReviewCase: childScope((tenantId) => ({ user: { tenantId } })),
       // ReimbursementClaim predates relations and carries only loose ids.
-      // Require its rider, order and customer to resolve in the same tenant;
+      // Require its mover, order and customer to resolve in the same tenant;
       // this hides malformed bridge rows rather than accepting whichever leg
       // happened to be local. The CashRulesService CAS and its re-read both
       // inherit this scope.
+      //
+      // [DS110 #19 · G3-F1] The mover leg resolves through EITHER profile: a
+      // rider claim by riderId, a driver (taxi) claim by driverId with riderId
+      // NULL — the database XOR. `riderId IN (...)` alone is never true for a
+      // driver claim, so every taxi guarantee claim was missing from the queue
+      // and approve/reject/paid answered 404, even after two-person approval.
       reimbursementClaim: childScope(async (tenantId) => {
-        const [riders, orders, customers] = await Promise.all([
+        const [riders, drivers, orders, customers] = await Promise.all([
           app.prisma.rider.findMany({ where: { user: { tenantId } }, select: { id: true } }),
+          app.prisma.driver.findMany({ where: { user: { tenantId } }, select: { id: true } }),
           app.prisma.order.findMany({ where: { tenantId }, select: { id: true } }),
           app.prisma.user.findMany({ where: { tenantId }, select: { id: true } }),
         ]);
         return {
-          riderId: { in: riders.map((rider) => rider.id) },
+          OR: [
+            { riderId: { in: riders.map((rider) => rider.id) } },
+            { riderId: null, driverId: { in: drivers.map((driver) => driver.id) } },
+          ],
           orderId: { in: orders.map((order) => order.id) },
           customerId: { in: customers.map((customer) => customer.id) },
         };
@@ -587,7 +587,9 @@ export async function adminRoutes(app: FastifyInstance) {
   const subscriptions = new SubscriptionService(tenantPrisma);
   const verification = new VerificationService(tenantPrisma, notifications, getKycProvider());
   const cashRules = new CashRulesService(tenantPrisma, notifications, orderService);
-  const ratingStats = new RatingStatsService(tenantPrisma);
+  // [E26] moderation re-levels a vendor aggregate, so the vendor's search
+  // document must re-sync — same seam as every other vendor write here.
+  const ratingStats = new RatingStatsService(tenantPrisma, (vendorId) => scheduleVendorSearchSync(app, vendorId));
 
   const mutationOrNotFound = async <T>(entity: string, id: string, mutate: () => Promise<T>): Promise<T> => {
     try {
@@ -718,7 +720,16 @@ export async function adminRoutes(app: FastifyInstance) {
     const header = request.headers[APPROVAL_HEADER];
     const outcome = await resolveApproval(
       app.prisma, authority,
-      { method: request.method, routeUrl, params: (request.params ?? {}) as Record<string, unknown>, body: request.body },
+      {
+        method: request.method,
+        routeUrl,
+        params: (request.params ?? {}) as Record<string, unknown>,
+        body: request.body,
+        // [DS110 rev D5] The query string is part of what executes: store and
+        // fingerprint it, so a route that keys a decision input off query can
+        // never have it silently dropped when the approval is replayed.
+        query: (request.query ?? {}) as Record<string, unknown>,
+      },
       { userId },
       typeof header === 'string' && header ? header : null,
       reasonOf(request.body, request.headers) ?? '',
@@ -764,7 +775,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeUrl}`];
     if (!authority?.entity) return;
     const params = (request.params ?? {}) as Record<string, string>;
-    request.auditBefore = await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id']);
+    request.auditBefore = await snapshot(app.prisma, authority.entity, params[authority.entity.routeParam ?? 'id']);
   });
 
   // [ADM-007] EVERY SENSITIVE READ LEAVES A RECORD.
@@ -864,7 +875,7 @@ export async function adminRoutes(app: FastifyInstance) {
       const authority = ADMIN_ROUTE_AUTHORITY[`${request.method.toUpperCase()} ${routeTemplateOf(request, app.prefix)}`];
       const before: EntitySnapshot = (request as { auditBefore?: EntitySnapshot }).auditBefore ?? ABSENT;
       const after = authority?.entity
-        ? await snapshot(app.prisma, authority.entity, params[authority.entity.param ?? 'id'])
+        ? await snapshot(app.prisma, authority.entity, params[authority.entity.routeParam ?? 'id'])
         : ABSENT;
       // [ADM-002] One builder, both writers — so a route that migrates to
       // `auditWithin` writes the row it wrote before, at a safer moment.
@@ -876,7 +887,9 @@ export async function adminRoutes(app: FastifyInstance) {
           before,
           after,
           entityDeclared: !!authority?.entity,
+          entity: authority?.entity,
           entityOverride: isAuditedRead ? 'integrity' : undefined,
+          cls: authority?.cls,
         }) as never,
       });
     } catch (err) {
@@ -919,8 +932,18 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/verification/doc-types/:code/external-processing', { preHandler: [platformControlGuard] }, async (request) => {
     const { code } = request.params as { code: string };
     const body = z.object({ allowed: z.boolean(), decisionRef: z.string().trim().min(3).max(120).optional(), reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const result = await recordExternalProcessingDecision(app.prisma, { code, allowed: body.allowed, decisionRef: body.decisionRef ?? null, reason: body.reason },
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, reason: body.reason, extra: facts }));
+    // [review] ONE reason, and it is the one that was VALIDATED. `reasonProblem`
+    // (the C4 guard) checks the STATED reason — the header when present, at
+    // ADMIN_REASON_MIN characters — while this route's own zod requires only
+    // min(3) on the body field. Passing `body.reason` therefore made the reason
+    // validated and the reason recorded two different strings, on the single
+    // route this whole change exists for, and left it disagreeing with the
+    // sibling route whose comment states the rule. No override: `auditWithin`
+    // derives the same value through `reasonOf(body, headers)`, and the
+    // decision row is given it too so the two can never diverge.
+    const stated = reasonOf(request.body, request.headers as never) ?? body.reason;
+    const result = await recordExternalProcessingDecision(app.prisma, { code, allowed: body.allowed, decisionRef: body.decisionRef ?? null, reason: stated },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: code, extra: facts }));
     return { success: true, data: result.after };
   });
 
@@ -1052,6 +1075,32 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, ...paginatedResponse(users, total, { page, limit, skip }) };
   });
 
+  /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
+   *  facts for the console's profile links and vehicle facts for the review
+   *  center. KYC document URLs, enforcement state, float and rating internals
+   *  must never ride on this envelope — the dedicated mover detail routes own
+   *  those. An allow-list, so a new Rider/Driver column does not leak here. */
+  const ADMIN_USER_MOVER_SELECT = {
+    id: true,
+    documentsVerified: true,
+    vehicleType: true,
+    vehicleMake: true,
+    vehicleModel: true,
+    vehicleColor: true,
+    licensePlate: true,
+  } as const;
+
+  /** Same story for a user's stores: what the console's profile section draws
+   *  (name + status) and the review center's business facts — never the
+   *  operational `phone`/`email`. */
+  const ADMIN_USER_VENDOR_SELECT = {
+    id: true,
+    name: true,
+    vendorType: true,
+    status: true,
+    city: true,
+  } as const;
+
   app.get('/users/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
@@ -1059,9 +1108,9 @@ export async function adminRoutes(app: FastifyInstance) {
       where: { id },
       include: {
         customer: true,
-        rider: { include: { subscription: true } },
-        driver: { include: { subscription: true } },
-        vendorOwner: { include: { vendors: true } },
+        rider: { select: ADMIN_USER_MOVER_SELECT },
+        driver: { select: ADMIN_USER_MOVER_SELECT },
+        vendorOwner: { select: { vendors: { select: ADMIN_USER_VENDOR_SELECT } } },
         addresses: true,
         // The trust story + the paper trail the operator acts on.
         strikes: { orderBy: { createdAt: 'desc' }, take: 20 },
@@ -1075,7 +1124,10 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!user) throw new NotFoundError('User', id);
 
-    return { success: true, data: user };
+    // [S1 response-shaping] passwordHash / failedLoginAttempts / lockedUntil /
+    // lastKnownLat / lastKnownLng never leave the API on a user object — the
+    // ONE shared deny-list every auth response already uses.
+    return { success: true, data: sanitizeUser(user) };
   });
 
   /** GET /users/:id/risk — one deterministic number from existing signals
@@ -1095,6 +1147,8 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
+    // [DS110 #12] Who may suspend whom is decided inside the transition, from
+    // the database's view of both accounts (see mover-authority.ts).
     const { updated } = await transitionUserStatusAuthority(app, id, 'SUSPENDED', {
       actorUserId: request.user.userId,
       reason: reason ?? null,
@@ -1117,6 +1171,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
+    // Restoration obeys the same hierarchy as the act it reverses: an ordinary
+    // ADMIN cannot lift a suspension a SUPER_ADMIN imposed on another ADMIN.
+    // This lifts a SUSPENSION only; a ban is lifted through /unban.
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
       actorUserId: request.user.userId,
       ipAddress: request.ip,
@@ -1139,10 +1196,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const user = await app.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundError('User', id);
-    // Prevent banning other admins unless SUPER_ADMIN
-    if (user.roles.includes('ADMIN') && request.user.role !== 'SUPER_ADMIN') {
-      throw new ForbiddenError('Only SUPER_ADMIN can ban admin users');
-    }
+    // [DS110 #12] The role hierarchy — not an ADMIN-string check — decides who
+    // may ban whom, inside the transition: the seed mints the SUPER_ADMIN as
+    // `['SUPER_ADMIN', 'CUSTOMER']`, so the old `roles.includes('ADMIN')` test
+    // never fired for the founder and any ADMIN could ban the top authority.
 
     const { updated } = await transitionUserStatusAuthority(app, id, 'BANNED', {
       actorUserId: request.user.userId,
@@ -1153,6 +1210,37 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // DPA §3.5 — a banned participant has left: schedule document deletion
     await verification.scheduleDocumentRetention(id);
+
+    return { success: true, data: updated };
+  });
+
+  app.put('/users/:id/unban', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reason } = reasonSchema.parse(request.body ?? {});
+
+    // [DS110 #12] A ban is the platform's terminal account revocation — the
+    // victim's sessions are deleted in the same transaction, and until now
+    // nothing could reverse one. Lifting a ban is SUPER_ADMIN-only; the
+    // transition enforces that whichever route asks, so an ordinary ADMIN can
+    // never walk a ban back, through this route or /unsuspend.
+    const user = await app.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundError('User', id);
+    const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
+      actorUserId: request.user.userId,
+      reason: reason ?? null,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+    }, { lifts: 'BANNED' });
+
+    // Status only: the sessions a ban deleted are not recreated (the person
+    // signs in again) and the device tokens it silenced are re-registered by
+    // the app on its next launch.
+    await notifications.send({
+      userId: id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Account Restored',
+      body: 'Your account has been unbanned. Welcome back!',
+    });
 
     return { success: true, data: updated };
   });
@@ -1266,6 +1354,12 @@ export async function adminRoutes(app: FastifyInstance) {
         `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
       );
     }
+
+    // [PR1270-S2-03] Price BEFORE the activation write. A market that cannot
+    // price this store refuses the approval here, with the config error, and
+    // the store stays pending — never ACTIVE and searchable with no
+    // subscription, which a failure after the CAS below used to leave behind.
+    await subscriptions.priceForActivation({ vendorId: id });
 
     // CAS [EV-ACT-11]: exactly one approval transitions the store, so a
     // double-tap cannot double-fire the trial/notification side effects.
@@ -1441,6 +1535,11 @@ export async function adminRoutes(app: FastifyInstance) {
       }
     }
 
+    // [PR1270-S2-03] Price BEFORE documentsVerified is written: a rider whose
+    // market cannot price them is refused here, still unverified, rather than
+    // verified with no subscription.
+    if (isVerified) await subscriptions.priceForActivation({ riderId: id });
+
     const updated = await mutationOrNotFound('Rider', id, () => app.prisma.rider.update({
       where: { id, user: { tenantId } },
       data: {
@@ -1571,6 +1670,11 @@ export async function adminRoutes(app: FastifyInstance) {
       }
     }
 
+    // [PR1270-S2-03] Price BEFORE documentsVerified is written: a driver whose
+    // market cannot price them is refused here, still unverified, rather than
+    // verified with no subscription.
+    if (isVerified) await subscriptions.priceForActivation({ driverId: id });
+
     const updated = await mutationOrNotFound('Driver', id, () => app.prisma.driver.update({
       where: { id, user: { tenantId } },
       data: {
@@ -1605,6 +1709,34 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: updated };
+  });
+
+  /**
+   * [High #9 · DS109] The admin-approved vehicle assignment: confirm this driver operates
+   * the vehicle their CURRENT plate names, so that vehicle's documents propagate to them.
+   * Pending links only — a retyped plate never inherits another subject's documents before
+   * this explicit, audited decision.
+   */
+  app.post('/drivers/:id/vehicle-assignment/approve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    // [ADM-006] C3 owes a reason (validated by the preValidation hook from the body or
+    // the x-swift-reason header); record the SAME stated reason so the audit row can be
+    // reviewed, never a different string than the one the gate validated.
+    const body = reasonSchema.parse(request.body ?? {});
+    const driver = await app.prisma.driver.findFirst({ where: { id, user: { tenantId } } });
+    if (!driver) throw new NotFoundError('Driver', id);
+    const result = await verification.approveVehicleAssignment(driver.userId);
+    await audit(
+      request.user.userId,
+      'APPROVE_DRIVER_VEHICLE_ASSIGNMENT',
+      'Driver',
+      id,
+      { approvedLinks: result.approved, reason: reasonOf(request.body, request.headers) ?? body.reason },
+      request,
+    );
+    return { success: true, data: result };
   });
 
   // Premium-fleet onboarding: set the top taxi tier a vehicle serves. This is the
@@ -1685,6 +1817,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const ACTIVE_STATUSES = [
       'PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
       'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED',
+      'RETURNING',
       'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS',
     ] as const;
 
@@ -2031,7 +2164,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // [A-15] the secrets are omitted above, so read the derived status separately
     const handoverRow = await app.prisma.order.findUnique({
       where: { id },
-      select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true },
+      select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
     return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}) } };
@@ -2070,6 +2203,20 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = handoverReasonSchema.parse(request.body ?? {});
     const result = await rotatePickupCode(
+      { prisma: app.prisma },
+      { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    return { success: true, data: result };
+  });
+
+  // [MKT-F057 · decision 5] The delivery PIN's support reset: the same door as the pickup
+  // code (step-up, a written reason, an audit row, a counter). A new PIN, a cleared budget;
+  // the customer reads the new value on their own order screen.
+  app.post('/orders/:id/handover-secret/reset-delivery-pin', { preHandler: [adminGuard] }, async (request) => {
+    await requireStepUp(app, request as never);
+    const { id } = request.params as { id: string };
+    const { reason } = handoverReasonSchema.parse(request.body ?? {});
+    const result = await resetDeliveryPin(
       { prisma: app.prisma },
       { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
     );
@@ -2410,6 +2557,19 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = settleOrderRefundSchema.parse(request.body);
     const existing = await tenantPrisma.order.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('Order', id);
+    // [E02 · DS272 F2] This route settles a CASH handover. A paid MMG order's
+    // refund is the store's own MMG transfer, which only the MMG refund rail
+    // records (obligation, "Refund sent", the customer's answer). The database
+    // refuses the REFUNDED write anyway (no CANCELLATION refund obligation),
+    // but only at COMMIT, as a 500: refuse it here, before the transaction.
+    if (existing.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(existing.paymentStatus)) {
+      orderRefundCounter.labels('refused_mmg').inc();
+      throw new AppError(
+        409,
+        'MMG_REFUND_RAIL_REQUIRED',
+        'MMG refunds are settled through the refund rail: the store sends the refund from its own MMG and the customer confirms it. This route settles cash handovers only.',
+      );
+    }
     if (existing.refundOwedAt === null || existing.refundSettledAt !== null) {
       orderRefundCounter.labels('refused_not_due').inc();
       throw new AppError(
@@ -2440,7 +2600,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // `E.order` fields, so the legacy row that hand-typed them is retired.
     const updated = await tenantPrisma.$transaction(async (tx) => {
       const settled = await tx.order.updateMany({
-        where: { id, refundOwedAt: { not: null }, refundSettledAt: null },
+        // [E02 · DS274 A3] The paid-MMG refusal above is re-stated in the CAS,
+        // so the database, not only the pre-check, holds it under a race.
+        where: {
+          id, refundOwedAt: { not: null }, refundSettledAt: null,
+          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+        },
         data: {
           status: 'REFUNDED',
           refundRef: reference,
@@ -4741,18 +4906,66 @@ export async function adminRoutes(app: FastifyInstance) {
   // [DOC-1 §5.1 T23 · P5-1] revoke(): withdraw a COMMITTED approval with a reason. C3 —
   // the same authority as a decision; the state machine refuses anything not committed.
   const revokeDocSchema = z.object({ reason: z.string().min(3).max(500) });
-  // [DOC-1 §31.5 · P31-2] A human resolves a payment-claim mismatch: the hold clears, the order moves.
+  // [DOC-1 §31.5 · P31-2 · ORDER-SPINE S1-6] A person decides a payment-claim disagreement —
+  // under the order's row lock (with this operator's tenant), against the claim generation they
+  // reviewed, with the canonical audit row (auditWithin) and the notice obligation committed in
+  // the SAME transaction. The same decision retried is a replay; a stale or conflicting one is
+  // refused and changes nothing. It never rewrites what the customer or the store said.
   app.post('/orders/:id/payment-claim/resolve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = z.object({ resolution: z.enum(['CUSTOMER_PAID', 'CUSTOMER_DID_NOT_PAY']), note: z.string().min(3).max(500) }).parse(request.body);
-    const order = await app.prisma.order.findUnique({ where: { id }, select: { id: true, mmgClaimMismatchAt: true, paymentStatus: true } });
-    if (!order) throw new NotFoundError('Order', id);
-    const updated = await app.prisma.order.update({ where: { id }, data: {
-      mmgClaimMismatchAt: null,
-      ...(body.resolution === 'CUSTOMER_DID_NOT_PAY' ? { paymentStatus: 'PENDING', customerClaimedPaidAt: null } : { customerClaimedPaidAt: new Date() }),
-    } });
-    await audit(request.user.userId, 'MMG_CLAIM_MISMATCH_RESOLVED', 'Order', id, { resolution: body.resolution, note: body.note, wasStatus: order.paymentStatus }, request);
-    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: false } };
+    const body = z.object({
+      resolution: z.enum(['CUSTOMER_PAID', 'CUSTOMER_DID_NOT_PAY']),
+      note: z.string().min(3).max(500),
+      expectedClaimRevision: z.number().int().min(0),
+    }).parse(request.body);
+    const tenantId = requireTenantId();
+    const outcome = await app.prisma.$transaction((tx) => resolveMmgClaimDisagreement(tx, {
+      orderId: id,
+      tenantId,
+      resolution: body.resolution,
+      expectedClaimRevision: body.expectedClaimRevision,
+      note: body.note,
+      actorId: request.user.userId,
+      audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+    const facts = outcome.facts;
+    if (outcome.replayed) {
+      // [R5] A replay changed nothing and wrote no row. The decision it repeats
+      // was audited inline when it was made (its row carries that decision's
+      // claim revision): point the backstop at that row, so it verifies it
+      // instead of writing a second one after the response.
+      const decidedRevision = facts.mmgClaimResolvedRevision;
+      const decisionRow = decidedRevision == null ? null : await app.prisma.auditLog.findFirst({
+        where: {
+          entityId: id,
+          action: `ADMIN ${request.method} ${request.routeOptions?.url ?? request.url}`,
+          changes: { path: ['claimRevision'], equals: decidedRevision },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true },
+      });
+      markReplayAudited(request as unknown as AuditRequestLike, decisionRow?.id);
+    } else {
+      app.io.to(`order:${id}`).emit('order:status_changed', {
+        orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
+        mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
+      });
+    }
+    if (outcome.notice && outcome.outboxId) {
+      await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: outcome.outboxId, notice: outcome.notice })
+        .catch((err: unknown) => request.log.error({ err, orderId: id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        paymentStatus: facts.paymentStatus,
+        mismatch: facts.mmgClaimMismatchAt != null,
+        resolution: facts.mmgClaimResolution,
+        replayed: outcome.replayed,
+        mmgClaim: mmgClaimView(facts),
+      },
+    };
   });
 
   app.put('/verification/:id/revoke', { preHandler: [adminGuard] }, async (request) => {
@@ -4859,7 +5072,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const doc = await tenantPrisma.verificationDocument.findUnique({
       where: { id },
-      select: { id: true, fileUrl: true, purgedAt: true, docType: true },
+      select: { id: true, userId: true, fileUrl: true, purgedAt: true, docType: true },
     });
     if (!doc) throw new NotFoundError('VerificationDocument', id);
     if (doc.purgedAt || !doc.fileUrl) {
@@ -4868,26 +5081,14 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const ttlSeconds = 300;
 
-    // Envelope-encrypted documents (spec §5): the bucket object is ciphertext,
-    // so a plain signed URL would render garbage. Mint the audited, expiring
-    // decrypt-render path instead. Legacy plaintext objects keep signed URLs.
-    const encrypted = await app.prisma.encryptedObject.findUnique({
-      where: { fileKey: doc.fileUrl },
-      select: { wrappedDek: true, shreddedAt: true },
-    });
-    if (encrypted) {
-      if (!encrypted.wrappedDek || encrypted.shreddedAt) {
-        throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered');
-      }
-      const minted = mintRenderPath(id, ttlSeconds);
-      await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
-      return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
-    }
-
-    const url = await getStorageProvider().getSignedUrl(doc.fileUrl, ttlSeconds);
-    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds }, request);
-
-    return { success: true, data: { url, expiresInSeconds: ttlSeconds } };
+    await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
+    const minted = mintRenderPath(id, ttlSeconds);
+    await audit(request.user.userId, 'VIEW_VERIFICATION_DOC', 'VerificationDocument', id, { docType: doc.docType, ttlSeconds, encrypted: true }, request);
+    // [DS110-15] A path RELATIVE to the API origin, on purpose. The console
+    // resolves it against its configured API origin and loads it through its
+    // own same-origin proxy; an origin built here from the Host header would
+    // be client-supplied input, and the console discards it anyway.
+    return { success: true, data: { url: minted.path, expiresInSeconds: minted.expiresInSeconds } };
   });
 
   // ─── Retail returns ──────────────────────────────────────────
@@ -5078,6 +5279,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/cash-rules/rlp/movers/:userId/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { userId } = request.params as { userId: string };
     const body = z.object({ reason: z.string().min(5).max(500) }).parse(request.body ?? {});
+    // [review] NO `reason` override. `auditWithin` derives it through
+    // `reasonOf(body, headers)`, where the HEADER wins — the rule ADM-006
+    // validates against. Passing `body.reason` here made the reason VALIDATED
+    // and the reason RECORDED two different strings, and left this route
+    // disagreeing with its own sibling one line below.
     const user = await cashRules.suspendLossProtection(userId, body.reason,
       (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     return { success: true, data: user };
@@ -5151,6 +5357,70 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { id: request.params.id, status: decision.status } };
   });
 
+  // [DS110-14] AN APPROVED ACTION ACTUALLY HAPPENS.
+  //
+  // Until now an APPROVED row sat in the queue forever: the only code that
+  // turns APPROVED → APPLIED is the approval gate itself, reached when the
+  // requester re-issues the exact request carrying `x-swift-approval` — and no
+  // console, job or cron ever did. This route performs that replay for the
+  // operator: it reconstructs the STORED body (never a body supplied here) and
+  // injects it back through the full request path with the approval header.
+  // The replay therefore passes the capability gate, the reason gate and the
+  // fingerprint check again, and the compare-and-set inside `resolveApproval`
+  // means exactly one apply can hold it — a second apply is refused.
+  app.post<{ Params: { id: string } }>('/approvals/:id/apply', { preHandler: [adminGuard] }, async (request) => {
+    requireTenantId();
+    // `bodySnapshot` enters the generated client with the 20260924140000
+    // migration; the assertion keeps this compiling against both generations.
+    const approval = (await tenantPrisma.privilegedApproval.findUnique({ where: { id: request.params.id } })) as unknown as ApprovalSnapshotRow | null;
+    if (!approval) throw new NotFoundError('Approval', request.params.id);
+    // Separation of duties: the admin who ASKED executes, after a second admin
+    // approved. The approver never executes what they approved, and a third
+    // admin does not act on a request that is not theirs. (Before this route the
+    // requester re-sent their own request with the approval id; this keeps that
+    // shape.)
+    if (approval.requestedBy !== request.user.userId) {
+      throw new ForbiddenError('Only the admin who asked for this action can execute it, once a second admin has approved it.');
+    }
+
+    // [DS110-13] The binding: what executes is what was stored and displayed.
+    // Recompute the fingerprint over the reconstructed subject — if the stored
+    // body and the reviewed fingerprint ever disagree, nothing executes.
+    const subject = approvalSubjectOf(approval);
+    if (!subject || fingerprintOf(subject) !== approval.fingerprint) {
+      throw new ForbiddenError(approvalRefusalMessage('request-changed'));
+    }
+
+    const url = `/api/v1/admin${fillRouteTemplate(subject.routeUrl, subject.params)}`;
+    const query = queryStringOf(subject.query ?? {});
+    const replay = await app.inject({
+      method: subject.method as never,
+      url: query ? `${url}?${query}` : url,
+      headers: {
+        authorization: String(request.headers.authorization ?? ''),
+        'content-type': 'application/json',
+        [ADMIN_REASON_HEADER]: approval.reason,
+        [APPROVAL_HEADER]: approval.id,
+      },
+      payload: subject.body as Record<string, unknown>,
+    });
+
+    if (replay.statusCode >= 200 && replay.statusCode < 300) {
+      const applied = await tenantPrisma.privilegedApproval.findUnique({
+        where: { id: approval.id },
+        select: { status: true, appliedAt: true },
+      });
+      return { success: true, data: { id: approval.id, status: applied?.status ?? 'APPLIED', appliedAt: applied?.appliedAt ?? null } };
+    }
+
+    let error: { code?: string; message?: string } | undefined;
+    try { error = (replay.json() as { error?: { code?: string; message?: string } }).error; } catch { error = undefined; }
+    const message = error?.message || `The approved action failed (HTTP ${replay.statusCode}).`;
+    if (replay.statusCode === 403) throw new ForbiddenError(message);
+    if (replay.statusCode === 409) throw new ConflictError(message);
+    throw new AppError(replay.statusCode >= 400 ? replay.statusCode : 502, error?.code ?? 'APPLY_FAILED', message);
+  });
+
   // ─── Audit Logs ────────────────────────────────────────────────────────
 
   app.get('/audit-logs', { preHandler: [adminGuard] }, async (request) => {
@@ -5222,48 +5492,6 @@ export async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     const updated = await mutationOrNotFound('SupportTicket', id, () => support.resolve(id, request.user.userId, body));
     return { success: true, data: updated };
-  });
-
-  // ── Ops agent (spec Part B) — approvals + audit ───────────────────────────
-  // The agent proposes; humans decide here. Approval replays the SAME
-  // deterministic executor — the model is nowhere in this path.
-  const agentService = new AgentService(tenantPrisma, app.io, async (orderId) => {
-    if (!app.queues?.dispatchQueue) throw new AppError(503, 'QUEUES_DOWN', 'Dispatch queue unavailable');
-    await app.queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-  });
-
-  app.get('/agent/approvals', { preHandler: [adminGuard] }, async (request) => {
-    const { status } = z.object({ status: z.nativeEnum(AgentActionStatus).default('PENDING') }).parse(request.query);
-    const requests = await tenantPrisma.agentActionRequest.findMany({
-      where: { status },
-      orderBy: { createdAt: 'asc' },
-      take: 100,
-    });
-    return { success: true, data: requests };
-  });
-
-  app.post('/agent/approvals/:id/approve', { preHandler: [adminGuard] }, async (request) => {
-    const { id } = request.params as { id: string };
-    const decided = await agentService.decideRequest(id, request.user.userId, true);
-    await audit(request.user.userId, 'APPROVE_AGENT_ACTION', 'AgentActionRequest', id, { action: decided.action, orderId: decided.orderId }, request);
-    return { success: true, data: decided };
-  });
-
-  app.post('/agent/approvals/:id/reject', { preHandler: [adminGuard] }, async (request) => {
-    const { id } = request.params as { id: string };
-    const decided = await agentService.decideRequest(id, request.user.userId, false);
-    await audit(request.user.userId, 'REJECT_AGENT_ACTION', 'AgentActionRequest', id, { action: decided.action, orderId: decided.orderId }, request);
-    return { success: true, data: decided };
-  });
-
-  /** The agent's every move, append-only — what it saw, chose, and why. */
-  app.get('/agent/audit', { preHandler: [adminGuard] }, async (request) => {
-    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
-    const [events, total] = await Promise.all([
-      tenantPrisma.agentAuditEvent.findMany({ orderBy: { at: 'desc' }, skip, take: limit }),
-      tenantPrisma.agentAuditEvent.count(),
-    ]);
-    return { success: true, ...paginatedResponse(events, total, { page, limit, skip }) };
   });
 
   // =========================================================================

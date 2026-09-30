@@ -3,6 +3,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { EmptyState, Spinner, T } from '../../kit';
 import { DocumentUploadCard } from './DocumentUploadCard';
+import { emptyChecklistCopy } from './documentChecklistPresentation';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
  *  theme maps no numeric spacing, so it was never a token. Named here so the
@@ -69,11 +70,12 @@ export function DocumentChecklist({
   const nextDoc = checklist.find((dt) => latestDoc(dt)?.status !== 'APPROVED');
 
   if (checklist.length === 0) {
+    const copy = emptyChecklistCopy(status ?? {});
     return (
       <EmptyState
         icon="shield"
-        title="You’re all set for now"
-        body="Your account is under review — we’ll approve within 24 hours. Nothing else is needed from you right now."
+        title={copy.title}
+        body={copy.body}
       />
     );
   }

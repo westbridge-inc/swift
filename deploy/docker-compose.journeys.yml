@@ -1,0 +1,84 @@
+# ===========================================================================
+# Swift — STAGING-ONLY override for the pilot journey suite. Never part of the
+# cutover (pilot-up.sh does not start it) and never used in production.
+#
+# Run it through deploy/journeys-run.sh, which checks the isolation contract
+# below (deploy/verify-journeys-isolation.py) before anything starts, stops
+# the private instance afterwards, and refuses any host that is not the
+# staging pilot in loadtest mode.
+#
+#   api-journeys  The SAME image, build, settings file and secret mounts as
+#                 the public `api` (extends), plus the two switches the public
+#                 API must never carry: DEV_OTP_BYPASS=1 (verify-otp accepts the
+#                 code 000000, so the runner can sign in without SMS) and
+#                 TEST_CONTROL_ENABLED=1 (/test-control/identity). It sits on
+#                 the private network only: no published port and no Caddy
+#                 route, so nothing internet-facing accepts 000000.
+#                 TEST_CONTROL_SECRET comes from the encrypted store through
+#                 the /run/secrets mount and TEST_CONTROL_SECRET_FILE the
+#                 public api already carries (inherited here, restated for the
+#                 isolation check); it is never a value in this file. Its SMS,
+#                 email and push providers are pinned to the in-memory dev
+#                 adapters.
+#   journeys      One-shot runner: scripts/livetest (mounted read-only from
+#                 this checkout) run by the tsx the API image already carries,
+#                 against http://api-journeys:3000. It holds no secrets and
+#                 writes journeys-result.json and journeys-summary.md to
+#                 JOURNEYS_RESULTS_DIR on the host.
+#
+# Both services carry the `journeys` profile, so a plain `up` of the stack
+# never starts them.
+# ===========================================================================
+services:
+  api-journeys:
+    extends:
+      file: docker-compose.yml
+      service: api
+    profiles: [journeys]
+    restart: "no"
+    environment:
+      DEV_OTP_BYPASS: "1"
+      TEST_CONTROL_ENABLED: "1"
+      TEST_CONTROL_SECRET_FILE: /run/secrets/TEST_CONTROL_SECRET
+      # Nothing this instance sends in-request leaves the process, whatever
+      # deploy/.env says (dev = in-memory for SMS, email and push). The SHARED
+      # worker still uses the public settings, which is why every runner phone
+      # is in the never-a-subscriber +5920 range (scripts/livetest/guard.ts).
+      NOTIFICATION_PROVIDER: dev
+      EMAIL_PROVIDER: dev
+      PUSH_PROVIDER: dev
+      # HTTP only, like the public api: the worker service owns the queues.
+      RUN_WORKERS: "0"
+    # The secret mount (/run/swift-secrets → /run/secrets, read-only) is
+    # inherited from the public api service. No host port and no Caddy route:
+    # the private network is the only way in.
+    networks: [private]
+
+  journeys:
+    image: swift-api:${SWIFT_TAG:-local}
+    profiles: [journeys]
+    restart: "no"
+    user: "${JOURNEYS_UID:-1000}:${JOURNEYS_GID:-1000}"
+    working_dir: /app
+    entrypoint: ["apps/api/node_modules/.bin/tsx", "scripts/livetest/run.ts", "--suite=journeys"]
+    environment:
+      LIVETEST_BASE_URL: http://api-journeys:3000
+      # The public hostname, so the runner can refuse it by name as well.
+      LIVETEST_PUBLIC_HOST: ${API_HOST:-}
+      # The fictional phone of the admin created by seed-production.
+      LIVETEST_ADMIN_PHONE: ${LIVETEST_ADMIN_PHONE:-}
+      # Optional: a second admin (seed break-glass) unlocks the two-person cases.
+      LIVETEST_ADMIN2_PHONE: ${LIVETEST_ADMIN2_PHONE:-}
+      # An origin CORS_ORIGIN allows, for the web-taxi refusal (a cookie session).
+      LIVETEST_WEB_ORIGIN: ${LIVETEST_WEB_ORIGIN:-}
+      LIVETEST_RUN_ID: ${LIVETEST_RUN_ID:-}
+      LIVETEST_OUT_DIR: /results
+    volumes:
+      - ../scripts/livetest:/app/scripts/livetest:ro
+      - ${JOURNEYS_RESULTS_DIR:-/var/tmp/swift-journeys}:/results
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Private network only; the runner needs nothing but api-journeys.
+    networks: [private]

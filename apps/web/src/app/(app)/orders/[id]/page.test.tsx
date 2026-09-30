@@ -55,6 +55,14 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const payButton = () => screen.findByRole('button', { name: /Pay Shanta Kitchen by MMG/ });
 
 describe('[W-32] the payment that opens is the payment that was shown', () => {
+  it('shows a service appointment at the market time on the order page', async () => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...ORDER, fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z',
+    } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/Thu, Sep 24, 9:00 AM/)).toBeTruthy();
+  });
+
   it('says who is paid and how much BEFORE anything opens', async () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(/sends .* directly to Shanta Kitchen/)).toBeTruthy();
@@ -115,5 +123,42 @@ describe('[W-32] the payment that opens is the payment that was shown', () => {
     render(<OrderDetailPage />);
     await screen.findByText(/do not pay from unverified details/);
     expect(screen.queryByRole('button', { name: /Pay .* by MMG/ })).toBeNull();
+  });
+});
+
+describe('taxi safety continues in the mobile app', () => {
+  it.each(['REQUESTED', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS', 'COMPLETED', 'CANCELLED'])(
+    '%s shows the mobile safety notice without pretending web can start the ride', async (status) => {
+      vi.spyOn(customer, 'getOrder').mockResolvedValue({
+        ...ORDER, orderType: 'TAXI', status, paymentMethod: 'CASH', paymentAction: null,
+      } as never);
+      vi.spyOn(customer, 'getRide').mockResolvedValue({ id: ORDER.id } as never);
+      vi.spyOn(customer, 'activeRide').mockResolvedValue(null);
+      render(<OrderDetailPage />);
+      expect(await screen.findByText(/Open the Swift app for your safety PIN and SOS/)).toBeTruthy();
+      expect(screen.getByText(/You cannot start or manage ride safety on the web/)).toBeTruthy();
+      expect(screen.getByRole('link', { name: 'Open Swift app' }).getAttribute('href')).toBe('swift://');
+      expect(screen.queryByRole('button', { name: /start ride|SOS|share trip|not my driver/i })).toBeNull();
+    },
+  );
+
+  it('does not show the taxi notice for a delivery', async () => {
+    render(<OrderDetailPage />);
+    await payButton();
+    expect(screen.queryByText(/Open the Swift app for your safety PIN and SOS/)).toBeNull();
+  });
+});
+
+describe('[E17 · DS231 F4] a courier parcel on its way back has its own heading', () => {
+  it.each([
+    ['RETURNING', 'Your parcel is coming back to you'],
+    ['RETURNED', 'Parcel returned to you'],
+  ])('%s reads "%s", never the "Order placed" fallback', async (status, heading) => {
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+      ...ORDER, orderType: 'COURIER', status, paymentMethod: 'CASH', paymentAction: null,
+    } as never);
+    render(<OrderDetailPage />);
+    const h1 = await screen.findByRole('heading', { level: 1 });
+    await waitFor(() => expect(h1.textContent).toBe(heading));
   });
 });

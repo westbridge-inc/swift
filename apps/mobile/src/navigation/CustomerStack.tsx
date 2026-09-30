@@ -22,6 +22,7 @@ import { CartScreen } from '../modules/cart/screens/CartScreen';
 import { OrdersHistoryScreen } from '../modules/orders/screens/OrdersHistoryScreen';
 import { MarketScreen } from '../modules/shop/screens/MarketScreen';
 import { useMarketDepth } from '../hooks/customer';
+import { marketTabVisible } from '../lib/homeReliability';
 import { DeliveryScreen } from '../modules/orders/screens/DeliveryScreen';
 import { FeedbackScreen } from '../modules/orders/screens/FeedbackScreen';
 import { ChatListScreen } from '../modules/chat/screens/ChatListScreen';
@@ -48,6 +49,7 @@ import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
 import { ServiceJobsScreen } from '../modules/services/screens/ServiceJobsScreen';
 import { ServiceProviderScreen } from '../modules/services/screens/ServiceProviderScreen';
 import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
+import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -77,7 +79,7 @@ const TAB_ICON: Record<string, TabGlyphName> = {
 
 function HomeTabs() {
   const depth = useMarketDepth();
-  const marketVisible = depth.data?.visible === true;
+  const marketVisible = marketTabVisible(depth.data);
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -121,11 +123,9 @@ function HomeTabs() {
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
-      {/* [MKT G7 / §5.4] "An empty marketplace is worse than no marketplace."
-          The tab used to mount unconditionally while market.routes.ts carried a
-          comment claiming it "stays hidden below ~150 items" — the comment was
-          true of the design and false of the code, and the tab shipped with one
-          store in it. The SERVER decides now; hidden while unknown. */}
+      {/* Server depth must positively confirm Market before its route mounts.
+          React Query retains a known-visible verdict during refetch errors,
+          and the last complete verdict seeds a cold start from device memory. */}
       {marketVisible ? <Tab.Screen name="Market" component={MarketScreen} /> : null}
       <Tab.Screen name="Cart" component={CartScreen} />
       <Tab.Screen name="Profile" component={ProfileScreen} />
@@ -176,6 +176,8 @@ export function CustomerStack() {
       <Stack.Screen name="ServiceJobs" component={ServiceJobsScreen} />
       <Stack.Screen name="ServiceProvider" component={ServiceProviderScreen} />
       <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
+      {/* [E27] the taxi screen's door when a ride request needs the profile photo */}
+      <Stack.Screen name="Selfie" component={SelfieCaptureScreen} />
     </Stack.Navigator>
   );
 }

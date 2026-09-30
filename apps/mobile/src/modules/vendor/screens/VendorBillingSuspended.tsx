@@ -9,7 +9,9 @@ import { Card, Chip, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { GUTTER } from '../shared';
 import { disconnectSocket } from '../../../services/socket';
 import { useVendorSubscription } from '../../../hooks/vendorops';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
+import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { type VendorMemberRole, TabHeader, VendorBillingNotice } from '../shared';
 
 export function VendorBillingSuspended({ store, stores, myRole }: { store: any; stores: any[]; myRole?: VendorMemberRole }) {
@@ -17,8 +19,15 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
   const qc = useQueryClient();
   const setSelectedStore = useStoreSwitcher((state) => state.setSelectedStore);
   const [switchingStore, setSwitchingStore] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const isOwner = myRole === 'OWNER';
   const subQ = useVendorSubscription(isOwner);
+  // Spinner on the owner's own pull or store switch, never on a background
+  // refetch (lib/pullToRefresh).
+  const pull = usePullToRefresh(() => Promise.all([
+    isOwner ? subQ.refetch() : undefined,
+    qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+  ]));
   const sub = subQ.data ?? (isOwner ? store?.subscription : null);
   const blockedSub = ['SUSPENDED', 'CHURNED'].includes(String(sub?.status ?? '').toUpperCase());
   const switchStore = async (id: string) => {
@@ -38,17 +47,16 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
 
   return (
     <Screen>
-      <TabHeader title={store.name} eyebrow="ACCOUNT PAUSED · ORDERS OFF" statusTone="warning" />
+      {/* A paused store pauses selling, not the person: Swift stays one tap away. */}
+      <TabHeader title={store.name} eyebrow="ACCOUNT PAUSED · ORDERS OFF" statusTone="warning" onSwitch={() => setSwitcherOpen(true)} />
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView
         contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={switchingStore || subQ.isRefetching}
-            onRefresh={() => {
-              if (isOwner) subQ.refetch();
-              void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
-            }}
+            refreshing={switchingStore || pull.refreshing}
+            onRefresh={() => { void pull.onRefresh(); }}
             tintColor={color.brand[500]}
           />
         }

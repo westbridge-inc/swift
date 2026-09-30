@@ -23,8 +23,8 @@ import { adsRoutes } from './modules/ads/ads.routes';
 import { placesRoutes } from './modules/places/places.routes';
 import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
+import { serviceCatalogRoutes } from './modules/services/service-catalog.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
-import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
 import { evaluateSchedulerHealth, schedulerStallMs, workerCheckStatus } from './utils/scheduler-health';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
@@ -150,10 +150,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(rateLimit, {
     // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
     // can raise it without a code change (per-route limits on auth/OTP stay tight
-    // regardless). Authenticated callers are bucketed per session token, anonymous
-    // ones per resolved IP (never the spoofable X-Forwarded-For) — see D1-01.
+    // regardless). Callers with a VERIFIED token are bucketed per userId;
+    // anonymous and unverifiable requests share the resolved-IP bucket (never
+    // the spoofable X-Forwarded-For) — see D1-01.
     ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
-    keyGenerator: rateLimitKey,
+    // The key generator verifies the bearer token (captured lazily via the
+    // closure — app.jwt is decorated by authPlugin, registered below) so an
+    // attacker cannot mint a fresh bucket per fake token; unverified and
+    // anonymous requests share the resolved-IP bucket.
+    keyGenerator: rateLimitKey((token) => app.jwt.verify(token)),
     max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
     timeWindow: '1 minute',
   });
@@ -313,8 +318,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(placesRoutes, { prefix: '/api/v1/places' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
+  await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
-  await app.register(aiRoutes, { prefix: '/api/v1/ai' });
   // Unauthenticated read-only storefront pages (web SEO) — see module header.
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   // Printed-QR short links: /s/{code} at the ROOT path (the production web

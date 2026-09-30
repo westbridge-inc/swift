@@ -32,6 +32,27 @@ function boardHandler(orders: unknown[], detail: unknown) {
   };
 }
 
+function deliveryOwnerHandler(detail: Record<string, unknown>) {
+  return (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders') {
+      return { body: { success: true, data: [detail], meta: { total: 1 } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders/order-live') {
+      return { body: { success: true, data: detail } };
+    }
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/vendor/orders/order-live/fulfillment-mode') {
+      return { body: { success: true, data: { ...detail, fulfillmentMode: JSON.parse(String(request.init?.body)).mode } } };
+    }
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/vendor/orders/order-live/delivered') {
+      return { body: { success: true, data: { ...detail, status: 'DELIVERED' } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/items') {
+      return { body: { success: true, data: [] } };
+    }
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+}
+
 /** The board row `<p>` is exactly `#SW-1001`; the takeover's is longer. */
 async function rowFor(orderNumber: string) {
   const heading = await screen.findByText(`#${orderNumber}`);
@@ -55,6 +76,20 @@ describe('vendor order board — money is never invented', () => {
   beforeEach(() => {
     // happy-dom has no Web Audio; the takeover mounts on the first poll.
     stubAudioContext();
+  });
+
+  it('shows a true appointment instant as the Guyana time on the provider board', async () => {
+    const booking = {
+      ...wireVendorOrder(), fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z',
+    };
+    mockApi(boardHandler([booking], { ...wireVendorOrderDetail(), ...booking }));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    expect(row.textContent).toContain('9:00 AM');
+    await user.click(row);
+    expect(await screen.findAllByText(/Appointment:.*9:00 AM/)).toHaveLength(2);
+    expect(screen.queryByText('20 min prep')).toBeNull();
   });
 
   it('renders the real order total from the wire Decimal STRING, and never "NaN"', async () => {
@@ -134,6 +169,100 @@ describe('vendor order board — money is never invented', () => {
     renderWithQuery(<OrdersPage />);
     await screen.findByText(/Nothing in/);
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
+  });
+});
+
+describe('delivery owner controls', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  async function openDeliveryOwner(over: Record<string, unknown>) {
+    const detail = wireVendorOrderDetail({
+      status: 'READY_FOR_PICKUP',
+      fulfillment: 'DELIVERY',
+      vendor: { vendorType: 'RESTAURANT', selfDeliveryEnabled: true },
+      ...over,
+    });
+    const fetchMock = mockApi(deliveryOwnerHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const bucket = detail.status === 'PENDING' ? /New/ : /Ready \/ handoff/;
+    await user.click(await screen.findByRole('button', { name: bucket }));
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByRole('region', { name: 'Delivery owner' });
+    return { user, fetchMock };
+  }
+
+  it('offers the alternative owner for an eligible riderless delivery and sends the typed choice', async () => {
+    const { user, fetchMock } = await openDeliveryOwner({ fulfillmentMode: 'PLATFORM_RIDER' });
+    expect(screen.getByText('Platform rider delivery selected')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'We’ll deliver' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Get a Swift rider' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'We’ll deliver' }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/fulfillment-mode'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body))).toEqual({ mode: 'VENDOR_DELIVERY' });
+    });
+  });
+
+  it('names vendor self-delivery and never offers a rider retry for it', async () => {
+    await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
+    expect(screen.getByText('Your store delivers this order')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Search for a rider again/i })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Get a Swift rider' })).toBeTruthy();
+  });
+
+  it('requires an explicit handoff confirmation before closing a self-delivery', async () => {
+    const { user, fetchMock } = await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
+
+    await user.click(screen.getByRole('button', { name: 'Confirm delivered' }));
+    expect(screen.getByRole('dialog', { name: 'Confirm store delivery' })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/delivered'))).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Yes, delivered' }));
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url, init]) =>
+        String(url).endsWith('/api/v1/vendor/orders/order-live/delivered')
+        && init?.method === 'PUT')).toBe(true);
+    });
+  });
+
+  it('keeps the platform-rider escape when the store-wide self-delivery setting is off', async () => {
+    await openDeliveryOwner({
+      fulfillmentMode: 'VENDOR_DELIVERY',
+      vendor: { vendorType: 'RESTAURANT', selfDeliveryEnabled: false },
+    });
+    expect(screen.getByText('Your store delivers this order')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Get a Swift rider' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'We’ll deliver' })).toBeNull();
+  });
+
+  it('does not claim dispatch is searching when the delivery owner is unresolved', async () => {
+    await openDeliveryOwner({ fulfillmentMode: null, status: 'PENDING' });
+    expect(screen.getByText('Delivery owner not chosen yet')).toBeTruthy();
+    expect(screen.getByText('No delivery owner has been recorded yet.')).toBeTruthy();
+    expect(screen.queryByText(/finding a rider/i)).toBeNull();
+  });
+
+  it('treats riderId as assignment even when the rider profile has no display name', async () => {
+    await openDeliveryOwner({
+      riderId: 'rider-without-name',
+      rider: { user: { firstName: null, lastName: null, phone: null } },
+      fulfillmentMode: 'PLATFORM_RIDER',
+    });
+    expect(screen.getByText('A Swift rider delivers this order')).toBeTruthy();
+    expect(screen.getByText('Swift rider')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'We’ll deliver' })).toBeNull();
+  });
+
+  it('preserves pickup semantics: a pickup has no delivery-owner controls', async () => {
+    const detail = wireVendorOrderDetail({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
+    mockApi(deliveryOwnerHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: /Ready \/ handoff/ }));
+    await user.click(await rowFor('SW-1001'));
+    expect(screen.queryByRole('region', { name: 'Delivery owner' })).toBeNull();
+    expect(screen.getByText(/Customer collects with a pickup code/)).toBeTruthy();
   });
 });
 
@@ -245,5 +374,88 @@ describe('[W-27] removing a line is not a refund', () => {
     const remove = await screen.findByRole('button', { name: /No substitute — remove line/ });
     expect((remove as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getAllByText(/settle item changes with the customer directly/).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [E10] The API now requires a non-empty reason on PUT /vendor/orders/:id/reject.
+// The board used to fire rejectOrder(id) straight off the Reject button, so the
+// server recorded the generic "Rejected by vendor". Now the button opens a
+// reason panel (parity with mobile's presets) and nothing is sent until the
+// store picks one.
+// ---------------------------------------------------------------------------
+describe('[E10] rejecting an order always carries a reason', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  const rejectHandler = (detail: Record<string, unknown>) => (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders') {
+      return { body: { success: true, data: [detail], meta: { total: 1 } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/orders/order-live') {
+      return { body: { success: true, data: detail } };
+    }
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/vendor/orders/order-live/reject') {
+      return { body: { success: true, data: { ...detail, status: 'CANCELLED' } } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/vendor/items') {
+      return { body: { success: true, data: [] } };
+    }
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+
+  async function openPendingDetail() {
+    const detail = wireVendorOrderDetail();
+    const fetchMock = mockApi(rejectHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
+    return { user, fetchMock };
+  }
+
+  it('the Reject button opens a reason panel and sends nothing until a preset is chosen', async () => {
+    const { user, fetchMock } = await openPendingDetail();
+
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    expect(screen.getByRole('dialog', { name: 'Confirm order rejection' })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reject'))).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Out of stock' }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/orders/order-live/reject'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body))).toEqual({ reason: 'Out of stock' });
+    });
+  });
+
+  it('a booking is declined with its own question, label and booking reasons (DS221 S3)', async () => {
+    const detail = wireVendorOrderDetail({ fulfillment: 'APPOINTMENT', appointmentSlot: '2026-09-24T13:00:00.000Z' });
+    const fetchMock = mockApi(rejectHandler(detail));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await user.click(await screen.findByRole('button', { name: 'Decline' }));
+
+    expect(screen.getByRole('dialog', { name: 'Confirm booking decline' })).toBeTruthy();
+    expect(screen.getByText('Decline this booking?')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Kitchen is too busy' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Fully booked at that time' }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/orders/order-live/reject'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call![1]?.body))).toEqual({ reason: 'Fully booked at that time' });
+    });
+  });
+
+  it('"Keep it" closes the panel without rejecting', async () => {
+    const { user, fetchMock } = await openPendingDetail();
+
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(screen.getByRole('button', { name: 'Keep it' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm order rejection' })).toBeNull());
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reject'))).toBe(false);
   });
 });

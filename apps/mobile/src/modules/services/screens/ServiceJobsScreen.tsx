@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { RefreshControl, ScrollView, TextInput, View } from 'react-native';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceJobs, useScheduleJob, useCancelJob, useRateJob, useQuoteJob, useConfirmJob, useDeclineSlot, useCompleteJob } from '../../../hooks';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 // [B3] The emergency path for BOTH people on a service job — the provider
 // working inside a stranger's home, and the customer whose home it is. Every
 // other in-flight surface had a button; this one had nothing.
@@ -11,6 +12,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot, serviceJobScheduleSelection, upcomingAppointmentDays } from '../../../lib/appointmentTime';
 import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
@@ -22,36 +24,24 @@ const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 
   CANCELLED: { label: 'Cancelled', tone: 'neutral' },
 };
 
-/** Next 7 days as chips — no datetime-picker dependency needed. */
-function upcomingDays(): Array<{ key: string; label: string; date: Date }> {
-  const days: Array<{ key: string; label: string; date: Date }> = [];
-  for (let i = 0; i < 7; i++) {
-    const d = new Date();
-    d.setDate(d.getDate() + i);
-    d.setSeconds(0, 0);
-    const label = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString([], { weekday: 'short', day: 'numeric' });
-    days.push({ key: d.toISOString().slice(0, 10), label, date: d });
-  }
-  return days;
-}
 const HOURS = ['08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
 
 /** Quote acceptance = picking a slot (QUOTED → SCHEDULED on the API). */
 function ScheduleSheet({ job, onDone }: { job: any; onDone: () => void }) {
   const schedule = useScheduleJob();
-  const days = upcomingDays();
+  const days = upcomingAppointmentDays();
   const [dayKey, setDayKey] = useState<string>(days[0]!.key);
   const [time, setTime] = useState<string>('09:00');
   const [pastErr, setPastErr] = useState(false);
 
   const confirm = () => {
-    const scheduledFor = new Date(`${dayKey}T${time}:00`);
-    if (scheduledFor.getTime() < Date.now()) {
+    const { scheduledFor, isPast } = serviceJobScheduleSelection(dayKey, time);
+    if (isPast) {
       setPastErr(true);
       return;
     }
     setPastErr(false);
-    schedule.mutate({ id: job.id, scheduledFor: scheduledFor.toISOString() }, { onSuccess: onDone });
+    schedule.mutate({ id: job.id, scheduledFor }, { onSuccess: onDone });
   };
 
   return (
@@ -216,7 +206,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
           <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
             {new Date(job.createdAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}
             {job.scheduledFor
-              ? ` · booked ${new Date(job.scheduledFor).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}`
+              ? ` · booked ${formatAppointmentSlot(job.scheduledFor)}`
               : ''}
           </T>
         </View>
@@ -324,6 +314,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
 
 export function ServiceJobsScreen({ navigation }: any) {
   const q = useServiceJobs<any[]>();
+  const pull = usePullToRefresh(q.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const jobs = q.data ?? [];
 
   return (
@@ -332,7 +323,7 @@ export function ServiceJobsScreen({ navigation }: any) {
       <ScrollView
         contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.sm, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+        refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
       >
         {q.isLoading ? (
           <LoadingBlock />

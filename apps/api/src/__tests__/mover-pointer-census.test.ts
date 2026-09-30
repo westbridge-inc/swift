@@ -103,6 +103,10 @@ const CENSUS: Record<string, { verdict: Verdict; why: string }> = {
     verdict: 'UNTOUCHED',
     why: 'one-time cutover preparation against the singular pointer as it existed; historical, and correct for what it did.',
   },
+  'apps/api/src/modules/partner/partner.service.ts': {
+    verdict: 'UNTOUCHED',
+    why: '[VEHICLES] the vehicle change refuses while the mover is busy: a rider is busy when the pointer is set OR riderLiveLegCount (the seam) counts a live leg, so stacked legs are covered by the seam, not the pointer; a driver is busy on currentRideId, one leg by law (moverCapacity DRIVER is a literal 1). It never enumerates or moves jobs.',
+  },
   'packages/types/src/rider.ts': {
     verdict: 'UNTOUCHED',
     why: 'a type declaration of the field. It gains a sibling when the plural lands; it does not read a value.',
@@ -184,7 +188,8 @@ describe('the singular-pointer census [B2 / SWIFT_CONCURRENCY §15.4]', () => {
     // them and someone should notice deliberately rather than in passing.
     // 2026-08-29: the six MUST_MIGRATE files became five MIGRATED and one
     // UNTOUCHED-by-law (taxi). Zero MUST_MIGRATE is the state Band B was for.
-    expect(counts).toEqual({ SEAM: 1, MIGRATED: 5, UNTOUCHED: 6, NAME_ONLY: 2 });
+    // 2026-09-24: +1 UNTOUCHED — the vehicle change's busy check (partner.service.ts).
+    expect(counts).toEqual({ SEAM: 1, MIGRATED: 5, UNTOUCHED: 7, NAME_ONLY: 2 });
   });
 
   it('every entry carries a reason someone can act on', () => {

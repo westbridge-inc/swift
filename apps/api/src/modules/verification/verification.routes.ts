@@ -9,6 +9,7 @@ import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRender
 import { createHash } from 'node:crypto';
 import { looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
+import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']);
 
@@ -132,8 +133,8 @@ export async function verificationRoutes(app: FastifyInstance) {
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
     // bucket only ever holds AES-256-GCM ciphertext; the wrapped per-file DEK
-    // lands in encrypted_objects. Without one, behavior is unchanged
-    // (private object + provider-side SSE) — encryption is config, not code.
+    // lands in encrypted_objects. Without it no ownership metadata can be
+    // proved at submission, so refuse instead of handing back an unusable file.
     const keys = getKeyProvider();
     if (keys) {
       const sha256 = createHash('sha256').update(buffer).digest('hex');
@@ -149,7 +150,10 @@ export async function verificationRoutes(app: FastifyInstance) {
       const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
       const { url } = await storage.upload({
         buffer: ciphertext,
-        filename: `${file.filename}.enc`,
+        // Multipart normalizes empty/path-only names to ''. Appending .enc
+        // would then make a dotfile, which adapters name .bin. The envelope
+        // extension is server-owned and must satisfy object authority.
+        filename: 'verification.enc',
         mimeType: 'application/octet-stream',
         folder: `verification/${request.user.userId}`,
       });
@@ -179,13 +183,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       return { success: true, data: { url, duplicate: !!dup } };
     }
 
-    const { url } = await storage.upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
-      folder: `verification/${request.user.userId}`,
-    });
-    return { success: true, data: { url } };
+    throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Document upload is temporarily unavailable. Try again later.');
   });
 
   /**
@@ -206,22 +204,23 @@ export async function verificationRoutes(app: FastifyInstance) {
 
     const doc = await app.prisma.verificationDocument.findUnique({
       where: { id: docId },
-      select: { fileUrl: true, purgedAt: true },
+      select: { userId: true, fileUrl: true, purgedAt: true },
     });
     if (!doc || doc.purgedAt || !doc.fileUrl) {
       throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
     }
-    const meta = await app.prisma.encryptedObject.findUnique({ where: { fileKey: doc.fileUrl } });
-    if (!meta) throw new AppError(404, 'NOT_ENCRYPTED', 'No encrypted object for this document.');
-    if (!meta.wrappedDek || meta.shreddedAt) {
-      throw new AppError(410, 'DOCUMENT_SHREDDED', 'This document was crypto-shredded and cannot be recovered.');
-    }
+    const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
     const keys = getKeyProvider();
     if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
 
-    const ciphertext = await getStorageProvider().getObject(doc.fileUrl);
-    const dek = await keys.unwrapDek(Buffer.from(meta.wrappedDek));
-    const plaintext = decryptBuffer(ciphertext, dek, Buffer.from(meta.iv), Buffer.from(meta.authTag));
+    let plaintext: Buffer;
+    try {
+      const ciphertext = await getStorageProvider().getObject(doc.fileUrl);
+      const dek = await keys.unwrapDek(Buffer.from(meta.wrappedDek!));
+      plaintext = decryptBuffer(ciphertext, dek, Buffer.from(meta.iv), Buffer.from(meta.authTag));
+    } catch {
+      throw verificationObjectUnavailable();
+    }
     reply
       .type(meta.mimeType)
       .header('Cache-Control', 'no-store, max-age=0')

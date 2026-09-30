@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi } from '../services/api';
@@ -33,7 +33,10 @@ import {
   resolveMoverProfile,
   unwrapOptionalMoverProfile,
 } from '../lib/moverProfile';
+import { accountHoldsRole } from '../lib/roleLanding';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
+import { confirmRiderCashSettlement } from './cashSettlement';
+import { usePartnerPricing } from './partnerPricing';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -73,17 +76,23 @@ export function useMoverKind() {
     lastMoverRole?: string | null;
   }) | null;
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  // An account with no mover role (a customer opening "Swift Driver" to
+  // apply) gets 403 on both probes by the server's authz rule. For that
+  // account 403 IS "no profile": one answer each, no retries, no error carried
+  // into the application screen (lib/moverProfile). The switcher's "Join"
+  // uses the same predicate.
+  const outsider = !accountHoldsRole(authority, 'mover');
   const retryDelay = (attempt: number) => Math.min(500 * (2 ** attempt), 2_000);
   const driver = useQuery<any | null>({
     queryKey: ['mover', 'driverProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,
   });
   const rider = useQuery<any | null>({
     queryKey: ['mover', 'riderProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,
@@ -436,11 +445,13 @@ export function useDeclineOffer(kind: MoverKind) {
   return pv ? PV.previewMutation() : m;
 }
 export type FareOutcome = 'paid' | 'refused' | 'no_show';
-export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover';
+export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover' | 'handback';
 export type DriverActionInput =
-  | { id: string; action: Exclude<DriverAction, 'handover'>; pin?: string }
+  | { id: string; action: Exclude<DriverAction, 'handover' | 'handback'>; pin?: string }
   /** [M-29] The fare outcome is explicit — never defaulted — because it moves money. */
-  | { id: string; action: 'handover'; outcome: FareOutcome };
+  | { id: string; action: 'handover'; outcome: FareOutcome }
+  /** A driver handback always carries the human reason the server requires. */
+  | { id: string; action: 'handback'; reason: string };
 
 /** The evidence fix for a handover / fare outcome. The server REQUIRES the
  *  mover's GPS (it is what a guarantee claim stands on). Last-known is
@@ -462,6 +473,7 @@ export function useDriverAction() {
   const m = useMutation({
     mutationFn: async (input: DriverActionInput) => {
       const { id } = input;
+      if (input.action === 'handback') return unwrap(driverApi.handback(id, input.reason));
       if (input.action === 'handover') {
         // [M-29] The fare outcome at the destination IS the ride's completion:
         // 'paid' captures and completes in one commit; 'refused' / 'no_show'
@@ -478,7 +490,16 @@ export function useDriverAction() {
       if (input.action === 'verify-pin') return unwrap(driverApi.verifyPin(id, input.pin ?? ''));
       return unwrap(driverApi.start(id));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+    onSuccess: (_data, input) => {
+      // Handback owns a native modal dismissal ceremony. Do not make its local
+      // onSuccess wait for the active-ride refetch (which returns null and can
+      // remove that modal before it stages its post-dismiss navigation).
+      if (input.action === 'handback') {
+        void qc.invalidateQueries({ queryKey: ['mover'] });
+        return;
+      }
+      return qc.invalidateQueries({ queryKey: ['mover'] });
+    },
   });
   return pv ? PV.previewMutation() : m;
 }
@@ -490,14 +511,27 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome, handoverVersion }: { id: string; action: RiderAction; reason?: string; outcome?: FareOutcome; handoverVersion?: string }) => {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin }: {
+      id: string;
+      action: RiderAction;
+      reason?: string;
+      outcome?: FareOutcome;
+      handoverVersion?: string;
+      /** [MKT-F057] The customer-held delivery PIN the rider enters at the door.
+       *  Omitted when empty so the server answers MISSING_PIN rather than a
+       *  schema refusal; never sent for the failed outcomes (no_show/refused). */
+      pin?: string;
+    }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
         case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
         case 'picked-up': return unwrap(riderApi.pickedUp(id));
         case 'en-route-delivery': return unwrap(riderApi.enRouteDelivery(id));
         case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
-        case 'delivered': return unwrap(riderApi.delivered(id, handoverVersion ? { handoverVersion } : undefined));
+        case 'delivered': return unwrap(riderApi.delivered(id, {
+          ...(handoverVersion ? { handoverVersion } : {}),
+          ...(pin ? { ridePin: pin } : {}),
+        }));
         case 'handback': return unwrap(riderApi.handback(id, reason ?? 'unable to continue'));
         case 'handover': {
           const owner = requireAuthSessionSnapshot();
@@ -506,7 +540,7 @@ export function useRiderAction() {
           // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
           // unpaid sheet sends explicitly.
           const { gps, current } = await evidenceFix(owner);
-          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps }, current));
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(pin ? { ridePin: pin } : {}) }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }
@@ -533,7 +567,7 @@ export function useConfirmCashSettlement() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: (id: string) => unwrap(riderApi.confirmCashSettlement(id)),
+    mutationFn: confirmRiderCashSettlement,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'cash-settlements'] }),
   });
   return pv ? PV.previewMutation() : m;
@@ -578,7 +612,34 @@ export function useMoverSubscription(kind: MoverKind | null) {
     queryFn: () => tryUnwrap<any>(svc(kind as MoverKind).subscription()),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_SUBSCRIPTION) : q;
+  // Preview bills the sample driver the live quote for the sample car — the
+  // public price list, read only in preview — never a number frozen in the app.
+  const pricing = usePartnerPricing(PV.PREVIEW_MARKET, pv);
+  const sample = useMemo(() => (pv ? PV.previewSubscription(pricing.data) : null), [pv, pricing.data]);
+  if (!pv) return q;
+  // [H7] While the price list is still loading or has failed, the preview
+  // query says so and the screen shows its own loading or error state — never
+  // a sample subscription with no fee.
+  return {
+    ...PV.previewQuery(sample),
+    isLoading: sample == null && pricing.isPending === true,
+    isError: sample == null && pricing.isError === true,
+    refetch: pricing.refetch,
+  };
+}
+
+/** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the mover's weekly fee,
+ *  then re-read the subscription so the screen's autoRenew state is server
+ *  truth. Preview is read-only: the mutation is a no-op there. */
+export function useSetMoverBillingMethod(kind: MoverKind | null) {
+  const pv = usePreview();
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
+      unwrap<any>(svc(kind as MoverKind).setBillingMethod(method, mmgPayerMsisdn)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['mover', 'subscription', kind] }),
+  });
+  return pv ? PV.previewMutation() : m;
 }
 
 /** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */

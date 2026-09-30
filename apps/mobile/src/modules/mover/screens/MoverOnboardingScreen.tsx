@@ -1,13 +1,18 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, LabeledInput, LinkText, PillButton, Screen, T } from '../../../kit';
+import { Card, LabeledInput, LinkText, PillButton, Screen, T, useLogoutConfirm } from '../../../kit';
 import { SwiftMark } from '../../../components/SwiftLogo';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
-import { useVerificationStatus, useBecomePartner } from '../../../hooks';
+import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
+import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
+import { StepUpDismissed } from '../../../lib/stepUp';
+import { VEHICLE_COPY, vehicleOffered } from '../../../lib/vehicleOffer';
+import { usePartnerPricing } from '../../../hooks/partnerPricing';
+import { moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
@@ -15,10 +20,14 @@ import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { GUTTER } from '../shared';
 
 // The full Guyana fleet, small → large. Order matches the vehicle-class
-// taxonomy on the server (config/vehicle-classes). Only CAR provisions a taxi
-// Driver (and collects vehicle details below); the rest register a delivery/
-// courier Rider — details and commercial docs follow in the Documents step.
-const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
+// taxonomy on the server (config/vehicle-classes). Cars, wagon cars and buses
+// provision a taxi Driver (and collect vehicle details below); bicycles,
+// motorbikes, canters and box trucks register a delivery/courier Rider —
+// details and commercial docs follow in the Documents step. [Launch vehicle
+// list] The picker shows only the vehicles Swift takes on today
+// (lib/vehicleOffer): canters and box trucks stay listed here for the day they
+// are offered.
+export const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
   { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Small deliveries' },
   { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries' },
   { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi + delivery' },
@@ -81,8 +90,26 @@ function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active
   );
 }
 
-function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: VehicleKind) => void; onDone: () => void }) {
+/**
+ * The vehicle picker. `join` saves the first vehicle (/become, with the Mover
+ * Agreement); `change` replaces the saved one (PUT /partner/vehicle), which
+ * takes the mover offline and retires the old vehicle's papers. A verified
+ * mover steps up first (`guard`).
+ */
+export function VehicleSetup({
+  vt, setVt, onDone, mode = 'join', current = null, guard,
+}: {
+  vt: VehicleKind;
+  setVt: (v: VehicleKind) => void;
+  /** `changed` is false when the server found this was already the saved vehicle. */
+  onDone: (changed?: boolean) => void;
+  mode?: 'join' | 'change';
+  current?: VehicleKind | null;
+  guard?: MutationGuard;
+}) {
   const become = useBecomePartner();
+  const changeVehicle = useChangeVehicle(guard);
+  const saving = mode === 'change' ? changeVehicle : become;
   const [make, setMake] = useState('');
   const [model, setModel] = useState('');
   const [year, setYear] = useState('');
@@ -93,27 +120,51 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
   const [agree, setAgree] = useState(false);
   const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
   const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate);
+  // The agreement was recorded when the first vehicle was saved; a change does not re-ask.
+  const needsAgreement = mode === 'join';
+  const sameAsSaved = mode === 'change' && vt === current && !needsDetails;
+  // [PR1270-S2-04] The price on the door is a condition of the door: the
+  // vehicle is saved only against a weekly fee that was fetched successfully,
+  // is the one the card above shows for THIS vehicle, and is current. The list
+  // is read fresh here, never from an hour-old cache. Loading, a failed fetch,
+  // no quote for the vehicle, or a stale quote disables the button and says so.
+  const user = useAuthStore((s) => s.user) as { countryCode?: string } | null;
+  const pricing = usePartnerPricing(user?.countryCode, true, { fresh: true });
+  const gate = quoteGate(pricing, (p) => moverQuote(p, vt));
+  const stale = !gate.ok && gate.why === 'stale';
+  const { refetch: refetchPricing } = pricing;
+  useEffect(() => {
+    if (stale) void refetchPricing();
+  }, [stale, refetchPricing]);
+  // Only the vehicles Swift takes on today (the price list's `offered`, else the launch list).
+  const offered = VTYPES.filter((v) => vehicleOffered(v.key, pricing.data));
+  useEffect(() => {
+    // A saved vehicle that is no longer offered (a canter) starts the picker on the first offered one.
+    if (!vehicleOffered(vt, pricing.data) && offered[0]) setVt(offered[0].key);
+  }, [vt, pricing.data, offered, setVt]);
+  const saveError = saving.error instanceof StepUpDismissed
+    ? null
+    : ((saving.error as any)?.response?.data?.error?.message as string | undefined) ?? (saving.isError ? 'Couldn’t save. Try again.' : null);
 
   const submit = () => {
-    become.mutate(
-      {
-        role: 'MOVER',
-        vehicleType: vt,
-        vehicle: needsDetails ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined,
-        acceptAgreement: agree,
-      },
-      { onSuccess: onDone },
-    );
+    if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
+    if (!vehicleOffered(vt, pricing.data)) return; // the picker lists only offered vehicles; restated for the same reason
+    const vehicle = needsDetails ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined;
+    if (mode === 'change') {
+      changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: (r) => onDone(r?.changed !== false) });
+      return;
+    }
+    become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: () => onDone(true) });
   };
 
   return (
     <Card>
-      <T variant="heading">Your vehicle</T>
+      <T variant="heading">{mode === 'change' ? 'Your new vehicle' : 'Your vehicle'}</T>
       <T variant="label" tone="muted" style={{ marginTop: 4 }}>
-        How will you earn?
+        {mode === 'change' ? VEHICLE_COPY.changeWarning : 'How will you earn?'}
       </T>
       <View style={{ gap: space.sm, marginTop: space.md }}>
-        {VTYPES.map((v) => (
+        {offered.map((v) => (
           <VehicleRow key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} />
         ))}
       </View>
@@ -128,6 +179,7 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
           <LabeledInput value={plate} onChangeText={setPlate} placeholder="Licence plate" autoCapitalize="characters" />
         </View>
       ) : null}
+      {needsAgreement ? (
       <Pressable
         accessibilityRole="checkbox"
         accessibilityState={{ checked: agree }}
@@ -147,16 +199,26 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
           </T>
         </T>
       </Pressable>
-      {become.isError ? (
+      ) : null}
+      {/* The server's own words for a refused save: a vehicle not offered, a job in
+          progress, a weekly plan to move with support. */}
+      {saveError ? (
         <T variant="label" tone="error" style={{ marginTop: space.md }}>
-          Couldn&apos;t save. Try again.
+          {saveError}
         </T>
       ) : null}
-      {/* [#947's grammar] Disabled says the ask. */}
+      {/* [#947's grammar] Disabled says the ask — the fee first, because
+          without a fee on the door there is nothing to agree to. */}
       <PillButton
-        label={!valid ? 'Fill in the vehicle details' : !agree ? 'Agree to the Mover Agreement first' : 'Save vehicle'}
-        loading={become.isPending}
-        disabled={!valid || !agree}
+        label={!gate.ok
+          ? QUOTE_GATE_COPY[gate.why]
+          : !valid
+            ? 'Fill in the vehicle details'
+            : needsAgreement && !agree
+              ? 'Agree to the Mover Agreement first'
+              : mode === 'change' ? VEHICLE_COPY.saveNew : 'Save vehicle'}
+        loading={saving.isPending}
+        disabled={!gate.ok || !valid || (needsAgreement && !agree) || sameAsSaved}
         style={{ marginTop: space.md }}
         onPress={submit}
       />
@@ -165,7 +227,13 @@ function VehicleSetup({ vt, setVt, onDone }: { vt: VehicleKind; setVt: (v: Vehic
 }
 
 export function MoverOnboardingScreen({ status }: { status: any }) {
-  const { logout, moverPreset } = useAuthStore();
+  const { moverPreset } = useAuthStore();
+  // Signing up is mostly already on the server: the vehicle is saved by its
+  // button and every document uploads the moment it is picked. The only thing
+  // held on this device is a vehicle form not yet saved.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    body: 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
+  });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const savedVehicle: VehicleKind | null = status?.vehicleType ?? null;
   // Default the vehicle from what they picked on the entry screen: a taxi
@@ -173,6 +241,15 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   const presetVehicle: VehicleKind = moverPreset === 'taxi' ? 'CAR' : 'MOTORCYCLE';
   const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? presetVehicle);
   const [vehicleSaved, setVehicleSaved] = useState(!!savedVehicle);
+  // [VEHICLES] "after you save vehicle you cant switch it at all": a saved vehicle has a
+  // Change action. A change retires the old vehicle's papers, so the checklist below
+  // follows the NEW vehicle; a verified mover steps up first (the server decides).
+  const [changing, setChanging] = useState(false);
+  const stepUp = useStepUp();
+  const countryCode = (useAuthStore((s) => s.user) as { countryCode?: string } | null)?.countryCode;
+  const pricing = usePartnerPricing(countryCode);
+  const savedOffered = !savedVehicle || vehicleOffered(savedVehicle, pricing.data);
+  const savedLabel = VTYPES.find((v) => v.key === (savedVehicle ?? vt))?.label ?? 'Your vehicle';
   const { data: preview, isLoading: statusLoading, isError: statusError, refetch: refetchStatus } = useVerificationStatus<any>('MOVER', vt);
   const checklistStatus = preview ?? status;
 
@@ -182,7 +259,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
         <SwiftMark size={28} />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
           <LinkText label="Switch app" onPress={() => setSwitcherOpen(true)} />
-          <LinkText label="Log out" tone="muted" onPress={logout} />
+          <LinkText label="Log out" tone="muted" onPress={requestLogout} />
         </View>
       </View>
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
@@ -205,22 +282,43 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
           <ValuePill icon="calendar-check" label="Flat weekly fee" />
         </View>
 
-        {/* The price on the door — what "flat weekly fee" actually costs. */}
+        {/* The price on the door — what "flat weekly fee" actually costs for
+            the vehicle picked below: a taxi driver, a delivery rider and a
+            heavy-delivery rider each read their own rate. */}
         <View style={{ marginTop: space.lg }}>
-          <PricingCard kind="mover" />
+          <PricingCard kind="mover" vehicleType={vt} />
         </View>
 
         <View style={{ marginTop: space.xl }}>
           {!vehicleSaved ? (
             <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} />
+          ) : changing ? (
+            <VehicleSetup
+              mode="change"
+              current={savedVehicle}
+              vt={vt}
+              setVt={setVt}
+              guard={stepUp.withStepUp}
+              onDone={() => {
+                setChanging(false);
+                void refetchStatus();
+              }}
+            />
           ) : (
-            <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-              <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: color.soft.success }}>
-                <MaterialCommunityIcons name="check" size={20} color={color.success} />
+            <Card style={{ gap: space.sm }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+                <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: savedOffered ? color.soft.success : color.soft.warning }}>
+                  <MaterialCommunityIcons name={savedOffered ? 'check' : 'alert'} size={20} color={savedOffered ? color.success : color.warning} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <T variant="body" weight="bold">{VEHICLE_COPY.saved}</T>
+                  <T variant="caption" tone="muted">{savedLabel}</T>
+                </View>
+                <LinkText label={VEHICLE_COPY.change} onPress={() => setChanging(true)} />
               </View>
-              <T variant="body" weight="bold" style={{ flex: 1 }}>
-                Vehicle saved
-              </T>
+              {!savedOffered ? (
+                <T variant="caption" tone="warning">{VEHICLE_COPY.notOffered}</T>
+              ) : null}
             </Card>
           )}
         </View>
@@ -237,6 +335,8 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
+      {stepUp.sheet}
+      {logoutDialog}
     </Screen>
   );
 }

@@ -63,6 +63,8 @@ export const STATUS_BUCKET: Readonly<Record<string, BucketKey>> = {
   PICKED_UP: 'moving',
   EN_ROUTE_DELIVERY: 'moving',
   ARRIVED: 'moving',
+  // [E17] The parcel is on its way back to the sender, still with the mover.
+  RETURNING: 'moving',
   // A mover on the ride rail can carry a delivery; these are still "with the
   // mover, on the way" from the vendor's side, and must not disappear.
   DRIVER_ASSIGNED: 'moving',
@@ -73,6 +75,7 @@ export const STATUS_BUCKET: Readonly<Record<string, BucketKey>> = {
   DELIVERED: 'done',
   COMPLETED: 'done',
   CANCELLED: 'done',
+  RETURNED: 'done',
 
   REFUNDED: 'attention',
   FAILED: 'attention',

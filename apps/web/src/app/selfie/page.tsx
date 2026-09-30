@@ -12,7 +12,7 @@ import styles from './selfie.module.css';
 const MAX_CAPTURE_EDGE = 1280;
 
 function safeNext(value: string | null): string {
-  return value && /^\/(?!\/)/.test(value) && !value.includes('..') && !value.includes('\\') ? value : '/order';
+  return value && /^\/(?!\/)/.test(value) && !value.includes('..') && !value.includes('\\') ? value : '/';
 }
 
 function SelfieSetup() {

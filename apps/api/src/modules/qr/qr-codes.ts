@@ -138,5 +138,5 @@ export function redirectTargetFor(
 /** The web origin printed QR codes point at. Reuses the codebase's existing
  *  public-web key (the old /vendor/qr route established it). */
 export function publicWebBase(): string {
-  return (process.env['APP_PUBLIC_URL'] ?? 'https://swift.gy').replace(/\/+$/, '');
+  return (process.env['APP_PUBLIC_URL'] ?? 'https://swiftgy.com').replace(/\/+$/, '');
 }

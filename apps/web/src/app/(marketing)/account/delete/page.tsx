@@ -75,7 +75,7 @@ export default function DeleteAccountPage() {
           If you no longer have the app
         </h2>
         <p className="mt-3 text-[var(--swift-muted)]">
-          Email <b><a className="underline" href="mailto:privacy@swift.gy">privacy@swift.gy</a></b> from
+          Email <b><a className="underline" href="mailto:privacy@swiftgy.com">privacy@swiftgy.com</a></b> from
           the address on your account, or include the phone number you signed up with, and ask for
           your account to be deleted. We verify that the request really comes from the account
           holder before acting on it — that check protects you, and it is why this page has no
@@ -122,7 +122,7 @@ export default function DeleteAccountPage() {
           Guyana&apos;s Data Protection Act 2023 also gives you the right to access your data,
           correct it, restrict or object to how it is processed, and receive a copy in a portable
           form. You can export your data from the same <b>Personal data</b> screen in the app, or
-          email <a className="underline" href="mailto:privacy@swift.gy">privacy@swift.gy</a>. The
+          email <a className="underline" href="mailto:privacy@swiftgy.com">privacy@swiftgy.com</a>. The
           full detail is in our{' '}
           <Link className="underline" href="/legal/privacy">
             privacy policy

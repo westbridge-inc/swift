@@ -2,11 +2,12 @@
 
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchApprovals, decideApproval } from '@/lib/api';
+import { fetchApprovals, decideApproval, applyApproval } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
 import {
   blockedBecause, BLOCK_COPY, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX,
+  canApply, awaitsRequester, snapshotEntries,
   type ApprovalRow,
 } from '@/lib/approvals';
 
@@ -99,6 +100,10 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
     mutationFn: (approve: boolean) => decideApproval(row.id, approve, note.trim()),
     onSuccess: onDecided,
   });
+  const apply = useMutation({
+    mutationFn: () => applyApproval(row.id),
+    onSuccess: onDecided,
+  });
 
   const problem = intent ? noteProblem(note, intent === 'approve') : null;
 
@@ -149,10 +154,59 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
         <div><span className="block text-[10px] uppercase tracking-wide">Signed over</span><code>{shortFingerprint(row.fingerprint)}</code></div>
       </div>
 
+      {/* [DS110-13] What the approver is signing: the stored body, field by
+          field. This is the same stored value `apply` replays, bound by the
+          fingerprint above — nothing not shown here can execute. */}
+      {snapshotEntries(row).length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs mb-3">
+          {snapshotEntries(row).map((entry) => (
+            <div key={entry.label} className="rounded-lg border border-[var(--border)] bg-[var(--bg)] p-2">
+              <span className="block text-[10px] uppercase tracking-wide text-[var(--muted)]">{entry.label}</span>
+              <code className="break-all text-[var(--muted)]">{entry.value}</code>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {row.status === 'APPROVED' && !row.bodySnapshot && (
+        <p className="text-xs text-amber-400 mb-3">
+          This request predates body capture, so it cannot be executed. The requester must ask again — the
+          new request stores its body and can be applied.
+        </p>
+      )}
+
       {row.decidedAt && (
         <p className="text-xs text-[var(--muted)] mb-2">
           {row.status.toLowerCase()} by {row.approvedBy} · {new Date(row.decidedAt).toLocaleString()}
           {row.decisionNote ? ` — “${row.decisionNote}”` : ''}
+        </p>
+      )}
+
+      {canApply(row) && (
+        <div className="border-t border-[var(--border)] pt-3 mb-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              disabled={apply.isPending}
+              onClick={() => apply.mutate()}
+              className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-40"
+            >
+              {apply.isPending ? 'Executing…' : 'Execute the approved action'}
+            </button>
+            <span className="text-xs text-[var(--muted)]">
+              Replays exactly the body shown above — the fingerprint check refuses anything else.
+            </span>
+          </div>
+          {apply.error && (
+            <div className="mt-2">
+              <MutationError error={apply.error} label="The approved action did not execute" />
+            </div>
+          )}
+        </div>
+      )}
+
+      {awaitsRequester(row) && (
+        <p className="text-xs text-[var(--muted)] border-t border-[var(--border)] pt-3 mb-3">
+          Approved. Only the admin who asked can execute it.
         </p>
       )}
 

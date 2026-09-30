@@ -231,12 +231,15 @@ describe('[W-18 / W-19] the shared location field enforces it', () => {
     expect(field.match(/if \(seq\.current\.accept\(mine\)\)/g) ?? []).toHaveLength(2);
   });
 
-  it('[W-18] BOTH forms use it — there is no second copy of the box to drift', () => {
-    for (const page of ['src/app/(app)/courier/page.tsx', 'src/app/(app)/taxi/page.tsx']) {
+  it('[W-18] courier uses the shared field and disabled taxi has no second box', () => {
+    for (const page of ['src/app/(app)/courier/page.tsx']) {
       const t = readFileSync(join(process.cwd(), page), 'utf8');
       expect(t, `${page} must use the shared field`).toMatch(/from '@\/components\/location-field'/);
       expect(stripComments(t), `${page} must not re-declare the box`).not.toMatch(/placesAutocomplete\(/);
     }
+    const taxi = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/page.tsx'), 'utf8'));
+    expect(taxi).not.toMatch(/LocationField|<input|placesAutocomplete|requestRide/);
+    expect(taxi).toContain('Taxi booking is unavailable on the web.');
   });
 });
 

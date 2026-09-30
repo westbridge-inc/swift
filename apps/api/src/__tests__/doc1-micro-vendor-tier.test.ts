@@ -7,7 +7,8 @@
  * MICRO_VENDOR requirement set, and the 60 % nudge — are pinned as named failing tests so
  * the build lands against a test that already exists.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -37,6 +38,8 @@ let mkUser: (n: number, roles: string[], active: string, extra?: Record<string, 
 const orderIds: string[] = [];
 
 beforeAll(async () => {
+  vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64'));
+  resetKeyProviderForTests();
   process.env['NODE_ENV'] = 'test';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -61,6 +64,8 @@ beforeAll(async () => {
   itemId = (await system(() => app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: `Plate ${RUN}`, basePrice: 1000 } as never }))).id;
 });
 afterAll(async () => {
+  vi.unstubAllEnvs();
+  resetKeyProviderForTests();
   await system(async () => {
     await app.prisma.cart.deleteMany({ where: { customerId } });
     await app.prisma.orderItem.deleteMany({ where: { order: { customerId } } });
@@ -208,6 +213,10 @@ describe('[DOC-1 P3-2] the build against the contract: declaration, requirement 
     expect((consent?.evidence as { tradingName?: string })?.tradingName).toBe(`Auntie ${RUN}`);
     const filed = await system(() => app.prisma.verificationDocument.findFirst({ where: { userId: o.id, docType: DECLARATION_DOC_TYPE } }));
     expect(filed).not.toBeNull();
+    expect(filed!.fileUrl).toMatch(/\.enc$/);
+    const envelope = await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: filed!.fileUrl } }));
+    expect(envelope).toMatchObject({ createdBy: o.id, mimeType: 'application/pdf', shreddedAt: null });
+    expect(envelope.wrappedDek?.length).toBeGreaterThan(0);
     // The tier's checklist is what the owner now sees: the declaration is on it, the registration is not.
     const checklist: string[] = data.status.required ?? data.status.checklist ?? [];
     expect(checklist).toContain(DECLARATION_DOC_TYPE);

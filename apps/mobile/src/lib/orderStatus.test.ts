@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { orderStatusLabel, orderSubtitle } from './orderStatus';
+import { orderRecipientNoun, orderStatusLabel, orderSubtitle, presentedVertical } from './orderStatus';
 
 // ---------------------------------------------------------------------------
 // THE STATUS LINE.
@@ -66,16 +66,34 @@ describe('every order status has words', () => {
     const listed = [...declared.matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]!).sort();
     expect(listed, 'OrderKind has drifted from the OrderType enum').toEqual(enumValues('OrderType').sort());
 
-    // KNOWN GAP, recorded here because it is invisible from the label layer.
+    // THE GAP THIS PIN RECORDED, AND THE DECISION THAT CLOSED IT.
     // Services have NO OrderType member: a barbershop appointment is stored as
-    // `orderType: 'FOOD_DELIVERY'` with `vendor.vendorType: 'SERVICE'`, so the
-    // words "Waiting for the store" are correctly derived from data that is
-    // itself wrong. Teaching this file a services vocabulary would paper over
-    // that — every other consumer of orderType still reads a haircut as a food
-    // delivery. The fix is a schema decision (add the member and backfill, or
-    // make vendorType the declared discriminator), so it is pinned, not patched:
-    // this fails the day SERVICE is added, which is the day the words are owed.
+    // `orderType: 'FOOD_DELIVERY'` with `vendor.vendorType: 'SERVICE'`. The
+    // earlier version of this test refused a services vocabulary until a schema
+    // decision was made — "add the member and backfill, or make vendorType the
+    // declared discriminator" — because words alone would paper over data that
+    // was itself wrong. The second option was taken, at the API: the server
+    // DECLARES the vertical of every customer order projection from the business
+    // type and the appointment fulfillment (`orderVertical`, below) and sends
+    // it as `vertical`. The persisted spine is unchanged, so OrderKind still
+    // mirrors the enum exactly (asserted above); the presentation vocabulary is
+    // the wider `OrderVertical`, which is OrderKind plus the declared SERVICE.
     expect(listed).not.toContain('SERVICE');
+    const declaredVertical = readFileSync(join(process.cwd(), 'src/lib/orderStatus.ts'), 'utf8')
+      .match(/export type OrderVertical =([^;]+);/)?.[1] ?? '';
+    expect(declaredVertical.replace(/\s+/g, ' ').trim()).toBe("OrderKind | 'SERVICE'");
+  });
+
+  it('the server declares the discriminator this file’s SERVICE words rely on', () => {
+    // Read, like the enum above, from where it lives: the API owns the
+    // decision, this file only renders it. If the discriminator is renamed or
+    // its inputs change, the words here are no longer backed by anything.
+    const api = readFileSync(join(process.cwd(), '../../apps/api/src/modules/order/order-vertical.ts'), 'utf8');
+    expect(api).toMatch(/export function orderVertical\(/);
+    // [R2 F02] The business type is NOT the discriminator: a service business's
+    // goods sold by delivery are a delivery. Only the appointment is a booking.
+    expect(api).not.toMatch(/vendorType === 'SERVICE'/);
+    expect(api).toMatch(/fulfillment === 'APPOINTMENT'/);
   });
 
   it('READY_FOR_PICKUP is the real key — READY never was', () => {
@@ -83,6 +101,37 @@ describe('every order status has words', () => {
     // The old map's key. It must NOT be mapped, or the same typo comes back
     // wearing a test as cover.
     expect(orderStatusLabel('READY', 'FOOD_DELIVERY')).toBe('In progress');
+  });
+});
+
+describe('a service booking is not a food order', () => {
+  it('a booking waits for the provider, never the store', () => {
+    expect(orderStatusLabel('PENDING', 'SERVICE')).toBe('Waiting for the provider');
+    expect(orderStatusLabel('PENDING', 'SERVICE')).not.toMatch(/store/i);
+  });
+
+  it('an accepted booking is a confirmed booking, not "Order accepted"', () => {
+    expect(orderStatusLabel('ACCEPTED', 'SERVICE')).toBe('Booking confirmed');
+  });
+
+  it('a completed booking is complete, and a rider status a booking never has stays honest', () => {
+    expect(orderStatusLabel('COMPLETED', 'SERVICE')).toBe('Completed');
+    expect(orderStatusLabel('RIDER_EN_ROUTE_PICKUP', 'SERVICE')).toBe('In progress');
+  });
+
+  it('the presented vertical is the server’s declaration, falling back to the persisted type for an older API', () => {
+    expect(presentedVertical({ vertical: 'SERVICE', orderType: 'FOOD_DELIVERY' })).toBe('SERVICE');
+    expect(presentedVertical({ vertical: 'FOOD_DELIVERY', orderType: 'FOOD_DELIVERY' })).toBe('FOOD_DELIVERY');
+    expect(presentedVertical({ orderType: 'TAXI' })).toBe('TAXI');
+    expect(presentedVertical({ orderType: 'FOOD_DELIVERY' })).toBe('FOOD_DELIVERY');
+    expect(presentedVertical({})).toBeNull();
+  });
+
+  it('the held card names who has not been told yet from the vertical', () => {
+    expect(orderRecipientNoun('SERVICE')).toBe('the provider');
+    expect(orderRecipientNoun('FOOD_DELIVERY')).toBe('the store');
+    expect(orderRecipientNoun('GROCERY_DELIVERY')).toBe('the store');
+    expect(orderRecipientNoun(null)).toBe('the store');
   });
 });
 

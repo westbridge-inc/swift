@@ -6,7 +6,8 @@
  *    retired by the retention purge (`purgedAt` null, retention clock not elapsed);
  *  - an image purged under its bucket's policy (`imagePurgedAt`, E2E-DOC-5) changes nothing;
  *  - the account's own records count, and so do the records of every VEHICLE subject the
- *    account holds an OPEN link to (a fleet's insurance serves every assigned driver).
+ *    account holds an OPEN, APPROVED link to (a fleet's insurance serves every assigned
+ *    driver) — [High #9 · DS109] a PENDING link (retyped plate) propagates nothing.
  * Used by the verification service (predicate, validity bound, live-operation gate) and
  * by the service-provider projection — one rule, one implementation.
  */
@@ -29,7 +30,7 @@ export interface EvidenceRow {
 export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
   if (checklist.length === 0) return [];
   const vehicles = await db.subjectLink.findMany({
-    where: { accountId: userId, validTo: null, subject: { kind: 'VEHICLE' } },
+    where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
     select: { subjectId: true },
   });
   const vehicleIds = vehicles.map((v) => v.subjectId);
@@ -53,4 +54,37 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
     userId: r.submission.userId, subjectId: r.submission.subjectId, coverageClass: r.submission.coverageClass,
     hireClassConfirmed: r.submission.hireClassConfirmed, plateCrossChecked: r.submission.plateCrossChecked,
   }));
+}
+
+/**
+ * [AUD-L8b-001] Has this account EVER held checklist evidence — valid, expired,
+ * rejected or superseded?
+ *
+ * `approvedEvidenceFor` answers "what is current". This answers "was a record
+ * for this type ever filed", which is the only question the legacy
+ * `documentsVerified` grandfather clause was ever entitled to ask — and it is
+ * asked of the MISSING types alone. A type missing because its record lapsed is
+ * an expiry; a type missing because nothing was ever filed is the pre-checklist
+ * state the clause exists for. Same ownership
+ * and purge filters as above; deliberately NO status or expiry filter, because a
+ * record that has expired is precisely the case the flag must not be allowed to
+ * paper over.
+ */
+export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[]): Promise<boolean> {
+  if (checklist.length === 0) return false;
+  const vehicles = await db.subjectLink.findMany({
+    where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
+    select: { subjectId: true },
+  });
+  const vehicleIds = vehicles.map((v) => v.subjectId);
+  const held = await db.documentRecord.count({
+    where: {
+      docType: { in: [...checklist] },
+      AND: [
+        { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
+        { submission: { purgedAt: null } },
+      ],
+    },
+  });
+  return held > 0;
 }

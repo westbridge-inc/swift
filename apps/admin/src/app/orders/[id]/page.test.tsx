@@ -251,7 +251,8 @@ describe('[A-14] an unsettled refund obligation', () => {
   it('settles only with a reference AND an amount, and sends both to the settle endpoint', async () => {
     const prompt = vi.fn()
       .mockReturnValueOnce('CASH-REF-001')
-      .mockReturnValueOnce('2500');
+      .mockReturnValueOnce('2500')
+      .mockReturnValueOnce('Cash handed back against receipt CASH-REF-001');
     vi.stubGlobal('prompt', prompt);
     const fetchMock = mockApi(orderHandler((request) => {
       if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/refund-settled') {

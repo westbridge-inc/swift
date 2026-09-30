@@ -46,8 +46,9 @@ export interface CaptureResult {
   matchedAccountIds: string[];
   merged: boolean;
   clusterId: string | null;
-  /** [F-022-14] true when the write barrier refused the capture (deletion-
-   *  terminal account) — distinct from a genuine empty-match result. */
+  /** [F-022-14] true when the write barrier refused the capture (for example,
+   *  a deletion-terminal account or an empty normalized signal) — distinct
+   *  from a genuine empty-match result. */
   dropped?: boolean;
 }
 
@@ -84,6 +85,24 @@ export class IdentityService {
    *  verification; failures are logged loudly instead. */
   async capture(input: CaptureInput): Promise<CaptureResult> {
     const strength = SIGNAL_STRENGTH[input.type];
+    // A punctuation-only document number / plate and a blank phone/device all
+    // normalize to the same empty value. Hashing that value would turn
+    // unrelated accounts into one HARD/STRONG identity and can revoke a valid
+    // trial during union reconciliation. Refuse it before hashing or touching
+    // the cross-tenant transaction; never log the sensitive raw value.
+    if (input.normalizedValue.trim().length === 0) {
+      log().warn(
+        { accountId: input.accountId, type: input.type, source: input.source },
+        'identity capture refused an empty normalized signal',
+      );
+      return {
+        strength,
+        matchedAccountIds: [],
+        merged: false,
+        clusterId: null,
+        dropped: true,
+      };
+    }
     const valueHash = hashSignal(input.normalizedValue);
     try {
       // Identity matching and union reconciliation is the single sanctioned

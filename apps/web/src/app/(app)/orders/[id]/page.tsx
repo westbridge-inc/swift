@@ -1,9 +1,11 @@
 'use client';
 
-import Link from 'next/link';
+import OrderDetailSkeleton from './loading';
+
+import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  ArrowLeft,
   Banknote,
   CircleX,
   Clock3,
@@ -61,6 +63,8 @@ type OrderDetail = {
     url: string;
   } | null;
   pickupCode?: string | null;
+  /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
+  ridePin?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
@@ -78,6 +82,7 @@ type OrderDetail = {
   timeline?: TimelineEvent[];
   holdExpiresAt?: string | null;
   freeCancellationExpiresAt?: string | null;
+  appointmentSlot?: string | null;
   canCancel?: boolean;
   cancellationFee?: number;
   cancellationReason?: string | null;
@@ -106,6 +111,14 @@ const appointmentStages: Stage[] = [
   { label: 'Completed', statuses: ['COMPLETED', 'DELIVERED'] },
 ];
 
+/** [E17 · DS202 D6] A courier parcel sent back to its sender. */
+const returnStages: Stage[] = [
+  { label: 'Placed', statuses: ['PENDING', 'ACCEPTED'] },
+  { label: 'Picked up', statuses: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] },
+  { label: 'Coming back to you', statuses: ['RETURNING'] },
+  { label: 'Returned', statuses: ['RETURNED'] },
+];
+
 const taxiStages: Stage[] = [
   { label: 'Requested', statuses: ['PENDING'] },
   { label: 'Driver assigned', statuses: ['ACCEPTED', 'DRIVER_ASSIGNED'] },
@@ -116,6 +129,7 @@ const taxiStages: Stage[] = [
 
 function stagesFor(order: OrderDetail): Stage[] {
   if (order.orderType === 'TAXI') return taxiStages;
+  if (order.status === 'RETURNING' || order.status === 'RETURNED') return returnStages;
   if (order.fulfillment === 'PICKUP') return pickupStages;
   if (order.fulfillment === 'APPOINTMENT') return appointmentStages;
   return deliveryStages;
@@ -130,6 +144,10 @@ function statusHeading(order: OrderDetail): string {
   if (order.status === 'CANCELLED') return order.orderType === 'TAXI' ? 'Ride cancelled' : 'Order cancelled';
   if (order.status === 'REFUNDED') return order.orderType === 'TAXI' ? 'Ride refunded' : 'Order refunded';
   if (order.status === 'FAILED') return order.orderType === 'TAXI' ? 'Ride could not be completed' : 'Order could not be completed';
+  // [E17 · DS231 F4] A courier parcel on its way back, and back: the heading
+  // agrees with the stage rail below instead of falling to "Order placed".
+  if (order.status === 'RETURNING') return 'Your parcel is coming back to you';
+  if (order.status === 'RETURNED') return 'Parcel returned to you';
   if (['DELIVERED', 'COMPLETED'].includes(order.status)) {
     if (order.orderType === 'TAXI') return 'Ride completed';
     if (order.fulfillment === 'APPOINTMENT') return 'Appointment completed';
@@ -314,7 +332,7 @@ export default function OrderDetailPage() {
     );
   }
 
-  if (!order) return <div className={styles.loading} aria-label="Loading order tracking" />;
+  if (!order) return <OrderDetailSkeleton />;
 
   const cancelled = order.status === 'CANCELLED';
   const refunded = order.status === 'REFUNDED';
@@ -446,11 +464,7 @@ export default function OrderDetailPage() {
 
   return (
     <div className={styles.page}>
-      <Link href="/orders" className={styles.backLink}>
-        <ArrowLeft size={18} aria-hidden="true" />
-        All orders
-      </Link>
-
+      {/* [Q7b] The way back is the app's own back button, in the top bar. */}
       <section className={styles.hero} aria-labelledby="order-status-heading">
         <div className={styles.heroIcon} aria-hidden="true">
           {stopped ? <CircleX size={28} /> : completed ? <PackageCheck size={28} /> : order.rider ? <Truck size={28} /> : <Clock3 size={28} />}
@@ -466,6 +480,14 @@ export default function OrderDetailPage() {
           {order.status.replaceAll('_', ' ').toLowerCase()}
         </span>
       </section>
+
+      {isTaxi ? (
+        <section className={styles.moneyNotice} aria-labelledby="taxi-app-title">
+          <h2 id="taxi-app-title" className={styles.cardTitle}>Open the Swift app for your safety PIN and SOS</h2>
+          <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
+          <OpenSwiftApp />
+        </section>
+      ) : null}
 
       {trackingError ? (
         <div className={styles.trackingNotice} role="alert">
@@ -586,6 +608,12 @@ export default function OrderDetailPage() {
                   <strong>{order.pickupCode}</strong>
                 </div>
               ) : null}
+              {order.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status) ? (
+                <div className={styles.pickupCode}>
+                  <span>Show this delivery code to your rider at the door</span>
+                  <strong>{order.ridePin}</strong>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
@@ -621,6 +649,7 @@ export default function OrderDetailPage() {
             ))}
           </div>
           <div className={styles.breakdown}>
+            {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? <div className={styles.line}><span>Appointment</span><strong>{formatAppointmentSlot(order.appointmentSlot)}</strong></div> : null}
             {typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
             {!isTaxi && typeof order.deliveryFee === 'number' ? <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div> : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
@@ -712,7 +741,7 @@ export default function OrderDetailPage() {
               <p id="cancellation-quote">
                 {effectiveCancelFee > 0
                   ? `Swift’s last server quote shows a ${money(effectiveCancelFee)} cash-only late-cancellation marker. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect the marker; the server confirms it when you cancel.`
-                  : `Swift’s last server quote showed no fee${order.freeCancellationExpiresAt ? ` through ${formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift rechecks the fee before cancelling and never collects a late marker.`}
+                  : `Swift’s last server quote showed no fee${order.freeCancellationExpiresAt ? ` through ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift rechecks the fee before cancelling and never collects a late marker.`}
               </p>
               <div className={styles.confirmActions}>
                 <button ref={cancelConfirmButton} type="button" className={styles.primaryButton} aria-describedby="cancellation-quote" disabled={cancelling} onClick={() => void confirmCancellation()}>

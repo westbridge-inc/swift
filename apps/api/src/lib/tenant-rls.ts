@@ -34,6 +34,9 @@ export const TENANT_TABLES = [
   'stock_movements',
   // [R048-007] money-surface commands: one operator's decided money changes.
   'money_surface_commands',
+  // [E02] MMG refund obligations and the sends that answer them, walled like their order.
+  'mmg_refund_obligations',
+  'mmg_refund_sends',
   'rating_outbox',
   'privileged_approvals',
   'sensitive_read_logs',
@@ -106,6 +109,8 @@ export const TENANT_TABLES = [
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
   'ride_queue_entries', 'safety_deletion_holds', 'san_tombstones',
+  // [TAXI multi-stop] The intermediate stops of one ride, walled like the ride itself.
+  'taxi_trip_stops',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -224,6 +229,9 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'payout_schedules', trigger: 'payout_schedules_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [E02] an MMG refund obligation and a refund send belong to the tenant of their order
+  { table: 'mmg_refund_obligations', trigger: 'mmg_refund_obligations_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  { table: 'mmg_refund_sends', trigger: 'mmg_refund_sends_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [money] two hops: an earning belongs to its mover (rider OR driver), who belongs to a user, who belongs to a tenant
   // [DOC-1 P4-5] a review case inherits through the document to the person; a decision inherits its case
   { table: 'review_case', trigger: 'review_case_tenant_matches_subject', parent: 'users', fk: 'submissionId',
@@ -272,6 +280,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
     parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
+  // [TAXI multi-stop] one hop: a stop inherits the tenant of its ride (the delivery_cash_settlements shape)
+  { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
 ];
 export function tenantLineageDdl(): string[] {
   return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch }) => [

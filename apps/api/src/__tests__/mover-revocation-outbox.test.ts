@@ -521,8 +521,17 @@ describe('durable mover revocation outbox', () => {
     // so restoring the control's spy after installing this one would silently
     // remove it — and the later "sendPush was called once" assertion would be
     // asserting against a method nobody had stubbed.
+    let completeHungPush!: (result: { sent: number }) => void;
+    const hungPush = new Promise<{ sent: number }>((resolve) => {
+      completeHungPush = resolve;
+    });
     const sendPush = vi.spyOn(ExpoPushProvider.prototype, 'sendPush')
-      .mockImplementation(() => new Promise(() => undefined));
+      .mockImplementation((deviceTokens, _title, _body, data) => (
+        deviceTokens.includes(hungCustomerToken)
+          && data?.['kind'] === 'mover_session_revocation'
+          ? hungPush
+          : Promise.resolve({ sent: 1 })
+      ));
     const sentinel = new Promise<'hung'>((resolve) => {
       const t = setTimeout(() => resolve('hung'), HANG_SENTINEL_MS);
       t.unref?.();
@@ -551,19 +560,50 @@ describe('durable mover revocation outbox', () => {
     ).toBeLessThan(OUTER_BUDGET_MS + TIMER_SLACK_MS);
     expect(await app.prisma.session.findUnique({ where: { id: mover.session.id } })).toBeNull();
 
+    // Redispatch may emit its own customer push before this outbox reaches its
+    // durable notification. Recipient-only counting therefore conflates two
+    // different events. Bind every assertion below to the notification ID the
+    // outbox committed in the logout transaction.
+    const outboxSeed = await app.prisma.moverRevocationOutbox.findFirstOrThrow({
+      where: { userId: mover.user.id },
+      select: { id: true, payload: true },
+    });
+    const payload = outboxSeed.payload as unknown as {
+      orders: Array<{ customerId: string; customerNotificationId: string }>;
+    };
+    const targetNotificationId = payload.orders
+      .find((order) => order.customerId === customer.user.id)
+      ?.customerNotificationId;
+    expect(targetNotificationId).toMatch(/^mro_notice_/);
+
+    // The effect timeout covers Redis cleanup, redispatch and notifications as
+    // one operation. On a loaded runner it can therefore fire before execution
+    // reaches sendPush. The timeout row below proves fencing, not push entry.
+    // Wait for this recipient's actual traversal without changing the logout
+    // timing measurement captured above; a missing traversal still fails.
+    const hungPushCalls = () => sendPush.mock.calls.filter((call) => (
+      call[0].includes(hungCustomerToken)
+      && call[3]?.['notificationId'] === targetNotificationId
+    ));
+    const hungTraversalDeadline = Date.now() + 15_000;
+    while (hungPushCalls().length === 0 && Date.now() < hungTraversalDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(hungPushCalls().length, 'the timed-out effects never reached the hung recipient push').toBe(1);
+
     // Wait on the CONDITION, not the clock: the 150ms effect-timeout must
     // fire AND its lease-preserving UPDATE must commit. A fixed 250ms sleep
     // left ~100ms of slack, which a loaded CI runner blows through — the row
     // was then read mid-flight (claimed, not yet re-armed) and the fence
     // assertion below lost by the enqueue→claim clock gap.
     const deadline = Date.now() + 15_000;
-    let outbox = await app.prisma.moverRevocationOutbox.findFirstOrThrow({
-      where: { userId: mover.user.id },
+    let outbox = await app.prisma.moverRevocationOutbox.findUniqueOrThrow({
+      where: { id: outboxSeed.id },
     });
     while (outbox.lastError === null && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
-      outbox = await app.prisma.moverRevocationOutbox.findFirstOrThrow({
-        where: { userId: mover.user.id },
+      outbox = await app.prisma.moverRevocationOutbox.findUniqueOrThrow({
+        where: { id: outboxSeed.id },
       });
     }
     expect(outbox).toMatchObject({ processedAt: null, attempts: 1 });
@@ -577,11 +617,24 @@ describe('durable mover revocation outbox', () => {
       retryDispatch,
     }))).resolves.toEqual({ processed: 0, failed: 0 });
     expect(retryDispatch).not.toHaveBeenCalled();
-    // [F-028-13] Recipient-scoped, not a global count: only calls carrying
-    // the HUNG customer's token belong to the delivery under test — a control
-    // straggler must never satisfy or break this line.
-    const hungCalls = sendPush.mock.calls.filter((c) => JSON.stringify(c[0]).includes(hungCustomerToken));
-    expect(hungCalls.length, 'exactly one push attempt for the hung delivery').toBe(1);
+    // [F-028-13] Event-scoped, not a global or recipient-only count: only calls
+    // carrying the committed notification ID belong to this delivery. A
+    // control straggler or redispatch notification cannot satisfy this line.
+    expect(hungPushCalls().length, 'exactly one push attempt for the hung delivery').toBe(1);
+
+    // Settle the deliberately deferred provider after the fence assertions so
+    // this test owns all background work before restoring spies or deleting
+    // its row. Late success must finish this exact claim without another push.
+    completeHungPush({ sent: 1 });
+    await vi.waitFor(async () => {
+      const completed = await app.prisma.moverRevocationOutbox.findUniqueOrThrow({
+        where: { id: outbox.id },
+      });
+      expect(completed.processedAt).not.toBeNull();
+      expect(completed.claimedAt).toBeNull();
+      expect(completed.lastError).toBeNull();
+    }, { timeout: 15_000, interval: 50 });
+    expect(hungPushCalls().length, 'late settlement must not redeliver the push').toBe(1);
     await app.prisma.moverRevocationOutbox.delete({ where: { id: outbox.id } });
   });
 

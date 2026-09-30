@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { useLiveOrders, useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo } from '../../../kit';
+import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo, useLogoutConfirm } from '../../../kit';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL, customerApi } from '../../../services/api';
@@ -94,13 +94,17 @@ function MarketingConsentRow() {
 export function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<any>();
-  const { isAuthenticated, promptLogin, logout, user, setIntent } = useAuthStore();
+  const { isAuthenticated, promptLogin, user, setIntent } = useAuthStore();
   const profile = useProfile<any>();
   const myRating = useMyRating();
   // [Wave 3 · ref 05] The Orders tile's badge is the LIVE order count — a real
   // number from the live query, never unread-notifications wearing its badge.
   const liveOrders = useLiveOrders();
-  const [confirmLogout, setConfirmLogout] = useState(false);
+  // Kit logout popup (51), now the one shared ask. The cart is a server
+  // query and the account keeps it; logout clears this device's copy.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    body: 'Your cart and session leave this device; your account keeps everything.',
+  });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);
   const [avatarBroken, setAvatarBroken] = useState(false);
@@ -160,19 +164,10 @@ export function ProfileScreen() {
         <ErrorState onRetry={() => profile.refetch()} />
         <View style={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'], gap: space.md }}>
           <PillButton label="Switch app" variant="soft" onPress={() => setSwitcherOpen(true)} />
-          <PillButton label="Log out" icon="log-out" variant="soft" onPress={() => setConfirmLogout(true)} />
+          <PillButton label="Log out" icon="log-out" variant="soft" onPress={requestLogout} />
         </View>
         <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
-        <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
-          <IconChip icon="log-out" size={56} />
-          <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-            Log out of Swift?
-          </PopupTitle>
-          <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
-            <PillButton label="Log out" size="md" onPress={() => { setConfirmLogout(false); logout(); }} />
-            <PillButton label="Stay signed in" variant="soft" size="md" onPress={() => setConfirmLogout(false)} />
-          </View>
-        </PopupCard>
+        {logoutDialog}
       </Screen>
     );
   }
@@ -446,13 +441,12 @@ export function ProfileScreen() {
             label="Log out"
             icon="log-out"
             variant="outline"
-            onPress={() => setConfirmLogout(true)}
+            onPress={requestLogout}
             style={{ marginTop: space['2xl'] }}
           />
         </View>
       </ScrollView>
 
-      {/* Logout confirm (kit 51) */}
       {/* Movement R9 — why customers have a rating (aggregate-only honesty) */}
       <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
         <IconChip icon="star" size={56} />
@@ -468,26 +462,8 @@ export function ProfileScreen() {
         </View>
       </PopupCard>
 
-      <PopupCard visible={confirmLogout} onClose={() => setConfirmLogout(false)}>
-        <IconChip icon="log-out" size={56} />
-        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          Log out of Swift?
-        </PopupTitle>
-        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
-          Your cart and session leave this device; your account keeps everything.
-        </T>
-        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
-          <PillButton
-            label="Log Out"
-            size="md"
-            onPress={() => {
-              setConfirmLogout(false);
-              logout();
-            }}
-          />
-          <PillButton label="Stay signed in" variant="soft" size="md" onPress={() => setConfirmLogout(false)} />
-        </View>
-      </PopupCard>
+      {/* Logout confirm (kit 51) */}
+      {logoutDialog}
 
       <RoleSwitcherSheet visible={switcherOpen} current="customer" onClose={() => setSwitcherOpen(false)} />
     </Screen>

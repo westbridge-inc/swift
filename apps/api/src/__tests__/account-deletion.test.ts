@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -102,10 +103,7 @@ describe('D9-05 — account deletion (erasure)', () => {
     const u = await makeUser(['CUSTOMER']);
     await app.prisma.address.create({ data: { userId: u.userId, label: 'Home', addressLine1: '1 Main St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.1 } });
 
-    const fileKey = `verif/${nanoid(12)}.jpg`;
-    await app.prisma.encryptedObject.create({
-      data: { fileKey, iv: Buffer.from('iv'), authTag: Buffer.from('tag'), wrappedDek: Buffer.from('dek'), mimeType: 'image/jpeg', sizeBytes: 10, sha256: 'abc', createdBy: u.userId },
-    });
+    const fileKey = await ownedVerificationFixture(app.prisma, u.userId);
     const doc = await app.prisma.verificationDocument.create({ data: { userId: u.userId, role: 'CUSTOMER', docType: 'ID_CARD', fileUrl: fileKey } });
 
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);

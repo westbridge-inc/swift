@@ -87,9 +87,11 @@ export interface VendorOrder {
   orderType: string;
   fulfillment?: string | null;
   fulfillmentMode?: string | null;
+  riderId?: string | null;
   paymentMethod?: string | null;
   paymentStatus?: string | null;
   placedAt: string;
+  appointmentSlot?: string | null;
   acceptedAt?: string | null;
   preparingAt?: string | null;
   readyAt?: string | null;
@@ -222,10 +224,15 @@ export const getOrder = (id: string): Promise<VendorOrder> =>
   apiFetch(`${V}/orders/${id}`).then((r) => normalizeVendorOrder(r.data));
 export const acceptOrder = (id: string, estimatedPrepTime?: number) =>
   apiFetch(`${V}/orders/${id}/accept`, { method: 'PUT', body: JSON.stringify(estimatedPrepTime ? { estimatedPrepTime } : {}) });
-export const rejectOrder = (id: string, reason?: string) =>
-  apiFetch(`${V}/orders/${id}/reject`, { method: 'PUT', body: JSON.stringify(reason ? { reason } : {}) });
+// [E10] The server requires a non-empty reason on every rejection; the web
+// client can no longer send `{}` and let the API substitute a generic one.
+export const rejectOrder = (id: string, reason: string) =>
+  apiFetch(`${V}/orders/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }) });
 export const markPreparing = (id: string) => apiFetch(`${V}/orders/${id}/preparing`, { method: 'PUT', body: '{}' });
 export const markReady = (id: string) => apiFetch(`${V}/orders/${id}/ready`, { method: 'PUT', body: '{}' });
+export const markDelivered = (id: string) => apiFetch(`${V}/orders/${id}/delivered`, { method: 'PUT', body: '{}' });
+export const setFulfillmentMode = (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
+  apiFetch(`${V}/orders/${id}/fulfillment-mode`, { method: 'PUT', body: JSON.stringify({ mode }) });
 /** [W-25] A store's attestation carries the provider reference from its own
  *  wallet message. The server refuses one without it, and refuses a reference
  *  already recorded against another order. */

@@ -10,6 +10,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
 import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppointmentClock } from '../../../lib/appointmentTime';
 import {
   Photo,
   Chip,
@@ -62,7 +63,7 @@ export function MenuItemScreen() {
   const [added, setAdded] = useState(false);
 
   // Appointment listings book a moment, not a quantity (kit chips reused as
-  // day + time pickers). Dates run on the UTC calendar to mirror the API.
+  // day + time pickers). Dates follow the market calendar used by the API.
   const [dayOffset, setDayOffset] = useState(0);
   const [slot, setSlot] = useState<string | null>(null);
   const [visitMode, setVisitMode] = useState<ServiceVisitMode>('AT_BUSINESS');
@@ -76,17 +77,21 @@ export function MenuItemScreen() {
   const [selected, setSelected] = useState<Selected>(() => defaultSelections(groups));
 
   const isBooking = item?.fulfillment === 'APPOINTMENT';
-  // Dates run on the UTC calendar to mirror the API's slot math exactly.
   const selectedDate = useMemo(() => {
-    const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + dayOffset))
-      .toISOString()
-      .slice(0, 10);
+    return addAppointmentDays(appointmentDayKey(new Date()), dayOffset);
   }, [dayOffset]);
   const slotsQ = useItemSlots<any>(isBooking ? itemId : '', selectedDate);
   const serviceMode: 'AT_BUSINESS' | 'MOBILE' | 'BOTH' = slotsQ.data?.serviceMode ?? 'AT_BUSINESS';
   const bookableWeekdays: number[] | undefined = slotsQ.data?.bookableWeekdays;
   const daySlots: string[] = slotsQ.data?.slots ?? [];
+
+  // A slot can disappear during the 20-second freshness poll because another
+  // customer won it. Never leave a now-unavailable selection armed in the
+  // sticky booking button; checkout remains the final server-side judge.
+  React.useEffect(() => {
+    const available = slotsQ.data?.slots as string[] | undefined;
+    if (slot && available && !available.includes(slot)) setSlot(null);
+  }, [slot, slotsQ.data]);
 
   // Re-seed defaults when the item arrives after a cold load.
   const seededFor = React.useRef<string | null>(item ? itemId : null);
@@ -346,16 +351,15 @@ export function MenuItemScreen() {
               <SectionHeader title="Pick a time" style={{ marginTop: space['2xl']}} />
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.md, flexGrow: 0 }} contentContainerStyle={{ gap: space.md }}>
                 {Array.from({ length: 7 }, (_, i) => {
-                  const now = new Date();
-                  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + i));
-                  const wd = d.getUTCDay();
+                  const key = addAppointmentDays(appointmentDayKey(new Date()), i);
+                  const wd = appointmentWeekday(key);
                   const closed = bookableWeekdays ? !bookableWeekdays.includes(wd) : false;
                   const label =
                     i === 0
                       ? 'Today'
                       : i === 1
                         ? 'Tomorrow'
-                        : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][wd]} ${d.getUTCDate()}`;
+                        : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][wd]} ${Number(key.slice(-2))}`;
                   return (
                     <Chip
                       key={i}
@@ -371,10 +375,22 @@ export function MenuItemScreen() {
                   );
                 })}
               </ScrollView>
-              {slotsQ.isLoading ? (
+              {slotsQ.isPending ? (
                 <T variant="label" tone="muted" style={{ marginTop: space.md }}>
                   Checking times…
                 </T>
+              ) : slotsQ.isError && !slotsQ.data ? (
+                <View style={{ marginTop: space.md, alignItems: 'flex-start', gap: space.sm }}>
+                  <T variant="label" tone="error">
+                    Couldn’t load available times. Check your connection and try again.
+                  </T>
+                  <Chip
+                    label="Try again"
+                    selected={false}
+                    onPress={() => void slotsQ.refetch()}
+                    style={{ height: 40, paddingHorizontal: space.lg }}
+                  />
+                </View>
               ) : daySlots.length === 0 ? (
                 <T variant="label" tone="muted" style={{ marginTop: space.md }}>
                   No times left this day — try another.
@@ -384,7 +400,7 @@ export function MenuItemScreen() {
                   {daySlots.map((iso) => (
                     <Chip
                       key={iso}
-                      label={new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}
+                      label={formatAppointmentClock(iso)}
                       selected={slot === iso}
                       onPress={() => setSlot(iso)}
                       style={{ height: 42, paddingHorizontal: space.lg }}
@@ -392,6 +408,19 @@ export function MenuItemScreen() {
                   ))}
                 </View>
               )}
+              {slotsQ.isError && slotsQ.data ? (
+                <View style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <T variant="caption" tone="warning" style={{ flex: 1 }}>
+                    These are the last known times. Refresh before choosing if your connection is back.
+                  </T>
+                  <Chip
+                    label="Refresh"
+                    selected={false}
+                    onPress={() => void slotsQ.refetch()}
+                    style={{ height: 36, paddingHorizontal: space.md }}
+                  />
+                </View>
+              ) : null}
               {slotsQ.data?.durationMinutes ? (
                 <T variant="caption" tone="faint" style={{ marginTop: space.sm }}>
                   Each appointment runs about {slotsQ.data.durationMinutes} minutes.
@@ -442,7 +471,7 @@ export function MenuItemScreen() {
                 ? slot
                   ? requiredUnmet
                     ? 'Choose required options'
-                    : `Book ${new Date(slot).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} · ${money(total)}`
+                    : `Book ${formatAppointmentClock(slot)} · ${money(total)}`
                   : 'Pick a time'
                 : requiredUnmet
                   ? 'Choose required options'

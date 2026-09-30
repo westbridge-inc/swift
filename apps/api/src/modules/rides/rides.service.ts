@@ -9,6 +9,27 @@ import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 
+const ACTIVE_TAXI_STATUSES = [
+  'PENDING',
+  'DRIVER_ASSIGNED',
+  'DRIVER_EN_ROUTE',
+  'DRIVER_ARRIVED',
+  'RIDE_IN_PROGRESS',
+] as const;
+
+const activeTaxiWhere = (customerId: string, tenantId: string) => ({
+  customerId,
+  tenantId,
+  orderType: 'TAXI' as const,
+  status: { in: [...ACTIVE_TAXI_STATUSES] },
+});
+
+const rideInProgress = () => new AppError(
+  409,
+  'RIDE_IN_PROGRESS',
+  'You already have an active ride',
+);
+
 // ---------------------------------------------------------------------------
 // The ride-request core, extracted from the POST /request handler (rides spec
 // 5.5B needed a second caller: the queue's auto-request). One source of truth
@@ -61,16 +82,11 @@ export async function assertRideGates(
   });
 
   const active = await app.prisma.order.findFirst({
-    where: {
-      customerId: user.id,
-      tenantId: user.tenantId,
-      orderType: 'TAXI',
-      status: { in: ['PENDING', 'DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'] },
-    },
+    where: activeTaxiWhere(user.id, user.tenantId),
     select: { id: true },
   });
   if (active) {
-    throw new AppError(409, 'RIDE_IN_PROGRESS', 'You already have an active ride');
+    throw rideInProgress();
   }
 
   // Strike consequences apply to rides exactly as to deliveries
@@ -193,6 +209,20 @@ export async function createRideRequest(
 
   const order = await app.prisma.$transaction(async (tx) => {
     await lockActiveOrderCustomer(tx, user.id, orderTenantId);
+
+    // The pre-flight check above preserves the request's historical error
+    // precedence, but it cannot serialize two overlapping hails. The customer
+    // row lock does: after a competing creation commits, this transaction sees
+    // its active TAXI row before it is allowed to insert another. Both the HTTP
+    // route and queue auto-hail share this exact authority boundary.
+    const active = await tx.order.findFirst({
+      where: activeTaxiWhere(user.id, orderTenantId),
+      select: { id: true },
+    });
+    if (active) {
+      throw rideInProgress();
+    }
+
     return tx.order.create({
       data: {
         tenantId: orderTenantId,

@@ -240,3 +240,74 @@ describe('Role gates hold', () => {
     expect(after.statusCode).toBe(403); // outsider again — authz answers, not existence
   });
 });
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] A floor STAFF member could page through the store's
+// whole history and read every past customer's phone, the rider's phone, and
+// the delivery street address + GPS — `resolveOwnedOrder` returned the full
+// row for every status. Contact is now gated on liveness: the live order keeps
+// what the handover needs; the terminal order keeps none of it.
+// ---------------------------------------------------------------------------
+
+describe('past orders keep no customer contact for floor staff', () => {
+  it('a terminal order redacts customer phone, rider phone and the delivery destination; the live order keeps them', async () => {
+    const customerUser = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const riderUser = await makeUser(['RIDER'], 'RIDER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: riderUser.userId, riderType: 'DELIVERY', vehicleType: 'BICYCLE', documentsVerified: true },
+    });
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SW-STAFF-PII-${nanoid(8).toUpperCase()}`,
+        orderType: 'FOOD_DELIVERY',
+        vendorId,
+        customerId: customerUser.userId,
+        riderId: rider.id,
+        status: 'DELIVERED',
+        deliveryAddress: '77 Private Street, Georgetown',
+        deliveryLat: 6.7913, deliveryLng: -58.1617,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 500, totalAmount: 1500,
+        paymentMethod: 'CASH',
+      },
+    });
+    try {
+      // The role suite above removes the staff member at the end; make the
+      // membership explicit so this test stands on its own.
+      await app.prisma.vendorStaff.upsert({
+        where: { vendorId_userId: { vendorId, userId: staffUser.userId } },
+        update: {},
+        create: { vendorId, userId: staffUser.userId, role: 'STAFF', invitedBy: owner.userId },
+      });
+
+      const closed = await inject('GET', `/api/v1/vendor/orders/${order.id}`, undefined, staffUser.token, vendorId);
+      expect(closed.statusCode).toBe(200);
+      expect(closed.json().data.customer.phone).toBeNull();
+      expect(closed.json().data.rider.user.phone).toBeNull();
+      expect(closed.json().data.deliveryLat).toBeNull();
+      expect(closed.json().data.deliveryLng).toBeNull();
+      expect(closed.json().data.deliveryAddress).toBeNull();
+
+      // The board is the drain path — history pages grade the same way.
+      const board = await inject('GET', '/api/v1/vendor/orders', undefined, staffUser.token, vendorId);
+      expect(board.statusCode).toBe(200);
+      const row = board.json().data.find((o: any) => o.id === order.id);
+      expect(row, 'the terminal order should be on the board').toBeTruthy();
+      expect(row.rider.user.phone).toBeNull();
+      expect(row.deliveryLat).toBeNull();
+      expect(row.deliveryLng).toBeNull();
+      expect(row.deliveryAddress).toBeNull();
+
+      // Live control: the same order, still open, keeps what the handover needs.
+      await app.prisma.order.update({ where: { id: order.id }, data: { status: 'PENDING' } });
+      const live = await inject('GET', `/api/v1/vendor/orders/${order.id}`, undefined, staffUser.token, vendorId);
+      expect(live.statusCode).toBe(200);
+      expect(live.json().data.customer.phone).toBe(customerUser.phone);
+      expect(live.json().data.deliveryAddress).toBe('77 Private Street, Georgetown');
+      expect(live.json().data.rider.user.phone).toBe(riderUser.phone);
+    } finally {
+      await app.prisma.order.delete({ where: { id: order.id } }).catch(() => {});
+      await app.prisma.rider.delete({ where: { id: rider.id } }).catch(() => {});
+    }
+  });
+});

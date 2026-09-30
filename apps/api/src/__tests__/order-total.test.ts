@@ -238,15 +238,20 @@ describe('[ALG-INV-1] the quote, the charge and a recompute agree', () => {
 describe('one home for the formula (source pins)', () => {
   const src = (rel: string) => readFileSync(path.join(__dirname, '..', rel), 'utf8');
   it('the promo maths lives in utils/order-total.ts and nowhere else', () => {
-    for (const rel of ['modules/user/customer.routes.ts', 'modules/order/order.service.ts']) {
+    for (const rel of ['modules/user/customer.routes.ts', 'modules/order/order.service.ts', 'modules/order/cart-plans.ts']) {
       expect(src(rel), `${rel} grew its own percentage maths`).not.toMatch(/Math\.ceil\(\w+ \* \(Number\(promo\.discountValue\) \/ 100\)\)/);
       expect(src(rel), `${rel} caps a discount on its own`).not.toMatch(/Math\.min\(\w+, Number\(promo\.maxDiscount\)\)/);
     }
   });
-  it('the total is summed in one place — the old inline sums are gone', () => {
+  it('the basket total is summed in one place — the quote and the charge both import it', () => {
     expect(src('modules/user/customer.routes.ts')).not.toContain('Math.max(0, subtotalCustomer + deliveryFee + tip - discount)');
     expect(src('modules/order/order.service.ts')).not.toContain('Math.max(0, plan.subtotal + plan.deliveryFee + planTip - planDiscount)');
-    expect(src('modules/user/customer.routes.ts')).toContain('orderTotal({ subtotal: subtotalCustomer, deliveryFee, tip, discount })');
-    expect(src('modules/order/order.service.ts')).toContain('orderTotal({ subtotal: plan.subtotal, deliveryFee: plan.deliveryFee, tip: planTip, discount: planDiscount })');
+    // Neither caller sums its own basket total: the formula now lives once, in
+    // the shared per-vendor planner, and both callers consume priceBasket.
+    expect(src('modules/user/customer.routes.ts')).not.toContain('orderTotal({ subtotal: subtotalCustomer, deliveryFee, tip, discount })');
+    expect(src('modules/order/order.service.ts')).not.toContain('orderTotal({ subtotal: plan.subtotal, deliveryFee: plan.deliveryFee, tip: planTip, discount: planDiscount })');
+    expect(src('modules/order/cart-plans.ts')).toContain('orderTotal({ subtotal: plan.subtotal, deliveryFee: plan.deliveryFee, tip: planTip, discount: planDiscount })');
+    expect(src('modules/user/customer.routes.ts')).toContain('priceBasket({');
+    expect(src('modules/order/order.service.ts')).toContain('priceBasket({');
   });
 });

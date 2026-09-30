@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
-import { Linking, Pressable, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Linking, Platform, Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -9,7 +9,7 @@ import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useRideSos } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
@@ -26,8 +26,9 @@ import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { openExternal } from '../../../lib/openExternal';
 import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
-import { doorFor, recordDoorBlocked, recordDoorMismatch } from '../../../lib/handoverAuthority';
+import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { telUrl } from '../../../lib/emergencyPolicy';
+import { canDriverHandbackRide } from '../../../lib/driverRide';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
 const RIDE_PIN_LENGTH = 6;
@@ -84,7 +85,9 @@ function railFor(status: string | undefined, isDriver: boolean): { steps: Timeli
   let currentIndex = keys.indexOf(s);
   if (currentIndex < 0) {
     if (s === 'COMPLETED' || s === 'DELIVERED') currentIndex = keys.length - 1;
-    else if (!isDriver && (s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED')) currentIndex = 1;
+    // [E17] A returning parcel is still with the rider — the same "picked up"
+    // node, never the unclaimed "assigned" node an unknown status would show.
+    else if (!isDriver && (s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED' || s === 'RETURNING')) currentIndex = 1;
     else currentIndex = 0;
   }
   const steps: TimelineStep[] = isDriver
@@ -111,6 +114,9 @@ export function ActiveJobScreen({ navigation }: any) {
   const riderAct = useRiderAction();
   const courierProof = useCourierProof();
   const courierCollect = useCourierCollect();
+  const courierPickupProof = useCourierPickupProof();
+  const courierReturn = useCourierReturn();
+  const courierReturnProof = useCourierReturnProof();
   const rate = useRateCustomer();
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   const [pin, setPin] = useState('');
@@ -123,8 +129,22 @@ export function ActiveJobScreen({ navigation }: any) {
   // [MOB-018] The signed-in market decides the emergency number the popup names and dials.
   const sosCountry = useAuthStore((st) => st.countryCode);
   const [sosConfirm, setSosConfirm] = useState(false);
+  // The popup owns a ride snapshot until its native dismissal completes. The
+  // handback refetch legitimately makes the live active ride null, but that must
+  // never unmount the closing modal or discard its post-dismiss navigation.
+  const [driverHandbackFlow, setDriverHandbackFlow] = useState<{
+    rideId: string;
+    job: any;
+    phase: 'confirm' | 'submitting' | 'dismissing';
+  } | null>(null);
+  // A successful request stages navigation; native onDismiss consumes it on
+  // iOS, with the cancellable frame fallback below on other platforms.
+  const driverHandbackNavigateAfterDismissRef = useRef(false);
   // G14: pre-pickup handback — a two-step with preset reasons, never one tap.
   const [handbackConfirm, setHandbackConfirm] = useState(false);
+  // [E17] Post-custody return-to-sender — a two-step with preset reasons, never
+  // one tap. The server makes it support-visible and tells the sender.
+  const [returnConfirm, setReturnConfirm] = useState(false);
   // [M-29] The unpaid sheet — the failed fare outcome (driver) or failed
   // handover (rider): refused, or nobody / left without paying.
   const [unpaidSheet, setUnpaidSheet] = useState(false);
@@ -141,7 +161,51 @@ export function ActiveJobScreen({ navigation }: any) {
   // `job`. A single leg is `active.data`, exactly as before.
   const legs: any[] = stackedJobs.legs;
   const stacked = legs.length > 1;
-  const job: any = stacked ? (legs.find((l) => l.id === selectedLegId) ?? legs[0]) : active.data;
+  const liveJob: any = stacked ? (legs.find((l) => l.id === selectedLegId) ?? legs[0]) : active.data;
+  const isDriver = kind === 'DRIVER';
+  const canDriverHandback = isDriver && canDriverHandbackRide(liveJob);
+  const retainDriverHandbackHost = driverHandbackFlow?.phase === 'submitting' || driverHandbackFlow?.phase === 'dismissing';
+  const job: any = liveJob ?? (retainDriverHandbackHost ? driverHandbackFlow?.job : null) ?? null;
+
+  // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
+  // changes — a stacked-leg switch, a leg dropped from the run (the
+  // selectedLegId fallback), or a new job taking over — forget the typed value
+  // so a guess meant for stop A can never burn one of stop B's five attempts.
+  useEffect(() => {
+    setPin('');
+  }, [job?.id]);
+
+  const finishDriverHandbackDismissal = useCallback(() => {
+    if (!driverHandbackNavigateAfterDismissRef.current) return;
+    driverHandbackNavigateAfterDismissRef.current = false;
+    setDriverHandbackFlow(null);
+    navigation?.goBack?.();
+  }, [navigation]);
+
+  // React Native's Modal.onDismiss is iOS-only. Elsewhere, retain the popup for
+  // the state-removal render and navigate after two presented frames. Cleanup
+  // prevents a scheduled exit from outliving this screen.
+  useEffect(() => {
+    if (Platform.OS === 'ios' || driverHandbackFlow?.phase !== 'dismissing') return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(finishDriverHandbackDismissal);
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  }, [driverHandbackFlow?.phase, finishDriverHandbackDismissal]);
+
+  // A snapshot can hold presentation together while a submitted request settles,
+  // but it never grants authority to submit. If the live ride disappears or
+  // crosses custody while the reason sheet is open, close it and say why.
+  useEffect(() => {
+    if (driverHandbackFlow?.phase !== 'confirm') return;
+    if (canDriverHandback && liveJob?.id === driverHandbackFlow.rideId) return;
+    setDriverHandbackFlow(null);
+    toast.show('Ride updated', 'This ride can no longer be handed back.');
+  }, [canDriverHandback, driverHandbackFlow?.phase, driverHandbackFlow?.rideId, liveJob?.id]);
 
   if (!job && !ratePopup) {
     return (
@@ -168,8 +232,7 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending;
-  const isDriver = kind === 'DRIVER';
+  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -226,15 +289,59 @@ export function ActiveJobScreen({ navigation }: any) {
   const doorBlocked = door.kind === 'blocked';
   const onHandoverRefused = (err: unknown) => {
     const code = (err as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
-    if (code === 'HANDOVER_STALE' || code === 'PAYMENT_NOT_CAPTURED' || code === 'MMG_PAYMENT_PENDING') {
-      // The server's door differs from the one on screen: count it, and re-read the job.
+    // [F-106-03] The dispute and unknown-authority codes belong here too: they
+    // are exactly the refusals where the screen and the server disagreed, and
+    // leaving them out meant the one case worth counting was the one not counted.
+    if (code && DOOR_REFUSAL_CODES.has(code)) {
       recordDoorMismatch(code);
       active.refetch?.();
     }
   };
+  // [MKT-F057] The server's own words for the door PIN: MISSING_PIN / INVALID_PIN
+  // (with the live countdown) / MAX_ATTEMPTS (support-only reset) surface as a
+  // toast, so the rider reads the tries left. The PIN value itself is never
+  // echoed — the refusal text names the outcome, never the code.
+  const onPinRefused = (err: unknown) => {
+    onHandoverRefused(err);
+    const body = (err as { response?: { data?: { error?: { code?: string; message?: string } } } })?.response?.data?.error;
+    if (body?.code === 'MISSING_PIN' || body?.code === 'INVALID_PIN' || body?.code === 'MAX_ATTEMPTS') {
+      toast.error(body.message ?? "Couldn't verify the delivery code — try again or contact support.");
+    }
+  };
   const markDelivered = () =>
-    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', handoverVersion: door.version ?? undefined }, { onError: onHandoverRefused });
+    isCourier ? captureCourierProof() : riderAct.mutate({ id: job.id, action: 'delivered', pin, handoverVersion: door.version ?? undefined }, { onError: onPinRefused });
   const deliverLabel = isCourier ? 'Capture proof & deliver' : 'Mark delivered';
+  // [E16] Pickup custody proof. PICKED_UP is a physical-custody claim: the
+  // server refuses the bare tap for a courier, so the pickup step captures a
+  // photo and confirms with the rider's location — the same camera flow as the
+  // door proof, but its own mutation and its own words.
+  const captureCourierPickupProof = async () => {
+    try {
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) {
+        toast.error('Camera access is needed to capture proof of pickup.');
+        return;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (shot.canceled || !shot.assets?.[0]) return;
+      courierPickupProof.mutate(
+        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        {
+          onSuccess: () => active.refetch?.(),
+          onError: (proofError: any) => {
+            if (!(proofError instanceof AuthSessionBoundaryError)) {
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the pickup proof. Try again.');
+            }
+          },
+        },
+      );
+    } catch (proofError) {
+      if (!(proofError instanceof AuthSessionBoundaryError)) throw proofError;
+    }
+  };
   // MMG direct-pay: the customer already paid the STORE — the rider collects
   // NOTHING at the door; their delivery fee comes from the store in cash.
   const isMmgPaid = door.kind === 'no-cash' && job?.paymentMethod === 'MOBILE_MONEY';
@@ -254,6 +361,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const canStillCollect = atSender || jobStatus === 'PICKED_UP';
   const courierFee = jobAmount(job);
   const pickedUp = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(String(job?.status ?? '').toUpperCase());
+  const returning = jobStatus === 'RETURNING';
   // The store owes the rider fee PLUS any prepaid tip on MMG — the settlement
   // ledger records fee + tip, so the door copy must claim the same number
   // [REPORT-006 carryover: fee-only copy under-claimed the rider's pay].
@@ -287,8 +395,19 @@ export function ActiveJobScreen({ navigation }: any) {
     driverAct.mutate(
       input,
       {
-        onError: () => {
+        onError: (e: any) => {
           if (step.pin) haptic.failure();
+          // [E19] The arrival gate refuses a status claim, never the driver:
+          // say why, and when the server offers it, name the passenger escape.
+          if (step.action === 'arrived') {
+            const err = e?.response?.data?.error;
+            toast.show(
+              err?.message ?? "Couldn't confirm arrival — try again or ask the passenger to confirm.",
+              err?.details?.allowPassengerConfirm === true
+                ? "If your GPS isn't working, ask the passenger to tap 'My driver is here'."
+                : undefined,
+            );
+          }
         },
         onSuccess: () => {
           if (step.pin) haptic.success();
@@ -350,6 +469,58 @@ export function ActiveJobScreen({ navigation }: any) {
     );
   };
 
+  // [E17] The mover can't deliver after custody. The reason + the rider's GPS
+  // start a support-visible return (the server refuses unless the parcel is in
+  // THIS rider's custody) and the sender is notified the parcel is coming back.
+  const startReturn = (reason: string) => {
+    setReturnConfirm(false);
+    if (preview || !job?.id) return;
+    courierReturn.mutate(
+      { orderId: job.id, reason },
+      {
+        onSuccess: () => {
+          haptic.success();
+          toast.show('Return started', 'The sender has been notified the parcel is coming back.');
+          active.refetch?.();
+        },
+        onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't start the return — try again or call support."),
+      },
+    );
+  };
+  // [E17] The return photo closes the return leg — the same capture flow as the
+  // door proof, uploading with the rider's location and releasing the rider.
+  const captureReturnProof = async () => {
+    try {
+      const owner = preview ? null : requireAuthSessionSnapshot();
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!perm.granted) {
+        toast.error('Camera access is needed to capture the return proof.');
+        return;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (shot.canceled || !shot.assets?.[0]) return;
+      courierReturnProof.mutate(
+        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        {
+          onSuccess: () => {
+            haptic.success();
+            toast.show('Return complete', 'The parcel is back with the sender — return proof saved.');
+            active.refetch?.();
+          },
+          onError: (proofError: any) => {
+            if (!(proofError instanceof AuthSessionBoundaryError)) {
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the return proof. Try again.');
+            }
+          },
+        },
+      );
+    } catch (proofError) {
+      if (!(proofError instanceof AuthSessionBoundaryError)) throw proofError;
+    }
+  };
+
   const closeRating = () => {
     setRatePopup(null);
     navigation?.goBack?.();
@@ -371,6 +542,26 @@ export function ActiveJobScreen({ navigation }: any) {
       // eye lands on the one thing left to do [100x pass §1c].
       style={{ minHeight: 56, ...(opts?.lockedIn ? lockInButtonStyle() : {}) }}
     />
+  );
+
+  // [MKT-F057] The door proof for a goods delivery — the customer holds a
+  // 6-digit code and the rider ENTERS it, exactly like the driver's ride PIN
+  // ceremony. The value never appears on this screen: only the entry boxes.
+  // The server is the authority (MISSING_PIN / INVALID_PIN / MAX_ATTEMPTS come
+  // back as error toasts); a legacy order without a PIN completes as before.
+  const doorPinCeremony = (
+    <View style={{ marginBottom: space.md }}>
+      <View style={{ alignItems: 'center', marginBottom: space.md }}>
+        <Eyebrow>Handover check</Eyebrow>
+        <T variant="body" weight="bold" center style={{ color: dk.text, marginTop: space.xs }}>
+          Ask {custName ?? 'the customer'} for their delivery code
+        </T>
+      </View>
+      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={riderAct.isError} autoFocus={false} />
+      <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
+        Their code proves you handed the order to the right person.
+      </T>
+    </View>
   );
 
   return (
@@ -595,6 +786,20 @@ export function ActiveJobScreen({ navigation }: any) {
                       onPress={() => setUnpaidSheet(true)}
                     />
                   ) : null}
+                  {/* Driver handback is a controlled pre-custody release, not a
+                      passenger cancellation: the same ride returns to dispatch. */}
+                  {canDriverHandback ? (
+                    <PillButton
+                      label="Can't complete this ride"
+                      variant="soft"
+                      style={{ marginTop: space.sm }}
+                      disabled={busy}
+                      onPress={() => {
+                        if (!liveJob?.id || !canDriverHandback) return;
+                        setDriverHandbackFlow({ rideId: liveJob.id, job: liveJob, phase: 'confirm' });
+                      }}
+                    />
+                  ) : null}
                 </>
               ) : (
                 <T variant="label" center style={{ color: dk.muted, paddingVertical: space.md }}>
@@ -622,10 +827,12 @@ export function ActiveJobScreen({ navigation }: any) {
                 ) : null}
                 {senderFeeDue && atSender
                   ? bigButton(`Collected ${courierFee} from the sender`, () => collectFromSender('paid'), { loading: courierCollect.isPending, disabled: busy })
-                  : bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
-                    loading: riderAct.isPending,
-                    disabled: busy,
-                  })}
+                  : isCourier && riderStep(job)!.action === 'picked-up'
+                    ? bigButton('Capture pickup photo & confirm pickup', captureCourierPickupProof, { loading: courierPickupProof.isPending, disabled: busy })
+                    : bigButton(riderStep(job)!.label, () => riderAct.mutate({ id: job.id, action: riderStep(job)!.action }), {
+                      loading: riderAct.isPending,
+                      disabled: busy,
+                    })}
                 {senderFeeDue && atSender ? (
                   <PillButton
                     label="Sender didn't pay"
@@ -655,6 +862,33 @@ export function ActiveJobScreen({ navigation }: any) {
                     onPress={() => setHandbackConfirm(true)}
                   />
                 ) : null}
+                {/* [E17 · DS231 F6] A courier who can't deliver mid-route returns
+                    from the rung they are on — the server accepts a return from
+                    every custody state — instead of first tapping a false
+                    "I've arrived" to reach the door's button. */}
+                {isCourier && pickedUp ? (
+                  <PillButton
+                    label="Can't deliver — return to sender"
+                    variant="soft"
+                    style={{ marginTop: space.sm }}
+                    disabled={busy}
+                    onPress={() => setReturnConfirm(true)}
+                  />
+                ) : null}
+              </>
+            ) : isCourier && returning ? (
+              // [E17] The return leg. The door is closed — the parcel is coming
+              // back — and the only action is the return photo that completes
+              // the return and releases the rider. No cash step exists here:
+              // whatever was collected at pickup is already settled peer-to-peer.
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
+                  <Feather name="rotate-ccw" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                    This parcel is on its way back to the sender. Capture the return photo to complete the return.
+                  </T>
+                </View>
+                {bigButton('Capture return photo & complete return', captureReturnProof, { loading: courierReturnProof.isPending, disabled: busy })}
               </>
             ) : isCourier ? (
               // [M-28] The courier's door. The proof photo ALWAYS closes the
@@ -703,19 +937,36 @@ export function ActiveJobScreen({ navigation }: any) {
                     {bigButton('Capture proof & deliver', () => captureCourierProof(), { loading: courierProof.isPending, disabled: busy })}
                   </>
                 )}
+                {/* [E17] After custody the job cannot be handed back (the server
+                    refuses) — the honest out is a return: support-visible, the
+                    sender notified, and the proof photo closes it back home. */}
+                <PillButton
+                  label="Can't deliver — return to sender"
+                  variant="soft"
+                  style={{ marginTop: space.sm }}
+                  disabled={busy}
+                  onPress={() => setReturnConfirm(true)}
+                />
               </>
             ) : doorBlocked ? (
               <>
-                {/* [MOB-023] The rail says "paid" but the payment state does not
-                    (pending, unknown, failed, reversed): no hand-over, nothing
-                    collected, nothing completed — refresh, or the store confirms. */}
+                {/* [MOB-023 · F-106-03] No hand-over, nothing collected, nothing
+                    completed. The REASON decides both the sentence and the way
+                    out: a dispute cannot be refreshed away, and telling the
+                    rider to ask the store again would strand them holding the
+                    order while following advice that cannot work. */}
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.error, 0.12), borderWidth: 1, borderColor: withAlpha(color.error, 0.4), padding: space.md }}>
                   <Feather name="alert-triangle" size={15} color={color.error} style={{ marginTop: 1 }} />
                   <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
-                    {`Payment not confirmed (${door.reason.replace(/_/g, ' ').toLowerCase()}) — do not hand over the order yet. Ask the store to confirm the payment, then refresh.`}
+                    {doorGuidanceFor(door.reason).headline}
                   </T>
                 </View>
-                {bigButton('Refresh payment status', () => { recordDoorBlocked(door.reason); active.refetch?.(); }, { loading: active.isFetching === true, disabled: busy })}
+                {doorGuidanceFor(door.reason).action !== 'support'
+                  ? bigButton('Refresh payment status', () => { recordDoorBlocked(door.reason); active.refetch?.(); }, { loading: active.isFetching === true, disabled: busy })
+                  : null}
+                {doorGuidanceFor(door.reason).action !== 'refresh'
+                  ? bigButton('Contact support', () => { recordDoorBlocked(door.reason); navigation.navigate('GetHelp' as never); }, { disabled: busy })
+                  : null}
               </>
             ) : isMmgPaid ? (
               <>
@@ -729,6 +980,7 @@ export function ActiveJobScreen({ navigation }: any) {
                       : `Customer already paid via MMG. Collect your ${feeLabel} pay (fee + tip) from the store with the order.`}
                   </T>
                 </View>
+                {doorPinCeremony}
                 {bigButton(deliverLabel, markDelivered, { loading: riderAct.isPending || courierProof.isPending, disabled: busy })}
               </>
             ) : (
@@ -743,7 +995,8 @@ export function ActiveJobScreen({ navigation }: any) {
                     hands over + completes the delivery server-side. No plain
                     "mark delivered" here — the server refuses a cash order that
                     wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered. */}
-                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover' }), { loading: riderAct.isPending, disabled: busy })}
+                {doorPinCeremony}
+                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover', pin }, { onError: onPinRefused }), { loading: riderAct.isPending, disabled: busy })}
                 {/* [M-29] The door's other outcome — the rail existed on the
                     server (strike + guarantee claim) with no way to reach it. */}
                 <PillButton
@@ -889,6 +1142,65 @@ export function ActiveJobScreen({ navigation }: any) {
         <PillButton label="Go back" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setSenderRefusedSheet(false)} />
       </PopupCard>
 
+      {/* A driver can release an accepted taxi only before the passenger handoff.
+          The server re-checks custody under lock, frees the driver, and sends the
+          same passenger ride back to dispatch. Keep the sheet open on failure. */}
+      <PopupCard
+        visible={!!driverHandbackFlow && driverHandbackFlow.phase !== 'dismissing' && (
+          driverHandbackFlow.phase === 'submitting'
+          || (canDriverHandback && driverHandbackFlow.rideId === liveJob?.id)
+        )}
+        onClose={() => {
+          if (driverAct.isPending || driverHandbackFlow?.phase === 'submitting') return;
+          driverHandbackNavigateAfterDismissRef.current = false;
+          setDriverHandbackFlow(null);
+        }}
+        onDismissed={finishDriverHandbackDismissal}
+      >
+        <PopupTitle variant="title" center>Hand this ride back?</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          The passenger keeps this ride and Swift will look for another driver. This may affect your driver standing. Pick what happened:
+        </T>
+        {(['Vehicle problem', 'Road or access blocked', 'Passenger did not arrive'] as const).map((why) => (
+          <PillButton
+            key={why}
+            label={why}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={driverAct.isPending || driverHandbackFlow?.phase !== 'confirm' || !canDriverHandback}
+            onPress={() => {
+              if (preview || !liveJob?.id || driverHandbackFlow?.phase !== 'confirm' || driverHandbackFlow.rideId !== liveJob.id || !canDriverHandback) return;
+              const rideId = liveJob.id;
+              setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'submitting' } : flow);
+              driverAct.mutate(
+                { id: rideId, action: 'handback', reason: why },
+                {
+                  onSuccess: () => {
+                    driverHandbackNavigateAfterDismissRef.current = true;
+                    setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'dismissing' } : flow);
+                    toast.show('Ride handed back', 'The passenger is being matched with another driver.');
+                  },
+                  onError: (e: any) => {
+                    setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'confirm' } : flow);
+                    toast.error(e?.response?.data?.error?.message ?? "Couldn't hand the ride back — keep the passenger informed and try again.");
+                  },
+                },
+              );
+            }}
+          />
+        ))}
+        <PillButton
+          label="Keep the ride"
+          variant="soft"
+          style={{ alignSelf: 'stretch', marginTop: space.lg }}
+          disabled={driverAct.isPending || driverHandbackFlow?.phase === 'submitting'}
+          onPress={() => {
+            driverHandbackNavigateAfterDismissRef.current = false;
+            setDriverHandbackFlow(null);
+          }}
+        />
+      </PopupCard>
+
       {/* G14 handback — reason required, honesty first: the customer is told
           "finding you another rider", and after pickup this popup can never
           appear (the button above is gone and the server refuses anyway). */}
@@ -915,6 +1227,27 @@ export function ActiveJobScreen({ navigation }: any) {
           />
         ))}
         <PillButton label="Keep the delivery" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setHandbackConfirm(false)} />
+      </PopupCard>
+
+      {/* [E17] Return-to-sender after custody — reason required, honesty first:
+          the server opens a support-visible return, notifies the sender the
+          parcel is coming back, and the proof photo closes it at the pickup. */}
+      <PopupCard visible={returnConfirm} onClose={() => setReturnConfirm(false)}>
+        <PopupTitle variant="title" center>Return this parcel to the sender?</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          The parcel goes back to the sender, a support ticket is opened, and the sender is notified. Pick what happened:
+        </T>
+        {(['Recipient unreachable', 'Recipient refused the parcel', 'Wrong or incomplete address'] as const).map((why) => (
+          <PillButton
+            key={why}
+            label={why}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={busy}
+            onPress={() => startReturn(why)}
+          />
+        ))}
+        <PillButton label="Keep the parcel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setReturnConfirm(false)} />
       </PopupCard>
 
       {/* Post-trip passenger rating — DRIVER_TO_CUSTOMER, once per ride */}

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
 import { bindPublicMarketTenant, decodeScopedCursor, encodeScopedCursor } from '../search/search-scope';
@@ -32,6 +33,12 @@ import { marketGate, thresholdsFrom } from './launch-depth';
  *  plausible category at launch depth (the tab itself stays hidden below ~150
  *  items); a breach is LOGGED, never silently truncated. */
 const CATEGORY_ITEM_CAP = 5_000;
+
+/** [S2-1] How many raw keyset windows one page will fetch while the defensive
+ *  gate drops rows behind it. A breach is LOGGED, never silently truncated. */
+const PAGE_FILL_CAP = 10;
+
+type MarketItemRow = Prisma.ItemGetPayload<{ select: typeof ITEM_HIT_SELECT }>;
 
 /**
  * Which sellers a vertical means. RETAIL is the STORE — "goods, not food:
@@ -99,9 +106,14 @@ export async function marketRoutes(app: FastifyInstance) {
   app.get('/depth', async (request) => {
     // The preHandler above has already bound the public tenant.
     const tenantId = request.publicTenantId!;
+    // [S2-1] The same hidden-only exclusion the feed applies, so the depth
+    // gate counts the catalogue a shopper can actually see — never raw rows.
+    const { hiddenOnlyItemIds } = await import('../verification/category-gate');
+    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
     const where = {
       isAvailable: true,
       vendor: { ...visibleVendorInTenant(tenantId), vendorType: VERTICAL_VENDOR_TYPE.RETAIL },
+      ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
     };
     const [items, sellers, config] = await Promise.all([
       app.prisma.item.count({ where }),
@@ -161,6 +173,19 @@ export async function marketRoutes(app: FastifyInstance) {
       itemIdsInCategory = tags.slice(0, CATEGORY_ITEM_CAP).map((t) => t.itemId);
     }
 
+    // [S2-1] Hidden-only items are removed HERE, in the where-clause, before
+    // the page is capped — a hidden row ranked ahead of a listable one must
+    // never consume the page budget. The in-memory gate below stays only as a
+    // defensive second pass, and the page-fill loop after it means that pass
+    // can never be the reason a page comes back short.
+    const { listableItemsForVendors, hiddenOnlyItemIds } = await import('../verification/category-gate');
+    const hiddenOnly = await hiddenOnlyItemIds(app.prisma, tenantId);
+    // One `id` key for both filters: a second spread would silently overwrite
+    // the category membership with the hidden exclusion (or vice versa).
+    const idFilter = {
+      ...(itemIdsInCategory ? { in: itemIdsInCategory } : {}),
+      ...(hiddenOnly.length > 0 ? { notIn: hiddenOnly } : {}),
+    };
     const where = {
       isAvailable: true,
       vendor: {
@@ -181,30 +206,53 @@ export async function marketRoutes(app: FastifyInstance) {
       // [§4.2] The CROSS-VENDOR taxonomy. Never `Item.categoryId`, which is the
       // store's own shelf and would return one shop's aisle wearing a
       // category's name.
-      ...(itemIdsInCategory ? { id: { in: itemIdsInCategory } } : {}),
+      ...(Object.keys(idFilter).length > 0 ? { id: idFilter } : {}),
     };
 
     const cursorId = q.cursor ? decodeScopedCursor(q.cursor, tenantId, q.sort) : null;
+    const total = await app.prisma.item.count({ where });
 
-    const [rows, total] = await Promise.all([
-      app.prisma.item.findMany({
+    // [DOC-1 §18.3 · P18-2] BLOCK_LISTING at read time as well as at publish
+    // time: a licence that lapsed after the item was tagged hides it here.
+    // That live rule is not a where-clause, so the window is filled past it:
+    // fetch keyset windows until the page has `limit` rows (and one more, so a
+    // cursor is only offered when its page is non-empty) or the eligible
+    // population is exhausted. The cursor is minted from the last raw row
+    // INCLUDED in the page, so following it can neither repeat nor skip a row.
+    let rawCursorId = cursorId;
+    let hasMoreRaw = false;
+    let capExhausted = true;
+    let listable: MarketItemRow[] = [];
+    for (let pass = 0; pass < PAGE_FILL_CAP; pass += 1) {
+      const rows = await app.prisma.item.findMany({
         where,
         select: ITEM_HIT_SELECT,
         orderBy: orderFor(q.sort),
         take: q.limit + 1, // one extra: its existence IS "there is a next page"
-        ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
-      }),
-      app.prisma.item.count({ where }),
-    ]);
+        ...(rawCursorId ? { cursor: { id: rawCursorId }, skip: 1 } : {}),
+      });
+      if (rows.length === 0) {
+        // The previous window was exactly full; the population is exhausted
+        // right here, so it cannot also be "there is a next page".
+        hasMoreRaw = false;
+        capExhausted = false;
+        break;
+      }
+      hasMoreRaw = rows.length > q.limit;
+      rawCursorId = rows[rows.length - 1]!.id;
+      listable.push(...(await listableItemsForVendors(app.prisma, tenantId, rows)));
+      if (!hasMoreRaw || listable.length >= q.limit + 1) { capExhausted = false; break; }
+    }
+    // [DS233 F5] Whenever the cap, not the population, ended the fill, the page
+    // may be short OR its cursor may lead to a page the gate empties — log both.
+    if (capExhausted && hasMoreRaw) {
+      // NO SILENT CAPS — the same stance as the category id cap above.
+      request.log.warn(
+        { tenantId, limit: q.limit, fillCap: PAGE_FILL_CAP },
+        'market: page-fill cap reached with ineligible rows ahead — the page is short',
+      );
+    }
 
-    // [DOC-1 §18.3 · P18-2] BLOCK_LISTING at read time as well as at publish
-    // time: a licence that lapsed after the item was tagged hides it here.
-    const { blockedCategoryIdsForVendors } = await import('../verification/category-gate');
-    const gated = rows.length === 0 ? new Map<string, Set<string>>() : await blockedCategoryIdsForVendors(app.prisma, tenantId, rows.map((r) => r.vendorId));
-    const gatedTags = [...gated.values()].some((set) => set.size > 0)
-      ? await app.prisma.itemDiscoveryCategory.findMany({ where: { itemId: { in: rows.map((r) => r.id) } }, select: { itemId: true, categoryId: true } })
-      : [];
-    const listable = rows.filter((r) => !gatedTags.some((t) => t.itemId === r.id && gated.get(r.vendorId)?.has(t.categoryId)));
     const page = listable.slice(0, q.limit);
     const items: ItemHit[] = page.map(toItemHit);
     const last = page[page.length - 1];
@@ -215,7 +263,7 @@ export async function marketRoutes(app: FastifyInstance) {
         items,
         // A cursor only when a further page actually exists — never a cursor
         // that leads to an empty page.
-        nextCursor: rows.length > q.limit && last ? encodeScopedCursor(tenantId, last.id, q.sort) : null,
+        nextCursor: hasMoreRaw && last ? encodeScopedCursor(tenantId, last.id, q.sort) : null,
         meta: { total, category: q.category ?? null },
       },
     };

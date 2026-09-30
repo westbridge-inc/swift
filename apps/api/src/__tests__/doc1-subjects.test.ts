@@ -10,6 +10,7 @@
  * tables to the account's tenant.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -43,6 +44,7 @@ async function person(n: number, role: 'VENDOR_OWNER' | 'MOVER' = 'VENDOR_OWNER'
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 const driver = (userId: string, plate: string) => system(() => app.prisma.driver.create({ data: {
@@ -50,7 +52,7 @@ const driver = (userId: string, plate: string) => system(() => app.prisma.driver
   driverLicenseUrl: `/uploads/test/${RUN}-dl.jpg`, vehicleInsuranceUrl: `/uploads/test/${RUN}-ins.jpg`,
 } }));
 const submit = (userId: string, roleKey: 'RESTAURANT' | 'MOVER', docType: string) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, roleKey, docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, roleKey, docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const docOf = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { subjectId: true, status: true, state: true, userId: true } }));
 const subjectOf = (id: string) => system(() => app.prisma.subject.findUniqueOrThrow({ where: { id }, include: { links: true, person: true, business: true, vehicle: true } }));
 
@@ -114,6 +116,10 @@ describe('[DOC-1 P1-2] every new submission writes a subject and a link', () => 
     expect((await docOf(reg.id)).subjectId).toBe(vid);
     const links = (await subjectOf(vid)).links.map((l) => [l.accountId, l.relation]).sort();
     expect(links).toEqual([[a, 'ASSIGNED_DRIVER'], [b, 'ASSIGNED_DRIVER']].sort());
+    // [High #9 · DS109] b's cross-account link is PENDING — it names the same vehicle but
+    // propagates none of its evidence until the admin approves the assignment.
+    expect((await linkedAccountIds(app.prisma, vid)).sort()).toEqual([a].sort());
+    expect((await system(() => service.approveVehicleAssignment(b))).approved).toBe(1);
     expect((await linkedAccountIds(app.prisma, vid)).sort()).toEqual([a, b].sort());
   });
 

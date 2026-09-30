@@ -43,7 +43,7 @@ export const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.
 /** A disposable test database, by name. Override with TEST_TARGET_DB_ALLOWLIST (comma-separated exact names). */
 export const TEST_DB_PATTERN = /^swift_test[a-z0-9_]*$/;
 /** Hosts that can only be someone's real data. */
-const PRODUCTION_LOOKING = /prod|live|swift\.gy|swiftgy\.com|rds\.amazonaws|render\.com|railway|supabase|neon\.tech|fly\.dev/i;
+const PRODUCTION_LOOKING = /prod|live|swift\.gy|swiftgy\.com|rds\.amazonaws|render\.com|railway|supabase|neon\.tech|fly\.dev/i; // [OLD-DOMAIN] the pre-2026-09-24 name stays a DENY pattern: Swift never owned it, so a test may never target a host there
 
 export interface TestTarget {
   pgHost: string;

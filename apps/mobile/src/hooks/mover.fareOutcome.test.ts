@@ -74,7 +74,9 @@ describe('the driver action', () => {
 describe('the rider action', () => {
   const hook = body(HOOKS, 'export function useRiderAction', '\n}\n');
   it('the door handover rides the same seam and accepts the failed outcomes explicitly', () => {
-    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps }, current)");
+    // [MKT-F057] The customer-held door PIN rides the same body; the failed
+    // outcomes still carry no PIN.
+    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(pin ? { ridePin: pin } : {}) }, current)");
     expect(hook).toContain('evidenceFix(owner)');
   });
 });

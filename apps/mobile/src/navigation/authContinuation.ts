@@ -2,8 +2,9 @@ import type { RootEntryGate, RootIntent } from './rootEntryGate';
 
 export interface AuthContinuationDestination {
   /** The destination is intentionally constrained to screens that are safe to
-   * resume inside the authenticated customer stack. */
-  screen: 'ServiceProvider';
+   * resume inside the authenticated customer stack: provider onboarding, and
+   * [Q4] the taxi screen a signed-out visitor was sent to sign in from. */
+  screen: 'ServiceProvider' | 'Taxi';
 }
 
 export interface AuthContinuationRootRoute {
@@ -54,8 +55,8 @@ export function flushAuthContinuation(
   if (!pending) return 'none';
   if (!state.isAuthenticated || state.entryGate !== 'main') return 'waiting';
 
-  // ServiceProvider belongs to CustomerStack. A role-routing regression must
-  // never send it into an unrelated earner or advertiser navigator.
+  // Both destinations belong to CustomerStack. A role-routing regression must
+  // never send them into an unrelated earner or advertiser navigator.
   if (state.intent !== 'customer') {
     pending = null;
     return 'discarded';

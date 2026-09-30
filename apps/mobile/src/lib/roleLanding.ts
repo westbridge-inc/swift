@@ -7,6 +7,37 @@
 
 export type Intent = 'customer' | 'mover' | 'vendor' | 'advertiser';
 
+/** The account's own roles and entities, as the session carries them. */
+export interface AccountRoles {
+  roles?: readonly string[] | null;
+  driver?: unknown;
+  rider?: unknown;
+  vendorOwner?: unknown;
+}
+
+/**
+ * Does THIS account hold a surface's role? ONE predicate, shared by the
+ * switcher (instant switch vs. "Join"), the sign-in landing and the earner
+ * shells (dashboard vs. onboarding), so a surface can never read as owned on
+ * one screen and joinable on the next.
+ *
+ * Customer is the open surface. Advertiser membership is not a UserRole.
+ * Store STAFF never hold a role here — the server's own profile answer (200
+ * with their memberships) seats them; this only says what the account holds.
+ */
+export function accountHoldsRole(account: AccountRoles | null | undefined, intent: Intent): boolean {
+  if (intent === 'customer') return true;
+  const roles = account?.roles ?? [];
+  if (intent === 'mover') {
+    return roles.includes('MOVER') || roles.includes('DRIVER') || roles.includes('RIDER')
+      || !!account?.driver || !!account?.rider;
+  }
+  if (intent === 'vendor') {
+    return roles.includes('VENDOR_OWNER') || roles.includes('VENDOR') || !!account?.vendorOwner;
+  }
+  return false;
+}
+
 export interface AccountShape {
   isVendor: boolean;
   isMover: boolean;

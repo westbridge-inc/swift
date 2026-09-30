@@ -9,6 +9,7 @@
  * over; only its holder releases it.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -65,7 +66,8 @@ async function subject(n: number) {
 }
 /** A pending document, and the review case P4-5 opened for it. */
 async function pendingCase(userId: string) {
-  const doc = await runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  await signupSelfieFixture(app.prisma, userId);
+  const doc = await runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', await ownedVerificationFixture(app.prisma, userId), 'v1'));
   const kase = await system(() => app.prisma.reviewCase.findFirstOrThrow({ where: { submissionId: doc.id, closedAt: null } }));
   return { doc, kase };
 }

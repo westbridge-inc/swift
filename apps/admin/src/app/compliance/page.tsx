@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 
 /**
  * The liability shield. Three panels:
@@ -23,10 +24,13 @@ export default function CompliancePage() {
 
   const run = useMutation({ mutationFn: runComplianceAudit, onSettled: refresh });
   const decide = useMutation({
-    mutationFn: ({ id, pass }: { id: string; pass: boolean }) => decideComplianceReview(id, pass, note[id]),
+    mutationFn: ({ id, pass, reason }: { id: string; pass: boolean; reason: string }) => decideComplianceReview(id, pass, note[id], reason),
     onSettled: refresh,
   });
-  const resolve = useMutation({ mutationFn: resolveComplianceViolation, onSettled: refresh });
+  const resolve = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => resolveComplianceViolation(id, reason),
+    onSettled: refresh,
+  });
 
   const d = q.data?.data;
   const runs: any[] = d?.runs ?? [];
@@ -86,7 +90,7 @@ export default function CompliancePage() {
                   {openEvidence === v.id ? 'Hide evidence' : 'View evidence'}
                 </button>
                 <button
-                  onClick={() => resolve.mutate(v.id)}
+                  onClick={() => { const reason = askReason({ action: 'mark this compliance violation as resolved', subject: `violation ${v.id}` }); if (reason) resolve.mutate({ id: v.id, reason }); }}
                   disabled={resolve.isPending}
                   className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
                   title="Only succeeds once their checklist passes again"
@@ -132,14 +136,14 @@ export default function CompliancePage() {
                   className="flex-1 min-w-48 bg-[var(--panel-2)] px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
                 />
                 <button
-                  onClick={() => decide.mutate({ id: c.id, pass: true })}
+                  onClick={() => { const reason = askReason({ action: 'pass this re-verification review' }); if (reason) decide.mutate({ id: c.id, pass: true, reason }); }}
                   disabled={decide.isPending}
                   className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
                 >
                   Documents check out
                 </button>
                 <button
-                  onClick={() => decide.mutate({ id: c.id, pass: false })}
+                  onClick={() => { const reason = askReason({ action: 'fail this re-verification review and force offline' }); if (reason) decide.mutate({ id: c.id, pass: false, reason }); }}
                   disabled={decide.isPending || !(note[c.id] ?? '').trim()}
                   className="px-3 py-1.5 text-xs rounded-lg bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50"
                 >

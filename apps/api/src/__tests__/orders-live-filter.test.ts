@@ -274,3 +274,54 @@ describe('the two filters cannot silently contradict each other', () => {
     expect(res.status, '`live=yes` must not be read as false and silently return history').toBe(400);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] The customer's order detail returned the rider's
+// personal phone UNCONDITIONALLY — the live coordinates beside it were already
+// gated on liveness, the phone was not, so every past customer permanently
+// kept the mover's number. The phone is now gated on the same liveness rule.
+// ---------------------------------------------------------------------------
+
+describe('a closed order does not hand out the rider\'s phone', () => {
+  it('keeps the phone while in flight and nulls it once the order closes', async () => {
+    const customer = await makeCustomer();
+    seq += 1;
+    const riderUser = await app.prisma.user.create({
+      data: {
+        phone: `${PHONE_PREFIX}${String(seq).padStart(2, '0')}`,
+        firstName: 'Rider', lastName: `Phone${seq}`,
+        roles: ['RIDER'], activeRole: 'RIDER',
+        isPhoneVerified: true,
+      },
+    });
+    createdUserIds.push(riderUser.id);
+    const rider = await app.prisma.rider.create({
+      data: { userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE', documentsVerified: true },
+    });
+    const order = await makeOrder({ customerId: customer.id, status: 'RIDER_ASSIGNED', placedAt: new Date() });
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.id } });
+
+    const read = () => app.inject({
+      method: 'GET',
+      url: `/api/v1/customer/orders/${order.id}`,
+      headers: { authorization: `Bearer ${customer.token}` },
+    });
+
+    try {
+      const inFlight = await read();
+      expect(inFlight.statusCode).toBe(200);
+      expect(inFlight.json().data.rider.phone).toBe(riderUser.phone);
+
+      await app.prisma.order.update({ where: { id: order.id }, data: { status: 'DELIVERED' } });
+
+      const closed = await read();
+      expect(closed.statusCode).toBe(200);
+      expect(closed.json().data.rider.phone).toBeNull();
+      // The mover's identity still reads — only the contact detail goes.
+      expect(closed.json().data.rider.firstName).toBe('Rider');
+    } finally {
+      await app.prisma.order.delete({ where: { id: order.id } }).catch(() => {});
+      await app.prisma.rider.delete({ where: { id: rider.id } }).catch(() => {});
+    }
+  });
+});

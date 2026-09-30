@@ -24,7 +24,6 @@ import { placesRoutes } from '../modules/places/places.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
-import { aiRoutes } from '../modules/ai/ai.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
 import { loginWithOtp } from './helpers/otp';
 
@@ -78,7 +77,6 @@ async function buildTestApp() {
   await server.register(courierRoutes, { prefix: '/api/v1/courier' });
   await server.register(servicesRoutes, { prefix: '/api/v1/services' });
   await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
-  await server.register(aiRoutes, { prefix: '/api/v1/ai' });
   await server.register(statementRoutes, { prefix: '/api/v1/statements' });
   await server.ready();
   return server;
@@ -153,7 +151,6 @@ const MATRIX: PrefixSpec[] = [
   { prefix: '/api/v1/courier/', wrongRoles: [] },
   { prefix: '/api/v1/services/', wrongRoles: [] },
   { prefix: '/api/v1/partner/', wrongRoles: [] },
-  { prefix: '/api/v1/ai/', wrongRoles: [] },
   { prefix: '/api/v1/statements/', wrongRoles: [] },
 ];
 
@@ -162,6 +159,12 @@ const MATRIX: PrefixSpec[] = [
  *  document/statement render-token model. Anything added here needs the same
  *  written justification. */
 const PUBLIC_BY_DESIGN = new Set([
+  // Guest catalogue reads use the public browse tenant/visibility authority.
+  // The sync operation stays in the authenticated sweep below.
+  'GET /api/v1/search',
+  'GET /api/v1/search/suggestions',
+  'GET /api/v1/search/trending',
+  'GET /api/v1/search/nearby',
   // Service-provider browse is customer discovery (guest-browse doctrine):
   // optionalAuth by design; unauthenticated requests hit schema validation
   // (400 on missing query), never a data leak — the handler serves a public

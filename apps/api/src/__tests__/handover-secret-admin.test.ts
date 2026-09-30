@@ -45,7 +45,10 @@ const userIds: string[] = [];
 const orderIds: string[] = [];
 let seq = 0;
 // a per-run phone base: a suite that dies before cleanup must not poison the next run
-const phoneBase = 592_609_000_000 + Math.floor(Math.random() * 800_000_000);
+// Reserved +592014 block (1M span, so every number stays inside the +592014 prefix
+// and can never reach another suite's block): the old 800M span overflowed into +593, and
+// send-otp now refuses anything outside Guyana before a code is ever issued.
+const phoneBase = 592_014_000_000 + Math.floor(Math.random() * 900_000);
 
 function assertNoSecrets(payload: string, where: string) {
   for (const key of FORBIDDEN) {

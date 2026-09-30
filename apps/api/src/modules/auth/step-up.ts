@@ -65,9 +65,13 @@ export async function sendStepUpOtp(app: FastifyInstance, userId: string): Promi
   if (!(await checkOtpRateLimit(app.redis, stepUpCodeKey(userId)))) {
     throw new AppError(429, 'RATE_LIMITED', 'Please wait a minute before requesting another code');
   }
-  const budget = await checkOtpDailyBudget(app.redis, user.phone);
+  // The account exists and holds a live session: its phone is KNOWN, so it
+  // draws from the separate known-phone budget — a flood of new-number
+  // requests cannot lock an existing user's step-up out (audit High #2).
+  const budget = await checkOtpDailyBudget(app.redis, user.phone, { knownPhone: true });
   if (!budget.allowed) {
     if (budget.reason === 'global_daily') log().error('[sms-budget] global daily OTP cap reached — refusing a step-up send');
+    else if (budget.reason === 'known_daily') log().error('[sms-budget] known-phone daily OTP cap reached — refusing a step-up send');
     throw new AppError(429, 'RATE_LIMITED', 'Too many verification requests right now. Please try again later.');
   }
 
@@ -76,6 +80,7 @@ export async function sendStepUpOtp(app: FastifyInstance, userId: string): Promi
   try {
     await getChannels().sms.sendSms(user.phone, `Your Swift confirmation code is ${code}. It confirms a change to your account. Swift will never ask you for it.`);
   } catch (err) {
+    await budget.refund?.().catch(() => {});
     log().error({ err, userId }, 'step-up: SMS send failed');
     throw new AppError(502, 'SMS_SEND_FAILED', "We couldn't send your code right now. Please try again in a moment.");
   }

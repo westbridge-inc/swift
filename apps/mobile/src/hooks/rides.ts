@@ -152,6 +152,20 @@ export function useCancelRide() {
   });
 }
 
+/** [E19] The passenger can see the car at the kerb; their confirm is the
+ *  one-tap override that keeps a driver with a stale or missing GPS fix from
+ *  ever being stranded by the arrival gate. */
+export function useConfirmDriverArrival() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) => unwrap(rideApi.confirmDriverArrival(id)),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['rides', 'active'] });
+      void qc.invalidateQueries({ queryKey: customerKeys.homeAll });
+    },
+  });
+}
+
 /** Raise an emergency on an active ride (rides safety spec). The app also dials
  *  the local emergency number; this records the incident and pages ops so a
  *  panic is never just a dropped call. Coords help ops locate the rider. */

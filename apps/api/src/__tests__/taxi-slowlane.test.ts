@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { PaymentMethod, PaymentStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -40,7 +40,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   return u;
 }
 
-async function makeTaxiRide(customerId: string, placedMinAgo = 0) {
+async function makeTaxiRide(customerId: string, placedMinAgo = 0, pay: { paymentMethod: PaymentMethod; paymentStatus: PaymentStatus } = { paymentMethod: 'CASH', paymentStatus: 'PENDING' }) {
   const placedAt = new Date(Date.now() - placedMinAgo * 60_000);
   const order = await app.prisma.order.create({
     data: {
@@ -49,7 +49,7 @@ async function makeTaxiRide(customerId: string, placedMinAgo = 0) {
       pickupAddress: 'Empty Flats', pickupLat: EXHAUST_AT.lat, pickupLng: EXHAUST_AT.lng,
       deliveryAddress: 'Nowhere Lane', deliveryLat: EXHAUST_AT.lat + 0.01, deliveryLng: EXHAUST_AT.lng,
       subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0,
-      deliveryFee: 0, totalAmount: 1500, taxiFareTotal: 1500, paymentMethod: 'CASH',
+      deliveryFee: 0, totalAmount: 1500, taxiFareTotal: 1500, ...pay,
       placedAt,
     },
   });
@@ -82,7 +82,7 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  for (const id of createdOrderIds) await app.redis.del(`dispatch:exhausts:${id}`, `dispatch:declined:${id}`);
+  for (const id of createdOrderIds) await app.redis.del(`dispatch:exhausts:${id}`, `dispatch:declined:${id}`, `ops_page:ride_release_held_mmg:${id}`);
   // order_status_logs is append-only (audit law) — order deletion cascades it.
   await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
@@ -138,5 +138,44 @@ describe('the taxi slow lane past the fast cap', () => {
     });
     expect(released).not.toBeNull();
     expect(await app.redis.exists(`dispatch:exhausts:${ride.id}`)).toBe(0);
+  });
+
+  it('[E02 · DS272 F1] a paid-MMG ride (legacy) is never released: it stays for an operator, who is paged, and the rides beside it still release', async () => {
+    // Rides are born CASH, so only legacy data can hold this row. The database
+    // refuses a paid MMG order becoming CANCELLED without a refund obligation;
+    // before the CAS excluded it, that refusal failed the paid ride's run and
+    // stopped a sweep over the rides after it.
+    const admin = await makeUser(['ADMIN'], 'ADMIN');
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const first = await makeTaxiRide(customer.id, TAXI_WAIT_LIMIT_MIN + 1);
+    const paid = await makeTaxiRide(customer.id, TAXI_WAIT_LIMIT_MIN + 1, { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' });
+    const last = await makeTaxiRide(customer.id, TAXI_WAIT_LIMIT_MIN + 1);
+    for (const r of [first, paid, last]) await app.redis.set(`dispatch:exhausts:${r.id}`, String(EXHAUST_CAP));
+
+    // One sweep over the batch, ride after ride, with no per-ride catch.
+    const dispatch = makeDispatch([]);
+    for (const r of [first, paid, last]) expect((await dispatch.dispatchOrder(r.id)).exhausted).toBe(true);
+
+    const rows = await app.prisma.order.findMany({
+      where: { id: { in: [first.id, paid.id, last.id] } },
+      select: { id: true, status: true, cancelledAt: true, cancellationReason: true },
+    });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    expect(byId.get(first.id)?.status).toBe('CANCELLED');
+    expect(byId.get(last.id)?.status).toBe('CANCELLED');
+    expect(byId.get(paid.id)).toMatchObject({ status: 'PENDING', cancelledAt: null, cancellationReason: null });
+    expect(await app.prisma.orderStatusLog.count({ where: { orderId: paid.id, status: 'CANCELLED' } })).toBe(0);
+    // The customer is told about the two rides that WERE released, never the held one.
+    const told = await app.prisma.notification.findMany({
+      where: { userId: customer.id, data: { path: ['kind'], equals: 'ride_released_no_drivers' } },
+      select: { data: true },
+    });
+    expect(told.map((n) => (n.data as { orderId: string }).orderId).sort()).toEqual([first.id, last.id].sort());
+    // An operator is told about the held one.
+    const paged = await app.prisma.notification.findMany({
+      where: { userId: admin.id, title: 'Ride not released: paid by MMG' },
+      select: { data: true },
+    });
+    expect(paged.map((n) => (n.data as { orderId: string }).orderId)).toEqual([paid.id]);
   });
 });

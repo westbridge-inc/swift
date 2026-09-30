@@ -12,7 +12,7 @@ const CUSTOMER_STEPS = [
 ];
 
 const RIDE_STEPS = [
-  ['Request', 'Set pickup and drop-off; see the fare before you book.'],
+  ['Request in the mobile app', 'Taxi rides are booked in the Swift mobile app. Set pickup and drop-off; see the fare before you book.'],
   ['Matched to the nearest driver', 'The closest available driver gets the ping and accepts.'],
   ['PIN handshake', 'Your driver enters the PIN from your app — proof the right person got in the right car.'],
   ['Ride and pay the driver', 'Cash or the driver’s own MMG. The fare is theirs, 100%.'],

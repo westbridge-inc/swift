@@ -93,12 +93,12 @@ describe('every failure says what happened, and none of them guess', () => {
 
 describe('the codes it must accept are the codes vendors print', () => {
   it('a printed short link resolves to a short-code destination', () => {
-    const d = destinationForUrl('https://swift.gy/s/BCDFGHJKMN');
+    const d = destinationForUrl('https://swiftgy.com/s/BCDFGHJKMN');
     expect(d).toEqual({ kind: 'short', code: 'BCDFGHJKMN' });
   });
 
   it('a storefront link with an attribution code carries the code through', () => {
-    const d = destinationForUrl('https://swift.gy/store/georgetown-grill?src=qr&c=BCDFGHJKMN');
+    const d = destinationForUrl('https://swiftgy.com/store/georgetown-grill?src=qr&c=BCDFGHJKMN');
     expect(d).toEqual({ kind: 'store', slug: 'georgetown-grill', code: 'BCDFGHJKMN' });
   });
 

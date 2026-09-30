@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, fetchBillingEvents } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
+import { askReason, reasonTooShort } from '@/lib/ask-reason';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -62,11 +63,11 @@ export default function SubscriptionsPage() {
     // [A-12] The transfer's reference is part of the attempt, not an optional
     // note: a different transfer is a different top-up even for the same
     // subscription and the same amount.
-    mutationFn: async ({ id, amount, reference }: { id: string; amount: number; reference: string }) => {
+    mutationFn: async ({ id, amount, reference, reason }: { id: string; amount: number; reference: string; reason: string }) => {
       const attempt = `${id}:${amount}:${reference}`;
       const key = attempts.current.get(attempt) ?? crypto.randomUUID();
       attempts.current.set(attempt, key);
-      const res = await topUpSubscription(id, amount, reference, key);
+      const res = await topUpSubscription(id, amount, reference, key, reason);
       attempts.current.delete(attempt);
       return res;
     },
@@ -155,7 +156,8 @@ export default function SubscriptionsPage() {
                               if (!reference) return;
                               // The clause asks for a confirmation naming the TARGET and the DELTA.
                               if (!window.confirm(`Credit ${h.name} with GY$${n.toLocaleString()} against transfer ${reference}?`)) return;
-                              topup.mutate({ id: s.id, amount: n, reference });
+                              const reason = askReason({ action: 'record this top-up', subject: `${h.name} (${reference})` });
+                              if (reason) topup.mutate({ id: s.id, amount: n, reference, reason });
                             }}
                             disabled={topup.isPending}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -168,7 +170,7 @@ export default function SubscriptionsPage() {
                                 const reason = window.prompt(
                                   `Waive this period's fee for ${h.name}? Say why — this is revenue Swift is giving up, and the reason is kept:`,
                                 );
-                                if (!reason || reason.trim().length < 8) return;
+                                if (!reason || reasonTooShort(reason)) return;
                                 waive.mutate({ id: s.id, reason: reason.trim() });
                               }}
                               disabled={waive.isPending}

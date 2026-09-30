@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { arrivalEvidence, MAX_ARRIVAL_FIX_AGE_MS } from '../modules/dispatch/arrival-evidence';
+import {
+  arrivalEvidence,
+  arrivalGate,
+  ARRIVAL_GATE_MAX_DISTANCE_KM,
+  MAX_ARRIVAL_FIX_AGE_MS,
+} from '../modules/dispatch/arrival-evidence';
 import { DEFAULT_CASH_RULES } from '../modules/cash/cash-rules.service';
 
 // ---------------------------------------------------------------------------
@@ -15,10 +20,11 @@ import { DEFAULT_CASH_RULES } from '../modules/cash/cash-rules.service';
 // moment that starts the customer's waiting clock, on which every no-show and
 // waiting-fee decision hangs.
 //
-// This does NOT refuse arrivals. It writes down what was true. A driver at the
-// door under a tin roof with no fix must still be able to say they are there,
-// and cash-rules' own philosophy is the one being followed: flag into human
-// review, never refuse a money outcome outright.
+// The evidence function does NOT refuse arrivals: it writes down what was true,
+// and a driver at the door under a tin roof with no fix can still be there
+// (cash-rules' own philosophy: flag into human review, never refuse a money
+// outcome outright). The E19 gate built on top of it (below) refuses the
+// status claim, with the passenger confirm as the escape hatch.
 // ---------------------------------------------------------------------------
 
 const PICKUP = { lat: 6.8013, lng: -58.1551 };          // Georgetown
@@ -122,8 +128,46 @@ describe('the evidence format still has exactly one author', () => {
 
   it('the arrival endpoint records evidence rather than a fixed sentence', () => {
     const src = readFileSync(path.join(__dirname, '..', 'modules', 'driver', 'driver.routes.ts'), 'utf8');
-    // The note must come from the evidence, and the clock must be stamped.
-    expect(src).toMatch(/note:\s*evidence\.note/);
+    // The note must come from the evidence (now through the E19 gate, which
+    // spreads the same `arrivalEvidence` result), and the clock must be stamped.
+    expect(src).toMatch(/note:\s*gate\.note/);
     expect(src).toContain('driverArrivedAt');
+  });
+});
+
+describe('the arrival gate refuses the claim while the evidence stays the evidence', () => {
+  it('allows a fresh fix ~40 m away', () => {
+    const g = arrivalGate({ lat: 6.8016, lng: -58.1553, at: fresh(5_000) }, PICKUP, NOW);
+    expect(g.allowed).toBe(true);
+    expect(g.verdict).toBe('at-pickup');
+    expect(g.needsReview).toBe(false);
+  });
+
+  it('refuses a fix ~400 m away that the 750 m handover guard would still pass', () => {
+    // ~400 m: inside the cash handover guard, outside the 300 m arrival gate.
+    const g = arrivalGate({ lat: PICKUP.lat + 0.0036, lng: PICKUP.lng, at: fresh(1_000) }, PICKUP, NOW);
+    expect(g.allowed).toBe(false);
+    expect(g.verdict).toBe('far');
+    expect(g.distanceM).toBeGreaterThan(ARRIVAL_GATE_MAX_DISTANCE_KM * 1000);
+    expect(g.distanceM).toBeLessThan(DEFAULT_CASH_RULES.maxHandoverDistanceKm * 1000);
+  });
+
+  it('refuses a stale fix and a missing fix', () => {
+    const stale = arrivalGate(
+      { lat: 6.8016, lng: -58.1553, at: fresh(MAX_ARRIVAL_FIX_AGE_MS + 60_000) },
+      PICKUP,
+      NOW,
+    );
+    expect(stale.allowed).toBe(false);
+    expect(stale.verdict).toBe('stale');
+
+    const none = arrivalGate({ lat: null, lng: null, at: null }, PICKUP, NOW);
+    expect(none.allowed).toBe(false);
+    expect(none.verdict).toBe('no-fix');
+  });
+
+  it('uses the documented 300 m radius, tighter than the handover guard', () => {
+    expect(ARRIVAL_GATE_MAX_DISTANCE_KM).toBe(0.3);
+    expect(ARRIVAL_GATE_MAX_DISTANCE_KM).toBeLessThan(DEFAULT_CASH_RULES.maxHandoverDistanceKm);
   });
 });

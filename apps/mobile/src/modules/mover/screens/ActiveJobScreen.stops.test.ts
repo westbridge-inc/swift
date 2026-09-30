@@ -19,7 +19,8 @@ const HOOK = strip(readFileSync(new URL('../../../hooks/mover.ts', import.meta.u
 
 describe('the singular case is the old code path', () => {
   it('one leg renders from active.data exactly as before', () => {
-    expect(SCREEN).toContain('const job: any = stacked ? (legs.find((l) => l.id === selectedLegId) ?? legs[0]) : active.data;');
+    expect(SCREEN).toContain('const liveJob: any = stacked ? (legs.find((l) => l.id === selectedLegId) ?? legs[0]) : active.data;');
+    expect(SCREEN).toContain('const job: any = liveJob ?? (retainDriverHandbackHost ? driverHandbackFlow?.job : null) ?? null;');
     expect(SCREEN).toContain('const stacked = legs.length > 1;');
   });
 

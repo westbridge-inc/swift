@@ -25,6 +25,8 @@ import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../s
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
 import { useVerificationStatus } from '../../../hooks/verification';
 import {
@@ -39,6 +41,7 @@ import {
   useUpdatePromo,
   useDeletePromo,
   useVendorSubscription,
+  useSetVendorBillingMethod,
   useVendorHours,
   useSetHours,
   type DayHours,
@@ -50,15 +53,31 @@ import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { safeVendorRole, TabHeader, VendorBillingNotice } from '../shared';
+import { useAuthStore } from '../../../stores/authStore';
+import { useVendorPreview } from '../../../stores/vendorPreview';
+import { BillingStopControl } from '../../../components/billing/BillingSurfaces';
+import { resumeBillingMethod } from '../../../lib/billing';
 
 export function VendorAccountScreen() {
   const navigation = useNavigation<any>();
   const { owner, store } = useVendorProfile();
   const myRole = safeVendorRole(owner?.myRole);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // [SPS-F-0024] A signed-out guest in the sample dashboard ("Preview a
+  // business dashboard" on the welcome screen) has no account for Switch app to
+  // move. The switch is the server's and needs a session, so a guest's pick
+  // went nowhere. That guest gets the Orders banner's own Exit instead: the
+  // sample is cleared, then the welcome screen offers Swift, Driver and
+  // Business. A signed-in account keeps Switch app unchanged.
+  const samplePreview = useVendorPreview((s) => s.previewType) != null;
+  const exitPreview = useVendorPreview((s) => s.exitPreview);
+  const signedIn = useAuthStore((s) => s.isAuthenticated);
+  const setIntent = useAuthStore((s) => s.setIntent);
+  const guestSample = samplePreview && !signedIn;
   const isOwner = myRole === 'OWNER';
   const isManager = myRole === 'OWNER' || myRole === 'MANAGER';
   const sub = useVendorSubscription(isOwner);
+  const setBilling = useSetVendorBillingMethod();
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
   const qc = useQueryClient();
@@ -148,10 +167,22 @@ export function VendorAccountScreen() {
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
-          <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Driver" onPress={() => setSwitcherOpen(true)} />
+          {guestSample ? (
+            <SettingsRow
+              icon="arrow-left"
+              label="Exit preview"
+              sub="Back to the welcome screen"
+              onPress={() => {
+                exitPreview();
+                setIntent(null);
+              }}
+            />
+          ) : (
+            <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Driver" onPress={() => setSwitcherOpen(true)} />
+          )}
         </Card>
 
-        {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} /> : null}
+        {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} setBilling={setBilling} /> : null}
 
         {isManager ? (
           <MmgPayLinkCard
@@ -175,6 +206,9 @@ export function VendorAccountScreen() {
             onSave={(p) => saveCallNumber.mutate(p)}
           />
         ) : null}
+
+        {/* A guest's sample store has no pin to move: the save needs a real account. */}
+        {isManager && !guestSample && store ? <StoreLocationCard store={store} /> : null}
 
         {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
 
@@ -265,6 +299,59 @@ export function VendorAccountScreen() {
   );
 }
 
+/**
+ * [Q8] Where the store is on the map: the pin riders and customers are sent to.
+ * There was no way to change it after sign-up, when it had been the phone's
+ * position. The same picker as List-your-business moves it, saved through
+ * PUT /vendor/profile: manager and up, like the rest of the store's details,
+ * and the server holds a moved pin to the same market rule as a new store.
+ */
+function StoreLocationCard({ store }: { store: any }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const movePin = useMutation({
+    mutationFn: (pin: StorePin) => vendorApi.updateProfile({ latitude: pin.latitude, longitude: pin.longitude }),
+    onMutate: () => setError(null),
+    onSuccess: () => {
+      setOpen(false);
+      toast.success('Store pin moved', 'Riders and customers will come to the new spot.');
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    // The server's own words: an out-of-market pin says what to do about it.
+    onError: (e: unknown) => setError(serverMessage(e, 'The pin could not be saved. Try again.')),
+  });
+  const current = Number.isFinite(store.latitude) && Number.isFinite(store.longitude)
+    ? { latitude: store.latitude as number, longitude: store.longitude as number }
+    : null;
+  const where = [store.addressLine1, store.city].filter(Boolean).join(', ');
+  return (
+    <>
+      <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
+        <SettingsRow
+          icon="map-pin"
+          label="Store location"
+          sub={where ? `${where} · move the pin` : 'Move the pin riders and customers are sent to'}
+          onPress={() => {
+            setError(null);
+            setOpen(true);
+          }}
+        />
+      </Card>
+      <StoreLocationPicker
+        visible={open}
+        current={current}
+        address={{ line: store.addressLine1 ?? '', city: store.city ?? '' }}
+        device={null}
+        saving={movePin.isPending}
+        error={error}
+        onClose={() => setOpen(false)}
+        onConfirm={(pin) => movePin.mutate(pin)}
+      />
+    </>
+  );
+}
+
 /** Billing state exactly as the subscription engine records it: trial, grace,
  *  rate and the next billing date (weekly flat fee — the whole Swift model). */
 /**
@@ -281,7 +368,7 @@ function VendorDocumentsSection({ vendorType }: { vendorType: string }) {
   );
 }
 
-function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
+function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string; setBilling: any }) {
   const navigation = useNavigation<any>();
   const pill = !sub
     ? { label: 'Inactive', tone: 'brand' as const }
@@ -314,6 +401,20 @@ function SubscriptionCard({ sub, phone }: { sub: any; phone?: string }) {
       {/* Only actionable billing status belongs here. A healthy account stays
           quiet; prepaid fee credit is deliberately not framed as a wallet. */}
       <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('VendorMySwiftNumber')} />
+      <BillingStopControl
+        sub={sub}
+        who="store"
+        pending={setBilling.isPending}
+        onStop={() => setBilling.mutate({ method: 'NONE' })}
+        onResume={() =>
+          setBilling.mutate({
+            method: resumeBillingMethod(sub),
+            ...(sub?.billingMethod === 'MOBILE_MONEY' && sub?.mmgPayerMsisdn
+              ? { mmgPayerMsisdn: sub.mmgPayerMsisdn }
+              : {}),
+          })
+        }
+      />
     </>
   );
 }

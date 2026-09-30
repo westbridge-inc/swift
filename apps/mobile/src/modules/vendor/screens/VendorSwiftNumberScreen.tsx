@@ -18,21 +18,25 @@ import {
 import { GUTTER } from '../shared';
 import { CopyButton } from '../../../components/billing/BillingSurfaces';
 import { useVendorSubscription } from '../../../hooks/vendorops';
-import { money } from '../../../lib/money';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
+import { moneyOrDash } from '../../../lib/money';
 import { payScreenState, type PayBandTone } from '../../../lib/billing';
 
 /** The tone of the state band — one 8px dot and one coloured word, never a
  *  filled tint card [Swift Pay §1a, "Colour budget"]. Viridian for covered,
- *  burnt amber for owed, ink for paused. Nothing on this screen turns red:
- *  being behind on a bill is not an error state, it is a Tuesday. */
+ *  burnt amber for owed, ink for paused, muted ink for a fee we could not
+ *  load. Nothing on this screen turns red: being behind on a bill is not an
+ *  error state, it is a Tuesday. */
 const PAY_BAND_INK: Record<PayBandTone, string> = {
   covered: color.success,
   owed: color.warning,
   paused: color.text.primary,
+  unknown: color.text.muted,
 };
 
 export function VendorSwiftNumberScreen({ navigation }: any) {
   const q = useVendorSubscription();
+  const pull = usePullToRefresh(q.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const insets = useSafeAreaInsets();
   const [aboutOpen, setAboutOpen] = useState(false);
   const sub: any = q.data;
@@ -99,7 +103,7 @@ export function VendorSwiftNumberScreen({ navigation }: any) {
         <ScrollView
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           showsVerticalScrollIndicator={false}
-          refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor={color.brand[500]} />}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
         >
           {q.isError ? (
             <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
@@ -114,8 +118,9 @@ export function VendorSwiftNumberScreen({ navigation }: any) {
             <T variant="micro" tone="muted">
               {state.eyebrow}
             </T>
+            {/* [H7] An unknown fee is a dash. "$0" asserts a fact; "—" admits there isn't one. */}
             <T variant="displayXl" style={{ marginTop: space.sm }}>
-              {money(state.amountGyd)}
+              {moneyOrDash(state.amountGyd)}
             </T>
             {state.covers ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>

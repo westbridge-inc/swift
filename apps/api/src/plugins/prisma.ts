@@ -118,6 +118,8 @@ const TENANT_QUERY_EXTENSIONS = {
   vendorPrepStat: scoped,
   etaPadStat: scoped,
   rideQueueEntry: scoped,
+  // [TAXI multi-stop] The intermediate stops of a ride belong to its operator, like the ride.
+  taxiTripStop: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
   supplyWatch: scoped,
@@ -128,6 +130,10 @@ const TENANT_QUERY_EXTENSIONS = {
   // [R048-007] A money-surface command carries the authority to change an
   // operator's money. It is tenant-owned like the surface it acts on.
   moneySurfaceCommand: scoped,
+  // [E02] What a store owes a customer back by MMG, and the transfers it says
+  // it sent: one operator's customers and money, walled like their order.
+  mmgRefundObligation: scoped,
+  mmgRefundSend: scoped,
   ratingOutbox: scoped,
   privilegedApproval: scoped,
   sensitiveReadLog: scoped,

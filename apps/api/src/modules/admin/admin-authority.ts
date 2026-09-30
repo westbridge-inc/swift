@@ -76,11 +76,35 @@ export const ADMIN_ACTION_CLASSES: Record<AdminActionClass, AdminActionMeaning> 
  * record what that row looked like before and after — as digests and a
  * field-level diff of the fields that matter, never the payload.
  */
+/**
+ * [C-01] The model columns a snapshot may select on. A CLOSED set: adding one
+ * is a deliberate edit here, never a string inferred from a route.
+ */
+export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code'] as const;
+export type SnapshotUniqueField = (typeof SNAPSHOT_UNIQUE_FIELDS)[number];
+
 export interface AdminRouteEntity {
   /** The Prisma model, as it is named on the client (`subscription`, `order`). */
   readonly model: string;
-  /** Which route param identifies it. Defaults to `id`. */
-  readonly param?: string;
+  /**
+   * [C-01] Which ROUTE PARAMETER carries the value — `:code`, `:key`, `:userId`.
+   * Defaults to `id`. This is a fact about the URL.
+   */
+  readonly routeParam?: string;
+  /**
+   * [C-01] Which MODEL COLUMN that value selects on. Defaults to `id`. This is a
+   * fact about the schema, and it is NOT the same fact as `routeParam`:
+   *
+   *     /doc-types/:code/...        routeParam 'code'    uniqueField 'code'
+   *     /config/:key               routeParam 'key'     uniqueField 'key'
+   *     /rlp/movers/:userId/...    routeParam 'userId'  uniqueField 'id'   <- differ
+   *
+   * One field served both meanings and the third row is why: `snapshot()` read
+   * `param` and asked for `where: { id }` on DocType, whose only key is `code`.
+   * Prisma refused, the catch swallowed it, and every external-processing
+   * decision recorded a null digest pair and an empty diff.
+   */
+  readonly uniqueField?: SnapshotUniqueField;
   /** The fields whose change is worth naming. The digest covers the whole row
    *  regardless, so this is what a reader sees first, not the limit of what is
    *  detected. */
@@ -113,11 +137,12 @@ const E = {
   // refund actually moves; the reference and the amount are the only proof
   // that a refund happened, and they belong in the trail as a diff.
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
-  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
+  // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
+  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
-  docType: { model: 'docType', param: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
-  platformConfig: { model: 'platformConfig', param: 'key', fields: ['value'] },
+  docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
+  platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
   zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
@@ -131,12 +156,12 @@ const E = {
   returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'reviewedAt', 'refundRef', 'refundPaidAmount', 'refundPaidAt'] },
   claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt', 'paymentRef', 'paidAmount', 'reviewedAt'] },
   // [DOC-1 §31.4 · P31-1] Loss protection suspension is a stated, reversible fact on the account.
-  lossProtection: { model: 'user', param: 'userId', fields: ['lossProtectionSuspendedAt', 'lossProtectionSuspendedReason'] },
+  // [C-01] `:userId` in the URL, `user.id` in the schema — the two names differ here.
+  lossProtection: { model: 'user', routeParam: 'userId', fields: ['lossProtectionSuspendedAt', 'lossProtectionSuspendedReason'] },
   contentReport: { model: 'contentReport', fields: ['status', 'disposition'] },
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
   approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
-  agentRequest: { model: 'agentActionRequest', fields: ['status', 'decidedBy', 'decidedAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
@@ -162,6 +187,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
+  'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),
@@ -179,6 +205,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /drivers/:id': c('C1', 'mover.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
+  // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
+  // vehicle subject's documents — a person's access to live work, so C3 (reason owed).
+  'POST /drivers/:id/vehicle-assignment/approve': c('C3', 'driver.assignment.approve', E.driver),
 
   // ── Orders and live ops ─────────────────────────────────────────────────
   'GET /orders': c('C1', 'order.read'),
@@ -191,6 +220,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /orders/:id/food-age-hold/release': c('C2', 'order.hold.release'),
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),
+  'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
@@ -354,15 +384,16 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // authorises is still gated on its own class when the requester re-issues it.
   'GET /approvals': c('C0', 'approvals.read'),
   'POST /approvals/:id/decide': c('C3', 'approvals.decide', E.approval),
+  // [DS110-14] Executing a decision is not itself a decision: the approval
+  // already carries the two-person authorisation, and the replayed request
+  // passes through its own C4/C5 gate again. C2 — no new reason, no new
+  // approval — so "apply" can never need a second approval of its own.
+  'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
 
-  // ── Support, audit and the agent ────────────────────────────────────────
+  // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
   'GET /support': c('C1', 'support.read'),
   'PUT /support/:id/resolve': c('C2', 'support.resolve'),
-  'GET /agent/approvals': c('C0', 'agent.read'),
-  'GET /agent/audit': c('C1', 'agent.read'),
-  'POST /agent/approvals/:id/approve': c('C3', 'agent.approval.decide', E.agentRequest),
-  'POST /agent/approvals/:id/reject': c('C3', 'agent.approval.decide', E.agentRequest),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),

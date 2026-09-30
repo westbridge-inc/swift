@@ -730,6 +730,7 @@ describe('[ALG-06 ①] the escalating re-offer — Swift’s own money', () => {
 describe('[ALG-06] source pins — the hook sits where the law says', () => {
   const service = readFileSync(path.join(__dirname, '../modules/dispatch/dispatch.service.ts'), 'utf8');
   const rescue = readFileSync(path.join(__dirname, '../modules/dispatch/rescue.ts'), 'utf8');
+  const generationKeys = readFileSync(path.join(__dirname, '../modules/dispatch/dispatch-generation-keys.ts'), 'utf8');
   const queue = readFileSync(path.join(__dirname, '../jobs/queue.ts'), 'utf8');
 
   it('the cutoff runs before the live-offer check, inside dispatchOrder, for the RIDER pool only', () => {
@@ -745,7 +746,7 @@ describe('[ALG-06] source pins — the hook sits where the law says', () => {
   it('the payable is settled after the durable claim, never before, and never load-bearing for it', () => {
     const start = service.indexOf('async acceptOffer(');
     const claim = service.indexOf('const claimed = await this.claimOrder(', start);
-    const settle = service.indexOf("if (pool === 'RIDER') await this.settleRescueIncentive(orderId, mover.id);", start);
+    const settle = service.indexOf("if (pool === 'RIDER') await this.settleRescueIncentive(orderId, mover.id, offeredVersion);", start);
     const ret = service.indexOf('return claimed;', start);
     expect(claim).toBeGreaterThan(start);
     expect(settle).toBeGreaterThan(claim);
@@ -755,10 +756,18 @@ describe('[ALG-06] source pins — the hook sits where the law says', () => {
   });
 
   it("rescue's key formats mirror the dispatch service's, and the incentive rides the offer payload", () => {
-    for (const prefix of ['dispatch:offer:${', 'dispatch:declined:${', 'dispatch:exhausts:${', 'dispatch:round:${']) {
-      expect(rescue).toContain(prefix);
-      expect(service).toContain(prefix);
+    expect(service).toContain('const declinedKey = dispatchDeclinedKey;');
+    expect(service).toContain('const roundKey = dispatchRoundKey;');
+    expect(service).toContain('const exhaustKey = dispatchExhaustKey;');
+    for (const helper of ['dispatchDeclinedKey', 'dispatchExhaustKey', 'dispatchRoundKey']) {
+      expect(rescue).toContain(helper);
+      expect(generationKeys).toContain(`export const ${helper}`);
     }
+    for (const prefix of ['dispatch:declined:${', 'dispatch:exhausts:${', 'dispatch:round:${']) {
+      expect(generationKeys).toContain(prefix);
+    }
+    expect(service).toContain('`dispatch:offer:${orderId}`');
+    expect(rescue).toContain('`dispatch:offer:${orderId}`');
     const emit = service.indexOf("emit('dispatch:offer', {");
     expect(service.slice(emit, emit + 4000)).toContain('rescueIncentiveGyd: rescueGyd > 0 ? rescueGyd : null,');
   });

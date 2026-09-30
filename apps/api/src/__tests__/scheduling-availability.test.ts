@@ -11,6 +11,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
 import { computeDaySlots, slotFitsConfig, strideMinutes } from '../modules/booking/availability';
+import { guyanaDayKey, guyanaWallClockParts, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
@@ -85,8 +86,9 @@ async function makeServiceVendor() {
 }
 
 function tomorrowParts() {
-  const d = new Date(Date.now() + DAY);
-  return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate() };
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  const next = new Date(Date.UTC(y!, m! - 1, d! + 1));
+  return { y: next.getUTCFullYear(), m: next.getUTCMonth() + 1, d: next.getUTCDate() };
 }
 function tomorrowStr() {
   const p = tomorrowParts();
@@ -94,7 +96,7 @@ function tomorrowStr() {
 }
 function tomorrowAt(hour: number, minute = 0): Date {
   const p = tomorrowParts();
-  return new Date(Date.UTC(p.y, p.m - 1, p.d, hour, minute));
+  return instantOfGuyanaWallClock(new Date(Date.UTC(p.y, p.m - 1, p.d, hour, minute)));
 }
 
 const getSlots = (itemId: string, token: string) =>
@@ -144,29 +146,29 @@ describe('SCH-E: buffers + lead time (pure math table)', () => {
   it('no buffer: aligned hourly starts fill the window', () => {
     const slots = computeDaySlots({ ...base, ...day, config: cfg({}) });
     expect(slots.map((s) => s.toISOString())).toEqual([
-      '2026-08-05T09:00:00.000Z', '2026-08-05T10:00:00.000Z', '2026-08-05T11:00:00.000Z',
+      '2026-08-05T13:00:00.000Z', '2026-08-05T14:00:00.000Z', '2026-08-05T15:00:00.000Z',
     ]);
   });
 
   it('bufferMinutes widens the stride and the END still fits the service', () => {
     const slots = computeDaySlots({ ...base, ...day, config: cfg({ bufferMinutes: 15 }) });
     expect(slots.map((s) => s.toISOString())).toEqual([
-      '2026-08-05T09:00:00.000Z', '2026-08-05T10:15:00.000Z', // 11:30 would end 12:30 — refused
+      '2026-08-05T13:00:00.000Z', '2026-08-05T14:15:00.000Z', // 11:30 would end 12:30 — refused
     ]);
     expect(strideMinutes(cfg({ bufferMinutes: 15 }) as never)).toBe(75);
   });
 
   it('minNoticeMinutes hides too-soon slots; reservation refuses them too', () => {
-    const now = new Date('2026-08-05T08:30:00Z');
+    const now = new Date('2026-08-05T12:30:00Z'); // 08:30 Guyana
     const slots = computeDaySlots({ ...base, ...day, now, config: cfg({ minNoticeMinutes: 120 }) });
-    expect(slots.map((s) => s.toISOString())).toEqual(['2026-08-05T11:00:00.000Z']); // 09:00+10:00 < now+2h
-    expect(slotFitsConfig(new Date('2026-08-05T09:00:00Z'), cfg({ minNoticeMinutes: 120 }) as never, now)).toBe('TOO_SOON');
-    expect(slotFitsConfig(new Date('2026-08-05T11:00:00Z'), cfg({ minNoticeMinutes: 120 }) as never, now)).toBe('OK');
+    expect(slots.map((s) => s.toISOString())).toEqual(['2026-08-05T15:00:00.000Z']); // 09:00+10:00 < now+2h
+    expect(slotFitsConfig(new Date('2026-08-05T13:00:00Z'), cfg({ minNoticeMinutes: 120 }) as never, now)).toBe('TOO_SOON');
+    expect(slotFitsConfig(new Date('2026-08-05T15:00:00Z'), cfg({ minNoticeMinutes: 120 }) as never, now)).toBe('OK');
   });
 
   it('buffer alignment is enforced at reservation (off-grid start refused)', () => {
-    expect(slotFitsConfig(new Date('2026-08-05T10:00:00Z'), cfg({ bufferMinutes: 15 }) as never, base.now)).toBe('OUTSIDE');
-    expect(slotFitsConfig(new Date('2026-08-05T10:15:00Z'), cfg({ bufferMinutes: 15 }) as never, base.now)).toBe('OK');
+    expect(slotFitsConfig(new Date('2026-08-05T14:00:00Z'), cfg({ bufferMinutes: 15 }) as never, base.now)).toBe('OUTSIDE');
+    expect(slotFitsConfig(new Date('2026-08-05T14:15:00Z'), cfg({ bufferMinutes: 15 }) as never, base.now)).toBe('OK');
   });
 });
 
@@ -187,7 +189,7 @@ describe('SCH-A: exceptions subtract — picker AND reservation, no leakage', ()
 
     const afternoon = (await getSlots(itemA.id, owner.token)).json().data.slots as string[];
     expect(afternoon.length).toBe(4); // 09,10,11,12 remain
-    expect(afternoon.every((s) => new Date(s).getUTCHours() < 13)).toBe(true);
+    expect(afternoon.every((s) => guyanaWallClockParts(new Date(s)).hour < 13)).toBe(true);
 
     // A stale picker cannot book into the block — same face as SLOT_TAKEN,
     // reason never leaks.
@@ -245,19 +247,17 @@ describe('SCH-A: exceptions subtract — picker AND reservation, no leakage', ()
 });
 
 describe('SCH-F: the timezone convention holds across the boundary', () => {
-  it('vendor-entered 09:00 ≡ the first offered slot\'s UTC face ≡ the stored booking instant', async () => {
+  it('vendor-entered 09:00 maps to 13:00Z on the wire and in the booking row', async () => {
     const { itemA, owner } = await makeServiceVendor();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
 
     const first = ((await getSlots(itemA.id, owner.token)).json().data.slots as string[])[0]!;
     const instant = new Date(first);
-    expect(instant.getUTCHours()).toBe(9); // the vendor's "09:00", verbatim on the UTC face
+    expect(instant.getUTCHours()).toBe(13);
     expect(instant.getUTCMinutes()).toBe(0);
 
     const booking = await bookings.reserveSlot(itemA.id, customer.userId, instant);
     expect(booking.slotStart.toISOString()).toBe(first); // stored instant is byte-identical
-    // The mobile picker formats with timeZone:'UTC' (CartScreen fmtSlot) —
-    // rendering this instant shows 9:00 to the customer. One convention,
-    // vendor-typed to customer-shown, zero offsets anywhere.
+    expect(guyanaWallClockParts(booking.slotStart).hour).toBe(9);
   });
 });

@@ -1,3 +1,4 @@
+import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -227,6 +228,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  recordDispatchQueue(app);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
@@ -551,6 +553,10 @@ describe('vendor prep signal with rider assigned', () => {
       where: { userId: rider.userId, title: 'Order ready for pickup' },
     });
     expect(note).not.toBeNull();
+    // [Q10] ...as an EARNER push: the tag keeps it out of a shopping inbox, and
+    // the tap-router opens the rider's live job for this kind (the mobile
+    // census, notification-router.test.ts), not the customer order screen.
+    expect(note!.data).toEqual({ orderId: order.id, kind: 'prep_ready', audience: 'earner' });
 
     // Double-tap is idempotent, not an error.
     const again = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, {}, vendor.token);
@@ -693,17 +699,21 @@ describe('driver offer decline', () => {
     const driver = await makeDriver({ online: true, at: DECLINE_AT });
     const ride = await makeOrder(customer.userId, null, 'PENDING', { orderType: 'TAXI', taxiFareTotal: 2300, at: DECLINE_AT });
 
-    const dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider());
+    const dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
     const offered = await dispatch.dispatchOrder(ride.id);
     expect(offered.offered).toBe(driver.driverId);
+    // Introduce the successor after the first offer so ranking cannot pick it first.
+    const next = await makeDriver({ online: true, at: DECLINE_AT });
 
     const res = await inject('POST', '/api/v1/driver/offers/decline', { orderId: ride.id }, driver.token);
     expect(res.statusCode).toBe(200);
 
     const offerKey = await app.redis.get(`dispatch:offer:${ride.id}`);
-    expect(offerKey).toBeNull(); // this driver's offer is gone (cascade exhausted — no other drivers)
+    expect(offerKey!.split(':')[0]).toBe(next.driverId); // cascade advanced to the successor
     const declined = await app.redis.smembers(`dispatch:declined:${ride.id}`);
     expect(declined).toContain(driver.driverId);
+    expect(await app.redis.get(`dispatch:mover-offer:${driver.driverId}`)).toBeNull();
+    expect((await app.redis.get(`dispatch:mover-offer:${next.driverId}`))!.split(':')[0]).toBe(ride.id);
     await app.redis.del(`dispatch:declined:${ride.id}`, `dispatch:round:${ride.id}`, `dispatch:exhausts:${ride.id}`);
   });
 });

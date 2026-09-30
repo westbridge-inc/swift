@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
@@ -8,10 +9,11 @@ import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
   acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
-  markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
-  retryDispatch, setPicked, type OrderLine, type VendorOrder,
+  markDelivered, markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
+  retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
 
 // Board buckets — same lanes the kitchen thinks in.
@@ -61,6 +63,13 @@ function actionsFor(o: VendorOrder) {
     else if (!o.readyAt) out.push({ label: 'Mark ready', kind: 'ready' });
   } else if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) {
     out.push({ label: 'Mark picked up', kind: 'complete-pickup' });
+  } else if (
+    (s === 'READY' || s === 'READY_FOR_PICKUP')
+    && o.fulfillment === 'DELIVERY'
+    && o.fulfillmentMode === 'VENDOR_DELIVERY'
+    && !o.riderId
+  ) {
+    out.push({ label: 'Confirm delivered', kind: 'delivered' });
   }
   return out;
 }
@@ -211,6 +220,8 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // wallet message. Without one there is nothing to reconcile against later.
   const [mmgRef, setMmgRef] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [confirmDelivered, setConfirmDelivered] = useState(false);
+  const [confirmReject, setConfirmReject] = useState(false);
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', id) });
@@ -219,10 +230,10 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const act = useMutation({
     mutationFn: async (kind: string) => {
       setError(null);
-      if (kind === 'accept') return acceptOrder(id, prepTime);
-      if (kind === 'reject') return rejectOrder(id);
+      if (kind === 'accept') return acceptOrder(id, order.data?.fulfillment === 'APPOINTMENT' ? undefined : prepTime);
       if (kind === 'preparing') return markPreparing(id);
       if (kind === 'ready') return markReady(id);
+      if (kind === 'delivered') return markDelivered(id);
       if (kind === 'complete-pickup') return completePickup(id, pickupCode.trim());
       if (kind === 'complete-appointment') {
         const { apiFetch } = await import('@/lib/auth');
@@ -230,10 +241,23 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       }
       if (kind === 'confirm-payment') return confirmPayment(id, mmgRef.trim());
       if (kind === 'retry-dispatch') return retryDispatch(id);
+      if (kind === 'vendor-delivery') return setFulfillmentMode(id, 'VENDOR_DELIVERY');
+      if (kind === 'platform-rider') return setFulfillmentMode(id, 'PLATFORM_RIDER');
       throw new Error(`Unknown action ${kind}`);
     },
     onError: (e) => setError((e as Error).message),
     onSettled: refresh,
+  });
+  // [E10] The API requires a reason on every rejection, so reject is its own
+  // mutation keyed on the chosen preset — it never flows through `act` with no
+  // reason. Same three presets the mobile app offers.
+  const reject = useMutation({
+    mutationFn: (why: string) => rejectOrder(id, why),
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => {
+      setConfirmReject(false);
+      refresh();
+    },
   });
 
   // `preparingAt` / `readyAt` / `paymentStatus` are declared on VendorOrder now
@@ -266,7 +290,31 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         }[String(o.paymentStatus ?? '')] ?? null
       : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
-  const rider = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : null;
+  const riderName = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : '';
+  const riderAssigned = Boolean(o.riderId || o.rider);
+  const isDelivery = o.fulfillment === 'DELIVERY';
+  const selfDelivery = o.fulfillmentMode === 'VENDOR_DELIVERY';
+  const activeDelivery = isDelivery && !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
+  const mayChangeDeliveryOwner = activeDelivery && !riderAssigned
+    && ['ACCEPTED', 'CONFIRMED', 'PREPARING', 'READY', 'READY_FOR_PICKUP'].includes(s);
+  const canChooseVendorDelivery = mayChangeDeliveryOwner && o.vendor?.selfDeliveryEnabled === true && !selfDelivery;
+  // A store-wide preference changing later must not strand an existing
+  // VENDOR_DELIVERY order without a way back to platform dispatch.
+  const canChoosePlatformRider = mayChangeDeliveryOwner && selfDelivery;
+  const deliveryOwnerTitle = selfDelivery
+    ? 'Your store delivers this order'
+    : riderAssigned
+      ? 'A Swift rider delivers this order'
+      : o.fulfillmentMode === 'PLATFORM_RIDER'
+        ? 'Platform rider delivery selected'
+        : 'Delivery owner not chosen yet';
+  const deliveryOwnerDescription = selfDelivery
+    ? 'No Swift rider will be sent for this order.'
+    : riderAssigned
+      ? 'The assigned rider is responsible for delivery.'
+      : o.fulfillmentMode === 'PLATFORM_RIDER'
+        ? 'No rider is assigned yet.'
+        : 'No delivery owner has been recorded yet.';
 
   return (
     <div className="rounded-2xl border border-black/5 bg-white p-6">
@@ -276,6 +324,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
           <p className="mt-0.5 text-sm text-[var(--swift-muted)]">
             {customer} · {timeAgo(o.placedAt)} · {o.fulfillment ?? o.orderType}
           </p>
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
         </div>
         <div className="flex items-center gap-2">
           {statusChip(s)}
@@ -297,7 +346,39 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       </div>
 
       {o.deliveryInstructions && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Note: {o.deliveryInstructions}</p>}
-      {rider && <p className="mt-3 text-sm text-[var(--swift-muted)]">Rider: <b className="text-[var(--swift-ink)]">{rider}</b> {o.rider?.user?.phone}</p>}
+      {riderAssigned && <p className="mt-3 text-sm text-[var(--swift-muted)]">Rider: <b className="text-[var(--swift-ink)]">{riderName || 'Swift rider'}</b> {o.rider?.user?.phone}</p>}
+      {activeDelivery && (
+        <section className="mt-3 rounded-lg bg-[var(--swift-subtle)] p-3" aria-label="Delivery owner">
+          <p className="text-sm font-semibold">
+            {deliveryOwnerTitle}
+          </p>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">
+            {deliveryOwnerDescription}
+          </p>
+          {(canChooseVendorDelivery || canChoosePlatformRider) && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {canChooseVendorDelivery && (
+                <button
+                  onClick={() => act.mutate('vendor-delivery')}
+                  disabled={act.isPending}
+                  className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold hover:bg-white disabled:opacity-50"
+                >
+                  We’ll deliver
+                </button>
+              )}
+              {canChoosePlatformRider && (
+                <button
+                  onClick={() => act.mutate('platform-rider')}
+                  disabled={act.isPending}
+                  className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold hover:bg-white disabled:opacity-50"
+                >
+                  Get a Swift rider
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+      )}
       {/* HND-003: the vendor VERIFIES the pickup code, it never READS it — both
           vendor routes strip the column, so this hint used to be gated on a
           field that can never arrive and therefore never rendered. Driven now
@@ -313,7 +394,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       <div className="mt-5 flex flex-wrap items-center gap-2">
         {actions.map((a) => (
           <span key={a.kind} className="flex items-center gap-2">
-            {a.kind === 'accept' && (
+            {a.kind === 'accept' && o.fulfillment !== 'APPOINTMENT' && (
               <select
                 value={prepTime}
                 onChange={(e) => setPrepTime(Number(e.target.value))}
@@ -331,8 +412,13 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
               />
             )}
             <button
-              onClick={() => act.mutate(a.kind)}
-              disabled={act.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
+              onClick={() =>
+                a.kind === 'delivered'
+                  ? setConfirmDelivered(true)
+                  : a.kind === 'reject'
+                    ? setConfirmReject(true)
+                    : act.mutate(a.kind)}
+              disabled={act.isPending || reject.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
               className={`rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 ${
                 a.tone === 'danger'
                   ? 'border border-[var(--swift-red)]/30 text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5'
@@ -343,6 +429,56 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             </button>
           </span>
         ))}
+        {confirmDelivered && (
+          <div role="dialog" aria-label="Confirm store delivery" className="w-full rounded-xl border border-amber-300 bg-amber-50 p-4">
+            <p className="text-sm font-semibold text-amber-950">Did your store hand this order to the customer?</p>
+            <p className="mt-1 text-sm text-amber-900">Only confirm after the handoff. This closes the order as delivered.</p>
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={() => {
+                  setConfirmDelivered(false);
+                  act.mutate('delivered');
+                }}
+                disabled={act.isPending}
+                className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              >
+                Yes, delivered
+              </button>
+              <button
+                onClick={() => setConfirmDelivered(false)}
+                disabled={act.isPending}
+                className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold disabled:opacity-50"
+              >
+                Not yet
+              </button>
+            </div>
+          </div>
+        )}
+        {confirmReject && (
+          <div role="dialog" aria-label={order.data?.fulfillment === 'APPOINTMENT' ? 'Confirm booking decline' : 'Confirm order rejection'} className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
+            <p className="text-sm font-semibold text-[var(--swift-red)]">{order.data?.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}</p>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">The customer is told right away — pick what happened. This can’t be undone.</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {rejectReasonsFor(order.data?.fulfillment).map((why) => (
+                <button
+                  key={why}
+                  onClick={() => reject.mutate(why)}
+                  disabled={reject.isPending}
+                  className="rounded-lg border border-[var(--swift-red)]/30 px-4 py-2 text-sm font-semibold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
+                >
+                  {why}
+                </button>
+              ))}
+              <button
+                onClick={() => setConfirmReject(false)}
+                disabled={reject.isPending}
+                className="rounded-lg border border-black/10 px-4 py-2 text-sm font-semibold disabled:opacity-50"
+              >
+                Keep it
+              </button>
+            </div>
+          </div>
+        )}
         {payBlockedReason && (
           <p className="w-full text-sm text-[var(--swift-muted)]">{payBlockedReason}</p>
         )}
@@ -364,7 +500,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             {money(o.totalAmount)} received in my MMG
           </button>
         )}
-        {s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !rider && (
+        {s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !selfDelivery && !riderAssigned && (
           <button
             onClick={() => act.mutate('retry-dispatch')}
             disabled={act.isPending}
@@ -469,6 +605,7 @@ export default function OrdersPage() {
                 {[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.items.length}{' '}
                 {o.items.length === 1 ? 'item' : 'items'} · {money(o.totalAmount)} · {timeAgo(o.placedAt)}
               </p>
+              {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
               {o.vendor?.name && <p className="mt-0.5 text-xs text-[var(--swift-muted)]">{o.vendor.name}</p>}
             </button>
           ))}

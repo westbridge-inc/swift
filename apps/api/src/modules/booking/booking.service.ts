@@ -2,6 +2,7 @@ import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { slotBlocked, slotFitsConfig, type ExceptionWindow } from './availability';
+import { guyanaWallClockParts } from '../../utils/guyana-day';
 
 /** Shape stored in Item.bookingConfig for SERVICE listings. */
 export interface BookingConfig {
@@ -68,17 +69,19 @@ export class BookingService {
     }
 
     const exceptions = await this.exceptionsFor(item.vendorId, slotStart);
-    const minutesIntoDay = slotStart.getUTCHours() * 60 + slotStart.getUTCMinutes();
+    const local = guyanaWallClockParts(slotStart);
+    const minutesIntoDay = local.hour * 60 + local.minute;
     if (slotBlocked(minutesIntoDay, config.durationMinutes, itemId, exceptions)) {
-      // Same face as a taken slot — a block's existence (or reason) never leaks.
+      // A block's existence (or reason) never leaks.
       throw new AppError(409, 'SLOT_TAKEN', 'That slot was just taken — pick another time');
     }
     return config;
   }
 
-  /** The vendor's exception windows overlapping the slot's UTC-face date. */
+  /** The vendor's exception windows for the slot's Guyana calendar date. */
   async exceptionsFor(vendorId: string, onDate: Date): Promise<ExceptionWindow[]> {
-    const day = new Date(Date.UTC(onDate.getUTCFullYear(), onDate.getUTCMonth(), onDate.getUTCDate()));
+    const local = guyanaWallClockParts(onDate);
+    const day = new Date(Date.UTC(local.year, local.month - 1, local.day));
     return this.prisma.bookingException.findMany({
       where: { vendorId, date: day },
       select: { itemId: true, start: true, end: true },

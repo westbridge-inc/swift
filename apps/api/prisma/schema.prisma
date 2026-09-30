@@ -394,6 +394,7 @@ model Tenant {
   vendors          Vendor[]
   orders           Order[]
   rideQueueEntries RideQueueEntry[]
+  taxiTripStops    TaxiTripStop[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -407,6 +408,8 @@ model Tenant {
   earnings          Earning[]
   settlements       Settlement[]
   deliveryCashSettlements DeliveryCashSettlement[]
+  mmgRefundObligations    MmgRefundObligation[]
+  mmgRefundSends          MmgRefundSend[]
   payoutRequests    PayoutRequest[]
   payoutSchedules   PayoutSchedule[]
   deletionReceipts  DeletionReceipt[]
@@ -805,9 +808,15 @@ model DispatchSearch {
   assignedTo      String?
   exhaustedAt     DateTime?
   resolution      String? // RETRIED | SWITCHED_PICKUP | CANCELLED | WATCHING | MANUAL
+  /// Delivery-custody generation read from Order when this search began.
+  /// Null is the pre-generation legacy shape and for non-delivery searches.
+  /// Vendor cleanup is bounded to generations at or before the decision that
+  /// requested it, so a delayed callback cannot cancel a newer rider search.
+  deliveryAuthorityVersion Int?
 
   @@index([status, startedAt])
   @@index([subjectId])
+  @@index([subjectId, deliveryAuthorityVersion, status])
   @@map("dispatch_searches")
 }
 
@@ -1289,6 +1298,12 @@ model Driver {
   /// Top taxi tier this vehicle serves (serves all classes <= it). Set via the
   /// driver-profile API and the admin drivers page (premium-fleet onboarding).
   rideClass                RideClass        @default(ECONOMY)
+  /// [TAXI multi-stop] The driver's app can run a ride with intermediate stops.
+  /// To be set from the capabilities the app declares (TAXI_STOPS_V1) on each
+  /// go-online, so a multi-stop ride is offered only to a capable driver. False
+  /// until the app says otherwise: an app that predates stops is never handed
+  /// one. Nothing sets or reads it yet.
+  taxiStopsCapable         Boolean          @default(false)
   /// Vehicle visual identity [rides spec 6B] — additive, nullable, every
   /// consumer handles null. bodyType from the make/model fleet mapping
   /// (UNKNOWN surfaces one-tap classification in admin — never guessed
@@ -1489,6 +1504,18 @@ model Vendor {
   mmgPayUrlPending   String?
   mmgPayUrlPendingAt DateTime?
   mmgPayUrlApplyAt   DateTime?
+
+  /// [E02 · refund rail 1/8] The store's MMG checkout is paused (cash only)
+  /// while `mmgCheckoutHeldAt` is set: the owner-approved consequence of
+  /// missing the MMG refund deadline too often. Announced, reasoned and
+  /// reversible: why, and who (null = the deadline sweeper). Misses are never
+  /// stored as a counter; they are counted from the obligations whose
+  /// `missedAt` falls after `mmgMissesClearedAt`, which support moves forward
+  /// when it restores the checkout. Nothing reads or writes these yet.
+  mmgCheckoutHeldAt     DateTime?
+  mmgCheckoutHeldReason String?
+  mmgCheckoutHeldById   String?
+  mmgMissesClearedAt    DateTime?
 
   /// The number the store CHOOSES to publish so a customer can call before
   /// ordering ("do you have this in stock", "can you do this today"). Opt-in:
@@ -1720,7 +1747,7 @@ model BookingException {
   itemId    String?
   vendorId  String
   date      DateTime @db.Date
-  start     String? // "13:00" local wall-clock (the UTC-face convention)
+  start     String? // "13:00" market wall-clock for the date-only exception
   end       String?
   reason    String?
   createdAt DateTime @default(now())
@@ -1817,6 +1844,23 @@ model Order {
   // delivery. Cleared implicitly once the order reaches DELIVERED.
   courierProofIssuedUrl     String?
   courierProofIssuedRiderId String?
+  /// [E17] Courier return-to-sender after custody. The mover (or support via
+  /// the ticket) starts a return from any custody state (RETURNING) and closes
+  /// it with a return photo (RETURNED). The reason + timestamps are the
+  /// support-visible record; no fee is minted for the return leg.
+  courierReturnReason         String?
+  courierReturnRequestedAt    DateTime?
+  courierReturnProofPhotoUrl  String?
+  courierReturnedAt           DateTime?
+  // E16: pickup custody proof. PICKED_UP is a physical-custody claim, so it
+  // carries the same issued-then-exact-matched two-step as delivery proof:
+  // the server-issued URL + the rider it was issued to, the bound photo, and
+  // the rider's location at pickup. Time is pickedUpAt (below).
+  courierPickupProofIssuedUrl     String?
+  courierPickupProofIssuedRiderId String?
+  courierPickupProofPhotoUrl      String?
+  courierPickupProofLat           Float?
+  courierPickupProofLng           Float?
   courierTrackingToken      String?      @unique
 
   taxiPickupAddress  String?
@@ -1824,6 +1868,14 @@ model Order {
   taxiPassengerCount Int?
   taxiDistance       Float?
   taxiDuration       Int?
+  /// [TAXI multi-stop] How many intermediate stops the ride was requested with
+  /// (1..3; a CHECK holds the range). NULL = a single-leg ride, which is every
+  /// ride today. The stops themselves are `taxiStops`; the pickup stays in
+  /// pickup*, the FINAL destination in delivery* / taxiDropoffAddress, and
+  /// taxiDistance / billableKm / taxiDuration / taxiFareTotal describe the
+  /// whole route.
+  taxiStopCount      Int?
+  taxiStops          TaxiTripStop[]
   /// [ALG-18] THE billable distance — decided once at quote time and frozen
   /// here, with the engine that produced it. The fee path priced this number;
   /// the receipt states it; the earnings sentence will read it. Null on
@@ -1881,12 +1933,39 @@ model Order {
   mmgAttestedRef           String?   @unique
   mmgAttestedById          String?
   mmgAttestedAt            DateTime?
+  /// [E02 · refund rail 1/8] The amount the store attested it received, written
+  /// with the attestation above (vendor/mmg-attestation.ts). It is the CAP: the
+  /// non-void MMG refund obligations on this order can never add up to more
+  /// (a deferred trigger in 20260925000100_mmg_refund_rail). Null = nothing was
+  /// attested, so nothing is refundable on this rail.
+  mmgAttestedAmount        Decimal?  @db.Decimal(12, 2)
+  /// [E02] What the store owes back by MMG on this order, and the transfers it
+  /// says it sent (order/mmg-refund-law.ts is the one law for both).
+  mmgRefundObligations     MmgRefundObligation[]
+  mmgRefundSends           MmgRefundSend[]
   /// [DOC-1 §31.5 · P31-2] The customer's own claim, from their device: "I paid" with the
   /// reference they entered — a second, independent claim; a dispute after the store's
   /// claim is a mismatch that holds dispatch until a human looks.
   customerClaimedPaidAt    DateTime?
   customerPaymentRef       String?
   mmgClaimMismatchAt       DateTime?
+  /// [ORDER-SPINE S1-6] The customer's statement under the locked claim authority
+  /// (order/mmg-claim.service.ts). UNRECORDED is "nothing said under this contract",
+  /// NOT proof of silence before it; NOT_PAID is durable, so a later store claim finds
+  /// it. `customerClaimedPaidAt`/`customerPaymentRef` stay as its compatibility
+  /// projections. `mmgClaimMismatchAt` remains THE open-disagreement latch every
+  /// fulfilment gate reads; CHECK constraints make an unheld contradiction unwritable.
+  customerMmgClaim         CustomerMmgClaim    @default(UNRECORDED)
+  customerMmgClaimAt       DateTime?
+  /// One generation counter for the claim facts: every changed customer statement,
+  /// first store claim and operator decision advances it; exact repeats do not. An
+  /// operator decision names the generation it reviewed.
+  mmgClaimRevision         Int                 @default(0)
+  /// The latest operator decision and the generation it produced. It covers the
+  /// claim facts only while `mmgClaimResolvedRevision = mmgClaimRevision`.
+  mmgClaimResolution       MmgClaimResolution?
+  mmgClaimResolvedAt       DateTime?
+  mmgClaimResolvedRevision Int?
 
   estimatedPrepTime     Int?
   estimatedDeliveryTime Int?
@@ -1990,6 +2069,10 @@ model Order {
   /// FUL-004: who actually delivers this order (set when the vendor chooses at
   /// Ready). NULL on orders predating the choice — treated as PLATFORM_RIDER.
   fulfillmentMode FulfillmentMode?
+  /// Monotonic custody generation. Every committed change or first resolution
+  /// of fulfillmentMode increments it. Dispatch offers and search journals pin
+  /// this value so delayed cleanup from generation N cannot erase N+1.
+  fulfillmentModeVersion Int @default(0)
   appointmentSlot DateTime?
   /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
   /// vendor verifies it to close the order (no rider involved). Null otherwise.
@@ -2029,6 +2112,52 @@ enum OrderType {
   TAXI
 }
 
+/// [TAXI multi-stop] Progress of one intermediate stop. Its edges live in
+/// modules/order/order-status.ts (TAXI_STOP_TRANSITIONS), never here.
+enum TaxiStopStatus {
+  PENDING
+  ARRIVED
+  DEPARTED
+  SKIPPED
+}
+
+/// [TAXI multi-stop] One intermediate stop of ONE taxi ride (an Order), in the
+/// order the passenger chose: sequence 1..3. Only intermediate stops live here.
+/// The pickup stays on the Order (pickup*) and so does the final destination
+/// (delivery* / taxiDropoffAddress). The itinerary is frozen at request: a
+/// trigger refuses any change to id, tenantId, orderId or sequence, and a
+/// ride's stops go with it (ON DELETE CASCADE). Status and its timestamps move
+/// as the driver arrives, departs or skips. No money column: stops carry no fee.
+model TaxiTripStop {
+  id           String         @id @default(cuid())
+  tenantId     String         @default("swift-default")
+  tenant       Tenant         @relation(fields: [tenantId], references: [id])
+  orderId      String
+  order        Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sequence     Int
+  lat          Float
+  lng          Float
+  address      String
+  /// The routed leg that ENDS at this stop (from the pickup or the previous
+  /// stop), as priced at request. Null when the leg was not routed.
+  legMeters    Int?
+  legSeconds   Int?
+  status       TaxiStopStatus @default(PENDING)
+  arrivedAt    DateTime?
+  departedAt   DateTime?
+  skippedAt    DateTime?
+  skipReason   String?
+  /// Who moved the stop last (a user id).
+  actedBy      String?
+  evidenceNote String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@unique([orderId, sequence])
+  @@index([tenantId])
+  @@map("taxi_trip_stops")
+}
+
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle
 /// serves (serves all classes <= it). Seat capacity is a code rule:
 /// ECONOMY/COMFORT = 4, XL = 6. Per-class fare multipliers live in
@@ -2060,6 +2189,8 @@ enum OrderStatus {
   CANCELLED
   REFUNDED
   FAILED
+  RETURNING
+  RETURNED
 }
 
 enum PackageSize {
@@ -2097,6 +2228,161 @@ enum PaymentStatus {
   EXPIRED
   /// Superseded before resolution (another rail paid the week first).
   CANCELLED
+}
+
+/// [ORDER-SPINE S1-6] What the CUSTOMER said about a direct-MMG payment, under
+/// the locked claim authority. Never a payment state: a customer statement
+/// neither authorises fulfilment nor proves money moved.
+enum CustomerMmgClaim {
+  UNRECORDED
+  PAID
+  NOT_PAID
+}
+
+/// [ORDER-SPINE S1-6] An operator's decision on a disagreement between the
+/// store's claim and the customer's statement. CUSTOMER_PAID upholds the
+/// store's claim; CUSTOMER_DID_NOT_PAY rejects that claim attempt for good.
+enum MmgClaimResolution {
+  CUSTOMER_PAID
+  CUSTOMER_DID_NOT_PAY
+}
+
+// ==========================================
+// [E02 · refund rail 1/8] THE MMG REFUND RAIL
+// What a store owes a customer back on a paid MMG order, and the transfers it
+// says it sent. Swift records; it never moves the money: the store refunds from
+// its own MMG (spec §3.1:5250). order/mmg-refund-law.ts is the one law.
+// ==========================================
+
+/// [E02] Why the store owes money back. One obligation per cause (`causeKey`).
+/// RETURN is reserved for the returns rail and is not a value yet.
+enum MmgRefundKind {
+  CANCELLATION
+  LINE_REMOVED
+  SUBSTITUTE_REJECTED
+  SUBSTITUTE_CHEAPER
+}
+
+/// [E02] Where an obligation stands. The migration holds `sendId` to exactly
+/// the states that carry a send (SENT, CONFIRMED, DISPUTED, SETTLED).
+enum MmgRefundStatus {
+  OWED
+  SENT
+  CONFIRMED
+  DISPUTED
+  SETTLED
+  VOIDED
+}
+
+/// [E02] The customer's word on a "Refund sent": the money arrived, or it did not.
+enum MmgRefundAnswer {
+  RECEIVED
+  NOT_RECEIVED
+}
+
+/// [E02] Support's finding on a disputed send.
+enum MmgRefundResolution {
+  RECEIVED
+  NOT_RECEIVED
+}
+
+/// [E02 · refund rail 1/8] What the store owes the customer back by MMG, and
+/// why. A paid MMG order becomes CANCELLED or REFUNDED only with a CANCELLATION
+/// obligation committed beside it (§3.1:5252; a deferred trigger refuses
+/// anything else), and the non-void obligations on an order never add up to
+/// more than `Order.mmgAttestedAmount`. Nothing writes this table yet.
+model MmgRefundObligation {
+  id             String          @id @default(cuid())
+  tenantId       String          @default("swift-default")
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  orderId        String
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  /// Copied from the order at creation, so the store's and the customer's
+  /// queues read an index instead of a join.
+  vendorId       String
+  customerId     String
+  /// The line a LINE_REMOVED or SUBSTITUTE_* obligation is about; null for a cancellation.
+  orderItemId    String?
+  kind           MmgRefundKind
+  /// One obligation per cause, ever: `order:<id>:cancel`, `line:<id>:close`, and so on.
+  causeKey       String          @unique
+  status         MmgRefundStatus @default(OWED)
+  amount         Decimal         @db.Decimal(12, 2)
+  currencyCode   String          @default("GYD")
+  /// How the amount was reached: the attested remainder, or ALG-25's basis for a line.
+  basis          String
+  reason         String?
+  /// The deadline policy at creation, COPIED: a later policy change never
+  /// moves the deadline of an obligation that already exists.
+  deadlineHours  Int
+  dueAt          DateTime
+  /// Set once, when `dueAt` passed with the obligation still OWED.
+  missedAt       DateTime?
+  /// The send covering it: set exactly while SENT, CONFIRMED, DISPUTED or SETTLED.
+  sendId         String?
+  send           MmgRefundSend?  @relation(fields: [sendId], references: [id], onDelete: Restrict)
+  resolvedAt     DateTime?
+  resolvedById   String?
+  resolutionNote String?
+  /// Who created it; null = the system.
+  createdById    String?
+  /// Advances on every change; a decision names the generation it reviewed.
+  revision       Int             @default(0)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([vendorId, status])
+  @@index([customerId, status])
+  @@index([status, dueAt])
+  @@index([vendorId, missedAt])
+  @@index([orderId])
+  @@index([tenantId])
+  @@map("mmg_refund_obligations")
+}
+
+/// [E02 · refund rail 1/8] One MMG transfer the store says it sent back: one
+/// reference, one amount (exactly the owed total it covers), one question to
+/// the customer. The MMG fee is Swift's (owner decision (d)): recorded here and
+/// never taken out of the refund. Nothing writes this table yet.
+model MmgRefundSend {
+  id                   String                @id @default(cuid())
+  tenantId             String                @default("swift-default")
+  tenant               Tenant                @relation(fields: [tenantId], references: [id])
+  orderId              String
+  order                Order                 @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  vendorId             String
+  customerId           String
+  /// The refund's MMG transaction reference, normalised like a payment
+  /// reference and unique across sends: one transfer settles one send.
+  mmgRefundRef         String                @unique
+  amount               Decimal               @db.Decimal(12, 2)
+  /// The MMG fee the store paid to send it. Swift pays it back; it never
+  /// enters the refund arithmetic.
+  feeBorneBySwift      Decimal?              @db.Decimal(12, 2)
+  currencyCode         String                @default("GYD")
+  sentById             String
+  sentAt               DateTime              @default(now())
+  answer               MmgRefundAnswer?
+  answeredAt           DateTime?
+  /// The PAYMENT support ticket the customer's "No" opened.
+  supportTicketId      String?
+  resolution           MmgRefundResolution?
+  resolvedById         String?
+  resolvedAt           DateTime?
+  /// Support's note on the resolution.
+  note                 String?
+  /// The obligations this send covered when it was made: history a later void cannot erase.
+  coveredObligationIds Json
+  revision             Int                   @default(0)
+  obligations          MmgRefundObligation[]
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  @@index([orderId])
+  @@index([customerId, answer])
+  @@index([vendorId, sentAt])
+  @@index([tenantId])
+  @@map("mmg_refund_sends")
 }
 
 /// markedUpPrice/markup* fields are V1 dormant (zero-commission) — kept
@@ -2677,6 +2963,12 @@ model BillingEvent {
   /// delivered. Null = the evidence exists but the payer has not been told;
   /// the notice job re-attempts it, and the charge gate does not count it.
   deliveredAt    DateTime?
+  /// Billing notice delivery lease/checkpoint. These are used only for
+  /// noticeVersion=1 nudge, churn and MMG mismatch events; financial facts
+  /// remain immutable while the delivery state can advance after commit.
+  noticeLeaseUntil DateTime?
+  noticeLeaseToken String?
+  noticeSmsSentAt DateTime?
   createdAt      DateTime         @default(now())
 
   @@index([subscriptionId])
@@ -2915,7 +3207,8 @@ model SanTombstone {
 /// [F-026-02] Durable census of storage objects still owed a deletion —
 /// failed unwind/account-deletion deletes and replaced selfie pointers.
 /// One open row per key (upsert re-opens); purgedAt closes it. Retried
-/// opportunistically at account deletion; IDV-1 Phase 2 owns the sweeper.
+/// by account deletion and the standing verification sweep; IDV-1 Phase 2
+/// may later absorb this compatibility census into its richer register.
 model StorageOrphan {
   id        String    @id @default(cuid())
   tenantId  String    @default("swift-default")
@@ -3888,57 +4181,6 @@ model CartItem {
   @@map("cart_items")
 }
 
-// ==========================================
-// OPS AGENT (spec Part B) — flag-gated OFF
-// The model only CLASSIFIES; every action executes through existing
-// deterministic services, and money-adjacent actions wait for a human.
-// ==========================================
-
-enum AgentActionStatus {
-  PENDING
-  APPROVED
-  REJECTED
-  EXECUTED
-  FAILED
-}
-
-model AgentActionRequest {
-  id        String            @id @default(cuid())
-  /// Tool name from the fixed allowlist (request_cancel, requeue_dispatch, …)
-  action    String
-  /// Tool input, JSON — replayed verbatim on approval
-  input     Json
-  /// The model's rationale — shown to the approving human
-  reasoning String?
-  orderId   String?
-  status    AgentActionStatus @default(PENDING)
-  /// Idempotency: one open request per (action, orderId) problem
-  actionKey String            @unique
-  createdAt DateTime          @default(now())
-  decidedAt DateTime?
-  decidedBy String?
-
-  @@index([status, createdAt])
-  @@map("agent_action_requests")
-}
-
-model AgentAuditEvent {
-  id        String   @id @default(cuid())
-  at        DateTime @default(now())
-  /// ops | approval
-  job       String
-  subjectId String?
-  action    String
-  input     Json
-  /// suggested | executed | pending_approval | auto_executed | rejected | error
-  outcome   String
-  reasoning String?
-
-  @@index([at])
-  @@index([subjectId])
-  @@map("agent_audit_events")
-}
-
 // ─── Safety: SOS engine (safety-system spec M1, foundation for M2) ───────────
 // Reconciled to Swift reality: a "trip" is an Order (rides are orderType=TAXI);
 // tenant is a scalar with code-level tenantScope (Swift has no RLS); actorRole
@@ -4000,6 +4242,8 @@ model SosRetrigger {
   lng                Float?
   accuracyM          Float?
   addressText        String?
+  /// [PRIV2-S1] What this repeat press said, if anything. Ops-only, like SosAlert.triggerNote.
+  note               String?
   counterpartyUserId String?
   actorRole          String
   clientCreatedAt    DateTime?
@@ -4360,6 +4604,14 @@ model SosAlert {
   triggerLng           Float?
   triggerAccuracyM     Float?
   triggerAddressText   String? // reverse-geocoded, for the on-screen 911 script
+  /// [PRIV2-S1] What the person wrote when they raised this alert (the in-ride
+  /// POST /rides/:id/sos `note`). Ops-only: the ops SOS reads (GET /safety/sos
+  /// and /safety/sos/:id) return it and the evidence bundle snapshots it. It
+  /// must never be copied onto the order timeline — both people on a ride read
+  /// order_status_logs verbatim, so a note like "he's threatening me" would
+  /// reach the person it is about. A repeat press keeps this note and records
+  /// its own on its sos_retriggers row.
+  triggerNote          String?
   clientCreatedAt      DateTime? // device clock — offline reconciliation
   clientIdempotencyKey String? // one alert per trigger PER ACTOR, even on retry — see @@unique below
   /// [F-027-17] How many times this person asked for help again while this
@@ -5680,8 +5932,8 @@ model SensitiveReadLog {
 /// Every `finance/*`, `billing/*`, `subscriptions/*` and `ads/*` money route
 /// decided on ONE actor's request: a settlement processed, a fee waived, a
 /// top-up granted or an invoice marked paid on one person's say-so, with no
-/// independent check and no reversal path. The only approval model in the
-/// schema, AgentActionRequest, gates the autonomous agent, not a human.
+/// independent check and no reversal path. There was no human-approval model
+/// in the schema at all.
 ///
 /// This is the general record the C4/C5 classes now require: what was asked,
 /// by whom, with what reason, over exactly which request — and who, other than
@@ -5701,6 +5953,11 @@ model PrivilegedApproval {
   entityId     String?
   /// SHA-256 over the method, route, params and body that were reviewed
   fingerprint  String
+  /// [DS110-13] Canonical `{ params, body, query }` copy of the request that
+  /// was reviewed. The approver reads THIS, and the apply step replays THIS —
+  /// one stored request, so what executes is always what was displayed. Rows
+  /// raised before this column existed are null and can never be applied.
+  bodySnapshot Json?
   /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
   status       String    @default("PENDING")
   requestedBy  String
@@ -6026,7 +6283,7 @@ model DiscoveryCategorySuggestion {
   itemId     String
   categoryId String
   confidence Decimal   @db.Decimal(3, 2)
-  stage      String // "MATCHER" | "AI"
+  stage      String // "MATCHER" — the only stage that writes; the model stage is retired
   status     String    @default("PENDING") // PENDING | ACCEPTED | DISMISSED | SUPERSEDED
   createdAt  DateTime  @default(now())
   resolvedAt DateTime?
@@ -6681,6 +6938,12 @@ model SubjectLink {
   relation  SubjectRelation
   validFrom DateTime        @default(now())
   validTo   DateTime?
+  /// [High #9 · DS109] NULL = a PENDING assignment (created when an account submitted a
+  /// VEHICLE-kind document whose plate matched an existing vehicle subject it does not
+  /// own). Pending links never propagate the subject's vehicle evidence; an admin-approved
+  /// assignment stamps this. The subject's registering account gets its link approved at
+  /// creation (the verified owner of record).
+  approvedAt DateTime?
 
   @@unique([accountId, subjectId, relation, validFrom])
   @@index([subjectId])

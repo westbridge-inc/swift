@@ -12,8 +12,8 @@ describe('CORS origin policy', () => {
   });
 
   it('trims, normalizes, and deduplicates explicit origins', () => {
-    expect(resolveCorsOrigins(' https://app.swift.gy/,tauri://localhost,https://app.swift.gy ', 'production')).toEqual([
-      'https://app.swift.gy',
+    expect(resolveCorsOrigins(' https://app.swiftgy.com/,tauri://localhost,https://app.swiftgy.com ', 'production')).toEqual([
+      'https://app.swiftgy.com',
       'tauri://localhost',
     ]);
   });
@@ -21,12 +21,12 @@ describe('CORS origin policy', () => {
   it.each([
     '*',
     'null',
-    'https://*.swift.gy',
-    'javascript://swift.gy',
-    'https://swift.gy/path',
-    'https://user:pass@swift.gy',
-    'https://swift.gy?origin=other',
-    'https://swift.gy#fragment',
+    'https://*.swiftgy.com',
+    'javascript://swiftgy.com',
+    'https://swiftgy.com/path',
+    'https://user:pass@swiftgy.com',
+    'https://swiftgy.com?origin=other',
+    'https://swiftgy.com#fragment',
     'not-a-url',
     ' , ',
   ])('rejects unsafe or malformed configuration: %s', (raw) => {

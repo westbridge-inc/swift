@@ -13,8 +13,8 @@ import { storageSigningKeys } from '../../utils/signing-keys';
  *
  * The KEK comes from a swappable KeyProvider (hard rule 4): env-based for
  * pilot, Vault/KMS later without touching this file's callers. When
- * MASTER_KEK is unset the feature is off and uploads store as before
- * (private + SSE) — encryption is config, not a fork in the code.
+ * MASTER_KEK is unset the provider reports unavailable. Verification uploads
+ * fail closed rather than minting a pointer without envelope metadata.
  */
 
 export interface KeyProvider {

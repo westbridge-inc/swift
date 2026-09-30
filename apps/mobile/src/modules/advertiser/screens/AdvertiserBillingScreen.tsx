@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, space } from '@swift/ui';
 import { Card, EmptyState, ErrorState, LoadingBlock, T, TonePill } from '../../../kit';
 import { useMyAdvertisers, useAdvertiserInvoices } from '../../../hooks/advertiser';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { moneyOrDash as money } from '../../../lib/money';
 
 // §14.5 — invoices. Every figure is the server's; refunds show against the
@@ -23,6 +24,7 @@ export function AdvertiserBillingScreen() {
   const me = useMyAdvertisers();
   const advertiser = (me.data ?? [])[0];
   const invoices = useAdvertiserInvoices(advertiser?.id);
+  const pull = usePullToRefresh(invoices.refetch); // the spinner follows the pull, never a background refetch (lib/pullToRefresh)
   const rows = invoices.data ?? [];
 
   return (
@@ -32,7 +34,7 @@ export function AdvertiserBillingScreen() {
       </T>
       <ScrollView
         contentContainerStyle={{ padding: space['2xl'], paddingBottom: space['3xl'] }}
-        refreshControl={<RefreshControl refreshing={invoices.isRefetching} onRefresh={() => invoices.refetch()} tintColor={color.brand[500]} />}
+        refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
       >
         {invoices.isLoading ? (
           <LoadingBlock style={{ paddingTop: 64 }} />

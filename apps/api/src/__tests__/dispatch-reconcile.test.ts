@@ -20,7 +20,7 @@ const createdOrderIds: string[] = [];
 let customerId: string;
 let vendorId: string;
 
-async function makeStuckOrder(status: OrderStatus, opts: { orderType?: string; fulfillment?: string; riderId?: string | null; driverId?: string | null } = {}) {
+async function makeStuckOrder(status: OrderStatus, opts: { orderType?: string; fulfillment?: string; riderId?: string | null; driverId?: string | null; paymentMethod?: string; paymentStatus?: string } = {}) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `RC-${nanoid(10)}`,
@@ -32,7 +32,8 @@ async function makeStuckOrder(status: OrderStatus, opts: { orderType?: string; f
       pickupAddress: 'x', pickupLat: 6.8, pickupLng: -58.15,
       deliveryAddress: 'y', deliveryLat: 6.81, deliveryLng: -58.16,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
-      deliveryFee: 500, totalAmount: 1500, paymentMethod: 'CASH',
+      deliveryFee: 500, totalAmount: 1500, paymentMethod: (opts.paymentMethod as never) ?? 'CASH',
+      ...(opts.paymentStatus ? { paymentStatus: opts.paymentStatus as never } : {}),
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
       ...(opts.driverId ? { driverId: opts.driverId } : {}),
     },
@@ -95,7 +96,14 @@ describe('reconcileStuckDispatch', () => {
     expect(res.recovered).toContain(order.id);
     expect(enqueued).toContain(order.id);
     // a cooldown marker is set so it won't be re-driven immediately
-    expect(await app.redis.get(`dispatch:reconciled:${order.id}`)).toBe('1');
+    const token = await app.redis.get(`dispatch:reconciled:${order.id}`);
+    expect(token).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(await app.redis.ttl(`dispatch:reconciled:${order.id}`)).toBeGreaterThan(0);
+    expect(await app.redis.ttl(`dispatch:reconciled:${order.id}`)).toBeLessThanOrEqual(600);
+    const again = collector();
+    await reconcileStuckDispatch(app.prisma, app.redis, again.enqueue, NOW_STUCK);
+    expect(again.enqueued).not.toContain(order.id);
+    expect(await app.redis.get(`dispatch:reconciled:${order.id}`)).toBe(token);
   });
 
   it('re-enqueues a stranded TAXI (PENDING, no driver)', async () => {
@@ -103,6 +111,19 @@ describe('reconcileStuckDispatch', () => {
     const { enqueue, enqueued } = collector();
     await reconcileStuckDispatch(app.prisma, app.redis, enqueue, NOW_STUCK);
     expect(enqueued).toContain(ride.id);
+  });
+
+  it('SKIPS a TAXI held because MMG money moved (legacy): it waits for a person and is never re-dispatched [E02 · DS274 A1]', async () => {
+    const claimed = await makeStuckOrder('PENDING', { orderType: 'TAXI', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' });
+    const captured = await makeStuckOrder('PENDING', { orderType: 'TAXI', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' });
+    const cash = await makeStuckOrder('PENDING', { orderType: 'TAXI' });
+    const { enqueue, enqueued } = collector();
+    await reconcileStuckDispatch(app.prisma, app.redis, enqueue, NOW_STUCK);
+    expect(enqueued).toContain(cash.id); // the sweep ran
+    expect(enqueued).not.toContain(claimed.id);
+    expect(enqueued).not.toContain(captured.id);
+    expect(await app.redis.get(`dispatch:reconciled:${claimed.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:reconciled:${captured.id}`)).toBeNull();
   });
 
   it('SKIPS an order that still has a live offer key (mid-cascade)', async () => {

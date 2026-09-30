@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchDrivers, verifyDriverDocuments, setDriverRideClass } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 
 const RIDE_CLASSES = ['ECONOMY', 'COMFORT', 'XL'] as const;
 
@@ -10,11 +11,11 @@ export default function DriversPage() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['drivers'], queryFn: fetchDrivers });
   const verifyMutation = useMutation({
-    mutationFn: verifyDriverDocuments,
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => verifyDriverDocuments(id, reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['drivers'] }),
   });
   const rideClassMutation = useMutation({
-    mutationFn: ({ id, rideClass }: { id: string; rideClass: string }) => setDriverRideClass(id, rideClass),
+    mutationFn: ({ id, rideClass, reason }: { id: string; rideClass: string; reason: string }) => setDriverRideClass(id, rideClass, reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['drivers'] }),
   });
 
@@ -51,7 +52,7 @@ export default function DriversPage() {
                     <select
                       value={driver.rideClass ?? 'ECONOMY'}
                       disabled={rideClassMutation.isPending}
-                      onChange={(e) => rideClassMutation.mutate({ id: driver.id, rideClass: e.target.value })}
+                      onChange={(e) => { const reason = askReason({ action: `set this driver's ride class to ${e.target.value}`, subject: `${driver.user?.firstName} ${driver.user?.lastName}` }); if (reason) rideClassMutation.mutate({ id: driver.id, rideClass: e.target.value, reason }); }}
                       className="bg-[var(--panel-2)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs text-white disabled:opacity-50"
                     >
                       {RIDE_CLASSES.map((c) => (
@@ -74,7 +75,7 @@ export default function DriversPage() {
                   <td className="p-4 text-right">
                     {!driver.documentsVerified && (
                       <button
-                        onClick={() => verifyMutation.mutate(driver.id)}
+                        onClick={() => { const reason = askReason({ action: 'verify these documents', subject: `${driver.user?.firstName} ${driver.user?.lastName}` }); if (reason) verifyMutation.mutate({ id: driver.id, reason }); }}
                         disabled={verifyMutation.isPending}
                         className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80 disabled:opacity-50"
                       >
