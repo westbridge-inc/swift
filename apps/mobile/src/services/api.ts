@@ -1,6 +1,6 @@
 import axios, { type AxiosRequestConfig } from 'axios';
 import Constants from 'expo-constants';
-import { TurboModuleRegistry } from 'react-native';
+import { Platform, TurboModuleRegistry } from 'react-native';
 import {
   getAuthSessionSnapshot,
   isAuthSessionSnapshotCurrent,
@@ -117,6 +117,7 @@ function capturedVendorAuthConfig(
 
 // Request interceptor to attach auth token
 api.interceptors.request.use((config) => {
+  if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
   const authorization = config.headers.get('Authorization');
@@ -192,8 +193,13 @@ api.interceptors.response.use(
       error.response?.status === 401
       && originalRequest
       && captured
-      && !authRefreshRetries.has(originalRequest)
     ) {
+      if (authRefreshRetries.has(originalRequest)) {
+        // A refreshed credential was authoritatively rejected. End only the
+        // exact replay session; a newer login/rotation must remain untouched.
+        useAuthStore.getState().logoutIfCurrent(captured);
+        return Promise.reject(error);
+      }
       const outcome = await refreshCoordinator.resolve(captured);
       // Re-check after awaiting: logout or account B may have won while the
       // refresh POST was in flight. A stale request is rejected, never retried.
@@ -1035,7 +1041,7 @@ export const vendorApi = {
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
   items: () => api.get('/vendor/items'),
-  subscription: () => api.get('/vendor/subscription'),
+  subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
     api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
@@ -1208,3 +1214,27 @@ export const adsApi = {
   cancel: (campaignId: string, session?: AuthSessionSnapshot) =>
     api.post(`/ads/campaigns/${campaignId}/cancel`, {}, capturedAuthConfig(session)),
 };
+
+/** Checkout calls capture the paying principal and selected store across retries. */
+export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = `/${family}/subscription/mmg-checkout`;
+  if (!session) return { start: async () => { throw new Error('Sign in to pay.'); }, read: async () => { throw new Error('Sign in to view payment.'); } };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => family === 'vendor'
+    ? capturedVendorAuthConfig(current(), storeId, { headers })
+    : capturedAuthConfig(current(), { headers });
+  return {
+    start: async (key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
+      const response = await api.post(base, {}, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
+      const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}

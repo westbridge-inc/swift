@@ -434,7 +434,7 @@ export const dispatchTimeToAssign = new client.Histogram({
 // the "is OSRM actually up?" signal. Labels: op = eta|route, outcome = ok|fallback.
 export const osrmOutcomeCounter = new client.Counter({
   name: 'swift_osrm_calls_total',
-  help: 'OSRM routing calls by operation and outcome (ok vs haversine fallback)',
+  help: 'OSRM routing calls by operation and outcome (ok, haversine fallback, or refused: an answer with an invalid number)',
   labelNames: ['op', 'outcome'] as const,
   registers: [registry],
 });

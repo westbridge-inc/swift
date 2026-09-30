@@ -1,11 +1,10 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
 import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
-import { bindPublicMarketTenant, requireRequestTenant } from './search-scope';
+import { bindBrowseTenant, requireRequestTenant } from './search-scope';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
-import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
@@ -78,18 +77,10 @@ export async function searchRoutes(app: FastifyInstance) {
     }
   })();
 
-  const bindPublicTenant = bindPublicMarketTenant(app);
-  const browseSearch = async (request: FastifyRequest, reply: FastifyReply) => {
-    // Keep credential-bearing requests on the existing strict session path,
-    // including cookie sessions and invalid/expired credential refusals.
-    const cookies = parseCookies(request.headers.cookie);
-    if (request.headers.authorization !== undefined ||
-      Object.hasOwn(cookies, ACCESS_COOKIE) || Object.hasOwn(cookies, REFRESH_COOKIE)) {
-      await app.authenticate(request, reply);
-    } else {
-      await bindPublicTenant(request);
-    }
-  };
+  // Credential-bearing requests keep the strict session path (cookie sessions
+  // and invalid/expired credential refusals included); guests bind the public
+  // catalogue's tenant — the one browse binding, shared with the Home rail.
+  const browseSearch = bindBrowseTenant(app);
 
   // Universal search — searches vendors AND items
   app.get('/search', { preHandler: [browseSearch] }, async (request) => {

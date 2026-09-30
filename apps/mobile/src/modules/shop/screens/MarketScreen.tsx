@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { Dimensions, FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -23,6 +23,7 @@ import {
   T,
   TonePill,
 } from '../../../kit';
+import { MARKET_WINDOW } from '../../../lib/listPerformance';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 
 /**
@@ -84,6 +85,113 @@ const CARD_W = Math.floor((SCREEN_W - GUTTER * 2 - space.lg) / 2);
  *  maroon, so a market card reads as market at a glance. */
 const MARKET_TINT = VERTICAL_TINT.shops;
 
+const marketItemKey = (item: MarketItem) => item.id;
+const MarketCard = React.memo(function MarketCard({ item, onOpen, onAdd, adding }: {
+  item: MarketItem;
+  onOpen: (item: MarketItem) => void;
+  onAdd: (item: MarketItem) => void;
+  adding: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={() => onOpen(item)}
+      accessibilityRole="button"
+      accessibilityLabel={`${item.name}. ${item.vendorName}.${item.isNew ? ' New.' : ''}`}
+      style={{ width: CARD_W }}
+    >
+      {({ pressed }) => (
+        <View
+          style={[
+            {
+              backgroundColor: color.surface.base,
+              borderRadius: radius.lg,
+              borderWidth: 1,
+              borderColor: color.border.subtle,
+              overflow: 'hidden',
+              opacity: pressed ? 0.9 : 1,
+            },
+            elevation.card,
+          ]}
+        >
+          <View style={{ width: '100%', aspectRatio: 1 }}>
+            {/* The merchant's REAL photograph when they have uploaded
+                one — the first cut of this card drew the placeholder
+                unconditionally and threw `imageUrl` away, so a vendor
+                who had photographed their stock saw a pictogram anyway.
+                `Photo` falls back to the honest placeholder (the
+                vertical's ground + the item's own name) and never to a
+                stranger's photograph. */}
+            <Photo
+              uri={itemPhoto(item)}
+              label={item.name}
+              glyph="shops"
+              {...(MARKET_TINT ? { tint: MARKET_TINT } : {})}
+              style={{ width: '100%', height: '100%' }}
+            />
+            {item.isNew ? (
+              <View style={{ position: 'absolute', top: space.sm, left: space.sm }}>
+                {/* The ONE badge with a real source behind it. */}
+                <TonePill label="NEW" tone="neutral" dark />
+              </View>
+            ) : null}
+          </View>
+
+          <View style={{ padding: space.md, gap: 2 }}>
+            <T variant="label" weight="semibold" numberOfLines={2}>
+              {item.name}
+            </T>
+            {/* THE STORE, on every card. "It'll be at their respective
+                stores" is the whole point of a product-first market: you
+                browse by thing and arrive at a shop. */}
+            <T variant="caption" tone="muted" numberOfLines={1}>
+              {item.vendorName}
+            </T>
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginTop: space.xs,
+              }}
+            >
+              {/* Maroon on the price is the founder's reference, and it
+                  takes this screen to three brand elements against the
+                  "maroon ≤2 per screen" law — chip, price, add button.
+                  REGISTERED, not silently resolved: the screenshot is
+                  the binding spec for this tab [WS-3.6]. */}
+              <Money amount={item.basePrice} tone="brand" />
+              <Pressable
+                onPress={() => onAdd(item)}
+                disabled={adding}
+                accessibilityRole="button"
+                accessibilityLabel={`Add ${item.name} to cart`}
+                hitSlop={10}
+              >
+                {({ pressed: p2 }) => (
+                  <View
+                    style={{
+                      width: 32,
+                      height: 32,
+                      borderRadius: radius.full,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      backgroundColor: color.brand[500],
+                      opacity: p2 || adding ? 0.7 : 1,
+                    }}
+                  >
+                    <Feather name="plus" size={18} color={color.white} />
+                  </View>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      )}
+    </Pressable>
+  );
+});
+
 export function MarketScreen() {
   const navigation = useNavigation<any>();
   const insets = useSafeAreaInsets();
@@ -113,9 +221,10 @@ export function MarketScreen() {
 
   const activeChip = chips.find((c) => c.slug === category);
 
-  const onAdd = (item: MarketItem) => {
+  const mutateCart = addToCart.mutate;
+  const onAdd = useCallback((item: MarketItem) => {
     haptic.select();
-    addToCart.mutate(
+    mutateCart(
       { vendorId: item.vendorId, itemId: item.id, quantity: 1 },
       {
         onSuccess: () => toast.success(`${item.name} added`),
@@ -125,7 +234,13 @@ export function MarketScreen() {
           toast.error(e?.response?.data?.error?.message ?? 'Couldn’t add that — try again.'),
       },
     );
-  };
+  }, [mutateCart]);
+  const onOpen = useCallback((item: MarketItem) => {
+    navigation.navigate('MenuItem', { itemId: item.id, vendorId: item.vendorId });
+  }, [navigation]);
+  const renderItem = useCallback(({ item }: { item: MarketItem }) => (
+    <MarketCard item={item} onOpen={onOpen} onAdd={onAdd} adding={addToCart.isPending} />
+  ), [onOpen, onAdd, addToCart.isPending]);
 
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
@@ -200,8 +315,9 @@ export function MarketScreen() {
         />
       ) : (
         <FlatList
+          {...MARKET_WINDOW}
           data={items}
-          keyExtractor={(i) => i.id}
+          keyExtractor={marketItemKey}
           numColumns={2}
           columnWrapperStyle={{ gap: space.lg, paddingHorizontal: GUTTER }}
           contentContainerStyle={{ gap: space.lg, paddingBottom: space['3xl'] }}
@@ -233,106 +349,9 @@ export function MarketScreen() {
           }
           onEndReachedThreshold={0.5}
           onEndReached={() => {
-            if (feed.hasNextPage && !feed.isFetchingNextPage) feed.fetchNextPage();
+            if (feed.hasNextPage && !feed.isFetching) feed.fetchNextPage();
           }}
-          renderItem={({ item }) => (
-            <Pressable
-              onPress={() => navigation.navigate('MenuItem', { itemId: item.id, vendorId: item.vendorId })}
-              accessibilityRole="button"
-              accessibilityLabel={`${item.name}. ${item.vendorName}.${item.isNew ? ' New.' : ''}`}
-              style={{ width: CARD_W }}
-            >
-              {({ pressed }) => (
-                <View
-                  style={[
-                    {
-                      backgroundColor: color.surface.base,
-                      borderRadius: radius.lg,
-                      borderWidth: 1,
-                      borderColor: color.border.subtle,
-                      overflow: 'hidden',
-                      opacity: pressed ? 0.9 : 1,
-                    },
-                    elevation.card,
-                  ]}
-                >
-                  <View style={{ width: '100%', aspectRatio: 1 }}>
-                    {/* The merchant's REAL photograph when they have uploaded
-                        one — the first cut of this card drew the placeholder
-                        unconditionally and threw `imageUrl` away, so a vendor
-                        who had photographed their stock saw a pictogram anyway.
-                        `Photo` falls back to the honest placeholder (the
-                        vertical's ground + the item's own name) and never to a
-                        stranger's photograph. */}
-                    <Photo
-                      uri={itemPhoto(item)}
-                      label={item.name}
-                      glyph="shops"
-                      {...(MARKET_TINT ? { tint: MARKET_TINT } : {})}
-                      style={{ width: '100%', height: '100%' }}
-                    />
-                    {item.isNew ? (
-                      <View style={{ position: 'absolute', top: space.sm, left: space.sm }}>
-                        {/* The ONE badge with a real source behind it. */}
-                        <TonePill label="NEW" tone="neutral" dark />
-                      </View>
-                    ) : null}
-                  </View>
-
-                  <View style={{ padding: space.md, gap: 2 }}>
-                    <T variant="label" weight="semibold" numberOfLines={2}>
-                      {item.name}
-                    </T>
-                    {/* THE STORE, on every card. "It'll be at their respective
-                        stores" is the whole point of a product-first market: you
-                        browse by thing and arrive at a shop. */}
-                    <T variant="caption" tone="muted" numberOfLines={1}>
-                      {item.vendorName}
-                    </T>
-
-                    <View
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        marginTop: space.xs,
-                      }}
-                    >
-                      {/* Maroon on the price is the founder's reference, and it
-                          takes this screen to three brand elements against the
-                          "maroon ≤2 per screen" law — chip, price, add button.
-                          REGISTERED, not silently resolved: the screenshot is
-                          the binding spec for this tab [WS-3.6]. */}
-                      <Money amount={item.basePrice} tone="brand" />
-                      <Pressable
-                        onPress={() => onAdd(item)}
-                        disabled={addToCart.isPending}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Add ${item.name} to cart`}
-                        hitSlop={10}
-                      >
-                        {({ pressed: p2 }) => (
-                          <View
-                            style={{
-                              width: 32,
-                              height: 32,
-                              borderRadius: radius.full,
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              backgroundColor: color.brand[500],
-                              opacity: p2 || addToCart.isPending ? 0.7 : 1,
-                            }}
-                          >
-                            <Feather name="plus" size={18} color={color.white} />
-                          </View>
-                        )}
-                      </Pressable>
-                    </View>
-                  </View>
-                </View>
-              )}
-            </Pressable>
-          )}
+          renderItem={renderItem}
           ListFooterComponent={
             <View style={{ paddingHorizontal: GUTTER, paddingTop: space.xl, flexDirection: 'row', gap: space.sm }}>
               <Feather name="check-circle" size={16} color={color.success} style={{ marginTop: 2 }} />

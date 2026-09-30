@@ -61,10 +61,13 @@ const PRIVATE_PAGES = [
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
   'dashboard/settings/page.tsx',
+  'dashboard/weekly-fee/page.tsx',
   'portal/page.tsx',
   'portal/account/page.tsx',
   'portal/documents/page.tsx',
   'portal/history/page.tsx',
+  'portal/weekly-fee/page.tsx',
+  'weekly-fee/page.tsx',
   'selfie/page.tsx',
   'login/page.tsx', // identity flows, not public search content
   'offline/page.tsx', // utility fallback, already intentionally noindex
@@ -73,13 +76,14 @@ const PRIVATE_PAGES = [
   'qr/unavailable/page.tsx',
 ];
 
-// Bearer links reveal personal data without sign-in. There are currently no
-// payment-return, magic-link or invite-link pages in this app; new routes of
-// those kinds belong here too, including when the secret is in a query string.
+// Bearer links reveal personal data without sign-in, including secrets in queries.
 const TOKEN_DISALLOWED_PAGES = [
   'track/[token]/page.tsx',
   'trip/[token]/page.tsx',
 ];
+
+// Token-bearing HTML route handlers carry response headers instead of metadata.
+const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[outcome]/route.ts'];
 
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
@@ -218,7 +222,7 @@ describe('[DS288] every route has a reviewed search classification', () => {
   });
 
   it('classifies every route handler and metadata resource', () => {
-    expect(FILES.filter((file) => RESOURCE.test(file)).sort()).toEqual([...PUBLIC_RESOURCES].sort());
+    expect(FILES.filter((file) => RESOURCE.test(file)).sort()).toEqual([...PUBLIC_RESOURCES, ...TOKEN_DISALLOWED_HANDLERS].sort());
   });
 
   it('evaluates every real page and ancestor layout, including route groups', () => {
@@ -234,6 +238,20 @@ describe('[DS288] every route has a reviewed search classification', () => {
   it.each(TOKEN_DISALLOWED_PAGES)('%s stays disallowed AND noindex, nofollow', async (page) => {
     expect(crawlable(urlOf(page)), `${urlOf(page)} must not invite token crawling`).toBe(false);
     expectRobots(await effectiveRobots(page), false, `${urlOf(page)} via ${ancestors(page).join(' -> ')}`);
+  });
+
+  it.each(TOKEN_DISALLOWED_HANDLERS)('%s stays disallowed AND sends noindex for GET and POST', async (handler) => {
+    expect(crawlable(urlOf(handler))).toBe(false);
+    const { GET, POST } = await import('./app/pay/mmg/[outcome]/route');
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }));
+    try {
+      for (const method of ['GET', 'POST'] as const) {
+        const request = new Request('https://example.test/pay/mmg/success', { method });
+        const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ outcome: 'success' }) });
+        expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
+        expect(await response.text()).toContain('<meta name="robots" content="noindex">');
+      }
+    } finally { fetch.mockRestore(); }
   });
 
   it.each(PUBLIC_PAGES)('%s stays crawlable and indexable through all ancestor layouts', async (page) => {
