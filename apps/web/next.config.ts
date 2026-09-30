@@ -43,6 +43,8 @@ export default function createNextConfig(phase: string): NextConfig {
 
   return {
     poweredByHeader: false,
+    // MMG return queries are private, including in the development request log.
+    logging: { incomingRequests: { ignore: [/^\/pay\/mmg\//] } },
     ...imageBuildConfig,
     // @swift/types ships TypeScript source; Next must transpile it (the admin
     // console declares the same). The site reads the market zone from it.
@@ -176,6 +178,11 @@ export default function createNextConfig(phase: string): NextConfig {
             ...(releaseChannel === 'staging' ? [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] : []),
           ],
         },
+        { source: '/pay/mmg/:outcome', headers: [
+          { key: 'X-Robots-Tag', value: 'noindex' },
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ] },
       ];
     },
   };

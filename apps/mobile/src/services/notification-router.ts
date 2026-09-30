@@ -20,6 +20,7 @@ type Destination = { screen: string; params?: Record<string, unknown> };
  *  looked like a route and was not one, so its pushes silently went nowhere. */
 export function destinationFor(data: Record<string, unknown> | null | undefined): Destination | null {
   if (!data) return null;
+  if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
   // Server-tagged surface ('customer' | 'earner' | 'business'), merged into
@@ -214,8 +215,17 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
 let pending: Destination | null = null;
 let installed = false;
 
-function go(dest: Destination | null) {
+async function go(dest: Destination | null) {
   if (!dest) return;
+  if (!navigationRef.isReady()) { pending = dest; return; }
+  if (dest.screen === 'WeeklyFee' && typeof dest.params?.['vendorId'] === 'string') {
+    const { resolveFeeNotification } = await import('./weekly-fee-notification');
+    const params = await resolveFeeNotification(dest.params, (resolved) => { safeNavigate('WeeklyFee', { ...resolved, feeFamily: 'vendor' }); });
+    if (!params) return;
+    dest = { ...dest, params: { ...params, feeFamily: 'vendor' } };
+  } else if (dest.screen === 'WeeklyFee') {
+    dest = { ...dest, params: { ...dest.params, feeFamily: 'mover' } };
+  }
   if (!safeNavigate(dest.screen, dest.params)) pending = dest;
 }
 
@@ -226,7 +236,7 @@ export function flushPendingNavigation() {
   const dest = pending;
   pending = null;
   // One frame of grace so the initial route settles before we move.
-  setTimeout(() => { if (!safeNavigate(dest.screen, dest.params)) pending = dest; }, 250);
+  setTimeout(() => { void go(dest).catch(() => undefined); }, 250);
 }
 
 /** Install once at app start: warm taps via the listener, cold starts via the
@@ -238,7 +248,7 @@ export function installNotificationTapRouter(): () => void {
 
   const sub = Notifications.addNotificationResponseReceivedListener((response) => {
     try {
-      go(destinationFor(response?.notification?.request?.content?.data as Record<string, unknown>));
+      void go(destinationFor(response?.notification?.request?.content?.data as Record<string, unknown>)).catch(() => undefined);
     } catch { /* never let a tap crash the app */ }
   });
 
@@ -246,7 +256,7 @@ export function installNotificationTapRouter(): () => void {
   Notifications.getLastNotificationResponseAsync()
     .then((response) => {
       if (!response) return;
-      go(destinationFor(response.notification?.request?.content?.data as Record<string, unknown>));
+      void go(destinationFor(response.notification?.request?.content?.data as Record<string, unknown>)).catch(() => undefined);
     })
     .catch(() => undefined);
 

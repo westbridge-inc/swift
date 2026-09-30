@@ -89,8 +89,19 @@ async function resolveAndGo(dest: LinkDestination, request: number): Promise<voi
 let navReady = false;
 let latestRequest = 0;
 
+export function isWeeklyFeeReturn(url: string): boolean {
+  try { const parsed = new URL(url); return parsed.protocol === 'swift:' && parsed.hostname === 'pay' && parsed.pathname === '/mmg/return'; } catch { return false; }
+}
+
 function handleUrl(url: string | null): boolean {
   if (!url) return false;
+  if (isWeeklyFeeReturn(url)) {
+    // A newer fee return supersedes pending scans and discards all parameters.
+    latestRequest += 1;
+    pendingUrl = null;
+    if (!safeNavigate('WeeklyFee') && !navReady) pendingUrl = 'swift://pay/mmg/return';
+    return true;
+  }
   const dest = destinationForUrl(url);
   if (!dest) return false; // not ours — the app opens normally
   const request = ++latestRequest;

@@ -94,7 +94,7 @@ export function billingStoppedLine(sub: any, who: 'store' | 'driver' | 'rider', 
   const periodEnd = shortDate(sub?.currentPeriodEnd);
   return periodEnd
     ? `You keep working until ${periodEnd}. No more weekly fees will be charged.`
-    : 'The week you paid for still runs out. No more weekly fees will be charged.';
+    : 'No more weekly fees will be charged.';
 }
 
 /** [E12] The rail a resume returns to: the one billing was stopped on. A
@@ -138,7 +138,7 @@ export function walletLine(balanceGyd?: number | null, weeklyGyd?: number | null
 //
 // Everything here is DERIVED FROM SERVER TRUTH and nothing is invented. If the
 // server did not send a grace deadline we do not print an hours countdown; if
-// it did not send a period end we do not print a paid-through date. A billing
+// it did not send a period end we do not print a billing date. A billing
 // screen that guesses is worse than one that says less: this is the screen a
 // vendor stands on when they think we have taken their money wrongly.
 // ---------------------------------------------------------------------------
@@ -254,11 +254,12 @@ export function payScreenState(sub: any, now: Date = new Date()): PayScreenState
     };
   }
 
-  // Covered. A big zero is the reward for paying, and the fee ahead is stated
-  // once, quietly, in the band — not repeated as a second number up top.
+  // Nothing due does not prove payment: trials also have period dates.
+  const trial = phase === 'trial' || sub.status === 'TRIAL';
+  const trialUntil = shortDate(sub.trialEndsAt ?? periodEnd);
   return {
     band: 'active', tone: 'covered', eyebrow: 'NOTHING DUE NOW', amountGyd: 0,
-    covers: through ? `Paid through ${through}` : '',
+    covers: trial ? (trialUntil ? `Free trial until ${trialUntil}` : '') : (through ? `Next bill: ${through}` : ''),
     title: 'You are covered',
     body: through && fee > 0
       ? `Next fee is ${money(fee)} on ${through}. You can pay early any time.`

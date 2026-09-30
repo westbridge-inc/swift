@@ -33,7 +33,7 @@ vi.mock('../stores/authStore', () => ({
 }));
 vi.mock('../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) } }));
 vi.mock('expo-constants', () => ({ default: { expoConfig: {} } }));
-vi.mock('react-native', () => ({ TurboModuleRegistry: { get: () => null } }));
+vi.mock('react-native', () => ({ Platform: { OS: 'ios' }, TurboModuleRegistry: { get: () => null } }));
 vi.mock('../lib/analytics', () => ({ track: vi.fn() }));
 vi.mock('../lib/checkoutAttemptStore', () => ({ checkoutAttempt: {} }));
 vi.mock('../lib/checkoutAttempt', () => ({ recordCheckoutOutcome: vi.fn(), stableBodyHash: vi.fn() }));
