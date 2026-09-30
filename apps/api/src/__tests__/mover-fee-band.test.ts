@@ -8,8 +8,9 @@ import { BillingService } from '../modules/billing/billing.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
-import { VEHICLE_CLASSES, feeBandFor } from '../config/vehicle-classes';
+import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isPassengerVehicle, isVehicleOffered } from '../config/vehicle-classes';
 import { partnerRateFor, type SubscriptionTiers } from '../modules/country/country-config.service';
+import { PartnerService } from '../modules/partner/partner.service';
 
 // ---------------------------------------------------------------------------
 // The mover weekly fee follows the ROLE first, then the VEHICLE — never the
@@ -315,5 +316,38 @@ describe('mover fee band — what a mover is actually charged', () => {
     expect(waived.feeWaived).toBe(true);
     // Untouched: the waiver, not the band, decides what is collected.
     expect(Number(waived.weeklyRate)).toBe(6000);
+  });
+
+  it('provisioning never makes a delivery Rider of a passenger vehicle, so the 6,000 band cannot reach a car [AX332]', async () => {
+    // The resolver prices a Rider by vehicle band, so a Rider on a car would
+    // pay the delivery rate. No such rider exists (staging, 09-30: five riders,
+    // all bicycle or motorbike) and no pricing rule is added for one. This pins
+    // that neither writer of a mover's vehicle can make one: /become turns a
+    // car, wagon or bus into a taxi Driver, and a delivery Rider who changes to
+    // one becomes a Driver while the Rider profile keeps its cargo vehicle.
+    const partners = new PartnerService(app.prisma);
+    const passenger = VEHICLE_TYPES_IN_ORDER.filter((v) => isPassengerVehicle(v) && isVehicleOffered(v));
+    expect(passenger).toEqual(expect.arrayContaining(['CAR', 'WAGON_CAR', 'BUS_9', 'BUS_15']));
+
+    for (const vehicleType of passenger) {
+      seq += 1;
+      const vehicle = { make: 'Toyota', model: 'Noah', year: 2019, color: 'White', licensePlate: `PAX ${seq}` };
+
+      const joiner = await makeMoverUser();
+      const joined = await partners.becomePartner(joiner, { role: 'MOVER', vehicleType, vehicle });
+      expect(joined.kind, vehicleType).toBe('DRIVER');
+      expect(await app.prisma.rider.findUnique({ where: { userId: joiner } }), vehicleType).toBeNull();
+
+      const switcher = await makeMoverUser();
+      expect((await partners.becomePartner(switcher, { role: 'MOVER', vehicleType: 'MOTORCYCLE' })).kind).toBe('RIDER');
+      const { result } = await partners.changeVehicleWithAuthority(
+        switcher,
+        { vehicleType, vehicle: { ...vehicle, licensePlate: `PAX ${seq} B` } },
+        async () => null,
+      );
+      expect(result.kind, vehicleType).toBe('DRIVER');
+      const rider = await app.prisma.rider.findUniqueOrThrow({ where: { userId: switcher } });
+      expect(rider.vehicleType, vehicleType).toBe('MOTORCYCLE');
+    }
   });
 });

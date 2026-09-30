@@ -60,6 +60,17 @@ const POLL_BACKOFF_CAP_SEC = 300;
 const nextBackoff = (current: number) => Math.min(POLL_BACKOFF_CAP_SEC, Math.max(30, current * 2));
 const jitter = (sec: number) => Math.round(sec * (0.8 + Math.random() * 0.4));
 const PRESERVED_NO_DUNNING = 'PRESERVED_NO_DUNNING';
+/**
+ * [AX332 F1] The plans the weekly re-tier moves, movers and vendors alike. A
+ * DORMANT plan (PAUSED: billing stopped and its paid period over; SUSPENDED:
+ * behind on the fee) is charged again at resume or at the next dunning retry,
+ * so its FUTURE rate follows the rate card like any other plan's. Leaving it
+ * out charged a rider paused on 8,000 exactly 8,000 the moment they resumed.
+ * Only the rate moves: a negotiated or waived rate is still skipped, and a
+ * charge already issued keeps its amount (the re-tier never writes a payment
+ * row). CANCELLED and CHURNED are closed and never re-tiered.
+ */
+const RETIER_STATUSES: SubscriptionStatus[] = ['ACTIVE', 'PAST_DUE', 'TRIAL', 'PAUSED', 'SUSPENDED'];
 const MMG_APPROVAL_HOLD = 'MMG_APPROVAL_MISMATCH';
 const MMG_HISTORY_HOLD = 'MMG_HISTORY_APPROVAL_UNVERIFIED';
 
@@ -3307,7 +3318,7 @@ export class BillingService {
     const moverSubs = await this.prisma.subscription.findMany({
       where: {
         OR: [{ riderId: { not: null } }, { driverId: { not: null } }],
-        status: { in: ['ACTIVE', 'PAST_DUE', 'TRIAL'] },
+        status: { in: RETIER_STATUSES },
       },
       include: {
         rider: { select: { vehicleType: true, user: { select: { countryCode: true } } } },
@@ -3405,7 +3416,7 @@ export class BillingService {
    */
   async recalculateVendorTiers(): Promise<number> {
     const vendorSubs = await this.prisma.subscription.findMany({
-      where: { vendorId: { not: null }, status: { in: ['ACTIVE', 'PAST_DUE', 'TRIAL'] } },
+      where: { vendorId: { not: null }, status: { in: RETIER_STATUSES } },
       include: {
         vendor: {
           select: {

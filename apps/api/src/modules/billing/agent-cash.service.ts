@@ -60,23 +60,50 @@ const ACTIVATION_COPY: Record<string, string> = {
   WEBHOOK: 'Service resumes within minutes of paying.',
 };
 
+/**
+ * [AX332 F2] The charge already ISSUED for the week now owed, at the amount it
+ * was issued for, or null when none is outstanding. Live means PENDING (the
+ * request is on the payer's phone) or UNKNOWN (the initiate died mid-flight and
+ * the request may still be there): approving either settles ITS amount, which a
+ * later rate change never rewrites. A request for an earlier week is not owed:
+ * that week was paid another way, so approving it is banked to the wallet.
+ * The newest live intent stands for the week; there is one by construction
+ * (SWIFT-004 never fires over a live request), and a second must not double it.
+ */
+async function issuedChargeDue(
+  prisma: PrismaClient,
+  sub: { id: string; nextBillingDate: Date },
+): Promise<number | null> {
+  const live = await prisma.subscriptionPayment.findFirst({
+    where: { subscriptionId: sub.id, status: { in: ['PENDING', 'UNKNOWN'] }, periodStart: sub.nextBillingDate },
+    orderBy: { createdAt: 'desc' },
+    select: { amount: true },
+  });
+  return live ? Number(live.amount) : null;
+}
+
 /** The Pay-screen data block [spec 6.1] — spread into the partner's
  *  GET /subscription next to sanDisplay. One amount-due source of truth
- *  [3.4]: next week's fee minus the parked wallet balance, floored at 0.
+ *  [3.4]: the charge already issued for the week owed, at its own amount
+ *  (AX332 F2: an 8,000 request still pending when the rate moved to 6,000 is
+ *  settled at 8,000, so that is what is due); with none outstanding, next
+ *  week's fee minus the parked wallet balance, floored at 0. The weekly fee
+ *  (weeklyFeeGyd) is the rate in force, reported beside it, never in its place.
  *  usdDisplay [usd spec Part 6, System 2 ③]: the dual-currency line — NULL
  *  until the founder enables usdPricingEnabled + displayDual for the tenant,
  *  so it ships dark and every consumer already handles absence. */
 export async function payInfo(
   prisma: PrismaClient,
-  sub: { id: string; type?: string; weeklyRate: unknown; customRate?: unknown | null },
+  sub: { id: string; type?: string; weeklyRate: unknown; customRate?: unknown | null; nextBillingDate: Date },
 ): Promise<{
   walletBalanceGyd: number; weeklyFeeGyd: number; amountDueGyd: number;
   activationCopy: string; payCashSteps: string[];
   usdDisplay: { amountUsd: number; rateUsed: number; line: string } | null;
 }> {
-  const [balanceRow, modeRow] = await Promise.all([
+  const [balanceRow, modeRow, issuedDue] = await Promise.all([
     prisma.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } }),
     prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_agent.ingestion_mode' } }),
+    issuedChargeDue(prisma, sub),
   ]);
   const weekly = weeklyFeeAmount(sub);
   const balance = Number(balanceRow?.balance ?? 0);
@@ -109,7 +136,7 @@ export async function payInfo(
   return {
     walletBalanceGyd: balance,
     weeklyFeeGyd: weekly,
-    amountDueGyd: Math.max(0, weekly - balance),
+    amountDueGyd: issuedDue ?? Math.max(0, weekly - balance),
     activationCopy: ACTIVATION_COPY[mode] ?? ACTIVATION_COPY['MANUAL']!,
     payCashSteps: [
       'Visit any MMG agent',
