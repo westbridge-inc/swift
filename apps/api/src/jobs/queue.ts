@@ -296,7 +296,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
-    ({ order } = await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'CANCELLED',
       allowedFrom: ['PENDING'],
@@ -366,7 +366,7 @@ export async function releaseHeldOrdersJob(
   queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue' | 'orderQueue'>,
 ): Promise<string[]> {
   const { OrderService } = await import('../modules/order/order.service');
-  const orders = new OrderService(ctx.prisma, ctx.io);
+  const orders = new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis);
   const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
     await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
   });
@@ -392,7 +392,7 @@ export async function releaseHeldOrdersJob(
 export async function autoCompleteDeliveredOrder(ctx: JobContext, orderId: string): Promise<boolean> {
   const { OrderService } = await import('../modules/order/order.service');
   try {
-    await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'COMPLETED',
       allowedFrom: ['DELIVERED'],
@@ -603,17 +603,27 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
           }
           await billing.scanUnkeyedTopUpDuplicates();
-          // [M-20] Settlement imports a person must see: unbalanced publications
-          // and rejected files with a credited row. Reported, never reversed.
-          const { scanSettlementImports } = await import('../modules/billing/settlement-import');
+          // [G5-F6] A settlement publication that stopped part-way (interrupted,
+          // or its publisher silent past the lease) is finished here, one winner
+          // per import; every row goes back through the same ingest, so none
+          // credits twice. The hold stops it.
+          const { resumeInterruptedSettlementImports, scanSettlementImports } = await import('../modules/billing/settlement-import');
+          const { AgentCashService } = await import('../modules/billing/agent-cash.service');
+          const resumedImports = await resumeInterruptedSettlementImports(ctx.prisma, new AgentCashService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)));
+          if (resumedImports.resumed.length + resumedImports.failed.length > 0) {
+            ctx.log.warn(resumedImports, '[G5-F6] settlement publications that stopped part-way — resumed');
+          }
+          // [M-20] Settlement imports a person must see: unbalanced publications,
+          // rejected files with a credited row, and publications the pass above
+          // could not finish. Reported, never reversed.
           const imports = await scanSettlementImports(ctx.prisma);
-          if (imports.unbalanced.length + imports.rejectedButCredited.length > 0) {
+          if (imports.unbalanced.length + imports.rejectedButCredited.length + imports.stuck.length > 0) {
             const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
                 title: '📄 Settlement imports need a person',
-                body: `${imports.unbalanced.length} published import(s) do not balance and ${imports.rejectedButCredited.length} rejected file(s) have a credited row. Reconcile against the MMG statement; nothing is reversed automatically.`,
+                body: `${imports.unbalanced.length} published import(s) do not balance, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
             ).catch(() => {});
@@ -1914,7 +1924,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { OrderService, reconcileMissingEarnings } = await import('../modules/order/order.service');
         const { scanned, healed, taxiUnpaidDelivered, courierUnpaidDelivered } = await reconcileMissingEarnings(
           ctx.prisma,
-          new OrderService(ctx.prisma, ctx.io),
+          new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         );
         // [M-29] A cash ride delivered with no captured fare after the fare
         // outcome became mandatory means a completion bypassed the terminal

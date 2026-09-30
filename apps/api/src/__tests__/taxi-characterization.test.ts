@@ -139,6 +139,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // [ALG-01] Drivers tied at one spot make the fairness band record decisions
+  // about these rides; they outlive the rides unless they go with them.
+  const rides = await app.prisma.order.findMany({ where: { OR: [{ id: { in: orderIds } }, { customerId: { in: userIds } }] }, select: { id: true } });
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: rides.map((r) => r.id) } } });
   // order_status_logs are append-only (audit law) — order delete cascades them.
   // Sweep by tracked id AND by this file's customers, so a test that creates
   // a ride through a raw inject can never strand a row that blocks user cleanup.

@@ -72,3 +72,15 @@ export function formatAmount(value: unknown, prefix: string): string {
   if (amount === null) return MONEY_UNKNOWN;
   return `${prefix}${Math.round(amount).toLocaleString()}`;
 }
+
+/** The single currency display used by orders and both business consoles. */
+export function formatMoney(value: unknown): string {
+  return formatAmount(value, 'GY$');
+}
+
+/** A receipt fallback may multiply a known unit price; missing prices stay unknown. */
+export function lineDisplayAmount(lineTotal: unknown, customerPrice: unknown, quantity: number): number | null {
+  if (lineTotal != null) return parseAmount(lineTotal);
+  const unit = parseAmount(customerPrice);
+  return unit === null || !Number.isFinite(quantity) ? null : unit * quantity;
+}

@@ -5,18 +5,17 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MutationNotice } from '@/components/mutation-notice';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { formatMoney as money } from '@/lib/money';
 import {
   confirmRiderSettlement, getDriverEarnings, getDriverProfile, getDriverSubscription,
   getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary,
 } from '@/lib/mover-api';
 
-const money = (n: number) => `$${Math.round(Number(n)).toLocaleString()}`;
-
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="rounded-2xl border border-black/5 bg-white p-5">
-      <p className="text-xs font-medium uppercase tracking-wide text-[var(--swift-muted)]">{label}</p>
-      <p className="mt-2 text-2xl font-extrabold">{value}</p>
+    <div className="min-w-0 rounded-2xl border border-black/5 bg-white p-5">
+      <p className="break-words text-xs font-medium uppercase tracking-wide text-[var(--swift-muted)]">{label}</p>
+      <p className="mt-2 break-words text-2xl font-extrabold">{value}</p>
       {sub && <p className="mt-1 text-xs text-[var(--swift-muted)]">{sub}</p>}
     </div>
   );
@@ -46,7 +45,7 @@ function SubscriptionCard({ title, sub, isError, error, onRetry }: {
         ) : null}
       </p>
       <p className="mt-0.5 text-sm text-[var(--swift-muted)]">
-        {money(Number(sub['weeklyRate'] ?? 0))}/week — you keep 100% of fares, fees and tips.
+        {money(sub['weeklyRate'])}/week — you keep 100% of fares, fees and tips.
         {sub['currentPeriodEnd'] ? ` Next bill: ${new Date(String(sub['currentPeriodEnd'])).toLocaleDateString()}.` : ''}
       </p>
     </div>
@@ -112,7 +111,7 @@ export default function PortalHome() {
         <DataUnavailable what="your earnings" error={summary.error} onRetry={() => void summary.refetch()} />
       )}
       {isRider && s && (
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Stat label="Today" value={money(s.today.total)} sub={`${s.today.count} jobs`} />
           <Stat label="This week" value={money(s.thisWeek.total)} sub={`${s.thisWeek.count} jobs`} />
           <Stat label="This month" value={money(s.thisMonth.total)} sub={`${s.thisMonth.count} jobs`} />
@@ -139,7 +138,7 @@ export default function PortalHome() {
       {isRider && owedRows.length > 0 && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5">
           <p className="font-semibold text-amber-800">
-            Stores owe you {money(settlements.data?.summary?.owed ?? 0)} in delivery fees ({settlements.data?.summary?.count ?? owedRows.length} MMG orders)
+            Stores owe you {money(settlements.data?.summary?.owed)} in delivery fees ({settlements.data?.summary?.count ?? owedRows.length} MMG orders)
           </p>
           <p className="mt-1 text-sm text-amber-800/80">
             When a customer pays the store&apos;s MMG, your fee lands in their wallet — collect it in cash and confirm here.
@@ -152,16 +151,16 @@ export default function PortalHome() {
               const orderNo = (r['order'] as { orderNumber?: string } | null)?.orderNumber;
               const status = String(r['status']);
               return (
-                <div key={id} className="flex items-center justify-between gap-3 rounded-lg bg-white p-3 text-sm">
+                <div key={id} className="flex flex-col gap-3 rounded-lg bg-white p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
                   <span>
-                    #{orderNo} · {vendorName} · <b>{money(Number(r['amount']))}</b>
+                    #{orderNo} · {vendorName} · <b>{money(r['amount'])}</b>
                     {status === 'STORE_CONFIRMED' && <span className="ml-2 text-xs text-green-600">store confirmed</span>}
                     {status === 'RIDER_CONFIRMED' && <span className="ml-2 text-xs text-amber-600">waiting on store</span>}
                   </span>
                   {status !== 'RIDER_CONFIRMED' && (
                     pending === id ? (
-                      <span className="flex shrink-0 items-center gap-2">
-                        <span className="text-xs font-semibold">Received {money(Number(r['amount']))} from {vendorName}?</span>
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold">Received {money(r['amount'])} from {vendorName}?</span>
                         <button
                           onClick={() => confirm.mutate({ id, amount: String(r['amount'] ?? '') })}
                           disabled={confirm.isPending}

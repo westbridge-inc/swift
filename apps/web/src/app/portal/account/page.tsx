@@ -106,7 +106,7 @@ export default function AccountPage() {
               value={mmg}
               onChange={(e) => setMmg(e.target.value)}
               placeholder="https://pay.mmg.gy/…"
-              className="min-w-64 flex-1 rounded-lg border border-black/10 px-3 py-2 text-sm focus:border-[var(--swift-red)] focus:outline-none"
+              className="min-w-0 w-full flex-1 rounded-lg border border-black/10 px-3 py-2 text-sm focus:border-[var(--swift-red)] focus:outline-none sm:w-auto"
             />
             <button
               onClick={() => {

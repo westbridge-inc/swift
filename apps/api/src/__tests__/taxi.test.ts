@@ -53,6 +53,9 @@ async function purgeFixtures() {
     select: { id: true },
   });
   const orderIds = orders.map((o) => o.id);
+  // [ALG-01] Drivers tied at one spot make the fairness band record decisions
+  // about these rides; they outlive the rides unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: orderIds } } });
   await app.prisma.rating.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
@@ -475,8 +478,11 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect((await app.redis.get(`dispatch:offer:${ride.id}`))!.split(':')[0]).toBe(driver.driverId); // [F-014-04 composite]
     const before = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).acceptanceRate;
     // The card RENDERED (the app stamps seen on render) — quitting now is a
-    // dodge and must cost. An unrendered card is spared [F-014-10].
-    const seen = await inject('POST', '/api/v1/driver/offers/seen', { orderId: ride.id }, driver.token);
+    // dodge and must cost. An unrendered card is spared [F-014-10]. The app
+    // names the card's attempt; a ping that names none never stamps a
+    // generated card [AX364].
+    const offerAttemptId = (await app.redis.get(`dispatch:offer:${ride.id}`))!.split(':')[1];
+    const seen = await inject('POST', '/api/v1/driver/offers/seen', { orderId: ride.id, offerAttemptId }, driver.token);
     expect(seen.statusCode).toBe(200);
 
     const off = await inject('POST', '/api/v1/driver/go-offline', {}, driver.token);
@@ -1310,9 +1316,11 @@ describe('Available-rides board — freshness window [SWIFT-064]', () => {
 
   it('shows a fresh request but hides a stale one (past the demand window)', async () => {
     const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    // The abandoned request is somebody else: one customer holds one live taxi.
+    const abandoner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver(); // online + available, in CENTRAL
     const fresh = await taxiRequest(cust.userId, 1);   // 1 min ago — live
-    const stale = await taxiRequest(cust.userId, 60);  // 60 min ago — abandoned
+    const stale = await taxiRequest(abandoner.userId, 60);  // 60 min ago — abandoned
 
     const res = await inject('GET', '/api/v1/driver/rides/available', undefined, driver.token);
     expect(res.statusCode).toBe(200);

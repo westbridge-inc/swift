@@ -189,7 +189,9 @@ describe('[W-04] the dashboard actually uses it', () => {
     // local component state — a half-typed form — belongs to the store it was
     // typed in. The remount is what stops the hours editor carrying A's rows
     // into B, where Save would have written them.
-    expect(src('dashboard-shell.tsx')).toMatch(/<main key=\{storeId \?\? 'no-store'\}/);
+    expect(src('dashboard-shell.tsx')).toMatch(/contentKey=\{storeId \?\? 'no-store'\}/);
+    const consoleShell = readFileSync(join(process.cwd(), 'src', 'components', 'console-shell.tsx'), 'utf8');
+    expect(consoleShell).toMatch(/<main key=\{contentKey\}/);
   });
 
   it('the switch clears rather than invalidates', () => {

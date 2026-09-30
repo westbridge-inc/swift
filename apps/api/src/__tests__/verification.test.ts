@@ -783,7 +783,7 @@ describe('Subscriptions are born on verification (auto-approval path)', () => {
     expect(rider.subscription!.status).toBe('TRIAL');
     // A delivery rider on a MOTORCYCLE pays the standard rider rate; on a
     // canter or box truck it would be the 9,000 heavy-delivery rate.
-    expect(Number(rider.subscription!.weeklyRate)).toBe(8000);
+    expect(Number(rider.subscription!.weeklyRate)).toBe(6000);
 
     // afterApproval fired once per approved document — birth must be idempotent
     const count = await app.prisma.subscription.count({ where: { riderId: rider.id } });

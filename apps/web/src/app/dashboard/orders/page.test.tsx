@@ -100,14 +100,14 @@ describe('vendor order board — money is never invented', () => {
     await dismissTakeover(user);
 
     // The list row: `totalAmount` arrived as the STRING "4500.00".
-    expect(row.textContent).toContain(`$${(4500).toLocaleString()}`);
+    expect(row.textContent).toContain(`GY$${(4500).toLocaleString()}`);
 
     // The detail pane: order total plus each line total (`totalCustomer`).
     await user.click(row);
     await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
-    expect(screen.getByText(`$${(4500).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`$${(3000).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`$${(1000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`GY$${(4500).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`GY$${(3000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`GY$${(1000).toLocaleString()}`)).toBeTruthy();
 
     // The headline guarantee: the letters N-a-N reach no part of this page.
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
@@ -457,5 +457,46 @@ describe('[E10] rejecting an order always carries a reason', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm order rejection' })).toBeNull());
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reject'))).toBe(false);
+  });
+});
+
+describe('order detail stays dismissible while its request settles', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('can close a pending detail request on a phone', async () => {
+    const order = wireVendorOrder({ status: 'ACCEPTED' });
+    mockApi((request) => {
+      if (request.url.pathname === '/api/v1/vendor/orders') return { body: { success: true, data: [order] } };
+      if (request.url.pathname.endsWith('/order-live')) return new Promise(() => {});
+      throw new Error(`Unexpected request: ${request.url}`);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText('Loading…');
+    await user.click(screen.getByRole('button', { name: 'Close order detail' }));
+    expect(screen.queryByRole('button', { name: 'Close order detail' })).toBeNull();
+  });
+
+  it('shows a failed detail request and retries it', async () => {
+    const order = wireVendorOrder({ status: 'ACCEPTED' });
+    let attempts = 0;
+    mockApi((request) => {
+      if (request.url.pathname === '/api/v1/vendor/orders') return { body: { success: true, data: [order] } };
+      if (request.url.pathname.endsWith('/order-live')) {
+        attempts++;
+        return attempts === 1
+          ? { status: 503, body: { success: false, error: { message: 'Unavailable' } } }
+          : { body: { success: true, data: wireVendorOrderDetail({ status: 'ACCEPTED' }) } };
+      }
+      throw new Error(`Unexpected request: ${request.url}`);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText(/Could not load this order/);
+    await user.click(screen.getByRole('button', { name: 'Retry order detail' }));
+    await screen.findByText('Total (Cash)');
+    expect(attempts).toBe(2);
   });
 });

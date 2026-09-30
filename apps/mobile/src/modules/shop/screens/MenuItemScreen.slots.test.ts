@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('react', async (original) => {
   const actual = await original<Record<string, any>>();
   const hooks = {
+    useCallback: (callback: unknown) => callback,
     useMemo: (factory: () => unknown) => factory(),
     useState: (initial: unknown) => {
       const call = mocks.useStateCall++;

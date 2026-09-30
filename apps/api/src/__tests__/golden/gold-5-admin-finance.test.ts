@@ -29,9 +29,10 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutabi
 //   · HOLD and RELEASE: with publication held the file is staged and
 //     validated but credits nothing; lifted, the same file publishes once
 //   · the wrong parties — a non-admin, a reasonless call — change nothing
-//   · G5-F6 [it.fails] a publication that dies mid-file is stuck PUBLISHING
-//     for ever: a retry answers "replayed, every row a duplicate" while a row
-//     was never credited, and the nightly scan does not see it
+//   · G5-F6: a publication that dies mid-file — at any row, before, inside
+//     or after its ingest — is marked INTERRUPTED, and importing the file
+//     again resumes it: every row credited exactly once, the import closed;
+//     two retries landing together resume it once
 //
 // The subscription and its Swift Account Number are fixtures (ensureSan is the
 // production minting function); activation is its own journey. Credits leave
@@ -137,6 +138,70 @@ async function withApproval(requester: Actor, approver: Actor, options: InjectOp
 }
 
 const importFile = (csv: string, src: string) => ({ method: 'POST' as const, url: '/api/v1/admin/billing/settlement-import', payload: { csv, source: src } });
+
+/** Ask, and approve as a DIFFERENT admin; the caller re-issues it. */
+async function approvedBy(requester: Actor, approver: Actor, options: InjectOptions): Promise<string> {
+  const ask = await admin({ ...options, token: requester.token });
+  expect(ask.statusCode, ask.body).toBe(202);
+  const approvalId = ask.json().error.details.approvalId as string;
+  const decided = await admin({ method: 'POST', url: `/api/v1/admin/approvals/${approvalId}/decide`, token: approver.token, payload: { approve: true, note: 'Totals checked against the MMG statement' } });
+  expect(decided.statusCode, decided.body).toBe(200);
+  return approvalId;
+}
+
+/** A barrier in the database: hold the import row lock until `waiters` other
+ *  sessions are blocked on it, then let go. Every request `start` sends has
+ *  read the import before any of them can change it. */
+async function holdingImportRow<T>(importId: string, waiters: number, start: () => Array<Promise<T>>): Promise<T[]> {
+  let sent: Array<Promise<T>> = [];
+  await sys(() => app.prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "settlement_imports" WHERE "id" = ${importId} FOR UPDATE`;
+    const pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
+    sent = start();
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      // A second waiter queues behind the first one, not behind this lock.
+      const blocked = (await app.prisma.$queryRaw<Array<{ blocked: number }>>`SELECT count(*)::int AS blocked FROM pg_stat_activity a
+        WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
+           OR EXISTS (SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS b(p) WHERE ${pid}::int = ANY(pg_blocking_pids(b.p)))`)[0]!.blocked;
+      if (blocked >= waiters) return;
+      if (Date.now() > deadline) throw new Error(`only ${blocked} of ${waiters} requests reached the import row`);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }, { timeout: 30_000 }));
+  return Promise.all(sent);
+}
+
+const realIngest = AgentCashService.prototype.ingest;
+const realCredit = AgentCashService.prototype.credit;
+type Stage = 'before' | 'inside' | 'after';
+/** Run `fn` with the k-th row of a publication dying at `stage` of its
+ *  ingest, the way a dropped connection or a killed process would: `before`
+ *  it (no observation), `inside` it (the observation persisted, its credit
+ *  lost), or `after` it (credited, the publisher gone before it wrote the row
+ *  down). */
+async function failingAt<T>(k: number, stage: Stage, fn: () => Promise<T>): Promise<T> {
+  let calls = 0;
+  const dropped = () => new Error('Connection terminated unexpectedly');
+  const spy = stage === 'inside'
+    ? vi.spyOn(AgentCashService.prototype, 'credit').mockImplementation(async function (this: AgentCashService, ...args: Parameters<AgentCashService['credit']>) {
+      calls += 1;
+      if (calls === k) throw dropped();
+      return realCredit.apply(this, args);
+    })
+    : vi.spyOn(AgentCashService.prototype, 'ingest').mockImplementation(async function (this: AgentCashService, ...args: Parameters<AgentCashService['ingest']>) {
+      const n = (calls += 1);
+      if (n === k && stage === 'before') throw dropped();
+      const res = await realIngest.apply(this, args);
+      if (n === k) throw dropped();
+      return res;
+    });
+  try {
+    return await fn();
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 /** Every trace of money on one subscription, as the books hold it. */
 async function money(subscriptionId: string) {
@@ -410,28 +475,42 @@ describe('GOLD-5 · ADMIN-04 — the settlement file: staged, processed, duplica
 });
 
 // ---------------------------------------------------------------------------
-// G5-F6 — a publication that dies mid-file can never be recovered
+// G5-F6 — a publication that dies mid-file resumes: every row credited once
 // ---------------------------------------------------------------------------
 //
-// settlement-import.ts publishSettlementImport claims the import
-// (STAGED → PUBLISHING) and credits row by row with no recovery: when a row's
-// ingest throws — a dropped database connection, a restart mid-file — the
-// import stays PUBLISHING for ever. A retry of the same file (a fresh
-// approval) then answers 200 "replayed: true, credited: 0, duplicates: 2"
-// while row 2 was never credited, publishSettlementImport has no other
-// caller, and scanSettlementImports only reads PUBLISHED and REJECTED
-// imports. The fault is one thrown ingest on row 2 of a real publication; the
-// interrupted attempt and the retry both run in beforeAll, so this can only
-// fail on the recovered state.
+// Before: settlement-import.ts publishSettlementImport claimed the import
+// (STAGED → PUBLISHING) and credited row by row with no recovery. When a
+// row's ingest threw — a dropped database connection, a restart mid-file —
+// the import stayed PUBLISHING for ever: a retry of the same file (a fresh
+// approval) answered 200 "replayed: true, credited: 0, duplicates: 2" while
+// row 2 was never credited, publishSettlementImport had no other caller, and
+// scanSettlementImports only read PUBLISHED and REJECTED imports.
+//
+// Now a publisher that fails part-way marks the import INTERRUPTED, and
+// importing the same file again resumes it, one winner: every row goes back
+// through the same ingest, whose replay guard credits a row at most once;
+// the rows the first attempt credited count as this import's, and an
+// observation persisted but never judged is finished. Through the mounted
+// route, two admins per upload:
+//   · the pinned case: row 2's ingest throws; the retry credits it once and
+//     closes the import. The interrupted attempt and the retry both run in
+//     beforeAll, so the test can only pass on the recovered state
+//   · two retries landing together: one resumes it, the other is answered;
+//     every row credited exactly once
+//   · the death at every row, at every point of its ingest: before it (no
+//     observation), inside it (the observation persisted, its credit lost),
+//     after it (credited, the publisher gone before it wrote the row down)
 describe('GOLD-5 · ADMIN-04 — G5-F6', () => {
+  let ops: Actor;
   let store: Awaited<ReturnType<typeof makeSubscriber>>;
   let t1 = '';
   let t2 = '';
   let stuckImport = '';
   let firstStatus = 0;
+  let retry: LightMyRequestResponse;
 
   beforeAll(async () => {
-    const ops = await makeUser(['ADMIN'], 'ADMIN', { admin: true, firstName: 'Olga' });
+    ops = await makeUser(['ADMIN'], 'ADMIN', { admin: true, firstName: 'Olga' });
     const approver = await makeUser(['ADMIN'], 'ADMIN', { admin: true, firstName: 'Abel' });
     store = await makeSubscriber('Gold5 Stuck Kitchen');
     t1 = txn();
@@ -452,19 +531,107 @@ describe('GOLD-5 · ADMIN-04 — G5-F6', () => {
     expect(firstStatus).toBe(500);
     const row = await sys(() => app.prisma.settlementImport.findFirstOrThrow({ where: { source: `${SOURCE_PREFIX}-stuck` } }));
     stuckImport = row.id;
-    expect(row.status).toBe('PUBLISHING');
+    // The import says what happened to it (it used to read PUBLISHING, for ever).
+    expect(row.status).toBe('INTERRUPTED');
     expect(await money(store.subscriptionId)).toMatchObject({ balance: 2100, credited: [t1] });
     // The operator does what the screen allows: import the same file again.
-    await withApproval(ops, approver, importFile(csv, source('stuck-retry')));
+    retry = (await withApproval(ops, approver, importFile(csv, source('stuck-retry')))).res;
   }, 60_000);
 
-  // GOLD-7 re-measure: settlement-import.ts:199 replays PUBLISHING without
-  // resuming, while :248 claims only STAGED. A guarded resume must replay
-  // row ingest idempotently, credit the missing row and close PUBLISHED.
-  // Money implementation is coordinator-owned; this defining pin stays red.
-  it.fails('[G5-F6] after a publication dies mid-file, importing the file again credits the missing row once and closes the import', async () => {
+  // GOLD-7 re-measure: settlement-import.ts replayed PUBLISHING without
+  // resuming, and claimed only STAGED. A guarded resume must replay row
+  // ingest idempotently, credit the missing row and close PUBLISHED.
+  // [G5-F6 · #1382] It now does, so this defining pin is green.
+  it('[G5-F6] after a publication dies mid-file, importing the file again credits the missing row once and closes the import', async () => {
+    expect(retry.statusCode, retry.body).toBe(200);
+    expect(retry.json().data).toMatchObject({ importId: stuckImport, status: 'PUBLISHED', fileRows: 2, credited: 2, duplicates: 0, unmatched: 0, replayed: false });
     const row = await sys(() => app.prisma.settlementImport.findUniqueOrThrow({ where: { id: stuckImport } }));
     expect(row.status).toBe('PUBLISHED');
-    expect(await money(store.subscriptionId)).toMatchObject({ balance: 3100, credited: [t1, t2].sort() });
+    expect({ credited: row.credited, rows: (row.results as Array<{ txnId: string; status: string }>).map((r) => [r.txnId, r.status]) })
+      .toEqual({ credited: 2, rows: [[t1, 'accepted'], [t2, 'accepted']] });
+    expect(await money(store.subscriptionId)).toEqual({ balance: 3100, topups: [1000, 2100], receipts: 2, ledger: 2, ledgerBalanced: true, credited: [t1, t2].sort() });
+    // The resume is on the record, by the person who asked, naming the import.
+    const trail = await sys(() => app.prisma.auditLog.findMany({ where: { entityId: stuckImport }, orderBy: { createdAt: 'asc' } }));
+    expect(trail.map((t) => ({ by: t.userId, status: (t.changes as Record<string, unknown>)['status'], from: (t.changes as Record<string, unknown>)['resumedFrom'] ?? null })))
+      .toEqual([{ by: ops.userId, status: 'STAGED', from: null }, { by: ops.userId, status: 'RESUMED', from: 'INTERRUPTED' }]);
   });
+});
+
+describe('GOLD-5 · ADMIN-04 — G5-F6: two retries at once', () => {
+  it('two approved retries of the interrupted file land together: one resumes it, the other is answered — every row credited exactly once', async () => {
+    const ops = await makeUser(['ADMIN'], 'ADMIN', { admin: true, firstName: 'Orla' });
+    const approver = await makeUser(['ADMIN'], 'ADMIN', { admin: true, firstName: 'Anan' });
+    const store = await makeSubscriber('Gold5 Twice Kitchen');
+    const ids = [txn(), txn(), txn()];
+    const csv = csvOf([[ids[0]!, store.san, 2100], [ids[1]!, store.san, 1000], [ids[2]!, store.san, 700]], { total: 3800, count: 3 });
+    const first = await failingAt(2, 'before', async () => (await withApproval(ops, approver, importFile(csv, source('twice')))).res);
+    expect(first.statusCode).toBe(500);
+    const stopped = await sys(() => app.prisma.settlementImport.findFirstOrThrow({ where: { source: `${SOURCE_PREFIX}-twice` } }));
+    expect(stopped.status).toBe('INTERRUPTED');
+
+    // Both retries are approved first, then land together. The test holds the
+    // import row until BOTH are blocked on it, so both read the stopped import
+    // before either can take it over: their compare-and-sets really race.
+    const retries = [importFile(csv, source('twice-a')), importFile(csv, source('twice-b'))];
+    const approvals = [await approvedBy(ops, approver, retries[0]!), await approvedBy(ops, approver, retries[1]!)];
+    const answers = await holdingImportRow(stopped.id, 2, () => retries.map((r, i) => admin({ ...r, token: ops.token, headers: { 'x-swift-approval': approvals[i]! } })));
+    expect(answers.map((a) => a.statusCode), answers.map((a) => a.body).join('\n')).toEqual([200, 200]);
+    const data = answers.map((a) => a.json().data as { importId: string; status: string; credited: number; duplicates: number; replayed: boolean });
+    const resumed = data.filter((d) => !d.replayed);
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0]).toMatchObject({ importId: stopped.id, status: 'PUBLISHED', credited: 3, duplicates: 0 });
+    const answered = data.find((d) => d.replayed)!;
+    expect(answered).toMatchObject({ importId: stopped.id, credited: 0 });
+    expect(['PUBLISHING', 'PUBLISHED']).toContain(answered.status);
+
+    expect(await money(store.subscriptionId)).toEqual({ balance: 3800, topups: [700, 1000, 2100], receipts: 3, ledger: 3, ledgerBalanced: true, credited: [...ids].sort() });
+    const closed = await sys(() => app.prisma.settlementImport.findUniqueOrThrow({ where: { id: stopped.id } }));
+    expect({ status: closed.status, credited: closed.credited }).toEqual({ status: 'PUBLISHED', credited: 3 });
+    const resumes = await sys(() => app.prisma.auditLog.count({ where: { entityId: stopped.id, changes: { path: ['status'], equals: 'RESUMED' } } }));
+    expect(resumes).toBe(1);
+  });
+});
+
+describe('GOLD-5 · ADMIN-04 — G5-F6: a publication that dies at any row, at any point of its ingest', () => {
+  let ops: Actor;
+  let approver: Actor;
+  const AMOUNTS = [2100, 1000, 700];
+  const LEFT_BEHIND = { before: null, inside: 'RECEIVED', after: 'MATCHED' } as const;
+
+  beforeAll(async () => {
+    ops = await makeUser(['ADMIN'], 'ADMIN', { admin: true, firstName: 'Onyx' });
+    approver = await makeUser(['ADMIN'], 'ADMIN', { admin: true, firstName: 'Ayo' });
+  }, 60_000);
+
+  for (const stage of ['before', 'inside', 'after'] as const) {
+    for (const k of [1, 2, 3]) {
+      it(`row ${k} of 3 dies ${stage} its ingest → importing the file again credits every row once and closes the import`, async () => {
+        const store = await makeSubscriber(`Gold5 Crash ${stage} ${k}`);
+        const ids = AMOUNTS.map(() => txn());
+        const csv = csvOf(ids.map((id, i) => [id, store.san, AMOUNTS[i]!] as [string, string, number]), { total: 3800, count: 3 });
+        const label = `crash-${stage}-${k}`;
+        const first = await failingAt(k, stage, async () => (await withApproval(ops, approver, importFile(csv, source(label)))).res);
+        expect(first.statusCode).toBe(500);
+        const stopped = await sys(() => app.prisma.settlementImport.findFirstOrThrow({ where: { source: `${SOURCE_PREFIX}-${label}` } }));
+        expect(stopped.status).toBe('INTERRUPTED');
+        // What the death left: the rows before it credited, and row k as its stage left it.
+        const landed = stage === 'after' ? k : k - 1;
+        const left = await money(store.subscriptionId);
+        expect({ balance: left.balance, credited: left.credited })
+          .toEqual({ balance: AMOUNTS.slice(0, landed).reduce((s, a) => s + a, 0), credited: ids.slice(0, landed).sort() });
+        const observed = await sys(() => app.prisma.mmgAgentPayment.findUnique({ where: { channel_externalId: { channel: 'MMG_SETTLEMENT_FILE', externalId: ids[k - 1]! } }, select: { status: true } }));
+        expect(observed?.status ?? null).toBe(LEFT_BEHIND[stage]);
+
+        const again = (await withApproval(ops, approver, importFile(csv, source(`${label}-retry`)))).res;
+        expect(again.statusCode, again.body).toBe(200);
+        expect(again.json().data).toMatchObject({ importId: stopped.id, status: 'PUBLISHED', fileRows: 3, credited: 3, reconciled: 0, duplicates: 0, unmatched: 0, replayed: false });
+        expect(await money(store.subscriptionId)).toEqual({ balance: 3800, topups: [700, 1000, 2100], receipts: 3, ledger: 3, ledgerBalanced: true, credited: [...ids].sort() });
+        const closed = await sys(() => app.prisma.settlementImport.findUniqueOrThrow({ where: { id: stopped.id } }));
+        expect({ status: closed.status, credited: closed.credited, rows: (closed.results as Array<{ txnId: string; status: string }>).map((r) => [r.txnId, r.status]) })
+          .toEqual({ status: 'PUBLISHED', credited: 3, rows: ids.map((id) => [id, 'accepted']) });
+        // The partner is told once per payment, not once per attempt.
+        expect(await sys(() => app.prisma.notification.count({ where: { userId: store.owner.userId, title: 'Top-up received' } }))).toBe(3);
+      });
+    }
+  }
 });
