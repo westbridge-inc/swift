@@ -20,6 +20,7 @@ export default function robots(): MetadataRoute.Robots {
         userAgent: '*',
         allow: '/',
         disallow: [
+          '/pay/mmg/',     // token-bearing payment returns
           '/trip/',        // tokenised trip share — private by construction
           '/track/',       // tokenised parcel tracking — private by construction
           '/s/',           // QR resolver records a scan on GET [AX303 F3]

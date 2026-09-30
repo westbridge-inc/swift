@@ -414,7 +414,7 @@ export function VendorMyQrScreen({ navigation }: any) {
             <TonePill label="Not assigned" tone="neutral" />
           </View>
           <T variant="caption" tone="muted">
-            Swift does not yet issue a call-in order number for this store. Your subscription Swift Number pays weekly fees and is not a phone line. Online orders still land in Orders with every other live order.
+            Swift does not yet issue a call-in order number for this store. Online orders still land in Orders with every other live order.
           </T>
         </Card>
 

@@ -53,7 +53,7 @@ function LoginInner() {
         router.replace(next || '/');
       } else {
         const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
-        router.replace(home);
+        router.replace(next === '/weekly-fee' ? next : home);
       }
     } catch (e) { setError((e as Error).message); }
     finally { busyNow.current = false; setBusy(false); }

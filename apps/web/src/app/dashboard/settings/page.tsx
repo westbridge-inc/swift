@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
@@ -136,13 +137,13 @@ function SubscriptionCard() {
               {s.status}
             </b>
             {s.status === 'TRIAL' && s.trialEndsAt && (
-              <span className="text-[var(--swift-muted)]"> — free until {new Date(s.trialEndsAt).toLocaleDateString()}</span>
+              <span className="text-[var(--swift-muted)]"> — Free trial until {new Date(s.trialEndsAt).toLocaleDateString()}</span>
             )}
           </p>
           <p>Weekly fee: <b>{money(s.weeklyRate)}</b> — you keep 100% of every sale.</p>
-          {s.currentPeriodEnd && <p>Paid through: {new Date(s.currentPeriodEnd).toLocaleDateString()}</p>}
+          {s.currentPeriodEnd && <p>Next bill: {new Date(s.currentPeriodEnd).toLocaleDateString()}</p>}
           <p className="text-[var(--swift-muted)]">
-            Billing method: {s.billingMethod === 'MOBILE_MONEY' ? 'MMG (auto-charge)' : 'Cash / prepaid balance'} — change it in the Swift app.
+            <Link href="/dashboard/weekly-fee" className="font-semibold underline">Weekly fee — view and pay</Link>
           </p>
         </div>
       )}
