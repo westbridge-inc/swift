@@ -92,6 +92,9 @@ model User {
   /// [DOC-1 P9-4] legal holds on this person's documents
 
   docLegalHolds        DocLegalHold[]         @relation("DocLegalHoldSubject")
+  /// Document destruction authority and its history for this person (retained; FK RESTRICT in SQL).
+  documentPurgeClaims  DocumentPurgeClaim[]
+  documentPurgeEvents  DocumentPurgeEvent[]
   complianceViolations  ComplianceViolation[]
   complianceReviews     ComplianceReviewCase[]
   strikes               Strike[]
@@ -666,7 +669,10 @@ model VerificationDocument {
   /// bytes are gone, the record below still answers. Distinct from `purgedAt`, which retires
   /// the submission itself (retention elapsed / erasure) and ends its evidence.
   activePurgeClaimId    String? @unique @db.Uuid
+  activePurgeClaim      DocumentPurgeClaim? @relation("VerificationDocumentActivePurgeClaim", fields: [activePurgeClaimId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "verification_documents_active_claim_fk")
   imageCompletionClaimId String? @db.Uuid
+  imageCompletionClaim  DocumentPurgeClaim? @relation("VerificationDocumentImageCompletionClaim", fields: [imageCompletionClaimId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "verification_documents_image_claim_fk")
+  purgeClaims           DocumentPurgeClaim[] @relation("DocumentPurgeClaimDocument")
   fieldsPurgedAt       DateTime?
   imageSourceKind      String @default("UNPROVEN")
   imagePurgedAt        DateTime?
@@ -991,6 +997,8 @@ enum ComplianceReviewStatus {
 model EncryptedObject {
   sourceId   String @unique @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   retiredClaimId String? @unique @db.Uuid
+  retiredClaim   DocumentPurgeClaim? @relation("EncryptedObjectRetiredClaim", fields: [retiredClaimId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "encrypted_objects_retirement_fk")
+  purgeClaims    DocumentPurgeClaim[] @relation("DocumentPurgeClaimSource")
   storageNamespace String?
   uploadState String @default("READY")
   fileKey    String    @id
@@ -3257,6 +3265,7 @@ model StorageOrphan {
   userId    String?
   createdAt DateTime  @default(now())
   purgedAt  DateTime?
+  purgeClaims DocumentPurgeClaim[]
 
   @@index([tenantId, purgedAt])
   @@map("storage_orphans")
@@ -6732,6 +6741,7 @@ model RequirementItem {
 // the receipt must outlive both (it is what a regulator is shown).
 model DeletionReceipt {
   purgeClaimId String? @unique @db.Uuid
+  purgeClaim   DocumentPurgeClaim? @relation(fields: [purgeClaimId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   scope String?
   id                      String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId                String   @default("swift-default")
@@ -6953,6 +6963,7 @@ model DocLegalHold {
   incidentCase   IncidentCase?          @relation(fields: [incidentCaseId], references: [id], onDelete: Restrict)
   documents      VerificationDocument[]
   fraudCases     FraudCase[]
+  purgeEvents    DocumentPurgeEvent[]
 
   @@index([subjectUserId, releasedAt])
   @@index([tenantId, releasedAt, reviewBy])
@@ -7301,29 +7312,40 @@ model DocumentRecord {
 model DocumentPurgeClaim {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId String
-  tenant Tenant @relation(fields: [tenantId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   documentId String?
+  document VerificationDocument? @relation("DocumentPurgeClaimDocument", fields: [documentId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   orphanId String?
+  orphan StorageOrphan? @relation(fields: [orphanId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   subjectId String? @db.Uuid
   docType String?
   role String?
   mode String
   sourceKind String
   sourceId String? @db.Uuid
+  source EncryptedObject? @relation("DocumentPurgeClaimSource", fields: [sourceId], references: [sourceId], onDelete: Restrict, onUpdate: NoAction)
   fileKey String?
   storageNamespace String?
   sourceFingerprint String?
   sha256 String?
   sizeBytes Int?
   previousImageClaimId String? @db.Uuid
-  runIds String[] @db.Uuid
-  fieldIds String[] @db.Uuid
+  previousImageClaim DocumentPurgeClaim? @relation("DocumentPurgeClaimPreviousImage", fields: [previousImageClaimId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  laterClaims DocumentPurgeClaim[] @relation("DocumentPurgeClaimPreviousImage")
+  runIds String[] @default([]) @db.Uuid
+  fieldIds String[] @default([]) @db.Uuid
   initiatedBy String
   createdAt DateTime @default(now())
   claimXid BigInt @default(dbgenerated("txid_current()"))
   state String @default("COMMITTED")
   completedAt DateTime?
+  events DocumentPurgeEvent[]
+  receipt DeletionReceipt?
+  retiredObject EncryptedObject? @relation("EncryptedObjectRetiredClaim")
+  activeForDocument VerificationDocument? @relation("VerificationDocumentActivePurgeClaim")
+  imageCompletedDocuments VerificationDocument[] @relation("VerificationDocumentImageCompletionClaim")
 
   @@index([tenantId, state, createdAt])
   @@index([documentId])
@@ -7335,10 +7357,13 @@ model DocumentPurgeClaim {
 model DocumentPurgeEvent {
   id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId String
-  tenant Tenant @relation(fields: [tenantId], references: [id])
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   claimId String? @db.Uuid
+  claim DocumentPurgeClaim? @relation(fields: [claimId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   holdId String? @db.Uuid
+  hold DocLegalHold? @relation(fields: [holdId], references: [id], onDelete: Restrict, onUpdate: NoAction)
   kind String
   actorId String
   details Json

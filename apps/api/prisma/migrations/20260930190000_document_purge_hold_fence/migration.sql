@@ -56,6 +56,9 @@ CREATE UNIQUE INDEX "deletion_receipt_purgeClaimId_key" ON deletion_receipt("pur
 -- These ledgers carry no default tenant: lineage must be explicit.
 ALTER TABLE document_purge_claim ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_purge_event ENABLE ROW LEVEL SECURITY;
+-- [STA-1 4.2] FORCE, as rlsDdlFor() prescribes: without it the table owner bypasses the wall.
+ALTER TABLE document_purge_claim FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_purge_event FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON document_purge_claim USING ("tenantId" = current_setting('app.current_tenant', true) OR pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER')) WITH CHECK ("tenantId" = current_setting('app.current_tenant', true) OR pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER'));
 CREATE POLICY tenant_isolation ON document_purge_event USING ("tenantId" = current_setting('app.current_tenant', true) OR pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER')) WITH CHECK ("tenantId" = current_setting('app.current_tenant', true) OR pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER'));
 
