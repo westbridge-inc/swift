@@ -160,6 +160,10 @@ export function getSessionPrincipal(): string | null {
  */
 export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
   if (typeof window === 'undefined') return { ok: false };
+  const generation = authGeneration;
+  // An old probe cannot undo a rejected refresh, deliberate logout or login.
+  // Tell its caller only whether the newer, already-attested session exists.
+  const currentAnswer = () => ({ ok: sessionPrincipal !== null });
   const forget = () => {
     const known = sessionPrincipal !== null;
     sessionPrincipal = null;
@@ -168,8 +172,10 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
   };
   try {
     const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', headers: { ...clientHeaders } });
+    if (generation !== authGeneration) return currentAnswer();
     if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
+    if (generation !== authGeneration) return currentAnswer();
     const user = json?.data?.user as { id?: unknown } | undefined;
     if (!user || typeof user.id !== 'string') return forget();
     rememberSession(true);
@@ -189,7 +195,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
     // A network failure is not "signed out" — say nothing rather than guess.
-    return { ok: false };
+    return generation !== authGeneration ? currentAnswer() : { ok: false };
   }
 }
 

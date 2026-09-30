@@ -1,6 +1,6 @@
 import { act, render, screen } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
-import { adoptSession, apiFetch, clearSession, logout, restoreSession, sessionProbe } from '@/lib/auth';
+import { adoptSession, apiFetch, clearSession, getSessionPrincipal, logout, restoreSession, sessionProbe } from '@/lib/auth';
 import { SignedOutNotice } from './customer-session';
 import { mockApi, type ApiReply, type ApiRequest } from '@/test/test-utils';
 
@@ -91,4 +91,25 @@ it('leaves a redirecting rejection for the login screen instead of consuming it 
   expect(await screen.findByText(message)).toBeTruthy();
   login.unmount(); render(<SignedOutNotice />);
   expect(screen.queryByText(message)).toBeNull();
+});
+
+
+it('keeps a late successful session probe from resurrecting a rejected session and hiding its notice', async () => {
+  adoptSession('test-person'); let finish!: (_reply: ApiReply) => void;
+  mockApi((r) => r.url.pathname.endsWith('/auth/me') ? new Promise((resolve) => { finish = resolve; }) : rejected);
+  const probe = sessionProbe();
+  await apiFetch('/api/v1/customer/orders', undefined, { redirectOnExpired: false }).catch(() => undefined);
+  render(<SignedOutNotice />); await screen.findByText(message);
+  await act(async () => { finish({ body: { success: true, data: { user: { id: 'test-person' } } } }); await probe; });
+  expect(getSessionPrincipal()).toBeNull();
+  expect(screen.getByText(message)).toBeTruthy();
+});
+
+it('keeps a late failed probe from forgetting a newly adopted account', async () => {
+  adoptSession('old-person'); let finish!: (_reply: ApiReply) => void;
+  mockApi(() => new Promise((resolve) => { finish = resolve; }));
+  const probe = sessionProbe(); adoptSession('new-person'); finish(rejected);
+  expect((await probe).ok).toBe(true);
+  expect(getSessionPrincipal()).toBe('new-person');
+  render(<SignedOutNotice />); expect(screen.queryByText(message)).toBeNull();
 });
