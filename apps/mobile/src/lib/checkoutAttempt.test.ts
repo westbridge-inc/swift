@@ -275,11 +275,11 @@ describe('[SX391] intent transitions compare both key and principal', () => {
     expect(attempt.end('chk_test_1', A2)).toBe(true);
   });
   it('the old v2 intent survives migration and another account using the device', () => {
-    const store = memoryStore(JSON.stringify({ key: 'chk_v2_pending', principal: A, bodyHash: DELIVERY, state: 'sent', createdAt: 1, sentAt: 2 }));
+    const store = memoryStore(JSON.stringify({ key: 'chk_test_v2', principal: A, bodyHash: DELIVERY, state: 'sent', createdAt: 1, sentAt: 2 }));
     const migrated = createCheckoutAttempt(store, mint);
-    expect(migrated.currentFor(A)).toMatchObject({ key: 'chk_v2_pending', sentAt: 2 });
+    expect(migrated.currentFor(A)).toMatchObject({ key: 'chk_test_v2', sentAt: 2 });
     migrated.begin({ principal: B, bodyHash: DELIVERY });
     const restarted = createCheckoutAttempt(store, mint);
-    expect(restarted.resumeFor(A2)).toMatchObject({ key: 'chk_v2_pending', principal: A2, state: 'sent', sentAt: 2 });
+    expect(restarted.resumeFor(A2)).toMatchObject({ key: 'chk_test_v2', principal: A2, state: 'sent', sentAt: 2 });
   });
 });
