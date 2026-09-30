@@ -198,7 +198,11 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
     });
     const failing = new VerificationService(app.prisma, notifications, getKycProvider());
     await expect(failing.expireLapsedDocuments())
-      .rejects.toThrow('injected mover suspension failure');
+      .rejects.toMatchObject({
+        code: 'VERIFICATION_SWEEP_INCOMPLETE',
+        counts: { expiry_effects: 1 },
+        samples: expect.arrayContaining([expect.objectContaining({ id: lapsed.id, stage: 'expiry_effects' })]),
+      });
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: lapsed.id } })).status)
       .toBe('EXPIRED');
     expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)

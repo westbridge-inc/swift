@@ -960,6 +960,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       if (job.name === 'expiry-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
+        const { VerificationSweepIncomplete } = await import('../modules/verification/sweep-failures');
         const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
         const { getKycProvider } = await import('../providers/kyc/kyc-provider');
 
@@ -993,7 +994,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             }),
           );
         }
-        const expired = await verification.expireLapsedDocuments();
+        let expiryFailure: InstanceType<typeof VerificationSweepIncomplete> | undefined;
+        let expired: number;
+        try {
+          expired = await verification.expireLapsedDocuments();
+        } catch (error) {
+          if (!(error instanceof VerificationSweepIncomplete)) throw error;
+          expiryFailure = error;
+          expired = error.completed;
+        }
         const reminded = await verification.sendExpiryReminders();
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
@@ -1024,6 +1033,20 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.log.info(
           `Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} documents and ${storageOrphansPurged} storage orphans purged; compliance audit: ${run.moversChecked} online movers checked, ${run.violations} violations`,
         );
+        if (expiryFailure) {
+          ctx.log.error({ counts: expiryFailure.counts, samples: expiryFailure.samples, expired }, 'Verification expiry sweep has failed or held rows; retry required');
+          await opsPageOnce(ctx, 'verification-expiry-incomplete', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: 'Document expiry needs attention',
+              body: 'Some document or provider rows could not complete expiry reconciliation. Other rows and retention work continued. Failed projections will be retried; overdue pipeline rows remain held for investigation.',
+              data: { kind: 'ops_reaper_failed', counts: expiryFailure!.counts },
+            }),
+          );
+          // The existing bounded BullMQ backoff and daily recurrence replay
+          // failed transactions/effects; a partial run is never successful.
+          throw expiryFailure;
+        }
       }
 
       if (job.name === 'compliance-sample') {
