@@ -336,7 +336,7 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
         <BoardFirstRunRow
           index={1}
           label={menuQ.isError ? 'Menu status unavailable' : 'Checking your menu'}
-          detail={menuQ.isError ? 'Open the menu to check its live items' : 'Loading your live catalogue facts'}
+          detail={menuQ.isError ? 'Open the menu to check its items' : 'Loading your menu details'}
           onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
         />
       ) : canManage && items.length === 0 ? (
@@ -677,9 +677,9 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
   const qrStale = qrQ.isError && !!qrQ.data;
   const subStale = subQ.isError && !!sub;
   const menuDetail = menuQ.isError && !menuQ.data
-    ? 'Catalogue unavailable'
+    ? 'Menu unavailable'
     : menuQ.isLoading && !menuQ.data
-      ? 'Checking live catalogue…'
+      ? 'Checking your menu…'
       : `${active} active · ${soldOut} sold out${menuStale ? ' · last loaded' : ''}`;
   const revenueDetail = revenueKnown
     ? `7d ${money(revenueWindow.cur.revenue)}`
@@ -795,7 +795,7 @@ function VendorStaffAvailability({ navigation }: any) {
   const detail = menuQ.isError && !menuQ.data
     ? 'Availability unavailable'
     : menuQ.isLoading && !menuQ.data
-      ? 'Checking live catalogue…'
+      ? 'Checking your menu…'
       : `${soldOut} sold out · one-tap updates${menuQ.isError && menuQ.data ? ' · last loaded' : ''}`;
   return (
     <View style={{ marginTop: space.lg, marginBottom: space.xl }}>
