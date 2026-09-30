@@ -143,10 +143,10 @@ it('rolls back only the failed store when two different favourites are saving', 
   const first = screen.getByRole('button', { name: 'Save One to favourites' }) as HTMLButtonElement;
   await waitFor(() => expect(first.disabled).toBe(false));
   await user.click(first); await user.click(screen.getByRole('button', { name: 'Save Two to favourites' }));
-  await act(async () => { finish.one!({ status: 503, body: {} }); });
+  await act(async () => { finish['one']!({ status: 503, body: {} }); });
   expect(first.getAttribute('aria-pressed')).toBe('false');
   expect(screen.getByRole('button', { name: 'Remove Two from favourites' }).getAttribute('aria-pressed')).toBe('true');
-  await act(async () => { finish.two!(ok({})); });
+  await act(async () => { finish['two']!(ok({})); });
 });
 
 
