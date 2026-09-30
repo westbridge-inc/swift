@@ -1669,7 +1669,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { date } = itemSlotsQuerySchema.parse(request.query);
 
-    const item = await app.prisma.item.findFirst({
+    const item = await app.prisma.item.findUnique({
       where: { id, vendor: vendorTenantForCaller() },
       select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
     });
