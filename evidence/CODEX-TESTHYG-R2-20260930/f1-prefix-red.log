@@ -4,7 +4,7 @@ Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules
 
 [R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 7a3eaafc-adab-4597-9e18-e2c495dd753b
 stdout | src/__tests__/golden/gold-7-cleanup.test.ts > refuses existing and post-preflight peer orders assigned to a fixture DRIVER without partial cleanup
-prisma:error 
+prisma:error
 Invalid `h.app.prisma.driver.create()` invocation in
 /Users/westbridgeinc/wt-testhyg-20260930/apps/api/src/__tests__/golden/gold-7-cleanup.test.ts:213:29
 
@@ -53,7 +53,7 @@ undefined
 ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
 
  FAIL  src/__tests__/golden/gold-7-cleanup.test.ts > refuses existing and post-preflight peer orders assigned to a fixture DRIVER without partial cleanup
-PrismaClientValidationError: 
+PrismaClientValidationError:
 Invalid `h.app.prisma.driver.create()` invocation in
 /Users/westbridgeinc/wt-testhyg-20260930/apps/api/src/__tests__/golden/gold-7-cleanup.test.ts:213:29
 

@@ -28,9 +28,9 @@
 +  const shared = await sys(() => app.prisma.algoConfig.create({ data: { tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 3, version: (latest?.version ?? 0) + 1, updatedBy: FIXTURE } }));
 +  mutantCapacityId = shared.id;
 +  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
- 
+
  });
- 
+
  afterAll(async () => {
    await purgeFixtures();
    restoreCapacityRead?.();

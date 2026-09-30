@@ -4,7 +4,7 @@ Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules
 
 [R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run f2fbdb47-e244-4d88-8b9a-40dd7831d8f0
 stdout | src/__tests__/golden/gold-7-vend-04.test.ts > GOLD-7 · VEND-04 — production worker billing journey > preserves a peer dunning alert inserted after setup while removing only successful run inserts
-prisma:error 
+prisma:error
 Invalid `app.prisma.alertDelivery.create()` invocation in
 /Users/westbridgeinc/wt-testhyg-20260930/apps/api/src/__tests__/golden/gold-7-vend-04.test.ts:479:55
 
