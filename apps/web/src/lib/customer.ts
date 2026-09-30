@@ -4,7 +4,7 @@
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
 import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
-import { formatAmount } from './money';
+import { formatMoney } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
@@ -214,7 +214,9 @@ async function publicGet<T>(path: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { cache: 'no-store' });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || json?.success === false) {
-    throw new Error(json?.error?.message || `Request failed (${response.status})`);
+    throw new Error(json?.error?.message || (response.status >= 500
+      ? 'Something went wrong on our side. Please try again.'
+      : 'We couldn’t complete that. Please try again.'));
   }
   return json.data as T;
 }
@@ -257,7 +259,7 @@ export async function setCartAddress(addressId: string): Promise<Cart> {
     body: JSON.stringify({ addressId }),
   })).data as { cart?: Cart };
   if (!payload?.cart || !Array.isArray(payload.cart.items)) {
-    throw new Error('Swift did not return an updated delivery quote. Checkout stays locked.');
+    throw new Error('Swift couldn’t update your delivery total. Checkout is paused. Check your cart and try again.');
   }
   return payload.cart;
 }
@@ -417,4 +419,4 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
 // [W-13] `Math.round(n ?? 0)` printed "GY$0" for a price the server never sent
 // and "GY$NaN" for a broken one. Free and unknown are different facts, and a
 // customer must never be shown either as the other.
-export const money = (n: unknown) => formatAmount(n, 'GY$');
+export const money = (n: unknown) => formatMoney(n);

@@ -6,6 +6,8 @@ import Link from 'next/link';
 import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
 import { sendOtp } from '@/lib/auth';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
+import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
+import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { SwiftLogo } from '@/components/swift-logo';
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
@@ -16,8 +18,7 @@ type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
 
 function safeReturnPath(): string {
   if (typeof window === 'undefined') return '';
-  const candidate = new URLSearchParams(window.location.search).get('next') ?? '';
-  return /^\/(?!\/)/.test(candidate) && !candidate.includes('..') && !candidate.includes('\\') ? candidate : '';
+  return storefrontAuthReturn(new URLSearchParams(window.location.search).get('next'));
 }
 
 const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
@@ -29,6 +30,8 @@ const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
 
 export default function SignupPage() {
   const router = useRouter();
+  const continueJourney = useStorefrontAuthJourney();
+  useEffect(() => { safeReturnPath(); }, []);
   const [step, setStep] = useState<Step>('role');
   const [role, setRole] = useState<Role>('CUSTOMER');
   const [phone, setPhone] = useState('+592');
@@ -71,6 +74,7 @@ export default function SignupPage() {
       const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
       const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
+      if (customerReturnPath) continueJourney();
       router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
       return;
     }
@@ -94,7 +98,9 @@ export default function SignupPage() {
     if (role === 'CUSTOMER') {
       // [E27] No profile selfie merely to browse or order: a new customer goes
       // where they were headed (else to ordering), not to the camera.
-      router.replace(safeReturnPath() || '/');
+      const destination = safeReturnPath();
+      if (destination) continueJourney();
+      router.replace(destination || '/');
     }
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
@@ -128,13 +134,13 @@ export default function SignupPage() {
             <ChevronLeft size={18} aria-hidden="true" /> Back
           </button>
         ) : null}
-        <Link href="/" aria-label="Swift home" className={styles.brandLink}><SwiftLogo /></Link>
+        <Link href="/" aria-label="Swift home" onClick={clearStorefrontContinuation} className={styles.brandLink}><SwiftLogo /></Link>
 
         {step === 'role' && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>What brings you to Swift?</h1>
             {ROLES.map(({ role: r, title, desc, Icon }) => (
-              <button key={r} type="button" onClick={() => { setRole(r); setStep('phone'); }} className={styles.roleButton}>
+              <button key={r} type="button" onClick={() => { if (r !== 'CUSTOMER') clearStorefrontContinuation(); setRole(r); setStep('phone'); }} className={styles.roleButton}>
                 <span className={styles.roleIcon}><Icon size={22} aria-hidden="true" /></span>
                 <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{desc}</span></span>
               </button>
@@ -142,6 +148,7 @@ export default function SignupPage() {
             <p className={styles.inlineText}>Already on Swift? <Link
               href="/login?next=/"
               onClick={(event) => {
+                continueJourney();
                 const next = safeReturnPath();
                 if (!next) return;
                 event.preventDefault();
@@ -209,7 +216,7 @@ export default function SignupPage() {
             ) : (
               <>
                 <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
-                {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed. {storePin.address ?? biz.addressLine1} — Latitude {storePin.latitude.toFixed(6)}, Longitude {storePin.longitude.toFixed(6)}</p>}
+                {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed: {storePin.address ?? biz.addressLine1}.</p>}
               </>
             )}
             <button type="button" onClick={() => void doBusiness()} disabled={busy || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>

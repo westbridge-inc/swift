@@ -7,6 +7,10 @@ const app = readFileSync(join(process.cwd(), 'src/App.tsx'), 'utf8');
 const appConfig = readFileSync(join(process.cwd(), 'app.config.ts'), 'utf8');
 
 describe('connectivity boundary contract', () => {
+  it('F5: offline copy is honest even on a cold start with no cached content', () => {
+    expect(banner).toContain("You're offline. Some things may not load until you're back online.");
+    expect(banner).not.toContain('saved content is still available');
+  });
   it('confirms stale false samples and refreshes when the app returns foreground', () => {
     expect(banner).toContain('OFFLINE_CONFIRMATION_MS');
     expect(banner).toContain('void netInfo.refresh()');
@@ -18,7 +22,8 @@ describe('connectivity boundary contract', () => {
   it('reserves measured banner body space instead of covering navigation headers', () => {
     expect(app).toContain('<ConnectivityBoundary>');
     expect(app).toContain('<RootNavigator />');
-    expect(banner).toContain('paddingTop: offline ? bannerBodyHeight : 0');
+    expect(banner).toContain('const showBanner = offline || slow');
+    expect(banner).toContain('paddingTop: showBanner ? bannerBodyHeight : 0');
     expect(banner).toContain('offlineBannerBodyHeight(event.nativeEvent.layout.height, insets.top)');
     expect(banner).toContain('pointerEvents="none"');
   });

@@ -25,6 +25,9 @@ export const loggerRedactConfig = {
     '*.mmgPassword',
     '*.mkey',
     '*.msecret',
+    // [PT-1 · C9] A card provider's vault token is a charge credential: never
+    // in a log line, top level or nested.
+    'vaultToken', '*.vaultToken',
     'req.body.code',
     'req.body.otp',
     // [DOC-1 §0.5] Raw extracted document PII and the signed URLs of PERSONAL

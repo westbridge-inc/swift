@@ -27,6 +27,18 @@ describe('new-order takeover', () => {
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
   });
 
+  it('[Q12] an order the next poll shows cancelled leaves the takeover — no chime for an order that no longer exists', async () => {
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder())]} />);
+    await screen.findByText(/NEW ORDER/);
+
+    // The customer cancelled (express, or after the free-cancel hold): the
+    // board's next poll carries the order as CANCELLED.
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder({ status: 'CANCELLED' }))]} />);
+    await waitFor(() => expect(screen.queryByText(/NEW ORDER/)).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull();
+  });
+
   it('renders an em-dash rather than a made-up $0 when no total arrived', async () => {
     const raw = wireVendorOrder() as Record<string, unknown>;
     delete raw['totalAmount'];
@@ -91,5 +103,20 @@ describe('new-order takeover', () => {
     expect(screen.getByText(/9:00 AM/)).toBeTruthy();
     expect(screen.queryByText('20 min prep')).toBeNull();
     expect(screen.getByRole('button', { name: 'Decline' })).toBeTruthy();
+  });
+
+  it('stacks full-width, touch-sized decisions on a narrow phone', async () => {
+    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder())]} />);
+    await screen.findByText('NEW ORDER');
+    const accept = screen.getByRole('button', { name: 'Accept' });
+    const reject = screen.getByRole('button', { name: 'Reject' });
+    const prep = screen.getByRole('option', { name: '20 min prep' }).closest('select')!;
+    const reason = screen.getByRole('combobox', { name: 'Reject reason' });
+    for (const control of [prep, accept, reason, reject]) {
+      expect(control.className).toContain('w-full');
+      expect(control.className).toContain('min-h-11');
+    }
+    expect(accept.parentElement?.className).toContain('flex-col');
   });
 });

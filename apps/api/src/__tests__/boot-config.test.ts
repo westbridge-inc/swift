@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
@@ -356,6 +357,46 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   });
 });
 
+// [AX352] SETTLEMENT_PUBLICATION_LEASE_MS shortens the settlement publication
+// lease so it can lapse inside a test or a drill. In production a short lease
+// could lapse while a slow row replays, before any progress is written, and
+// strand the unpaid tail of a settlement file: production refuses to boot with
+// any override below the 5-minute default.
+describe('[AX352] the settlement publication lease override is test and drill only', () => {
+  it('refuses to boot production with the lease shortened: 1000 ms, anything under 5 minutes, or unreadable', () => {
+    expect(PUBLICATION_LEASE_MS).toBe(5 * 60_000);
+    expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }))
+      .toThrow(/FATAL: SETTLEMENT_PUBLICATION_LEASE_MS .*Refusing to start/);
+    for (const value of ['299999', '0', '-1', 'abc', ' ']) {
+      expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: value }), value)
+        .toThrow(/SETTLEMENT_PUBLICATION_LEASE_MS/);
+    }
+  });
+
+  it('boots production with the override unset, or no shorter than the default', () => {
+    for (const value of [undefined, '', '300000', '600000']) {
+      expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: value }), String(value)).not.toThrow();
+    }
+  });
+
+  it('allows the short lease in the test, drill and development postures', () => {
+    for (const mode of ['test', 'loadtest', 'development']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }), mode).not.toThrow();
+      expect(publicationLeaseMs({ NODE_ENV: mode, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }), mode).toBe(1000);
+    }
+  });
+
+  it('[AX355] in production the lease read at call time ignores the override: an environment changed after boot never shortens it', () => {
+    const env: Record<string, string | undefined> = { ...good };
+    expect(() => assertSafeBootConfig(env)).not.toThrow(); // booted clean
+    env['SETTLEMENT_PUBLICATION_LEASE_MS'] = '1000'; // changed after boot
+    expect(publicationLeaseMs(env)).toBe(PUBLICATION_LEASE_MS);
+    expect(publicationHeartbeatMs(env)).toBe(15_000);
+    env['SETTLEMENT_PUBLICATION_LEASE_MS'] = '600000'; // even a longer one: production runs the default
+    expect(publicationLeaseMs(env)).toBe(PUBLICATION_LEASE_MS);
+  });
+});
+
 // [ledger E08] The order hold is the customer's free-cancel window: while it
 // runs, the order is hidden from the vendor. holdWindowMs()/
 // checkoutQueueTiming() treat a MISSING LIFECYCLE_V2 as hold OFF, so a deploy
@@ -672,5 +713,47 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))
       .toThrow(/non-UAT MMG_CHECKOUT_URL/);
+  });
+});
+
+// [PT-1 · C10] Card rail v2 in production. The card simulator is a test page
+// with no real money, and this build has no production-capable v2 provider:
+// production refuses both, loudly, at boot — never at a partner's first tap.
+describe('[PT-1] card rail v2 cannot be switched on in production yet, and the simulator never', () => {
+  it('refuses the card simulator in production, whatever the flag says', () => {
+    for (const flag of [undefined, '0', '1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_V2: flag }), String(flag))
+        .toThrow(/CARD_RAIL_PROVIDER=simulator/);
+    }
+  });
+
+  it('refuses CARD_RAIL_V2=1 in production: no production v2 provider exists in this build', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '1' })).toThrow(/FATAL: CARD_RAIL_V2=1/);
+  });
+
+  it('the flag is 1 or 0 (or unset), never a guess', () => {
+    for (const value of ['true', 'on', 'yes', '01', ' 1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: value }), value).toThrow(/CARD_RAIL_V2 must be 1 or 0/);
+    }
+  });
+
+  it('OFF — 0 or unset — boots exactly as before', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: undefined })).not.toThrow();
+  });
+
+  it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
+  });
+
+  // [AX297 F5] Draining v2 after a switch-off is its own switch, held to the same rules.
+  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and never 1 in production: there is nothing there to drain', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/FATAL: CARD_RAIL_V2_DRAIN=1/);
+    for (const value of ['true', 'yes', '2', ' 1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: value }), value).toThrow(/CARD_RAIL_V2_DRAIN must be 1 or 0/);
+    }
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: undefined })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });
 });

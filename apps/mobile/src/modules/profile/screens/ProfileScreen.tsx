@@ -16,6 +16,7 @@ import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BrandSwitch } from '../../../kit/controls';
+import { retryRead } from '../../../lib/appQueryPolicy';
 
 const GUTTER = space['2xl'];
 
@@ -103,7 +104,7 @@ export function ProfileScreen() {
   // Kit logout popup (51), now the one shared ask. The cart is a server
   // query and the account keeps it; logout clears this device's copy.
   const { requestLogout, logoutDialog } = useLogoutConfirm({
-    body: 'Your cart and session leave this device; your account keeps everything.',
+    body: 'You’ll be signed out on this device. Your cart and account details stay with your account.',
   });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);
@@ -156,7 +157,8 @@ export function ProfileScreen() {
       </Screen>
     );
   }
-  if (profile.isError) {
+  if (profile.isError && (!profile.data || !retryRead(0, profile.error))) {
+    // Cached details are useful during outages, not after permanent rejection.
     // [REPORT-022 F-022-19] An API failure must never trap the session: the
     // account controls that don't depend on profile data stay reachable.
     return (
@@ -208,6 +210,14 @@ export function ProfileScreen() {
           entering={FadeInDown.duration(320).reduceMotion(ReduceMotion.System)}
           style={{ paddingTop: insets.top + space.lg, paddingHorizontal: GUTTER }}
         >
+          {profile.isError ? (
+            <View style={{ gap: space.sm, marginBottom: space.md }}>
+              <T variant="caption" tone="muted">
+                Couldn’t refresh your profile. Showing the last loaded details.
+              </T>
+              <PillButton size="sm" label="Try again" onPress={() => { void profile.refetch(); }} />
+            </View>
+          ) : null}
           {/* [ref 05] The page names itself before it names the person. */}
           <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>ACCOUNT</T>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>

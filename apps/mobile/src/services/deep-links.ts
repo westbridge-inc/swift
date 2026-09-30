@@ -1,12 +1,11 @@
 import { Linking } from 'react-native';
 import { api } from './api';
 import { safeNavigate } from '../navigation/navigationRef';
-import { toast } from '../kit/toast';
 
 // The QR/link DEEP-LINK ROUTER [qr spec Part 6]. Universal links hand the app
 // a full https URL for /store/{slug} or /s/{code}; this module turns it into
-// the storefront screen — or an honest toast + normal open, never a crash,
-// never a guess. Same queue-and-flush shape as the notification tap-router:
+// the storefront screen — or a dedicated QR outcome, never an unrelated
+// store or Home behind a transient toast. Same queue-and-flush shape as the notification tap-router:
 // navigation not ready yet → queued, RootNavigator's onReady flushes.
 //
 // Android note: universal-link INTERCEPTION also needs assetlinks + intent
@@ -24,16 +23,13 @@ function reportAppOpen(code: string | null): void {
   void api.post(`/public/qr/${code}/app-open`, {}).catch(() => undefined);
 }
 
-const FAIL_TOAST = "That link didn't work — here's home instead.";
-
 let pendingUrl: string | null = null;
 let installed = false;
 
 /**
  * Why a code did not open a store. The IN-APP SCANNER needs these apart — the
  * person is standing at the counter holding the phone and "replaced" and "not
- * a Swift code" call for different next moves — whereas a deep link that
- * already dumped them on Home only needs one apology.
+ * a Swift code" call for different next moves — and external links use the same truthful outcomes.
  *
  * `unavailable` never says WHY: the server deliberately collapses "no such
  * entity" and "not publicly live" into one verdict so the endpoint cannot be
@@ -70,45 +66,58 @@ export async function resolveDestination(dest: LinkDestination): Promise<Resolve
     const vendorId = (res.data?.data as { id?: string } | undefined)?.id;
     reportAppOpen(dest.code);
     return vendorId ? { ok: true, vendorId } : { ok: false, reason: 'unavailable' };
-  } catch {
+  } catch (error) {
+    const status = (error as { response?: { status?: number } })?.response?.status;
+    if (status === 404) return { ok: false, reason: dest.kind === 'short' ? 'not-a-swift-code' : 'unavailable' };
+    if (status === 410) return { ok: false, reason: 'replaced' };
     // A dead network is NOT a dead code. Saying "this code is invalid" to
     // someone holding a perfectly good printed sign is the lie this separates.
     return { ok: false, reason: 'offline' };
   }
 }
 
-async function resolveAndGo(dest: LinkDestination): Promise<void> {
+async function resolveAndGo(dest: LinkDestination, request: number): Promise<void> {
   const outcome = await resolveDestination(dest);
+  if (request !== latestRequest) return;
   if (outcome.ok) {
-    if (!safeNavigate('Restaurant', { vendorId: outcome.vendorId })) throw new Error('nav');
+    safeNavigate('Storefront', { screen: 'Restaurant', params: { vendorId: outcome.vendorId } });
     return;
   }
-  // A network failure must still THROW here. handleUrl's catch is what queues a
-  // cold-start link for RootNavigator's onReady to flush, and on a cold start
-  // the request can fail simply because the app is still coming up. Swallowing
-  // it would turn a link that used to open on the retry into a dead toast.
-  // resolveDestination folds that case into a value for the scanner's benefit;
-  // this path puts it back.
-  if (outcome.reason === 'offline') throw new Error('resolve');
-  toast.show(FAIL_TOAST);
+  safeNavigate('QrOutcome', { reason: outcome.reason, destination: dest, requestId: request });
 }
 
 let navReady = false;
+let latestRequest = 0;
 
-function handleUrl(url: string | null): void {
-  if (!url) return;
+export function isWeeklyFeeReturn(url: string): boolean {
+  try { const parsed = new URL(url); return parsed.protocol === 'swift:' && parsed.hostname === 'pay' && parsed.pathname === '/mmg/return'; } catch { return false; }
+}
+
+function handleUrl(url: string | null): boolean {
+  if (!url) return false;
+  if (isWeeklyFeeReturn(url)) {
+    // A newer fee return supersedes pending scans and discards all parameters.
+    latestRequest += 1;
+    pendingUrl = null;
+    if (!safeNavigate('WeeklyFee') && !navReady) pendingUrl = 'swift://pay/mmg/return';
+    return true;
+  }
   const dest = destinationForUrl(url);
-  if (!dest) return; // not ours — the app opens normally
-  resolveAndGo(dest).catch(() => {
-    // Navigation not ready (cold start) → queue; RootNavigator's onReady
-    // flushes. Genuine resolve failures once ready (retired code, dead
-    // store, offline) → honest toast, the app stays on Home.
-    if (!navReady && pendingUrl === null) {
-      pendingUrl = url;
-    } else {
-      toast.show(FAIL_TOAST);
-    }
-  });
+  if (!dest) return false; // not ours — the app opens normally
+  const request = ++latestRequest;
+  if (!navReady) {
+    pendingUrl = url;
+    return true;
+  }
+  void resolveAndGo(dest, request);
+  return true;
+}
+
+/** Retry only the currently displayed scan. A later external link or an
+ * uninstalled handler wins over a slow retry, just as it wins over initialURL. */
+export async function retryQrDestination(destination: LinkDestination, requestId: number): Promise<void> {
+  if (!navReady || requestId !== latestRequest) return;
+  await resolveAndGo(destination, ++latestRequest);
 }
 
 /** RootNavigator onReady: deliver the URL that launched a cold start. */
@@ -117,7 +126,7 @@ export function flushPendingDeepLink(): void {
   if (!pendingUrl) return;
   const url = pendingUrl;
   pendingUrl = null;
-  setTimeout(() => handleUrl(url), 300);
+  handleUrl(url);
 }
 
 /** Install once at app start: warm URLs via the listener, cold start via the
@@ -125,6 +134,8 @@ export function flushPendingDeepLink(): void {
 export function installDeepLinkHandler(): () => void {
   if (installed) return () => undefined;
   installed = true;
+  let active = true;
+  let receivedWarmLink = false;
   // [MOB-002] Every origin decision is counted: accepted by origin, rejected by
   // reason (deep_link_accepted / deep_link_rejected). analytics.track is the
   // one seam events leave through, and today it is a no-op by design.
@@ -133,12 +144,20 @@ export function installDeepLinkHandler(): () => void {
     else track('deep_link_rejected', { reason: d.reason });
   });
   const sub = Linking.addEventListener('url', ({ url }) => {
-    try { handleUrl(url); } catch { /* never crash on a link */ }
+    try { receivedWarmLink = handleUrl(url) || receivedWarmLink; } catch { /* never crash on a link */ }
   });
   Linking.getInitialURL()
-    .then((url) => { if (url) { pendingUrl = url; } })
+    .then((url) => {
+      // Initial URL and onReady can finish in either order. A new tap wins
+      // over a late initial URL; a stopped listener never navigates later.
+      if (active && !receivedWarmLink) handleUrl(url);
+    })
     .catch(() => undefined);
   return () => {
+    active = false;
+    latestRequest += 1;
+    pendingUrl = null;
+    navReady = false;
     installed = false;
     setLinkDecisionObserver(null);
     sub.remove();
@@ -150,4 +169,5 @@ export function resetDeepLinksForTests(): void {
   pendingUrl = null;
   navReady = false;
   installed = false;
+  latestRequest = 0;
 }

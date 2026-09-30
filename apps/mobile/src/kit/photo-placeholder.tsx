@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { View, type ViewStyle } from 'react-native';
-import { Image } from 'expo-image';
+import { Image } from './image';
 import { color, radius, space } from '@swift/ui';
 import { DARK_BLURHASH } from '../lib/images';
 import { T } from './text';
@@ -115,6 +115,7 @@ export function Photo({
   return (
     <Image
       source={{ uri }}
+      recyclingKey={uri}
       placeholder={{ blurhash: DARK_BLURHASH }}
       transition={transition}
       style={style as never}

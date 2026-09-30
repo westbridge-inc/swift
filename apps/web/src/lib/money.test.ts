@@ -105,9 +105,10 @@ describe('[W-13] formatting never invents a figure', () => {
     expect(money('4000.00')).toBe('GY$4,000');
   });
 
-  it('the vendor formatter is the same parser, with its own prefix', () => {
+  it('the vendor and customer formatters share the GY$ presentation', () => {
     expect(vendorMoney(undefined)).toBe(MONEY_UNKNOWN);
-    expect(vendorMoney('4500.00')).toBe('$4,500');
+    expect(vendorMoney('4500.00')).toBe('GY$4,500');
+    expect(vendorMoney('4500.00')).toBe(money('4500.00'));
     expect(toAmount('4500.00')).toBe(4500);
     expect(toAmount('')).toBeNull();
   });
@@ -144,7 +145,7 @@ describe('[W-13] the surfaces that spent money use it', () => {
     const vendor = source('src/lib/vendor-api.ts');
     const customer = source('src/lib/customer.ts');
     expect(vendor).toMatch(/return parseAmount\(value\);/);
-    expect(customer).toMatch(/formatAmount\(n, 'GY\$'\)/);
+    expect(customer).toMatch(/formatMoney\(n\)/);
     // the permissive one is gone — checked on CODE, not on the comment that
     // quotes it (a census that matches its own documentation proves nothing)
     const code = customer.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');

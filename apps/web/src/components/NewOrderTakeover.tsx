@@ -61,6 +61,15 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     }
   }, [orders, seen]);
 
+  // [Q12] A queued order the latest poll shows is no longer PENDING — the
+  // customer cancelled it, another device answered it, the no-response timer
+  // reaped it — leaves the takeover: the chime is for an open decision.
+  useEffect(() => {
+    const settled = new Set(orders.filter((o) => (o.status || '').toUpperCase() !== 'PENDING').map((o) => o.id));
+    if (settled.size === 0) return;
+    setQueue((q) => (q.some((o) => settled.has(o.id)) ? q.filter((o) => !settled.has(o.id)) : q));
+  }, [orders]);
+
   // Chime + tab flash while the takeover is up.
   useEffect(() => {
     if (queue.length === 0) return;
@@ -109,8 +118,8 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   const customer = [current.customer?.firstName, current.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-6">
-      <div className="w-full max-w-lg rounded-3xl bg-white p-8 text-center shadow-2xl">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/80 p-3 min-[400px]:p-6">
+      <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-4 text-center shadow-2xl min-[400px]:p-8">
         <p className="text-4xl">🔔</p>
         <h2 className="mt-2 text-3xl font-extrabold text-[var(--swift-red)]">
           {current.fulfillment === 'APPOINTMENT' ? 'NEW BOOKING' : queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
@@ -131,11 +140,12 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           ))}
         </div>
 
-        <div className="mt-5 flex items-center justify-center gap-2">
+        <div className="mt-5 flex flex-col items-stretch gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-center">
           {current.fulfillment !== 'APPOINTMENT' && <select
             value={prepTime}
             onChange={(e) => setPrepTime(Number(e.target.value))}
-            className="rounded-lg border border-black/10 px-2 py-3 text-sm"
+            aria-label="Preparation time"
+            className="min-h-11 w-full min-w-0 rounded-lg border border-black/10 px-2 py-3 text-sm min-[400px]:w-auto"
           >
             {[10, 15, 20, 30, 45, 60].map((m) => (
               <option key={m} value={m}>{m} min prep</option>
@@ -144,7 +154,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           <button
             onClick={() => accept.mutate(current.id)}
             disabled={accept.isPending || reject.isPending}
-            className="rounded-xl bg-green-600 px-8 py-3 text-lg font-extrabold text-white disabled:opacity-50"
+            className="min-h-11 w-full rounded-xl bg-green-600 px-8 py-3 text-lg font-extrabold text-white disabled:opacity-50 min-[400px]:w-auto"
           >
             Accept
           </button>
@@ -152,7 +162,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
             value={rejectReasonsFor(current.fulfillment).includes(rejectReason) ? rejectReason : rejectReasonsFor(current.fulfillment)[0]}
             onChange={(e) => setRejectReason(e.target.value)}
             aria-label="Reject reason"
-            className="rounded-lg border border-black/10 px-2 py-3 text-sm"
+            className="min-h-11 w-full min-w-0 rounded-lg border border-black/10 px-2 py-3 text-sm min-[400px]:w-auto"
           >
             {rejectReasonsFor(current.fulfillment).map((why) => (
               <option key={why} value={why}>{why}</option>
@@ -161,7 +171,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           <button
             onClick={() => reject.mutate(current.id)}
             disabled={accept.isPending || reject.isPending}
-            className="rounded-xl border-2 border-[var(--swift-red)] px-6 py-3 text-lg font-bold text-[var(--swift-red)] disabled:opacity-50"
+            className="min-h-11 w-full rounded-xl border-2 border-[var(--swift-red)] px-6 py-3 text-lg font-bold text-[var(--swift-red)] disabled:opacity-50 min-[400px]:w-auto"
           >
             {current.fulfillment === 'APPOINTMENT' ? 'Decline' : 'Reject'}
           </button>

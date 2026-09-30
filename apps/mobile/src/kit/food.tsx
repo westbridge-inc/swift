@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Pressable, View, type ViewStyle } from 'react-native';
-import { Image } from 'expo-image';
+import { Image } from './image';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space, withAlpha } from '@swift/ui';
 import { DARK_BLURHASH } from '../lib/images';

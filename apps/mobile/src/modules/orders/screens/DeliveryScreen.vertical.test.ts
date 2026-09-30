@@ -43,12 +43,12 @@ describe('the MMG cancellation copy names the provider on a booking', () => {
 
 describe('controls — the words every other vertical already had', () => {
   it('the cancel sheet still says what it said for a courier request', () => {
-    expect(SCREEN).toMatch(/This cancels the pickup and puts the assigned rider back in the dispatch pool\. It can’t be undone\./);
+    expect(SCREEN).toMatch(/This cancels the pickup\. The rider can take other jobs\. It can’t be undone\./);
     expect(SCREEN).toMatch(/This stops the rider search and cancels the pickup request\. It can’t be undone\./);
   });
 
-  it('the sheet keeps its non-MMG sentence and the server-preview wording', () => {
-    expect(SCREEN).toMatch(/Cancelling stops fulfilment\. The server preview is shown below; the final outcome is confirmed when cancellation completes\./);
+  it('the sheet keeps the possible fee and final confirmation clear', () => {
+    expect(SCREEN).toMatch(/Cancelling stops this \$\{cancelledNoun\}\. Check the possible fee below\. We’ll show the final result when cancellation is confirmed\./);
   });
 
   it('the booking-aware hold caption and pending summary this screen already had are still there', () => {

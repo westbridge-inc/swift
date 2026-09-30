@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { activeRide, cancelOrder, getOrder, getRide, money } from '@/lib/customer';
+import { lineDisplayAmount } from '@/lib/money';
 import styles from './tracking.module.css';
 
 const POLL_INTERVAL_MS = 8_000;
@@ -440,7 +441,7 @@ export default function OrderDetailPage() {
       }
       if (latestFee !== effectiveCancelFee) {
         setCancelFee(latestFee);
-        setError(`The server’s cancellation quote changed to ${money(latestFee)}. Review the updated cash-only marker, then confirm again if you still want to cancel.`);
+        setError(`The possible cancellation fee changed to ${money(latestFee)}. Check the new amount, then confirm again if you still want to cancel.`);
         window.requestAnimationFrame(() => cancelConfirmButton.current?.focus());
         return;
       }
@@ -492,7 +493,7 @@ export default function OrderDetailPage() {
       {trackingError ? (
         <div className={styles.trackingNotice} role="alert">
           <span>
-            The last update failed; Swift keeps retrying. {lastUpdatedAt ? `Showing the last server result from ${lastUpdatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}. ` : ''}
+            Updates are taking longer than usual. Swift keeps trying. {lastUpdatedAt ? `Last checked at ${lastUpdatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. ` : ''}
             {trackingError}
           </span>
           <button type="button" className={styles.secondaryButton} onClick={() => void load()}>Try updates again</button>
@@ -503,7 +504,7 @@ export default function OrderDetailPage() {
         <div className={`${styles.cancelOutcome} ${Number(cancelFee ?? 0) > 0 ? styles.cancelWarning : ''}`} role="status">
           <strong>{cancelResult}</strong>
           {typeof cancelFee === 'number' ? (
-            <span>{cancelFee > 0 ? `${money(cancelFee)} cash-only late-cancellation marker recorded; Swift does not collect it.` : 'No cancellation fee recorded by the server.'}</span>
+            <span>{cancelFee > 0 ? `A ${money(cancelFee)} late-cancellation fee was recorded. Swift does not collect it.` : 'No cancellation fee was recorded.'}</span>
           ) : null}
         </div>
       ) : null}
@@ -517,7 +518,7 @@ export default function OrderDetailPage() {
       {holdActive ? (
         <section className={styles.holdCard} aria-labelledby="hold-title">
           <div>
-            <p className={styles.eyebrow}>Server-set order hold</p>
+            <p className={styles.eyebrow}>A short hold on your order</p>
             <h2 id="hold-title" className={styles.cardTitle}>A short window before the store sees it</h2>
             <p className={styles.mutedCopy}>
               {mmgAmbiguous
@@ -525,7 +526,7 @@ export default function OrderDetailPage() {
                 : 'You can cancel without a fee while this hold is active. Swift is holding the order, not your money.'}
             </p>
           </div>
-          <div className={styles.timer} role="timer" aria-label={`${formatRemaining(holdExpiryMs - now)} remains in the server order hold`}>
+          <div className={styles.timer} role="timer" aria-label={`${formatRemaining(holdExpiryMs - now)} remains in the order hold`}>
             <span>{formatRemaining(holdExpiryMs - now)}</span>
             <small>remaining</small>
           </div>
@@ -619,7 +620,7 @@ export default function OrderDetailPage() {
 
           {(order.timeline?.length ?? 0) > 0 ? (
             <section className={styles.card} aria-labelledby="timeline-title">
-              <p className={styles.eyebrow}>Server history</p>
+              <p className={styles.eyebrow}>Order updates</p>
               <h2 id="timeline-title" className={styles.cardTitle}>{isTaxi ? 'Ride timeline' : 'Order timeline'}</h2>
               <ol className={styles.timeline}>
                 {order.timeline?.map((event, index) => (
@@ -644,7 +645,7 @@ export default function OrderDetailPage() {
             {(order.items ?? []).map((item, index) => (
               <div key={item.id ?? `${item.name}-${index}`} className={styles.line}>
                 <span>{item.quantity}× {item.name}</span>
-                <strong>{money(item.lineTotal ?? Number(item.customerPrice ?? 0) * item.quantity)}</strong>
+                <strong>{money(lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
               </div>
             ))}
           </div>
@@ -654,7 +655,7 @@ export default function OrderDetailPage() {
             {!isTaxi && typeof order.deliveryFee === 'number' ? <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div> : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
             {Number(order.tipAmount ?? 0) > 0 ? <div className={styles.line}><span>{isTaxi ? 'Driver tip' : 'Rider tip'}</span><strong>{money(Number(order.tipAmount))}</strong></div> : null}
-            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total ?? 0)}</strong></div>
+            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total)}</strong></div>
           </div>
           {showPaymentTruth ? (
             <div className={styles.cashTruth}>
@@ -708,7 +709,7 @@ export default function OrderDetailPage() {
                           : completed
                             ? `${isTaxi ? 'The ride' : order.fulfillment === 'APPOINTMENT' ? 'The appointment' : order.fulfillment === 'PICKUP' ? 'The collection' : 'The handover'} is complete, but this order does not yet show confirmed cash receipt.`
                             : `Pay ${isTaxi ? 'the driver' : order.fulfillment === 'DELIVERY' ? 'the rider' : 'the business'} directly. Swift does not hold your money.`
-                        : `The server reports ${order.paymentStatus?.toLowerCase() ?? 'an unknown payment state'} for this order.`}
+                        : 'Swift can’t show this order’s payment status. Check again shortly.'}
                 </p>
                 {payableMmgAction ? (
                   <button type="button" className={`${styles.secondaryButton} ${styles.paymentAction}`} disabled={openingPayment} onClick={() => void openVerifiedMmgPayment(payableMmgAction)}>
@@ -740,8 +741,8 @@ export default function OrderDetailPage() {
             <div className={`${styles.cancelConfirm} ${effectiveCancelFee > 0 ? styles.cancelWarning : ''}`}>
               <p id="cancellation-quote">
                 {effectiveCancelFee > 0
-                  ? `Swift’s last server quote shows a ${money(effectiveCancelFee)} cash-only late-cancellation marker. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect the marker; the server confirms it when you cancel.`
-                  : `Swift’s last server quote showed no fee${order.freeCancellationExpiresAt ? ` through ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift rechecks the fee before cancelling and never collects a late marker.`}
+                  ? `The last check showed a possible ${money(effectiveCancelFee)} late-cancellation fee. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect it. We check the amount again when you confirm.`
+                  : `The last check showed no cancellation fee${order.freeCancellationExpiresAt ? ` through ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift checks again before cancelling and does not collect the fee.`}
               </p>
               <div className={styles.confirmActions}>
                 <button ref={cancelConfirmButton} type="button" className={styles.primaryButton} aria-describedby="cancellation-quote" disabled={cancelling} onClick={() => void confirmCancellation()}>

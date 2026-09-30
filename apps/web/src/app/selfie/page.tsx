@@ -113,7 +113,7 @@ function SelfieSetup() {
     canvas.height = Math.round(video.videoHeight * scale);
     const context = canvas.getContext('2d');
     if (!context) {
-      setError('This browser could not capture the camera frame.');
+      setError('This browser couldn’t take the photo. Try another browser.');
       return;
     }
     context.translate(canvas.width, 0);
@@ -188,7 +188,7 @@ function SelfieSetup() {
           )}
         </div>
 
-        <p className={styles.privacy}>The captured frame is sent as a JPEG and becomes your Swift profile picture. This page does not accept gallery uploads.</p>
+        <p className={styles.privacy}>Your photo is sent to Swift and becomes your profile picture. You can’t upload a photo from your gallery here.</p>
         {error ? <p className={styles.alert} role="alert">{error}</p> : null}
         <button type="button" className={styles.primary} disabled={!file || busy} onClick={() => void save()}>
           {busy ? 'Saving photo…' : 'Save captured photo and continue'}

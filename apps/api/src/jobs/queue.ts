@@ -296,7 +296,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
-    ({ order } = await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'CANCELLED',
       allowedFrom: ['PENDING'],
@@ -355,6 +355,36 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   return true;
 }
 
+/**
+ * LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed become
+ * visible to the vendor + dispatchable. No-op while every order is unheld
+ * (flag off ⇒ nothing ever matches). Exported so tests drive the worker's own
+ * job — the release AND the ladder it arms — never a copy of it [Q12].
+ */
+export async function releaseHeldOrdersJob(
+  ctx: JobContext,
+  queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue' | 'orderQueue'>,
+): Promise<string[]> {
+  const { OrderService } = await import('../modules/order/order.service');
+  const orders = new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis);
+  const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
+    await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+  });
+  if (released.length > 0) {
+    // A RELEASED order is the vendor's first sight of it — it deserves the
+    // same escalation ladder a fresh checkout gets (re-alert, then SMS). The
+    // release wrote that ladder as the checkout's own outbox row, inside the
+    // release transaction [Q12 · AX289 F5]; publish those rows now for
+    // latency, exactly as checkout drains its own. A failure here is logged,
+    // never lost: the checkout-outbox sweep publishes whatever this could not.
+    const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
+    await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { orderIds: released })
+      .catch((err: unknown) => ctx.log.error({ err }, '[Q12] release ladder drain failed — the outbox sweep will publish'));
+    ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
+  }
+  return released;
+}
+
 /** Delivery-window auto-completion. COMPLETED and its immutable status log
  * share the canonical row-lock transaction; retries after a committed attempt
  * are a clean no-op, while an injected pre-commit failure leaves DELIVERED for
@@ -362,7 +392,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
 export async function autoCompleteDeliveredOrder(ctx: JobContext, orderId: string): Promise<boolean> {
   const { OrderService } = await import('../modules/order/order.service');
   try {
-    await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'COMPLETED',
       allowedFrom: ['DELIVERED'],
@@ -477,11 +507,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { SubscriptionService } = await import('../modules/subscription/subscription.service');
       const { NotificationService } = await import('../modules/notification/notification.service');
       const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+      const { cardRailWorkerSource, sweepCardSessions } = await import('../modules/billing/card-rail-worker');
 
+      // [PT-1 · AX297 F5] Card rail v2: nothing at all unless CARD_RAIL_V2=1
+      // (or CARD_RAIL_V2_DRAIN=1 to drain what exists). When wired, the
+      // provider is resolved lazily on this worker's own Redis, where the
+      // simulator keeps its state.
+      const cardRail = cardRailWorkerSource({ redis: ctx.redis });
       const billing = new BillingService(
         ctx.prisma,
         new NotificationService(ctx.prisma, ctx.io),
         getPaymentProvider(),
+        undefined,
+        cardRail,
       );
       const subscriptions = new SubscriptionService(ctx.prisma);
 
@@ -565,17 +603,27 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
           }
           await billing.scanUnkeyedTopUpDuplicates();
-          // [M-20] Settlement imports a person must see: unbalanced publications
-          // and rejected files with a credited row. Reported, never reversed.
-          const { scanSettlementImports } = await import('../modules/billing/settlement-import');
+          // [G5-F6] A settlement publication that stopped part-way (interrupted,
+          // or its publisher silent past the lease) is finished here, one winner
+          // per import; every row goes back through the same ingest, so none
+          // credits twice. The hold stops it.
+          const { resumeInterruptedSettlementImports, scanSettlementImports } = await import('../modules/billing/settlement-import');
+          const { AgentCashService } = await import('../modules/billing/agent-cash.service');
+          const resumedImports = await resumeInterruptedSettlementImports(ctx.prisma, new AgentCashService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)));
+          if (resumedImports.resumed.length + resumedImports.failed.length > 0) {
+            ctx.log.warn(resumedImports, '[G5-F6] settlement publications that stopped part-way — resumed');
+          }
+          // [M-20] Settlement imports a person must see: unbalanced publications,
+          // rejected files with a credited row, and publications the pass above
+          // could not finish. Reported, never reversed.
           const imports = await scanSettlementImports(ctx.prisma);
-          if (imports.unbalanced.length + imports.rejectedButCredited.length > 0) {
+          if (imports.unbalanced.length + imports.rejectedButCredited.length + imports.stuck.length > 0) {
             const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
                 title: '📄 Settlement imports need a person',
-                body: `${imports.unbalanced.length} published import(s) do not balance and ${imports.rejectedButCredited.length} rejected file(s) have a credited row. Reconcile against the MMG statement; nothing is reversed automatically.`,
+                body: `${imports.unbalanced.length} published import(s) do not balance, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
             ).catch(() => {});
@@ -584,9 +632,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // settled, declined, re-sent under the same key, or expired — the
           // kill switch stops new instructions, never this.
           const cards = await billing.reconcileUnknownCardCharges();
-          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown > 0) {
+          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown + cards.actionRequired > 0) {
             ctx.log.warn(cards, '[M-01] unknown card charge intents reconciled');
           }
+          // [PT-1] Card rail v2 sessions: an unused page past its window closes,
+          // and a Pay now that may have moved money is asked again. The kill
+          // switch never stops this [C7]; with CARD_RAIL_V2 off it runs only
+          // under the explicit CARD_RAIL_V2_DRAIN=1 [AX297 F5].
+          const cardSessions = await sweepCardSessions({ prisma: ctx.prisma, notifications: new NotificationService(ctx.prisma, ctx.io), billing, cardRail });
+          if (cardSessions && cardSessions.checked > 0) ctx.log.info(cardSessions, '[PT-1] card sessions swept');
           // [M-18] The historical double credits: one provider transaction
           // credited by more than one channel before the identity existed.
           // Reported and paged for human reconciliation, never reversed here.
@@ -1870,7 +1924,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { OrderService, reconcileMissingEarnings } = await import('../modules/order/order.service');
         const { scanned, healed, taxiUnpaidDelivered, courierUnpaidDelivered } = await reconcileMissingEarnings(
           ctx.prisma,
-          new OrderService(ctx.prisma, ctx.io),
+          new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         );
         // [M-29] A cash ride delivered with no captured fare after the fare
         // outcome became mandatory means a completion bypassed the terminal
@@ -1904,28 +1958,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'release-held-orders') {
-        // LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed
-        // become visible to the vendor + dispatchable. No-op while every order
-        // is unheld (flag off ⇒ nothing ever matches).
-        const { OrderService } = await import('../modules/order/order.service');
-        const orders = new OrderService(ctx.prisma, ctx.io);
-        const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
-          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-        });
-        if (released.length > 0) {
-          // A RELEASED order is the vendor's first sight of it — it deserves
-          // the same escalation ladder a fresh checkout gets (re-alert, then
-          // SMS). Previously only checkout enqueued this; a held order the
-          // vendor slept through escalated nowhere.
-          for (const orderId of released) {
-            await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
-              delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
-              removeOnComplete: 100,
-              removeOnFail: 50,
-            });
-          }
-          ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
-        }
+        await releaseHeldOrdersJob(ctx, queues);
         return;
       }
 

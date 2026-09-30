@@ -26,7 +26,7 @@ import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
 import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
-import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
@@ -651,6 +651,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // §2 checkout gate reads the SAME supply dispatch would search — including
     // the cash-float requirement, so the probe and the real dispatch agree.
     (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
+    app.redis,
   );
   const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma, app.io, (vendorId) => scheduleVendorSearchSync(app, vendorId));
@@ -2394,11 +2395,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // [REPORT-006 F-006-01] Captured MMG orders can't cancel in-app (the store
     // holds the money and settles refunds directly) — the button must not
     // offer what the locked cancel path will refuse.
+    // [Q12] "Money moved" is the locked path's own set (MMG_MONEY_MOVED): a
+    // store's CLAIM refuses the cancel exactly as a capture does, so a
+    // store-claimed order offered a Cancel (and a late fee) the server then
+    // refused with MMG_CANCEL_UNAVAILABLE.
     // [E17 · DS202 D3] A parcel on its way back (RETURNING) is in the mover's
     // custody like the forward leg, and RETURNED is closed: neither offers a
     // Cancel the locked cancel path would refuse.
     const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING', 'RETURNED'].includes(order.status)
-      && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
+      && !(order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus));
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the fee shown here and the marker recorded there can never drift

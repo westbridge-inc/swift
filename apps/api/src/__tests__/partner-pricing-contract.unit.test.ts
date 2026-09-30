@@ -10,7 +10,7 @@ import type { PrismaClient, VehicleType } from '@prisma/client';
 // bills must be the same number, for every kind of partner.
 //
 // Owner rate card (GYD per week, flat, independent of sales):
-//   delivery/courier rider on a standard vehicle   8,000
+//   delivery/courier rider on a standard vehicle   6,000   (owner, 2026-09-29; was 8,000)
 //   heavy delivery (canters, box trucks)            9,000
 //   taxi driver (any vehicle)                        9,000
 //   service provider                                8,000
@@ -58,7 +58,7 @@ type Tiers = Record<string, unknown>;
 type MoverKind = 'RIDER' | 'DRIVER';
 type VendorKind = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
 
-const OWNER = { courier: 8000, courierHeavy: 9000, taxi: 9000, service: 8000, small: 15000, large: 20000, department: 60000 };
+const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 9000, service: 8000, small: 15000, large: 20000, department: 60000 };
 /** Every key the complete card carries — a Guyana card missing any one of them is no card at all. */
 const CARD_KEYS = [
   'mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 'smallVendor', 'largeVendor', 'departmentVendor',
@@ -413,8 +413,10 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
 
   it('a changed rate card is a new config version, never an in-place rewrite of an applied one', () => {
     // 2026-09-02.1 carried the previous card; 2026-09-23.1 is main's
-    // Guyana-only launch config, which this card is layered on.
-    for (const applied of ['2026-09-02.1', '2026-09-23.1']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
+    // Guyana-only launch config, which this card is layered on; 2026-09-23.3
+    // carried the 8,000 rider rate (applied on staging) before the owner's
+    // 2026-09-29 change to 6,000.
+    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 
   it('the three mover classes together are exactly the fleet, split by the passenger-vehicle rule provisioning uses', () => {
@@ -546,7 +548,7 @@ describe('an unpriceable partner is an error, never a free subscription', () => 
 // ── 4. Signup writes the owner rate ─────────────────────────────────────────
 
 describe('signup — the rate a partner is born on', () => {
-  it('standard riders 8,000 and heavy delivery 9,000, whatever work the rider does', async () => {
+  it('standard riders 6,000 and heavy delivery 9,000, whatever work the rider does', async () => {
     for (const vehicleType of STANDARD_RIDER_VEHICLES) {
       for (const riderType of ['DELIVERY', 'COURIER', 'BOTH'] as const) {
         expect((await signup({ kind: 'RIDER', vehicleType, riderType }, seededTiers('GY'))).weeklyRate).toBe(OWNER.courier);

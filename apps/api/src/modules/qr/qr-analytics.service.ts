@@ -1,5 +1,6 @@
 import type { PrismaClient, ScanDecision } from '@prisma/client';
 import { Prisma } from '@prisma/client';
+import { vendorVisibleFilter } from '../order/hold-visibility';
 
 // ---------------------------------------------------------------------------
 // Vendor QR analytics (spec 12.5). The one law: every number the dashboard
@@ -87,8 +88,10 @@ export class QrAnalyticsService {
       ]);
 
     const [webOrders, installsAttributed] = await Promise.all([
+      // [Q12] Only orders the store can see — never one still held in the
+      // customer's free-cancel window, nor one cancelled inside it.
       this.prisma.order.count({
-        where: { attributionQrCodeId: { in: ids }, channel: 'WEB', placedAt: { gte: since } },
+        where: { attributionQrCodeId: { in: ids }, channel: 'WEB', placedAt: { gte: since }, AND: [vendorVisibleFilter(this.prisma)] },
       }),
       this.prisma.attributionClaim.count({
         where: { qrCodeId: { in: ids }, destinationPath: { not: null }, createdAt: { gte: since } },
@@ -119,14 +122,17 @@ export class QrAnalyticsService {
       _sum: { count: true },
       where: { qrCodeId: { in: ids }, date: { gte: since }, decision: { in: SCAN_DECISIONS } },
     });
-    const orderByDay = await this.prisma.$queryRaw<{ day: string; n: bigint }[]>(Prisma.sql`
-      SELECT to_char("placedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, COUNT(*) AS n
-      FROM "orders"
-      WHERE "attributionQrCodeId" IN (${Prisma.join(ids)})
-        AND "channel" = 'WEB'
-        AND "placedAt" >= ${since}
-      GROUP BY 1
-    `);
+    // [Q12] The per-day web orders follow the board's visibility rule too —
+    // read through the one Prisma rule, never restated in SQL — and bucket by
+    // UTC date exactly as the scan series above does.
+    const visibleWebOrders = await this.prisma.order.findMany({
+      where: { attributionQrCodeId: { in: ids }, channel: 'WEB', placedAt: { gte: since }, AND: [vendorVisibleFilter(this.prisma)] },
+      select: { placedAt: true },
+    });
+    const orderByDay = [...visibleWebOrders.reduce((days, o) => {
+      const key = o.placedAt.toISOString().slice(0, 10);
+      return days.set(key, (days.get(key) ?? 0) + 1);
+    }, new Map<string, number>())].map(([day, n]) => ({ day, n }));
     const dayMap = new Map<string, { scans: number; webOrders: number }>();
     const day = (d: string) => {
       const cur = dayMap.get(d) ?? { scans: 0, webOrders: 0 };

@@ -48,6 +48,30 @@ const signedInAs = (id: string) => ({
   body: { success: true, data: { user: { id, roles: ['CUSTOMER'], activeRole: 'CUSTOMER' }, client: 'web' } },
 });
 
+describe('plain error fallback', () => {
+  it('uses a helpful message for missing 5xx errors while retaining the status for callers', async () => {
+    const auth = await loadAuth();
+    mockApi(() => ({ status: 503, body: {} }));
+    await expect(auth.apiFetch('/api/v1/customer/home')).rejects.toMatchObject({
+      message: 'Something went wrong on our side. Please try again.', status: 503,
+    });
+  });
+
+  it('does not blame Swift for an unexplained 4xx error', async () => {
+    const auth = await loadAuth();
+    mockApi(() => ({ status: 400, body: {} }));
+    await expect(auth.apiFetch('/api/v1/customer/home')).rejects.toMatchObject({
+      message: 'We couldn’t complete that. Please try again.', status: 400,
+    });
+  });
+
+  it('uses the same plain fallback for public customer reads', async () => {
+    const customer = await loadCustomer();
+    mockApi(() => ({ status: 500, body: {} }));
+    await expect(customer.getMarketDepth()).rejects.toThrow('Something went wrong on our side. Please try again.');
+  });
+});
+
 describe('[W-01] nothing a script can read', () => {
   it('a partner sign-in writes no credential anywhere — not localStorage, not sessionStorage, not a cookie a script can see', async () => {
     const auth = await loadAuth();
@@ -171,7 +195,7 @@ describe('[W-01] every request carries the client name and the cookies; a 401 re
       value: { pathname: '/dashboard/orders', search: '?status=NEW', set href(v: string) { assign(v); } },
       configurable: true,
     });
-    await expect(auth.apiFetch('/api/v1/vendor/orders')).rejects.toThrow(/Session expired/);
+    await expect(auth.apiFetch('/api/v1/vendor/orders')).rejects.toThrow(/You were signed out\. Please sign in again\./);
     expect(assign).toHaveBeenCalledWith('/login?next=%2Fdashboard%2Forders%3Fstatus%3DNEW');
   });
 
@@ -275,12 +299,19 @@ describe('[W-01] signing out is a server act, because only the server can expire
     expect(code(confirm), 'components/sign-out-button.tsx').toMatch(/logout\(\)/);
     expect(code(confirm), 'components/sign-out-button.tsx').not.toMatch(/clearSession/);
     for (const file of [
-      ['src', 'app', 'portal', 'portal-shell.tsx'],
-      ['src', 'app', 'dashboard', 'dashboard-shell.tsx'],
+      ['src', 'components', 'console-shell.tsx'],
       ['src', 'app', '(app)', 'account', 'page.tsx'],
     ]) {
       const source = readFileSync(join(process.cwd(), ...file), 'utf8');
       expect(source, file.join('/')).toMatch(/<SignOutButton\b/);
+      expect(code(source), file.join('/')).not.toMatch(/clearSession/);
+    }
+    for (const file of [
+      ['src', 'app', 'portal', 'portal-shell.tsx'],
+      ['src', 'app', 'dashboard', 'dashboard-shell.tsx'],
+    ]) {
+      const source = readFileSync(join(process.cwd(), ...file), 'utf8');
+      expect(source, file.join('/')).toMatch(/<ConsoleShell\b/);
       expect(code(source), file.join('/')).not.toMatch(/clearSession/);
     }
   });

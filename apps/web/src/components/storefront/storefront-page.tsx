@@ -37,6 +37,8 @@ export async function StorefrontPage({ params, searchParams }: StorefrontRoutePr
   const { slug } = await params;
   const store = await fetchStorefront(slug);
   if (!store) notFound();
-  const returnPath = scannedReturnPath(store.slug, searchParams ? await searchParams : {});
-  return <StorefrontExperience store={store} returnPath={returnPath} />;
+  const query = searchParams ? await searchParams : {};
+  const fromQr = query['src'] === 'qr';
+  const returnPath = scannedReturnPath(store.slug, query);
+  return <StorefrontExperience key={`${store.slug}:${fromQr}`} store={store} returnPath={returnPath} fromQr={fromQr} />;
 }
