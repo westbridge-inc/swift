@@ -193,7 +193,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       const result = await createMany({ ...args, data });
       for (const id of owned) createdAdminAlerts.add(id);
       return result;
-    }) as typeof createMany);
+    }) as unknown as typeof createMany);
     restoreAlertTracking = () => tracking.mockRestore();
     await purge();
   }

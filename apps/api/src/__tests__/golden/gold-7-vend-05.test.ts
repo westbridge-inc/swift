@@ -38,7 +38,7 @@ async function raceCheckouts(customers: Actor[], choices: Record<string, string>
       }
       return row;
     });
-  }) as typeof readCart);
+  }) as unknown as typeof readCart);
   const race = await (async () => {
     try {
       return await Promise.all(customers.map((customer, index) => h.call('POST', '/api/v1/customer/checkout', customer.token,
