@@ -472,16 +472,21 @@ export class BillingService {
     let priced = await this.priceEligibleFor(sub, usd);
 
     if (!reclaimedAttempt) try {
-      await this.prisma.billingEvent.create({
-        data: {
-          subscriptionId: sub.id,
-          type: 'CHARGE_ATTEMPT',
-          amount: priced.amount,
-          currencyCode: sub.currencyCode,
-          idempotencyKey: attemptKey,
-          ...(priced.usdTrio ?? {}),
-        },
+      const reserved = await this.prisma.$transaction(async (tx) => {
+        if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+        await tx.billingEvent.create({
+          data: {
+            subscriptionId: sub.id,
+            type: 'CHARGE_ATTEMPT',
+            amount: priced.amount,
+            currencyCode: sub.currencyCode,
+            idempotencyKey: attemptKey,
+            ...(priced.usdTrio ?? {}),
+          },
+        });
+        return true;
       });
+      if (!reserved) return 'skipped';
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         // [REPORT-013 F-013-09] A duplicate attempt key is NOT always

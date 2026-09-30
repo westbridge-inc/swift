@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient, Subscription } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { moverSourceFinancialFingerprint, paidMoverResolutionBlocker } from './mover-fee-history';
 import { capabilitiesOf, holdsCapability } from '../admin/admin-authority';
 
@@ -49,6 +50,7 @@ export async function lockMoverSources(
   tx: Prisma.TransactionClient,
   payer: { userId: string; tenantId: string },
 ): Promise<Subscription[]> {
+  await bindTenantTransaction(tx);
   const users = await tx.$queryRaw<Array<{ id: string; tenantId: string }>>`
     SELECT "id", "tenantId" FROM "users" WHERE "id" = ${payer.userId} FOR UPDATE
   `;
@@ -77,6 +79,7 @@ export async function lockSubscriptionPayer(
   tx: Prisma.TransactionClient,
   subscriptionId: string,
 ): Promise<SubscriptionPayer> {
+  await bindTenantTransaction(tx);
   const payer = await subscriptionPayer(tx, subscriptionId);
   if (payer.kind === 'MOVER') {
     const sources = await lockMoverSources(tx, payer);
@@ -234,6 +237,10 @@ export async function lockMoverFeeAuthority(tx: Prisma.TransactionClient, payer:
 
 /** GET paths only project legacy ambiguity; they never change financial state. */
 export async function resolveMoverFeeAuthority(db: Db, payer: { userId: string; tenantId: string }): Promise<MoverFeeResolution | null> {
+  if ('$transaction' in db) return db.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    return resolveMoverFeeAuthority(tx, payer);
+  });
   const user = await db.user.findUnique({ where: { id: payer.userId }, select: { tenantId: true } });
   if (!user || user.tenantId !== payer.tenantId) throw ownershipError();
   const sources = await db.subscription.findMany({ where: { OR: [{ rider: { userId: payer.userId } }, { driver: { userId: payer.userId } }] }, orderBy: { id: 'asc' } });
@@ -336,6 +343,7 @@ export async function resolveMoverFeeHold(
   payer: { userId: string; tenantId: string },
   input: { expectedRevision: number; sourceSubscriptionIds: string[]; canonicalSubscriptionId: string; actorUserId: string; approvalId: string },
 ): Promise<MoverFeeResolution> {
+  await bindTenantTransaction(tx);
   const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { roles: true, status: true, tenantId: true, admin: { select: { permissions: true } } } });
   const role = actor?.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : actor?.roles.includes('ADMIN') ? 'ADMIN' : null;
   if (!actor || actor.status !== 'ACTIVE' || actor.tenantId !== payer.tenantId || !role
@@ -353,12 +361,19 @@ export async function resolveMoverFeeHold(
   const params = snapshot?.['params'] as Prisma.JsonObject | undefined;
   const approvedSources = body?.['sourceSubscriptionIds'];
   if (!approval || approval.tenantId !== payer.tenantId || approval.status !== 'APPLIED'
+    || !approval.appliedAt || approval.expiresAt.getTime() <= Date.now()
     || approval.requestedBy !== input.actorUserId || !approval.approvedBy || approval.approvedBy === input.actorUserId
     || approval.action !== 'POST /billing/mover-fees/:userId/resolve' || approval.capability !== 'billing.payment.attach'
     || params?.['userId'] !== payer.userId || body?.['expectedRevision'] !== input.expectedRevision
     || body?.['canonicalSubscriptionId'] !== input.canonicalSubscriptionId || !Array.isArray(approvedSources)
     || JSON.stringify([...approvedSources].sort()) !== JSON.stringify([...input.sourceSubscriptionIds].sort())) {
     throw new AppError(403, 'MOVER_FEE_APPROVAL_REQUIRED', 'This exact finance decision needs a current independent approval.');
+  }
+  const approver = await tx.user.findUnique({ where: { id: approval.approvedBy }, select: { roles: true, status: true, tenantId: true, admin: { select: { permissions: true } } } });
+  const approverRole = approver?.roles.includes('SUPER_ADMIN') ? 'SUPER_ADMIN' : approver?.roles.includes('ADMIN') ? 'ADMIN' : null;
+  if (!approver || approver.status !== 'ACTIVE' || approver.tenantId !== payer.tenantId || !approverRole
+    || !holdsCapability(capabilitiesOf({ role: approverRole, permissions: approver.admin?.permissions }), 'billing.payment.attach')) {
+    throw new AppError(403, 'MOVER_FEE_APPROVAL_REQUIRED', 'The independent approver must still hold finance authority.');
   }
   const requested = [...input.sourceSubscriptionIds].sort();
   if (new Set(requested).size !== requested.length || requested.join(',') !== authority.sourceSubscriptionIds.join(',')

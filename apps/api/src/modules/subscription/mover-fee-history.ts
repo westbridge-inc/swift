@@ -17,6 +17,7 @@ export async function moverSourceFinancialFingerprint(db: Db, source: Subscripti
       'topups', (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.id) FROM topup_commands t WHERE t."subscriptionId"=${source.id}),
       'agent', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM mmg_agent_payments a WHERE a."subscriptionId"=${source.id} OR (${source.san}::text IS NOT NULL AND regexp_replace(a."sanRaw",'[^0-9]','','g')=${source.san})),
       'provider', (SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id) FROM provider_payments p WHERE p."subscriptionId"=${source.id} OR p.id IN (SELECT a."providerPaymentId" FROM mmg_agent_payments a WHERE a."subscriptionId"=${source.id} OR (${source.san}::text IS NOT NULL AND regexp_replace(a."sanRaw",'[^0-9]','','g')=${source.san}))),
+      'providerAliases', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.provider, a."aliasKey") FROM provider_payment_aliases a WHERE a."providerPaymentId" IN (SELECT p.id FROM provider_payments p WHERE p."subscriptionId"=${source.id} OR p.id IN (SELECT m."providerPaymentId" FROM mmg_agent_payments m WHERE m."subscriptionId"=${source.id} OR (${source.san}::text IS NOT NULL AND regexp_replace(m."sanRaw",'[^0-9]','','g')=${source.san})))),
       'receipts', (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM fee_receipts r WHERE r."subscriptionId"=${source.id}),
       'contacts', (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM collection_contacts c WHERE c."subscriptionId"=${source.id}),
       'tombstone', (SELECT jsonb_agg(to_jsonb(t) ORDER BY t.san) FROM san_tombstones t WHERE t."subscriptionId"=${source.id} OR t.san=${source.san}),
@@ -41,7 +42,8 @@ export async function paidMoverResolutionBlocker(db: Db, sources: Subscription[]
       || s.gracePeriodEnd || s.suspendedAt || s.nextRetryAt || s.failedAttempts
       || s.feeWaived || s.customRate !== null || s.feeWaivedBy || s.feeWaivedReason) return 'SOURCE_RESTRICTIONS_REQUIRE_REVIEW';
     if (s.currencyCode !== canonical.currencyCode) return 'SOURCE_CURRENCY_REQUIRES_REVIEW';
-    if (s.currentPeriodEnd > canonical.currentPeriodEnd || s.nextBillingDate > canonical.nextBillingDate) return 'PAID_ENTITLEMENT_NOT_COVERED';
+    if (s.currentPeriodStart < canonical.currentPeriodStart || s.currentPeriodEnd > canonical.currentPeriodEnd
+      || s.nextBillingDate > canonical.nextBillingDate) return 'PAID_ENTITLEMENT_NOT_COVERED';
     const linked = { subscriptionId: s.id };
     const [balance, unconfirmed, paidPeriod, refund, topup, agent, provider, session, tombstone, contacts] = await Promise.all([
       db.prepaidBalance.findUnique({ where: linked }),

@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { bindTenantTransaction } from '../../plugins/prisma';
 
 /**
  * [Apple 5.1.1(v)] A mover or vendor can close their own account.
@@ -149,6 +150,7 @@ export async function windDownPartner(
   userId: string,
 ): Promise<WindDownResult> {
   if ('$transaction' in prisma) return prisma.$transaction((tx) => windDownPartner(tx, userId));
+  await bindTenantTransaction(prisma);
   // Cancellation shares the same payer-first order as activation, collection
   // and historical settlement, including all original mover sources.
   await prisma.$queryRaw`SELECT id FROM users WHERE id=${userId} FOR UPDATE`;
