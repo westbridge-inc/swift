@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { createHmac, randomBytes } from 'node:crypto';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
@@ -37,9 +37,9 @@ import { startGoldenWorker } from './gold-7-worker';
 // and real SMS/push delivery. The signed notice is the in-app boundary.
 // ---------------------------------------------------------------------------
 
-// +5920977nnn was checked against source literals and generated fixture ranges;
-// GOLD-7a owns +5920971..0976, and this file alone owns +5920977.
-const PHONE_PREFIX = '+5920977';
+// +5920977 with a run-unique numeric suffix; GOLD-7a owns +5920971..0976.
+const PHONE_PREFIX = `+5920977${customAlphabet('0123456789', 5)()}`;
+const TXN_PREFIX = `G7AC-${nanoid(8).toUpperCase()}-`;
 const FIXTURE = 'gold7-vend04-fixture';
 const DAY = 24 * 60 * 60 * 1000;
 const WEEK = 7 * DAY;
@@ -53,6 +53,10 @@ let clockStart = 0;
 let foreignBefore = '';
 let foreignIds: string[] = [];
 let alertsBefore = new Set<string>();
+const userIds: string[] = [];
+const vendorIds: string[] = [];
+const subIds: string[] = [];
+const txnIds = new Set<string>();
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
 type Actor = { userId: string; token: string; sessionId: string };
@@ -73,6 +77,7 @@ async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRo
       ...(opts.admin && { admin: { create: { permissions: ['*'] } } }),
     },
   }));
+  userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) }, { expiresIn: '40d' });
   const session = await sys(() => app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `g7f-${seq}`, deviceType: 'test', expiresAt: new Date(Date.now() + 40 * DAY) },
@@ -93,6 +98,8 @@ async function makePartner(firstName: string): Promise<Partner> {
     },
   }));
   const sub = await sys(() => subscriptions.startTrialForVendor(vendor.id));
+  vendorIds.push(vendor.id);
+  subIds.push(sub.id);
   const row = await subRow(sub.id);
   expect(row.san).toMatch(/^\d{10}$/);
   return { owner, vendorId: vendor.id, subId: sub.id, san: row.san! };
@@ -121,8 +128,10 @@ function signedRequest(url: string, body: unknown, over: { ts?: number; sig?: st
     },
   };
 }
-const agentPays = (san: string, amount: number, transactionId = `G7AC-${nanoid(10)}`, over: { ts?: number; sig?: string; unsigned?: boolean } = {}) =>
-  app.inject(signedRequest('/api/v1/billing/mmg/agent-notification', { transactionId, accountNumber: san, amount, currency: 'GYD' }, over));
+const agentPays = (san: string, amount: number, transactionId = `${TXN_PREFIX}${nanoid(10).toUpperCase()}`, over: { ts?: number; sig?: string; unsigned?: boolean } = {}) => {
+  txnIds.add(transactionId);
+  return app.inject(signedRequest('/api/v1/billing/mmg/agent-notification', { transactionId, accountNumber: san, amount, currency: 'GYD' }, over));
+};
 const inquiry = (san: string) => app.inject(signedRequest('/api/v1/billing/mmg/inquiry', { accountNumber: san }));
 const agentRows = (externalId: string) => sys(() => app.prisma.mmgAgentPayment.findMany({ where: { externalId }, select: { channel: true, status: true, failureCode: true, subscriptionId: true } }));
 
@@ -149,20 +158,13 @@ async function ledgerFor(subscriptionId: string) {
 
 async function purgeFixtures() {
   await sys(async () => {
-    const byPhone = (await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } })).map((u) => u.id);
-    // A closed account's phone is tombstoned; its stores keep this block's phones.
-    const vendors = await app.prisma.vendor.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true, owner: { select: { userId: true } } } });
-    const ids = [...new Set([...byPhone, ...vendors.map((v) => v.owner.userId)])];
-    const vendorIds = vendors.map((v) => v.id);
+    const ids = [...userIds];
     if (ids.length === 0 && vendorIds.length === 0) return;
-    const subIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
     const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
-    const imports = await app.prisma.settlementImport.findMany({ where: { source: { startsWith: 'gold7-vend04-' } }, select: { id: true } });
-    await app.prisma.mmgAgentPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { externalId: { startsWith: 'G7AC-' } }] } });
-    await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { startsWith: 'G7AC-' } }] } });
-    await app.prisma.settlementImport.deleteMany({ where: { id: { in: imports.map((i) => i.id) } } });
+    await app.prisma.mmgAgentPayment.deleteMany({ where: { externalId: { in: [...txnIds] } } });
+    await app.prisma.providerPayment.deleteMany({ where: { providerTxnId: { in: [...txnIds] } } });
     await app.prisma.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: ids } }, { approvedBy: { in: ids } }] } });
-    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...vendorIds, ...subIds, ...imports.map((i) => i.id)] } }] }, 'GOLD-7 golden journey fixture cleanup (gold-7-vend-04)');
+    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...vendorIds, ...subIds] } }] }, 'GOLD-7 golden journey fixture cleanup (gold-7-vend-04)');
     if (subIds.length > 0) {
       // A real dunning page reaches seeded admins too. Compare row IDs, so
       // no pre-existing alert is removed by timestamp proximity.
@@ -261,7 +263,7 @@ async function foreignSnapshot() {
 }
 
 const foreignSubscriptions = () => sys(() => app.prisma.subscription.findMany({
-  where: { OR: [{ vendorId: null }, { vendor: { phone: { not: { startsWith: PHONE_PREFIX } } } }] }, orderBy: { id: 'asc' },
+  where: { id: { notIn: subIds } }, orderBy: { id: 'asc' },
 }));
 
 beforeAll(async () => {
@@ -388,7 +390,7 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
     const lookup = await inquiry(p.san);
     expect(lookup.statusCode).toBe(200);
     expect(lookup.json()).toMatchObject({ valid: true, amountDueGyd: '15000.00', weeklyFeeGyd: '15000.00', currency: 'GYD' });
-    const txn = `G7AC-${nanoid(10)}`;
+    const txn = `${TXN_PREFIX}${nanoid(10).toUpperCase()}`;
     const paid = await agentPays(p.san, RATE_CARD_SMALL_VENDOR, txn);
     expect(paid.statusCode, paid.body).toBe(200);
     expect(paid.json()).toEqual({ status: 'accepted' });
@@ -443,4 +445,25 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
     expect(await moneySnapshot(p.subId)).toEqual(posted);
     expect(await foreignSnapshot() === foreignBefore).toBe(true);
   }, 120_000);
+
+  it('preserves another run’s G7AC payment rows during fixture cleanup', async () => {
+    const peerTxn = `G7AC-PEER-${nanoid(10).toUpperCase()}`;
+    const provider = await sys(() => app.prisma.providerPayment.create({ data: {
+      provider: 'MMG', providerTxnId: peerTxn, amount: RATE_CARD_SMALL_VENDOR,
+      currencyCode: 'GYD', status: 'OPEN',
+    } }));
+    const agent = await sys(() => app.prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: peerTxn, mmgTxnId: peerTxn,
+      providerPaymentId: provider.id, sanRaw: '0000000000', amount: RATE_CARD_SMALL_VENDOR,
+      currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', raw: { peer: true },
+    } }));
+    try {
+      await purgeFixtures();
+      expect(await sys(() => app.prisma.mmgAgentPayment.findUnique({ where: { id: agent.id } }))).toEqual(agent);
+      expect(await sys(() => app.prisma.providerPayment.findUnique({ where: { id: provider.id } }))).toEqual(provider);
+    } finally {
+      await sys(() => app.prisma.mmgAgentPayment.deleteMany({ where: { id: agent.id } }));
+      await sys(() => app.prisma.providerPayment.deleteMany({ where: { id: provider.id } }));
+    }
+  });
 });

@@ -74,6 +74,9 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     expect(await other.notification.count({ where: {
       userId: admin.userId, data: { path: ['vendorId'], equals: vendor.id },
     } })).toBe(1);
+    const peerAdminNotice = await other.notification.findFirstOrThrow({ where: {
+      userId: admin.userId, data: { path: ['vendorId'], equals: vendor.id },
+    } });
     // Deliberately fan out BEFORE checking our inserts: concurrent delivery to
     // the same admin must not contaminate the two-row ownership assertion.
     const own = await other.alertDelivery.findMany({ where: { id: { in: ownedAlertIds } } });
@@ -107,6 +110,11 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     expect(await other.notification.count({ where: { id: { in: ownedNotificationIds } } })).toBe(2);
     const peerBeforeClose = await other.user.findUniqueOrThrow({ where: { id: peerId } });
     const vendorBeforeClose = await other.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
+    await expect(h.close()).rejects.toThrow(/untracked notifications block fixture user cleanup/);
+    expect(await other.notification.findUnique({ where: { id: peerAdminNotice.id } })).toEqual(peerAdminNotice);
+    expect(await other.user.findUnique({ where: { id: admin.userId } })).not.toBeNull();
+    // The peer owns its notice and removes it. Only then may our user cascade.
+    await other.notification.delete({ where: { id: peerAdminNotice.id } });
     await h.close(); closed = true;
     expect(await other.alertDelivery.findUnique({ where: { id: peerOfferId } })).toEqual(peerOffer);
     expect(await other.alertDelivery.findUnique({ where: { id: fanout[0]!.id } })).toEqual(fanout[0]);
@@ -133,5 +141,42 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
         await other.user.deleteMany({ where: { id: peerId } });
       } finally { await other.$disconnect(); }
     }
+  }
+});
+
+it('refuses to remove a fixture vendor while a peer order belongs to it', async () => {
+  const other = new PrismaClient();
+  const h = createGolden('+5920978', 'gold7-cleanup-order');
+  const peerRun = createGolden('+5920978', 'gold7-cleanup-order');
+  const peerId = `gold7-peer-customer-${nanoid(16)}`;
+  let orderId: string | undefined;
+  let closed = false;
+  try {
+    await h.start();
+    const owner = await h.actor(['VENDOR_OWNER']);
+    const store = await h.vendor(owner);
+    await other.user.create({ data: {
+      id: peerId, phone: peerRun.nextPhone(), firstName: 'Golden', lastName: 'Peer',
+      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', countryCode: 'GY',
+    } });
+    const order = await other.order.create({ data: {
+      orderNumber: `G7PEER-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
+      fulfillment: 'DELIVERY', customerId: peerId, vendorId: store.vendorId,
+      status: 'PENDING', deliveryAddress: 'Peer Lane', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 1200, subtotalMarkup: 0, subtotalCustomer: 1200,
+      deliveryFee: 0, totalAmount: 1200, paymentMethod: 'CASH',
+    } });
+    orderId = order.id;
+    await expect(h.close()).rejects.toThrow(`foreign orders block fixture cleanup: ${orderId}`);
+    expect(await other.order.findUnique({ where: { id: orderId } })).toEqual(order);
+    expect(await other.vendor.findUnique({ where: { id: store.vendorId } })).not.toBeNull();
+    await other.order.delete({ where: { id: orderId } });
+    await h.close(); closed = true;
+    expect(await other.user.findUnique({ where: { id: peerId } })).not.toBeNull();
+  } finally {
+    if (orderId) await other.order.deleteMany({ where: { id: orderId } });
+    if (!closed && h.app) await h.close().catch(() => {});
+    await other.user.deleteMany({ where: { id: peerId } });
+    await other.$disconnect();
   }
 });

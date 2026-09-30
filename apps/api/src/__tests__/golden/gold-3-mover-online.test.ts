@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
@@ -11,6 +11,7 @@ import courierRoutes from '../../modules/courier/courier.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { makeDispatchService } from '../../modules/dispatch/dispatch.service';
 import { riderStackingCapacity } from '../../modules/dispatch/concurrency-policy';
+import { invalidateAlgoConfig } from '../../modules/algo/algo-config';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
 
 // ---------------------------------------------------------------------------
@@ -42,12 +43,11 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 // processor body (DispatchService.dispatchOrder) and delayed jobs are
 // recorded, so a recorded re-dispatch is driven the way the worker would.
 //
-// Fixture range: +5920331nnn (this file only). Phones and the crash-recovery
-// purge share PHONE_PREFIX, so a crashed run's rows are found next time.
+// Fixture range: +5920331 plus a run-unique numeric suffix.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONE_PREFIX = '+5920331';
+const PHONE_PREFIX = `+5920331${customAlphabet('0123456789', 4)()}`;
 const FIXTURE = 'gold3-ride01-fixture';
 // A quiet corner of Georgetown; fixes are 5-decimal literals so a round trip
 // through float8 is exact.
@@ -66,6 +66,9 @@ let seq = 0;
 /** Every mover this file made — each test's supply is retired afterwards so
  *  no test's dispatch pass can offer to another test's mover. */
 const movers: Array<{ riderId: string; device: Device }> = [];
+const userIds: string[] = [];
+const createdOrderIds: string[] = [];
+let capacityConfigId: string | undefined;
 
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
@@ -85,6 +88,7 @@ async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRo
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
   }));
+  userIds.push(user.id);
   return { userId: user.id, device: await login(user.id, activeRole, `ride01-${seq}-a`) };
 }
 
@@ -127,8 +131,8 @@ async function retireSupply() {
   }
 }
 
-function call(method: 'GET' | 'POST' | 'PUT', url: string, token?: string, payload?: unknown) {
-  return app.inject({
+async function call(method: 'GET' | 'POST' | 'PUT', url: string, token?: string, payload?: unknown) {
+  const result = await app.inject({
     method,
     url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
@@ -137,6 +141,12 @@ function call(method: 'GET' | 'POST' | 'PUT', url: string, token?: string, paylo
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
   });
+  if (method === 'POST' && url === '/api/v1/courier/order' && result.statusCode === 201) {
+    const id = result.json().data?.orderId;
+    if (typeof id !== 'string') throw new Error('GOLD-3 courier order returned no id');
+    createdOrderIds.push(id);
+  }
+  return result;
 }
 
 const riderRow = (riderId: string) => sys(() => app.prisma.rider.findUniqueOrThrow({ where: { id: riderId } }));
@@ -171,14 +181,10 @@ const COURIER_BODY = {
 
 async function purgeFixtures() {
   await sys(async () => {
-    const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
-    const ids = users.map((u) => u.id);
+    const ids = [...userIds];
     if (ids.length === 0) return;
     const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
-    const orderIds = (await app.prisma.order.findMany({
-      where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
-      select: { id: true },
-    })).map((o) => o.id);
+    const orderIds = [...createdOrderIds];
     await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
     await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
@@ -225,11 +231,21 @@ beforeAll(async () => {
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.ready();
-  await purgeFixtures();
+  const latestCapacity = await sys(() => app.prisma.algoConfig.findFirst({ where: {
+    tenantId: 'swift-default', key: 'stacking.riderCapacity',
+  }, orderBy: { version: 'desc' }, select: { version: true } }));
+  const capacity = await sys(() => app.prisma.algoConfig.create({ data: {
+    tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 3,
+    version: (latestCapacity?.version ?? 0) + 1, updatedBy: FIXTURE,
+  } }));
+  capacityConfigId = capacity.id;
+  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
 });
 
 afterAll(async () => {
   await purgeFixtures();
+  if (capacityConfigId) await sys(() => app.prisma.algoConfig.delete({ where: { id: capacityConfigId } }));
+  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
   await app.close();
 });
 
@@ -453,9 +469,8 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
       sys(() => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'MOVER_OFFER', subjectId: orderId } })),
     ]);
     expect({ status: order.status, rider: order.riderId }).toEqual({ status: 'RIDER_ASSIGNED', rider: mover.riderId });
-    // The seeded founder directive stacks up to three legs per rider (raised
-    // from two on 2026-09-24), so one live leg still leaves room: the winner
-    // stays available for another leg.
+    // This run explicitly sets stacking capacity to three, so one live leg
+    // still leaves room: the winner stays available for another leg.
     expect(await riderStackingCapacity(app.prisma)).toBe(3);
     expect({ pointer: won.currentOrderId, available: won.isAvailable }).toEqual({ pointer: orderId, available: true });
     expect({ pointer: left.currentOrderId, available: left.isAvailable }).toEqual({ pointer: null, available: true });

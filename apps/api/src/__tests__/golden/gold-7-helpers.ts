@@ -18,8 +18,8 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutabi
 // GOLD-7 shares the GOLD-2/6 composition and fixture helpers, not product
 // substitutes. Each file owns a distinct, range-audited phone prefix. Every
 // defining action goes through a mounted production route, on real Postgres.
-// Every golden file must assert notifications only for users it owns: deleting
-// our own users inherently cascades their inbox, including peer-created rows.
+// A peer may send a notification to one of our users. Never let the user
+// cascade turn fixture cleanup into deletion of that peer's row.
 export type Actor = { userId: string; token: string; refreshToken: string; sessionId: string; phone: string };
 export const DAY = 86_400_000;
 
@@ -33,6 +33,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
   const savedClusterIds = new Set<string>();
   const createdAlertIds = new Set<string>();
   const createdNotificationIds = new Set<string>();
+  const createdOrderIds = new Set<string>();
   let restoreNotificationTracking: (() => void) | undefined;
   let restoreAlertTracking: (() => void) | undefined;
   const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, fixture);
@@ -42,11 +43,17 @@ export function createGolden(phonePrefix: string, fixture: string) {
     for (const member of members) savedClusterIds.add(member.clusterId);
   }
 
-  function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
-    return app.inject({ method, url, headers: {
+  async function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
+    const result = await app.inject({ method, url, headers: {
       ...headers, authorization: `Bearer ${token}`,
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
     }, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
+    if (method === 'POST' && url === '/api/v1/customer/checkout' && result.statusCode === 200) {
+      const id = result.json().data?.order?.id;
+      if (typeof id !== 'string') throw new Error(`GOLD-7 checkout returned no order id (${fixture})`);
+      createdOrderIds.add(id);
+    }
+    return result;
   }
 
   async function actor(roles: UserRole[] = ['CUSTOMER'], activeRole: UserRole = roles[0]!) {
@@ -101,6 +108,16 @@ export function createGolden(phonePrefix: string, fixture: string) {
       const vendorIds = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: ids } } }, select: { id: true } })).map((v) => v.id);
       const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
       const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+      // Check both fixture parents before deleting anything that could cascade.
+      const foreignOrders = await app.prisma.order.findMany({ where: {
+        OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } }],
+        id: { notIn: [...createdOrderIds] },
+      }, select: { id: true } });
+      if (foreignOrders.length) throw new Error(`GOLD-7 ${fixture}: foreign orders block fixture cleanup: ${foreignOrders.map((o) => o.id).join(', ')}`);
+      const foreignNotifications = await app.prisma.notification.findMany({ where: {
+        userId: { in: ids }, id: { notIn: [...createdNotificationIds] },
+      }, select: { id: true } });
+      if (foreignNotifications.length) throw new Error(`GOLD-7 ${fixture}: untracked notifications block fixture user cleanup: ${foreignNotifications.map((n) => n.id).join(', ')}`);
       const docs = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
       const cases = (await app.prisma.reviewCase.findMany({ where: { submissionId: { in: docs } }, select: { id: true } })).map((c) => c.id);
       await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...docs, ...cases, ...vendorIds] } }] }, `test-cleanup:${fixture}`);
@@ -125,9 +142,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
       await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
       await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-      const orderIds = (await app.prisma.order.findMany({ where: { OR: [
-        { customerId: { in: ids } }, { vendorId: { in: vendorIds } },
-      ] }, select: { id: true } })).map((o) => o.id);
+      const orderIds = [...createdOrderIds];
       const ratings = (await app.prisma.rating.findMany({ where: { orderId: { in: orderIds } }, select: { id: true } })).map((r) => r.id);
       await app.prisma.ratingReport.deleteMany({ where: { ratingId: { in: ratings } } });
       await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: { in: ratings } } });
@@ -223,11 +238,13 @@ export function createGolden(phonePrefix: string, fixture: string) {
 
   return { get app() { return app; }, sys, call, actor, vendor, start, purge, fillCart, rememberClusters, nextPhone,
     close: async () => {
-      try {
-        // Admin audit writes may finish just after the response (GOLD-5).
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        await purge();
-      } finally { restoreAlertTracking?.(); restoreNotificationTracking?.(); await app.close(); }
+      // Admin audit writes may finish just after the response (GOLD-5). A
+      // blocked purge leaves the app available so the peer can remove its row
+      // and the owner can retry; closing would strand our fixture parents.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await purge();
+      restoreAlertTracking?.(); restoreNotificationTracking?.();
+      await app.close();
     },
   };
 }
