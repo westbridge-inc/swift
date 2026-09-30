@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { LayoutDashboard, History, FileCheck2, Receipt, UserRound } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleShell } from '@/components/console-shell';
-import { sessionProbe } from '@/lib/auth';
+import { currentSessionProof, sessionProbe } from '@/lib/auth';
 
 export const NAV = [
   { href: '/portal', label: 'Earnings', icon: LayoutDashboard, exact: true },
@@ -22,10 +22,10 @@ export function PortalShell({ children }: { children: React.ReactNode }) {
     // [W-01] The session is an HttpOnly cookie: gate on the SERVER's word,
     // never on a token's presence, because there is no token to be present.
     let cancelled = false;
-    void sessionProbe().then((session) => {
+    void currentSessionProof(sessionProbe()).then((session) => {
       if (cancelled) return;
-      if (!session.ok) router.replace('/login');
-      else setReady(true);
+      if (session.signedOut) router.replace('/login');
+      else if (session.ok) setReady(true);
     });
     return () => { cancelled = true; };
   }, [router]);

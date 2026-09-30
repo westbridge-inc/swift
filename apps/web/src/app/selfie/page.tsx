@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
 import { SessionBoundary } from '@/components/providers';
-import { currentSessionEpoch, sessionProbe, verifySessionNow } from '@/lib/auth';
+import { currentSessionEpoch, currentSessionProof, sessionProbe, verifySessionNow } from '@/lib/auth';
 import { uploadSelfie } from '@/lib/customer';
 import styles from './selfie.module.css';
 
@@ -43,8 +43,8 @@ function SelfieSetup() {
     // [W-01] The session is an HttpOnly cookie: gate on the SERVER's word,
     // never on a token's presence, because there is no token to be present.
     let cancelled = false;
-    void sessionProbe().then((session) => {
-      if (cancelled || session.ok) return;
+    void currentSessionProof(sessionProbe()).then((session) => {
+      if (cancelled || !session.signedOut) return;
       const returnToSelfie = `/selfie?next=${encodeURIComponent(next)}`;
       router.replace(`/login?next=${encodeURIComponent(returnToSelfie)}`);
     });

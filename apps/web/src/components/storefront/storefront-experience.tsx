@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { SessionBoundary } from '@/components/providers';
-import { ApiRequestError, sessionProbe } from '@/lib/auth';
+import { ApiRequestError, currentSessionProof, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
   addToCart,
@@ -273,7 +273,7 @@ function StorefrontSession({ store, returnPath, fromQr = false }: StorefrontProp
     // only once the server has attested — so a signed-out visitor never fires
     // the two authenticated loads, exactly as the token check used to prevent.
     setSignedIn(false);
-    void sessionProbe().then((session) => {
+    void currentSessionProof(sessionProbe()).then((session) => {
       if (!alive || !session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);

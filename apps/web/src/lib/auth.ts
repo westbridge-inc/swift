@@ -65,8 +65,15 @@ function announceSessionChange(source: SessionChangeSource = 'local'): void {
   announceStoreChange();
 }
 
-function invalidatePrivateCaches(): void {
+// Remember deferred shared-cache cleanup so a later conclusive 401 can
+// complete it even after local proof has already been retired.
+let sharedPrivateStateRetained = false;
+function invalidatePrivateCaches(clearSharedState = true): void {
   clearStoredCheckoutAttempts();
+  // Local uncertainty retires memory and tab storage, but has no authority
+  // to remove another tab's selected store or appointment draft.
+  sharedPrivateStateRetained = !clearSharedState;
+  if (!clearSharedState) return;
   clearPrivateBrowserState();
   try { localStorage.removeItem(STORE_KEY); } catch { /* Storage disabled. */ }
 }
@@ -77,12 +84,12 @@ function ensureSessionEvents(): void {
     forgetSession(false);
   });
 }
-function forgetSession(advanceContinuation = true, source: SessionChangeSource = 'local'): void {
+function forgetSession(advanceContinuation = true, source: SessionChangeSource = 'local', clearSharedState = true): void {
   if (advanceContinuation) invalidateStorefrontContinuations();
   else clearStorefrontContinuation();
   authGeneration += 1;
   sessionPrincipal = null;
-  invalidatePrivateCaches();
+  invalidatePrivateCaches(clearSharedState);
   announceSessionChange(source);
 }
 
@@ -172,8 +179,8 @@ async function probeSession(): Promise<SessionAnswer> {
   const obsolete = () => generation !== authGeneration || probeId !== probeSequence;
   const forget = (signedOut = false): SessionAnswer => {
     if (obsolete()) return { ok: false, obsolete: true };
-    if (sessionPrincipal !== null) {
-      forgetSession(signedOut, 'probe');
+    if (sessionPrincipal !== null || (signedOut && sharedPrivateStateRetained)) {
+      forgetSession(signedOut, 'probe', signedOut);
       // Uncertainty retires only this tab's private state.
       if (signedOut) publishSessionInvalidation();
     }
@@ -211,7 +218,7 @@ async function probeSession(): Promise<SessionAnswer> {
   }
 }
 
-type SessionAnswer = { ok: boolean; user?: Record<string, unknown>; signedOut?: true; obsolete?: true };
+export type SessionAnswer = { ok: boolean; user?: Record<string, unknown>; signedOut?: true; obsolete?: true };
 let verification: { epoch: number; promise: Promise<SessionAnswer> } | undefined;
 
 /** Force server proof; concurrent callers in this epoch share one request.
@@ -228,6 +235,15 @@ export function verifySessionNow({ fresh = false }: { fresh?: boolean } = {}): P
   });
   verification = { epoch, promise };
   return promise;
+}
+
+/** An obsolete answer is no verdict. Follow the replacement verification
+ * shared with the boundary, or obtain current server proof if it settled
+ * already. Never infer success from the principal retained in memory. */
+export async function currentSessionProof(initial: Promise<SessionAnswer> = verifySessionNow()): Promise<SessionAnswer> {
+  let answer = await initial;
+  while (answer.obsolete) answer = await verifySessionNow();
+  return answer;
 }
 
 /** Adopt a session the server has just issued as cookies. No tokens involved. */
@@ -256,7 +272,7 @@ export function adoptSession(principal: string | null) {
  * every page load. The shell calls this only when a signed-in answer is
  * actually needed — a private page, or an action like adding to the cart.
  */
-export async function restoreSession(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export async function restoreSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   if (!(await tryRefresh())) return { ok: false };
   return sessionProbe();

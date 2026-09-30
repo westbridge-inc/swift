@@ -38,6 +38,7 @@ const API_BASE = API_URL;
 
 /** Verify the OTP without deciding a role — returns whether the number is new. */
 export async function verifyOtp(phone: string, code: string): Promise<{ isNewUser: boolean; user?: any; signedIn: boolean }> {
+  const epoch = currentSessionEpoch();
   const res = await fetch(`${API_BASE}/api/v1/auth/verify-otp`, {
     method: 'POST', credentials: 'include',
     headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
@@ -45,6 +46,7 @@ export async function verifyOtp(phone: string, code: string): Promise<{ isNewUse
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
+  if (currentSessionEpoch() !== epoch) throw new ApiRequestError('The signed-in account changed. Try again.', 409, 'SESSION_CHANGED');
   const d = json.data;
   if (!d.isNewUser && d.user?.id) { adoptSession(d.user.id); return { isNewUser: false, user: d.user, signedIn: true }; }
   return { isNewUser: true, signedIn: false };
@@ -52,6 +54,7 @@ export async function verifyOtp(phone: string, code: string): Promise<{ isNewUse
 
 /** Register a brand-new account with the chosen role (after OTP verify). */
 export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean }): Promise<{ user: any; roles: string[] }> {
+  const epoch = currentSessionEpoch();
   const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
     method: 'POST', credentials: 'include',
     headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
@@ -60,6 +63,7 @@ export async function registerAccount(body: { phone: string; firstName: string; 
   const json = await res.json().catch(() => ({}));
   const registered = json?.data?.user;
   if (!res.ok || !registered?.id) throw new Error(json?.error?.message || 'Could not create your account.');
+  if (currentSessionEpoch() !== epoch) throw new ApiRequestError('The signed-in account changed. Try again.', 409, 'SESSION_CHANGED');
   adoptSession(registered.id);
   return { user: json.data.user, roles: json.data.user?.roles ?? [] };
 }

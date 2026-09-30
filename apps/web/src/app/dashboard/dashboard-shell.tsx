@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleShell } from '@/components/console-shell';
-import { sessionProbe, setSelectedStore } from '@/lib/auth';
+import { currentSessionProof, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
 
@@ -142,10 +142,10 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   // asks the SERVER whether one exists instead of inspecting localStorage.
   useEffect(() => {
     let cancelled = false;
-    void sessionProbe().then((session) => {
+    void currentSessionProof(sessionProbe()).then((session) => {
       if (cancelled) return;
-      if (!session.ok) router.replace('/login');
-      else setReady(true);
+      if (session.signedOut) router.replace('/login');
+      else if (session.ok) setReady(true);
     });
     return () => { cancelled = true; };
   }, [router]);
