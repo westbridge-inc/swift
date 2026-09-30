@@ -382,7 +382,8 @@ export class OsrmMapsProvider implements MapsProvider {
 
   /** Real road distance + duration via the OSRM `route` service. Falls back to
    *  the deterministic estimate when OSRM fails to answer (down, an error, no
-   *  route, no distance), so an outage never blocks a fare. An answer that
+   *  route, no distance beside a valid or absent duration), so an outage never
+   *  blocks a fare. An answer that
    *  PRESENTS an invalid distance or duration (negative, Infinity, NaN, not a
    *  number) is refused instead: 503 ROUTE_UNAVAILABLE, never priced and never
    *  swapped for the estimate. An absent duration stays null, as always: the
@@ -397,8 +398,13 @@ export class OsrmMapsProvider implements MapsProvider {
       if (!res.ok) return this.degraded('route', await this.fallback.routeKm(origin, dest));
       const data = (await res.json()) as OsrmRouteResponse;
       const route = data.code === 'Ok' ? data.routes?.[0] : undefined;
-      if (!route || route.distance == null) return this.degraded('route', await this.fallback.routeKm(origin, dest));
-      if (!isOsrmMeasure(route.distance) || !isOsrmDurationOrAbsent(route.duration)) throw this.refused('route');
+      if (!route) return this.degraded('route', await this.fallback.routeKm(origin, dest));
+      // A duration OSRM presents is judged BEFORE a missing distance may fall
+      // back, so no distance cannot carry an invalid duration into the
+      // estimate [AX336 R1]. Beside a valid or absent duration it still does.
+      if (!isOsrmDurationOrAbsent(route.duration)) throw this.refused('route');
+      if (route.distance == null) return this.degraded('route', await this.fallback.routeKm(origin, dest));
+      if (!isOsrmMeasure(route.distance)) throw this.refused('route');
       recordOsrm('route', 'ok');
       return {
         km: route.distance / 1000,

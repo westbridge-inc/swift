@@ -12,7 +12,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { FareService } from '../modules/rides/fare.service';
 import { planVendorGroup } from '../modules/order/cart-plans';
 import { DEFAULT_DELIVERY_RATES } from '../utils/markup';
-import { OsrmMapsProvider } from '../providers/maps/maps-provider';
+import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
 import { osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
 
@@ -25,7 +25,9 @@ import { AppError } from '../utils/errors';
 // base fee only; Infinity or NaN surfaced as a different error; a string was
 // coerced into a number. An ABSENT duration still falls back to the speed
 // model, and OSRM failing to answer still falls back to the deterministic
-// estimate (both pinned in osrm-route-km-pin.test.ts).
+// estimate (both pinned in osrm-route-km-pin.test.ts). A missing distance
+// falls back only beside a valid or absent duration: beside a present invalid
+// one it is refused too, so the fallback never launders it [AX336 R1].
 //
 // Every OSRM body is TEXT read through a real Response, as the provider reads
 // it, so JSON itself makes 1e309 Infinity. JSON has no NaN, so NaN comes from
@@ -57,6 +59,22 @@ const INVALID_TEXT: Array<[string, string]> = [
   ['a duration of 1e309 (Infinity)', body('10150', '1e309')],
   ['a duration of -1e309 (-Infinity)', body('10150', '-1e309')],
   ['a duration that is a string', body('10150', '"1620"')],
+];
+
+/** [AX336 R1] No distance (the key omitted, or null) beside a PRESENT invalid
+ *  duration. On the first cut of this fix it took the missing-distance
+ *  fallback before the duration was judged, and was priced. */
+const NO_DISTANCE_INVALID_DURATION: Array<[string, string]> = [
+  ['no distance key, a negative duration', '{"code":"Ok","routes":[{"duration":-1620}]}'],
+  ['no distance key, a duration of 1e309 (Infinity)', '{"code":"Ok","routes":[{"duration":1e309}]}'],
+  ['no distance key, a duration of -1e309 (-Infinity)', '{"code":"Ok","routes":[{"duration":-1e309}]}'],
+  ['no distance key, a duration that is a string', '{"code":"Ok","routes":[{"duration":"1620"}]}'],
+  ['no distance key, a duration that is a boolean', '{"code":"Ok","routes":[{"duration":true}]}'],
+  ['a null distance, a negative duration', body('null', '-1620')],
+  ['a null distance, a duration of 1e309 (Infinity)', body('null', '1e309')],
+  ['a null distance, a duration of -1e309 (-Infinity)', body('null', '-1e309')],
+  ['a null distance, a duration that is a string', body('null', '"1620"')],
+  ['a null distance, a duration that is a boolean', body('null', 'true')],
 ];
 
 async function counted(outcome: string): Promise<number> {
@@ -153,7 +171,7 @@ afterEach(() => {
 });
 
 describe('routeKm refuses a present but invalid number: 503 ROUTE_UNAVAILABLE, never the fallback', () => {
-  it.each(INVALID_TEXT)('%s', async (_label, text) => {
+  it.each([...INVALID_TEXT, ...NO_DISTANCE_INVALID_DURATION])('%s', async (_label, text) => {
     vi.stubGlobal('fetch', answer(text));
     const [fallbackBefore, refusedBefore] = [await counted('fallback'), await counted('refused')];
     const err = await refusal(new OsrmMapsProvider(OSRM).routeKm(PICKUP, DROPOFF));
@@ -166,6 +184,8 @@ describe('routeKm refuses a present but invalid number: 503 ROUTE_UNAVAILABLE, n
   it.each([
     ['a distance that is NaN', { distance: Number.NaN, duration: 1620 }],
     ['a duration that is NaN', { distance: 10150, duration: Number.NaN }],
+    ['no distance key, a duration that is NaN', { duration: Number.NaN }],
+    ['a null distance, a duration that is NaN', { distance: null, duration: Number.NaN }],
   ])('%s', async (_label, route) => {
     vi.stubGlobal('fetch', parsed(route));
     const err = await refusal(new OsrmMapsProvider(OSRM).routeKm(PICKUP, DROPOFF));
@@ -173,10 +193,25 @@ describe('routeKm refuses a present but invalid number: 503 ROUTE_UNAVAILABLE, n
   });
 });
 
+describe('[AX336 R1] a missing distance still falls back beside a valid or absent duration', () => {
+  // A valid duration beside no distance is pinned in osrm-route-km-pin.test.ts;
+  // these are the absent-duration side, which must stay an outage, not a refusal.
+  it.each([
+    ['no distance key and no duration key', '{"code":"Ok","routes":[{}]}'],
+    ['a null distance and a null duration', body('null', 'null')],
+  ])('%s → the deterministic estimate, counted as a fallback', async (_label, text) => {
+    vi.stubGlobal('fetch', answer(text));
+    const [fallbackBefore, refusedBefore] = [await counted('fallback'), await counted('refused')];
+    expect(await new OsrmMapsProvider(OSRM).routeKm(PICKUP, DROPOFF)).toStrictEqual(await new HaversineMapsProvider().routeKm(PICKUP, DROPOFF));
+    expect(await counted('fallback')).toBe(fallbackBefore + 1);
+    expect(await counted('refused')).toBe(refusedBefore);
+  });
+});
+
 describe('the taxi fare service: never a price from an invalid OSRM number', () => {
   const svc = () => new FareService(app.prisma, new OsrmMapsProvider(OSRM));
 
-  it.each(INVALID_TEXT)('%s → estimate and estimateTiers refuse', async (_label, text) => {
+  it.each([...INVALID_TEXT, ...NO_DISTANCE_INVALID_DURATION])('%s → estimate and estimateTiers refuse', async (_label, text) => {
     vi.stubGlobal('fetch', answer(text));
     const one = await refusal(svc().estimate(PICKUP, DROPOFF, 'GY'));
     const tiered = await refusal(svc().estimateTiers(PICKUP, DROPOFF, 'GY'));
@@ -193,6 +228,15 @@ describe('the taxi fare service: never a price from an invalid OSRM number', () 
 describe('every caller of routeKm refuses it, end to end', () => {
   it('POST /rides/estimate: a negative duration is 503, not a lowered 3400; a negative distance is 503, not the 1500 minimum', async () => {
     for (const text of [body('10150', '-1620'), body('-10150', '1620')]) {
+      vi.stubGlobal('fetch', answer(text));
+      const res = await post('/api/v1/rides/estimate', { pickup: PICKUP, dropoff: DROPOFF });
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error.code).toBe('ROUTE_UNAVAILABLE');
+    }
+  });
+
+  it('POST /rides/estimate: no distance (null, or the key omitted) beside a negative duration is 503, not the estimate priced [AX336 R1]', async () => {
+    for (const text of [body('null', '-1620'), '{"code":"Ok","routes":[{"duration":-1620}]}']) {
       vi.stubGlobal('fetch', answer(text));
       const res = await post('/api/v1/rides/estimate', { pickup: PICKUP, dropoff: DROPOFF });
       expect(res.statusCode).toBe(503);
