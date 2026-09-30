@@ -47,7 +47,7 @@ import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counte
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
-import { CheckoutOutcomeUnknownError, checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim } from '../order/checkout-outbox';
+import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
@@ -2109,12 +2109,28 @@ export async function customerRoutes(app: FastifyInstance) {
         // exposes internal order columns.
         return { success: true, data: shapeStoredCheckoutResult(receipt.result), replayed: true };
       }
-      const claimed = await app.redis.set(redisKey, claim, 'EX', 86_400, 'NX');
+      const claimed = await app.redis.set(redisKey, claim, 'EX', CHECKOUT_CLAIM_TTL_S, 'NX');
       if (!claimed) {
         const existing = await app.redis.get(redisKey);
         if (existing && !isCheckoutClaim(existing)) {
-          checkoutIdempotencyCounter.labels('replayed_cache').inc();
-          return { success: true, data: JSON.parse(existing), replayed: true };
+          // [AX372 R2] A cached answer is another request's: it is replayed
+          // only for the request that made it. It can land between this
+          // request's receipt lookup above and its claim (the other request
+          // committed in between), so the durable receipt is read again and
+          // the fingerprint checked: a different body under this key is a
+          // 422, never a 200 replay of another body's order.
+          const committed = await findCheckoutReceipt(app.prisma, userId, idemKey as string);
+          if (committed && committed.requestHash !== requestHash) {
+            checkoutIdempotencyCounter.labels('key_body_conflict').inc();
+            throw new AppError(422, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used for a different order request. Use a new key for a new order.');
+          }
+          if (committed) {
+            checkoutIdempotencyCounter.labels('replayed_cache').inc();
+            return { success: true, data: shapeStoredCheckoutResult(committed.result), replayed: true };
+          }
+          // A cached answer without its receipt cannot be checked against
+          // this body, so it is never replayed: the key is busy, as the probe
+          // reports it (in_flight).
         }
         checkoutIdempotencyCounter.labels('duplicate_in_flight').inc();
         throw new AppError(409, 'DUPLICATE_REQUEST', 'This order is already being placed — hold on.');
@@ -2149,9 +2165,21 @@ export async function customerRoutes(app: FastifyInstance) {
         if (err instanceof CheckoutOutcomeUnknownError) {
           // [AX366 F1] The commit's outcome is UNKNOWN and no durable receipt
           // proves the order: unknown is not "nothing placed". The claim is
-          // kept (the probe answers in_flight, a same-key retry is refused)
-          // until the receipt appears or the claim expires.
-          request.log.error({ err, receiptId: err.receiptId }, '[CHECKOUT-IDEM] checkout outcome unknown; claim kept');
+          // kept (the probe answers in_flight, a same-key retry is refused).
+          // [AX372 F1b] ...but for a short settle window, not the claim's
+          // day: this request's own claim is re-set (atomic, ownership-
+          // checked) to CHECKOUT_UNKNOWN_SETTLE_S. That is safe because the
+          // receipt is written in the order's own transaction and
+          // checkout_receipts is unique on (userId, idempotencyKey): at most
+          // one commit per key, so once the window lapses a missing receipt
+          // is conclusive (the probe says none, a same-key retry places one
+          // order) and a present one is replayed. See checkoutUnknownSettleSeconds.
+          if (redisKey) {
+            await settleCheckoutClaim(app.redis, redisKey, claim, checkoutUnknownSettleSeconds()).catch((settleErr: unknown) => {
+              request.log.warn({ err: settleErr }, '[CHECKOUT-IDEM] could not shorten the claim to its settle window; it holds its full TTL');
+            });
+          }
+          request.log.error({ err, receiptId: err.receiptId }, '[CHECKOUT-IDEM] checkout outcome unknown; claim kept for its settle window');
           throw err;
         }
         // A CONFIRMED rollback: nothing was placed. A failed attempt must not
@@ -2210,8 +2238,10 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     // [CHECKOUT-IDEM · AX354 S1] The claim FIRST, the receipt SECOND. The
     // checkout route releases a claim only for a confirmed rollback, never
-    // once a commit is reported or while its outcome is unknown [AX366 F1],
-    // so by the time a claim is gone any receipt its transaction wrote is
+    // once a commit is reported or while its outcome is unknown [AX366 F1]
+    // (an unknown outcome holds it for its settle window [AX372 F1b], long
+    // enough for its transaction to settle), so by the time a claim is gone
+    // any receipt its transaction wrote is
     // visible: a receipt read AFTER the claim read sees every order the claim
     // read missed. Read the other way round, a probe could miss the receipt
     // (not committed yet), then miss the claim (gone after the commit), and

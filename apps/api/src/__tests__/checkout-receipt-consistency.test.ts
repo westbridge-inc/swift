@@ -10,6 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { checkoutUnknownSettleSeconds, newCheckoutClaim, settleCheckoutClaim } from '../modules/order/checkout-outbox';
 
 // ---------------------------------------------------------------------------
 // [CHECKOUT-IDEM · AX354 S1] The receipt probe never answers "none" for an
@@ -73,6 +74,30 @@ const claimKey = (c: Customer, key: string) => `checkout:idem:${c.userId}:${key}
 const receiptOf = (c: Customer, key: string) =>
   app.prisma.checkoutReceipt.findUnique({ where: { userId_idempotencyKey: { userId: c.userId, idempotencyKey: key } } });
 const ordersOf = (userId: string) => app.prisma.order.count({ where: { customerId: userId } });
+
+/** The claim's TTL lapses: Redis expires the key. */
+async function lapse(k: string) {
+  await app.redis.pexpire(k, 1);
+  await new Promise((r) => setTimeout(r, 25));
+  expect(await app.redis.exists(k)).toBe(0);
+}
+
+/** [AX372 F1b] The read that settles an unknown commit (the durable receipt,
+ *  by its row id) fails once: the outcome stays UNKNOWN even though the order
+ *  did commit. */
+function failReceiptReconciliationOnce() {
+  let fired = 0;
+  const receipts = app.prisma.checkoutReceipt;
+  const real = receipts.count.bind(receipts);
+  const spy = vi.spyOn(receipts, 'count').mockImplementation(((args: unknown) => {
+    if (fired === 0) {
+      fired += 1;
+      return Promise.reject(new Error('Connection terminated unexpectedly (the receipt read settling an unknown commit)'));
+    }
+    return real(args as never);
+  }) as never);
+  return { fired: () => fired, restore: () => spy.mockRestore() };
+}
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -555,6 +580,242 @@ describe('[AX366 F1] a claim is released only by the request that holds it', () 
       olderGate.resolve();
       newerGate.resolve();
       await Promise.allSettled([older, newer]);
+    }
+  });
+});
+
+describe('[AX372 R2] a cached answer is replayed only for the request that made it', () => {
+  /**
+   * The reviewer's interleaving, driven deterministically. A holds key K for
+   * its body (claimed, its transaction not yet begun). B submits K with
+   * `bBody`: B's receipt lookup misses (A has not committed), and only then
+   * does A commit and cache its answer under K. B then fails to claim K and
+   * finds A's cached answer.
+   */
+  async function cacheRace(bBody: Record<string, unknown>) {
+    const c = await makeCustomer();
+    await fillCart(c, vendorId, itemId);
+    const key = `ckidem-${nanoid(10)}`;
+    const aInFlight = deferred();
+    const aGate = deferred();
+    const realCheckout = OrderService.prototype.checkout;
+    const checkoutSpy = vi.spyOn(OrderService.prototype, 'checkout').mockImplementationOnce(async function (this: OrderService, input) {
+      return realCheckout.call(this, { ...input, beforeTransaction: async () => { aInFlight.resolve(); await aGate.promise; } });
+    });
+    const postingA = checkout(c, key);
+    let a: LightMyRequestResponse | undefined;
+    let bLookupMissed: boolean | undefined;
+    let findSpy: { mockRestore: () => void } | undefined;
+    try {
+      await aInFlight.promise;
+      expect(await app.redis.get(claimKey(c, key))).toMatch(/^IN_FLIGHT/);
+      const receipts = app.prisma.checkoutReceipt;
+      const realFind = receipts.findUnique.bind(receipts);
+      findSpy = vi.spyOn(receipts, 'findUnique').mockImplementation((async (args: { where?: { userId_idempotencyKey?: { idempotencyKey?: string } } }) => {
+        const seen = await realFind(args as never);
+        if (bLookupMissed === undefined && args?.where?.userId_idempotencyKey?.idempotencyKey === key) {
+          bLookupMissed = seen === null;
+          aGate.resolve();
+          a = await postingA; // A commits and caches its answer under K
+        }
+        return seen;
+      }) as never);
+      const b = await inject('POST', '/api/v1/customer/checkout', bBody, c.token, { 'idempotency-key': key });
+      expect(bLookupMissed).toBe(true); // B looked before A committed
+      expect(a!.statusCode, a!.body).toBe(200);
+      return { c, key, a: a!, b };
+    } finally {
+      findSpy?.mockRestore();
+      checkoutSpy.mockRestore();
+      aGate.resolve();
+      await postingA;
+    }
+  }
+
+  it('A holds K for H1, B submits K with a different body H2 before A commits: B gets 422 IDEMPOTENCY_KEY_REUSED, never a 200 replay of A’s order', async () => {
+    const { c, key, b } = await cacheRace({ paymentMethod: 'CASH', deliveryInstructions: 'Leave it at the gate' });
+    // B fell back to A's cached answer: the claim is gone, the answer is there.
+    const cached = await app.redis.get(claimKey(c, key));
+    expect(cached).not.toBeNull();
+    expect(cached).not.toMatch(/^IN_FLIGHT/);
+    expect(b.statusCode, b.body).toBe(422);
+    expect(b.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+
+  it('a cached answer whose receipt cannot be found is never replayed: the key is busy (409), as the probe reports it (in_flight)', async () => {
+    const c = await makeCustomer();
+    await fillCart(c, vendorId, itemId);
+    const key = `ckidem-${nanoid(10)}`;
+    await app.redis.set(claimKey(c, key), JSON.stringify({ orders: [{ id: 'someone-else' }], grandTotal: 1 }), 'EX', 60);
+    const res = await checkout(c, key);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('DUPLICATE_REQUEST');
+    expect((await probe(c, key)).json().data).toEqual({ status: 'in_flight' });
+    expect(await ordersOf(c.userId)).toBe(0);
+    await app.redis.del(claimKey(c, key));
+  });
+
+  it('the same interleaving with the SAME body is a replay of A’s order: its durable receipt, field for field', async () => {
+    const { c, key, a, b } = await cacheRace({ paymentMethod: 'CASH' });
+    expect(b.statusCode, b.body).toBe(200);
+    expect(b.json().replayed).toBe(true);
+    const receipt = await receiptOf(c, key);
+    expect(b.json().data).toEqual(receipt!.result);
+    expect(b.json().data).toEqual(a.json().data);
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+});
+
+describe('[AX372 F1b] an unknown outcome holds its key for a short settle window, not a day', () => {
+  it('the claim an unknown outcome keeps is re-set to the settle window (120 s by default); once it lapses with no receipt, the probe says none and the same key places exactly one order', async () => {
+    const c = await makeCustomer();
+    await fillCart(c, vendorId, itemId);
+    const key = `ckidem-${nanoid(10)}`;
+    const lost = loseCommitAcknowledgement(false);
+    let res: LightMyRequestResponse;
+    try {
+      res = await checkout(c, key);
+    } finally {
+      lost.restore();
+    }
+    expect(lost.fired()).toBe(1);
+    expect(res.statusCode, res.body).toBe(503);
+    expect(res.json().error.code).toBe('CHECKOUT_OUTCOME_UNKNOWN');
+    expect(await receiptOf(c, key)).toBeNull();
+    // Still this request's own claim, now for the settle window, not the 24 h claim.
+    expect(await app.redis.get(claimKey(c, key))).toMatch(/^IN_FLIGHT:/);
+    const ttl = await app.redis.ttl(claimKey(c, key));
+    expect(ttl).toBeGreaterThan(60);
+    expect(ttl).toBeLessThanOrEqual(120);
+    // Inside the window the outcome is still unsettled.
+    expect((await probe(c, key)).json().data).toEqual({ status: 'in_flight' });
+    expect((await checkout(c, key)).statusCode).toBe(409);
+    expect(await ordersOf(c.userId)).toBe(0);
+
+    await lapse(claimKey(c, key));
+    expect((await probe(c, key)).json().data).toEqual({ status: 'none' });
+    const again = await checkout(c, key);
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().replayed).toBeUndefined();
+    expect(await ordersOf(c.userId)).toBe(1);
+    const receipt = await receiptOf(c, key);
+    expect((await probe(c, key)).json().data).toEqual({ status: 'placed', orderIds: receipt!.orderIds });
+    await fillCart(c, vendorId, itemId);
+    const replay = await checkout(c, key);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json().replayed).toBe(true);
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+
+  it('once the window lapses over an order that DID commit (its receipt unreadable when the outcome was settled), the probe says placed and the same key replays it: never a second order', async () => {
+    const c = await makeCustomer();
+    await fillCart(c, vendorId, itemId);
+    const key = `ckidem-${nanoid(10)}`;
+    const lost = loseCommitAcknowledgement(true);
+    const unreadable = failReceiptReconciliationOnce();
+    let res: LightMyRequestResponse;
+    try {
+      res = await checkout(c, key);
+    } finally {
+      unreadable.restore();
+      lost.restore();
+    }
+    expect(lost.fired()).toBe(1);
+    expect(unreadable.fired()).toBe(1);
+    expect(res.statusCode, res.body).toBe(503);
+    expect(res.json().error.code).toBe('CHECKOUT_OUTCOME_UNKNOWN');
+    const receipt = await receiptOf(c, key);
+    expect(receipt).not.toBeNull(); // the database did commit
+    const ttl = await app.redis.ttl(claimKey(c, key));
+    expect(ttl).toBeGreaterThan(60);
+    expect(ttl).toBeLessThanOrEqual(120);
+
+    await lapse(claimKey(c, key));
+    expect((await probe(c, key)).json().data).toEqual({ status: 'placed', orderIds: receipt!.orderIds });
+    await fillCart(c, vendorId, itemId);
+    const again = await checkout(c, key);
+    expect(again.statusCode, again.body).toBe(200);
+    expect(again.json().replayed).toBe(true);
+    expect(again.json().data).toEqual(receipt!.result);
+    expect(await ordersOf(c.userId)).toBe(1);
+  });
+
+  it('the window is read from CHECKOUT_UNKNOWN_SETTLE_S when the outcome is unknown', async () => {
+    const prev = process.env['CHECKOUT_UNKNOWN_SETTLE_S'];
+    process.env['CHECKOUT_UNKNOWN_SETTLE_S'] = '300';
+    try {
+      const c = await makeCustomer();
+      await fillCart(c, vendorId, itemId);
+      const key = `ckidem-${nanoid(10)}`;
+      const lost = loseCommitAcknowledgement(false);
+      let res: LightMyRequestResponse;
+      try {
+        res = await checkout(c, key);
+      } finally {
+        lost.restore();
+      }
+      expect(res.statusCode, res.body).toBe(503);
+      const ttl = await app.redis.ttl(claimKey(c, key));
+      expect(ttl).toBeGreaterThan(120);
+      expect(ttl).toBeLessThanOrEqual(300);
+    } finally {
+      if (prev === undefined) delete process.env['CHECKOUT_UNKNOWN_SETTLE_S'];
+      else process.env['CHECKOUT_UNKNOWN_SETTLE_S'] = prev;
+    }
+  });
+
+  it('the window is 120 s by default and never under 60 s', () => {
+    const prev = process.env['CHECKOUT_UNKNOWN_SETTLE_S'];
+    const at = (v: string | undefined) => {
+      if (v === undefined) delete process.env['CHECKOUT_UNKNOWN_SETTLE_S'];
+      else process.env['CHECKOUT_UNKNOWN_SETTLE_S'] = v;
+      return checkoutUnknownSettleSeconds();
+    };
+    try {
+      expect(at(undefined)).toBe(120);
+      expect(at('')).toBe(120);
+      expect(at('soon')).toBe(120);
+      expect(at('0')).toBe(120);
+      expect(at('-5')).toBe(120);
+      expect(at('300')).toBe(300);
+      expect(at('90.7')).toBe(90);
+      expect(at('60')).toBe(60);
+      expect(at('59')).toBe(60);
+      expect(at('1')).toBe(60);
+    } finally {
+      at(prev);
+    }
+  });
+
+  it('the re-set is atomic and ownership-checked: only this request’s own claim is re-set, never a newer claim or a cached answer, and a lapsed claim is never re-created', async () => {
+    const k = `checkout:idem:ckidem-settle:${nanoid(10)}`;
+    const mine = newCheckoutClaim();
+    const newer = newCheckoutClaim();
+    try {
+      await app.redis.set(k, newer, 'EX', 86_400);
+      expect(await settleCheckoutClaim(app.redis, k, mine, 120)).toBe(false);
+      expect(await app.redis.get(k)).toBe(newer);
+      expect(await app.redis.ttl(k)).toBeGreaterThan(86_000);
+
+      const answer = JSON.stringify({ orders: [{ id: 'o1' }] });
+      await app.redis.set(k, answer, 'EX', 86_400);
+      expect(await settleCheckoutClaim(app.redis, k, mine, 120)).toBe(false);
+      expect(await app.redis.get(k)).toBe(answer);
+      expect(await app.redis.ttl(k)).toBeGreaterThan(86_000);
+
+      await app.redis.set(k, mine, 'EX', 86_400);
+      expect(await settleCheckoutClaim(app.redis, k, mine, 120)).toBe(true);
+      expect(await app.redis.get(k)).toBe(mine);
+      const ttl = await app.redis.ttl(k);
+      expect(ttl).toBeGreaterThan(100);
+      expect(ttl).toBeLessThanOrEqual(120);
+
+      await app.redis.del(k);
+      expect(await settleCheckoutClaim(app.redis, k, mine, 120)).toBe(false);
+      expect(await app.redis.exists(k)).toBe(0);
+    } finally {
+      await app.redis.del(k);
     }
   });
 });

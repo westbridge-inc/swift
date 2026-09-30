@@ -306,6 +306,48 @@ export async function releaseCheckoutClaim(redis: Redis, key: string, claim: str
   return Number(await redis.eval(RELEASE_CHECKOUT_CLAIM_SCRIPT, 1, key, claim)) === 1;
 }
 
+/** How long a checkout claim holds its key: a day. */
+export const CHECKOUT_CLAIM_TTL_S = 86_400;
+const DEFAULT_CHECKOUT_UNKNOWN_SETTLE_S = 120;
+const MIN_CHECKOUT_UNKNOWN_SETTLE_S = 60;
+
+/**
+ * [CHECKOUT-IDEM · AX372 F1b] How long a claim whose commit outcome is
+ * UNKNOWN keeps holding its key: CHECKOUT_UNKNOWN_SETTLE_S seconds, 120 by
+ * default, never under 60 (and never longer than the claim's own day).
+ *
+ * Why a short window is safe: the receipt is written inside the order's own
+ * transaction, and checkout_receipts is unique on (userId, idempotencyKey)
+ * (CheckoutReceipt @@unique([userId, idempotencyKey]) in schema.prisma), so
+ * at most one commit can ever exist per key. Once the transaction has
+ * settled, a missing receipt is conclusive: nothing was placed. When the
+ * window lapses, the probe answers "none" and a same-key retry places exactly
+ * one order; with the receipt present it answers "placed" and a retry
+ * replays it. Should the first transaction still commit after the window, a
+ * retry's own receipt insert collides with that unique constraint and rolls
+ * the retry back: never a second order under one key.
+ */
+export function checkoutUnknownSettleSeconds(): number {
+  const v = Number(process.env['CHECKOUT_UNKNOWN_SETTLE_S']);
+  if (!Number.isFinite(v) || v <= 0) return DEFAULT_CHECKOUT_UNKNOWN_SETTLE_S;
+  return Math.min(CHECKOUT_CLAIM_TTL_S, Math.max(MIN_CHECKOUT_UNKNOWN_SETTLE_S, Math.floor(v)));
+}
+
+const SETTLE_CHECKOUT_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+return 1
+`;
+
+/**
+ * [AX372 F1b] Re-set this request's OWN claim to hold its key for `seconds`
+ * (atomic compare-and-set): a newer request's claim, a cached answer or a
+ * claim that already lapsed is never touched or re-created.
+ */
+export async function settleCheckoutClaim(redis: Redis, key: string, claim: string, seconds: number): Promise<boolean> {
+  return Number(await redis.eval(SETTLE_CHECKOUT_CLAIM_SCRIPT, 1, key, claim, String(seconds))) === 1;
+}
+
 /**
  * [CHECKOUT-IDEM · AX366 F1] A checkout whose commit outcome cannot be
  * established yet: its transaction rejected after the body had finished (a

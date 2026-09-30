@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
-import { recordCheckoutOutcome, stableBodyHash, type CheckoutPrincipal } from '../lib/checkoutAttempt';
+import { checkoutFailureOutcome, recordCheckoutOutcome, settleUnresolvedIntent, stableBodyHash, type CheckoutPrincipal, type ReceiptProbe } from '../lib/checkoutAttempt';
 import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import { homePlaceholderData, homeQueryKey, isHomeFeed, marketDepthVerdict, retainedHomeData } from '../lib/homeReliability';
 import { rememberMarketDepth, rememberedMarketDepth, type MarketDepthBody } from '../lib/marketDepthMemory';
@@ -531,14 +531,27 @@ export class CheckoutInFlightError extends Error {
   }
 }
 
+/** [AX372 R1] What the customer reads while an order's outcome is unknown. */
+export const CHECKING_ORDER_MESSAGE = "We're checking whether your order went through.";
+
+/** [AX372 R1] The order's outcome is still unknown after asking the server
+ *  (no answer came back, or the server could not say, and the receipt probe
+ *  still finds the key in flight): nothing new is placed over it. The intent
+ *  stays SENT: the same order tapped again replays its key, a changed one asks
+ *  the server first, and the cart screen asks again on its next visit. */
+export class CheckoutOutcomeUnknownError extends Error {
+  constructor() {
+    super(CHECKING_ORDER_MESSAGE);
+    this.name = 'CheckoutOutcomeUnknownError';
+  }
+}
+
 /** The signed-in principal a checkout intent belongs to. */
 function checkoutPrincipal(): CheckoutPrincipal {
   const session = getAuthSessionSnapshot();
   if (!session) throw new Error('Sign in to place an order.');
   return { userId: session.userId, generation: session.generation };
 }
-
-type ReceiptProbe = { status: 'placed'; orderIds: string[] } | { status: 'in_flight' } | { status: 'none' };
 
 /** Ask the server what became of an unresolved intent. A probe that cannot be answered is treated as in flight — never as "nothing". */
 async function probeReceipt(key: string): Promise<ReceiptProbe> {
@@ -553,25 +566,39 @@ async function probeReceipt(key: string): Promise<ReceiptProbe> {
   }
 }
 
+/** Ask about an unresolved key until the server can say (placed or none), backing off while it is still in flight. */
+async function settleSentIntent(key: string, stopped?: () => boolean): Promise<ReceiptProbe> {
+  return settleUnresolvedIntent(() => probeReceipt(key), stopped ? { stopped } : {});
+}
+
 /** The intent this request is: the key the server sees, reused, superseded or resolved first. */
-async function beginCheckoutIntent(payload: unknown): Promise<string> {
+async function beginCheckoutIntent(payload: unknown, checking: (on: boolean) => void = () => {}): Promise<string> {
   const principal = checkoutPrincipal();
   const bodyHash = stableBodyHash(payload);
   const begun = checkoutAttempt.begin({ principal, bodyHash });
   if (begun.kind !== 'ambiguous') return begun.key;
   // A previous intent is on the wire with the outcome unknown, and this body
-  // differs. Never place a second order over an unresolved first one: ask.
-  const probe = await probeReceipt(begun.pending.key);
+  // differs. Never place a second order over an unresolved first one: ask,
+  // and keep asking with backoff while it is in flight [AX372 R1]. No key is
+  // minted for this body until the server says the first placed nothing.
+  checking(true);
+  let probe: ReceiptProbe;
+  try {
+    probe = await settleSentIntent(begun.pending.key);
+  } finally {
+    checking(false);
+  }
   recordCheckoutOutcome('ambiguous_recovery', probe.status);
   track('checkout_ambiguous_recovery', { outcome: probe.status });
   if (probe.status === 'placed') {
     checkoutAttempt.end();
     throw new CheckoutAlreadyPlacedError(probe.orderIds);
   }
-  if (probe.status === 'in_flight') throw new CheckoutInFlightError();
+  if (probe.status === 'in_flight') throw new CheckoutOutcomeUnknownError();
+  // Only "none" re-opens: nothing was placed under the old key.
   checkoutAttempt.end();
   const fresh = checkoutAttempt.begin({ principal, bodyHash });
-  if (fresh.kind === 'ambiguous') throw new CheckoutInFlightError();
+  if (fresh.kind === 'ambiguous') throw new CheckoutOutcomeUnknownError();
   return fresh.key;
 }
 
@@ -588,9 +615,12 @@ export function usePlaceOrder<T = any>() {
   // (409) and refuses the same key under a different body (422) — each is
   // read for what it is, never as a generic failure.
   const inFlight = useRef(false);
+  // [AX372 R1] True while the phone asks the server what became of an order
+  // whose outcome is unknown: the screen says so in plain words.
+  const [checkingOutcome, setCheckingOutcome] = useState(false);
   const m = useMutation<T, unknown, any>({
     mutationFn: async (payload: any) => {
-      const key = await beginCheckoutIntent(payload);
+      const key = await beginCheckoutIntent(payload, setCheckingOutcome);
       checkoutAttempt.markSent(key);
       try {
         const res = await customerApi.placeOrder(payload, key);
@@ -613,12 +643,37 @@ export function usePlaceOrder<T = any>() {
           recordCheckoutOutcome('in_flight_refused');
           throw new CheckoutInFlightError();
         }
-        // No answer at all (offline, timeout): the outcome is UNKNOWN — the
-        // intent stays SENT so the next tap replays it, and a changed body
-        // must ask the server first. A definitive answer (validation, no
-        // riders, min order) re-opens it: the same key may retry.
-        if (isAxiosError(err) && err.response) checkoutAttempt.markOpen(key);
-        throw err;
+        if (checkoutFailureOutcome({ status, code }) === 'refused') {
+          // The server refused it (validation, no riders, min order): nothing
+          // was placed, so the intent re-opens and the same key may retry.
+          checkoutAttempt.markOpen(key);
+          throw err;
+        }
+        // [AX372 R1] The outcome is UNKNOWN: no answer came back (offline, a
+        // timeout), or the server could not say (any 5xx, its
+        // CHECKOUT_OUTCOME_UNKNOWN among them). The order may exist, so the
+        // intent stays SENT (restart recovery probes it, a changed body asks
+        // first) and the server is asked what became of it, with backoff:
+        // placed → that order; none → only then re-opened; still in flight →
+        // it stays sent.
+        setCheckingOutcome(true);
+        let settled: ReceiptProbe;
+        try {
+          settled = await settleSentIntent(key);
+        } finally {
+          setCheckingOutcome(false);
+        }
+        recordCheckoutOutcome('ambiguous_recovery', `unknown:${settled.status}`);
+        track('checkout_ambiguous_recovery', { outcome: settled.status, unknown: true });
+        if (settled.status === 'placed') {
+          checkoutAttempt.end();
+          throw new CheckoutAlreadyPlacedError(settled.orderIds);
+        }
+        if (settled.status === 'none') {
+          checkoutAttempt.markOpen(key);
+          throw err;
+        }
+        throw new CheckoutOutcomeUnknownError();
       }
     },
     // Checkout shows its own inline error (orderErr) — no global toast on top.
@@ -644,7 +699,7 @@ export function usePlaceOrder<T = any>() {
     inFlight.current = true;
     m.mutate(variables, options);
   };
-  return { ...m, mutate };
+  return { ...m, mutate, checkingOutcome };
 }
 
 /** [MOB-020] On the cart screen's mount: an intent this principal sent and
@@ -662,7 +717,9 @@ export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: st
     if (!pending || pending.state !== 'sent') return;
     let cancelled = false;
     setRecovering(true);
-    void probeReceipt(pending.key).then((probe) => {
+    // [AX372 R1] Asked with backoff while the key is still in flight (an
+    // unknown outcome holds it for the server's settle window).
+    void settleUnresolvedIntent(() => probeReceipt(pending.key), { stopped: () => cancelled }).then((probe) => {
       if (cancelled) return;
       recordCheckoutOutcome('ambiguous_recovery', `restart:${probe.status}`);
       track('checkout_ambiguous_recovery', { outcome: probe.status, restart: true });

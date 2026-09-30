@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import {
-  CHECKOUT_ATTEMPT_STORAGE_KEY, checkoutCounters, createCheckoutAttempt, LEGACY_CHECKOUT_ATTEMPT_STORAGE_KEY, mintCheckoutKey, recordCheckoutOutcome,
-  resetCheckoutCountersForTests, stableBodyHash, UNKNOWN_BODY_HASH, type CheckoutKeyStore,
+  CHECKOUT_ATTEMPT_STORAGE_KEY, checkoutCounters, checkoutFailureOutcome, createCheckoutAttempt, LEGACY_CHECKOUT_ATTEMPT_STORAGE_KEY, mintCheckoutKey,
+  RECEIPT_PROBE_BACKOFF_MS, recordCheckoutOutcome, resetCheckoutCountersForTests, settleUnresolvedIntent, stableBodyHash, UNKNOWN_BODY_HASH,
+  type CheckoutKeyStore, type ReceiptProbe,
 } from './checkoutAttempt';
 
 // ---------------------------------------------------------------------------
@@ -184,5 +185,58 @@ describe('the counters', () => {
     recordCheckoutOutcome('ambiguous_recovery', 'none');
     recordCheckoutOutcome('in_flight_refused');
     expect(checkoutCounters()).toEqual({ checkout_dedupe_replay: 1, key_body_conflict: 1, 'ambiguous_recovery:placed': 1, 'ambiguous_recovery:none': 1, in_flight_refused: 1 });
+  });
+});
+
+describe('[AX372 R1] a failed checkout is read for what it says about the order', () => {
+  it('no answer (offline, a timeout), a 408 or any 5xx (CHECKOUT_OUTCOME_UNKNOWN among them) is UNKNOWN; a 4xx refusal is REFUSED', () => {
+    expect(checkoutFailureOutcome({})).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 503, code: 'CHECKOUT_OUTCOME_UNKNOWN' })).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 500 })).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 502 })).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 504 })).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 408 })).toBe('unknown');
+    // the code is the server saying it cannot tell, whatever status carries it
+    expect(checkoutFailureOutcome({ status: 409, code: 'CHECKOUT_OUTCOME_UNKNOWN' })).toBe('unknown');
+    expect(checkoutFailureOutcome({ status: 400, code: 'VALIDATION_ERROR' })).toBe('refused');
+    expect(checkoutFailureOutcome({ status: 409, code: 'DELIVERY_NO_RIDERS' })).toBe('refused');
+    expect(checkoutFailureOutcome({ status: 422 })).toBe('refused');
+    expect(checkoutFailureOutcome({ status: 429 })).toBe('refused');
+  });
+});
+
+describe('[AX372 R1] an unresolved intent is settled by asking the server, with backoff', () => {
+  function answers(...seq: ReceiptProbe[]) {
+    let asked = 0;
+    return { asked: () => asked, probe: async () => seq[Math.min(asked++, seq.length - 1)]! };
+  }
+
+  it('keeps asking while the key is in flight, backing off, and stops at the first placed or none', async () => {
+    const waits: number[] = [];
+    const none = answers({ status: 'in_flight' }, { status: 'in_flight' }, { status: 'none' });
+    expect(await settleUnresolvedIntent(none.probe, { sleep: async (ms) => { waits.push(ms); } })).toEqual({ status: 'none' });
+    expect(none.asked()).toBe(3);
+    expect(waits).toEqual([1_000, 2_000]);
+    const placed = answers({ status: 'in_flight' }, { status: 'placed', orderIds: ['o1'] });
+    expect(await settleUnresolvedIntent(placed.probe, { sleep: async () => {} })).toEqual({ status: 'placed', orderIds: ['o1'] });
+    expect(placed.asked()).toBe(2);
+  });
+
+  it('never turns "still in flight" into "none": when the waits run out the answer is in_flight, and the waits back off to 15 s and outlast the server’s 120 s settle window', async () => {
+    const waits: number[] = [];
+    const stuck = answers({ status: 'in_flight' });
+    expect(await settleUnresolvedIntent(stuck.probe, { sleep: async (ms) => { waits.push(ms); } })).toEqual({ status: 'in_flight' });
+    expect(waits).toEqual([...RECEIPT_PROBE_BACKOFF_MS]);
+    expect(stuck.asked()).toBe(RECEIPT_PROBE_BACKOFF_MS.length + 1);
+    for (let i = 1; i < waits.length; i += 1) expect(waits[i]!).toBeGreaterThanOrEqual(waits[i - 1]!);
+    expect(Math.max(...waits)).toBe(15_000);
+    expect(waits.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThan(120_000);
+  });
+
+  it('stops asking once whoever asked is gone', async () => {
+    let gone = false;
+    const stuck = answers({ status: 'in_flight' });
+    expect(await settleUnresolvedIntent(stuck.probe, { sleep: async () => { gone = true; }, stopped: () => gone })).toEqual({ status: 'in_flight' });
+    expect(stuck.asked()).toBe(1);
   });
 });

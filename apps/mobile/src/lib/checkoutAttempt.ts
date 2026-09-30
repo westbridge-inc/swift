@@ -14,10 +14,12 @@
  *               intent from another principal (a shared device) is never reused
  *   bodyHash    the canonical hash of what will be sent — payment method,
  *               fulfillment, tip, promo, schedule, appointments
- *   state       open  = minted, or answered with a definitive failure: the
- *                       same key may be retried, a changed body supersedes it
+ *   state       open  = minted, or refused by the server (a 4xx) or found
+ *                       "none" by the receipt probe: the same key may be
+ *                       retried, a changed body supersedes it
  *               sent  = on the wire with the outcome UNKNOWN (a timeout, a lost
- *                       response, an app killed mid-request): the same body
+ *                       response, an app killed mid-request, any 5xx or the
+ *                       server's CHECKOUT_OUTCOME_UNKNOWN): the same body
  *                       replays it; a DIFFERENT body must first ask the server
  *                       what became of it (the receipt probe) — never place a
  *                       second order over an unresolved first one
@@ -191,6 +193,54 @@ export function createCheckoutAttempt(
 }
 
 export type CheckoutAttempt = ReturnType<typeof createCheckoutAttempt>;
+
+// ---------------------------------------------------------------------------
+// [AX372 R1] An unknown outcome is never read as a failure.
+// ---------------------------------------------------------------------------
+
+/** What a failed checkout request says about its order:
+ *  unknown  no answer came back (offline, a timeout), or the server could not
+ *           say: a 408, any 5xx, or CHECKOUT_OUTCOME_UNKNOWN (the server lost
+ *           the commit's acknowledgement). The order may exist: the intent
+ *           stays SENT until the receipt probe settles it.
+ *  refused  the server answered a 4xx: it refused the request before placing
+ *           anything, so the same key may retry and a changed body supersede. */
+export type CheckoutFailureOutcome = 'unknown' | 'refused';
+
+export function checkoutFailureOutcome(failure: { status?: number; code?: string }): CheckoutFailureOutcome {
+  if (failure.code === 'CHECKOUT_OUTCOME_UNKNOWN') return 'unknown';
+  const { status } = failure;
+  if (status === undefined || status === 408 || status >= 500) return 'unknown';
+  return status >= 400 ? 'refused' : 'unknown';
+}
+
+/** The receipt probe's answer for a key (GET /customer/checkout/receipts/:key). */
+export type ReceiptProbe = { status: 'placed'; orderIds: string[] } | { status: 'in_flight' } | { status: 'none' };
+
+/** The waits between receipt probes while a key is still in flight: backing
+ *  off to 15 s, 135 s in all, past the server's 120 s default settle window
+ *  for an unknown outcome (CHECKOUT_UNKNOWN_SETTLE_S), after which a missing
+ *  receipt is conclusive and the probe can answer "none". */
+export const RECEIPT_PROBE_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000, 15_000];
+
+/** Ask what became of an unresolved intent until the server can say. "placed"
+ *  or "none" ends the asking; "in_flight" keeps asking, with backoff. When the
+ *  waits run out (or whoever asked is gone) the answer is still "in_flight":
+ *  never "none" by default. */
+export async function settleUnresolvedIntent(
+  probe: () => Promise<ReceiptProbe>,
+  options: { sleep?: (ms: number) => Promise<void>; backoffMs?: readonly number[]; stopped?: () => boolean } = {},
+): Promise<ReceiptProbe> {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+  let answer = await probe();
+  for (const ms of options.backoffMs ?? RECEIPT_PROBE_BACKOFF_MS) {
+    if (answer.status !== 'in_flight' || options.stopped?.()) return answer;
+    await sleep(ms);
+    if (options.stopped?.()) return answer;
+    answer = await probe();
+  }
+  return answer;
+}
 
 // ---------------------------------------------------------------------------
 // On-device counters: checkout_dedupe_replay, key_body_conflict,

@@ -12,8 +12,10 @@ import { readFileSync } from 'node:fs';
 //   begin:    the checkout mutation, bound to the principal and the body hash
 //   ambiguous: a sent intent with another body is resolved by the receipt
 //             probe BEFORE anything is placed — placed ends it, in flight
-//             waits, none supersedes
-//   sent:     marked before the request leaves; a definitive failure re-opens
+//             keeps asking with backoff [AX372 R1], none supersedes
+//   sent:     marked before the request leaves; only a 4xx refusal re-opens
+//             it — an unknown outcome (no answer, any 5xx) is asked about
+//             first and re-opens only on "none" [AX372 R1]
 //   422 IDEMPOTENCY_KEY_REUSED → the order already exists (never a retry)
 //   409 DUPLICATE_REQUEST      → still being placed (never a second order)
 //   replayed: true             → counted as a dedupe replay
@@ -54,18 +56,21 @@ describe('the intent', () => {
     expect(begin).toContain('const principal = checkoutPrincipal();');
     expect(begin).toContain('const bodyHash = stableBodyHash(payload);');
     expect(begin).toContain('checkoutAttempt.begin({ principal, bodyHash })');
-    const principal = body(HOOKS, 'function checkoutPrincipal(): CheckoutPrincipal {', 'type ReceiptProbe');
+    const principal = body(HOOKS, 'function checkoutPrincipal(): CheckoutPrincipal {', 'async function probeReceipt(');
     expect(principal).toContain('getAuthSessionSnapshot()');
     expect(principal).toContain('generation: session.generation');
   });
 
-  it('an ambiguous intent is resolved by the receipt probe before anything is placed: placed ends it, in flight waits, none supersedes', () => {
+  it('an ambiguous intent is resolved by the receipt probe before anything is placed: placed ends it, in flight keeps asking with backoff, none supersedes', () => {
     expect(begin).toContain("if (begun.kind !== 'ambiguous') return begun.key;");
-    expect(begin).toContain('const probe = await probeReceipt(begun.pending.key);');
+    expect(begin).toContain('probe = await settleSentIntent(begun.pending.key);');
+    const settle = body(HOOKS, 'async function settleSentIntent(', 'async function beginCheckoutIntent(');
+    expect(settle).toContain('settleUnresolvedIntent(() => probeReceipt(key)');
     const placed = body(begin, "if (probe.status === 'placed') {", "if (probe.status === 'in_flight')");
     expect(placed).toContain('checkoutAttempt.end();');
     expect(placed).toContain('throw new CheckoutAlreadyPlacedError(probe.orderIds);');
-    expect(begin).toContain("if (probe.status === 'in_flight') throw new CheckoutInFlightError();");
+    expect(begin).toContain("if (probe.status === 'in_flight') throw new CheckoutOutcomeUnknownError();");
+    expect(begin.indexOf('settleSentIntent(begun.pending.key)')).toBeLessThan(begin.indexOf('checkoutAttempt.begin({ principal, bodyHash })', begin.indexOf('settleSentIntent(')));
     const none = begin.slice(begin.indexOf("if (probe.status === 'in_flight')"));
     expect(none).toContain('checkoutAttempt.end();');
     expect(none).toContain('checkoutAttempt.begin({ principal, bodyHash })');
@@ -78,7 +83,16 @@ describe('the intent', () => {
   it('is marked SENT before the request leaves, and re-opened only on a definitive answer', () => {
     const fn = body(hook, 'mutationFn: async (payload: any) => {', 'meta: { silent: true }');
     expect(fn.indexOf('checkoutAttempt.markSent(key);')).toBeLessThan(fn.indexOf('customerApi.placeOrder(payload, key)'));
-    expect(fn).toContain('if (isAxiosError(err) && err.response) checkoutAttempt.markOpen(key);');
+    // [AX372 R1] Re-opened in exactly two places: a 4xx refusal, and an
+    // unknown outcome the receipt probe settled as "none".
+    expect(fn.match(/checkoutAttempt\.markOpen\(key\)/g) ?? []).toHaveLength(2);
+    const refused = body(fn, "if (checkoutFailureOutcome({ status, code }) === 'refused') {", 'throw err;');
+    expect(refused).toContain('checkoutAttempt.markOpen(key);');
+    const unknown = fn.slice(fn.indexOf("if (checkoutFailureOutcome({ status, code }) === 'refused') {") + 1);
+    const none = body(unknown, "if (settled.status === 'none') {", 'throw err;');
+    expect(none).toContain('checkoutAttempt.markOpen(key);');
+    expect(unknown.indexOf('settled = await settleSentIntent(key);')).toBeLessThan(unknown.indexOf("if (settled.status === 'none') {"));
+    expect(unknown).toContain('throw new CheckoutOutcomeUnknownError();');
     expect(fn).not.toMatch(/markOpen\(key\);\s*\}\s*catch/);
   });
 
@@ -100,7 +114,7 @@ describe('the intent', () => {
     expect(hook).toContain('const inFlight = useRef(false);');
     expect(hook).toMatch(/if \(inFlight\.current\) return;\s*inFlight\.current = true;\s*m\.mutate\(variables, options\);/);
     expect(hook).toMatch(/onSettled: \(\) => \{\s*inFlight\.current = false;/);
-    expect(hook).toContain('return { ...m, mutate };');
+    expect(hook).toContain('return { ...m, mutate, checkingOutcome };');
   });
 });
 
@@ -110,6 +124,7 @@ describe('the restart', () => {
     expect(recovery).toContain("checkoutAttempt.currentFor({ userId: session.userId, generation: session.generation })");
     expect(recovery).toContain("if (!pending || pending.state !== 'sent') return;");
     expect(recovery).toContain('probeReceipt(pending.key)');
+    expect(recovery).toContain('settleUnresolvedIntent(() => probeReceipt(pending.key), { stopped: () => cancelled })');
     const placed = body(recovery, "if (probe.status === 'placed') {", "} else if (probe.status === 'none') {");
     expect(placed).toContain('checkoutAttempt.end();');
     expect(placed).toContain('setPlacedOrderIds(probe.orderIds);');
@@ -124,6 +139,10 @@ describe('the restart', () => {
     expect((CART.match(/recovery\.recovering \|\| alreadyPlaced \|\| stillPlacing/g) ?? []).length).toBeGreaterThanOrEqual(2);
     expect(CART).toContain('This order was already placed');
     expect(CART).toContain('This order is already being placed');
+    // [AX372 R1] An unknown outcome reads as plain words while it is asked about, never as a failure.
+    expect(CART).toContain('placeOrder.checkingOutcome || recovery.recovering || placeOrder.error instanceof CheckoutOutcomeUnknownError');
+    expect(CART).toMatch(/: checkingOutcome\s*\? CHECKING_ORDER_MESSAGE/);
+    expect(HOOKS).toContain(`export const CHECKING_ORDER_MESSAGE = "We're checking whether your order went through.";`);
   });
 });
 
