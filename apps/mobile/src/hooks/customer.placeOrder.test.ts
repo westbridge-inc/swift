@@ -64,17 +64,21 @@ describe('the intent', () => {
 
   it('an ambiguous intent is resolved by the receipt probe before anything is placed: placed ends it, in flight keeps asking with backoff, none supersedes', () => {
     expect(begin).toContain("if (begun.kind !== 'ambiguous') return begun.key;");
-    expect(begin).toContain('probe = await settleSentIntent(begun.pending.key, principal);');
+    expect(begin).toContain('settled = await settleSentIntent(begun.pending.key, principal);');
     const settle = body(HOOKS, 'async function settleSentIntent(', 'async function beginCheckoutIntent(');
     expect(settle).toContain('settleUnresolvedIntent(() => probeReceipt(key, principal)');
     const placed = body(begin, "if (probe.status === 'placed') {", "if (probe.status === 'in_flight')");
     expect(placed).toContain('checkoutAttempt.end(begun.pending.key, principal);');
     expect(placed).toContain('throw new CheckoutAlreadyPlacedError(probe.orderIds);');
     expect(begin).toContain("if (probe.status === 'in_flight') throw new CheckoutOutcomeUnknownError();");
-    expect(begin.indexOf('settleSentIntent(begun.pending.key, principal)')).toBeLessThan(begin.indexOf('checkoutAttempt.begin({ principal, bodyHash })', begin.indexOf('settleSentIntent(')));
+    expect(begin.indexOf('settleSentIntent(begun.pending.key, principal)')).toBeLessThan(begin.indexOf('checkoutAttempt.replaceAfterNone(settled.observation, bodyHash)'));
     const none = begin.slice(begin.indexOf("if (probe.status === 'in_flight')"));
-    expect(none).toContain('checkoutAttempt.end(begun.pending.key, principal);');
-    expect(none).toContain('checkoutAttempt.begin({ principal, bodyHash })');
+    expect(none).toContain('checkoutAttempt.replaceAfterNone(settled.observation, bodyHash)');
+    expect(none).toContain('if (!key) throw new CheckoutOutcomeUnknownError();');
+    expect(none).not.toContain('checkoutAttempt.end(');
+    expect(none).not.toContain('checkoutAttempt.begin(');
+    expect(settle).toContain('const observation = checkoutAttempt.observe(key, principal);');
+    expect(settle).toContain('return { receipt, observation };');
     // a probe that cannot be answered is IN FLIGHT, never "nothing"
     const probe = body(HOOKS, 'async function probeReceipt(key: string, principal: CheckoutPrincipal)', 'async function beginCheckoutIntent(');
     expect(probe).toMatch(/catch \{\s*requireCheckoutIntent\(key, principal\);\s*return \{ status: 'in_flight' \};/);
@@ -84,14 +88,16 @@ describe('the intent', () => {
 
   it('is marked SENT before the request leaves, and re-opened only on a definitive answer', () => {
     const fn = body(hook, 'mutationFn: async (operation) => {', 'meta: { silent: true }');
-    expect(fn.indexOf('checkoutAttempt.markSent(key, principal);')).toBeLessThan(fn.indexOf('customerApi.placeOrder(payload, key, session)'));
+    expect(fn.indexOf('checkoutAttempt.startSend(key, principal)')).toBeGreaterThan(-1);
+    expect(fn.indexOf('checkoutAttempt.startSend(key, principal)')).toBeLessThan(fn.indexOf('customerApi.placeOrder(payload, key, session)'));
     // Exactly one reopening branch, after receipt authority is consulted.
-    expect(fn.match(/checkoutAttempt\.markOpen\(key, principal\)/g) ?? []).toHaveLength(1);
+    expect(fn.match(/checkoutAttempt\.markOpen\(observed\.observation\)/g) ?? []).toHaveLength(1);
     const refusal = "if (checkoutFailureOutcome({ status, code, receipt: settled }) === 'refused') {";
     const none = body(fn, refusal, 'throw err;');
-    expect(none).toContain('checkoutAttempt.markOpen(key, principal);');
-    expect(fn.indexOf('settled = await settleSentIntent(key, principal);')).toBeLessThan(fn.indexOf(refusal));
+    expect(none).toContain('if (!checkoutAttempt.markOpen(observed.observation)) throw new CheckoutOutcomeUnknownError();');
+    expect(fn.indexOf('observed = await settleSentIntent(key, principal);')).toBeLessThan(fn.indexOf(refusal));
     expect(fn).toContain('throw new CheckoutOutcomeUnknownError();');
+    expect(fn).toContain('finally { checkoutAttempt.finishSend(send); }');
     expect(fn).not.toMatch(/markOpen\(key, principal\);\s*\}\s*catch/);
   });
 
@@ -99,7 +105,7 @@ describe('the intent', () => {
     const fn = body(hook, 'mutationFn: async (operation) => {', 'meta: { silent: true }');
     const conflict = body(fn, "if (status === 422 && code === 'IDEMPOTENCY_KEY_REUSED') {", "if (status === 409 && code === 'DUPLICATE_REQUEST') {");
     expect(conflict).toContain("recordCheckoutOutcome('key_body_conflict')");
-    expect(conflict).toContain('checkoutAttempt.end(key, principal);');
+    expect(conflict).toContain('if (!checkoutAttempt.endIfUnchanged(send)) throw new CheckoutOutcomeUnknownError();');
     expect(conflict).toContain('throw new CheckoutAlreadyPlacedError');
     const dup = fn.slice(fn.indexOf("if (status === 409 && code === 'DUPLICATE_REQUEST') {"));
     expect(dup).toContain("recordCheckoutOutcome('in_flight_refused')");
@@ -132,7 +138,7 @@ describe('the restart', () => {
     expect(placed).toContain('checkoutAttempt.end(pending.key, session);');
     expect(placed).toContain('setPlacedOrderIds(probe.orderIds);');
     const none = recovery.slice(recovery.indexOf("} else if (probe.status === 'none') {"));
-    expect(none).toContain('checkoutAttempt.markOpen(pending.key, session);');
+    expect(none).toContain('checkoutAttempt.markOpen(observation);');
     expect(none).not.toContain('checkoutAttempt.end(');
   });
   it('the cart screen holds the button while an intent is being resolved, and shows the two non-failure answers as facts', () => {

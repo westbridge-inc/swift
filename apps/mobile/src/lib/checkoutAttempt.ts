@@ -14,8 +14,8 @@
  *               account cannot use it; a new login may recover its own sent key
  *   bodyHash    the canonical hash of what will be sent — payment method,
  *               fulfillment, tip, promo, schedule, appointments
- *   state       open  = minted, or refused by the server (a 4xx) or found
- *                       "none" by the receipt probe: the same key may be
+ *   state       open  = minted, or reopened by a current observation of
+ *                       "none" with no active transport: the same key may be
  *                       retried, a changed body supersedes it
  *               sent  = on the wire with the outcome UNKNOWN (a timeout, a lost
  *                       response, an app killed mid-request, any 5xx or the
@@ -57,6 +57,16 @@ export interface CheckoutIntent {
   state: CheckoutIntentState;
   createdAt: number;
   sentAt?: number;
+  /** Persisted send/ownership revision; negative observations compare this. */
+  revision: number;
+}
+
+export interface CheckoutObservation {
+  readonly key: string;
+  readonly principal: CheckoutPrincipal;
+  readonly revision: number;
+  /** Captured before probing; live observations never gain negative authority later. */
+  readonly quiescent: boolean;
 }
 
 export type BeginOutcome =
@@ -103,7 +113,7 @@ function decodeIntent(raw: string | null): CheckoutIntent | null {
     if (typeof v.bodyHash !== 'string' || !v.bodyHash) return null;
     if (v.state !== 'open' && v.state !== 'sent') return null;
     if (!Number.isFinite(v.createdAt)) return null;
-    return { key: v.key, principal: { userId: v.principal.userId, generation: v.principal.generation }, bodyHash: v.bodyHash, state: v.state, createdAt: v.createdAt as number, ...(Number.isFinite(v.sentAt) ? { sentAt: v.sentAt as number } : {}) };
+    return { key: v.key, principal: { userId: v.principal.userId, generation: v.principal.generation }, bodyHash: v.bodyHash, state: v.state, createdAt: v.createdAt as number, revision: Number.isSafeInteger(v.revision) && (v.revision as number) >= 0 ? v.revision as number : 0, ...(Number.isFinite(v.sentAt) ? { sentAt: v.sentAt as number } : {}) };
   } catch {
     return null;
   }
@@ -120,6 +130,12 @@ export function createCheckoutAttempt(
   let memory: CheckoutIntent[] | null = null;
   let activeUserId: string | null = null;
   let legacyRead = false;
+  // Shared by every mounted consumer. SENT/revision persist before transport.
+  const activeSends = new Set<CheckoutObservation>();
+  const advance = (revision: number) => {
+    if (revision >= Number.MAX_SAFE_INTEGER) throw new Error('Checkout revision exhausted');
+    return revision + 1;
+  };
   const samePrincipal = (a: CheckoutPrincipal, b: CheckoutPrincipal) => a.userId === b.userId && a.generation === b.generation;
   const read = (): CheckoutIntent[] => {
     if (memory) return memory;
@@ -130,17 +146,23 @@ export function createCheckoutAttempt(
       if (old) { memory = [old]; activeUserId = old.principal.userId; }
       else if (raw) {
         const saved = JSON.parse(raw) as { version?: number; intents?: unknown[]; activeUserId?: string };
-        if (saved.version === 3 && Array.isArray(saved.intents)) {
+        if ((saved.version === 3 || saved.version === 4) && Array.isArray(saved.intents)) {
           memory = saved.intents.map((v) => decodeIntent(JSON.stringify(v))).filter((v): v is CheckoutIntent => !!v);
           activeUserId = saved.activeUserId ?? null;
         }
       }
     } catch { /* Memory still protects retries when storage is unavailable. */ }
+    // Restart invalidates observations from the previous authority even when
+    // the login generation was persisted unchanged. Unknown sends stay SENT.
+    if (memory.length) {
+      memory = memory.map((i) => i.state === 'sent' ? { ...i, revision: advance(i.revision) } : i);
+      persist();
+    }
     return memory;
   };
   const persist = () => {
     try {
-      if (read().length) store.set(JSON.stringify({ version: 3, intents: memory, activeUserId }));
+      if (read().length) store.set(JSON.stringify({ version: 4, intents: memory, activeUserId }));
       else store.clear();
     } catch { /* The in-memory records remain intact. */ }
   };
@@ -156,7 +178,7 @@ export function createCheckoutAttempt(
     try { raw = legacy.get(); } catch { raw = null; }
     try { legacy.clear(); } catch { /* best effort */ }
     if (!validKey(raw)) return null;
-    const intent: CheckoutIntent = { key: raw, principal, bodyHash: UNKNOWN_BODY_HASH, state: 'sent', createdAt: now(), sentAt: now() };
+    const intent: CheckoutIntent = { key: raw, principal, bodyHash: UNKNOWN_BODY_HASH, state: 'sent', createdAt: now(), sentAt: now(), revision: 0 };
     put(intent);
     return intent;
   };
@@ -172,11 +194,61 @@ export function createCheckoutAttempt(
     if (!intent) return null;
     if (samePrincipal(intent.principal, principal)) return intent;
     if (intent.state !== 'sent') return null;
-    const adopted = { ...intent, principal };
+    const adopted = { ...intent, principal, revision: advance(intent.revision) };
     put(adopted);
     return adopted;
   };
+  const hasActiveSend = (key: string, principal: CheckoutPrincipal) => [...activeSends].some((send) => send.key === key && send.principal.userId === principal.userId);
+  const observe = (key: string, principal: CheckoutPrincipal): CheckoutObservation | null => {
+    const intent = owned(key, principal);
+    return intent ? { key, principal: { ...principal }, revision: intent.revision, quiescent: !hasActiveSend(key, principal) } : null;
+  };
+  const unchanged = (observation: CheckoutObservation) => {
+    const intent = owned(observation.key, observation.principal);
+    return intent?.revision === observation.revision ? intent : null;
+  };
+  const negativeAuthority = (observation: CheckoutObservation) => {
+    const intent = unchanged(observation);
+    // Include old login generations: their wire request can still be live
+    // after recovery adopts this account's SENT key.
+    const active = hasActiveSend(observation.key, observation.principal);
+    return intent && observation.quiescent && !active ? intent : null;
+  };
+  const markSent = (key: string, principal: CheckoutPrincipal): CheckoutObservation | null => {
+    const intent = owned(key, principal);
+    if (!intent) return null;
+    put({ ...intent, state: 'sent', sentAt: now(), revision: advance(intent.revision) });
+    return observe(key, principal);
+  };
   return {
+    observe,
+    markSent,
+    startSend(key: string, principal: CheckoutPrincipal): CheckoutObservation | null {
+      const send = markSent(key, principal);
+      if (send) activeSends.add(send);
+      return send;
+    },
+    finishSend(send: CheckoutObservation): void { activeSends.delete(send); },
+    /** Synchronous CAS: a negative answer cannot outlive a send or adoption. */
+    markOpen(observation: CheckoutObservation): boolean {
+      const intent = negativeAuthority(observation);
+      if (!intent) return false;
+      put({ ...intent, state: 'open', revision: advance(intent.revision) });
+      return true;
+    },
+    /** CAS/replacement are one transition; never end/await/begin. */
+    replaceAfterNone(observation: CheckoutObservation, bodyHash: string): string | null {
+      if (!negativeAuthority(observation)) return null;
+      const intent: CheckoutIntent = { key: mint(), principal: observation.principal, bodyHash, state: 'open', createdAt: now(), revision: 0 };
+      put(intent);
+      return intent.key;
+    },
+    endIfUnchanged(observation: CheckoutObservation): boolean {
+      if (!negativeAuthority(observation)) return false;
+      memory = read().filter((i) => !(i.key === observation.key && samePrincipal(i.principal, observation.principal)));
+      persist();
+      return true;
+    },
     current(): CheckoutIntent | null { return read().find((i) => i.principal.userId === activeUserId) ?? null; },
     currentFor,
     resumeFor,
@@ -186,17 +258,9 @@ export function createCheckoutAttempt(
         if (existing.bodyHash === input.bodyHash) return { kind: 'reused', key: existing.key, state: existing.state };
         if (existing.state === 'sent') return { kind: 'ambiguous', key: null, pending: existing };
       }
-      const intent: CheckoutIntent = { key: mint(), principal: input.principal, bodyHash: input.bodyHash, state: 'open', createdAt: now() };
+      const intent: CheckoutIntent = { key: mint(), principal: input.principal, bodyHash: input.bodyHash, state: 'open', createdAt: now(), revision: 0 };
       put(intent);
       return { kind: 'new', key: intent.key };
-    },
-    markSent(key: string, principal: CheckoutPrincipal): void {
-      const intent = owned(key, principal);
-      if (intent && intent.state !== 'sent') put({ ...intent, state: 'sent', sentAt: now() });
-    },
-    markOpen(key: string, principal: CheckoutPrincipal): void {
-      const intent = owned(key, principal);
-      if (intent && intent.state !== 'open') put({ ...intent, state: 'open' });
     },
     /** An authoritative completion can remove only the exact operation. */
     end(key: string, principal: CheckoutPrincipal): boolean {

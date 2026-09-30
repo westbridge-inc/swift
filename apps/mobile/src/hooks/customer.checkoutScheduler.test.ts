@@ -11,7 +11,8 @@ const env = vi.hoisted(() => {
   process.env['EXPO_PUBLIC_API_URL'] = 'https://api.test';
   return {
     previousApiUrl, session: null as AuthSessionSnapshot | null, anonymousGeneration: 0,
-    client: null as any, frame: null as any, resetAttempt: () => {},
+    client: null as any, frame: null as any, resetAttempt: () => {}, restartAttempt: () => {},
+    effects: [] as Array<() => void | (() => void)>, toastError: vi.fn(),
     barrier: null as null | (() => Promise<void>), disposers: [] as Array<() => void>,
   };
 });
@@ -23,7 +24,7 @@ vi.mock('react', async (original) => ({
     if (!(index in f.states)) f.states[index] = value;
     return [f.states[index], (next: unknown) => { f.states[index] = next; }];
   },
-  useEffect: () => {},
+  useEffect: (effect: () => void | (() => void)) => { env.effects.push(effect); },
 }));
 vi.mock('@tanstack/react-query', async (original) => {
   const actual = await original<typeof import('@tanstack/react-query')>();
@@ -67,23 +68,26 @@ vi.mock('../stores/authStore', async () => {
 vi.mock('../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null }) } }));
 vi.mock('expo-constants', () => ({ default: { expoConfig: {} } }));
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' }, TurboModuleRegistry: { get: () => null } }));
+vi.mock('../kit/toast', () => ({ toast: { error: env.toastError } }));
 vi.mock('../lib/analytics', () => ({ track: vi.fn() }));
 vi.mock('../lib/marketDepthMemory', () => ({ rememberedMarketDepth: () => null, rememberMarketDepth: () => {} }));
 vi.mock('../lib/checkoutAttemptStore', async () => {
   const { createCheckoutAttempt } = await vi.importActual<typeof import('../lib/checkoutAttempt')>('../lib/checkoutAttempt');
   let next = 0;
+  let serialized: string | null = null;
   const fresh = () => {
-    let serialized: string | null = null;
     return createCheckoutAttempt({ get: () => serialized, set: (v: string) => { serialized = v; }, clear: () => { serialized = null; } }, () => `chk_scheduler_${++next}`);
   };
-  let attempt = fresh(); env.resetAttempt = () => { attempt = fresh(); };
+  let attempt = fresh(); env.resetAttempt = () => { serialized = null; attempt = fresh(); };
+  env.restartAttempt = () => { attempt = fresh(); };
   return { checkoutAttempt: new Proxy({}, { get: (_t, key) => Reflect.get(attempt, key) }) };
 });
 
 import { api } from '../services/api';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
+import { queryClient } from '../lib/queryClient';
 import { stableBodyHash } from '../lib/checkoutAttempt';
-import { useAddToCart, useUpdateCartItem, useRemoveCartItem, useClearCart, useSetCartAddress, useSetCartTip, useRemoveCartPromo, useReorder, usePlaceOrder } from './customer';
+import { useAddToCart, useUpdateCartItem, useRemoveCartItem, useClearCart, useSetCartAddress, useSetCartTip, useRemoveCartPromo, useReorder, usePlaceOrder, useCheckoutRecovery } from './customer';
 
 const A: AuthSessionSnapshot = { userId: 'a', generation: 1, accessToken: 'access-a', refreshToken: 'refresh-a' };
 const B: AuthSessionSnapshot = { userId: 'b', generation: 2, accessToken: 'access-b', refreshToken: 'refresh-b' };
@@ -118,7 +122,7 @@ function assertBIntact(key: string | null) {
   expect(requests.filter((r) => !r.url?.includes('/auth/')).map((r) => r.headers.get('Authorization'))).not.toContain('Bearer access-b');
 }
 beforeEach(() => {
-  env.session = { ...A }; env.anonymousGeneration = 0; env.resetAttempt(); env.barrier = null; requests = [];
+  env.session = { ...A }; env.anonymousGeneration = 0; env.resetAttempt(); env.barrier = null; env.effects = []; env.toastError.mockClear(); requests = [];
   env.client = new QueryClient({ mutationCache: new MutationCache({ onMutate: async () => { await env.barrier?.(); } }), defaultOptions: { mutations: { retry: false, gcTime: Infinity }, queries: { retry: false, gcTime: Infinity } } });
   invalidate = vi.spyOn(env.client, 'invalidateQueries');
   const adapter: AxiosAdapter = async (config) => { requests.push(config); return response(config); };
@@ -373,5 +377,241 @@ describe('[SX401] an upstream retry refusal does not resolve an earlier send', (
     expect(requests.some((r) => r.url?.startsWith('/customer/checkout/receipts/'))).toBe(true);
     expect(checkoutAttempt.currentFor(A)).toMatchObject({ key: initial.key, state: 'open' });
     expect(checkoutAttempt.begin({ principal: A, bodyHash: stableBodyHash(changedBody) }).key).not.toBe(initial.key);
+  });
+});
+
+
+describe('[SX405] shared receipt observations across mounted consumers', () => {
+  it.each(['failure', 'changed-body', 'restart-recovery'] as const)('%s: old none produced before newer K send cannot reopen or replace it', async (path) => {
+    vi.useFakeTimers();
+    const produced = deferred(); const deliver = deferred(); let probes = 0; let sends = 0;
+    const committed = new Set<string>();
+    api.defaults.adapter = async (config) => {
+      requests.push(config);
+      if (config.url?.startsWith('/customer/checkout/receipts/')) {
+        if (++probes === 1) {
+          // The server has produced a correct none BEFORE the second consumer
+          // enters transport. Only delivery is held; it is never recomputed.
+          const oldNone = response(config, 200, { status: 'none' });
+          produced.resolve(); await deliver.promise; return oldNone;
+        }
+        return response(config, 200, { status: 'in_flight' });
+      }
+      if (config.url === '/customer/checkout') {
+        ++sends;
+        if (path === 'failure' && sends === 1) return reject(config, 400);
+        committed.add(String(config.headers.get('Idempotency-Key')));
+        throw new AxiosError('Lost acknowledgement', 'ERR_NETWORK', config);
+      }
+      return response(config);
+    };
+    if (path !== 'failure') {
+      const intent = checkoutAttempt.begin({ principal: A, bodyHash: stableBodyHash(body) });
+      checkoutAttempt.markSent(intent.key!, A);
+    }
+    if (path === 'restart-recovery') {
+      env.restartAttempt(); env.session = { ...A, generation: 3 };
+    }
+    const principal = env.session!;
+    const firstRender = path === 'restart-recovery' ? mount(useCheckoutRecovery) : mount(usePlaceOrder);
+    const firstHook = firstRender();
+    const first = path === 'restart-recovery' ? null
+      : firstHook.mutateAsync(path === 'changed-body' ? changedBody : body).catch((e: unknown) => e);
+    if (path === 'restart-recovery') env.effects.shift()!();
+    await produced.promise;
+    const key = checkoutAttempt.currentFor(principal)!.key;
+    // A genuinely separate mounted MutationObserver starts K after production.
+    const secondRender = mount(usePlaceOrder);
+    const newer = secondRender().mutateAsync(body).catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    expect(await newer).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(committed).toEqual(new Set([key]));
+    deliver.resolve(); await vi.runAllTimersAsync();
+    if (first) expect(await first).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    else expect(firstRender()).toMatchObject({ recovering: false, placedOrderIds: null });
+    expect(checkoutAttempt.currentFor(principal), 'stale none must leave K SENT').toMatchObject({ key, state: 'sent' });
+    await mount(useAddToCart)().mutateAsync({ vendorId: 'v1', itemId: 'i1' });
+    expect(checkoutAttempt.currentFor(principal)?.key).toBe(key);
+    const changed = secondRender().mutateAsync(changedBody).catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    expect(await changed).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(committed).toEqual(new Set([key]));
+    expect(requests.filter((r) => r.url === '/customer/checkout').map((r) => r.headers.get('Idempotency-Key')))
+      .toEqual(path === 'failure' ? [key, key] : [key]);
+  });
+
+  it('none observed during an older live transport cannot authorize replacement', async () => {
+    const entered = deferred(); const release = deferred(); let sends = 0;
+    api.defaults.adapter = async (config) => {
+      requests.push(config);
+      if (config.url?.startsWith('/customer/checkout/receipts/')) return response(config, 200, { status: 'none' });
+      if (config.url === '/customer/checkout') {
+        if (++sends === 1) { entered.resolve(); await release.promise; }
+        return reject(config, 400);
+      }
+      return response(config);
+    };
+    const first = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    await entered.promise;
+    const key = checkoutAttempt.currentFor(A)!.key;
+    const second = await mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    expect(second).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(checkoutAttempt.currentFor(A)).toMatchObject({ key, state: 'sent' });
+    release.resolve(); expect(await first).toBeInstanceOf(AxiosError);
+    expect(checkoutAttempt.currentFor(A)).toMatchObject({ key, state: 'open' });
+  });
+});
+
+describe('[SX405] application MutationCache feedback ownership', () => {
+  const applicationCache = () => {
+    env.client.clear(); env.client = queryClient; queryClient.clear();
+    queryClient.getMutationCache().config.onMutate = async () => { await env.barrier?.(); };
+    invalidate = vi.spyOn(env.client, 'invalidateQueries');
+  };
+  afterEach(() => { queryClient.getMutationCache().config.onMutate = undefined; });
+
+  it.each(changes)('%s late A failure produces no global toast after switch', async (_name, hook, payload) => {
+    applicationCache(); const entered = deferred(); const release = deferred();
+    api.defaults.adapter = async (config) => { requests.push(config); entered.resolve(); await release.promise; return reject(config, 400); };
+    const callback = vi.fn(); const render = mount(hook);
+    const pending = render().mutateAsync(payload, { onError: callback }).catch((e: unknown) => e);
+    await entered.promise; switchToB(); release.resolve();
+    expect(await pending).toMatchObject({ name: 'AuthSessionBoundaryError' });
+    expect(queryClient.getMutationCache().getAll().at(-1)!.state.status).toBe('error');
+    expect(env.toastError, 'stale A must not publish a global toast').not.toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+  });
+  it.each(changes)('%s queued guest failure produces no global toast after sign-in', async (_name, hook, payload) => {
+    applicationCache(); env.session = null; const entered = deferred(); const release = deferred();
+    env.barrier = () => { entered.resolve(); return release.promise; };
+    const pending = mount(hook)().mutateAsync(payload).catch((e: unknown) => e);
+    await entered.promise; switchToB(); release.resolve();
+    expect(await pending).toMatchObject({ name: 'AuthSessionBoundaryError' });
+    expect(requests).toEqual([]);
+    expect(env.toastError, 'stale guest must not publish a global toast').not.toHaveBeenCalled();
+  });
+  it.each(changes)('%s current account failure still publishes global feedback', async (_name, hook, payload) => {
+    applicationCache(); api.defaults.adapter = async (config) => reject(config, 400);
+    const error = await mount(hook)().mutateAsync(payload).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(AxiosError);
+    expect(env.toastError).toHaveBeenCalledExactlyOnceWith('Couldn’t complete that', expect.any(String));
+  });
+  it('current anonymous generation still receives its failure toast', async () => {
+    applicationCache(); env.session = null;
+    expect(await mount(useClearCart)().mutateAsync(undefined).catch((e: unknown) => e)).toMatchObject({ name: 'AuthSessionBoundaryError' });
+    expect(env.toastError).toHaveBeenCalledTimes(1); expect(requests).toEqual([]);
+  });
+});
+
+
+describe('[SX405] positive authority and concurrent first sends', () => {
+  it('a placed receipt produced before a newer send still recovers the existing order', async () => {
+    vi.useFakeTimers();
+    const produced = deferred(); const deliver = deferred(); let probes = 0; let sends = 0;
+    const committed = new Set<string>();
+    api.defaults.adapter = async (config) => {
+      requests.push(config);
+      if (config.url?.startsWith('/customer/checkout/receipts/')) {
+        if (++probes === 1) {
+          const placed = response(config, 200, { status: 'placed', orderIds: ['original'] });
+          produced.resolve(); await deliver.promise; return placed;
+        }
+        return response(config, 200, { status: 'in_flight' });
+      }
+      ++sends; committed.add(String(config.headers.get('Idempotency-Key')));
+      throw new AxiosError('Lost acknowledgement', 'ERR_NETWORK', config);
+    };
+    const first = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    await produced.promise; const key = checkoutAttempt.currentFor(A)!.key;
+    const newer = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    await vi.runAllTimersAsync(); expect(await newer).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    deliver.resolve(); await vi.runAllTimersAsync();
+    expect(await first).toMatchObject({ name: 'CheckoutAlreadyPlacedError', orderIds: ['original'] });
+    expect(checkoutAttempt.currentFor(A)).toBeNull();
+    expect(committed).toEqual(new Set([key])); expect(sends).toBe(2);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['customer', 'orders'] });
+  });
+  it('a delayed old 422 conflict cannot discard a newer unresolved K send', async () => {
+    vi.useFakeTimers(); const entered = deferred(); const release = deferred(); let sends = 0;
+    api.defaults.adapter = async (config) => {
+      requests.push(config);
+      if (config.url?.startsWith('/customer/checkout/receipts/')) return response(config, 200, { status: 'in_flight' });
+      if (++sends === 1) {
+        entered.resolve(); await release.promise;
+        const conflict = response(config, 422); conflict.data = { error: { code: 'IDEMPOTENCY_KEY_REUSED' } };
+        throw new AxiosError('Synthetic conflict', 'ERR_BAD_RESPONSE', config, undefined, conflict);
+      }
+      throw new AxiosError('Lost acknowledgement', 'ERR_NETWORK', config);
+    };
+    const first = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    await entered.promise; const key = checkoutAttempt.currentFor(A)!.key;
+    const newer = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    await vi.runAllTimersAsync(); expect(await newer).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    release.resolve(); await vi.runAllTimersAsync();
+    expect(await first, 'old conflict loses send authority').toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(checkoutAttempt.currentFor(A)).toMatchObject({ key, state: 'sent' });
+    expect(sends).toBe(2);
+  });
+  it('two first invocations released together use one shared key', async () => {
+    vi.useFakeTimers(); const entered = deferred(); const release = deferred(); let scheduled = 0;
+    env.barrier = () => { if (++scheduled === 2) entered.resolve(); return release.promise; };
+    const committed = new Set<string>();
+    api.defaults.adapter = async (config) => {
+      requests.push(config);
+      if (config.url?.startsWith('/customer/checkout/receipts/')) return response(config, 200, { status: 'in_flight' });
+      committed.add(String(config.headers.get('Idempotency-Key')));
+      throw new AxiosError('Lost acknowledgement', 'ERR_NETWORK', config);
+    };
+    const first = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    const second = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    await entered.promise; release.resolve(); await vi.runAllTimersAsync();
+    expect(await first).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(await second).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    const key = checkoutAttempt.currentFor(A)!.key;
+    expect(checkoutAttempt.currentFor(A)?.state).toBe('sent');
+    expect(committed).toEqual(new Set([key]));
+    expect(requests.filter((r) => r.url === '/customer/checkout').map((r) => r.headers.get('Idempotency-Key'))).toEqual([key, key]);
+  });
+});
+
+
+describe('[SX405] observations made while transport is live', () => {
+  it('none produced during an older K transport cannot reopen it after that transport commits', async () => {
+    vi.useFakeTimers(); const transportEntered = deferred(); const transportRelease = deferred();
+    const noneProduced = deferred(); const noneDeliver = deferred(); let sends = 0; let probes = 0;
+    const committed = new Set<string>();
+    api.defaults.adapter = async (config) => {
+      requests.push(config);
+      if (config.url?.startsWith('/customer/checkout/receipts/')) {
+        if (++probes === 1) {
+          const oldNone = response(config, 200, { status: 'none' });
+          noneProduced.resolve(); await noneDeliver.promise; return oldNone;
+        }
+        return response(config, 200, { status: 'in_flight' });
+      }
+      if (config.url === '/customer/checkout') {
+        if (++sends === 1) {
+          transportEntered.resolve(); await transportRelease.promise;
+          committed.add(String(config.headers.get('Idempotency-Key')));
+          throw new AxiosError('Lost acknowledgement', 'ERR_NETWORK', config);
+        }
+        return reject(config, 400);
+      }
+      return response(config);
+    };
+    const first = mount(usePlaceOrder)().mutateAsync(body).catch((e: unknown) => e);
+    await transportEntered.promise; const key = checkoutAttempt.currentFor(A)!.key;
+    const secondRender = mount(usePlaceOrder);
+    const second = secondRender().mutateAsync(body).catch((e: unknown) => e);
+    await noneProduced.promise; transportRelease.resolve(); await vi.runAllTimersAsync();
+    expect(await first).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(committed).toEqual(new Set([key]));
+    noneDeliver.resolve(); await vi.runAllTimersAsync();
+    expect(await second, 'live observation remains invalid after transport finishes').toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(checkoutAttempt.currentFor(A)).toMatchObject({ key, state: 'sent' });
+    await mount(useAddToCart)().mutateAsync({ vendorId: 'v1', itemId: 'i1' });
+    const changed = secondRender().mutateAsync(changedBody).catch((e: unknown) => e);
+    await vi.runAllTimersAsync(); expect(await changed).toMatchObject({ name: 'CheckoutOutcomeUnknownError' });
+    expect(sends).toBe(2); expect(committed).toEqual(new Set([key]));
   });
 });

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type MutateOptions } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
-import { checkoutFailureOutcome, recordCheckoutOutcome, settleUnresolvedIntent, stableBodyHash, type CheckoutPrincipal, type ReceiptProbe } from '../lib/checkoutAttempt';
+import { checkoutFailureOutcome, recordCheckoutOutcome, settleUnresolvedIntent, stableBodyHash, type CheckoutObservation, type CheckoutPrincipal, type ReceiptProbe } from '../lib/checkoutAttempt';
 import { AuthSessionBoundaryError, getAuthSessionSnapshot, requireAuthSessionForPrincipal, useAuthStore } from '../stores/authStore';
 import { homePlaceholderData, homeQueryKey, isHomeFeed, marketDepthVerdict, retainedHomeData } from '../lib/homeReliability';
 import { rememberMarketDepth, rememberedMarketDepth, type MarketDepthBody } from '../lib/marketDepthMemory';
@@ -575,10 +575,14 @@ async function probeReceipt(key: string, principal: CheckoutPrincipal): Promise<
     return { status: 'in_flight' };
   }
 }
-async function settleSentIntent(key: string, principal: CheckoutPrincipal, stopped: () => boolean = () => false): Promise<ReceiptProbe> {
-  return settleUnresolvedIntent(() => probeReceipt(key, principal), {
-    stopped: () => stopped() || !checkoutCurrent(principal) || checkoutAttempt.currentFor(principal)?.key !== key,
+async function settleSentIntent(key: string, principal: CheckoutPrincipal, stopped: () => boolean = () => false): Promise<{ receipt: ReceiptProbe; observation: CheckoutObservation }> {
+  requireCheckoutIntent(key, principal);
+  const observation = checkoutAttempt.observe(key, principal);
+  if (!observation) throw new AuthSessionBoundaryError();
+  const receipt = await settleUnresolvedIntent(() => probeReceipt(key, principal), {
+    stopped: () => stopped() || !checkoutCurrent(principal) || checkoutAttempt.observe(key, principal)?.revision !== observation.revision,
   });
+  return { receipt, observation };
 }
 
 interface CheckoutOperation { principal: CheckoutPrincipal; payload: any; key?: string }
@@ -591,10 +595,11 @@ async function beginCheckoutIntent(operation: CheckoutOperation, checking: (on: 
   operation.key = begun.kind === 'ambiguous' ? begun.pending.key : begun.key;
   if (begun.kind !== 'ambiguous') return begun.key;
   checking(true);
-  let probe: ReceiptProbe;
-  try { probe = await settleSentIntent(begun.pending.key, principal); }
+  let settled: Awaited<ReturnType<typeof settleSentIntent>>;
+  try { settled = await settleSentIntent(begun.pending.key, principal); }
   finally { checking(false); }
   requireCheckoutIntent(begun.pending.key, principal);
+  const probe = settled.receipt;
   recordCheckoutOutcome('ambiguous_recovery', probe.status);
   track('checkout_ambiguous_recovery', { outcome: probe.status });
   if (probe.status === 'placed') {
@@ -603,11 +608,10 @@ async function beginCheckoutIntent(operation: CheckoutOperation, checking: (on: 
   }
   if (probe.status === 'in_flight') throw new CheckoutOutcomeUnknownError();
   // Only authoritative none permits replacement of the unresolved key.
-  checkoutAttempt.end(begun.pending.key, principal);
-  const fresh = checkoutAttempt.begin({ principal, bodyHash });
-  if (fresh.kind === 'ambiguous') throw new CheckoutOutcomeUnknownError();
-  operation.key = fresh.key;
-  return fresh.key;
+  const key = checkoutAttempt.replaceAfterNone(settled.observation, bodyHash);
+  if (!key) throw new CheckoutOutcomeUnknownError();
+  operation.key = key;
+  return key;
 }
 
 export function usePlaceOrder<T = any>() {
@@ -624,9 +628,12 @@ export function usePlaceOrder<T = any>() {
       const checking = (on: boolean) => { if (current(operation)) setCheckingOutcome(on); };
       const key = await beginCheckoutIntent(operation, checking);
       const session = requireCheckoutIntent(key, principal);
-      checkoutAttempt.markSent(key, principal);
+      const send = checkoutAttempt.startSend(key, principal);
+      if (!send) throw new AuthSessionBoundaryError();
       try {
-        const res = await customerApi.placeOrder(payload, key, session);
+        let res;
+        try { res = await customerApi.placeOrder(payload, key, session); }
+        finally { checkoutAttempt.finishSend(send); }
         requireCheckoutIntent(key, principal);
         if ((res.data as { replayed?: boolean } | undefined)?.replayed) {
           recordCheckoutOutcome('checkout_dedupe_replay');
@@ -640,7 +647,7 @@ export function usePlaceOrder<T = any>() {
         if (status === 422 && code === 'IDEMPOTENCY_KEY_REUSED') {
           recordCheckoutOutcome('key_body_conflict');
           track('checkout_key_body_conflict', {});
-          checkoutAttempt.end(key, principal);
+          if (!checkoutAttempt.endIfUnchanged(send)) throw new CheckoutOutcomeUnknownError();
           throw new CheckoutAlreadyPlacedError([]);
         }
         if (status === 409 && code === 'DUPLICATE_REQUEST') {
@@ -648,10 +655,11 @@ export function usePlaceOrder<T = any>() {
           throw new CheckoutInFlightError();
         }
         checking(true);
-        let settled: ReceiptProbe;
-        try { settled = await settleSentIntent(key, principal); }
+        let observed: Awaited<ReturnType<typeof settleSentIntent>>;
+        try { observed = await settleSentIntent(key, principal); }
         finally { checking(false); }
         requireCheckoutIntent(key, principal);
+        const settled = observed.receipt;
         recordCheckoutOutcome('ambiguous_recovery', `unknown:${settled.status}`);
         track('checkout_ambiguous_recovery', { outcome: settled.status, unknown: true });
         if (settled.status === 'placed') {
@@ -659,7 +667,7 @@ export function usePlaceOrder<T = any>() {
           throw new CheckoutAlreadyPlacedError(settled.orderIds);
         }
         if (checkoutFailureOutcome({ status, code, receipt: settled }) === 'refused') {
-          checkoutAttempt.markOpen(key, principal);
+          if (!checkoutAttempt.markOpen(observed.observation)) throw new CheckoutOutcomeUnknownError();
           throw err;
         }
         throw new CheckoutOutcomeUnknownError();
@@ -741,7 +749,7 @@ export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: st
     let cancelled = false;
     const current = () => !cancelled && checkoutCurrent(session);
     setRecovering(true);
-    void settleSentIntent(pending.key, session, () => !current()).then((probe) => {
+    void settleSentIntent(pending.key, session, () => !current()).then(({ receipt: probe, observation }) => {
       if (!current()) return;
       requireCheckoutIntent(pending.key, session);
       recordCheckoutOutcome('ambiguous_recovery', `restart:${probe.status}`);
@@ -752,7 +760,7 @@ export function useCheckoutRecovery(): { recovering: boolean; placedOrderIds: st
         qc.invalidateQueries({ queryKey: customerKeys.orders });
         qc.invalidateQueries({ queryKey: ['customer', 'cart'] });
       } else if (probe.status === 'none') {
-        checkoutAttempt.markOpen(pending.key, session);
+        checkoutAttempt.markOpen(observation);
       }
     }).catch(() => { /* Cancelled ownership leaves the unresolved record intact. */ })
       .finally(() => { if (current()) setRecovering(false); });
@@ -813,6 +821,7 @@ function useCartMutation<T>(send: (payload: T, session: AuthSessionSnapshot) => 
         throw error;
       }
     },
+    meta: { errorOwnerCurrent: (variables: unknown) => cartOwnerCurrent(variables as CartOperation<T>) },
     onSuccess: (_data, operation) => { if (operation.principal) invalidateCart(qc, operation.principal); },
   });
   type Options = MutateOptions<any, unknown, T>;

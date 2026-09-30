@@ -89,7 +89,7 @@ describe('the intent', () => {
     const attempt = createCheckoutAttempt(memoryStore(), mint);
     attempt.begin({ principal: A, bodyHash: DELIVERY });
     attempt.markSent('chk_test_1', A);
-    attempt.markOpen('chk_test_1', A);
+    attempt.markOpen({ key: 'chk_test_1', principal: A, revision: attempt.current()?.revision ?? 0, quiescent: true });
     expect(attempt.begin({ principal: A, bodyHash: DELIVERY })).toEqual({ kind: 'reused', key: 'chk_test_1', state: 'open' });
     expect(attempt.begin({ principal: A, bodyHash: PICKUP })).toEqual({ kind: 'new', key: 'chk_test_2' });
   });
@@ -100,7 +100,7 @@ describe('the intent', () => {
     attempt.markSent('chk_test_other', A);
     expect(attempt.current()?.state).toBe('open');
     attempt.markSent('chk_test_1', A);
-    attempt.markOpen('chk_test_other', A);
+    attempt.markOpen({ key: 'chk_test_other', principal: A, revision: attempt.current()?.revision ?? 0, quiescent: true });
     expect(attempt.current()?.state).toBe('sent');
   });
 });
@@ -271,10 +271,10 @@ describe('[SX391] intent transitions compare both key and principal', () => {
     const attempt = createCheckoutAttempt(memoryStore(), mint);
     attempt.begin({ principal: A, bodyHash: DELIVERY }); attempt.markSent('chk_test_1', A);
     attempt.resumeFor(A2);
-    attempt.markOpen('chk_test_1', A);
+    attempt.markOpen({ key: 'chk_test_1', principal: A, revision: attempt.current()?.revision ?? 0, quiescent: true });
     expect(attempt.end('chk_test_1', A)).toBe(false);
     expect(attempt.currentFor(A2)).toMatchObject({ state: 'sent' });
-    attempt.markOpen('chk_test_1', A2);
+    attempt.markOpen(attempt.observe('chk_test_1', A2)!);
     attempt.markSent('chk_test_1', A);
     expect(attempt.currentFor(A2)).toMatchObject({ state: 'open' });
     expect(attempt.end('chk_test_wrong', A2)).toBe(false);
@@ -287,5 +287,82 @@ describe('[SX391] intent transitions compare both key and principal', () => {
     migrated.begin({ principal: B, bodyHash: DELIVERY });
     const restarted = createCheckoutAttempt(store, mint);
     expect(restarted.resumeFor(A2)).toMatchObject({ key: 'chk_test_v2', principal: A2, state: 'sent', sentAt: 2 });
+  });
+});
+
+
+describe('[SX405] shared send and observation authority', () => {
+  it('every send advances revision even when already SENT; old none cannot reopen, replace or end', () => {
+    const attempt = createCheckoutAttempt(memoryStore(), mint);
+    attempt.begin({ principal: A, bodyHash: DELIVERY });
+    const first = attempt.startSend('chk_test_1', A)!; attempt.finishSend(first);
+    const oldNone = attempt.observe('chk_test_1', A)!;
+    const second = attempt.startSend('chk_test_1', A)!; attempt.finishSend(second);
+    expect(second.revision).toBeGreaterThan(oldNone.revision);
+    expect(attempt.markOpen(oldNone), 'revision CAS rejects old none').toBe(false);
+    expect(attempt.replaceAfterNone(oldNone, PICKUP)).toBeNull();
+    expect(attempt.endIfUnchanged(first)).toBe(false);
+    expect(attempt.currentFor(A)).toMatchObject({ key: first.key, state: 'sent' });
+  });
+  it('a current none is consumed atomically and cannot authorize a second transition', () => {
+    const attempt = createCheckoutAttempt(memoryStore(), mint);
+    attempt.begin({ principal: A, bodyHash: DELIVERY }); attempt.markSent('chk_test_1', A);
+    const none = attempt.observe('chk_test_1', A)!;
+    expect(attempt.markOpen(none)).toBe(true);
+    expect(attempt.markOpen(none)).toBe(false);
+    expect(attempt.replaceAfterNone(none, PICKUP)).toBeNull();
+    attempt.markSent('chk_test_1', A);
+    expect(attempt.replaceAfterNone(attempt.observe('chk_test_1', A)!, PICKUP)).toBe('chk_test_2');
+    expect(attempt.currentFor(A)).toMatchObject({ key: 'chk_test_2', bodyHash: PICKUP, state: 'open' });
+  });
+  it('persists repeated-send revisions and fences old observations on same-generation restart', () => {
+    const store = memoryStore(); const attempt = createCheckoutAttempt(store, mint);
+    attempt.begin({ principal: A, bodyHash: DELIVERY }); attempt.markSent('chk_test_1', A);
+    const oldNone = attempt.observe('chk_test_1', A)!;
+    attempt.markSent('chk_test_1', A);
+    const persisted = JSON.parse(store.raw()!);
+    expect(persisted.version).toBe(4);
+    expect(persisted.intents[0].revision, 'repeated send revision persisted').toBe(oldNone.revision + 1);
+    const beforeRestart = attempt.observe('chk_test_1', A)!;
+    const restarted = createCheckoutAttempt(store, mint);
+    expect(restarted.observe('chk_test_1', A)!.revision, 'restart advances persisted revision').toBe(beforeRestart.revision + 1);
+    expect(restarted.markOpen(beforeRestart)).toBe(false);
+    expect(restarted.replaceAfterNone(oldNone, PICKUP)).toBeNull();
+    expect(restarted.currentFor(A)).toMatchObject({ key: 'chk_test_1', state: 'sent' });
+  });
+  it('adoption persists its revision and old-generation live transport blocks new-generation none', () => {
+    const store = memoryStore(); const attempt = createCheckoutAttempt(store, mint);
+    attempt.begin({ principal: A, bodyHash: DELIVERY });
+    const oldSend = attempt.startSend('chk_test_1', A)!;
+    const adopted = attempt.resumeFor(A2)!;
+    expect(adopted.revision, 'adoption advances revision').toBe(oldSend.revision + 1);
+    expect(JSON.parse(store.raw()!).intents[0].revision).toBe(adopted.revision);
+    const none = attempt.observe('chk_test_1', A2)!;
+    expect(attempt.markOpen(none), 'old generation live lease blocks none').toBe(false);
+    expect(attempt.replaceAfterNone(none, PICKUP)).toBeNull();
+    attempt.finishSend({ ...oldSend }); // A lookalike is not the acquired lease.
+    expect(attempt.markOpen(none)).toBe(false);
+    expect(attempt.markOpen(attempt.observe('chk_test_1', A2)!), 'lookalike cannot release live transport').toBe(false);
+    attempt.finishSend(oldSend);
+    expect(attempt.markOpen(none), 'live observation stays invalid after lease release').toBe(false);
+    expect(attempt.markOpen(attempt.observe('chk_test_1', A2)!)).toBe(true);
+  });
+  it('placed authority remains valid across a newer same-key send', () => {
+    const attempt = createCheckoutAttempt(memoryStore(), mint);
+    attempt.begin({ principal: A, bodyHash: DELIVERY });
+    const old = attempt.startSend('chk_test_1', A)!; attempt.finishSend(old);
+    const newer = attempt.startSend('chk_test_1', A)!;
+    expect(attempt.end(old.key, A)).toBe(true);
+    expect(attempt.currentFor(A)).toBeNull();
+    attempt.finishSend(newer);
+  });
+  it('old schema records migrate without replacing the unresolved key', () => {
+    for (const version of [2, 3]) {
+      const intent = { key: 'chk_schema_old', principal: A, bodyHash: DELIVERY, state: 'sent', createdAt: 1 };
+      const store = memoryStore(JSON.stringify(version === 2 ? intent : { version, intents: [intent], activeUserId: A.userId }));
+      const attempt = createCheckoutAttempt(store, mint);
+      expect(attempt.currentFor(A)).toMatchObject({ key: intent.key, state: 'sent', revision: 1 });
+      expect(JSON.parse(store.raw()!).version).toBe(4);
+    }
   });
 });
