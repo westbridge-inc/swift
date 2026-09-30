@@ -8,15 +8,16 @@ import { createGolden } from './gold-7-helpers';
 // [G7-01] Cleanup isolation, not a journey. A concurrent writer can use the
 // same admin subject and recipient. Before/after census is not ownership.
 // Phone +5920978nnn: source/range-audited; no other fixture uses this prefix.
-it('removes only run-owned admin alerts and preserves unrelated rows inserted before and during the run', async () => {
+it('removes only exact run-inserted alerts of every kind and preserves peer fan-out and mover offers', async () => {
   const other = new PrismaClient();
   const h = createGolden('+5920978', 'gold7-cleanup');
   const recipientId = `gold7-external-${nanoid(12)}`;
   const beforeId = `gold7-before-${nanoid(12)}`;
+  const peerOfferId = `gold7-peer-offer-${nanoid(12)}`;
   const duringId = `gold7-during-${nanoid(12)}`;
   const peerId = `gold7-cleanup-${nanoid(16)}-${nanoid(12)}`;
   const peerAlertIds: string[] = [];
-  const ownedAlertIds: string[] = [];
+  const ownedAlertIds = [0, 1].map(() => `gold7-owned-${nanoid(16)}`);
   const data = { kind: 'ADMIN_OPS', subjectId: 'vendor_pending', recipientId };
   // Separate client = another run. Capture that writer's exact insert IDs for
   // its own final cleanup; neither a recipient nor a before/after census owns it.
@@ -39,10 +40,12 @@ it('removes only run-owned admin alerts and preserves unrelated rows inserted be
     expect(await other.user.findUnique({ where: { id: peerId } })).toEqual(peer);
     await h.actor();
     const admin = await h.actor(['ADMIN']);
-    await h.sys(() => h.app.prisma.alertDelivery.createMany({ data: [data, { ...data, recipientId: admin.userId }] }));
-    const own = await other.alertDelivery.findMany({ where: { recipientId: { in: [recipientId, admin.userId] }, id: { not: beforeId } } });
-    ownedAlertIds.push(...own.map((row) => row.id));
-    expect(own).toHaveLength(2);
+    const inserted = await h.sys(() => h.app.prisma.alertDelivery.createMany({ data: [
+      { ...data, id: ownedAlertIds[0] },
+      { ...data, id: ownedAlertIds[1], recipientId: admin.userId },
+      { ...data, id: beforeId }, // skipped peer row must never become ours
+    ], skipDuplicates: true }));
+    expect(inserted.count).toBe(2);
     const during = await other.alertDelivery.create({ data: { ...data, id: duringId } });
 
     // Exercise the real post-provision fan-out. This vendor belongs to the peer
@@ -61,9 +64,29 @@ it('removes only run-owned admin alerts and preserves unrelated rows inserted be
     expect(await other.notification.count({ where: {
       userId: admin.userId, data: { path: ['vendorId'], equals: vendor.id },
     } })).toBe(1);
+    // Deliberately fan out BEFORE checking our inserts: concurrent delivery to
+    // the same admin must not contaminate the two-row ownership assertion.
+    const own = await other.alertDelivery.findMany({ where: { id: { in: ownedAlertIds } } });
+    expect(own).toHaveLength(2);
+    const rider = await h.actor(['RIDER']);
+    const peerOffer = await other.alertDelivery.create({ data: {
+      id: peerOfferId, kind: 'MOVER_OFFER', subjectId: `${peerId}-order`, recipientId: rider.userId,
+    } });
+    // Single inserts and non-admin bulk inserts to external recipients must
+    // also be removed even though subject/recipient discovery cannot find them.
+    const single = await h.sys(() => h.app.prisma.alertDelivery.create({ data: {
+      kind: 'MOVER_OFFER', subjectId: `${recipientId}-order`, recipientId,
+    } }));
+    ownedAlertIds.push(single.id);
+    const bulkId = `gold7-owned-bulk-${nanoid(16)}`;
+    expect(await h.sys(() => h.app.prisma.alertDelivery.createMany({ data: {
+      id: bulkId, kind: 'VENDOR_ORDER', subjectId: `${recipientId}-order`, recipientId,
+    } }))).toEqual({ count: 1 });
+    ownedAlertIds.push(bulkId);
     const peerBeforeClose = await other.user.findUniqueOrThrow({ where: { id: peerId } });
     const vendorBeforeClose = await other.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     await h.close(); closed = true;
+    expect(await other.alertDelivery.findUnique({ where: { id: peerOfferId } })).toEqual(peerOffer);
     expect(await other.alertDelivery.findUnique({ where: { id: fanout[0]!.id } })).toEqual(fanout[0]);
     expect(await other.alertDelivery.findUnique({ where: { id: duringId } })).toEqual(during);
     expect(await other.alertDelivery.findUnique({ where: { id: beforeId } })).toEqual(before);
@@ -77,7 +100,7 @@ it('removes only run-owned admin alerts and preserves unrelated rows inserted be
     } finally {
       peerTracking.mockRestore();
       try {
-        await other.alertDelivery.deleteMany({ where: { id: { in: [beforeId, duringId, ...peerAlertIds] } } });
+        await other.alertDelivery.deleteMany({ where: { id: { in: [beforeId, duringId, peerOfferId, ...peerAlertIds, ...ownedAlertIds] } } });
         const stores = await other.vendor.findMany({ where: { owner: { userId: peerId } }, select: { id: true } });
         for (const store of stores) {
           await other.notification.deleteMany({ where: { data: { path: ['vendorId'], equals: store.id } } });

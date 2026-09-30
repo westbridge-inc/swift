@@ -27,9 +27,8 @@ export function createGolden(phonePrefix: string, fixture: string) {
   let seq = 0;
   const createdIds = new Set<string>();
   const savedClusterIds = new Set<string>();
-  const createdAdminAlerts = new Set<string>();
+  const createdAlertIds = new Set<string>();
   let restoreAlertTracking: (() => void) | undefined;
-  const adminAlertKinds = ['vendor_pending', 'verification_pending', 'doc_review', 'dup_doc'];
   const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, fixture);
 
   async function rememberClusters(userId: string) {
@@ -84,9 +83,9 @@ export function createGolden(phonePrefix: string, fixture: string) {
 
   async function purge() {
     await sys(async () => {
-      // ADMIN_OPS subjects/recipients can be shared by overlapping runs.
-      // Even with no surviving users, only our tracked insert IDs are ours.
-      await app.prisma.alertDelivery.deleteMany({ where: { kind: 'ADMIN_OPS', id: { in: [...createdAdminAlerts] } } });
+      // Every alert kind can target another run's fixture. Ownership comes only
+      // from successful inserts, even if none of our users survive erasure.
+      await app.prisma.alertDelivery.deleteMany({ where: { id: { in: [...createdAlertIds] } } });
       const users = await app.prisma.user.findMany({ where: { OR: [
         { id: { in: [...createdIds] } },
         { id: { startsWith: `${fixturePrefix}-` } },
@@ -134,10 +133,6 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.actorRatingStat.deleteMany({ where: { subjectId: { in: [...ids, ...vendorIds] } } });
       if (orderIds.length) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
       await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.alertDelivery.deleteMany({ where: {
-        kind: { not: 'ADMIN_OPS' },
-        OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }],
-      } });
       await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
       await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
       // Stock movements, consent and deletion receipts are append-only evidence.
@@ -184,24 +179,25 @@ export function createGolden(phonePrefix: string, fixture: string) {
     await app.register(authRoutes, { prefix: '/api/v1/auth' });
     if (extra) await extra(app);
     await app.ready();
-    // [G7-01] Shared subjects are NOT ownership. Give only this app's new,
-    // unkeyed tracking inserts explicit run-owned IDs, forwarding the real
-    // database write unchanged otherwise. Existing keyed/deduped rows stay
-    // outside cleanup; another client's concurrent inserts are never ours.
-    const createMany = app.prisma.alertDelivery.createMany.bind(app.prisma.alertDelivery);
-    const tracking = vi.spyOn(app.prisma.alertDelivery, 'createMany').mockImplementation((async (args: Prisma.AlertDeliveryCreateManyArgs) => {
-      const owned: string[] = [];
-      const data = (Array.isArray(args.data) ? args.data : [args.data]).map((row) => {
-        if (row.id || row.kind !== 'ADMIN_OPS' || !adminAlertKinds.includes(row.subjectId)) return row;
-        const id = `${fixturePrefix}-alert-${nanoid(16)}`;
-        owned.push(id);
-        return { ...row, id };
-      });
-      const result = await createMany({ ...args, data });
-      for (const id of owned) createdAdminAlerts.add(id);
+    // [G7-01] Track both production write paths, for every alert kind. A single
+    // create owns its ID only after success (including calls that select no ID).
+    // Bulk RETURNING captures only rows actually inserted, so skipDuplicates
+    // cannot claim a peer's keyed alert, even if it wins a concurrent insert.
+    const alerts = app.prisma.alertDelivery;
+    const create = alerts.create.bind(alerts);
+    const createManyAndReturn = alerts.createManyAndReturn.bind(alerts);
+    const singleTracking = vi.spyOn(alerts, 'create').mockImplementation((async (args: Prisma.AlertDeliveryCreateArgs) => {
+      const id = args.data.id ?? `${fixturePrefix}-alert-${nanoid(16)}`;
+      const result = await create({ ...args, data: { ...args.data, id } });
+      createdAlertIds.add(id);
       return result;
-    }) as unknown as typeof createMany);
-    restoreAlertTracking = () => tracking.mockRestore();
+    }) as unknown as typeof create);
+    const bulkTracking = vi.spyOn(alerts, 'createMany').mockImplementation((async (args: Prisma.AlertDeliveryCreateManyArgs) => {
+      const inserted = await createManyAndReturn({ ...args, select: { id: true } });
+      for (const row of inserted) createdAlertIds.add(row.id);
+      return { count: inserted.length };
+    }) as unknown as typeof alerts.createMany);
+    restoreAlertTracking = () => { singleTracking.mockRestore(); bulkTracking.mockRestore(); };
     await purge();
   }
 
