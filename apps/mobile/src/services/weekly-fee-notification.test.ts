@@ -109,4 +109,37 @@ describe('notified subscription context', () => {
     expect(await resolveFeeNotification(destinationFor(notice)!.params!)).toBeNull();
     expect(useStoreSwitcher.getState().selectedStoreId).not.toBe('store-A');
   });
+
+  it('discards a notification for C when validation spans A → B → A', async () => {
+    useStoreSwitcher.getState().setSelectedStore('store-A');
+    let finish!: () => void;
+    api.defaults.adapter = async (config) => {
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return { config, status: 200, statusText: 'OK', headers: {}, data: { data: { id: 'subscription-C' } } };
+    };
+    const pending = resolveFeeNotification({ vendorId: 'store-C', subscriptionId: 'subscription-C' });
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    useStoreSwitcher.getState().setSelectedStore('store-B');
+    useStoreSwitcher.getState().setSelectedStore('store-A');
+    finish();
+    expect(await pending).toBeNull();
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+    expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+  });
+
+  it('retires a failed notification retry after A → B → A', async () => {
+    useStoreSwitcher.getState().setSelectedStore('store-A');
+    const request = vi.fn(async () => { throw { response: { status: 503 } }; });
+    api.defaults.adapter = request;
+    const navigate = vi.fn();
+    await resolveFeeNotification({ vendorId: 'store-C', subscriptionId: 'subscription-C' }, navigate);
+    const retry = useStoreSwitcher.getState().feeContextError!.retry;
+    expect(request).toHaveBeenCalledOnce();
+    useStoreSwitcher.getState().setSelectedStore('store-B');
+    useStoreSwitcher.getState().setSelectedStore('store-A');
+    await retry();
+    expect(request).toHaveBeenCalledOnce();
+    expect(navigate).not.toHaveBeenCalled();
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+  });
 });

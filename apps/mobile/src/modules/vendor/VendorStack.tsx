@@ -226,10 +226,11 @@ function VendorTabs() {
 
 export function VendorStack() {
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
+  const storeGeneration = useStoreSwitcher((s) => s.storeGeneration);
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      {/* Retire all store routes, including nested tab editors, on handoff. */}
-      <Stack.Group navigationKey={storeId ?? 'unselected'}>
+      {/* A batched A → B → A must also retire editors and reconnect live orders. */}
+      <Stack.Group navigationKey={`${storeId ?? 'unselected'}:${storeGeneration}`}>
         <Stack.Screen name="VendorRoot" component={VendorRoot} />
         <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
         <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />

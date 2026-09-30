@@ -10,11 +10,12 @@ export async function resolveFeeNotification(params: Record<string, unknown>, on
   const owner = getAuthSessionSnapshot();
   if (!owner) return null;
   const attempt = ++resolution;
-  const previous = useStoreSwitcher.getState().selectedStoreId;
+  const { selectedStoreId: previous, storeGeneration } = useStoreSwitcher.getState();
   const current = () => {
     const now = getAuthSessionSnapshot();
+    const selection = useStoreSwitcher.getState();
     return attempt === resolution && now?.userId === owner.userId && now.generation === owner.generation
-      && useStoreSwitcher.getState().selectedStoreId === previous;
+      && selection.selectedStoreId === previous && selection.storeGeneration === storeGeneration;
   };
   const fallback = () => ({ ref: undefined, subscriptionId: undefined, vendorId: useStoreSwitcher.getState().selectedStoreId });
   let unresolved = false;

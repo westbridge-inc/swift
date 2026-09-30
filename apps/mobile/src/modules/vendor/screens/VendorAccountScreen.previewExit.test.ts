@@ -702,7 +702,7 @@ describe('AX360: store handoff retires Account drafts and callbacks', () => {
       account = fx.mount(VendorAccountScreen, {});
     } else account.render();
     expect(named(account.output, 'InlineInput').map((el) => el.props.value), 'A’s dirty draft must be gone').not.toContain('03:17');
-    expect(newKey).toBe('store-b');
+    expect(newKey).toBe(`store-b:${useStoreSwitcher.getState().storeGeneration}`);
     expect(ofType(only(navigator.output, 'Stack.Group'), 'Stack.Screen').some((el) => el.props.name === 'WeeklyFee'),
       'the notification destination survives the store route reset').toBe(false);
     const routeKeyChanges = ofType(only(navigator.output, 'Stack.Group'), 'Stack.Screen').map((el) => el.props.name as string);
