@@ -27,7 +27,7 @@ import { LIVE_ORDER_STATUSES } from '../modules/order/order-status';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { AppError } from '../utils/errors';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
-import { dispatchWithdrawnCardKey } from '../modules/dispatch/dispatch-generation-keys';
+import { dispatchWithdrawnCardsKey } from '../modules/dispatch/dispatch-generation-keys';
 
 // ---------------------------------------------------------------------------
 // [DISPATCH 1/3] EXACTLY ONE WINNER — proven by racing it.
@@ -1009,8 +1009,12 @@ describe('[DISPATCH 1/3 · AX299 F2] a withdrawn card leaves the screen, and nev
     expect(await expiryLogged(carded.driverId, second.id, b.attemptId)).toBe(true);
     expect((await offerOf(second.id))?.attemptId).not.toBe(b.attemptId);
 
-    // As if A's countdown had run out: a card seen and ignored costs again.
-    await app.redis.set(dispatchWithdrawnCardKey(carded.driverId), String(Date.now() - 60_000), 'PX', 60_000);
+    // As if A's countdown had run out: the record the withdrawal wrote now says
+    // A left the screen a minute ago, and a card seen and ignored costs again.
+    const record = dispatchWithdrawnCardsKey(carded.driverId);
+    const [aRecord] = await app.redis.zrange(record, 0, 0);
+    expect(aRecord, 'the withdrawal recorded A').toMatch(new RegExp(`^\\d+:${first.id}:`));
+    await app.redis.zadd(record, Date.now() - 60_000, aRecord!);
     const third = await makeTaxi(await makeCustomer());
     const c = await offer(third.id, (await dispatch.dispatchOrder(third.id)).offered!);
     expect(c.moverId).toBe(carded.driverId);
@@ -1036,6 +1040,72 @@ describe('[DISPATCH 1/3 · AX299 F2] a withdrawn card leaves the screen, and nev
     await dispatch.releaseHeldOffer(carded.driverId);
     expect((await offerOf(second.id))?.attemptId, 'the released card is gone').not.toBe(b.attemptId);
     expect(Number((await driverRow(carded.driverId)).acceptanceRate), 'B was sent while A could still be on the screen').toBe(before);
+  });
+
+  // [AX310] The exemption is about the card that could have hidden THIS one:
+  // withdrawn BEFORE it was sent, and still possibly on screen when it came.
+  it('[AX310 1] controlled: a card offered and withdrawn AFTER B lapsed never excuses B — even when it lands while B\'s timeout is being handled', async () => {
+    await park();
+    const carded = await makeDriver(SPOT);
+    const b = await makeTaxi(await makeCustomer());
+    const bCard = await offer(b.id, (await dispatch.dispatchOrder(b.id)).offered!);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: b.id, offerAttemptId: bCard.attemptId })).statusCode).toBe(200);
+    const before = Number((await driverRow(carded.driverId)).acceptanceRate);
+
+    // B's timeout frees the driver and is held before it scores the lapse.
+    // Meanwhile C rings the freed driver and its customer cancels it.
+    const hold = holdNext(DispatchService.prototype, 'offerAuthority');
+    try {
+      const lapsing = dispatch.handleOfferTimeout(b.id, carded.driverId, bCard.attemptId);
+      await hold.entered;
+      const cCustomer = await makeCustomer();
+      const c = await makeTaxi(cCustomer);
+      expect((await dispatch.dispatchOrder(c.id)).offered).toBe(carded.driverId);
+      expect((await call('POST', `/api/v1/rides/${c.id}/cancel`, cCustomer.token, {})).statusCode).toBe(200);
+      hold.release();
+      await lapsing;
+    } finally {
+      hold.restore();
+    }
+    expect(Number((await driverRow(carded.driverId)).acceptanceRate), 'B lapsed on screen; C came after it').toBeLessThan(before);
+  });
+
+  it('[AX310 1] a withdrawn card recorded as withdrawn after B was sent never excuses B', async () => {
+    await park();
+    const carded = await makeDriver(SPOT);
+    const b = await makeTaxi(await makeCustomer());
+    const bCard = await offer(b.id, (await dispatch.dispatchOrder(b.id)).offered!);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: b.id, offerAttemptId: bCard.attemptId })).statusCode).toBe(200);
+    const before = Number((await driverRow(carded.driverId)).acceptanceRate);
+    // A record whose card was withdrawn 10 s after B went out, still "on screen" for a minute.
+    const later = Date.now() + 10_000;
+    await app.redis.zadd(dispatchWithdrawnCardsKey(carded.driverId), later + 60_000, `${later}:planted-order:planted-attempt`);
+    await app.redis.pexpire(dispatchWithdrawnCardsKey(carded.driverId), 120_000);
+    await dispatch.handleOfferTimeout(b.id, carded.driverId, bCard.attemptId);
+    expect(Number((await driverRow(carded.driverId)).acceptanceRate), 'the recorded card did not precede B').toBeLessThan(before);
+  });
+
+  it('[AX310 3] a card cancelled in its grace tail — past its server deadline, still on screen by the skew — excuses the next card too', async () => {
+    await park();
+    const carded = await makeDriver(SPOT);
+    const customer = await makeCustomer();
+    const first = await makeTaxi(customer);
+    const a = await offer(first.id, (await dispatch.dispatchOrder(first.id)).offered!);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: first.id, offerAttemptId: a.attemptId })).statusCode).toBe(200);
+    // A's timeout worker is late: the pair has 9 s left, so the server
+    // deadline (TTL less the 10 s grace tail) passed a second ago, while an
+    // app that stamped its deadline on arrival may still be showing A.
+    await app.redis.pexpire(`dispatch:offer:${first.id}`, 9_000);
+    await app.redis.pexpire(`dispatch:mover-offer:${carded.driverId}`, 9_000);
+    expect((await call('POST', `/api/v1/rides/${first.id}/cancel`, customer.token, {})).statusCode).toBe(200);
+    const before = Number((await driverRow(carded.driverId)).acceptanceRate);
+
+    const second = await makeTaxi(await makeCustomer());
+    const b = await offer(second.id, (await dispatch.dispatchOrder(second.id)).offered!);
+    expect(b.moverId).toBe(carded.driverId);
+    expect((await call('POST', '/api/v1/driver/offers/seen', carded.token, { orderId: second.id, offerAttemptId: b.attemptId })).statusCode).toBe(200);
+    await dispatch.handleOfferTimeout(second.id, carded.driverId, b.attemptId);
+    expect(Number((await driverRow(carded.driverId)).acceptanceRate), 'A could still have been on the screen when B came').toBe(before);
   });
 });
 

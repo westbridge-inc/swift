@@ -20,12 +20,21 @@ export const deliveryGenerationSuffix = (version?: number | null): string =>
 export const dispatchOfferKey = (orderId: string): string => `dispatch:offer:${orderId}`;
 export const dispatchMoverOfferKey = (moverId: string): string => `dispatch:mover-offer:${moverId}`;
 
-/** [AX299 F2] A card withdrawn from under this mover (its order closed) may
- *  still be on their screen until its own deadline, if the withdrawal event
- *  never reached the app. Valued with that deadline (ms since epoch; the latest
- *  when several), kept a while past it: offer-withdrawal.ts writes it, and an
- *  offer sent to the mover before that deadline never earns an expiry penalty. */
-export const dispatchWithdrawnCardKey = (moverId: string): string => `dispatch:withdrawn-card:${moverId}`;
+/** [AX299 F2 · AX310] The cards withdrawn from under this mover (their order
+ *  closed) that could still be on their screen, should the withdrawal event
+ *  never reach the app: a sorted set, one member per card,
+ *  `<withdrawnAt>:<orderId>:<attemptId>`, scored with the card's own server
+ *  deadline (ms since epoch). offer-withdrawal.ts writes it; an offer sent to
+ *  the mover AFTER such a withdrawal and before that deadline (plus the screen
+ *  skew) never earns an expiry penalty. */
+export const dispatchWithdrawnCardsKey = (moverId: string): string => `dispatch:withdrawn-cards:${moverId}`;
+
+/** [AX299 F2 · AX310] How far past a card's server deadline it may still be on
+ *  the mover's screen: the app stamps its own deadline on arrival, a network hop
+ *  later and rounded up to whole seconds. ONE value for the writer (a withdrawn
+ *  card is recorded while its deadline plus this is still ahead) and the reader
+ *  (an offer sent before the deadline plus this is excused), so they agree. */
+export const WITHDRAWN_CARD_SCREEN_SKEW_MS = 3_000;
 
 export const dispatchDeclinedKey = (orderId: string, version?: number | null): string =>
   `dispatch:declined:${orderId}${deliveryGenerationSuffix(version)}`;

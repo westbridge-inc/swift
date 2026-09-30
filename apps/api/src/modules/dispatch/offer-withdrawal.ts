@@ -3,7 +3,7 @@ import type Redis from 'ioredis';
 import type { Server } from 'socket.io';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { log } from '../../utils/logger';
-import { dispatchMoverOfferKey, dispatchOfferKey, dispatchWithdrawnCardKey } from './dispatch-generation-keys';
+import { dispatchMoverOfferKey, dispatchOfferKey, dispatchWithdrawnCardsKey, WITHDRAWN_CARD_SCREEN_SKEW_MS } from './dispatch-generation-keys';
 
 // ---------------------------------------------------------------------------
 // [DISPATCH 1/3 · B4] THE ONE POINT WHERE A CLOSED ORDER LOSES ITS OFFER CARD.
@@ -35,9 +35,12 @@ import { dispatchMoverOfferKey, dispatchOfferKey, dispatchWithdrawnCardKey } fro
 // later, while the withdrawn card is still on their screen. So the point also
 //   * tells the mover's app which card went (`dispatch:offer_withdrawn`, keyed
 //     by order AND attempt), and the app drops exactly that card;
-//   * remembers until when that card could still be showing, should the event
-//     never arrive: an offer sent to the mover before then is never charged as
-//     an ignored one (DispatchService.shadowedByWithdrawnCard).
+//   * records when that card was withdrawn and until when it could still be
+//     showing, should the event never arrive: an offer sent to the mover in
+//     that interval is never charged as an ignored one
+//     (DispatchService.shadowedByWithdrawnCard). [AX310] Recorded whenever the
+//     reader could still match it: the card's deadline plus the screen skew is
+//     ahead, even when its server deadline itself has passed (a late worker).
 // ---------------------------------------------------------------------------
 
 export interface OfferWithdrawalDeps {
@@ -59,7 +62,7 @@ export interface OfferWithdrawnPayload {
 /** The pair's TTL carries a ten-second worker grace tail beyond the card's own
  *  deadline (dispatch.service liveOfferDeadline); the screen never shows it. */
 const CARD_GRACE_TAIL_MS = 10_000;
-/** How long past the withdrawn card's deadline the marker is kept: longer than
+/** How long past the withdrawn card's deadline its record is kept: longer than
  *  any next card's window plus that grace tail, so its timeout still finds it. */
 const WITHDRAWN_CARD_RETENTION_MS = 60_000;
 
@@ -84,14 +87,22 @@ export async function withdrawOfferOfClosedOrder(deps: OfferWithdrawalDeps, orde
         if redis.call('GET', KEYS[2]) == ARGV[2] then
           redis.call('DEL', KEYS[2])
         end
-        -- [AX299 F2] Until when the withdrawn card could still be on screen:
-        -- its remaining TTL less the grace tail. The latest such deadline wins.
-        local screen = ttl - tonumber(ARGV[4])
-        if screen > 0 then
-          local deadline = tonumber(ARGV[3]) + screen
-          local known = tonumber(redis.call('GET', KEYS[3]) or '0') or 0
-          if deadline > known then
-            redis.call('SET', KEYS[3], tostring(deadline), 'PX', screen + tonumber(ARGV[5]))
+        -- [AX299 F2 · AX310] The withdrawn card's own server deadline (its
+        -- remaining TTL less the grace tail), recorded with the moment it was
+        -- withdrawn, whenever it could still be on screen by the reader's rule:
+        -- deadline + skew still ahead. Old records are trimmed as it goes.
+        if ttl > 0 then
+          local now = tonumber(ARGV[3])
+          local deadline = now + ttl - tonumber(ARGV[4])
+          local skew = tonumber(ARGV[6])
+          if deadline + skew > now then
+            local retention = tonumber(ARGV[5])
+            redis.call('ZADD', KEYS[3], deadline, ARGV[3] .. ':' .. ARGV[7])
+            redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now - skew - retention)
+            local keep = deadline + skew + retention - now
+            if redis.call('PTTL', KEYS[3]) < keep then
+              redis.call('PEXPIRE', KEYS[3], keep)
+            end
           end
         end
         return 1
@@ -99,12 +110,14 @@ export async function withdrawOfferOfClosedOrder(deps: OfferWithdrawalDeps, orde
       3,
       forward,
       dispatchMoverOfferKey(moverId),
-      dispatchWithdrawnCardKey(moverId),
+      dispatchWithdrawnCardsKey(moverId),
       live,
       reverseValue,
       String(Date.now()),
       String(CARD_GRACE_TAIL_MS),
       String(WITHDRAWN_CARD_RETENTION_MS),
+      String(WITHDRAWN_CARD_SCREEN_SKEW_MS),
+      `${orderId}:${attemptId ?? ''}`,
     );
     if (Number(removed) !== 1) return false;
     await tellTheMover(deps, order, moverId, { orderId, offerAttemptId: attemptId, reason: order.status === 'CANCELLED' ? 'ORDER_CANCELLED' : 'ORDER_CLOSED' });

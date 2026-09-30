@@ -46,9 +46,10 @@ import {
   dispatchGenerationInitKey,
   dispatchReplayTag,
   dispatchRoundKey,
-  dispatchWithdrawnCardKey,
+  dispatchWithdrawnCardsKey,
   exhaustJobKey,
   redispatchJobId,
+  WITHDRAWN_CARD_SCREEN_SKEW_MS,
 } from './dispatch-generation-keys';
 
 declare module 'fastify' {
@@ -330,11 +331,6 @@ function isUniqueViolationOn(error: unknown, column: string): boolean {
   const target = e.meta?.target;
   return target === undefined || (Array.isArray(target) ? target.includes(column) : String(target).includes(column));
 }
-
-/** [AX299 F2] How far past a withdrawn card's server deadline it may still
- *  be on the mover's screen: the app stamps its own deadline on arrival, a
- *  network hop later and rounded up to whole seconds. */
-const WITHDRAWN_CARD_SCREEN_SKEW_MS = 3_000;
 
 /** An order should have been in the cascade this long before we treat a
  *  missing offer key as LOST STATE rather than an in-flight gap. */
@@ -2074,20 +2070,45 @@ export class DispatchService {
     return !!ping && (ping.seenAt !== null || ping.acknowledgedAt !== null);
   }
 
-  /** [AX299 F2] Was this card sent while a card withdrawn from under the same
-   *  mover (its order closed) could still be on their screen? An app that never
-   *  heard of that withdrawal kept the dead card on top of its queue until the
-   *  dead card's own deadline, and this one waited behind it: seen on arrival
-   *  by an older app, or shown with its window half gone. Its lapse is never
-   *  charged then, whatever the render proof says. Read from the marker
-   *  offer-withdrawal.ts writes and from this attempt's own evidence row (when
-   *  the card was sent). Fails fair, like the render proof: a read that fails
-   *  spares the mover. */
-  private async shadowedByWithdrawnCard(orderId: string, moverId: string, pool: DispatchPool, attemptId?: string): Promise<boolean> {
+  /** [AX299 F2 · AX310] The cards withdrawn from under this mover that could
+   *  still be on their screen (offer-withdrawal.ts records them), read while
+   *  the card being judged still holds the mover's reservation. Once that
+   *  reservation is freed a NEWER card can be offered and withdrawn, and its
+   *  record must never excuse an earlier lapse. `null`: the read failed. */
+  private async withdrawnCardsOf(moverId: string): Promise<Array<{ withdrawnAt: number; shownUntil: number }> | null> {
     try {
-      const raw = await this.redis.get(dispatchWithdrawnCardKey(moverId));
-      const shownUntil = raw ? Number(raw) : Number.NaN;
-      if (!Number.isFinite(shownUntil)) return false;
+      const flat = await this.redis.zrange(dispatchWithdrawnCardsKey(moverId), 0, -1, 'WITHSCORES');
+      const cards: Array<{ withdrawnAt: number; shownUntil: number }> = [];
+      for (let i = 0; i + 1 < flat.length; i += 2) {
+        const member = flat[i]!;
+        const withdrawnAt = Number(member.slice(0, member.indexOf(':')));
+        const shownUntil = Number(flat[i + 1]);
+        if (Number.isFinite(withdrawnAt) && Number.isFinite(shownUntil)) cards.push({ withdrawnAt, shownUntil });
+      }
+      return cards;
+    } catch {
+      return null;
+    }
+  }
+
+  /** [AX299 F2 · AX310] Could a withdrawn card have hidden THIS one? Only a
+   *  card withdrawn BEFORE this one was sent, whose own deadline (plus the
+   *  screen skew) was still ahead when it came: an app that never heard of
+   *  that withdrawal kept the dead card on top of its queue, and this one
+   *  waited behind it (seen on arrival by an older app, or shown with its
+   *  window half gone). Its lapse is never charged then, whatever the render
+   *  proof says. `withdrawn` is the record read before this card's reservation
+   *  was freed; when is "sent" comes from this attempt's own evidence row. The
+   *  same skew allows for the clocks of two API instances on the lower bound:
+   *  a card offered after this one lapsed was withdrawn a whole offer window
+   *  later. Fails fair, like the render proof: a failed read spares the mover. */
+  private async shadowedByWithdrawnCard(
+    orderId: string, moverId: string, pool: DispatchPool, attemptId: string | undefined,
+    withdrawn: Array<{ withdrawnAt: number; shownUntil: number }> | null,
+  ): Promise<boolean> {
+    if (withdrawn === null) return true;
+    if (withdrawn.length === 0) return false;
+    try {
       const mover = pool === 'DRIVER'
         ? await this.prisma.driver.findUnique({ where: { id: moverId }, select: { userId: true } })
         : await this.prisma.rider.findUnique({ where: { id: moverId }, select: { userId: true } });
@@ -2102,7 +2123,10 @@ export class DispatchService {
         orderBy: { sentAt: 'desc' },
         select: { sentAt: true },
       });
-      return !!sent && sent.sentAt.getTime() < shownUntil + WITHDRAWN_CARD_SCREEN_SKEW_MS;
+      if (!sent) return false;
+      const at = sent.sentAt.getTime();
+      return withdrawn.some((card) =>
+        card.withdrawnAt <= at + WITHDRAWN_CARD_SCREEN_SKEW_MS && at < card.shownUntil + WITHDRAWN_CARD_SCREEN_SKEW_MS);
     } catch {
       return true;
     }
@@ -2114,6 +2138,8 @@ export class DispatchService {
    *  redispatch — to the exact generation this job was scheduled for. A
    *  stale generation-1 job firing while generation 2 is live is a no-op. */
   async handleOfferTimeout(orderId: string, moverId: string, attemptId?: string): Promise<void> {
+    // [AX310] Read while this attempt still holds the mover's reservation.
+    const withdrawnBefore = await this.withdrawnCardsOf(moverId);
     const removed = await this.removeOfferIfOwned(orderId, moverId, attemptId);
     if (!removed) return; // answered or superseded — never delete the new offer
     const pool = await this.poolOf(orderId);
@@ -2144,7 +2170,7 @@ export class DispatchService {
     // failed) is absence of proof, not proof of delivery — spared too.
     // [AX299 F2] And a card sent while a withdrawn one could still be on the
     // screen is never charged, render proof or not.
-    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId)) {
+    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId, withdrawnBefore)) {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: offer timeout behind a withdrawn card that could still be on screen — acceptance rate spared');
     } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);
@@ -2168,6 +2194,8 @@ export class DispatchService {
     const reverse = await this.redis.get(moverOfferKey(moverId));
     if (!reverse) return;
     const { id: orderId, attemptId } = parseOfferValue(reverse);
+    // [AX310] Read while this attempt still holds the mover's reservation.
+    const withdrawnBefore = await this.withdrawnCardsOf(moverId);
     // [F-014-04] Strict-generation release: if a NEWER attempt installed
     // between the read above and this consume, the compare misses and we
     // touch nothing — the newer offer's own lifecycle owns it.
@@ -2193,7 +2221,7 @@ export class DispatchService {
     // publish tail — before the socket emit ever ran — must not charge the
     // mover a miss for a card that never reached a screen. [AX299 F2] Nor
     // for one sent while a withdrawn card could still be on it.
-    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId)) {
+    if (await this.shadowedByWithdrawnCard(orderId, moverId, pool, attemptId, withdrawnBefore)) {
       log().info({ orderId, moverId, pool, attemptId }, 'dispatch: released offer sat behind a withdrawn card that could still be on screen — acceptance rate spared');
     } else if (await this.offerWasDeliverable(orderId, moverId, pool, attemptId)) {
       await this.recordOfferOutcome(moverId, false, pool);

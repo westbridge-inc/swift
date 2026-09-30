@@ -74,6 +74,10 @@ function isWithdrawnCard(card: DispatchOffer, withdrawn: DispatchOfferWithdrawn)
   return !card.offerAttemptId || !withdrawn.offerAttemptId || card.offerAttemptId === withdrawn.offerAttemptId;
 }
 
+/** [AX310] How many retired cards the hook remembers: far more than can ring
+ *  one mover while a request is in flight, small enough to never matter. */
+const RETIRED_CARDS_REMEMBERED = 64;
+
 /**
  * Real-time dispatch offers. The backend emits `dispatch:offer` to the mover's
  * user room the moment they're the top candidate; we surface it instantly and
@@ -92,10 +96,34 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
   const [offerQueue, setOfferQueue] = useState<(DispatchOffer & { deadlineAt?: number })[]>([]);
   const offer = offerQueue[0] ?? null;
   const queuedBehind = Math.max(0, offerQueue.length - 1);
-  const pushOffer = (data: DispatchOffer) =>
+  // [AX310] Cards this device has retired (withdrawn by the server, answered
+  // here, or lapsed), by order and attempt, for the life of the hook. A
+  // recovery answer the server read BEFORE a withdrawal can land after it; it
+  // must not put the dead card back on top of the queue with a fresh deadline.
+  // A card with an attempt id is refused only on its exact generation, so a
+  // new attempt for the same order still shows; one without (a pre-attempt
+  // card) is refused once its order has retired anything.
+  const retired = useRef(new Map<string, { orderId: string; attemptId: string }>());
+  const retire = (orderId: string, attemptId?: string | null) => {
+    const key = `${orderId}:${attemptId ?? ''}`;
+    retired.current.delete(key);
+    retired.current.set(key, { orderId, attemptId: attemptId ?? '' });
+    while (retired.current.size > RETIRED_CARDS_REMEMBERED) {
+      retired.current.delete(retired.current.keys().next().value!);
+    }
+  };
+  const isRetired = (card: DispatchOffer) => {
+    for (const r of retired.current.values()) {
+      if (r.orderId === card.orderId && (!card.offerAttemptId || r.attemptId === card.offerAttemptId)) return true;
+    }
+    return false;
+  };
+  const pushOffer = (data: DispatchOffer) => {
+    if (isRetired(data)) return;
     setOfferQueue((q) => (q.some((o) => o.orderId === data.orderId)
       ? q.map((o) => (o.orderId === data.orderId ? { ...o, ...data, deadlineAt: o.deadlineAt } : o))
       : [...q, { ...data, deadlineAt: data.expiresInSeconds ? Date.now() + data.expiresInSeconds * 1000 : undefined }]));
+  };
   const dropOffer = (orderId: string) => setOfferQueue((q) => q.filter((o) => o.orderId !== orderId));
   const setOffer = (data: DispatchOffer | null) => {
     if (data === null) setOfferQueue((q) => q.slice(1));
@@ -125,6 +153,7 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     // screen with its whole window instead of waiting behind a dead card.
     const onWithdrawn = (withdrawn: DispatchOfferWithdrawn) => {
       if (!withdrawn?.orderId) return;
+      retire(withdrawn.orderId, withdrawn.offerAttemptId);
       setOfferQueue((q) => q.filter((o) => !isWithdrawnCard(o, withdrawn)));
       qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
     };
@@ -188,12 +217,13 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     if (!offer) return;
     const deadline = offer.deadlineAt ?? (offer.expiresInSeconds ? Date.now() + offer.expiresInSeconds * 1000 : null);
     if (!deadline) return;
-    const { orderId } = offer;
+    const { orderId, offerAttemptId } = offer;
+    const lapse = () => { retire(orderId, offerAttemptId); dropOffer(orderId); };
     if (deadline <= Date.now()) {
-      dropOffer(orderId);
+      lapse();
       return;
     }
-    const t = setTimeout(() => dropOffer(orderId), deadline - Date.now());
+    const t = setTimeout(lapse, deadline - Date.now());
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offer?.orderId]);
@@ -203,6 +233,11 @@ export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
     // Stacking: how many more offers wait behind the visible card — the UI
     // states queue depth honestly, like the vendor takeover does.
     queuedBehind,
-    dismiss: () => { if (offer) dropOffer(offer.orderId); },
+    // Answered on this device (accepted or declined): retired, like a lapse.
+    dismiss: () => {
+      if (!offer) return;
+      retire(offer.orderId, offer.offerAttemptId);
+      dropOffer(offer.orderId);
+    },
   };
 }

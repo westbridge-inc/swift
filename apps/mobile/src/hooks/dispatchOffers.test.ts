@@ -184,6 +184,50 @@ describe('[AX299 F2] a withdrawn card leaves the screen at once', () => {
   });
 });
 
+describe('[AX310 2] a retired card never comes back', () => {
+  /** A recovery request the test answers when it chooses: in flight across events. */
+  function recoveryInFlight() {
+    let answer!: (offer: DispatchOffer | null) => void;
+    h.api.currentOffer = () => new Promise((resolve) => {
+      answer = (offer) => resolve({ data: { data: { offer } } });
+    });
+    return { answer: (offer: DispatchOffer | null) => answer(offer) };
+  }
+
+  it('recovery snapshots A, the withdrawal removes A, the late recovery answer brings A: A stays gone and B is not blocked', async () => {
+    const recovery = recoveryInFlight();
+    render(); // mount: the recovery request goes out and waits
+    h.server('dispatch:offer', card('A', 'a1', 20));
+    expect(render().offer?.orderId).toBe('A');
+    h.server('dispatch:offer_withdrawn', { orderId: 'A', offerAttemptId: 'a1', reason: 'ORDER_CANCELLED' });
+    expect(render().offer).toBeNull();
+
+    recovery.answer(card('A', 'a1', 15)); // the server read A before the cancel
+    let view = await settle();
+    expect(view.offer, 'the withdrawn card is not resurrected by a stale recovery answer').toBeNull();
+
+    h.server('dispatch:offer', card('B', 'b1', 20));
+    view = render();
+    expect([view.offer?.orderId, view.queuedBehind]).toEqual(['B', 0]);
+    expect(deadlineOf(view.offer)).toBe(Date.now() + 20_000);
+    expect(seenCalls).toEqual(['A:a1', 'B:b1']);
+  });
+
+  it('nor a card the mover already answered: a late recovery answer cannot put it back on screen', async () => {
+    const recovery = recoveryInFlight();
+    render();
+    h.server('dispatch:offer', card('A', 'a1', 20));
+    const view = render();
+    view.dismiss(); // accepted or declined on this device
+    expect(render().offer).toBeNull();
+    recovery.answer(card('A', 'a1', 18));
+    expect((await settle()).offer).toBeNull();
+    // A NEW attempt for the same order is a new card, and it shows.
+    h.server('dispatch:offer', card('A', 'a2', 20));
+    expect([render().offer?.orderId, render().offer?.offerAttemptId]).toEqual(['A', 'a2']);
+  });
+});
+
 describe('[AX299 F2] seen means shown', () => {
   it('a card queued behind another is not marked seen until it reaches the screen', async () => {
     await settle();

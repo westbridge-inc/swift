@@ -12,9 +12,7 @@ const source = ts.createSourceFile('dispatch.ts', sourceText, ts.ScriptTarget.La
 const klass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === 'DispatchService')!;
 const helperNames = new Set(['parseOfferValue', 'journalAuthorityWhere', 'deliveryAuthorityVersionFromAttempt', 'riderDeliveryAuthorityVersionFromAttempt', 'deliveryOfferAttemptId', 'offerValue', 'offerKey', 'moverOfferKey', 'offerPendingKey', 'offerPublishingKey', 'offerRecoveryKey', 'offerEpochKey', 'offersSentKey', 'offerOutcomeKey', 'reconciledKey',
   // [DISPATCH 1/3] the claim-refusal classifier acceptOffer runs on every refusal
-  'ORDER_HELD_CLAIM_CODES', 'LOST_RACE_CLAIM_CODES', 'MOVER_INELIGIBLE_CLAIM_CODES', 'classifyClaimRefusal', 'claimRefusalMarksTheMover', 'isUniqueViolationOn',
-  // [AX299 F2] the screen skew a lapse behind a withdrawn card is judged with
-  'WITHDRAWN_CARD_SCREEN_SKEW_MS']);
+  'ORDER_HELD_CLAIM_CODES', 'LOST_RACE_CLAIM_CODES', 'MOVER_INELIGIBLE_CLAIM_CODES', 'classifyClaimRefusal', 'claimRefusalMarksTheMover', 'isUniqueViolationOn']);
 const helpers = source.statements.filter(n =>
   (ts.isFunctionDeclaration(n) && helperNames.has(n.name?.text ?? '')) ||
   (ts.isVariableStatement(n) && n.declarationList.declarations.some(d => helperNames.has(d.name.getText(source))))
