@@ -738,15 +738,15 @@ export function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => voi
       </View>
       <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
         {blocked
-          ? 'Pay using your Swift Number. Confirmation clears the billing hold; any separate verification hold remains.'
-          : 'Pay using your Swift Number to keep the weekly fee current.'}
+          ? 'A credited payment clears the billing hold; any separate verification hold remains.'
+          : 'View your weekly fee and payment status.'}
       </T>
       {due != null && due > 0 ? (
         <T variant="label" weight="semibold" style={{ marginTop: space.sm }}>
           Due now: {money(due)}
         </T>
       ) : null}
-      <PillButton label="How to pay" icon="hash" size="md" style={{ marginTop: space.md }} onPress={onPay} />
+      <PillButton label="Weekly fee" icon="hash" size="md" style={{ marginTop: space.md }} onPress={onPay} />
     </View>
   );
 }
