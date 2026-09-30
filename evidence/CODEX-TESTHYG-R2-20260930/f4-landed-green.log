@@ -1,0 +1,14 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/golden/gold-3-mover-online.test.ts
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 0af49349-466d-40d5-975d-07a913fe2da3
+
+ Test Files  1 passed (1)
+      Tests  6 passed (6)
+   Start at  11:49:19
+   Duration  2.24s (transform 605ms, setup 0ms, import 995ms, tests 892ms, environment 0ms)
+
+[R048-001] run 0af49349-466d-40d5-975d-07a913fe2da3 finished in 2s on swift_test_hyg
+
+EXIT: 0

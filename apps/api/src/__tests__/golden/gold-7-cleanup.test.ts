@@ -116,15 +116,17 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     // The peer owns its notice and removes it. Insert another peer notice
     // after the first preflight, while cleanup is already in progress.
     await other.notification.delete({ where: { id: peerAdminNotice.id } });
-    const deleteOrders = h.app.prisma.order.deleteMany.bind(h.app.prisma.order);
+    const findNotices = h.app.prisma.notification.findMany.bind(h.app.prisma.notification);
     let lateNoticeId: string | undefined;
-    const interleave = vi.spyOn(h.app.prisma.order, 'deleteMany').mockImplementation((async (args: Prisma.OrderDeleteManyArgs) => {
+    const interleave = vi.spyOn(h.app.prisma.notification, 'findMany').mockImplementation((async (args: Prisma.NotificationFindManyArgs) => {
+      const result = await findNotices(args);
+      if (lateNoticeId) return result;
       const late = await other.notification.create({ data: {
         userId: admin.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Late peer notice', body: 'Fixture only',
       } });
       lateNoticeId = late.id;
-      return deleteOrders(args);
-    }) as typeof deleteOrders);
+      return result;
+    }) as typeof findNotices);
     try {
       await expect(h.close()).rejects.toThrow(/untracked notifications block fixture user cleanup/);
       expect(lateNoticeId).toBeDefined();
@@ -193,6 +195,71 @@ it('refuses to remove a fixture vendor while a peer order belongs to it', async 
   } finally {
     if (orderId) await other.order.deleteMany({ where: { id: orderId } });
     if (!closed && h.app) await h.close().catch(() => {});
+    await other.user.deleteMany({ where: { id: peerId } });
+    await other.$disconnect();
+  }
+});
+
+// AX395-1: SET NULL on either mover FK must never detach a peer's order.
+it.each(['RIDER', 'DRIVER'] as const)('refuses existing and post-preflight peer orders assigned to a fixture %s without partial cleanup', async (role) => {
+  const other = new PrismaClient();
+  const h = createGolden('+5920978', `gold7-cleanup-${role.toLowerCase()}`);
+  const peerId = `gold7-peer-${nanoid(16)}`;
+  const peerOrders: string[] = [];
+  let closed = false;
+  try {
+    await h.start();
+    const mover = await h.actor([role]);
+    const profile = await h.sys(async () => role === 'RIDER'
+      ? await h.app.prisma.rider.create({ data: { userId: mover.userId, riderType: 'BOTH', vehicleType: 'MOTORCYCLE' } })
+      : await h.app.prisma.driver.create({ data: { userId: mover.userId, vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2026, vehicleColor: 'Blue', licensePlate: `G7-${nanoid(8)}`, driverLicenseUrl: 'https://example.invalid/fixture-license', vehicleInsuranceUrl: 'https://example.invalid/fixture-insurance' } }));
+    const ownedAlert = await h.sys(() => h.app.prisma.alertDelivery.create({ data: {
+      kind: 'MOVER_OFFER', subjectId: `owned-${nanoid(16)}`, recipientId: mover.userId,
+    } }));
+    await other.user.create({ data: {
+      id: peerId, phone: h.nextPhone(), firstName: 'Golden', lastName: 'Peer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
+    } });
+    const insertPeer = async () => {
+      const order = await other.order.create({ data: {
+        orderNumber: `G7PEER-${nanoid(16)}`, orderType: 'COURIER', fulfillment: 'DELIVERY',
+        customerId: peerId, ...(role === 'RIDER' ? { riderId: profile.id } : { driverId: profile.id }),
+        status: 'RIDER_ASSIGNED', deliveryAddress: 'Peer Lane', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 1200, totalAmount: 1200, paymentMethod: 'CASH',
+      } });
+      peerOrders.push(order.id);
+      return order;
+    };
+    const readProfile = () => role === 'RIDER'
+      ? other.rider.findUnique({ where: { id: profile.id } })
+      : other.driver.findUnique({ where: { id: profile.id } });
+    const existing = await insertPeer();
+    await expect(h.close().then(() => { closed = true; })).rejects.toThrow(`foreign orders block fixture cleanup: ${existing.id}`);
+    expect(await other.order.findUnique({ where: { id: existing.id } })).toEqual(existing);
+    expect(await readProfile()).toEqual(profile);
+    expect(await other.alertDelivery.findUnique({ where: { id: ownedAlert.id } })).toEqual(ownedAlert);
+    await other.order.delete({ where: { id: existing.id } });
+
+    const findOrders = h.app.prisma.order.findMany.bind(h.app.prisma.order);
+    let late: typeof existing | undefined;
+    const interleave = vi.spyOn(h.app.prisma.order, 'findMany').mockImplementation((async (args: Prisma.OrderFindManyArgs) => {
+      const result = await findOrders(args);
+      if (!late) late = await insertPeer(); // empty preflight already read; peer commits before cleanup continues
+      return result;
+    }) as typeof findOrders);
+    try {
+      await expect(h.close().then(() => { closed = true; })).rejects.toThrow(/foreign orders block fixture cleanup/);
+      expect(late).toBeDefined();
+      expect(await other.order.findUnique({ where: { id: late!.id } })).toEqual(late);
+      expect(await readProfile()).toEqual(profile);
+      expect(await other.alertDelivery.findUnique({ where: { id: ownedAlert.id } })).toEqual(ownedAlert);
+    } finally { interleave.mockRestore(); }
+    await other.order.delete({ where: { id: late!.id } });
+    await h.close(); closed = true;
+    expect(await readProfile()).toBeNull();
+    expect(await other.alertDelivery.findUnique({ where: { id: ownedAlert.id } })).toBeNull();
+  } finally {
+    await other.order.deleteMany({ where: { id: { in: peerOrders } } });
+    if (!closed && h.app) await h.close();
     await other.user.deleteMany({ where: { id: peerId } });
     await other.$disconnect();
   }

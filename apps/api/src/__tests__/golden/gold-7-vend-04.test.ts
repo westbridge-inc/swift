@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { createHmac, randomBytes } from 'node:crypto';
 import { customAlphabet, nanoid } from 'nanoid';
-import { Prisma, type UserRole } from '@prisma/client';
+import { Prisma, PrismaClient, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
 import { authPlugin } from '../../plugins/auth';
@@ -17,6 +17,8 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { agentCashRoutes } from '../../modules/billing/agent-cash.routes';
 import { SubscriptionService } from '../../modules/subscription/subscription.service';
+import { trackMessageInserts } from '../helpers/insert-ownership';
+import { auditClientInCleanup } from '../helpers/cleanup-transaction';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { startGoldenWorker } from './gold-7-worker';
 
@@ -52,7 +54,7 @@ let seq = 0;
 let clockStart = 0;
 let foreignBefore = '';
 let foreignIds: string[] = [];
-let alertsBefore = new Set<string>();
+let messageInserts: ReturnType<typeof trackMessageInserts>;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const subIds: string[] = [];
@@ -161,61 +163,54 @@ async function purgeFixtures() {
     const ids = [...userIds];
     if (ids.length === 0 && vendorIds.length === 0) return;
     const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
-    await app.prisma.mmgAgentPayment.deleteMany({ where: { externalId: { in: [...txnIds] } } });
-    await app.prisma.providerPayment.deleteMany({ where: { providerTxnId: { in: [...txnIds] } } });
-    await app.prisma.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: ids } }, { approvedBy: { in: ids } }] } });
-    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...vendorIds, ...subIds] } }] }, 'GOLD-7 golden journey fixture cleanup (gold-7-vend-04)');
-    if (subIds.length > 0) {
-      // A real dunning page reaches seeded admins too. Compare row IDs, so
-      // no pre-existing alert is removed by timestamp proximity.
-      const pages = await app.prisma.$queryRaw<Array<{ userId: string }>>`
-        SELECT "userId" FROM "notifications"
-        WHERE "data"->>'subscriptionId' IN (${Prisma.join(subIds)}) AND "data"->>'kind' = 'billing_dunning_ops_task'`;
-      const alerts = await app.prisma.alertDelivery.findMany({
-        where: { kind: 'ADMIN_OPS', subjectId: 'billing_dunning_ops_task', recipientId: { in: pages.map((p) => p.userId) } }, select: { id: true },
-      });
-      await app.prisma.alertDelivery.deleteMany({ where: { id: { in: alerts.filter((a) => !alertsBefore.has(a.id)).map((a) => a.id) } } });
-      await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'subscriptionId' IN (${Prisma.join(subIds)})`;
-    }
-    await app.prisma.alertDelivery.deleteMany({ where: { recipientId: { in: ids } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    // Activation opens an identity cluster per human (the trial law); billing
-    // captures the MMG payer. A cluster goes only when nothing else uses it.
-    const clusterIds = [...new Set([
-      ...(await app.prisma.trialGrant.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } })).map((g) => g.clusterId),
-      ...(await app.prisma.identityClusterMember.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } })).map((m) => m.clusterId),
-    ].filter((c): c is string => !!c))];
-    await app.prisma.trialGrant.deleteMany({ where: { accountId: { in: ids } } });
-    await app.prisma.identityKey.deleteMany({ where: { accountId: { in: ids } } });
-    await app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
-    // A crashed earlier run can leave a payer key that a new run's payer then
-    // unions with; walk that union history around this file's clusters and
-    // remove, leaf first, every node nothing lives in or points at any more.
-    const around = new Set(clusterIds);
-    for (let hop = 0; hop < 8; hop += 1) {
-      const linked = await app.prisma.identityCluster.findMany({ where: { OR: [{ id: { in: [...around] } }, { mergedIntoId: { in: [...around] } }] }, select: { id: true, mergedIntoId: true } });
-      const size = around.size;
-      for (const c of linked) { around.add(c.id); if (c.mergedIntoId) around.add(c.mergedIntoId); }
-      if (around.size === size) break;
-    }
-    for (let round = 0; round < 8; round += 1) {
-      const empty = (await app.prisma.identityCluster.findMany({ where: { id: { in: [...around] }, members: { none: {} }, trialGrants: { none: {} } }, select: { id: true } })).map((c) => c.id);
-      const pointedAt = new Set((await app.prisma.identityCluster.findMany({ where: { mergedIntoId: { in: empty } }, select: { mergedIntoId: true } })).map((c) => c.mergedIntoId));
-      const leaves = empty.filter((id) => !pointedAt.has(id));
-      if (leaves.length === 0) break;
-      await app.prisma.identityCluster.deleteMany({ where: { id: { in: leaves } } });
-    }
-    await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
-    await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-    await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-    await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-    await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.$transaction(async (tx) => {
+      if (ids.length) await tx.$queryRaw`SELECT id FROM "users" WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
+      const foreignNotices = await tx.notification.findMany({ where: { userId: { in: ids }, id: { notIn: [...messageInserts.notificationIds] } }, select: { id: true } });
+      if (foreignNotices.length) throw new Error('GOLD-7 VEND04: foreign notifications block fixture cleanup');
+      await tx.mmgAgentPayment.deleteMany({ where: { externalId: { in: [...txnIds] } } });
+      await tx.providerPayment.deleteMany({ where: { providerTxnId: { in: [...txnIds] } } });
+      await tx.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: ids } }, { approvedBy: { in: ids } }] } });
+      await purgeAuditLogs(auditClientInCleanup(tx), { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...vendorIds, ...subIds] } }] }, 'GOLD-7 golden journey fixture cleanup (gold-7-vend-04)');
+      await tx.alertDelivery.deleteMany({ where: { id: { in: [...messageInserts.alertIds] } } });
+      await tx.notification.deleteMany({ where: { id: { in: [...messageInserts.notificationIds] } } });
+      // Activation opens an identity cluster per human (the trial law); billing
+      // captures the MMG payer. A cluster goes only when nothing else uses it.
+      const clusterIds = [...new Set([
+        ...(await tx.trialGrant.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } })).map((g) => g.clusterId),
+        ...(await tx.identityClusterMember.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } })).map((m) => m.clusterId),
+      ].filter((c): c is string => !!c))];
+      await tx.trialGrant.deleteMany({ where: { accountId: { in: ids } } });
+      await tx.identityKey.deleteMany({ where: { accountId: { in: ids } } });
+      await tx.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
+      // A crashed earlier run can leave a payer key that a new run's payer then
+      // unions with; walk that union history around this file's clusters and
+      // remove, leaf first, every node nothing lives in or points at any more.
+      const around = new Set(clusterIds);
+      for (let hop = 0; hop < 8; hop += 1) {
+        const linked = await tx.identityCluster.findMany({ where: { OR: [{ id: { in: [...around] } }, { mergedIntoId: { in: [...around] } }] }, select: { id: true, mergedIntoId: true } });
+        const size = around.size;
+        for (const c of linked) { around.add(c.id); if (c.mergedIntoId) around.add(c.mergedIntoId); }
+        if (around.size === size) break;
+      }
+      for (let round = 0; round < 8; round += 1) {
+        const empty = (await tx.identityCluster.findMany({ where: { id: { in: [...around] }, members: { none: {} }, trialGrants: { none: {} } }, select: { id: true } })).map((c) => c.id);
+        const pointedAt = new Set((await tx.identityCluster.findMany({ where: { mergedIntoId: { in: empty } }, select: { mergedIntoId: true } })).map((c) => c.mergedIntoId));
+        const leaves = empty.filter((id) => !pointedAt.has(id));
+        if (leaves.length === 0) break;
+        await tx.identityCluster.deleteMany({ where: { id: { in: leaves } } });
+      }
+      await tx.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
+      await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
+      await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
+      await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+      await tx.subscription.deleteMany({ where: { id: { in: subIds } } });
+      await tx.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+      await tx.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
+      await tx.session.deleteMany({ where: { userId: { in: ids } } });
+      await tx.admin.deleteMany({ where: { userId: { in: ids } } });
+      await tx.customer.deleteMany({ where: { userId: { in: ids } } });
+      await tx.user.deleteMany({ where: { id: { in: ids } } });
+    }, { timeout: 30_000 });
     await purgeRedis([...ids, ...sessionIds, ...vendorIds, ...subIds]);
   });
 }
@@ -284,8 +279,7 @@ beforeAll(async () => {
   await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
   await app.ready();
   subscriptions = new SubscriptionService(app.prisma);
-  // Preserve existing admin tracking even during crash-recovery cleanup.
-  alertsBefore = new Set((await sys(() => app.prisma.alertDelivery.findMany({ where: { kind: 'ADMIN_OPS', subjectId: 'billing_dunning_ops_task' }, select: { id: true } }))).map((a) => a.id));
+  messageInserts = trackMessageInserts(app.prisma);
   await purgeFixtures();
 
   // Other suites can leave ownerless ACTIVE/PAST_DUE subscriptions when their
@@ -323,6 +317,7 @@ afterAll(async () => {
   vi.useRealTimers();
   if (app) {
     await finish(() => purgeFixtures());
+    messageInserts?.restore();
     await finish(() => app.close());
   }
   vi.unstubAllEnvs();
@@ -466,4 +461,29 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
       await sys(() => app.prisma.providerPayment.deleteMany({ where: { id: provider.id } }));
     }
   });
+  it('preserves a peer dunning alert inserted after setup while removing only successful run inserts', async () => {
+    const peer = new PrismaClient();
+    const recipient = await makeUser('Fixture', ['ADMIN'], 'ADMIN', { admin: true });
+    const partner = await makePartner('Fixture');
+    const data = { kind: 'ADMIN_OPS', subjectId: 'billing_dunning_ops_task', recipientId: recipient.userId };
+    const peerAlert = await peer.alertDelivery.create({ data });
+    const ownId = `g7-vend04-owned-${nanoid(16)}`;
+    try {
+      await sys(() => app.prisma.notification.create({ data: {
+        userId: recipient.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Fixture dunning', body: 'Fixture only',
+        data: { kind: 'billing_dunning_ops_task', subscriptionId: partner.subId },
+      } }));
+      expect(await sys(() => app.prisma.alertDelivery.createMany({ data: [
+        { ...data, id: ownId }, { ...data, id: peerAlert.id },
+      ], skipDuplicates: true }))).toEqual({ count: 1 });
+      await expect(sys(() => app.prisma.alertDelivery.create({ data: { ...data, id: peerAlert.id } }))).rejects.toThrow();
+      await purgeFixtures();
+      expect(await peer.alertDelivery.findUnique({ where: { id: peerAlert.id } })).toEqual(peerAlert);
+      expect(await peer.alertDelivery.findUnique({ where: { id: ownId } })).toBeNull();
+    } finally {
+      await peer.alertDelivery.deleteMany({ where: { id: { in: [peerAlert.id, ownId] } } });
+      await peer.$disconnect();
+    }
+  });
+
 });

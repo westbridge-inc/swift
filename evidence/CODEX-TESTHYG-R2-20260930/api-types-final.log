@@ -1,0 +1,3 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh node node_modules/typescript/bin/tsc --noEmit -p tsconfig.localcheck.json
+
+EXIT: 0

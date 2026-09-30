@@ -1,0 +1,59 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/golden/gold-7-vend-04.test.ts -t preserves a peer dunning alert
+[heavy.sh] slot 0 acquired after 35s
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 8390615c-8b12-43fe-9530-26aab57bb6d5
+stdout | src/__tests__/golden/gold-7-vend-04.test.ts > GOLD-7 · VEND-04 — production worker billing journey > preserves a peer dunning alert inserted after setup while removing only successful run inserts
+prisma:error 
+Invalid `app.prisma.alertDelivery.create()` invocation in
+/Users/westbridgeinc/wt-testhyg-20260930/apps/api/src/__tests__/golden/gold-7-vend-04.test.ts:484:55
+
+  481 expect(await sys(() => app.prisma.alertDelivery.createMany({ data: [
+  482   { ...data, id: ownId }, { ...data, id: peerAlert.id },
+  483 ], skipDuplicates: true }))).toEqual({ count: 1 });
+→ 484 await expect(sys(() => app.prisma.alertDelivery.create(
+Unique constraint failed on the fields: (`id`)
+
+ ❯ src/__tests__/golden/gold-7-vend-04.test.ts (3 tests | 1 failed | 2 skipped) 597ms
+     × preserves a peer dunning alert inserted after setup while removing only successful run inserts 263ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/golden/gold-7-vend-04.test.ts > GOLD-7 · VEND-04 — production worker billing journey > preserves a peer dunning alert inserted after setup while removing only successful run inserts
+AssertionError: expected null to deeply equal { …(8) }
+
+- Expected:
+{
+  "acknowledgedAt": null,
+  "id": "cmuoa01s3000mongu8ki7c4jw",
+  "kind": "ADMIN_OPS",
+  "offerAttemptId": null,
+  "recipientId": "cmuoa01o60004ongu6w8n44fy",
+  "seenAt": null,
+  "sentAt": 2026-09-30T15:44:26.883Z,
+  "subjectId": "billing_dunning_ops_task",
+}
+
++ Received:
+null
+
+ ❯ src/__tests__/golden/gold-7-vend-04.test.ts:486:84
+    484|       await expect(sys(() => app.prisma.alertDelivery.create({ data: {…
+    485|       await purgeFixtures();
+    486|       expect(await peer.alertDelivery.findUnique({ where: { id: peerAl…
+       |                                                                                    ^
+    487|       expect(await peer.alertDelivery.findUnique({ where: { id: ownId …
+    488|     } finally {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 skipped (3)
+   Start at  11:44:23
+   Duration  3.57s (transform 1.61s, setup 0ms, import 2.53s, tests 597ms, environment 0ms)
+
+[R048-001] run 8390615c-8b12-43fe-9530-26aab57bb6d5 finished in 3s on swift_test_hyg
+
+EXIT: 1

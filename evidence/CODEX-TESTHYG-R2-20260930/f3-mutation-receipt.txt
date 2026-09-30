@@ -1,0 +1,10 @@
+Case: f3
+LANDED SHA256: d2d5065620d4894a901756d6c6ad7387f991a024bdc1446676a049e9a5568585
+MUTANT SHA256: dbb9512adbe2a8a65c023fe0f4d0f3e387809e7ad750ce22224b4e9e9999b294
+Test command: run.py f3-mutation-red test src/__tests__/golden/gold-7-vend-04.test.ts -t preserves a peer dunning alert
+MUTATION LANDED: True
+RED EXIT: 1
+TRAVERSED assertion failure: True
+RESTORED SHA256: d2d5065620d4894a901756d6c6ad7387f991a024bdc1446676a049e9a5568585
+RESTORED EXACT: True
+RESTORED GREEN EXIT: 0

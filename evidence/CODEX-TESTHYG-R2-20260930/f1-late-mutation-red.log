@@ -1,0 +1,39 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/golden/gold-7-cleanup.test.ts -t refuses existing and post-preflight
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 4406ab53-f573-4513-9ad8-4a1fb743e68f
+ ❯ src/__tests__/golden/gold-7-cleanup.test.ts (4 tests | 2 failed | 2 skipped) 2892ms
+   × refuses existing and post-preflight peer orders assigned to a fixture RIDER without partial cleanup 1525ms
+   × refuses existing and post-preflight peer orders assigned to a fixture DRIVER without partial cleanup 1367ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/golden/gold-7-cleanup.test.ts > refuses existing and post-preflight peer orders assigned to a fixture RIDER without partial cleanup
+ FAIL  src/__tests__/golden/gold-7-cleanup.test.ts > refuses existing and post-preflight peer orders assigned to a fixture DRIVER without partial cleanup
+Error: Connection is closed.
+ ❯ EventEmitter.sendCommand ../../../swift-donor-main-14deaff5/node_modules/.pnpm/ioredis@5.10.1/node_modules/ioredis/built/Redis.js:333:28
+ ❯ EventEmitter.scan ../../../swift-donor-main-14deaff5/node_modules/.pnpm/ioredis@5.10.1/node_modules/ioredis/built/utils/Commander.js:90:25
+ ❯ src/__tests__/golden/gold-7-helpers.ts:187:46
+    185|       let cursor = '0';
+    186|       do {
+    187|         const [next, keys] = await app.redis.scan(cursor, 'COUNT', 100…
+       |                                              ^
+    188|         cursor = next;
+    189|         const mine = keys.filter((k) => k.split(':').some((part) => wa…
+ ❯ src/plugins/tenant-context.ts:101:88
+ ❯ purge src/__tests__/golden/gold-7-helpers.ts:98:5
+ ❯ Object.close src/__tests__/golden/gold-7-helpers.ts:259:7
+ ❯ src/__tests__/golden/gold-7-cleanup.test.ts:262:27
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 2 skipped (4)
+   Start at  11:52:55
+   Duration  4.48s (transform 775ms, setup 0ms, import 1.25s, tests 2.89s, environment 0ms)
+
+[R048-001] run 4406ab53-f573-4513-9ad8-4a1fb743e68f finished in 4s on swift_test_hyg
+
+EXIT: 1

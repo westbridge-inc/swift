@@ -1,0 +1,10 @@
+Case: f4
+LANDED SHA256: 70ebdfe37f54668d4c8521a95e120fd7c8754451d06ea3f8c3f5efcf471fee0c
+MUTANT SHA256: 43644d50d9ae4778cb80721615d6d251bdd80664773c699da651cf1502a2fe98
+Test command: run.py f4-mutation-red test src/__tests__/golden/gold-3-mover-online.test.ts -t keeps the peer capacity-one
+MUTATION LANDED: True
+RED EXIT: 1
+TRAVERSED assertion failure: True
+RESTORED SHA256: 70ebdfe37f54668d4c8521a95e120fd7c8754451d06ea3f8c3f5efcf471fee0c
+RESTORED EXACT: True
+RESTORED GREEN EXIT: 0

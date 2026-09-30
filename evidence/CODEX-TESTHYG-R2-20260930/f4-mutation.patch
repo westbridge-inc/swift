@@ -1,0 +1,40 @@
+--- apps/api/src/__tests__/golden/gold-3-mover-online.test.ts
++++ apps/api/src/__tests__/golden/gold-3-mover-online.test.ts
+@@ -71,6 +71,7 @@
+ const userIds: string[] = [];
+ const createdOrderIds: string[] = [];
+ let restoreCapacityRead: (() => void) | undefined;
++let mutantCapacityId: string | undefined;
+ let ownCapacityReads = 0;
+ const peerCapacityClient = new PrismaClient();
+ let peerCapacityBefore: number;
+@@ -246,24 +247,17 @@
+   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
+   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
+   await app.ready();
+-  // Intercept only this client's capacity read at the existing config seam.
+-  // No shared DB version, no cache entry, no dispatch/claim replacement. All
+-  // other keys, tenants and clients still execute the production reader.
+-  const readConfig = algoStore.algoValue;
+-  const capacityRead = vi.spyOn(algoStore, 'algoValue').mockImplementation(((prisma, key, tenantId = 'swift-default') => {
+-    if (prisma === app.prisma && key === 'stacking.riderCapacity' && tenantId === 'swift-default') {
+-      ownCapacityReads += 1;
+-      return Promise.resolve(3);
+-    }
+-    return readConfig(prisma, key, tenantId);
+-  }) as typeof algoStore.algoValue);
+-  restoreCapacityRead = () => capacityRead.mockRestore();
++  const latest = await sys(() => app.prisma.algoConfig.findFirst({ where: { tenantId: 'swift-default', key: 'stacking.riderCapacity' }, orderBy: { version: 'desc' } }));
++  const shared = await sys(() => app.prisma.algoConfig.create({ data: { tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 3, version: (latest?.version ?? 0) + 1, updatedBy: FIXTURE } }));
++  mutantCapacityId = shared.id;
++  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+ 
+ });
+ 
+ afterAll(async () => {
+   await purgeFixtures();
+   restoreCapacityRead?.();
++  if (mutantCapacityId) await sys(() => app.prisma.algoConfig.delete({ where: { id: mutantCapacityId } }));
+   expect(await sharedCapacityRows()).toEqual(sharedConfigBefore);
+   invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+   await app.close();

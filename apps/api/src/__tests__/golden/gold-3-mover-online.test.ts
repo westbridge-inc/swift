@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { customAlphabet, nanoid } from 'nanoid';
-import { Prisma, type UserRole } from '@prisma/client';
+import { Prisma, PrismaClient, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
 import { authPlugin } from '../../plugins/auth';
@@ -11,8 +11,10 @@ import courierRoutes from '../../modules/courier/courier.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { makeDispatchService } from '../../modules/dispatch/dispatch.service';
 import { riderStackingCapacity } from '../../modules/dispatch/concurrency-policy';
-import { invalidateAlgoConfig } from '../../modules/algo/algo-config';
+import * as algoStore from '../../modules/algo/algo-config';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
+
+const { invalidateAlgoConfig } = algoStore;
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · RIDE-01 — a delivery mover goes online and streams a live location.
@@ -68,7 +70,14 @@ let seq = 0;
 const movers: Array<{ riderId: string; device: Device }> = [];
 const userIds: string[] = [];
 const createdOrderIds: string[] = [];
-let capacityConfigId: string | undefined;
+let restoreCapacityRead: (() => void) | undefined;
+let ownCapacityReads = 0;
+const peerCapacityClient = new PrismaClient();
+let peerCapacityBefore: number;
+const peerTenant = `gold3-peer-${nanoid(16)}`;
+let peerConfigId: string;
+let sharedConfigBefore: unknown;
+const sharedCapacityRows = () => peerCapacityClient.algoConfig.findMany({ where: { tenantId: 'swift-default', key: 'stacking.riderCapacity' }, orderBy: { id: 'asc' } });
 
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
@@ -218,6 +227,12 @@ async function purgeRedis(ids: string[]) {
 }
 
 beforeAll(async () => {
+  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+  peerCapacityBefore = await riderStackingCapacity(peerCapacityClient);
+  const peerConfig = await peerCapacityClient.algoConfig.create({ data: { tenantId: peerTenant, key: 'stacking.riderCapacity', value: 1, version: 1, updatedBy: FIXTURE } });
+  peerConfigId = peerConfig.id;
+  expect(await algoStore.algoValue(peerCapacityClient, 'stacking.riderCapacity', peerTenant)).toBe(1);
+  sharedConfigBefore = await sharedCapacityRows();
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   // The production composition root gives every request a fresh tenant store
@@ -231,22 +246,30 @@ beforeAll(async () => {
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.ready();
-  const latestCapacity = await sys(() => app.prisma.algoConfig.findFirst({ where: {
-    tenantId: 'swift-default', key: 'stacking.riderCapacity',
-  }, orderBy: { version: 'desc' }, select: { version: true } }));
-  const capacity = await sys(() => app.prisma.algoConfig.create({ data: {
-    tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 3,
-    version: (latestCapacity?.version ?? 0) + 1, updatedBy: FIXTURE,
-  } }));
-  capacityConfigId = capacity.id;
-  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+  // Intercept only this client's capacity read at the existing config seam.
+  // No shared DB version, no cache entry, no dispatch/claim replacement. All
+  // other keys, tenants and clients still execute the production reader.
+  const readConfig = algoStore.algoValue;
+  const capacityRead = vi.spyOn(algoStore, 'algoValue').mockImplementation(((prisma, key, tenantId = 'swift-default') => {
+    if (prisma === app.prisma && key === 'stacking.riderCapacity' && tenantId === 'swift-default') {
+      ownCapacityReads += 1;
+      return Promise.resolve(3);
+    }
+    return readConfig(prisma, key, tenantId);
+  }) as typeof algoStore.algoValue);
+  restoreCapacityRead = () => capacityRead.mockRestore();
+
 });
 
 afterAll(async () => {
   await purgeFixtures();
-  if (capacityConfigId) await sys(() => app.prisma.algoConfig.delete({ where: { id: capacityConfigId } }));
+  restoreCapacityRead?.();
+  expect(await sharedCapacityRows()).toEqual(sharedConfigBefore);
   invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
   await app.close();
+  if (peerConfigId) await peerCapacityClient.algoConfig.delete({ where: { id: peerConfigId } });
+  invalidateAlgoConfig(peerTenant, 'stacking.riderCapacity');
+  await peerCapacityClient.$disconnect();
 });
 
 afterEach(async () => {
@@ -254,6 +277,14 @@ afterEach(async () => {
 });
 
 describe('GOLD-3 · RIDE-01 — go online + live location', () => {
+  it('keeps the peer capacity-one reader unchanged while the harness gets capacity three', async () => {
+    expect(await algoStore.algoValue(peerCapacityClient, 'stacking.riderCapacity', peerTenant)).toBe(1);
+    expect(await riderStackingCapacity(app.prisma)).toBe(3);
+    invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+    expect(await riderStackingCapacity(peerCapacityClient)).toBe(peerCapacityBefore);
+    expect(await sharedCapacityRows()).toEqual(sharedConfigBefore);
+  });
+
   it('only a verified mover with a selfie goes online; GO records the owning device session, the fix and the flags', async () => {
     const customer = await makeUser('Cora', ['CUSTOMER'], 'CUSTOMER');
     const noSelfie = await makeMover('Nell', { selfie: false });
@@ -394,6 +425,7 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60_000);
     await sys(() => app.prisma.rider.updateMany({ where: { id: { in: [stale.riderId, mover.riderId] } }, data: { lastLocationUpdate: fiveMinutesAgo } }));
 
+    const capacityReadsBefore = ownCapacityReads;
     const jobsBefore = jobs.length;
     const created = await call('POST', '/api/v1/courier/order', sender.device.token, COURIER_BODY);
     expect(created.statusCode, created.body).toBe(201);
@@ -469,7 +501,8 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
       sys(() => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'MOVER_OFFER', subjectId: orderId } })),
     ]);
     expect({ status: order.status, rider: order.riderId }).toEqual({ status: 'RIDER_ASSIGNED', rider: mover.riderId });
-    // This run explicitly sets stacking capacity to three, so one live leg
+    expect(ownCapacityReads, 'real dispatch and accept traversed the private config read').toBeGreaterThan(capacityReadsBefore);
+    // This client reads stacking capacity three, so one live leg
     // still leaves room: the winner stays available for another leg.
     expect(await riderStackingCapacity(app.prisma)).toBe(3);
     expect({ pointer: won.currentOrderId, available: won.isAvailable }).toEqual({ pointer: orderId, available: true });

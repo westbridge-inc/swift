@@ -1,0 +1,36 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/order-hold-cleanup.test.ts
+[heavy.sh] slot 0 acquired after 95s
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 9e40d036-86af-471b-af76-369d89643bd0
+ ❯ src/__tests__/order-hold-cleanup.test.ts (1 test | 1 failed) 294ms
+   × refuses a post-preflight peer order without detaching its vendor or partially purging the held fixture 294ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/order-hold-cleanup.test.ts > refuses a post-preflight peer order without detaching its vendor or partially purging the held fixture
+AssertionError: promise resolved "undefined" instead of rejecting
+
+- Expected:
+Error {
+  "message": "rejected promise",
+}
+
++ Received:
+undefined
+
+ ❯ src/__tests__/order-hold-cleanup.test.ts:40:167
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  11:44:35
+   Duration  998ms (transform 171ms, setup 0ms, import 259ms, tests 294ms, environment 0ms)
+
+[R048-001] run 9e40d036-86af-471b-af76-369d89643bd0 finished in 1s on swift_test_hyg
+
+EXIT: 1

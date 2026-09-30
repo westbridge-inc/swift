@@ -1,0 +1,14 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/golden/gold-7-cleanup.test.ts
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 30f51d75-ab20-46e0-abec-d379808cd718
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+   Start at  11:41:56
+   Duration  6.66s (transform 761ms, setup 0ms, import 1.25s, tests 5.06s, environment 0ms)
+
+[R048-001] run 30f51d75-ab20-46e0-abec-d379808cd718 finished in 6s on swift_test_hyg
+
+EXIT: 0

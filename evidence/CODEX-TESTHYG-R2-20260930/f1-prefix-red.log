@@ -1,0 +1,100 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/golden/gold-7-cleanup.test.ts -t refuses existing and post-preflight
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 7a3eaafc-adab-4597-9e18-e2c495dd753b
+stdout | src/__tests__/golden/gold-7-cleanup.test.ts > refuses existing and post-preflight peer orders assigned to a fixture DRIVER without partial cleanup
+prisma:error 
+Invalid `h.app.prisma.driver.create()` invocation in
+/Users/westbridgeinc/wt-testhyg-20260930/apps/api/src/__tests__/golden/gold-7-cleanup.test.ts:213:29
+
+  210 const mover = await h.actor([role]);
+  211 const profile = await h.sys(() => role === 'RIDER'
+  212   ? h.app.prisma.rider.create({ data: { userId: mover.userId, riderType: 'BOTH', vehicleType: 'MOTORCYCLE' } })
+→ 213   : h.app.prisma.driver.create({
+          data: {
+            userId: "gold7-cleanup-driver--9h1sKb00dhNP1D6-OjMXLpDLdh77",
+            vehicleMake: "Test",
+            vehicleModel: "Fixture",
+            vehicleYear: 2026,
+            vehicleColor: "Blue",
+            licensePlate: "G7-qCuYUh6u",
+        +   driverLicenseUrl: String
+          }
+        })
+
+Argument `driverLicenseUrl` is missing.
+
+ ❯ src/__tests__/golden/gold-7-cleanup.test.ts (4 tests | 2 failed | 2 skipped) 1613ms
+   × refuses existing and post-preflight peer orders assigned to a fixture RIDER without partial cleanup 1087ms
+   × refuses existing and post-preflight peer orders assigned to a fixture DRIVER without partial cleanup 525ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/golden/gold-7-cleanup.test.ts > refuses existing and post-preflight peer orders assigned to a fixture RIDER without partial cleanup
+AssertionError: promise resolved "undefined" instead of rejecting
+
+- Expected:
+Error {
+  "message": "rejected promise",
+}
+
++ Received:
+undefined
+
+ ❯ src/__tests__/golden/gold-7-cleanup.test.ts:234:27
+    232|       : other.driver.findUnique({ where: { id: profile.id } });
+    233|     const existing = await insertPeer();
+    234|     await expect(h.close()).rejects.toThrow(`foreign orders block fixt…
+       |                           ^
+    235|     expect(await other.order.findUnique({ where: { id: existing.id } }…
+    236|     expect(await readProfile()).toEqual(profile);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/__tests__/golden/gold-7-cleanup.test.ts > refuses existing and post-preflight peer orders assigned to a fixture DRIVER without partial cleanup
+PrismaClientValidationError: 
+Invalid `h.app.prisma.driver.create()` invocation in
+/Users/westbridgeinc/wt-testhyg-20260930/apps/api/src/__tests__/golden/gold-7-cleanup.test.ts:213:29
+
+  210 const mover = await h.actor([role]);
+  211 const profile = await h.sys(() => role === 'RIDER'
+  212   ? h.app.prisma.rider.create({ data: { userId: mover.userId, riderType: 'BOTH', vehicleType: 'MOTORCYCLE' } })
+→ 213   : h.app.prisma.driver.create({
+          data: {
+            userId: "gold7-cleanup-driver--9h1sKb00dhNP1D6-OjMXLpDLdh77",
+            vehicleMake: "Test",
+            vehicleModel: "Fixture",
+            vehicleYear: 2026,
+            vehicleColor: "Blue",
+            licensePlate: "G7-qCuYUh6u",
+        +   driverLicenseUrl: String
+          }
+        })
+
+Argument `driverLicenseUrl` is missing.
+ ❯ Nn .prisma-local/runtime/library.js:33:1363
+ ❯ ei.handleRequestError .prisma-local/runtime/library.js:125:6911
+ ❯ ei.handleAndLogRequestError .prisma-local/runtime/library.js:125:6593
+ ❯ ei.request .prisma-local/runtime/library.js:125:6300
+ ❯ a .prisma-local/runtime/library.js:134:9551
+ ❯ src/plugins/tenant-context.ts:101:88
+     99|
+    100| export async function runWithoutTenant<T>(fn: () => Promise<T>, capabi…
+    101|   return tenantContext.run({ tenantId: null, mode: 'system', capabilit…
+       |                                                                                        ^
+    102| }
+    103|
+ ❯ src/__tests__/golden/gold-7-cleanup.test.ts:211:21
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 2 skipped (4)
+   Start at  11:40:42
+   Duration  3.24s (transform 764ms, setup 0ms, import 1.26s, tests 1.61s, environment 0ms)
+
+[R048-001] run 7a3eaafc-adab-4597-9e18-e2c495dd753b finished in 3s on swift_test_hyg
+
+EXIT: 1

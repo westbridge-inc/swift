@@ -1,0 +1,4 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh node node_modules/typescript/bin/tsc --noEmit -p tsconfig.localcheck.json
+[heavy.sh] slot 0 acquired after 95s
+
+EXIT: 0

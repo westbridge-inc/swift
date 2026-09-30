@@ -13,6 +13,7 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { authRoutes } from '../../modules/auth/auth.routes';
+import { auditClientInCleanup } from '../helpers/cleanup-transaction';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
 
 // GOLD-7 shares the GOLD-2/6 composition and fixture helpers, not product
@@ -97,93 +98,90 @@ export function createGolden(phonePrefix: string, fixture: string) {
     await sys(async () => {
       // Every alert kind can target another run's fixture. Ownership comes only
       // from successful inserts, even if none of our users survive erasure.
-      await app.prisma.alertDelivery.deleteMany({ where: { id: { in: [...createdAlertIds] } } });
-      await app.prisma.notification.deleteMany({ where: { id: { in: [...createdNotificationIds] } } });
       const users = await app.prisma.user.findMany({ where: { OR: [
         { id: { in: [...createdIds] } },
         { id: { startsWith: `${fixturePrefix}-` } },
       ] }, select: { id: true } });
-      const ids = users.map((u) => u.id);
-      if (!ids.length) return;
+      const ids = [...new Set([...createdIds, ...users.map((u) => u.id)])];
       const vendorIds = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: ids } } }, select: { id: true } })).map((v) => v.id);
       const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+      const driverIds = (await app.prisma.driver.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
       const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
-      // Check both fixture parents before deleting anything that could cascade.
-      const foreignOrders = await app.prisma.order.findMany({ where: {
-        OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } }],
-        id: { notIn: [...createdOrderIds] },
-      }, select: { id: true } });
-      if (foreignOrders.length) throw new Error(`GOLD-7 ${fixture}: foreign orders block fixture cleanup: ${foreignOrders.map((o) => o.id).join(', ')}`);
-      const foreignNotifications = await app.prisma.notification.findMany({ where: {
-        userId: { in: ids }, id: { notIn: [...createdNotificationIds] },
-      }, select: { id: true } });
-      if (foreignNotifications.length) throw new Error(`GOLD-7 ${fixture}: untracked notifications block fixture user cleanup: ${foreignNotifications.map((n) => n.id).join(', ')}`);
-      const docs = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
-      const cases = (await app.prisma.reviewCase.findMany({ where: { submissionId: { in: docs } }, select: { id: true } })).map((c) => c.id);
-      await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...docs, ...cases, ...vendorIds] } }] }, `test-cleanup:${fixture}`);
-      await purgeSensitiveReadLogs(app.prisma, { OR: [{ actorUserId: { in: ids } }, { subjectId: { in: docs } }] }, `test-cleanup:${fixture}`);
-      await app.prisma.reviewDecision.deleteMany({ where: { caseId: { in: cases } } });
-      await app.prisma.reviewCase.deleteMany({ where: { id: { in: cases } } });
-      await app.prisma.verificationDocument.deleteMany({ where: { id: { in: docs } } });
-      await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: ids } } });
-      await app.prisma.storageOrphan.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.identityKey.deleteMany({ where: { accountId: { in: ids } } });
-      await app.prisma.trialGrant.deleteMany({ where: { accountId: { in: ids } } });
-      const members = await app.prisma.identityClusterMember.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } });
-      await app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
-      for (const clusterId of new Set([...savedClusterIds, ...members.map((m) => m.clusterId)])) {
-        if (await app.prisma.identityClusterMember.count({ where: { clusterId } }) === 0) {
-          await app.prisma.identityCluster.deleteMany({ where: { id: clusterId, mergedIntoId: null } });
-        }
-      }
-      const subIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
-      await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
       const orderIds = [...createdOrderIds];
-      const ratings = (await app.prisma.rating.findMany({ where: { orderId: { in: orderIds } }, select: { id: true } })).map((r) => r.id);
-      await app.prisma.ratingReport.deleteMany({ where: { ratingId: { in: ratings } } });
-      await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: { in: ratings } } });
-      await app.prisma.rating.deleteMany({ where: { id: { in: ratings } } });
-      await app.prisma.actorRatingStat.deleteMany({ where: { subjectId: { in: [...ids, ...vendorIds] } } });
-      await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
-      await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
-      // Stock movements, consent and deletion receipts are append-only evidence.
-      // Their scalar subject IDs allow the mutable fixtures to be removed.
-      await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
-      await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
-      await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-      await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
-      await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
-      await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-      await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-      // Lock the parent rows through the final check and delete. A peer can
-      // fan out after the earlier preflight; its FK insert then waits for
-      // these locks instead of being silently removed by the user cascade.
-      await app.prisma.$transaction(async (tx) => {
-        await tx.$queryRaw`SELECT id FROM "users" WHERE id IN (${Prisma.join(ids)}) FOR UPDATE`;
-        if (vendorIds.length) await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(vendorIds)}) FOR UPDATE`;
-        const lateOrders = await tx.order.findMany({ where: {
-          OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } }],
+      const assertNoForeignDependents = async (client: Prisma.TransactionClient) => {
+        const foreignOrders = await client.order.findMany({ where: {
+          OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } },
+            { riderId: { in: riderIds } }, { driverId: { in: driverIds } }],
           id: { notIn: orderIds },
         }, select: { id: true } });
-        if (lateOrders.length) throw new Error(`GOLD-7 ${fixture}: foreign orders block fixture cleanup: ${lateOrders.map((o) => o.id).join(', ')}`);
-        const lateNotifications = await tx.notification.findMany({ where: {
+        if (foreignOrders.length) throw new Error(`GOLD-7 ${fixture}: foreign orders block fixture cleanup: ${foreignOrders.map((o) => o.id).join(', ')}`);
+        const foreignNotifications = await client.notification.findMany({ where: {
           userId: { in: ids }, id: { notIn: [...createdNotificationIds] },
         }, select: { id: true } });
-        if (lateNotifications.length) throw new Error(`GOLD-7 ${fixture}: untracked notifications block fixture user cleanup: ${lateNotifications.map((n) => n.id).join(', ')}`);
+        if (foreignNotifications.length) throw new Error(`GOLD-7 ${fixture}: untracked notifications block fixture user cleanup: ${foreignNotifications.map((n) => n.id).join(', ')}`);
+      };
+      await assertNoForeignDependents(app.prisma);
+      // No destructive statement precedes the locks and locked recheck. All
+      // dependent and parent deletes roll back together if any step refuses.
+      await app.prisma.$transaction(async (tx) => {
+        if (ids.length) await tx.$queryRaw`SELECT id FROM "users" WHERE id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
+        if (vendorIds.length) await tx.$queryRaw`SELECT id FROM "vendors" WHERE id IN (${Prisma.join(vendorIds)}) ORDER BY id FOR UPDATE`;
+        if (riderIds.length) await tx.$queryRaw`SELECT id FROM "riders" WHERE id IN (${Prisma.join(riderIds)}) ORDER BY id FOR UPDATE`;
+        if (driverIds.length) await tx.$queryRaw`SELECT id FROM "drivers" WHERE id IN (${Prisma.join(driverIds)}) ORDER BY id FOR UPDATE`;
+        await assertNoForeignDependents(tx);
+        await tx.alertDelivery.deleteMany({ where: { id: { in: [...createdAlertIds] } } });
+        await tx.notification.deleteMany({ where: { id: { in: [...createdNotificationIds] } } });
+        const docs = (await tx.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
+        const cases = (await tx.reviewCase.findMany({ where: { submissionId: { in: docs } }, select: { id: true } })).map((c) => c.id);
+        await purgeAuditLogs(auditClientInCleanup(tx), { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...docs, ...cases, ...vendorIds] } }] }, `test-cleanup:${fixture}`);
+        await purgeSensitiveReadLogs(auditClientInCleanup(tx), { OR: [{ actorUserId: { in: ids } }, { subjectId: { in: docs } }] }, `test-cleanup:${fixture}`);
+        await tx.reviewDecision.deleteMany({ where: { caseId: { in: cases } } });
+        await tx.reviewCase.deleteMany({ where: { id: { in: cases } } });
+        await tx.verificationDocument.deleteMany({ where: { id: { in: docs } } });
+        await tx.encryptedObject.deleteMany({ where: { createdBy: { in: ids } } });
+        await tx.storageOrphan.deleteMany({ where: { userId: { in: ids } } });
+        await tx.identityKey.deleteMany({ where: { accountId: { in: ids } } });
+        await tx.trialGrant.deleteMany({ where: { accountId: { in: ids } } });
+        const members = await tx.identityClusterMember.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } });
+        await tx.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
+        for (const clusterId of new Set([...savedClusterIds, ...members.map((m) => m.clusterId)])) {
+          if (await tx.identityClusterMember.count({ where: { clusterId } }) === 0) {
+            await tx.identityCluster.deleteMany({ where: { id: clusterId, mergedIntoId: null } });
+          }
+        }
+        const subIds = (await tx.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
+        await tx.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.subscription.deleteMany({ where: { id: { in: subIds } } });
+        const ratings = (await tx.rating.findMany({ where: { orderId: { in: orderIds } }, select: { id: true } })).map((r) => r.id);
+        await tx.ratingReport.deleteMany({ where: { ratingId: { in: ratings } } });
+        await tx.ratingOutbox.deleteMany({ where: { ratingId: { in: ratings } } });
+        await tx.rating.deleteMany({ where: { id: { in: ratings } } });
+        await tx.actorRatingStat.deleteMany({ where: { subjectId: { in: [...ids, ...vendorIds] } } });
+        await tx.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
+        await tx.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
+        // Stock movements, consent and deletion receipts are append-only evidence.
+        // Their scalar subject IDs allow the mutable fixtures to be removed.
+        await tx.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
+        await tx.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
+        await tx.earning.deleteMany({ where: { orderId: { in: orderIds } } });
+        await tx.order.deleteMany({ where: { id: { in: orderIds } } });
+        await tx.cart.deleteMany({ where: { customerId: { in: ids } } });
+        await tx.address.deleteMany({ where: { userId: { in: ids } } });
+        await tx.rider.deleteMany({ where: { id: { in: riderIds } } });
+        await tx.driver.deleteMany({ where: { id: { in: driverIds } } });
+        await tx.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
+        await tx.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
         await tx.vendor.deleteMany({ where: { id: { in: vendorIds } } });
         await tx.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
         await tx.session.deleteMany({ where: { userId: { in: ids } } });
         await tx.admin.deleteMany({ where: { userId: { in: ids } } });
         await tx.customer.deleteMany({ where: { userId: { in: ids } } });
         await tx.user.deleteMany({ where: { id: { in: ids } } });
-      });
-      const wanted = new Set([...ids, ...vendorIds, ...orderIds, ...riderIds, ...sessionIds]);
+      }, { timeout: 30_000 });
+      const wanted = new Set([...ids, ...vendorIds, ...orderIds, ...riderIds, ...driverIds, ...sessionIds]);
       let cursor = '0';
       do {
         const [next, keys] = await app.redis.scan(cursor, 'COUNT', 1000);

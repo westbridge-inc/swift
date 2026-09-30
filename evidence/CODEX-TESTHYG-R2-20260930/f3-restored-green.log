@@ -1,0 +1,14 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/golden/gold-7-vend-04.test.ts -t preserves a peer dunning alert
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 4a11300b-5f8e-4342-8eeb-b0c95b5fde4f
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 2 skipped (3)
+   Start at  11:54:51
+   Duration  2.33s (transform 1.01s, setup 0ms, import 1.59s, tests 395ms, environment 0ms)
+
+[R048-001] run 4a11300b-5f8e-4342-8eeb-b0c95b5fde4f finished in 2s on swift_test_hyg
+
+EXIT: 0

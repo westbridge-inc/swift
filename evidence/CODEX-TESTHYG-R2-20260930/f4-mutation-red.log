@@ -1,0 +1,57 @@
+Command: /Users/westbridgeinc/swift-coordination/scripts/heavy.sh ./node_modules/.bin/vitest run --config vitest.local-sos.config.ts --maxWorkers=1 src/__tests__/golden/gold-3-mover-online.test.ts -t keeps the peer capacity-one
+
+ RUN  v4.1.0 /Users/westbridgeinc/wt-testhyg-20260930/apps/api
+
+[R048-001] test target locked: 127.0.0.1:5434/swift_test_hyg as swift · redis db 9 · run 640bd35d-194b-42a5-a5f8-ae6220fa3ed1
+stderr | src/__tests__/golden/gold-3-mover-online.test.ts > GOLD-3 · RIDE-01 — go online + live location > keeps the peer capacity-one reader unchanged while the harness gets capacity three
+[TEN-01] unscoped AlgoConfig.findFirst (unbound) — no tenant bound; counted, allowed under TENANT_UNSCOPED_ACCESS=log
+
+ ❯ src/__tests__/golden/gold-3-mover-online.test.ts (6 tests | 1 failed | 5 skipped) 181ms
+     × keeps the peer capacity-one reader unchanged while the harness gets capacity three 10ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__tests__/golden/gold-3-mover-online.test.ts > GOLD-3 · RIDE-01 — go online + live location > keeps the peer capacity-one reader unchanged while the harness gets capacity three
+AssertionError: expected [ { …(9) }, { …(9) } ] to deeply equal [ { …(9) } ]
+
+- Expected
++ Received
+
+@@ -8,6 +8,17 @@
+      "updatedAt": 2026-09-30T14:31:25.590Z,
+      "updatedBy": "seed:founder-directive-2026-09-24",
+      "value": 3,
+      "version": 1,
+    },
++   {
++     "createdAt": 2026-09-30T15:54:55.828Z,
++     "founderGated": false,
++     "id": "cmuoadj2s0001on7uehc5i528",
++     "key": "stacking.riderCapacity",
++     "tenantId": "swift-default",
++     "updatedAt": 2026-09-30T15:54:55.828Z,
++     "updatedBy": "gold3-ride01-fixture",
++     "value": 3,
++     "version": 2,
++   },
+  ]
+
+ ❯ src/__tests__/golden/gold-3-mover-online.test.ts:279:40
+    277|     invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+    278|     expect(await riderStackingCapacity(peerCapacityClient)).toBe(peerC…
+    279|     expect(await sharedCapacityRows()).toEqual(sharedConfigBefore);
+       |                                        ^
+    280|   });
+    281|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 5 skipped (6)
+   Start at  11:54:53
+   Duration  1.90s (transform 847ms, setup 0ms, import 1.34s, tests 181ms, environment 0ms)
+
+[R048-001] run 640bd35d-194b-42a5-a5f8-ae6220fa3ed1 finished in 2s on swift_test_hyg
+
+EXIT: 1

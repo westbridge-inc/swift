@@ -1,0 +1,10 @@
+Case: f2
+LANDED SHA256: 9e7322335262311ca8c9d300ee5522e17f1e62e09d2940acdfa5ebde645b8c6e
+MUTANT SHA256: a34edf1ca5cf9265d017954e6aab651c431f182f8d024a372e7c41f8eb83e396
+Test command: run.py f2-mutation-red test src/__tests__/order-hold-cleanup.test.ts
+MUTATION LANDED: True
+RED EXIT: 1
+TRAVERSED assertion failure: True
+RESTORED SHA256: 9e7322335262311ca8c9d300ee5522e17f1e62e09d2940acdfa5ebde645b8c6e
+RESTORED EXACT: True
+RESTORED GREEN EXIT: 0

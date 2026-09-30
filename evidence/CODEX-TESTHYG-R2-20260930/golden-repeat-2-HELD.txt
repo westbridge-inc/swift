@@ -1,0 +1,1 @@
+Not started: the first whole-golden run was HELD by the 15 GiB disk gate. Both required whole-golden repetitions remain a same-database CI requirement. No reset or deletion performed.

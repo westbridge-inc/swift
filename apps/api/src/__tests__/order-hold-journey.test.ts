@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import type { AddressInfo } from 'node:net';
@@ -16,6 +16,9 @@ import { LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import { escalateVendorAlert } from '../modules/notification/notification.service';
 import { autoCancelUnresponsiveOrder, enqueueVendorAlertFollowup, releaseHeldOrdersJob } from '../jobs/queue';
 import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
+import { withDashboardClock } from './helpers/dashboard-clock';
+import { purgeHoldFixtures } from './helpers/order-hold-cleanup';
+import { trackMessageInserts } from './helpers/insert-ownership';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
 
 // ---------------------------------------------------------------------------
@@ -47,6 +50,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const HOLD_MS = 5 * 60_000;
 
 let app: FastifyInstance;
+let messageInserts: ReturnType<typeof trackMessageInserts>;
 let socketUrl = '';
 const openSockets: Socket[] = [];
 let seq = 0;
@@ -396,6 +400,7 @@ beforeAll(async () => {
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   // Socket.IO needs a real listening server — inject() cannot carry websockets.
   await app.listen({ port: 0, host: '127.0.0.1' });
+  messageInserts = trackMessageInserts(app.prisma);
   socketUrl = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 
   // Every room emit — order service, notification service, the ladder — is
@@ -413,37 +418,21 @@ beforeAll(async () => {
   }) as never);
 });
 
+// Each journey has one Date snapshot, including every awaited dashboard
+// read and later sweep. Only Date is frozen; socket timers remain real.
+beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); });
+afterEach(() => { vi.useRealTimers(); });
+
 afterAll(async () => {
   for (const socket of openSockets) socket.disconnect();
   vi.unstubAllEnvs();
   if (priorHoldMinutes !== undefined) process.env['ORDER_HOLD_MINUTES'] = priorHoldMinutes;
-  vi.restoreAllMocks();
   userIds.push(...foreignUserIds);
   vendorIds.push(...foreignVendorIds);
-  const foreignOrders = await app.prisma.order.findMany({ where: {
-    OR: [{ customerId: { in: userIds } }, { vendorId: { in: vendorIds } }],
-    id: { notIn: orderIds },
-  }, select: { id: true } });
-  if (foreignOrders.length) throw new Error(`Q12 fixture cleanup blocked by foreign orders: ${foreignOrders.map((o) => o.id).join(', ')}`);
-  if (orderIds.length > 0) {
-    await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
-  }
-  await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: userIds } }] } });
-  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds] } } });
-  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
-  await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.cart.deleteMany({ where: { customerId: { in: userIds } } });
-  await app.prisma.address.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.deviceToken.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-  await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await purgeHoldFixtures(app.prisma, { userIds, vendorIds, orderIds,
+    alertIds: [...messageInserts.alertIds], notificationIds: [...messageInserts.notificationIds] });
+  messageInserts.restore();
+  vi.restoreAllMocks();
   await app.close();
 });
 
@@ -1092,4 +1081,55 @@ describe('Q12 · MMG — the one thing the store is told about an order cancelle
     const mine = await call('GET', `/api/v1/customer/orders/${paid.id}`, buyer.token);
     expect(mine.json().data).toMatchObject({ paymentStatus: 'CLAIMED', canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null });
   });
+});
+
+// AX395-5: a real timer advances the underlying wall across each midnight
+// between successive dashboard reads. Each assertion window must freeze Date;
+// a new window recomputes exact buckets rather than reusing the prior counts.
+it.each([
+  { label: 'UTC', hour: 0, after: { today: 1, tierToday: 0 } },
+  { label: 'Guyana', hour: 4, after: { today: 0, tierToday: 1 } },
+])('synchronizes dashboard reads across the $label midnight boundary with real timers', async ({ hour, after }) => {
+  vi.useRealTimers(); // simulate a changing wall beneath the assertion-window clock
+  const NativeDate = Date;
+  const boundaryDate = new NativeDate();
+  boundaryDate.setUTCDate(16); // interior of week/month windows, independent of wall date
+  boundaryDate.setUTCHours(hour, 0, 0, 0);
+  const boundary = boundaryDate.getTime();
+  const before = boundary - 1_000;
+  let wall = before;
+  class MovingDate extends NativeDate {
+    constructor(value?: string | number | Date) {
+      super(value === undefined ? wall : value instanceof NativeDate ? value.getTime() : value);
+    }
+    static override now() { return wall; }
+  }
+  vi.stubGlobal('Date', MovingDate);
+  try {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Boundary');
+    const order = await placeOrder(buyer, store, 1);
+    await travel(order.id, HOLD_MS + 1_000);
+    expect(await releaseSweep()).toContain(order.id);
+    await withDashboardClock(before, async () => {
+      const counts = await dayCounts(order.id);
+      expect(counts).toEqual({ today: 1, tierToday: 1 });
+      expect(await storeDashboard(store)).toMatchObject(counts);
+      let timerRan = false;
+      await new Promise<void>((resolve) => setTimeout(() => {
+        wall = boundary + 1_000; timerRan = true; resolve();
+      }, 5));
+      expect(timerRan).toBe(true); // Date-only control must preserve real timers
+      expect(await storeDashboard(store)).toMatchObject(counts);
+    });
+    await withDashboardClock(boundary + 1_000, async () => {
+      const counts = await dayCounts(order.id);
+      expect(counts).toEqual(after);
+      expect(await storeDashboard(store)).toMatchObject(counts);
+      expect(await releaseSweep()).not.toContain(order.id);
+      expect(await storeDashboard(store)).toMatchObject(counts);
+    });
+  } finally {
+    vi.useRealTimers(); vi.unstubAllGlobals();
+  }
 });
