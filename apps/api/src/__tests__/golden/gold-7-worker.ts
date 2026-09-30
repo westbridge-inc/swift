@@ -7,9 +7,9 @@ import { closeResourcesBounded, withTimeout } from '../../utils/async-lifecycle'
 
 // Production consumers, real Redis, real timers. Only the named consumer runs;
 // no recurring schedules are installed and cleanup removes only our job IDs.
-export async function startGoldenWorker(app: FastifyInstance, kind: 'subscription' | 'dispatch', prefix: string) {
+export async function startGoldenWorker(app: FastifyInstance, consumer: 'subscription' | 'dispatch', prefix: string) {
   const queues = createQueues(app.redis);
-  const queue = kind === 'subscription' ? queues.subscriptionQueue : queues.dispatchQueue;
+  const queue = consumer === 'subscription' ? queues.subscriptionQueue : queues.dispatchQueue;
   let events: QueueEvents | undefined;
   let workers: Awaited<ReturnType<typeof createWorkers>> | undefined;
   let loop: Promise<void> | undefined;
@@ -34,12 +34,12 @@ export async function startGoldenWorker(app: FastifyInstance, kind: 'subscriptio
     expect(await queue.getRepeatableJobs()).toHaveLength(0);
     expect(await queue.getJobCounts('waiting', 'active', 'delayed', 'paused', 'prioritized', 'waiting-children'))
       .toEqual({ waiting: 0, active: 0, delayed: 0, paused: 0, prioritized: 0, 'waiting-children': 0 });
-    events = new QueueEvents(kind === 'subscription' ? QUEUE_NAMES.SUBSCRIPTION : QUEUE_NAMES.DISPATCH, { connection: bullConnectionOpts(app.redis) });
+    events = new QueueEvents(consumer === 'subscription' ? QUEUE_NAMES.SUBSCRIPTION : QUEUE_NAMES.DISPATCH, { connection: bullConnectionOpts(app.redis) });
     events.on('error', (error: unknown) => { failure ??= error; });
     await events.waitUntilReady();
     workers = await createWorkers({ prisma: app.prisma, redis: app.redis, io: app.io, log: app.log }, queues);
     await workers.waitUntilReady();
-    const worker = kind === 'subscription' ? workers.subscriptionWorker : workers.dispatchWorker;
+    const worker = consumer === 'subscription' ? workers.subscriptionWorker : workers.dispatchWorker;
     worker.on('error', (error: unknown) => { failure ??= error; });
     loop = worker.run().catch((error: unknown) => { failure ??= error; });
   } catch (error) {
