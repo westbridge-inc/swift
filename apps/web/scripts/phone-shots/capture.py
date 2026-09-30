@@ -2,7 +2,7 @@
 """Local, synthetic phone screenshots. Never contacts the configured API host.
 
 Run a production `next start` with API_URL=http://127.0.0.1:3109, then run
-`python3 capture.py before|after`. Browser API traffic is intercepted in CDP
+`python3 capture.py before|after|after-v2`. Browser API traffic is intercepted in CDP
 and fulfilled by this local fixture server. No third-party Python modules.
 """
 import base64
@@ -27,6 +27,30 @@ ROUTES = ["/dashboard", "/dashboard/orders", "/dashboard/inventory",
           "/dashboard/inventory/import", "/dashboard/settings", "/portal",
           "/portal/history", "/portal/documents", "/portal/account",
           "/", "/store/phone-fixture", "/how-it-works"]
+V2_ROUTES = ["/dashboard/orders", "/portal/history"]
+FIXTURE_MARKERS = {
+    "/dashboard": "Today", "/dashboard/orders": "SW-1001",
+    "/dashboard/inventory": "Rice", "/dashboard/inventory/import": "Bulk import",
+    "/dashboard/settings": "Operating hours", "/portal": "GY$",
+    "/portal/history": "SW-1001", "/portal/documents": "Documents",
+    "/portal/account": "Account", "/": "Swift",
+    "/store/phone-fixture": "Phone Fixture Market", "/how-it-works": "How it works",
+}
+
+def classify_request(raw_url):
+    url = urllib.parse.urlparse(raw_url)
+    if url.scheme in ("http", "https") and url.hostname in ("api.swiftgy.com", "api-staging.swiftgy.com"):
+        return "mock"
+    if url.scheme == "http" and url.hostname == "127.0.0.1" and url.port in (3108, 3109):
+        return "local"
+    return "block"
+
+def loaded_state(route, current_url, text, ready, api_errors):
+    expected = urllib.parse.urlparse(WEB + route)
+    current = urllib.parse.urlparse(current_url)
+    return (ready == "complete" and not api_errors
+            and (current.scheme, current.netloc, current.path) == (expected.scheme, expected.netloc, expected.path)
+            and "Loading…" not in text and FIXTURE_MARKERS[route] in text)
 
 STORE = {"id": "store-phone", "name": "Phone Fixture Market", "slug": "phone-fixture",
          "vendorType": "STORE", "city": "Georgetown", "region": "Demerara-Mahaica",
@@ -124,6 +148,7 @@ class WS:
         self.pending = head.split(b"\r\n\r\n", 1)[1]
         self.serial = 0
         self.events = []
+        self.api_errors = []
     def readn(self, n):
         while len(self.pending) < n: self.pending += self.sock.recv(max(4096, n-len(self.pending)))
         data, self.pending = self.pending[:n], self.pending[n:]
@@ -157,6 +182,16 @@ class WS:
             else: self.events.append(message)
     def fulfill(self, params):
         req = params["request"]
+        disposition = classify_request(req["url"])
+        if disposition == "local":
+            self.serial += 1
+            self.send({"id": self.serial, "method": "Fetch.continueRequest", "params": {"requestId": params["requestId"]}})
+            return
+        if disposition == "block":
+            self.api_errors.append("Blocked unexpected browser request: " + req["url"])
+            self.serial += 1
+            self.send({"id": self.serial, "method": "Fetch.failRequest", "params": {"requestId": params["requestId"], "errorReason": "BlockedByClient"}})
+            return
         url = urllib.parse.urlparse(req["url"])
         cookie = f"swift_at=fixture-{self.role}"
         request = urllib.request.Request(MOCK + url.path + ("?" + url.query if url.query else ""), headers={"Cookie": cookie}, method=req.get("method", "GET"))
@@ -165,6 +200,8 @@ class WS:
                 status, data = response.status, response.read()
         except urllib.error.HTTPError as error:
             status, data = error.code, error.read()
+        if status >= 400:
+            self.api_errors.append(f"{req.get('method', 'GET')} {url.path}: {status}")
         self.serial += 1
         self.send({"id": self.serial, "method": "Fetch.fulfillRequest", "params": {
             "requestId": params["requestId"], "responseCode": status,
@@ -179,7 +216,7 @@ class WS:
 def main():
     import sys
     phase = sys.argv[1]
-    assert phase in ("before", "after")
+    assert phase in ("before", "after", "after-v2")
     os.makedirs(ROOT, exist_ok=True)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 3109), Mock)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -192,29 +229,41 @@ def main():
                 urllib.request.urlopen("http://127.0.0.1:3110/json/version", timeout=1); break
             except Exception: time.sleep(.2)
         passed = 0; failures = []
-        for route in ROUTES:
+        routes = V2_ROUTES if phase == "after-v2" else ROUTES
+        for route in routes:
             for width, height, dpr in ((390, 844, 3), (360, 800, 2)):
                 # Start blank so interception is installed before any app code runs.
                 tab = json.load(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:3110/json/new?about:blank", method="PUT")))
                 ws = WS(tab["webSocketDebuggerUrl"])
                 ws.role = "mover" if route.startswith("/portal") else "owner"
                 ws.command("Page.enable"); ws.command("Network.enable")
-                ws.command("Fetch.enable", {"patterns": [{"urlPattern": "https://api.swiftgy.com/*", "requestStage": "Request"}]})
+                ws.command("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
                 cookie_set = ws.command("Network.setCookie", {"name": "swift_at", "value": f"fixture-{ws.role}", "domain": "api.swiftgy.com", "path": "/", "secure": True, "httpOnly": True, "sameSite": "None"})
                 assert cookie_set.get("success"), "Synthetic session cookie was not set"
                 ws.command("Emulation.setDeviceMetricsOverride", {"width": width, "height": height, "deviceScaleFactor": dpr, "mobile": True})
                 ws.command("Page.navigate", {"url": WEB+route})
                 end = time.time()+12
+                loaded = False
                 while time.time() < end:
-                    result = ws.command("Runtime.evaluate", {"expression": "({ready:document.readyState, text:document.body?.innerText?.slice(0,200), scroll:document.documentElement.scrollWidth, width:innerWidth})", "returnByValue": True}).get("result", {}).get("value")
+                    result = ws.command("Runtime.evaluate", {"expression": "({ready:document.readyState, text:document.body?.innerText, url:location.href, scroll:document.documentElement.scrollWidth, width:innerWidth})", "returnByValue": True}).get("result", {}).get("value")
                     if not result: time.sleep(.2); continue
-                    expected = "Swift Business" if route.startswith("/dashboard") else "Swift Earner" if route.startswith("/portal") else "Swift"
-                    if result["ready"] == "complete" and expected in result["text"] and "Loading…" not in result["text"]: break
+                    if ws.api_errors: raise AssertionError(f"{route}: {ws.api_errors}")
+                    if loaded_state(route, result["url"], result["text"] or "", result["ready"], ws.api_errors):
+                        loaded = True
+                        break
                     time.sleep(.2)
+                assert loaded, f"{route}: fixture did not load at expected URL; last state={result!r}; errors={ws.api_errors}"
                 time.sleep(.5)
-                state = ws.command("Runtime.evaluate", {"expression": "({scroll:document.documentElement.scrollWidth,width:innerWidth,text:document.body.innerText.slice(0,180)})", "returnByValue": True})["result"]["value"]
+                state = ws.command("Runtime.evaluate", {"expression": "({scroll:document.documentElement.scrollWidth,width:innerWidth,text:document.body.innerText,url:location.href,ready:document.readyState})", "returnByValue": True})["result"]["value"]
+                assert loaded_state(route, state["url"], state["text"], state["ready"], ws.api_errors), f"{route}: fixture changed or API failed: {ws.api_errors}"
+                if route == "/dashboard/orders" and phase == "after-v2":
+                    geometry = ws.command("Runtime.evaluate", {"expression": "(() => {const panel=Array.from(document.querySelectorAll('h2')).find(e=>e.textContent?.includes('NEW ORDER'))?.parentElement; const controls=panel && Array.from(panel.querySelectorAll('select,button')).filter(e=>['Preparation time','Reject reason','Accept','Reject'].includes(e.getAttribute('aria-label')||e.textContent?.trim())); return controls?.map(e=>({name:e.getAttribute('aria-label')||e.textContent?.trim(),left:e.getBoundingClientRect().left,right:e.getBoundingClientRect().right,top:e.getBoundingClientRect().top,bottom:e.getBoundingClientRect().bottom,height:e.getBoundingClientRect().height}));})()", "returnByValue": True})["result"].get("value")
+                    assert geometry and len(geometry) == 4, f"Takeover controls missing: {geometry}"
+                    assert all(g["height"] >= 44 and g["left"] >= 0 and g["right"] <= width for g in geometry), f"Takeover target or overflow: {geometry}"
+                    if width < 400:
+                        assert all(geometry[i]["bottom"] <= geometry[i+1]["top"] for i in range(3)), f"Takeover controls overlap: {geometry}"
                 slug = route.strip("/").replace("/", "-") or "home"
-                filename = f"{phase}-{slug}-{width}x{height}.png"
+                filename = f"after-{slug}-{width}x{height}-v2.png" if phase == "after-v2" else f"{phase}-{slug}-{width}x{height}.png"
                 image = ws.command("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})["data"]
                 with open(os.path.join(ROOT, filename), "wb") as out: out.write(base64.b64decode(image))
                 ok = state["scroll"] <= state["width"] and state["scroll"] <= width
@@ -259,8 +308,8 @@ def main():
                         with open(os.path.join(ROOT, name), "wb") as out: out.write(base64.b64decode(shot))
                         print(f"{name}: interaction PASS", flush=True)
                 ws.command("Page.close"); ws.sock.close()
-        print(f"NO OVERFLOW: {passed}/{len(ROUTES)*2}; failures={failures}")
-        if phase == "after" and failures: sys.exit(1)
+        print(f"NO OVERFLOW: {passed}/{len(routes)*2}; failures={failures}")
+        if phase.startswith("after") and failures: sys.exit(1)
     finally:
         chrome.terminate(); server.shutdown()
 

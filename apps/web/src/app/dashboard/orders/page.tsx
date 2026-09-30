@@ -263,7 +263,23 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // `preparingAt` / `readyAt` / `paymentStatus` are declared on VendorOrder now
   // (the detail route returns the whole Order row) — no local re-declaration.
   const o = order.data;
-  if (!o) return <div className="rounded-2xl border border-black/5 bg-white p-6 text-sm text-[var(--swift-muted)]">Loading…</div>;
+  const closeButton = (
+    <button onClick={onClose} aria-label="Close order detail" className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-xl text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
+  );
+  if (!o) return (
+    <div className="rounded-2xl border border-black/5 bg-white p-6 text-sm text-[var(--swift-muted)]">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-semibold text-[var(--swift-ink)]">Order detail</p>
+        {closeButton}
+      </div>
+      {order.isError ? (
+        <div className="mt-3" role="alert">
+          <p>Could not load this order. Try again.</p>
+          <button onClick={() => void order.refetch()} aria-label="Retry order detail" className="mt-3 min-h-11 rounded-lg border border-black/10 px-4 font-semibold text-[var(--swift-ink)]">Retry</button>
+        </div>
+      ) : <p className="mt-3">Loading…</p>}
+    </div>
+  );
 
   const s = (o.status || '').toUpperCase();
   const actions = actionsFor(o);
@@ -328,7 +344,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         </div>
         <div className="flex items-center gap-2">
           {statusChip(s)}
-          <button onClick={onClose} aria-label="Close order detail" className="text-sm text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
+          {closeButton}
         </div>
       </div>
 

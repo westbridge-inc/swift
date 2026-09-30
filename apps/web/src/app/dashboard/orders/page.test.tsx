@@ -459,3 +459,44 @@ describe('[E10] rejecting an order always carries a reason', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/reject'))).toBe(false);
   });
 });
+
+describe('order detail stays dismissible while its request settles', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  it('can close a pending detail request on a phone', async () => {
+    const order = wireVendorOrder({ status: 'ACCEPTED' });
+    mockApi((request) => {
+      if (request.url.pathname === '/api/v1/vendor/orders') return { body: { success: true, data: [order] } };
+      if (request.url.pathname.endsWith('/order-live')) return new Promise(() => {});
+      throw new Error(`Unexpected request: ${request.url}`);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText('Loading…');
+    await user.click(screen.getByRole('button', { name: 'Close order detail' }));
+    expect(screen.queryByRole('button', { name: 'Close order detail' })).toBeNull();
+  });
+
+  it('shows a failed detail request and retries it', async () => {
+    const order = wireVendorOrder({ status: 'ACCEPTED' });
+    let attempts = 0;
+    mockApi((request) => {
+      if (request.url.pathname === '/api/v1/vendor/orders') return { body: { success: true, data: [order] } };
+      if (request.url.pathname.endsWith('/order-live')) {
+        attempts++;
+        return attempts === 1
+          ? { status: 503, body: { success: false, error: { message: 'Unavailable' } } }
+          : { body: { success: true, data: wireVendorOrderDetail({ status: 'ACCEPTED' }) } };
+      }
+      throw new Error(`Unexpected request: ${request.url}`);
+    });
+    const { user } = renderWithQuery(<OrdersPage />);
+    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await user.click(await rowFor('SW-1001'));
+    await screen.findByText(/Could not load this order/);
+    await user.click(screen.getByRole('button', { name: 'Retry order detail' }));
+    await screen.findByText('Total (Cash)');
+    expect(attempts).toBe(2);
+  });
+});

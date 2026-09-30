@@ -148,7 +148,7 @@ export default function InventoryPage() {
           <input type="checkbox" checked={lowOnly} onChange={(e) => setLowOnly(e.target.checked)} className="h-4 w-4 accent-[var(--swift-red)]" />
           Low stock only
         </label>
-        <span className="text-sm text-[var(--swift-muted)]">{list.length} items</span>
+        <span className="text-sm text-[var(--swift-muted)]">{list.length} {list.length === 1 ? 'item' : 'items'}</span>
       </div>
 
       <div className="max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white">
@@ -157,9 +157,9 @@ export default function InventoryPage() {
             <tr>
               <th className="px-4 py-3">Item</th>
               <th className="px-4 py-3">Category</th>
-              <th className="px-4 py-3">SKU</th>
               <th className="px-4 py-3">Price</th>
               <th className="px-4 py-3">Stock</th>
+              <th className="px-4 py-3">SKU</th>
               <th className="px-4 py-3">Live</th>
               <th className="px-4 py-3" />
             </tr>
@@ -178,7 +178,6 @@ export default function InventoryPage() {
                   <tr key={i.id} className="border-b border-black/5 last:border-0">
                     <td className="px-4 py-3 font-medium">{i.name}</td>
                     <td className="px-4 py-3 text-[var(--swift-muted)]">{i.category?.name ?? '—'}</td>
-                    <td className="px-4 py-3 text-[var(--swift-muted)]">{i.sku ?? '—'}</td>
                     <td className="px-4 py-3">
                       {editingPrice === i.id ? (
                         <PriceEdit item={i} onDone={() => { setEditingPrice(null); refresh(); }} />
@@ -200,6 +199,7 @@ export default function InventoryPage() {
                         </button>
                       )}
                     </td>
+                    <td className="px-4 py-3 text-[var(--swift-muted)]">{i.sku ?? '—'}</td>
                     <td className="px-4 py-3">
                       <button
                         onClick={() => availMut.mutate({ id: i.id, isAvailable: !i.isAvailable })}
