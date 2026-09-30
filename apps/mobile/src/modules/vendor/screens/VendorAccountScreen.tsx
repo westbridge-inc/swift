@@ -208,7 +208,7 @@ export function VendorAccountScreen() {
         ) : null}
 
         {/* A guest's sample store has no pin to move: the save needs a real account. */}
-        {isManager && !guestSample && store ? <StoreLocationCard store={store} /> : null}
+        {isOwner && !guestSample && store ? <StoreLocationCard store={store} /> : null}
 
         {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
 
@@ -303,8 +303,8 @@ export function VendorAccountScreen() {
  * [Q8] Where the store is on the map: the pin riders and customers are sent to.
  * There was no way to change it after sign-up, when it had been the phone's
  * position. The same picker as List-your-business moves it, saved through
- * PUT /vendor/profile: manager and up, like the rest of the store's details,
- * and the server holds a moved pin to the same market rule as a new store.
+ * PUT /vendor/profile: owner only, and the server holds a moved pin to the
+ * same market rule as a new store.
  */
 function StoreLocationCard({ store }: { store: any }) {
   const qc = useQueryClient();
