@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
 import { expect, vi } from 'vitest';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
@@ -18,6 +18,8 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutabi
 // GOLD-7 shares the GOLD-2/6 composition and fixture helpers, not product
 // substitutes. Each file owns a distinct, range-audited phone prefix. Every
 // defining action goes through a mounted production route, on real Postgres.
+// Every golden file must assert notifications only for users it owns: deleting
+// our own users inherently cascades their inbox, including peer-created rows.
 export type Actor = { userId: string; token: string; refreshToken: string; sessionId: string; phone: string };
 export const DAY = 86_400_000;
 
@@ -25,9 +27,13 @@ export function createGolden(phonePrefix: string, fixture: string) {
   const fixturePrefix = `${fixture}-${nanoid(16)}`;
   let app: FastifyInstance;
   let seq = 0;
+  const phoneRun = customAlphabet('0123456789', 5)();
+  const nextPhone = () => `${phonePrefix}${phoneRun}${String(++seq).padStart(3, '0')}`;
   const createdIds = new Set<string>();
   const savedClusterIds = new Set<string>();
   const createdAlertIds = new Set<string>();
+  const createdNotificationIds = new Set<string>();
+  let restoreNotificationTracking: (() => void) | undefined;
   let restoreAlertTracking: (() => void) | undefined;
   const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, fixture);
 
@@ -44,8 +50,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
   }
 
   async function actor(roles: UserRole[] = ['CUSTOMER'], activeRole: UserRole = roles[0]!) {
-    seq += 1;
-    const phone = `${phonePrefix}${String(seq).padStart(3, '0')}`;
+    const phone = nextPhone();
     const user = await sys(() => app.prisma.user.create({ data: {
       id: `${fixturePrefix}-${nanoid(12)}`, phone, firstName: 'Golden', lastName: fixture, roles, activeRole,
       isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L2', countryCode: 'GY',
@@ -86,6 +91,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       // Every alert kind can target another run's fixture. Ownership comes only
       // from successful inserts, even if none of our users survive erasure.
       await app.prisma.alertDelivery.deleteMany({ where: { id: { in: [...createdAlertIds] } } });
+      await app.prisma.notification.deleteMany({ where: { id: { in: [...createdNotificationIds] } } });
       const users = await app.prisma.user.findMany({ where: { OR: [
         { id: { in: [...createdIds] } },
         { id: { startsWith: `${fixturePrefix}-` } },
@@ -119,10 +125,6 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
       await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
       await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-      if (docs.length) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'docId' IN (${Prisma.join(docs)}) OR "data"->>'documentId' IN (${Prisma.join(docs)}) OR "data"->>'submissionId' IN (${Prisma.join(docs)})`;
-      if (vendorIds.length) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'vendorId' IN (${Prisma.join(vendorIds)})`;
-      if (subIds.length) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'subscriptionId' IN (${Prisma.join(subIds)})`;
-      await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'uploader' IN (${Prisma.join(ids)}) OR "data"->>'accountId' IN (${Prisma.join(ids)}) OR "data"->>'userId' IN (${Prisma.join(ids)})`;
       const orderIds = (await app.prisma.order.findMany({ where: { OR: [
         { customerId: { in: ids } }, { vendorId: { in: vendorIds } },
       ] }, select: { id: true } })).map((o) => o.id);
@@ -131,8 +133,6 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: { in: ratings } } });
       await app.prisma.rating.deleteMany({ where: { id: { in: ratings } } });
       await app.prisma.actorRatingStat.deleteMany({ where: { subjectId: { in: [...ids, ...vendorIds] } } });
-      if (orderIds.length) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
-      await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
       await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
       await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
       // Stock movements, consent and deletion receipts are append-only evidence.
@@ -198,6 +198,21 @@ export function createGolden(phonePrefix: string, fixture: string) {
       return { count: inserted.length };
     }) as unknown as typeof alerts.createMany);
     restoreAlertTracking = () => { singleTracking.mockRestore(); bulkTracking.mockRestore(); };
+    const notifications = app.prisma.notification;
+    const createNotification = notifications.create.bind(notifications);
+    const createNotifications = notifications.createManyAndReturn.bind(notifications);
+    const singleNotificationTracking = vi.spyOn(notifications, 'create').mockImplementation((async (args: Prisma.NotificationCreateArgs) => {
+      const id = args.data.id ?? `${fixturePrefix}-notification-${nanoid(16)}`;
+      const result = await createNotification({ ...args, data: { ...args.data, id } });
+      createdNotificationIds.add(id);
+      return result;
+    }) as unknown as typeof createNotification);
+    const bulkNotificationTracking = vi.spyOn(notifications, 'createMany').mockImplementation((async (args: Prisma.NotificationCreateManyArgs) => {
+      const inserted = await createNotifications({ ...args, select: { id: true } });
+      for (const row of inserted) createdNotificationIds.add(row.id);
+      return { count: inserted.length };
+    }) as unknown as typeof notifications.createMany);
+    restoreNotificationTracking = () => { singleNotificationTracking.mockRestore(); bulkNotificationTracking.mockRestore(); };
     await purge();
   }
 
@@ -206,13 +221,13 @@ export function createGolden(phonePrefix: string, fixture: string) {
     expect(added.statusCode, added.json().error?.code).toBe(201);
   }
 
-  return { get app() { return app; }, sys, call, actor, vendor, start, purge, fillCart, rememberClusters,
+  return { get app() { return app; }, sys, call, actor, vendor, start, purge, fillCart, rememberClusters, nextPhone,
     close: async () => {
       try {
         // Admin audit writes may finish just after the response (GOLD-5).
         await new Promise((resolve) => setTimeout(resolve, 300));
         await purge();
-      } finally { restoreAlertTracking?.(); await app.close(); }
+      } finally { restoreAlertTracking?.(); restoreNotificationTracking?.(); await app.close(); }
     },
   };
 }

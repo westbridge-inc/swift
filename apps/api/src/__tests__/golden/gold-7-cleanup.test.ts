@@ -7,16 +7,18 @@ import { createGolden } from './gold-7-helpers';
 
 // [G7-01] Cleanup isolation, not a journey. A concurrent writer can use the
 // same admin subject and recipient. Before/after census is not ownership.
-// Phone +5920978nnn: source/range-audited; no other fixture uses this prefix.
+// Phone +5920978…: run-random suffix plus sequence; no shared literal phone.
 it('removes only exact run-inserted alerts of every kind and preserves peer fan-out and mover offers', async () => {
   const other = new PrismaClient();
   const h = createGolden('+5920978', 'gold7-cleanup');
+  const peerRun = createGolden('+5920978', 'gold7-cleanup');
   const recipientId = `gold7-external-${nanoid(12)}`;
   const beforeId = `gold7-before-${nanoid(12)}`;
   const peerOfferId = `gold7-peer-offer-${nanoid(12)}`;
   const duringId = `gold7-during-${nanoid(12)}`;
   const peerId = `gold7-cleanup-${nanoid(16)}-${nanoid(12)}`;
   const peerAlertIds: string[] = [];
+  const ownedNotificationIds: string[] = [];
   const ownedAlertIds = [0, 1].map(() => `gold7-owned-${nanoid(16)}`);
   const data = { kind: 'ADMIN_OPS', subjectId: 'vendor_pending', recipientId };
   // Separate client = another run. Capture that writer's exact insert IDs for
@@ -32,13 +34,14 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
   try {
     // Same stable fixture label AND phone range, different run ownership.
     const peer = await other.user.create({ data: {
-      id: peerId, phone: '+5920978999', firstName: 'Golden', lastName: 'Peer',
+      id: peerId, phone: peerRun.nextPhone(), firstName: 'Golden', lastName: 'Peer',
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER', countryCode: 'GY',
     } });
     const before = await other.alertDelivery.create({ data: { ...data, id: beforeId } });
     await h.start();
     expect(await other.user.findUnique({ where: { id: peerId } })).toEqual(peer);
-    await h.actor();
+    const customer = await h.actor();
+    expect(customer.phone).not.toBe(peer.phone);
     const admin = await h.actor(['ADMIN']);
     const inserted = await h.sys(() => h.app.prisma.alertDelivery.createMany({ data: [
       { ...data, id: ownedAlertIds[0] },
@@ -83,6 +86,18 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
       id: bulkId, kind: 'VENDOR_ORDER', subjectId: `${recipientId}-order`, recipientId,
     } }))).toEqual({ count: 1 });
     ownedAlertIds.push(bulkId);
+    // This test owns the peer user too, so its inbox survives h's user cascade.
+    // Shared payload subjects must not give h ownership of a peer insert.
+    const noticeData = { userId: peerId, type: 'SYSTEM_ANNOUNCEMENT' as const, title: 'Golden notice', body: 'Fixture only', data: { userId: admin.userId } };
+    const peerNotice = await other.notification.create({ data: noticeData });
+    const ownNotice = await h.sys(() => h.app.prisma.notification.create({ data: noticeData }));
+    ownedNotificationIds.push(ownNotice.id);
+    const bulkNoticeId = `gold7-notification-${nanoid(16)}`;
+    expect(await h.sys(() => h.app.prisma.notification.createMany({ data: [
+      { ...noticeData, id: bulkNoticeId }, { ...noticeData, id: peerNotice.id },
+    ], skipDuplicates: true }))).toEqual({ count: 1 });
+    ownedNotificationIds.push(bulkNoticeId);
+    expect(await other.notification.count({ where: { id: { in: ownedNotificationIds } } })).toBe(2);
     const peerBeforeClose = await other.user.findUniqueOrThrow({ where: { id: peerId } });
     const vendorBeforeClose = await other.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     await h.close(); closed = true;
@@ -91,6 +106,8 @@ it('removes only exact run-inserted alerts of every kind and preserves peer fan-
     expect(await other.alertDelivery.findUnique({ where: { id: duringId } })).toEqual(during);
     expect(await other.alertDelivery.findUnique({ where: { id: beforeId } })).toEqual(before);
     expect(await other.alertDelivery.count({ where: { id: { in: ownedAlertIds } } })).toBe(0);
+    expect(await other.notification.count({ where: { id: { in: ownedNotificationIds } } })).toBe(0);
+    expect(await other.notification.findUnique({ where: { id: peerNotice.id } })).toEqual(peerNotice);
     expect(await other.user.findUnique({ where: { id: admin.userId } })).toBeNull();
     expect(await other.user.findUnique({ where: { id: peerId } })).toEqual(peerBeforeClose);
     expect(await other.vendor.findUnique({ where: { id: vendor.id } })).toEqual(vendorBeforeClose);
