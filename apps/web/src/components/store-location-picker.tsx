@@ -27,7 +27,8 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
   const [searching, setSearching] = useState(false);
   const [locating, setLocating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [named, setNamed] = useState<{ point: StorePoint; line: string | null } | null>(null);
+  const [named, setNamed] = useState<{ point: StorePoint; line: string | null } | null>(current ? { point: current, line: current.address } : null);
+  const [announcement, setAnnouncement] = useState('');
   const [mapFailed, setMapFailed] = useState(false);
   const [loadedTiles, setLoadedTiles] = useState<Set<string>>(() => new Set());
   const [tileAttempt, setTileAttempt] = useState(0);
@@ -37,6 +38,8 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
   // Any owner action invalidates a pending suggestion/fix. No late GPS,
   // details or old search response can move the map under the owner's hand.
   const revision = useRef(0);
+  const searchRequest = useRef(0);
+  const selectedName = useRef(named);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -51,6 +54,7 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
 
   async function search(text: string) {
     const ticket = ++revision.current;
+    searchRequest.current = ticket;
     setSuggestions([]);
     if (text.trim().length < 3) return;
     setSearching(true); setNotice(null);
@@ -61,18 +65,27 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
       if (!results.length) setNotice('We couldn’t find that address on the map. Move the map to your store.');
     } catch {
       if (mounted.current && ticket === revision.current) setNotice('Address search is unavailable right now. Move the map to your store.');
-    } finally { if (mounted.current) setSearching(false); }
+    } finally { if (mounted.current && searchRequest.current === ticket) setSearching(false); }
   }
 
   useEffect(() => {
     if (!current) void search(address);
-    // Opening address is a snapshot. Form edits remount the picker.
+    // Opening address is a snapshot; its form fields are disabled while open.
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let live = true;
     const timer = setTimeout(() => {
-      void storePinAddress(point).catch(() => null).then((line) => { if (live) setNamed({ point, line }); });
+      const selected = selectedName.current?.point === point ? selectedName.current.line : null;
+      // A selected search result already names this exact point. A failed
+      // reverse lookup must not erase its label or change a confirmed address.
+      const lookup = selected ? Promise.resolve(selected) : storePinAddress(point).catch(() => null);
+      void lookup.then((line) => {
+        if (!live) return;
+        setNamed({ point, line });
+        // Announce only once the pin settles, never on each drag frame.
+        setAnnouncement(`${line ?? 'Store pin'}. Latitude ${point.latitude.toFixed(6)}, Longitude ${point.longitude.toFixed(6)}`);
+      });
     }, 350);
     return () => { live = false; clearTimeout(timer); };
   }, [point]);
@@ -91,7 +104,9 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
       if (!Number.isFinite(detail.lat) || !Number.isFinite(detail.lng)) throw new Error('No coordinates');
       const next = { latitude: detail.lat!, longitude: detail.lng! };
       setPoint(next); setBasis('address'); setZoom(17); setSuggestions([]); setNotice(null);
-      setNamed({ point: next, line: [place.primary, place.secondary].filter(Boolean).join(', ') });
+      selectedName.current = { point: next, line: [place.primary, place.secondary].filter(Boolean).join(', ') };
+      setNamed(selectedName.current);
+      map.current?.focus();
     } catch {
       if (mounted.current && ticket === revision.current) setNotice('We couldn’t find that address on the map. Move the map to your store.');
     }
@@ -188,11 +203,12 @@ export function StoreLocationPicker({ current, address, onConfirm, onClose }: {
         <button type="button" className={styles['button']} disabled={zoom >= 19} onClick={() => { revision.current++; setZoom(zoom + 1); }}>Zoom in</button>
         <button type="button" className={styles['button']} disabled={zoom <= 6} onClick={() => { revision.current++; setZoom(zoom - 1); }}>Zoom out</button>
       </div>
-      <div id="store-map-readout" aria-label="Chosen store location" aria-live="polite" className={styles['readout']}>
+      <div id="store-map-readout" role="group" aria-label="Chosen store location" className={styles['readout']}>
         <span>Store address: {address}</span>
         <span>{line ?? (named?.point === point ? 'No street name found at this pin.' : 'Finding the address…')}</span>
         <span>Latitude {point.latitude.toFixed(6)}, Longitude {point.longitude.toFixed(6)}</span>
       </div>
+      <p role="status" aria-live="polite" aria-atomic="true" className={styles['srOnly']}>{announcement}</p>
       {!inMarket && <p role="alert" className={styles['error']}>{STORE_PIN_OUTSIDE}</p>}
       {!mapReady && !mapFailed && <p role="status" className={styles['copy']}>Loading map…</p>}
       {mapFailed && <><p role="alert" className={styles['error']}>The map couldn’t load. Retry to check your store’s entrance before confirming.</p><button type="button" className={styles['button']} onClick={() => { setMapFailed(false); setLoadedTiles(new Set()); setTileAttempt(tileAttempt + 1); }}>Retry map</button></>}

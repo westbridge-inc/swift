@@ -260,4 +260,52 @@ describe('Q8 website store pin', () => {
     expect(pin.latitude).toBeCloseTo(6.8013, 6);
     expect(pin.longitude).toBeGreaterThan(-58.1551);
   });
+
+  it('keeps a selected address label if reverse lookup is unavailable and restores keyboard focus', async () => {
+    fx.api.mockRejectedValue(new Error('Reverse lookup unavailable'));
+    const user = await business();
+    await picker(user);
+    expect((screen.getByLabelText('Street address') as HTMLInputElement).disabled).toBe(true);
+    await chooseDoor(user);
+    expect(document.activeElement).toBe(screen.getByRole('application'));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+    const readout = screen.getByRole('group', { name: 'Chosen store location' });
+    expect(readout.getAttribute('aria-live')).toBeNull();
+    expect(readout.textContent).toContain('12 Regent Street, Georgetown');
+    expect(readout.textContent).not.toContain('No street name found');
+    await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move the store pin' }));
+    expect(screen.getByRole('status').textContent).toContain('12 Regent Street, Georgetown');
+    await user.click(screen.getByRole('button', { name: 'Move the store pin' }));
+    await user.click(screen.getByRole('button', { name: 'Close without placing the pin' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move the store pin' }));
+  });
+
+  it('announces the settled pin rather than each keyboard nudge', async () => {
+    const user = await business();
+    await picker(user);
+    await chooseDoor(user);
+    const announcement = screen.getByRole('status');
+    const previous = announcement.textContent;
+    await user.keyboard('{ArrowUp}{ArrowRight}{ArrowUp}');
+    expect(announcement.textContent).toBe(previous);
+    await waitFor(() => expect(announcement.textContent).toContain('Store entrance, Georgetown'));
+    expect(announcement.textContent).toContain('Latitude');
+  });
+
+  it('keeps a newer search busy when an older response arrives first', async () => {
+    let first!: (_value: typeof DOOR[]) => void;
+    let second!: (_value: typeof DOOR[]) => void;
+    fx.search.mockReturnValueOnce(new Promise((r) => { first = r; })).mockReturnValueOnce(new Promise((r) => { second = r; }));
+    const user = await business();
+    await user.click(screen.getByRole('button', { name: 'Place your store on the map' }));
+    fireEvent.change(screen.getByLabelText('Search for your store’s address'), { target: { value: 'New address' } });
+    fireEvent.keyDown(screen.getByLabelText('Search for your store’s address'), { key: 'Enter' });
+    expect(fx.search).toHaveBeenCalledTimes(2);
+    await act(async () => first([]));
+    expect(disabled('Finding the address…')).toBe(true);
+    await act(async () => second([DOOR]));
+    expect(disabled('Find address')).toBe(false);
+    expect(screen.getByRole('button', { name: /12 Regent Street.*Georgetown/ })).toBeTruthy();
+  });
 });

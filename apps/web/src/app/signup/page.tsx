@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ShoppingBag, Store, Car, ChevronLeft } from 'lucide-react';
@@ -38,6 +38,15 @@ export default function SignupPage() {
   const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
   const [storePin, setStorePin] = useState<StorePin | null>(null);
   const [placingStore, setPlacingStore] = useState(false);
+  const storePinButton = useRef<HTMLButtonElement>(null);
+  const restorePinFocus = useRef(false);
+  useEffect(() => {
+    if (!placingStore && restorePinFocus.current) {
+      storePinButton.current?.focus();
+      restorePinFocus.current = false;
+    }
+  }, [placingStore]);
+  const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
   const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,14 +201,14 @@ export default function SignupPage() {
             <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
               <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
             </select></div>
-            <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
             {placingStore ? (
-              <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); setPlacingStore(false); setError(null); }} onClose={() => setPlacingStore(false)} />
+              <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
             ) : (
               <>
-                <button type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
+                <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
                 {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed. {storePin.address ?? biz.addressLine1} — Latitude {storePin.latitude.toFixed(6)}, Longitude {storePin.longitude.toFixed(6)}</p>}
               </>
             )}
