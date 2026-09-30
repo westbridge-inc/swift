@@ -53,10 +53,13 @@ describe('[Q11] the staging website build', () => {
     });
   });
 
-  it('asks every crawler not to index the staging copy; the public site never sends that', async () => {
+  it('asks crawlers not to index the whole staging copy; the public site limits that header to QR scan links', async () => {
     expect(headerOf(await siteWideHeaders(await productionConfig(STAGING)), 'X-Robots-Tag')).toBe('noindex, nofollow');
     const publicRules = await (await productionConfig(PUBLIC_SITE)).headers!();
-    expect(publicRules.flatMap((rule) => rule.headers).map((header) => header.key)).not.toContain('X-Robots-Tag');
+    // [AX303 F3] Public content stays indexable; /s/ alone now needs a
+    // response noindex because its external resolver returns a redirect.
+    expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag')))
+      .toEqual([{ source: '/s/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] }]);
   });
 
   it('keeps every security header the public site sends, unchanged but for the API it connects to', async () => {
