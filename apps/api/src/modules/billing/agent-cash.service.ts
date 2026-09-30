@@ -1,7 +1,7 @@
 import type { OnAudit } from '../../lib/audit-writer';
 import { Prisma, type MmgAgentPayment, type PrismaClient } from '@prisma/client';
 import type { BillingService } from './billing.service';
-import { resolveSan } from './san.service';
+import { resolveSan, subscriptionOwnerTenant } from './san.service';
 import { validateSanShape } from './san';
 import { captureMmgPayer } from '../integrity/capture-hooks';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
@@ -288,7 +288,7 @@ export class AgentCashService {
     }
 
     // 4. Resolve the SAN platform-wide.
-    const res = await resolveSan(this.prisma, p.sanRaw);
+    const res = await resolveSan(this.prisma, p.sanRaw, { tenantId: row.tenantId }); // [AX363-F2] this tenant's accounts only
     if (!res.ok) return this.suspense(row.id, res.code);
 
     // 5. Credit through the SAME pipeline every rail uses.
@@ -387,27 +387,43 @@ export class AgentCashService {
 
       const payment = await tx.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
 
+      // [AX363-F1] Every credit is the credit OF one provider transaction: its
+      // identity must exist and agree with this observation, and the CAS
+      // below is the one gate. Missing or disagreeing, nothing is credited
+      // and the payment stays held for a person. There is no per-observation
+      // fallback key that could credit the same cash a second time.
+      const providerPaymentId = payment.providerPaymentId;
+      if (!providerPaymentId) throw new Error('PROVIDER_IDENTITY_MISSING');
+      const identity = await tx.providerPayment.findUniqueOrThrow({ where: { id: providerPaymentId } });
+      if (Number(identity.amount) !== Number(payment.amount) || identity.currencyCode !== payment.currencyCode) {
+        throw new Error('PROVIDER_ID_CONFLICT');
+      }
+      // [AX363-F2] The destination belongs to the observation's tenant, read
+      // here whatever query extension the caller's client carries: money
+      // never crosses a tenant.
+      if ((await subscriptionOwnerTenant(tx, requestedSubscriptionId)) !== payment.tenantId) {
+        throw new Error('DESTINATION_TENANT_MISMATCH');
+      }
+
       // [M-18] THE single CAS: exactly one observation of a provider
       // transaction ever credits. A concurrent channel, or a later attach of
       // the unmatched original, waits on this row, re-reads the predicate
       // after the winner commits and gets count=0 — and becomes a reconciled
       // observation of the credit that won. No money moves for it.
-      if (payment.providerPaymentId) {
-        const won = await tx.providerPayment.updateMany({
-          where: { id: payment.providerPaymentId, status: 'OPEN' },
-          data: { status: 'CREDITED', creditedPaymentId: paymentId, subscriptionId: requestedSubscriptionId, creditedAt: new Date() },
+      const won = await tx.providerPayment.updateMany({
+        where: { id: providerPaymentId, status: 'OPEN' },
+        data: { status: 'CREDITED', creditedPaymentId: paymentId, subscriptionId: requestedSubscriptionId, creditedAt: new Date() },
+      });
+      if (won.count !== 1) {
+        const credited = await tx.providerPayment.findUniqueOrThrow({ where: { id: providerPaymentId } });
+        const original = credited.creditedPaymentId ?? 'unknown';
+        await tx.mmgAgentPayment.updateMany({
+          where: { id: paymentId, status: resolution.expectedStatus },
+          data: { status: 'RECONCILED', note: `duplicate of ${original} (already credited)`, resolvedAt: new Date() },
         });
-        if (won.count !== 1) {
-          const identity = await tx.providerPayment.findUniqueOrThrow({ where: { id: payment.providerPaymentId } });
-          const original = identity.creditedPaymentId ?? 'unknown';
-          await tx.mmgAgentPayment.updateMany({
-            where: { id: paymentId, status: resolution.expectedStatus },
-            data: { status: 'RECONCILED', note: `duplicate of ${original} (already credited)`, resolvedAt: new Date() },
-          });
-          // [ADM-002] The caller's audit row commits with the reconciliation.
-          await onAudit?.(tx, { paymentId, subscriptionId: identity.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original });
-          return { paymentId, subscriptionId: identity.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original };
-        }
+        // [ADM-002] The caller's audit row commits with the reconciliation.
+        await onAudit?.(tx, { paymentId, subscriptionId: credited.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original });
+        return { paymentId, subscriptionId: credited.subscriptionId ?? requestedSubscriptionId, credited: false, duplicateOf: original };
       }
 
       // Heal the one legacy crash window from the pre-atomic implementation:
@@ -432,7 +448,8 @@ export class AgentCashService {
           // second key merely because an admin selects another subscription —
           // and [M-18] the key is the provider transaction's, so the ledger's
           // own uniqueness refuses a second credit even if the CAS were bypassed.
-          eventKey: payment.providerPaymentId ? `agent-cash:pp:${payment.providerPaymentId}` : `agent-cash:${paymentId}`,
+          // [AX363-F1] Always: there is no per-observation key any more.
+          eventKey: `agent-cash:pp:${providerPaymentId}`,
         });
       }
 
@@ -447,8 +464,8 @@ export class AgentCashService {
         },
       });
       if (finalized.count !== 1) throw new Error('PAYMENT_FINALIZE_CONFLICT');
-      if (payment.providerPaymentId && subscriptionId !== requestedSubscriptionId) {
-        await tx.providerPayment.update({ where: { id: payment.providerPaymentId }, data: { subscriptionId } });
+      if (subscriptionId !== requestedSubscriptionId) {
+        await tx.providerPayment.update({ where: { id: providerPaymentId }, data: { subscriptionId } });
       }
       // [ADM-002] The caller's audit row is the last statement of the credit.
       await onAudit?.(tx, { paymentId: payment.id, subscriptionId, credited: !legacy, finalStatus: resolution.finalStatus });
@@ -592,6 +609,12 @@ export class AgentCashService {
   async attach(paymentId: string, subscriptionId: string, adminId: string, onAudit?: OnAudit): Promise<IngestResult> {
     const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
     if (row.status !== 'UNMATCHED') throw new Error('NOT_UNMATCHED');
+    // [AX363-F1] The provider identity first, resolved (or minted) and
+    // validated exactly as ingest does: a payment whose delivery died before
+    // it was linked, and that the repair pass then gave up on, is credited
+    // only THROUGH its identity. A conflict keeps it held for a person.
+    const identity = await this.identityFor(row, row.channel);
+    if (identity.conflict) throw new Error('PROVIDER_ID_CONFLICT');
     return this.creditAtomic(paymentId, subscriptionId, {
       amount: Number(row.amount),
       channel: row.channel,

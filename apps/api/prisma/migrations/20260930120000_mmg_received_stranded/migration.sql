@@ -18,6 +18,13 @@
 --
 -- Metadata only: a nullable column and a new column default, no rewrite, no
 -- backfill. Existing rows keep their createdAt.
+--
+-- [AX363-F3] The ALTER still needs an ACCESS EXCLUSIVE lock on a live payments
+-- table. Waiting for it behind a long or idle transaction would queue every
+-- payment INSERT and credit UPDATE behind this migration, so the wait is
+-- bounded here (set in THIS migration, never inherited from an earlier one):
+-- under contention the deploy fails fast and is retried once it clears.
+SET lock_timeout = '10s';
 
 -- AlterTable
 ALTER TABLE "mmg_agent_payments" ADD COLUMN     "finishAttemptAt" TIMESTAMP(3),

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -73,6 +75,37 @@ async function makeVendorSub(opts: { san?: boolean } = {}) {
   return { sub, san };
 }
 
+/** [AX363-F2] An account of ANOTHER tenant, retained and inactive: the data a
+ *  single-active-tenant deployment may still hold. */
+const tenantIds: string[] = [];
+async function makeForeignVendorSub() {
+  seq += 1;
+  const tenant = await prisma.tenant.create({ data: { name: `Retained operator ${seq}`, slug: `retained-${nanoid(8).toLowerCase()}`, isActive: false } });
+  tenantIds.push(tenant.id);
+  const user = await prisma.user.create({
+    data: { tenantId: tenant.id, phone: `+${phoneBase + seq}`, firstName: 'Foreign', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+  });
+  userIds.push(user.id);
+  const owner = await prisma.vendorOwner.create({ data: { userId: user.id } });
+  const vendor = await prisma.vendor.create({
+    data: {
+      tenantId: tenant.id, ownerId: owner.id, name: `Foreign Kitchen ${seq}`, slug: `foreign-${nanoid(8).toLowerCase()}`,
+      vendorType: 'RESTAURANT', phone: `+${phoneBase + 700_000 + seq}`,
+      addressLine1: '1 Elsewhere St', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
+    },
+  });
+  vendorIds.push(vendor.id);
+  const sub = await prisma.subscription.create({
+    data: {
+      vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 2100, billingMethod: 'CASH',
+      currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000),
+    },
+  });
+  subIds.push(sub.id);
+  return { sub, san: await ensureSan(prisma, sub.id) };
+}
+
 const txnId = () => { const id = `RECV-${nanoid(10)}`; externalIds.push(id); providerTxnIds.push(id.toUpperCase()); return id; };
 const receiptNo = () => { const r = `RCPT-${nanoid(10)}`; externalIds.push(`MANUAL:${r}`); providerTxnIds.push(r.toUpperCase()); return r; };
 
@@ -112,6 +145,41 @@ const strandedWebhook = async (san: string, amount = 2100) => {
   const txn = txnId();
   return { ...(await strandedBy(webhookPayment(txn, san, amount))), txn };
 };
+
+/** [AX363-F1] The delivery dies BEFORE its provider identity is linked: every
+ *  identity lookup fails while `down` says so. */
+type IdentityFor = (row: unknown, channel: string) => Promise<unknown>;
+const identityProto = AgentCashService.prototype as unknown as { identityFor: IdentityFor };
+const realIdentityFor = identityProto.identityFor;
+function identityOutage() {
+  const state = { down: true };
+  const spy = vi.spyOn(identityProto, 'identityFor').mockImplementation(async function (this: unknown, row: unknown, channel: string) {
+    if (state.down) throw new Error('CONNECTION_LOST');
+    return realIdentityFor.call(this, row, channel);
+  });
+  return { end: () => { state.down = false; spy.mockRestore(); } };
+}
+/** A payment whose delivery died before its identity was linked, and that the
+ *  repair pass then gave up on: UNMATCHED / UNFINISHED, with no identity. */
+async function givenUpWithoutIdentity(san: string) {
+  const txn = txnId();
+  const outage = identityOutage();
+  let id: string;
+  try {
+    await expect(svc.ingest(webhookPayment(txn, san))).rejects.toThrow('CONNECTION_LOST');
+    id = (await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { channel_externalId: { channel: 'MMG_AGENT_WEBHOOK', externalId: txn } } })).id;
+    await savedAgo(id, STRANDED_GIVE_UP_AFTER_MS + 60_000);
+    expect(await svc.finishStrandedPayments({ paymentIds: [id] })).toEqual({ finished: [], failed: [id], suspensed: [] });
+    await lastTriedAgo([id], STRANDED_RETRY_BACKOFF_MS + 60_000);
+    expect(await svc.finishStrandedPayments({ paymentIds: [id] })).toEqual({ finished: [], failed: [], suspensed: [id] });
+  } finally {
+    outage.end();
+  }
+  const held = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id } });
+  expect({ status: held.status, failureCode: held.failureCode, providerPaymentId: held.providerPaymentId })
+    .toEqual({ status: 'UNMATCHED', failureCode: 'UNFINISHED', providerPaymentId: null });
+  return { id, txn };
+}
 
 const dbNow = async () => (await prisma.$queryRaw<Array<{ now: Date }>>`SELECT now() AS now`)[0]!.now;
 /** Saved this long ago, on the database clock. */
@@ -204,6 +272,7 @@ afterAll(async () => {
   await prisma.identityKey.deleteMany({ where: { accountId: { in: userIds } } });
   await prisma.identityClusterMember.deleteMany({ where: { accountId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
   await app.close();
   await prisma.$disconnect();
 });
@@ -497,5 +566,92 @@ describe('[MMG-RECV · fair] the repair pass: never tried first, then the least 
     // A person resolves it through the same credit pipeline: once.
     expect(await svc.attach(s.id, sub.id, 'admin-resolver')).toMatchObject({ status: 'accepted', paymentId: s.id });
     expect(await money(sub.id, [s.txn])).toEqual({ credits: 1, ledger: 1, observations: 1 });
+  });
+});
+
+describe('[AX363] every credit goes through the provider identity and stays inside its tenant', () => {
+  it('[F1] a payment whose delivery died before its identity was linked, given up and then attached by a person, and the same MMG transaction keyed from the portal: exactly one credit', async () => {
+    const { sub, san } = await makeVendorSub();
+    const { id, txn } = await givenUpWithoutIdentity(san);
+    externalIds.push(`MANUAL:${txn}`);
+    const attached = await svc.attach(id, sub.id, 'admin-resolver');
+    const keyed = await svc.ingest(manualPayment(txn, san, 'admin-portal'), adminAudit('admin-portal'));
+    expect([attached.status, keyed.status]).toEqual(['accepted', 'reconciled']);
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id } });
+    expect(row.status).toBe('RESOLVED');
+    expect(row.providerPaymentId).not.toBeNull();
+    expect(await money(sub.id, [txn, `MANUAL:${txn}`])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
+  it('[F1] the same, with the attach and the other channel landing together: exactly one credit', async () => {
+    const { sub, san } = await makeVendorSub();
+    const { id, txn } = await givenUpWithoutIdentity(san);
+    externalIds.push(`MANUAL:${txn}`);
+    const answers = await within(Promise.all([
+      svc.attach(id, sub.id, 'admin-resolver'),
+      svc.ingest(manualPayment(txn, san, 'admin-portal'), adminAudit('admin-portal')),
+    ]));
+    expect(answers.map((a) => a.status).sort()).toEqual(['accepted', 'reconciled']);
+    expect(await money(sub.id, [txn, `MANUAL:${txn}`])).toEqual({ credits: 1, ledger: 1, observations: 2 });
+  });
+
+  it('[F1] the shared credit refuses an observation with no provider identity: nothing is credited and it stays held', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const row = await prisma.mmgAgentPayment.create({
+      data: { channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, sanRaw: san, amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {} },
+    });
+    await expect(svc.credit(row.id, sub.id, { amount: 2100, channel: 'MMG_AGENT_WEBHOOK', externalId: txn })).rejects.toThrow('PROVIDER_IDENTITY_MISSING');
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('RECEIVED');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it('[F1] the shared credit refuses an observation whose identity disagrees with it: nothing is credited', async () => {
+    const { sub, san } = await makeVendorSub();
+    const txn = txnId();
+    const identity = await prisma.providerPayment.create({ data: { provider: 'MMG', providerTxnId: txn.toUpperCase(), amount: 9999, currencyCode: 'GYD' } });
+    const row = await prisma.mmgAgentPayment.create({
+      data: { channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, providerPaymentId: identity.id, sanRaw: san, amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'RECEIVED', raw: {} },
+    });
+    await expect(svc.credit(row.id, sub.id, { amount: 2100, channel: 'MMG_AGENT_WEBHOOK', externalId: txn })).rejects.toThrow('PROVIDER_ID_CONFLICT');
+    expect((await prisma.providerPayment.findUniqueOrThrow({ where: { id: identity.id } })).status).toBe('OPEN');
+    expect(await money(sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it("[F2] a recovery whose SAN belongs to another tenant moves nothing there: the payment is held in suspense for a person, the other tenant's wallet untouched", async () => {
+    const foreign = await makeForeignVendorSub();
+    const txn = txnId();
+    // Saved in this tenant; the delivery died before it judged anything.
+    const outage = identityOutage();
+    try {
+      await expect(svc.ingest(webhookPayment(txn, foreign.san))).rejects.toThrow('CONNECTION_LOST');
+    } finally {
+      outage.end();
+    }
+    const saved = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { channel_externalId: { channel: 'MMG_AGENT_WEBHOOK', externalId: txn } } });
+    expect(saved.tenantId).toBe('swift-default');
+    await savedAgo(saved.id, STRANDED_AFTER_MS + 60_000);
+    expect(await svc.finishStrandedPayments({ paymentIds: [saved.id] })).toEqual({ finished: [saved.id], failed: [], suspensed: [] });
+    const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: saved.id } });
+    expect({ status: row.status, failureCode: row.failureCode, subscriptionId: row.subscriptionId }).toEqual({ status: 'UNMATCHED', failureCode: 'SAN_UNKNOWN', subscriptionId: null });
+    expect(await money(foreign.sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+    expect(await prisma.prepaidBalance.findUnique({ where: { subscriptionId: foreign.sub.id } })).toBeNull();
+  });
+
+  it("[F2] a person cannot attach a payment to another tenant's account: refused, nothing moves", async () => {
+    const foreign = await makeForeignVendorSub();
+    const txn = txnId();
+    const parked = await svc.ingest(webhookPayment(txn, generateSan())); // nobody holds it: suspense
+    expect(parked.status).toBe('received_unmatched');
+    await expect(svc.attach(parked.paymentId, foreign.sub.id, 'admin-resolver')).rejects.toThrow('DESTINATION_TENANT_MISMATCH');
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: parked.paymentId } })).status).toBe('UNMATCHED');
+    expect(await money(foreign.sub.id, [txn])).toEqual({ credits: 0, ledger: 0, observations: 1 });
+  });
+
+  it('[F3] the migration waits at most 10 s for its lock on the live payments table, set in the migration itself', () => {
+    const sql = readFileSync(join(process.cwd(), 'prisma/migrations/20260930120000_mmg_received_stranded/migration.sql'), 'utf8');
+    const bound = sql.indexOf("SET lock_timeout = '10s';");
+    expect(bound).toBeGreaterThan(-1);
+    expect(bound).toBeLessThan(sql.indexOf('ALTER TABLE'));
   });
 });
