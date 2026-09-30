@@ -381,7 +381,7 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 **You:**
 
-1. **Switch app** (on the customer **Profile** it is the **Earn with Swift** card), then **Swift Driver**. The top of the screen must say **Swift Rider**: only a rider is offered deliveries. (If it asks **How are you working today?**, tap **Deliver orders**. If it says **Swift Driver**, stop and tell the coordinator.) Tap **GO**. You see **You're online**. Stay on this screen.
+1. **Switch app** (in the store app it is on the **Account** tab; on the customer **Profile** it is the **Earn with Swift** card), then **Swift Driver**. The top of the screen must say **Swift Rider**: only a rider is offered deliveries. (If it asks **How are you working today?**, tap **Deliver orders**. If it says **Swift Driver**, stop and tell the coordinator.) Tap **GO**. You see **You're online**. Stay on this screen.
 
 **Coordinator:**
 
@@ -408,7 +408,7 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 **Coordinator:**
 
 ```bash
-./deploy/phone-helper.sh customer codes --order <order id>    # prints: door PIN NNNN
+./deploy/phone-helper.sh customer codes --order <order id>    # prints: door PIN NNNNNN
 ```
 
 **You:**
@@ -544,7 +544,7 @@ All paths are in build 8 (`c950da9b`), under `apps/mobile/src/` unless they star
 - `Your order has arrived` — DeliveryScreen.tsx:1587
 
 **Store**
-- `Switch app` — the sheet's title, components/RoleSwitcherSheet.tsx:146; shown as a control in the store app's header (modules/vendor/shared.tsx:632) and on the mover Account screen (modules/mover/screens/MoverAccountScreen.tsx:231). On a signed-in customer Profile the visible entry is `Earn with Swift`; modules/profile/screens/ProfileScreen.tsx:136 is the guest-only row.
+- `Switch app` — the sheet's title, components/RoleSwitcherSheet.tsx:146; a row on the live store's `Account` tab (modules/vendor/screens/VendorAccountScreen.tsx:181; tab label modules/vendor/VendorStack.tsx:238) and on the mover Account screen (modules/mover/screens/MoverAccountScreen.tsx:231). The store header's `Switch app` (modules/vendor/shared.tsx:632) shows only during setup, a load error or a paused account. On a signed-in customer Profile the visible entry is `Earn with Swift`; modules/profile/screens/ProfileScreen.tsx:136 is the guest-only row.
 - `Earn with Swift` — ProfileScreen.tsx:424
 - `Swift Business` — components/RoleSwitcherSheet.tsx:50
 - `ACCEPT ORDER` — modules/vendor/NewOrderTakeover.tsx:210
