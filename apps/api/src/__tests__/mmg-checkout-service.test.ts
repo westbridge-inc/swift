@@ -1,3 +1,5 @@
+import { readFeePaymentDecision } from '../modules/billing/fee-payment-authority';
+import { readDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -207,6 +209,7 @@ afterAll(async () => {
   await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+  await app.prisma.cardSession.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
@@ -1303,4 +1306,127 @@ describe('what a partner may read about a checkout', () => {
     await app.prisma.mmgCheckoutIntent.update({ where: { id: checkout.ref }, data: { status: 'CONFIRMING' } });
     expect((await start(s, k)).checkout).toMatchObject({ ref: checkout.ref, status: 'CONFIRMING', checkoutUrl: null });
   });
+});
+
+
+describe('shared confirmation authority fences a new MMG page', () => {
+  it('the shared PayActions hint is read-only and fails closed on missing clock coverage and undiscovered uncertainty', async () => {
+    const s = await makeSub();
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: false, reason: 'BILLING_REVIEW_REQUIRED' });
+    expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    await readDunningClock(app.prisma, s.subId);
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: true, reason: null });
+    await uncertainCard(s);
+    const before = await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: s.subId } });
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    expect(await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: s.subId } })).toEqual(before);
+    await expect(start(s)).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: s.subId, status: 'ACTIVE' } })).toBe(1);
+  });
+
+  async function uncertainCard(s: Awaited<ReturnType<typeof makeSub>>, session = false) {
+    const sub = await subWithRelations(s.subId);
+    if (session) return app.prisma.cardSession.create({ data: { subscriptionId: s.subId, userId: s.userId,
+      purpose: 'PAY_NOW', provider: 'simulator', environment: 'sandbox', providerAccount: 'synthetic-clock',
+      stateHash: 'a'.repeat(64), amount: 2100, currencyCode: 'GYD', periodStart: sub.nextBillingDate,
+      status: 'OPEN', failureCode: 'REQUIRES_ACTION', expiresAt: new Date(Date.now() + DAY) } });
+    return app.prisma.subscriptionPayment.create({ data: { subscriptionId: s.subId, amount: 2100, paymentMethod: 'CARD',
+      status: 'UNKNOWN', periodStart: sub.nextBillingDate, periodEnd: new Date(+sub.nextBillingDate + 7 * DAY),
+      failureRaw: { providerEffect: 'AUTHORIZED' } } });
+  }
+  it.each(['legacy-card', 'card-3ds', 'mmg-pending', 'mmg-held', 'mmg-expired'] as const)(
+    '%s cannot authorize a second payable MMG instruction', async (kind) => {
+      const s = await makeSub();
+      let originalCount = 0;
+      if (kind === 'legacy-card' || kind === 'card-3ds') await uncertainCard(s, kind === 'card-3ds');
+      else if (kind === 'mmg-pending') {
+        const sub = await subWithRelations(s.subId);
+        await app.prisma.subscriptionPayment.create({ data: { subscriptionId: s.subId, amount: 2100,
+          paymentMethod: 'MOBILE_MONEY', status: 'PENDING', externalRef: tx('HELDPRIOR'), clientKey: key(),
+          periodStart: sub.nextBillingDate, periodEnd: new Date(+sub.nextBillingDate + 7 * DAY), failureRaw: { providerEffect: 'AUTHORIZED' } } });
+      } else {
+        const first = await start(s);
+        await app.prisma.mmgCheckoutIntent.update({ where: { id: first.checkout.ref }, data: { status: kind === 'mmg-held' ? 'HELD' : 'EXPIRED' } });
+        originalCount = 1;
+      }
+      await expect(start(s)).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(originalCount);
+      expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: s.subId, status: 'ACTIVE' } })).toBeGreaterThan(0);
+      expect((await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: s.subId } })).pausedAt).not.toBeNull();
+    });
+
+  const barrier = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    return { promise, release };
+  };
+  it('a card uncertainty committed during async page sealing wins before MMG reservation', async () => {
+    const s = await makeSub();
+    const keys = getKeyProvider()!;
+    const wrap = keys.wrapDek.bind(keys);
+    const entered = barrier(); const release = barrier();
+    const spy = vi.spyOn(keys, 'wrapDek').mockImplementationOnce(async (dek) => {
+      entered.release(); await release.promise; return wrap(dek);
+    });
+    const pending = start(s).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    try {
+      await entered.promise;
+      await uncertainCard(s);
+      release.release();
+      expect((await pending).error).toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    } finally { release.release(); await pending; spy.mockRestore(); }
+  });
+
+  it.each(['rate', 'wallet', 'period'] as const)('a changed %s during sealing rejects the stale quote before reservation', async (kind) => {
+    const s = await makeSub();
+    const keys = getKeyProvider()!;
+    const wrap = keys.wrapDek.bind(keys);
+    const entered = barrier(); const release = barrier();
+    const spy = vi.spyOn(keys, 'wrapDek').mockImplementationOnce(async (dek) => {
+      entered.release(); await release.promise; return wrap(dek);
+    });
+    const pending = start(s).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    try {
+      await entered.promise;
+      if (kind === 'rate') await app.prisma.subscription.update({ where: { id: s.subId }, data: { weeklyRate: 2500 } });
+      else if (kind === 'wallet') await app.prisma.prepaidBalance.update({ where: { subscriptionId: s.subId }, data: { balance: 600 } });
+      else {
+        const sub = await subWithRelations(s.subId);
+        await app.prisma.subscription.update({ where: { id: s.subId }, data: {
+          nextBillingDate: new Date(+sub.nextBillingDate + 7 * DAY),
+          currentPeriodStart: sub.nextBillingDate, currentPeriodEnd: new Date(+sub.nextBillingDate + 7 * DAY),
+        } });
+      }
+      release.release();
+      expect((await pending).error).toMatchObject({ code: 'PAYMENT_QUOTE_CHANGED' });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    } finally { release.release(); await pending; spy.mockRestore(); }
+    expect((await start(s)).checkout.amountGyd).toBe(kind === 'rate' ? 2500 : kind === 'wallet' ? 1500 : 2100);
+  });
+  it.each(['same-key', 'new-key'] as const)('a %s replay keeps its intent but cannot emit a URL after a cross-rail hold wins during unseal', async (kind) => {
+    const s = await makeSub();
+    const originalKey = key();
+    const first = await start(s, originalKey);
+    const keys = getKeyProvider()!;
+    const unwrap = keys.unwrapDek.bind(keys);
+    const entered = barrier(); const release = barrier();
+    const spy = vi.spyOn(keys, 'unwrapDek').mockImplementationOnce(async (dek) => {
+      entered.release(); await release.promise; return unwrap(dek);
+    });
+    const replayKey = kind === 'same-key' ? originalKey : key();
+    const pending = start(s, replayKey).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    try {
+      await entered.promise;
+      await uncertainCard(s);
+      release.release();
+      expect((await pending).error).toMatchObject({ code: 'PAYMENT_CONFIRMING', details: { ref: first.checkout.ref } });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
+      expect(await app.prisma.mmgCheckoutKey.findFirst({ where: { createdByUserId: s.userId, clientKey: replayKey } }))
+        .toMatchObject({ intentId: first.checkout.ref });
+      expect((await intentOf(first.checkout.ref)).status).toBe('OPEN');
+    } finally { release.release(); await pending; spy.mockRestore(); }
+  });
+
 });

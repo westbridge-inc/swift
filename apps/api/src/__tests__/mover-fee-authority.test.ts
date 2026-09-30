@@ -1,3 +1,5 @@
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { activeOverdueMs, currentDunningClock, projectDunningClock } from '../modules/billing/dunning-clock';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -26,6 +28,7 @@ const run = nanoid(7);
 const ids: string[] = [];
 const tenantIds: string[] = [];
 const rateIds: string[] = [];
+const orphanSubscriptionIds: string[] = [];
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test-mover-fee-authority');
 let app: FastifyInstance;
 let billing: BillingService;
@@ -115,7 +118,13 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await sys(async () => {
+    const originals = await app.prisma.subscription.findMany({ where: { OR: [
+      { rider: { userId: { in: ids } } }, { driver: { userId: { in: ids } } },
+    ] }, select: { id: true } });
+    orphanSubscriptionIds.push(...originals.map((s) => s.id));
+    await cleanupPayerBillingClocks(app.prisma, ids);
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: orphanSubscriptionIds } } });
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: ids } } });
     await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: ids } }] }, 'test-mover-fee-authority-cleanup');
     await app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
@@ -218,14 +227,47 @@ describe('bounded finance decision with original money retained', () => {
     expect((await sys(() => resolveMoverFeeAuthority(app.prisma, a)))?.sourceSubscriptionIds).toEqual(a.authority.sourceSubscriptionIds);
   });
 
-  it('a clean legacy pair converts, pays once at 8,000 and resumes both roles without inventing an alias stop', async () => {
+  it('an accrued clock prevents raw whole-payer deletion and preserves the original authority and history', async () => {
     const retained = await legacy('empty', 'swift-default', 9);
-    await sys(() => app.prisma.user.delete({ where: { id: retained.userId } }));
+    await sys(async () => {
+      const clock = await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { moverPayerUserId: retained.userId } });
+      const authority = await app.prisma.moverFeeAuthority.findUniqueOrThrow({ where: { userId: retained.userId }, include: { members: true, decision: true } });
+      const sources = await app.prisma.subscription.findMany({ where: { id: { in: retained.authority.sourceSubscriptionIds } }, orderBy: { id: 'asc' } });
+      expect(clock.epoch).toBe(1);
+      expect(activeOverdueMs(clock, new Date())).toBeGreaterThanOrEqual(48 * 3_600_000);
+      expect(await app.prisma.paymentConfirmationHold.count({ where: { clockId: clock.id } })).toBe(0);
+      expect(await app.prisma.billingFeeNotice.count({ where: { clockId: clock.id } })).toBe(0);
+      await expect(app.prisma.user.delete({ where: { id: retained.userId } })).rejects.toThrow(/foreign key constraint/i);
+      expect(await app.prisma.user.count({ where: { id: retained.userId } })).toBe(1);
+      expect(await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { id: clock.id } })).toEqual(clock);
+      expect(await app.prisma.moverFeeAuthority.findUniqueOrThrow({ where: { userId: retained.userId }, include: { members: true, decision: true } })).toEqual(authority);
+      expect(await app.prisma.subscription.findMany({ where: { id: { in: retained.authority.sourceSubscriptionIds } }, orderBy: { id: 'asc' } })).toEqual(sources);
+    });
+  });
+
+  it('a retained pre-clock orphan stays outside trial conversion and cannot mint billing authority', async () => {
+    const old = await dual();
+    await sys(async () => {
+      const start = new Date(Date.now() - 9 * DAY);
+      const end = new Date(start.getTime() + 7 * DAY);
+      const source = await app.prisma.subscription.create({ data: { riderId: old.riderId, type: 'DELIVERY_RIDER',
+        status: 'TRIAL', isTrialActive: true, weeklyRate: 6000, currentPeriodStart: start,
+        currentPeriodEnd: end, nextBillingDate: end, trialEndDate: end } });
+      orphanSubscriptionIds.push(source.id);
+      expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: source.id } })).toBe(0);
+      await app.prisma.user.delete({ where: { id: old.userId } });
+      await expect(app.prisma.$transaction((tx) => currentDunningClock(tx, source.id))).rejects.toThrow(/ownership check/);
+      await subscriptions.convertExpiredTrials();
+      expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: source.id } })).status).toBe('TRIAL');
+      expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: source.id } })).toBe(0);
+    });
+  });
+
+  it('a clean legacy pair converts, pays once at 8,000 and resumes both roles without inventing an alias stop', async () => {
     const f = await legacy('empty', 'swift-default', 9);
     await sys(async () => {
       await subscriptions.startTrialForDriver(f.driverId);
       await subscriptions.convertExpiredTrials();
-      expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: retained.rider.id } })).status).toBe('TRIAL');
       await billing.recordTopUp(f.driver.id, 20_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
       expect(await billing.billSubscription(await ready(f.driver))).toBe('succeeded');
       const captures = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, status: 'CAPTURED' } });
@@ -269,8 +311,39 @@ describe('bounded finance decision with original money retained', () => {
     expect(await sys(async () => billing.billSubscription(await ready(f.rider)))).toBe('skipped');
   });
 
+  it('a canonical switch to exact broader paid coverage advances the one stable obligation through its typed proof', async () => {
+    const f = await legacy('paid');
+    const before = await sys(() => app.prisma.billingDunningClock.findUniqueOrThrow({ where: { moverPayerUserId: f.userId } }));
+    const target = before.subscriptionId === f.driver.id ? f.rider : f.driver;
+    const coveredStart = new Date(target.currentPeriodStart.getTime() - DAY);
+    const coveredEnd = new Date(target.currentPeriodEnd.getTime() + 7 * DAY);
+    const ref = `synthetic-covered:${target.id}`;
+    await sys(async () => {
+      await app.prisma.subscription.update({ where: { id: target.id }, data: { currentPeriodStart: coveredStart,
+        currentPeriodEnd: coveredEnd, nextBillingDate: coveredEnd } });
+      await app.prisma.subscriptionPayment.create({ data: { subscriptionId: target.id, amount: Number(target.weeklyRate),
+        paymentMethod: 'CASH', status: 'CAPTURED', paidAt: coveredStart, externalRef: ref, periodStart: coveredStart, periodEnd: coveredEnd } });
+      await app.prisma.billingEvent.create({ data: { subscriptionId: target.id, type: 'CHARGE_SUCCESS', amount: Number(target.weeklyRate),
+        currencyCode: 'GYD', paymentRef: ref, idempotencyKey: `success:${target.id}:${coveredStart.toISOString().slice(0, 10)}` } });
+      f.authority = (await app.prisma.$transaction((tx) => lockMoverFeeAuthority(tx, f)))!;
+    });
+    const action = await approvedDecision(f, { ...decisionBody(f), canonicalSubscriptionId: target.id });
+    const answer = await action.apply();
+    expect(answer.statusCode, answer.body).toBe(200);
+    await sys(async () => {
+      const clock = await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { moverPayerUserId: f.userId } });
+      expect(clock).toMatchObject({ id: before.id, subscriptionId: target.id, epoch: before.epoch + 1,
+        dueAt: coveredEnd, runningSince: coveredEnd, elapsedMs: 0n, pausedAt: null });
+      const transition = await app.prisma.billingObligationTransition.findUniqueOrThrow({ where: { clockId_toEpoch: { clockId: clock.id, toEpoch: clock.epoch } } });
+      expect(transition).toMatchObject({ kind: 'PAID', fromSubscriptionId: before.subscriptionId, subscriptionId: target.id,
+        fromEpoch: before.epoch, fromDue: before.dueAt, toDue: coveredEnd });
+      expect(await app.prisma.billingDunningClock.count({ where: { moverPayerUserId: f.userId } })).toBe(1);
+    });
+  });
+
   it.each(['taxi-source', 'delivery-source'] as const)('paid history resolves through two admins onto %s, preserves amounts and periods, and rejects replay', async (choice) => {
     const f = await legacy('paid');
+    const beforeClock = await sys(() => app.prisma.billingDunningClock.findUniqueOrThrow({ where: { moverPayerUserId: f.userId } }));
     const canonical = choice === 'taxi-source' ? f.driver : f.rider;
     const alias = choice === 'taxi-source' ? f.rider : f.driver;
     const before = await sys(() => app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds } }, orderBy: { id: 'asc' } }));
@@ -285,6 +358,10 @@ describe('bounded finance decision with original money retained', () => {
       expect(await app.prisma.billingEvent.count({ where: { subscriptionId: alias.id, type: 'CHARGE_ATTEMPT' } })).toBe(0);
       expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: canonical.id } })).weeklyRate)).toBe(8000);
       expect((await resolveMoverFeeAuthority(app.prisma, f))?.canonicalSubscriptionId).toBe(canonical.id);
+      const clock = await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { moverPayerUserId: f.userId } });
+      expect(clock.id).toBe(beforeClock.id); expect(clock.epoch).toBe(beforeClock.epoch);
+      expect(clock.elapsedMs).toBe(beforeClock.elapsedMs); expect(clock.subscriptionId).toBe(canonical.id);
+      expect(await app.prisma.billingDunningClock.count({ where: { moverPayerUserId: f.userId } })).toBe(1);
       expect(await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds } }, orderBy: { id: 'asc' } })).toEqual(before);
       const original = await app.prisma.subscription.findUniqueOrThrow({ where: { id: f.rider.id } });
       expect(original.currentPeriodEnd).toEqual(f.rider.currentPeriodEnd);
@@ -304,6 +381,22 @@ describe('bounded finance decision with original money retained', () => {
     expect(response.statusCode, response.body).toBe(409);
     expect(response.json().error.code).toBe('MOVER_FEE_FINANCE_ACTION_REQUIRED');
     expect((await sys(() => resolveMoverFeeAuthority(app.prisma, f)))?.state).toBe('FINANCE_HOLD');
+  });
+
+  it('derived timer projection preserves finance acknowledgment, while a new manual stop re-holds', async () => {
+    const f = await legacy('paid'); const action = await approvedDecision(f);
+    const resolved = await action.apply(); expect(resolved.statusCode, resolved.body).toBe(200);
+    await sys(async () => {
+      await app.prisma.subscription.update({ where: { id: f.rider.id }, data: { nextRetryAt: new Date(), gracePeriodEnd: new Date() } });
+      expect((await resolveMoverFeeAuthority(app.prisma, f))?.state).toBe('ACTIVE');
+      await app.prisma.$transaction(async (tx) => {
+        const clock = await currentDunningClock(tx, f.driver.id);
+        await projectDunningClock(tx, clock, new Date());
+      });
+      expect((await resolveMoverFeeAuthority(app.prisma, f))?.state).toBe('ACTIVE');
+      await app.prisma.subscription.update({ where: { id: f.rider.id }, data: { autoRenew: false } });
+      expect((await resolveMoverFeeAuthority(app.prisma, f))?.state).toBe('FINANCE_HOLD');
+    });
   });
 
   it('a capture without exact paid-period success evidence cannot retire an old obligation', async () => {

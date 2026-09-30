@@ -1,3 +1,4 @@
+import { lockFeePaymentDecision } from './fee-payment-authority';
 import { beginConfirmationInTx, lockBillingAuthority, resolveConfirmationInTx } from './dunning-clock';
 import { lockFeeCollectionAuthority, lockSubscriptionPayer } from '../subscription/mover-fee-authority';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -191,9 +192,12 @@ export class CardRailService {
     const expiresAt = new Date(now.getTime() + CARD_SESSION_TTL_MS);
     let session: CardSession;
     try {
-      session = await this.prisma.$transaction(async (tx) => {
+      const reserved = await this.prisma.$transaction(async (tx) => {
         const authority = await lockFeeCollectionAuthority(tx, sub.id);
-        if (!authority.allowed) throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before opening another payment page.');
+        if (priced) {
+          const decision = await lockFeePaymentDecision(tx, sub.id, new Date());
+          if (!decision.allowed) return { kind: 'blocked' as const };
+        } else if (!authority.allowed) throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before opening another payment page.');
         if (priced) {
           const current = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id } });
           // A read-only quote can project revision zero before this same
@@ -227,8 +231,10 @@ export class CardRailService {
         },
         });
         if (created.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, sub.id, { cardSessionId: created.id }, 'CARD_PAGE_PENDING', now);
-        return created;
+        return { kind: 'reserved' as const, session: created };
       });
+      if (reserved.kind === 'blocked') throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.');
+      session = reserved.session;
     } catch (error) {
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
         // A concurrent retry with the same key won: answer its session. Otherwise
@@ -269,7 +275,7 @@ export class CardRailService {
       where: { id: session.id },
       data: { providerSessionRef: created.providerSessionRef, hostedUrl: created.hostedUrl },
     });
-    return sessionDto(opened);
+    return this.handoffSession(opened, input.userId);
   }
 
   private async replayOf(userId: string, subscriptionId: string, purpose: CardSessionPurpose, idempotencyKey: string): Promise<CardSessionDto | null> {
@@ -278,7 +284,25 @@ export class CardRailService {
     });
     if (!found) return null;
     if (found.userId !== userId) throw new NotFoundError('Subscription', subscriptionId);
-    return sessionDto(found);
+    return this.handoffSession(found, userId);
+  }
+
+  /** Provider creation and stored-key replay share the final payable-URL
+   * decision. Provider fields stay stored even when another hold wins. */
+  private async handoffSession(session: CardSession, userId: string): Promise<CardSessionDto> {
+    if (session.purpose !== 'PAY_NOW') return sessionDto(session);
+    const result = await this.prisma.$transaction(async (tx) => {
+      const owner = await lockBillingAuthority(tx, session.subscriptionId);
+      if (owner.userId !== userId) throw new NotFoundError('Subscription', session.subscriptionId);
+      const now = new Date();
+      const decision = await lockFeePaymentDecision(tx, session.subscriptionId, now, { cardSessionId: session.id });
+      await tx.$queryRaw`SELECT "id" FROM "card_sessions" WHERE "id" = ${session.id} FOR UPDATE`;
+      const current = await tx.cardSession.findUniqueOrThrow({ where: { id: session.id } });
+      const payable = current.status === 'OPEN' && current.expiresAt > now;
+      return { current, payable, blocked: payable && !decision.allowed };
+    });
+    if (result.blocked) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.', { sessionId: result.current.id });
+    return sessionDto({ ...result.current, hostedUrl: result.payable ? result.current.hostedUrl : null });
   }
 
   /** The subscription the caller pays for, as the caller's tenant sees it — or 404. */

@@ -1,4 +1,6 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
+import { voluntaryResumeProofInTx } from './obligation-evidence';
+import { resumeVoluntaryObligationInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
@@ -449,6 +451,12 @@ export class BillingService {
       try {
         const done = await this.prisma.$transaction(async (tx) => {
           if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+          const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+          const clock = await currentDunningClock(tx, sub.id, now);
+          // A resumed but uncollected obligation is still owed. A stopped
+          // flag and an old period end cannot erase that liability.
+          const proof = await voluntaryResumeProofInTx(tx, fresh, clock);
+          if (!proof) return false;
           // Guarded: a resume that armed autoRenew in between wins.
           const flipped = await tx.subscription.updateMany({
             where: { id: sub.id, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
@@ -460,11 +468,10 @@ export class BillingService {
               subscriptionId: sub.id,
               type: 'TIER_CHANGE',
               currencyCode: sub.currencyCode,
-              // [DS207 F1] Keyed by the row version this lapse paused, not by
-              // the period: a resume that has not been charged yet leaves the
-              // same currentPeriodEnd, and a second stop must be able to pause
-              // it again without colliding with the first pause's event.
-              idempotencyKey: `pause:${sub.id}:${sub.updatedAt.toISOString()}`,
+              // The exact settled obligation can lapse only once. An unpaid
+              // resumed obligation cannot reuse the old period's proof.
+              idempotencyKey: `pause:${sub.id}:${clock.id}:${clock.epoch}`,
+              amount: proof.payment.amount, paymentRef: proof.payment.externalRef,
               note: 'Plan paused at the end of the paid period — weekly billing was stopped by the partner',
             },
           });
@@ -2111,8 +2118,6 @@ export class BillingService {
       },
     });
 
-    await advanceDunningObligation(tx, sub.id, periodEnd, now);
-
     await tx.billingEvent.create({
       data: {
         subscriptionId: sub.id,
@@ -2124,6 +2129,8 @@ export class BillingService {
         ...(usdTrio ?? {}),
       },
     });
+
+    await advanceDunningObligation(tx, sub.id, periodEnd, now);
 
     if (amount > 0) {
       const rail = paymentRef === 'prepaid' ? 'prepaid' : sub.billingMethod === 'CARD' ? 'CARD' : 'EXTERNAL';
@@ -3210,6 +3217,7 @@ export class BillingService {
       // failed charge follows the normal dunning.
       const paused = fresh.status === 'PAUSED';
       if (paused && clock.pausedAt) throw new AppError(409, 'PAYMENT_CONFIRMING', 'The weekly-fee payment is being confirmed.');
+      if (paused && !await resumeVoluntaryObligationInTx(tx, fresh, clock, resumedAt)) return null;
       resumedFromPause = paused;
       await tx.subscription.update({
         where: { id: subscriptionId },
@@ -3217,13 +3225,12 @@ export class BillingService {
           billingMethod: method,
           mmgPayerMsisdn: method === 'MOBILE_MONEY' ? mmgPayerMsisdn!.trim() : null,
           autoRenew: true,
-          ...(paused ? { status: 'ACTIVE', nextBillingDate: resumedAt, nextRetryAt: null } : {}),
         },
       });
-      if (paused) await advanceDunningObligation(tx, subscriptionId, resumedAt, resumedAt);
-      else await projectDunningClock(tx, clock, resumedAt);
+      if (!paused) await projectDunningClock(tx, clock, resumedAt);
       return tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
     });
+    if (!updated) throw new AppError(409, 'BILLING_OBLIGATION_REVIEW_REQUIRED', 'The paused weekly fee needs finance review before a new period can start.');
     await this.prisma.billingEvent.create({
       data: {
         subscriptionId,

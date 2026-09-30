@@ -47,7 +47,7 @@ export function hasMmgTerminalProof(payment: SubscriptionPayment, currency: stri
   if (!proof || typeof proof !== 'object' || Array.isArray(proof) || proof['version'] !== 1
     || proof['provider'] !== 'MMG' || !isMmgTerminalStatus(proof['status']) || !currency
     || proof['currencyCode'] !== currency || typeof proof['observedAt'] !== 'string'
-    || !Number.isFinite(Date.parse(proof['observedAt']))) return false;
+    || !Number.isFinite(Date.parse(proof['observedAt'])) || Date.parse(proof['observedAt']) < payment.createdAt.getTime()) return false;
   for (const [key, value] of Object.entries(paymentFacts(payment))) if (proof[key] !== value) return false;
   if (proof['source'] === 'LOOKUP') {
     const observation = proof['observation'];

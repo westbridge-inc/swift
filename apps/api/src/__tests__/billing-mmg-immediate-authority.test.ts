@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
+import { billingMemoryTable, cloneBillingValue, matchesBillingRow } from './helpers/billing-memory-tables';
+import { BILLING_CUTOVER_KEY, BILLING_CUTOVER_VERSION } from '../modules/billing/billing-cutover';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
@@ -52,24 +54,25 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
   const periodKey = due.toISOString().slice(0, 10);
   const reference = `sub:sub-1:${periodKey}:a0`;
   const state = {
-    user: { id: 'user-1', status: 'ACTIVE', phone: '+5926000001' },
+    user: { id: 'user-1', status: 'ACTIVE', phone: '+5926000001', tenantId: 'swift-default', countryCode: 'GY', roles: ['MOVER'] },
     vendor: { id: 'vendor-1', status: 'ACTIVE', acceptingOrders: true, isVerified: true, suspensionSource: null as string | null },
     sub: {
       id: 'sub-1', riderId: vendor ? null : 'rider-1', driverId: null, vendorId: vendor ? 'vendor-1' : null,
-      type: 'DELIVERY_RIDER', status: 'ACTIVE', weeklyRate: 2100, customRate: null,
+      type: vendor ? 'RESTAURANT' : 'DELIVERY_RIDER', status: 'ACTIVE', weeklyRate: 2100, customRate: null,
       feeWaived: false, currencyCode: 'GYD', billingMethod: 'MOBILE_MONEY',
       mmgPayerMsisdn: '5926000001', paymentToken: null, autoRenew: true,
       autoSuspendEnabled: true, failedAttempts: 0, nextRetryAt: null,
       currentPeriodStart: new Date(due.getTime() - WEEK), currentPeriodEnd: due,
       nextBillingDate: due, lastPaymentDate: null, isInGracePeriod: false,
-      gracePeriodEnd: null, suspendedAt: null,
+      gracePeriodEnd: null, suspendedAt: null, billingConfirmationPausedAt: null, billingEnforcementDueAt: null,
+      createdAt: new Date(due.getTime() - WEEK), updatedAt: due,
       rider: vendor ? null : { userId: 'user-1' }, driver: null,
       vendor: vendor ? { id: 'vendor-1', owner: { userId: 'user-1' } } : null,
     },
     payment: entry === 'prior_lookup' ? {
       id: 'payment-1', subscriptionId: 'sub-1', amount: 2100, status: 'PENDING',
       paymentMethod: 'MOBILE_MONEY', externalRef: 'mmgtx-prior', clientKey: reference,
-      periodStart: due, periodEnd: new Date(due.getTime() + WEEK), createdAt: new Date(),
+      periodStart: due, periodEnd: new Date(due.getTime() + WEEK), createdAt: due,
       expiresAt: new Date(Date.now() + 86_400_000), lastPolledAt: null, pollBackoffSec: 30,
       failureCode: null, failureRaw: null,
     } as PaymentState : null as PaymentState | null,
@@ -88,6 +91,7 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     // Independent synthetic database clock for lease/race schedules. Existing
     // fixed-time tests align it with their drain time; hostile cases override it.
     noticeClock: null as null | (() => Date),
+    tables: Object.fromEntries(['clock', 'transition', 'hold', 'feeNotice', 'handoff', 'authority', 'member', 'audit'].map((name) => [name, []])) as Record<string, Record<string, any>[]>,
   };
   const barriers = {
     beforeCommit: undefined as (() => Promise<void>) | undefined,
@@ -97,13 +101,36 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
   let noticeSelectionTime = due;
   const noticeNow = () => state.noticeClock?.() ?? noticeSelectionTime;
   const accessWrites: boolean[] = [];
+  // These provider-fixture identifiers are ASCII. SQL canonicalization and
+  // historical Unicode alias retention are exercised against PostgreSQL.
+  const providerKey = (value: unknown) => {
+    if (typeof value !== 'string' || !/^[\x20-\x7e]*$/.test(value)) throw new Error('Non-ASCII provider identity needs the PostgreSQL harness');
+    return value.trim().toUpperCase();
+  };
+  const memory = (name: string, defaults?: () => Record<string, any>) => billingMemoryTable(() => state.tables[name]!, name, defaults);
+  const subscriptionRow = () => ({ ...state.sub, weeklyRate: new Prisma.Decimal(state.sub.weeklyRate),
+    rider: state.sub.rider ? { ...state.sub.rider, user: { ...state.user } } : null,
+    vendor: state.sub.vendor ? { ...state.sub.vendor, tenantId: state.user.tenantId,
+      owner: { ...state.sub.vendor.owner, user: { ...state.user } } } : null,
+  });
+  const authority = memory('authority');
+  const authorityRead = authority.findUnique;
+  authority.findUnique = vi.fn(async (args: any) => {
+    const row = await authorityRead(args);
+    return row ? { ...row, members: cloneBillingValue(state.tables['member']!.filter((m) => m['userId'] === row['userId'])),
+      decision: cloneBillingValue(state.tables['audit']!.find((a) => a['id'] === row['decisionId'])) } : null;
+  });
+  authority.findUniqueOrThrow = vi.fn(async (args: any) => {
+    const row = await authority.findUnique(args); if (!row) throw new Error('authority missing'); return row;
+  });
 
+  // PostgreSQL stores an absent card instrument as NULL. Keep that column in
+  // the fixture so the production legacy-card selector traverses these rows.
+  const paymentRow = () => state.payment ? { instrumentId: null, ...state.payment } : null;
   const matchesStatus = (where: any) => {
     if (!state.payment) return false;
     if (where?.id?.not === state.payment.id) return false;
-    if (where?.subscriptionId && where.subscriptionId !== state.payment.subscriptionId) return false;
-    if (where?.paymentMethod && where.paymentMethod !== state.payment.paymentMethod) return false;
-    if (where?.failureCode && where.failureCode !== state.payment.failureCode) return false;
+    if (!matchesBillingRow(paymentRow()!, where)) return false;
     if (where?.failureRaw?.path) {
       const value = where.failureRaw.path.reduce((raw: any, key: string) => raw?.[key], state.payment.failureRaw);
       if (value !== where.failureRaw.equals) return false;
@@ -125,12 +152,7 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
       return { id: 'payment-1' };
     }),
     findMany: vi.fn(async ({ where }: any) => {
-      if (!state.payment) return [];
-      if (typeof where?.status === 'string' && where.status !== state.payment.status) return [];
-      if (where?.status?.in && !where.status.in.includes(state.payment.status)) return [];
-      if (where?.paymentMethod && where.paymentMethod !== state.payment.paymentMethod) return [];
-      if (where?.subscriptionId && where.subscriptionId !== state.payment.subscriptionId) return [];
-      return [{ ...state.payment }];
+      return state.payment && matchesBillingRow(paymentRow()!, where) ? [cloneBillingValue(paymentRow()!)] : [];
     }),
     findUnique: vi.fn(async ({ where }: any) => {
       if (!state.payment) return null;
@@ -139,6 +161,10 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
       return { ...state.payment };
     }),
     findFirst: vi.fn(async ({ where }: any) => matchesStatus(where) ? { ...state.payment } : null),
+    findUniqueOrThrow: vi.fn(async ({ where }: any) => {
+      if (!state.payment || !matchesBillingRow(state.payment, where)) throw new Error('payment missing');
+      return cloneBillingValue(state.payment);
+    }),
     count: vi.fn(async ({ where }: any) => matchesStatus(where) ? 1 : 0),
     updateMany: vi.fn(async ({ where, data }: any) => {
       if (!state.payment || (where.id && where.id !== state.payment.id) || !matchesStatus(where)) return { count: 0 };
@@ -168,8 +194,10 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
       ? state.events.get(where.idempotencyKey) ?? null
       : [...state.events.values()].find(event => event['id'] === where.id) ?? null),
     findFirst: vi.fn(async ({ where }: any) => [...state.events.entries()].find(([key, event]) =>
-      event['type'] === where.type && key.startsWith(where.idempotencyKey.startsWith))?.[1] ?? null),
-    findMany: vi.fn(async () => []),
+      matchesBillingRow({ ...event, idempotencyKey: key }, where))?.[1] ?? null),
+    findMany: vi.fn(async ({ where = {} }: any = {}) => [...state.events.entries()]
+      .map(([key, event]) => ({ ...event, idempotencyKey: key }))
+      .filter((event) => matchesBillingRow(event, where))),
   };
   const tx: any = {
     $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: any[]) => {
@@ -196,13 +224,25 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
           }).slice(0, 200);
       }
       if (sql.includes('pg_backend_pid()')) return [{ pid: 41 }];
+      if (sql.includes('set_config(')) return [];
+      if (sql.includes('FROM "billing_dunning_clocks"')) return cloneBillingValue(state.tables['clock']);
+      if (sql.includes('JOIN "users" u')) return [{ tenantId: state.user.tenantId }];
+      if (sql.includes('LEFT JOIN "riders"')) return [{ id: state.sub.id }];
       // [MMG checkout F2 · F7] The payer's tenant, and the provider identity row lock.
-      if (sql.includes('JOIN "users" u')) return [{ tenantId: 'swift-default' }];
+      if (sql.includes('SELECT mmg_txn_canon(')) return [{ key: providerKey(values[0]) }];
+      if (sql.includes('FROM provider_payment_aliases')) return [];
+      if (sql.includes('FROM mmg_agent_payments ap')) return state.payment?.status === 'CAPTURED'
+        && state.payment.externalRef && providerKey(state.payment.externalRef) === providerKey(values[1])
+        ? [{ claimant: `push:${state.payment.id}` }] : [];
+      if (sql.includes('FROM provider_payments p')) {
+        const identity = state.providerIdentities.get(providerKey(values[0]));
+        return identity ? [{ ...identity, canonicalMatches: true }] : [];
+      }
       if (sql.includes('FROM "provider_payments"')) {
         const identity = state.providerIdentities.get(values[1]);
         return identity ? [{ ...identity }] : [];
       }
-      if (sql.includes('FROM "users"')) return [{ status: state.user.status, phone: state.user.phone }];
+      if (sql.includes('FROM "users"')) return [{ ...state.user }];
       if (sql.includes('FROM "subscriptions"')) return [{ status: state.sub.status, autoRenew: state.sub.autoRenew }];
       if (sql.includes('FROM "subscription_payments"')) {
         const payment = state.payment;
@@ -214,9 +254,11 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     }),
     $executeRaw: vi.fn(async (strings: TemplateStringsArray, ...values: any[]) => {
       const sql = strings.join(' ');
+      if (sql.includes('set_config(')) return 0;
       // [MMG checkout F2] Mint (ON CONFLICT DO NOTHING) and compare-and-set the provider identity.
-      if (sql.includes('INSERT INTO "provider_payments"')) {
-        const [tenantId, , key, amount, currencyCode] = values;
+      if (sql.includes('INSERT INTO "provider_payments"') || sql.includes('INSERT INTO provider_payments')) {
+        const [tenantId, , raw, amount, currencyCode] = values;
+        const key = providerKey(raw);
         if (!state.providerIdentities.has(key)) {
           state.providerIdentities.set(key, { id: `pp-${state.providerIdentities.size + 1}`, tenantId, status: 'OPEN', amount: Number(amount), currencyCode, creditedPaymentId: null });
         }
@@ -251,7 +293,21 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     }),
     subscriptionPayment: payments,
     // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; none here.
-    mmgCheckoutIntent: { findFirst: vi.fn(async () => null) },
+    mmgCheckoutIntent: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    cardSession: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    user: { findUnique: vi.fn(async () => ({ ...state.user })), findUniqueOrThrow: vi.fn(async () => ({ ...state.user })), findMany: vi.fn(async () => []) },
+    moverFeeAuthority: authority,
+    moverFeeSubscription: memory('member'),
+    auditLog: memory('audit'),
+    billingDunningClock: memory('clock', () => ({ moverPayerUserId: null, epoch: 1, version: 0, elapsedMs: 0n, runningSince: null,
+      pausedAt: null, resumedAt: null, authorityHoldReason: null, authorityRevision: null, retryAtMs: null, nudgeAtMs: null, churnAtMs: null })),
+    paymentConfirmationHold: memory('hold', () => ({ paymentId: null, checkoutId: null, cardSessionId: null, status: 'ACTIVE',
+      resolvedAt: null, resolvedBy: null, resolutionEvidence: null, resolutionHistory: [], reviewNotifiedAt: null })),
+    billingObligationTransition: memory('transition'),
+    billingFeeNotice: memory('feeNotice', () => ({ status: 'PENDING' })),
+    billingNoticeHandoff: memory('handoff', () => ({ status: 'NOT_SENT', completedAt: null })),
+    platformConfig: { findUnique: vi.fn(async ({ where }: any) => where.key === BILLING_CUTOVER_KEY ? { value: {
+      version: BILLING_CUTOVER_VERSION, state: 'READY', completedAt: due.toISOString(), coverageDigest: 'synthetic-completed-backfill' } } : null) },
     billingEvent,
     subscription: {
       update: vi.fn(async ({ data }: any) => { Object.assign(state.sub, data); return { ...state.sub }; }),
@@ -260,7 +316,9 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
         Object.assign(state.sub, data);
         return { count: 1 };
       }),
-      findUnique: vi.fn(async ({ select }: any = {}) => select?.autoRenew ? { autoRenew: state.sub.autoRenew } : ({ ...state.sub })),
+      findUnique: vi.fn(async () => subscriptionRow()),
+      findUniqueOrThrow: vi.fn(async () => subscriptionRow()),
+      findMany: vi.fn(async ({ where }: any = {}) => matchesBillingRow(subscriptionRow(), where) ? [subscriptionRow()] : []),
     },
     prepaidBalance: {
       findUnique: vi.fn(async () => state.walletExists || state.wallet > 0
@@ -309,10 +367,9 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
   };
   const prisma: any = {
     ...tx,
-    user: { findUnique: vi.fn(async () => ({ tenantId: 'synthetic-tenant' })), findMany: vi.fn(async () => []) },
     alertDelivery: { createMany: vi.fn(async () => ({ count: 0 })) },
     $transaction: vi.fn(async (fn: (inner: any) => Promise<any>) => {
-      const snapshot = structuredClone(state);
+      const snapshot = cloneBillingValue(state);
       const ledgerLength = ledger.keys.length;
       inTransaction = true;
       let result: any;
@@ -331,6 +388,9 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     tenantBillingCurrency: { findUnique: vi.fn(async () => null) },
   };
   const notifications = {
+    // Legacy notice-outbox cases below exercise their original real delivery
+    // path. The shared channel handoff is covered by its PostgreSQL suite.
+    drainFeeDemands: vi.fn(async () => ({ attempted: 0, delivered: 0 })),
     send: vi.fn(async (input: any) => {
       const key = input.dedupeKey ? `${input.userId}:${input.dedupeKey}` : null;
       if (key && state.notificationKeys.has(key)) return state.notificationKeys.get(key)!;
@@ -343,6 +403,13 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
   };
   const billing = new BillingService(prisma as PrismaClient, notifications as any, {} as any);
   return { billing, state, periodKey, reference, barriers, accessWrites, prisma, notifications };
+}
+
+// Sweep race hooks affect only the initial candidate query. Resolver source
+// reads must still traverse the actual fixture rows, as they do in PostgreSQL.
+function selectSuspended(h: ReturnType<typeof harness>, select: () => Promise<any[]>) {
+  const read = h.prisma.subscription.findMany;
+  h.prisma.subscription.findMany = vi.fn(async (args: any) => args?.where?.status === 'SUSPENDED' ? select() : read(args));
 }
 
 describe('53FEC809 R3 approved mismatch quarantine', () => {
@@ -399,7 +466,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     const evidence = approval(h, { amountMinor: 210001 });
     h.state.sub.nextRetryAt = new Date(due.getTime() + DAY_FOR_R3) as any;
     await observe(h, evidence);
-    const firstEvidence = structuredClone(h.state.payment!.failureRaw);
+    const firstEvidence = cloneBillingValue(h.state.payment!.failureRaw);
     vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockResolvedValue({ ...evidence, status } as any);
     expect(await h.billing.pollPendingMmgCharges(new Date(due.getTime() + DAY_FOR_R3))).toMatchObject({ failed: 0, stillPending: 1 });
     expect(h.state.payment).toMatchObject({ status: 'PENDING', failureCode: 'SETTLEMENT_MISMATCH', failureRaw: firstEvidence });
@@ -437,7 +504,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     const notices = h.state.notificationPayloads.filter(notice => notice.data?.kind === 'reconcile_mismatch');
     expect(notices.map(notice => notice.userId)).toEqual(['synthetic-admin-a', 'synthetic-admin-b']);
     expect(h.prisma.user.findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ OR: [{ tenantId: 'synthetic-tenant' }, { roles: { has: 'SUPER_ADMIN' } }] }),
+      where: expect.objectContaining({ OR: [{ tenantId: 'swift-default' }, { roles: { has: 'SUPER_ADMIN' } }] }),
     }));
     expect([...h.state.events.keys()].filter(key => key.startsWith('mmg-approval-evidence:'))).toHaveLength(1);
     expect(h.state.payment!.failureRaw).toMatchObject({ providerObservation: evidence });
@@ -520,7 +587,9 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     await arrived.promise;
     if (order === 'approval-first') await observe(h, evidence);
     else await (h.billing as any).terminalizeFailedPayment({ ...h.state.sub }, h.state.payment!,
-      { status: 'FAILED', failureCode: 'DECLINED', from: ['PENDING', 'UNKNOWN'] }, 'earlier decline', due, h.periodKey);
+      { status: 'FAILED', failureCode: 'DECLINED', from: ['PENDING', 'UNKNOWN'],
+        mmgLookup: (h.billing as any).mmgLookupObservation(h.state.payment, { ...approval(h), status: 'declined' }) },
+      'earlier bound decline', due, h.periodKey);
     release.resolve();
     await polling;
     expect(h.state.payment).toMatchObject({ status: 'PENDING', failureCode: 'SETTLEMENT_MISMATCH', failureRaw: { providerOutcome: 'CAPTURED', providerObservation: evidence } });
@@ -560,7 +629,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each([1, 40])('R3 suspended dunning skips a %s-day old subscription when an approval hold commits after selection', async days => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => {
+    selectSuspended(h, async () => {
       const stale = { ...h.state.sub };
       await observe(h, approval(h, { amountMinor: 1 }));
       return [stale];
@@ -580,7 +649,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     let selected = false;
     let holdCommitted = false;
     let sweepAuthorityLock = false;
-    h.prisma.subscription.findMany = vi.fn(async () => {
+    selectSuspended(h, async () => {
       selected = true;
       return [{ ...h.state.sub }];
     });
@@ -625,7 +694,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each([1, 40])('R4 a failed %s-day sweep transaction rolls back its decision before any notice', async days => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.barriers.beforeCommit = async () => { throw new Error('synthetic commit refusal'); };
     const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
 
@@ -640,7 +709,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each([1, 40])('R4 a normal %s-day sweep commits one event before its one notice', async days => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     let committed = false;
     h.barriers.afterCommit = async () => { committed = true; };
     h.notifications.send.mockImplementation(async (input: any) => {
@@ -667,7 +736,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     const h = issuedHarness();
     const first = new Date(due.getTime() - 40 * DAY_FOR_R3);
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: first });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
 
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 1 });
@@ -680,7 +749,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each([1, 40])('R8 a failed push on day %s still attempts the independent SMS', async days => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.notifications.send.mockRejectedValue(new Error('synthetic push failure'));
     const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
 
@@ -693,7 +762,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it('R8 an SMS outage after a committed inbox row retries SMS without a second inbox or lifecycle event', async () => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     const sms = vi.spyOn(h.billing as any, 'smsPayer')
       .mockRejectedValueOnce(new Error('synthetic SMS outage')).mockResolvedValue(undefined);
 
@@ -712,7 +781,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each([1, 40])('R8 day %s retries the committed inbox after restart without repeating a checkpointed SMS or lifecycle event', async days => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => h.state.sub.status === 'SUSPENDED' ? [{ ...h.state.sub }] : []);
+    selectSuspended(h, async () => h.state.sub.status === 'SUSPENDED' ? [{ ...h.state.sub }] : []);
     h.notifications.send.mockRejectedValueOnce(new Error('synthetic push outage'));
     const firstSms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
     const expected = days === 40 ? { nudged: 0, churned: 1 } : { nudged: 1, churned: 0 };
@@ -738,7 +807,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it('R8 both failed channels remain due through a restarted worker and expired claim lease', async () => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.notifications.send.mockResolvedValueOnce('');
     vi.spyOn(h.billing as any, 'smsPayer').mockRejectedValueOnce(new Error('synthetic SMS outage'));
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 1, churned: 0 });
@@ -761,7 +830,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it('R8 publisher death after commit leaves the billing event for a restarted worker', async () => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.barriers.afterCommit = async () => { throw new Error('synthetic publisher death'); };
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
     const event = [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
@@ -778,7 +847,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it('R8 competing restarted workers atomically claim one pending event', async () => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.barriers.afterCommit = async () => { throw new Error('synthetic publisher death'); };
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
     h.barriers.afterCommit = undefined;
@@ -800,7 +869,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it('R8 holds the active lease while another worker drains and permits only one send', async () => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.barriers.afterCommit = async () => { throw new Error('synthetic publisher death'); };
     await h.billing.sweepSuspended(due);
     h.barriers.afterCommit = undefined;
@@ -830,7 +899,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it('R8 preserves the obligation after an SMS acknowledgement before its checkpoint', async () => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     const originalExecute = h.prisma.$executeRaw.getMockImplementation()!;
     let failCheckpoint = true;
     h.prisma.$executeRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: any[]) => {
@@ -858,7 +927,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it('R8 replays only the final acknowledgement after both channels checkpoint', async () => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     const originalExecute = h.prisma.$executeRaw.getMockImplementation()!;
     let failAck = true;
     h.prisma.$executeRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: any[]) => {
@@ -911,7 +980,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each([1, 40])('R9 payment before day %s notice retry preserves historical evidence without a stale payment demand', async days => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.notifications.send.mockRejectedValueOnce(new Error('synthetic inbox outage'));
     const sms = vi.spyOn(h.billing as any, 'smsPayer').mockRejectedValueOnce(new Error('synthetic SMS outage'));
     await h.billing.sweepSuspended(due);
@@ -934,7 +1003,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each(['inbox', 'sms'] as const)('R9 payment between partial %s delivery and retry does not issue a current-state payment demand', async missing => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     if (missing === 'inbox') h.notifications.send.mockRejectedValueOnce(new Error('synthetic inbox outage'));
     const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
     if (missing === 'sms') sms.mockRejectedValueOnce(new Error('synthetic SMS outage'));
@@ -1002,7 +1071,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   it.each(['CANCELLED', 'PAUSED', 'HELD'] as const)('R9 queued history remains truthful after %s without changing the audited decision', async status => {
     const h = issuedHarness();
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - DAY_FOR_R3) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.notifications.send.mockRejectedValueOnce(new Error('synthetic inbox outage'));
     const sms = vi.spyOn(h.billing as any, 'smsPayer').mockRejectedValueOnce(new Error('synthetic SMS outage'));
     await h.billing.sweepSuspended(due);
@@ -1103,7 +1172,7 @@ describe('R11 billing notice ownership through the real SMS recipient callback',
     const h = harness();
     let logical = +due;
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - 86_400_000) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.prisma.user.findUnique.mockResolvedValue({ phone: h.state.user.phone });
     const notice = () => [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
     const installClock = () => { h.state.noticeClock = () => new Date(logical); };
@@ -1241,7 +1310,7 @@ describe('R13 final notice renewal result freshness at the real SMS boundary', (
     let logical = +due;
     let monotonic = 10_000;
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - 86_400_000) });
-    h.prisma.subscription.findMany = vi.fn(async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => [{ ...h.state.sub }]);
     h.prisma.user.findUnique.mockResolvedValue({ phone: h.state.user.phone });
     vi.spyOn(performance, 'now').mockImplementation(() => monotonic);
     // A wall-clock jump must not license a stale result or reject a fresh one.
@@ -1452,7 +1521,7 @@ describe('R5 affirmative MMG evidence and fair card reconciliation', () => {
     vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockResolvedValue({ ...history, status: 'declined' });
 
     expect(await h.billing.billSubscription({ ...h.state.sub } as any, due)).toBe('pending');
-    const initialFact = structuredClone((h.state.payment!.failureRaw as any).providerObservation);
+    const initialFact = cloneBillingValue((h.state.payment!.failureRaw as any).providerObservation);
     expect(await h.billing.pollPendingMmgCharges(new Date(due.getTime() + 60_000))).toMatchObject({ adopted: 1, failed: 0 });
     expect(h.state.payment).toMatchObject({ status: 'PENDING', externalRef: 'history-later',
       failureCode: 'SETTLEMENT_MISMATCH', failureRaw: { providerObservation: initialFact } });
@@ -1488,7 +1557,7 @@ describe('R5 affirmative MMG evidence and fair card reconciliation', () => {
     });
     expect(['PENDING', 'UNKNOWN']).toContain(h.state.payment?.status);
     expect([...h.state.events.values()].filter(event => event['idempotencyKey']?.startsWith('mmg-approval-evidence:'))).toHaveLength(1);
-    const firstObservation = structuredClone(h.state.payment!.failureRaw);
+    const firstObservation = cloneBillingValue(h.state.payment!.failureRaw);
     const later = await h.billing.pollPendingMmgCharges(new Date(due.getTime() + 86_400_000));
     expect(later.failed).toBe(0);
     expect(h.state.payment?.failureRaw).toMatchObject(firstObservation as any);
@@ -1668,7 +1737,7 @@ describe('R6 approved initiation with a usable MMG identifier', () => {
     vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockResolvedValue(matching);
 
     expect(await h.billing.billSubscription({ ...h.state.sub } as any, due)).toBe('pending');
-    const first = structuredClone(h.state.payment!.failureRaw);
+    const first = cloneBillingValue(h.state.payment!.failureRaw);
     expect(h.state.sub.nextBillingDate).toEqual(due);
     expect(ledger.keys).toEqual([]);
     expect(await (h.billing as any).retainMmgHistoryApproval(
@@ -2530,11 +2599,44 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
     expect(ledger.keys).toEqual([`ledger:success:sub-1:${h.periodKey}`]);
   });
 
+  function terminalFixture(h: ReturnType<typeof harness>, status: 'FAILED' | 'EXPIRED') {
+    const payment = h.state.payment!;
+    payment.status = status;
+    const observedStatus = status === 'FAILED' ? 'declined' : 'expired';
+    h.state.events.set(`charge:sub-1:${h.periodKey}:a0`, {
+      id: 'original-attempt', subscriptionId: 'sub-1', type: 'CHARGE_ATTEMPT',
+      amount: 2100, currencyCode: 'GYD', createdAt: due,
+    });
+    // A retained provider observation supplies the negative authority in these
+    // repair controls. Separate regressions below keep bare local status unknown.
+    payment.failureRaw = { reason: 'original provider failure', mmgTerminalEvidence: {
+      version: 1, provider: 'MMG', source: 'LOOKUP', paymentId: payment.id,
+      subscriptionId: payment.subscriptionId, transactionId: payment.externalRef,
+      reference: payment.clientKey, amountMinor: 210000, currencyCode: 'GYD',
+      periodStart: payment.periodStart.toISOString(), periodEnd: payment.periodEnd.toISOString(),
+      status: observedStatus, generation: 'synthetic-retained-lookup', observedAt: due.toISOString(),
+      observation: { transactionId: payment.externalRef, reference: payment.clientKey,
+        amountMinor: 210000, currencyCode: 'GYD', status: observedStatus },
+    } };
+  }
+
+  it.each(['FAILED', 'EXPIRED'] as const)('a legacy local %s without bound provider evidence stays held without dunning', async (status) => {
+    const h = harness('prior_lookup');
+    h.state.payment!.status = status;
+    h.state.payment!.failureRaw = { reason: 'unproved local status' };
+    expect(await h.billing.reconcileTerminalWithoutOutcome(due)).toMatchObject({ repaired: 0, stillOpen: 1 });
+    expect(h.state.payment!.status).toBe('PENDING');
+    expect(h.state.sub).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
+    expect(h.state.events.size).toBe(0);
+    expect(h.state.tables['hold']).toEqual([expect.objectContaining({ paymentId: 'payment-1', status: 'ACTIVE' })]);
+    expect(h.state.notifications).toEqual([]);
+  });
+
   for (const authority of ['DEACTIVATED', 'BANNED_TOMBSTONE', 'CANCELLED', 'PAUSED'] as const) {
     it.each(['before', 'after'] as const)(`terminal repair preserves ${authority} committed %s its subscription snapshot`, async (order) => {
       const h = harness('prior_lookup');
-      h.state.payment!.status = 'FAILED';
-      h.state.payment!.failureRaw = { reason: 'original provider failure' };
+      terminalFixture(h, 'FAILED');
+      const retained = cloneBillingValue(h.state.payment!.failureRaw as Record<string, unknown>);
       if (order === 'before') applyAuthority(h.state, authority);
       const read = h.prisma.subscription.findUnique.getMockImplementation()!;
       h.prisma.subscription.findUnique.mockImplementationOnce(async () => {
@@ -2550,7 +2652,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
       expect(h.state.sub.nextRetryAt).toBeNull();
       if (authority !== 'PAUSED') expect(h.state.sub.autoRenew).toBe(false);
       expect(h.state.payment!.failureRaw).toEqual({
-        reason: 'original provider failure', subscriptionOutcome: 'PRESERVED_NO_DUNNING',
+        ...retained, subscriptionOutcome: 'PRESERVED_NO_DUNNING',
         subscriptionStatus: authority === 'PAUSED' ? 'PAUSED' : 'CANCELLED',
       });
       expect([...h.state.events.values()].filter((event) => event['type'] === 'CHARGE_FAILED')).toHaveLength(0);
@@ -2562,7 +2664,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
   for (const outcome of ['captured', 'reopened', 'success', 'failed', 'preserved'] as const) {
     it(`terminal repair rechecks a concurrent ${outcome} outcome inside the authority transaction`, async () => {
       const h = harness('prior_lookup');
-      h.state.payment!.status = 'FAILED';
+      terminalFixture(h, 'FAILED');
       const read = h.prisma.subscription.findUnique.getMockImplementation()!;
       h.prisma.subscription.findUnique.mockImplementationOnce(async () => {
         const snapshot = await read();
@@ -2584,7 +2686,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
 
   it('terminal repair applies a live failure once using fresh locked counters', async () => {
     const h = harness('prior_lookup');
-    h.state.payment!.status = 'EXPIRED';
+    terminalFixture(h, 'EXPIRED');
     h.state.sub.failedAttempts = 2;
     const read = h.prisma.subscription.findUnique.getMockImplementation()!;
     h.prisma.subscription.findUnique.mockImplementationOnce(async () => {
@@ -2603,7 +2705,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
 
   it('terminal repair prefilters every handled outcome and reports work beyond the 500-row cap', async () => {
     const h = harness('prior_lookup');
-    h.state.payment!.status = 'EXPIRED';
+    terminalFixture(h, 'EXPIRED');
     h.state.rawOpenCount = 501;
 
     expect(await h.billing.reconcileTerminalWithoutOutcome()).toMatchObject({ scanned: 1, repaired: 1, stillOpen: 500 });

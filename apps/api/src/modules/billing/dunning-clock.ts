@@ -1,7 +1,8 @@
 import { billingEffectsReady } from './billing-cutover';
 import { hasMmgTerminalProof, mmgPaymentRaw } from './mmg-terminal-evidence';
 import { lockSubscriptionPayer, lockMoverFeeAuthority, type MoverFeeResolution } from '../subscription/mover-fee-authority';
-import type { BillingDunningClock, PaymentConfirmationHold, Prisma, PrismaClient } from '@prisma/client';
+import type { BillingDunningClock, PaymentConfirmationHold, Prisma, PrismaClient, Subscription, SubscriptionPayment } from '@prisma/client';
+import { settledFeePeriodInTx, voluntaryResumeProofInTx, voluntaryLapseInTx } from './obligation-evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
 
 export const FULL_FEE_GRACE_MS = 48 * 3_600_000;
@@ -61,6 +62,27 @@ export async function projectDunningClock(tx: Tx, clock: BillingDunningClock, no
   }
 }
 
+type SettledProof = NonNullable<Awaited<ReturnType<typeof settledFeePeriodInTx>>>;
+async function recordObligationTransition(tx: Tx, previous: BillingDunningClock, sub: Subscription,
+  proof: SettledProof, kind: 'PAID' | 'VOLUNTARY_RESUME', nextDue: Date, now: Date, lapseEventId: string | null = null) {
+  const audit = await tx.auditLog.create({ data: {
+    action: kind === 'PAID' ? 'BILLING_CLOCK_PAID_ADVANCE' : 'BILLING_CLOCK_VOLUNTARY_RESUME',
+    entity: 'BillingDunningClock', entityId: previous.id,
+    changes: { clockId: previous.id, tenantId: previous.tenantId, fromSubscriptionId: previous.subscriptionId,
+      subscriptionId: sub.id, previousEpoch: previous.epoch, nextEpoch: previous.epoch + 1,
+      previousDue: previous.dueAt.toISOString(), nextDue: nextDue.toISOString(),
+      paymentId: proof.payment.id, successEventId: proof.event.id, lapseEventId,
+      currencyCode: sub.currencyCode, amount: proof.payment.amount.toString() },
+  } });
+  return tx.billingObligationTransition.create({ data: {
+    tenantId: previous.tenantId, clockId: previous.id, fromSubscriptionId: previous.subscriptionId,
+    subscriptionId: sub.id, kind, fromEpoch: previous.epoch, toEpoch: previous.epoch + 1,
+    fromDue: previous.dueAt, toDue: nextDue, effectiveAt: now, paymentId: proof.payment.id,
+    successEventId: proof.event.id, lapseEventId, auditId: audit.id, amount: proof.payment.amount,
+    currencyCode: sub.currencyCode, periodStart: proof.payment.periodStart, periodEnd: proof.payment.periodEnd,
+  } });
+}
+
 /** Change only the canonical projection of the same stable clock. The mover
  * resolver has already written its exact independently approved decision. */
 async function moveCanonicalClockInTx(tx: Tx, clock: BillingDunningClock, authority: MoverFeeResolution, now: Date) {
@@ -78,6 +100,7 @@ async function moveCanonicalClockInTx(tx: Tx, clock: BillingDunningClock, author
   if (sameDue && (next.currentPeriodStart.getTime() !== original.currentPeriodStart.getTime()
     || next.currentPeriodEnd.getTime() !== original.currentPeriodEnd.getTime())) throw refuse();
   let paymentProof: string | null = null;
+  let covered: SettledProof | null = null;
   if (!sameDue) {
     if (next.currentPeriodStart > clock.dueAt || next.currentPeriodEnd <= clock.dueAt
       || next.currentPeriodEnd.getTime() !== next.nextBillingDate.getTime()) throw refuse();
@@ -87,16 +110,18 @@ async function moveCanonicalClockInTx(tx: Tx, clock: BillingDunningClock, author
       amount: payment.amount, currencyCode: next.currencyCode, paymentRef: payment.externalRef } });
     if (!payment || !event) throw refuse();
     paymentProof = payment.id;
+    covered = { payment, event };
   }
   const snapshot = JSON.parse(JSON.stringify(clock, (_key, value) => typeof value === 'bigint' ? value.toString() : value)) as Prisma.InputJsonObject;
   await tx.auditLog.create({ data: { action: 'BILLING_CLOCK_CANONICAL_CHANGED', entity: 'BillingDunningClock', entityId: clock.id,
     changes: { clockId: clock.id, tenantId: clock.tenantId, payerUserId: authority.payerUserId, previous: snapshot,
       canonicalSubscriptionId: next.id, authorityRevision: authority.revision, authorityDecisionId: persisted.decisionId, paymentProof } } });
+  if (covered) await recordObligationTransition(tx, clock, next, covered, 'PAID', next.nextBillingDate, now);
   if (!sameDue) await tx.billingFeeNotice.updateMany({ where: { clockId: clock.id, epoch: clock.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
   return tx.billingDunningClock.update({ where: { id: clock.id }, data: {
     subscriptionId: next.id,
     ...(!sameDue ? { dueAt: next.nextBillingDate, epoch: { increment: 1 }, elapsedMs: 0n, runningSince: null, pausedAt: now,
-      retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null } : {}),
+      retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null, resumedAt: null } : {}),
   } });
 }
 
@@ -183,11 +208,9 @@ export async function beginConfirmationInTx(
   return hold;
 }
 
-/** Covers pre-cutover rows and trusted source fixtures. Runtime adapters begin
- * at reservation/handoff; this repair never infers a negative from a timeout. */
-async function discoverUnresolvedSources(tx: Tx, subscriptionId: string, now: Date) {
-  const authority = await tx.moverFeeAuthority.findUnique({ where: { canonicalSubscriptionId: subscriptionId }, include: { members: true } });
-  const sourceIds = authority?.members.map((m) => m.subscriptionId) ?? [subscriptionId];
+/** Shared source census for both locked effects and read-only pay actions.
+ * Local expiry is never negative payment evidence. */
+export async function confirmationSources(tx: Tx | PrismaClient, sourceIds: string[]) {
   const sourceSubscription = { in: sourceIds };
   const [checkouts, sessions, payments, legacyTerminal] = await Promise.all([
     tx.mmgCheckoutIntent.findMany({ where: { subscriptionId: sourceSubscription, status: { in: ['OPEN', 'CONFIRMING', 'HELD', 'EXPIRED'] } },
@@ -202,15 +225,15 @@ async function discoverUnresolvedSources(tx: Tx, subscriptionId: string, now: Da
     ] }, select: { id: true, subscriptionId: true, createdAt: true, failureCode: true, failureRaw: true, clientKey: true } }),
     tx.subscriptionPayment.findMany({ where: { subscriptionId: sourceSubscription, paymentMethod: 'MOBILE_MONEY', status: { in: ['FAILED', 'EXPIRED'] } } }),
   ]);
+  const terminals: Array<{ payment: SubscriptionPayment; proof: Prisma.JsonObject }> = [];
   for (const payment of legacyTerminal) {
     const raw = mmgPaymentRaw(payment);
     if (raw['providerEffect'] === 'NOT_SENT' && !payment.externalRef) continue;
     const attempt = payment.clientKey?.startsWith(`sub:${payment.subscriptionId}:`)
       ? await tx.billingEvent.findUnique({ where: { idempotencyKey: `charge:${payment.clientKey.slice(4)}` } }) : null;
-    if (hasMmgTerminalProof(payment, attempt?.currencyCode ?? null) && raw['providerOutcome'] !== 'CAPTURED') continue;
-    // A previously resolved source remains immutable. Finance closure is
-    // checked against its exact source by the resolver and repair boundary.
-    payments.push(payment);
+    if (hasMmgTerminalProof(payment, attempt?.currencyCode ?? null)) {
+      terminals.push({ payment, proof: raw['mmgTerminalEvidence'] as Prisma.JsonObject });
+    } else payments.push(payment);
   }
   const sessionPayments = new Set(sessions.map((s) => s.paymentId).filter(Boolean));
   const sources: Array<{ subscriptionId: string; source: ConfirmationSource; at: Date; reason: string }> = [
@@ -222,7 +245,27 @@ async function discoverUnresolvedSources(tx: Tx, subscriptionId: string, now: Da
         && raw?.['providerEffect'] !== 'NOT_SENT';
     }).map((s) => ({ subscriptionId: s.subscriptionId, source: { paymentId: s.id }, at: s.createdAt, reason: s.failureCode ?? 'PAYMENT_CONFIRMATION_PENDING' })),
   ];
-  sources.sort((a, b) => a.at.getTime() - b.at.getTime());
+  return { sources: sources.sort((a, b) => a.at.getTime() - b.at.getTime()), terminals };
+}
+
+/** Covers pre-cutover rows and trusted source fixtures. Runtime adapters begin
+ * at reservation/handoff; this repair never infers a negative from a timeout. */
+async function discoverUnresolvedSources(tx: Tx, subscriptionId: string, now: Date) {
+  const authority = await tx.moverFeeAuthority.findUnique({ where: { canonicalSubscriptionId: subscriptionId }, include: { members: true } });
+  const sourceIds = authority?.members.map((m) => m.subscriptionId) ?? [subscriptionId];
+  const { sources, terminals } = await confirmationSources(tx, sourceIds);
+  for (const { payment, proof } of terminals) {
+    // Retain proven historical closure without pausing today's clock.
+    if (await tx.paymentConfirmationHold.findUnique({ where: { paymentId: payment.id } })) continue;
+    const clock = await tx.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId } });
+    const resolvedAt = new Date(String(proof['observedAt']));
+    const reference = `mmg-terminal:${payment.id}:${String(proof['generation'])}`;
+    await tx.paymentConfirmationHold.create({ data: { tenantId: clock.tenantId, subscriptionId: payment.subscriptionId,
+      clockId: clock.id, sourceEpoch: clock.epoch, paymentId: payment.id, status: 'PROVEN_UNPAID', reason: 'MMG_PROVIDER_TERMINAL',
+      beganAt: payment.createdAt, resolvedAt, resolvedBy: 'provider-confirmation', resolutionEvidence: reference,
+      resolutionHistory: [{ status: 'PROVEN_UNPAID', at: resolvedAt.toISOString(), actor: 'provider-confirmation', reference, epoch: clock.epoch }],
+      reviewDueAt: new Date(payment.createdAt.getTime() + FEE_RETRY_MS) } });
+  }
   for (const source of sources) {
     await beginConfirmationInTx(tx, source.subscriptionId, source.source, source.reason,
       new Date(Math.min(source.at.getTime(), now.getTime())));
@@ -275,10 +318,10 @@ export async function resolveConfirmationInTx(
   } });
   if (!clock.authorityHoldReason && !await tx.paymentConfirmationHold.findFirst({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } }, select: { id: true } })) {
     const prior = await tx.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId } });
-    const resumedClock = await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
+    const resumedClock = prior.pausedAt ? await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
       pausedAt: null, runningSince: new Date(Math.max(now.getTime(), prior.dueAt.getTime())),
       resumedAt: now, version: { increment: 1 },
-    } });
+    } }) : prior;
     await projectDunningClock(tx, resumedClock, now);
   }
   return resolved;
@@ -315,14 +358,41 @@ export async function markSettlementApplying(tx: Tx, subscriptionId: string, sou
 export async function advanceDunningObligation(tx: Tx, subscriptionId: string, nextDue: Date, now: Date) {
   const previous = await clockRow(tx, subscriptionId, now);
   if (previous.subscriptionId !== subscriptionId) throw new AppError(409, 'MOVER_FEE_SOURCE_CHANGED', 'Use the current shared weekly fee.');
+  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+  const proof = await settledFeePeriodInTx(tx, sub, previous.dueAt, nextDue);
+  if (!proof || sub.currentPeriodStart.getTime() !== previous.dueAt.getTime()
+    || sub.currentPeriodEnd.getTime() !== nextDue.getTime() || sub.nextBillingDate.getTime() !== nextDue.getTime()) {
+    throw new AppError(409, 'BILLING_OBLIGATION_REVIEW_REQUIRED', 'The weekly-fee obligation needs verified coverage before it can advance.');
+  }
+  await recordObligationTransition(tx, previous, sub, proof, 'PAID', nextDue, now);
   await tx.billingFeeNotice.updateMany({ where: { clockId: previous.id, epoch: previous.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
   const held = previous.authorityHoldReason || await tx.paymentConfirmationHold.count({ where: { clockId: previous.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
   const clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: {
     dueAt: nextDue, epoch: { increment: 1 }, version: { increment: 1 }, elapsedMs: 0n,
-    runningSince: held ? null : nextDue, pausedAt: held ? previous.pausedAt ?? now : null,
+    runningSince: held ? null : nextDue, pausedAt: held ? previous.pausedAt ?? now : null, resumedAt: null,
     retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null,
   } });
   await projectDunningClock(tx, clock, now);
+}
+
+export async function resumeVoluntaryObligationInTx(tx: Tx, sub: Subscription, previous: BillingDunningClock, now: Date) {
+  const proof = await voluntaryResumeProofInTx(tx, sub, previous);
+  const lapse = proof && await voluntaryLapseInTx(tx, sub, previous, proof);
+  if (!proof || !lapse) {
+    await tx.auditLog.create({ data: { action: 'BILLING_OBLIGATION_REVIEW_REQUIRED', entity: 'BillingDunningClock', entityId: previous.id,
+      changes: { clockId: previous.id, tenantId: previous.tenantId, subscriptionId: sub.id,
+        epoch: previous.epoch, dueAt: previous.dueAt.toISOString(), reason: 'PAUSED_COVERAGE_UNPROVEN_OR_ALREADY_USED' } } });
+    return false;
+  }
+  await recordObligationTransition(tx, previous, sub, proof, 'VOLUNTARY_RESUME', now, now, lapse.id);
+  await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', autoRenew: true, nextBillingDate: now, nextRetryAt: null } });
+  await tx.billingFeeNotice.updateMany({ where: { clockId: previous.id, epoch: previous.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
+  const next = await tx.billingDunningClock.update({ where: { id: previous.id }, data: {
+    dueAt: now, epoch: { increment: 1 }, version: { increment: 1 }, elapsedMs: 0n, runningSince: now,
+    pausedAt: null, resumedAt: null, retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null,
+  } });
+  await projectDunningClock(tx, next, now);
+  return true;
 }
 
 export async function scheduleDunningFailure(tx: Tx, subscriptionId: string, now: Date) {

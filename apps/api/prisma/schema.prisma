@@ -2926,6 +2926,8 @@ model MoverFeeSubscription {
 }
 
 model Subscription {
+  obligationTransitions BillingObligationTransition[] @relation("ObligationSource")
+  priorObligationTransitions BillingObligationTransition[] @relation("ObligationPreviousSource")
   confirmationHolds PaymentConfirmationHold[]
   billingFeeNotices BillingFeeNotice[]
   moverFeeAuthority MoverFeeAuthority? @relation("CanonicalMoverFee")
@@ -3009,6 +3011,8 @@ model Subscription {
 /// idempotencyKey is the double-charge guard: one CHARGE_ATTEMPT per
 /// subscription per period per retry level, enforced at the database.
 model BillingEvent {
+  obligationTransitions BillingObligationTransition[] @relation("ObligationSuccess")
+  voluntaryResumes BillingObligationTransition[] @relation("ObligationLapse")
   id             String           @id @default(cuid())
   subscriptionId String
   subscription   Subscription     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
@@ -3046,6 +3050,7 @@ model BillingEvent {
 /// One active-time clock for the canonical subscription's current fee obligation.
 /// Provider uncertainty stops this clock; it never rewrites the original due date.
 model BillingDunningClock {
+  obligationTransitions BillingObligationTransition[]
   id String @id @default(cuid())
   /// Audited canonical projection; the clock ID never changes.
   subscriptionId String @unique
@@ -3073,6 +3078,43 @@ model BillingDunningClock {
   @@unique([moverPayerUserId, tenantId])
   @@index([tenantId])
   @@map("billing_dunning_clocks")
+}
+
+/// Immutable consumed coverage. The database binds each epoch change to its
+/// original captured payment, successful charge, audit, and voluntary lapse.
+model BillingObligationTransition {
+  id String @id @default(cuid())
+  tenantId String
+  clockId String
+  clock BillingDunningClock @relation(fields: [clockId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  fromSubscriptionId String
+  previousSource Subscription @relation("ObligationPreviousSource", fields: [fromSubscriptionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  subscriptionId String
+  source Subscription @relation("ObligationSource", fields: [subscriptionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  kind String
+  fromEpoch Int
+  toEpoch Int
+  fromDue DateTime
+  toDue DateTime
+  effectiveAt DateTime
+  paymentId String
+  payment SubscriptionPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  successEventId String
+  successEvent BillingEvent @relation("ObligationSuccess", fields: [successEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  lapseEventId String? @unique
+  lapseEvent BillingEvent? @relation("ObligationLapse", fields: [lapseEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  auditId String @unique
+  audit AuditLog @relation(fields: [auditId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  amount Decimal @db.Decimal(10, 2)
+  currencyCode String
+  periodStart DateTime
+  periodEnd DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([clockId, toEpoch])
+  @@unique([paymentId, kind])
+  @@index([tenantId])
+  @@map("billing_obligation_transitions")
 }
 
 /// Exactly one original payment source. Resolved evidence is retained; a
@@ -3626,6 +3668,7 @@ enum SubscriptionStatus {
 /// provider unreachable past TTL) — UNKNOWN is never auto-failed; it ages
 /// into the admin queue and resolves by poller, portal check, or settlement.
 model SubscriptionPayment {
+  obligationTransitions BillingObligationTransition[]
   id             String               @id @default(cuid())
   subscriptionId String
   subscription   Subscription         @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
@@ -4406,6 +4449,7 @@ model PlatformConfig {
 }
 
 model AuditLog {
+  obligationTransition BillingObligationTransition?
   moverFeeDecision MoverFeeAuthority?
   id        String   @id @default(cuid())
   userId    String?

@@ -27,6 +27,33 @@ CREATE TABLE "billing_dunning_clocks" (
     CONSTRAINT "billing_dunning_clocks_pkey" PRIMARY KEY ("id")
 );
 
+-- Consumed settled coverage; it cannot be reassigned to another clock/source.
+CREATE TABLE billing_obligation_transitions (
+  id TEXT PRIMARY KEY,
+  "tenantId" TEXT NOT NULL,
+  "clockId" TEXT NOT NULL REFERENCES billing_dunning_clocks(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  "fromSubscriptionId" TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  "subscriptionId" TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  kind TEXT NOT NULL CHECK (kind IN ('PAID','VOLUNTARY_RESUME')),
+  "fromEpoch" INTEGER NOT NULL CHECK ("fromEpoch">0),
+  "toEpoch" INTEGER NOT NULL CHECK ("toEpoch"="fromEpoch"+1),
+  "fromDue" TIMESTAMP(3) NOT NULL,
+  "toDue" TIMESTAMP(3) NOT NULL,
+  "effectiveAt" TIMESTAMP(3) NOT NULL,
+  "paymentId" TEXT NOT NULL REFERENCES subscription_payments(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  "successEventId" TEXT NOT NULL REFERENCES billing_events(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  "lapseEventId" TEXT UNIQUE REFERENCES billing_events(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  "auditId" TEXT NOT NULL UNIQUE REFERENCES audit_logs(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+  amount DECIMAL(10,2) NOT NULL CHECK (amount>=0),
+  "currencyCode" TEXT NOT NULL,
+  "periodStart" TIMESTAMP(3) NOT NULL,
+  "periodEnd" TIMESTAMP(3) NOT NULL CHECK ("periodEnd">"periodStart"),
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE ("clockId","toEpoch"), UNIQUE ("paymentId",kind),
+  CHECK ((kind='VOLUNTARY_RESUME')=("lapseEventId" IS NOT NULL))
+);
+CREATE INDEX "billing_obligation_transitions_tenantId_idx" ON billing_obligation_transitions("tenantId");
+
 -- CreateTable
 CREATE TABLE "payment_confirmation_holds" (
     "id" TEXT NOT NULL,
@@ -196,10 +223,110 @@ ALTER TABLE billing_fee_notices ADD CONSTRAINT billing_notice_shape CHECK (
 ALTER TABLE billing_notice_handoffs ADD CONSTRAINT billing_handoff_shape CHECK (
   length(channel)>0 AND length(part)>0 AND status IN ('PREPARED','UNKNOWN','DELIVERED','NOT_SENT'));
 
-CREATE FUNCTION billing_clock_lineage() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE owner_id text; owner_tenant text; is_vendor boolean; authority mover_fee_authorities%ROWTYPE; decision audit_logs%ROWTYPE;
+-- A transition is inserted while the prior clock is locked. JSON audits are
+-- checked against typed money/source facts; they cannot substitute for them.
+CREATE FUNCTION billing_obligation_proof() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE c billing_dunning_clocks%ROWTYPE; s subscriptions%ROWTYPE; p subscription_payments%ROWTYPE;
+  e billing_events%ROWTYPE; lapse billing_events%ROWTYPE; a audit_logs%ROWTYPE; paid billing_obligation_transitions%ROWTYPE;
 BEGIN
-  SELECT p."userId",p."tenantId",s."vendorId" IS NOT NULL INTO owner_id,owner_tenant,is_vendor
+  IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'Billing obligation transition is immutable' USING ERRCODE='check_violation'; END IF;
+  SELECT * INTO c FROM billing_dunning_clocks WHERE id=NEW."clockId" FOR UPDATE;
+  SELECT * INTO s FROM subscriptions WHERE id=NEW."subscriptionId";
+  SELECT * INTO p FROM subscription_payments WHERE id=NEW."paymentId";
+  SELECT * INTO e FROM billing_events WHERE id=NEW."successEventId";
+  SELECT * INTO a FROM audit_logs WHERE id=NEW."auditId";
+  IF c.id IS NULL OR s.id IS NULL OR p.id IS NULL OR e.id IS NULL OR a.id IS NULL
+    OR (c."tenantId",c."subscriptionId",c.epoch,c."dueAt") IS DISTINCT FROM
+      (NEW."tenantId",NEW."fromSubscriptionId",NEW."fromEpoch",NEW."fromDue")
+    OR NOT billing_clock_source_matches(c.id,s.id)
+    OR p."subscriptionId"<>s.id OR p.status<>'CAPTURED' OR p."paidAt" IS NULL OR p."externalRef" IS NULL
+    OR (p.amount,p."periodStart",p."periodEnd",s."currencyCode") IS DISTINCT FROM (NEW.amount,NEW."periodStart",NEW."periodEnd",NEW."currencyCode")
+    OR (e."subscriptionId",e.type::text,e.amount,e."currencyCode",e."paymentRef",e."idempotencyKey") IS DISTINCT FROM
+      (s.id,'CHARGE_SUCCESS',p.amount,s."currencyCode",p."externalRef",'success:'||s.id||':'||to_char(p."periodStart",'YYYY-MM-DD'))
+    OR (a.entity,a."entityId",a.action) IS DISTINCT FROM ('BillingDunningClock',c.id,
+      CASE WHEN NEW.kind='PAID' THEN 'BILLING_CLOCK_PAID_ADVANCE' ELSE 'BILLING_CLOCK_VOLUNTARY_RESUME' END)
+    OR (a.changes->>'clockId',a.changes->>'tenantId',a.changes->>'fromSubscriptionId',a.changes->>'subscriptionId',
+      a.changes->>'paymentId',a.changes->>'successEventId',a.changes->>'lapseEventId',a.changes->>'currencyCode') IS DISTINCT FROM
+      (c.id,c."tenantId",c."subscriptionId",s.id,p.id,e.id,NEW."lapseEventId",NEW."currencyCode")
+    OR (a.changes->>'previousEpoch')::integer IS DISTINCT FROM NEW."fromEpoch"
+    OR (a.changes->>'nextEpoch')::integer IS DISTINCT FROM NEW."toEpoch"
+    OR (a.changes->>'previousDue')::timestamp IS DISTINCT FROM NEW."fromDue"
+    OR (a.changes->>'nextDue')::timestamp IS DISTINCT FROM NEW."toDue"
+    OR (a.changes->>'amount')::numeric IS DISTINCT FROM NEW.amount THEN
+    RAISE EXCEPTION 'Billing obligation requires exact retained settlement proof' USING ERRCODE='check_violation';
+  END IF;
+  IF NEW.kind='PAID' THEN
+    IF NEW."toDue"<>p."periodEnd" OR p."periodStart">c."dueAt" OR p."periodEnd"<=c."dueAt"
+      OR (s.id=c."subscriptionId" AND p."periodStart"<>c."dueAt")
+      OR (s."currentPeriodStart",s."currentPeriodEnd",s."nextBillingDate") IS DISTINCT FROM (p."periodStart",p."periodEnd",NEW."toDue") THEN
+      RAISE EXCEPTION 'Paid transition must cover the current obligation' USING ERRCODE='check_violation';
+    END IF;
+  ELSE
+    SELECT * INTO lapse FROM billing_events WHERE id=NEW."lapseEventId";
+    SELECT * INTO paid FROM billing_obligation_transitions WHERE "paymentId"=p.id AND kind='PAID';
+    IF s.id<>c."subscriptionId" OR s.status<>'PAUSED' OR s."autoRenew" OR s."failedAttempts"<>0 OR c."pausedAt" IS NOT NULL
+      OR (s."currentPeriodStart",s."currentPeriodEnd",s."nextBillingDate",c."dueAt") IS DISTINCT FROM
+        (p."periodStart",p."periodEnd",p."periodEnd",p."periodEnd")
+      OR NEW."toDue"<>NEW."effectiveAt" OR NEW."toDue"<c."dueAt"
+      OR (paid.id IS NULL AND c.epoch<>1)
+      OR (paid.id IS NOT NULL AND (paid."clockId",paid."toEpoch",paid."toDue") IS DISTINCT FROM (c.id,c.epoch,c."dueAt"))
+      OR lapse.id IS NULL OR (lapse."subscriptionId",lapse.type::text,lapse."idempotencyKey",lapse.amount,lapse."currencyCode",lapse."paymentRef") IS DISTINCT FROM
+        (s.id,'TIER_CHANGE','pause:'||s.id||':'||c.id||':'||c.epoch::text,p.amount,s."currencyCode",p."externalRef")
+      OR EXISTS (SELECT 1 FROM payment_confirmation_holds WHERE "clockId"=c.id AND status IN ('ACTIVE','SETTLEMENT_APPLY_PENDING'))
+      OR EXISTS (SELECT 1 FROM subscription_payments q WHERE billing_clock_source_matches(c.id,q."subscriptionId") AND q."periodStart">=c."dueAt")
+      OR EXISTS (SELECT 1 FROM billing_events b WHERE billing_clock_source_matches(c.id,b."subscriptionId") AND b.type='CHARGE_ATTEMPT'
+        AND b."idempotencyKey" LIKE 'charge:'||b."subscriptionId"||':'||to_char(c."dueAt",'YYYY-MM-DD')||'%') THEN
+      RAISE EXCEPTION 'Voluntary resume requires unused exact lapse coverage' USING ERRCODE='check_violation';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER billing_obligation_proof BEFORE INSERT OR UPDATE ON billing_obligation_transitions FOR EACH ROW EXECUTE FUNCTION billing_obligation_proof();
+
+-- Every inserted proof must be consumed in the same transaction. Multiple
+-- legitimate transitions in one transaction form an unbroken epoch chain.
+CREATE FUNCTION billing_obligation_committed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE c billing_dunning_clocks%ROWTYPE;
+BEGIN
+  SELECT * INTO c FROM billing_dunning_clocks WHERE id=NEW."clockId";
+  IF c.id IS NULL OR c.epoch<NEW."toEpoch"
+    OR (c.epoch=NEW."toEpoch" AND (c."dueAt",c."subscriptionId") IS DISTINCT FROM (NEW."toDue",NEW."subscriptionId"))
+    OR (c.epoch>NEW."toEpoch" AND NOT EXISTS (SELECT 1 FROM billing_obligation_transitions t WHERE t."clockId"=c.id
+      AND (t."fromEpoch",t."fromDue",t."fromSubscriptionId")=(NEW."toEpoch",NEW."toDue",NEW."subscriptionId"))) THEN
+    RAISE EXCEPTION 'Billing obligation transition must commit with its clock' USING ERRCODE='check_violation';
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE CONSTRAINT TRIGGER billing_obligation_committed AFTER INSERT ON billing_obligation_transitions
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION billing_obligation_committed();
+
+CREATE FUNCTION billing_obligation_parent_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_TABLE_NAME='subscription_payments' THEN
+    IF (NEW.id,NEW."subscriptionId",NEW.status,NEW.amount,NEW."externalRef",NEW."periodStart",NEW."periodEnd",NEW."paidAt",NEW."paymentMethod") IS DISTINCT FROM
+      (OLD.id,OLD."subscriptionId",OLD.status,OLD.amount,OLD."externalRef",OLD."periodStart",OLD."periodEnd",OLD."paidAt",OLD."paymentMethod")
+      AND EXISTS (SELECT 1 FROM billing_obligation_transitions WHERE "paymentId"=OLD.id) THEN
+      RAISE EXCEPTION 'Consumed payment coverage is immutable' USING ERRCODE='check_violation';
+    END IF;
+  ELSIF TG_TABLE_NAME='billing_events' THEN
+    IF (NEW.id,NEW."subscriptionId",NEW.type,NEW.amount,NEW."currencyCode",NEW."paymentRef",NEW."idempotencyKey",NEW."createdAt",NEW.note) IS DISTINCT FROM
+      (OLD.id,OLD."subscriptionId",OLD.type,OLD.amount,OLD."currencyCode",OLD."paymentRef",OLD."idempotencyKey",OLD."createdAt",OLD.note)
+      AND EXISTS (SELECT 1 FROM billing_obligation_transitions WHERE "successEventId"=OLD.id OR "lapseEventId"=OLD.id) THEN
+      RAISE EXCEPTION 'Consumed billing event is immutable' USING ERRCODE='check_violation';
+    END IF;
+  ELSIF NEW IS DISTINCT FROM OLD AND EXISTS (SELECT 1 FROM billing_obligation_transitions WHERE "auditId"=OLD.id) THEN
+    RAISE EXCEPTION 'Billing obligation audit is immutable' USING ERRCODE='check_violation';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER billing_obligation_parent_immutable BEFORE UPDATE ON subscription_payments FOR EACH ROW EXECUTE FUNCTION billing_obligation_parent_immutable();
+CREATE TRIGGER billing_obligation_parent_immutable BEFORE UPDATE ON billing_events FOR EACH ROW EXECUTE FUNCTION billing_obligation_parent_immutable();
+CREATE TRIGGER billing_obligation_parent_immutable BEFORE UPDATE ON audit_logs FOR EACH ROW EXECUTE FUNCTION billing_obligation_parent_immutable();
+
+CREATE FUNCTION billing_clock_lineage() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE owner_id text; owner_tenant text; is_vendor boolean; initial_due timestamp; authority mover_fee_authorities%ROWTYPE; decision audit_logs%ROWTYPE;
+BEGIN
+  SELECT p."userId",p."tenantId",s."vendorId" IS NOT NULL,s."nextBillingDate" INTO owner_id,owner_tenant,is_vendor,initial_due
   FROM subscriptions s CROSS JOIN LATERAL billing_clock_payer(s.id) p WHERE s.id=NEW."subscriptionId";
   IF owner_id IS NULL OR owner_tenant<>NEW."tenantId" OR (is_vendor AND NEW."moverPayerUserId" IS NOT NULL)
     OR (NOT is_vendor AND NEW."moverPayerUserId" IS DISTINCT FROM owner_id) THEN
@@ -211,11 +338,41 @@ BEGIN
       RAISE EXCEPTION 'Billing clock canonical source unavailable' USING ERRCODE='check_violation';
     END IF;
   END IF;
+  IF TG_OP='INSERT' AND (NEW."dueAt",NEW.epoch,NEW."elapsedMs",NEW."runningSince",NEW."pausedAt",NEW."resumedAt") IS DISTINCT FROM
+    (initial_due,1,0::bigint,initial_due,NULL::timestamp,NULL::timestamp) THEN
+    RAISE EXCEPTION 'Billing initial obligation must retain its source due and time' USING ERRCODE='check_violation';
+  END IF;
   IF TG_OP='UPDATE' THEN
     IF (NEW.id,NEW."tenantId",NEW."moverPayerUserId",NEW."createdAt") IS DISTINCT FROM (OLD.id,OLD."tenantId",OLD."moverPayerUserId",OLD."createdAt")
       OR (NEW."dueAt"<>OLD."dueAt" AND NOT (NEW.epoch=OLD.epoch+1 AND NEW."elapsedMs"=0))
       OR NEW.epoch<OLD.epoch OR NEW.epoch>OLD.epoch+1 OR NEW.version<OLD.version THEN
       RAISE EXCEPTION 'Billing clock identity is immutable' USING ERRCODE='check_violation';
+    END IF;
+    IF NEW.epoch=OLD.epoch THEN
+      IF OLD."pausedAt" IS NULL AND NEW."pausedAt" IS NOT NULL THEN
+        IF NEW."elapsedMs"<>OLD."elapsedMs"+GREATEST(0,(extract(epoch FROM NEW."pausedAt"-OLD."runningSince")*1000)::bigint)
+          OR NEW."runningSince" IS NOT NULL OR NEW."resumedAt" IS DISTINCT FROM OLD."resumedAt" THEN
+          RAISE EXCEPTION 'Billing pause must preserve accrued time' USING ERRCODE='check_violation';
+        END IF;
+      ELSIF OLD."pausedAt" IS NOT NULL AND NEW."pausedAt" IS NULL THEN
+        IF NEW."elapsedMs"<>OLD."elapsedMs" OR NEW."resumedAt" IS NULL OR NEW."resumedAt"<OLD."pausedAt"
+          OR NEW."runningSince" IS DISTINCT FROM GREATEST(NEW."resumedAt",NEW."dueAt")
+          OR NEW."authorityHoldReason" IS NOT NULL
+          OR EXISTS (SELECT 1 FROM payment_confirmation_holds WHERE "clockId"=OLD.id AND status IN ('ACTIVE','SETTLEMENT_APPLY_PENDING')) THEN
+          RAISE EXCEPTION 'Billing resume must preserve remaining time' USING ERRCODE='check_violation';
+        END IF;
+      ELSIF (NEW."elapsedMs",NEW."runningSince",NEW."pausedAt",NEW."resumedAt") IS DISTINCT FROM
+        (OLD."elapsedMs",OLD."runningSince",OLD."pausedAt",OLD."resumedAt") THEN
+        RAISE EXCEPTION 'Billing clock cannot reset accrued time' USING ERRCODE='check_violation';
+      END IF;
+    ELSE
+      IF NEW."elapsedMs"<>0 OR NEW."resumedAt" IS NOT NULL
+        OR (NEW."runningSince" IS NOT NULL AND NEW."runningSince"<>NEW."dueAt")
+        OR NOT EXISTS (SELECT 1 FROM billing_obligation_transitions t WHERE t."clockId"=OLD.id AND t."tenantId"=OLD."tenantId"
+          AND (t."fromSubscriptionId",t."subscriptionId",t."fromEpoch",t."toEpoch",t."fromDue",t."toDue")=
+            (OLD."subscriptionId",NEW."subscriptionId",OLD.epoch,NEW.epoch,OLD."dueAt",NEW."dueAt")) THEN
+        RAISE EXCEPTION 'Billing epoch change requires its exact consumed settlement' USING ERRCODE='check_violation';
+      END IF;
     END IF;
     IF NEW."subscriptionId"<>OLD."subscriptionId" THEN
       SELECT * INTO decision FROM audit_logs WHERE id=authority."decisionId";
@@ -339,6 +496,15 @@ CREATE TRIGGER billing_handoff_lineage BEFORE INSERT OR UPDATE ON billing_notice
 -- A parent edit cannot strand existing source/clock evidence in another owner.
 CREATE FUNCTION billing_preserve_parent_lineage() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF EXISTS (SELECT 1 FROM billing_obligation_transitions t
+    LEFT JOIN LATERAL billing_clock_payer(t."subscriptionId") p ON true
+    LEFT JOIN LATERAL billing_clock_payer(t."fromSubscriptionId") q ON true
+    JOIN billing_dunning_clocks c ON c.id=t."clockId"
+    WHERE p."tenantId" IS DISTINCT FROM t."tenantId" OR q."tenantId" IS DISTINCT FROM t."tenantId"
+      OR p."userId" IS DISTINCT FROM q."userId"
+      OR (c."moverPayerUserId" IS NOT NULL AND p."userId" IS DISTINCT FROM c."moverPayerUserId")) THEN
+    RAISE EXCEPTION 'Consumed obligation source ownership is immutable' USING ERRCODE='check_violation';
+  END IF;
   IF EXISTS (SELECT 1 FROM billing_dunning_clocks c LEFT JOIN LATERAL billing_clock_payer(c."subscriptionId") p ON true
     WHERE p."tenantId" IS DISTINCT FROM c."tenantId" OR (c."moverPayerUserId" IS NOT NULL AND p."userId" IS DISTINCT FROM c."moverPayerUserId"))
     OR EXISTS (SELECT 1 FROM payment_confirmation_holds h WHERE NOT billing_clock_source_matches(h."clockId",h."subscriptionId")) THEN
@@ -363,7 +529,7 @@ CREATE FUNCTION billing_confirmation_missing_coverage() RETURNS bigint LANGUAGE 
     SELECT 'checkout' kind,c.id,c."subscriptionId" FROM mmg_checkout_intents c WHERE c.status IN ('OPEN','CONFIRMING','HELD','EXPIRED')
     UNION ALL SELECT 'card',c.id,c."subscriptionId" FROM card_sessions c WHERE c.purpose='PAY_NOW' AND (c.status IN ('OPEN','UNKNOWN','HELD') OR (c.status='EXPIRED' AND c."failureCode" IS DISTINCT FROM 'PROVIDER_PAGE_UNAVAILABLE'))
     UNION ALL SELECT 'payment',p.id,p."subscriptionId" FROM subscription_payments p WHERE p."paymentMethod" IN ('CARD','MOBILE_MONEY')
-      AND (p.status IN ('UNKNOWN','PENDING') OR (p."paymentMethod"='MOBILE_MONEY' AND p.status IN ('FAILED','EXPIRED') AND COALESCE(p."failureRaw"->'mmgTerminalEvidence'->>'version','')<>'1') OR p."failureCode" IN ('REQUIRES_ACTION','AMOUNT_MISMATCH','SETTLEMENT_MISMATCH','HISTORY_APPROVAL_UNVERIFIED','CURRENCY_UNPINNED','WALLET_CURRENCY_MISMATCH','PROVIDER_NOT_FOUND'))
+      AND (p.status IN ('UNKNOWN','PENDING') OR (p."paymentMethod"='MOBILE_MONEY' AND p.status IN ('FAILED','EXPIRED')) OR p."failureCode" IN ('REQUIRES_ACTION','AMOUNT_MISMATCH','SETTLEMENT_MISMATCH','HISTORY_APPROVAL_UNVERIFIED','CURRENCY_UNPINNED','WALLET_CURRENCY_MISMATCH','PROVIDER_NOT_FOUND'))
       AND COALESCE(p."failureRaw"->>'providerEffect','')<>'NOT_SENT' AND COALESCE(p."clientKey",'') NOT LIKE 'cardpay:%'
       AND NOT EXISTS (SELECT 1 FROM card_sessions c WHERE c."paymentId"=p.id)
   )
@@ -499,3 +665,11 @@ END $$;
 CREATE TRIGGER billing_confirmation_source_immutable BEFORE UPDATE ON subscription_payments FOR EACH ROW EXECUTE FUNCTION billing_confirmation_source_immutable();
 CREATE TRIGGER billing_confirmation_source_immutable BEFORE UPDATE ON mmg_checkout_intents FOR EACH ROW EXECUTE FUNCTION billing_confirmation_source_immutable();
 CREATE TRIGGER billing_confirmation_source_immutable BEFORE UPDATE ON card_sessions FOR EACH ROW EXECUTE FUNCTION billing_confirmation_source_immutable();
+
+ALTER TABLE billing_obligation_transitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE billing_obligation_transitions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON billing_obligation_transitions
+USING ("tenantId"=current_setting('app.current_tenant',true) OR pg_has_role(current_user,'swift_bypass_rls','MEMBER'))
+WITH CHECK ("tenantId"=current_setting('app.current_tenant',true) OR pg_has_role(current_user,'swift_bypass_rls','MEMBER'));
+GRANT SELECT,INSERT ON billing_obligation_transitions TO swift_app;
+REVOKE UPDATE,DELETE ON billing_obligation_transitions FROM swift_app;

@@ -985,3 +985,61 @@ describe('[AX297 F5] CARD_RAIL_V2 off: the worker sweep is a strict no-op; CARD_
     expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).toMatchObject({ status: 'EXPIRED', failureCode: 'EXPIRED_UNUSED' });
   });
 });
+
+describe('shared confirmation authority fences card PAY_NOW', () => {
+  async function pendingMmg(p: Awaited<ReturnType<typeof partner>>) {
+    const sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } });
+    return app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: p.subId, amount: WEEKLY, paymentMethod: 'MOBILE_MONEY', status: 'PENDING',
+      externalRef: `synthetic-held-${nanoid(12)}`, clientKey: `synthetic-mmg-${nanoid(12)}`,
+      periodStart: sub.nextBillingDate, periodEnd: new Date(+sub.nextBillingDate + 7 * DAY),
+      failureRaw: { providerEffect: 'AUTHORIZED' },
+    } });
+  }
+  it('MMG uncertainty committed after quote prevents a second provider page reservation', async () => {
+    const p = await partner();
+    const quote = billing.quoteCardPayNow.bind(billing);
+    const observer = vi.spyOn(billing, 'quoteCardPayNow').mockImplementationOnce(async (...args) => {
+      const priced = await quote(...args); await pendingMmg(p); return priced;
+    });
+    const create = vi.spyOn(sim, 'createSession');
+    try {
+      await expect(start(p, 'PAY_NOW')).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(create).not.toHaveBeenCalled();
+      expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(0);
+      expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE' } })).toBe(1);
+    } finally { observer.mockRestore(); create.mockRestore(); }
+  });
+
+  it('MMG uncertainty during provider creation preserves the session evidence but suppresses the hosted URL and replay', async () => {
+    const p = await partner();
+    const idempotencyKey = `handoff-${nanoid(12)}`;
+    const create = sim.createSession.bind(sim);
+    const observer = vi.spyOn(sim, 'createSession').mockImplementationOnce(async (...args) => {
+      const answer = await create(...args); await pendingMmg(p); return answer;
+    });
+    try {
+      await expect(start(p, 'PAY_NOW', { idempotencyKey })).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      const rows = await app.prisma.cardSession.findMany({ where: { subscriptionId: p.subId } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ purpose: 'PAY_NOW', status: 'OPEN', idempotencyKey });
+      expect(rows[0]!.providerSessionRef).toBeTruthy();
+      expect(rows[0]!.hostedUrl).toBeTruthy();
+      await expect(start(p, 'PAY_NOW', { idempotencyKey })).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(1);
+      expect(observer).toHaveBeenCalledOnce();
+      expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE' } })).toBe(2);
+    } finally { observer.mockRestore(); }
+  });
+
+  it('a saved PAY_NOW key cannot bypass a later cross-rail hold', async () => {
+    const p = await partner();
+    const idempotencyKey = `replay-${nanoid(12)}`;
+    const first = await start(p, 'PAY_NOW', { idempotencyKey });
+    await pendingMmg(p);
+    await expect(start(p, 'PAY_NOW', { idempotencyKey })).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+    expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: first.sessionId } }))
+      .toMatchObject({ idempotencyKey, status: 'OPEN', providerSessionRef: expect.any(String) });
+    expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(1);
+  });
+});

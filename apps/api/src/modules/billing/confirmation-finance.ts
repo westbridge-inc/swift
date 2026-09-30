@@ -30,14 +30,34 @@ export async function verifiedCheckoutCredit(tx: Prisma.TransactionClient, check
 export async function confirmationReviewQueue(db: PrismaClient, tenantId: string, now = new Date()) {
   const holds = await db.paymentConfirmationHold.findMany({ where: { tenantId, status: { in: ACTIVE_CONFIRMATION_STATES } },
     orderBy: [{ reviewDueAt: 'asc' }, { id: 'asc' }], take: 200, include: { clock: true } });
-  return holds.map((hold) => ({
+  const payments = holds.map((hold) => ({
     id: hold.id, subscriptionId: hold.subscriptionId, epoch: hold.sourceEpoch, clockEpoch: hold.clock.epoch,
-    clockVersion: hold.clock.version, status: hold.status,
+    clockVersion: hold.clock.version, status: hold.status, resolvable: true,
     source: hold.checkoutId ? 'MMG_CHECKOUT' : hold.cardSessionId ? 'CARD_SESSION' : 'PAYMENT',
     sourceId: hold.checkoutId ?? hold.cardSessionId ?? hold.paymentId,
     reason: hold.reason, beganAt: hold.beganAt, reviewDueAt: hold.reviewDueAt, overdue: hold.reviewDueAt <= now,
     remainingGraceMs: Math.max(0, FULL_FEE_GRACE_MS - activeOverdueMs(hold.clock, now)),
   }));
+  // A legacy PAUSED obligation is a review item, not a provider confirmation.
+  // It cannot acquire a PAID/UNPAID override through the hold resolver.
+  const clocks = await db.billingDunningClock.findMany({ where: { tenantId, subscription: { status: 'PAUSED' } },
+    orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: 200 });
+  const byId = new Map(clocks.map((clock) => [clock.id, clock]));
+  const audits = clocks.length ? await db.auditLog.findMany({ where: { entity: 'BillingDunningClock',
+    entityId: { in: clocks.map((clock) => clock.id) }, action: 'BILLING_OBLIGATION_REVIEW_REQUIRED' },
+    distinct: ['entityId'], orderBy: { createdAt: 'desc' }, take: 200 }) : [];
+  const obligations = audits.flatMap((audit) => {
+    const clock = byId.get(audit.entityId);
+    const facts = audit.changes as Prisma.JsonObject | null;
+    if (!clock || facts?.['tenantId'] !== tenantId || facts['clockId'] !== clock.id
+      || facts['subscriptionId'] !== clock.subscriptionId || facts['epoch'] !== clock.epoch
+      || facts['dueAt'] !== clock.dueAt.toISOString()) return [];
+    return [{ id: audit.id, subscriptionId: clock.subscriptionId, epoch: clock.epoch, clockEpoch: clock.epoch,
+      clockVersion: clock.version, status: 'REVIEW_REQUIRED', resolvable: false, source: 'OBLIGATION', sourceId: clock.subscriptionId,
+      reason: 'PAUSED_COVERAGE_UNPROVEN_OR_ALREADY_USED', beganAt: audit.createdAt, reviewDueAt: audit.createdAt, overdue: true,
+      remainingGraceMs: Math.max(0, FULL_FEE_GRACE_MS - activeOverdueMs(clock, now)) }];
+  });
+  return [...payments, ...obligations];
 }
 
 export async function resolveFinanceConfirmation(db: PrismaClient, input: {

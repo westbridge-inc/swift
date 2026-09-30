@@ -8,6 +8,7 @@ export async function cleanupBillingClocks(db: PrismaClient, subscriptionIds: re
   await db.billingNoticeHandoff.deleteMany({ where: { notice: { subscriptionId } } });
   await db.billingFeeNotice.deleteMany({ where: { subscriptionId } });
   await db.paymentConfirmationHold.deleteMany({ where: { subscriptionId } });
+  await db.billingObligationTransition.deleteMany({ where: { clock: { subscriptionId } } });
   await db.billingDunningClock.deleteMany({ where: { subscriptionId } });
 }
 

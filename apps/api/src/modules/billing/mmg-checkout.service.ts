@@ -1,4 +1,7 @@
-import { lockFeeCollectionAuthority } from '../subscription/mover-fee-authority';
+import { readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
+import { lockFeePaymentDecision } from './fee-payment-authority';
+import { amountDueNow } from './amount-due';
+import { weeklyFeeAmount } from './subscription-fee';
 import { beginConfirmationInTx, lockBillingAuthority, markSettlementApplying, resolveConfirmationInTx } from './dunning-clock';
 import { Prisma, type MmgCheckoutIntent, type PrismaClient, type Subscription, type SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -65,6 +68,14 @@ const POLL_BATCH = 50;
 const CLIENT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
 /** Creating a checkout re-reads after a lost race; it never spins. */
 const CREATE_ATTEMPTS = 3;
+
+/** A quote names an obligation as well as an amount. Equal-price changes of
+ * period, eligibility or future tariff still require a fresh instruction. */
+function checkoutQuoteBasis(sub: Subscription) {
+  return JSON.stringify([sub.type, String(sub.weeklyRate), String(sub.customRate), sub.feeWaived,
+    sub.currencyCode, sub.status, sub.autoRenew, sub.nextBillingDate.toISOString(),
+    sub.currentPeriodStart.toISOString(), sub.currentPeriodEnd.toISOString()]);
+}
 
 export type CheckoutStatus = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type ReturnState = 'CONFIRMED' | 'CONFIRMING' | 'NOT_PAID' | 'UNKNOWN';
@@ -307,7 +318,10 @@ export class MmgCheckoutService {
       }
 
       // [I1] Priced here, from payInfo's own amount due.
-      const amountGyd = checkoutAmountGyd(await payInfo(this.prisma, sub));
+      const priced = await payInfo(this.prisma, sub);
+      const amountGyd = checkoutAmountGyd(priced);
+      const quoteBasis = checkoutQuoteBasis(sub);
+      const quotedAuthority = await readFeeCollectionAuthority(this.prisma, sub.id);
       const merchantTransactionId = newMerchantTransactionId(now);
       let checkoutUrl: string;
       try {
@@ -323,10 +337,23 @@ export class MmgCheckoutService {
       // Persisted, with the key that asked for it, BEFORE the page leaves the
       // server: a checkout nobody wrote down could be paid and never found.
       try {
-        const intent = await this.prisma.$transaction(async (tx) => {
-          if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.');
+        const result = await this.prisma.$transaction(async (tx) => {
           const authority = await lockBillingAuthority(tx, sub.id);
           if (authority.userId !== input.userId) throw new NotFoundError('Subscription', sub.id);
+          const decision = await lockFeePaymentDecision(tx, sub.id, new Date());
+          if (!decision.allowed) return { kind: 'blocked' as const };
+          const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+          const currentAuthority = await readFeeCollectionAuthority(tx, sub.id);
+          const before = quotedAuthority.mover?.revision ?? null;
+          const after = currentAuthority.mover?.revision ?? null;
+          const sameRevision = before === after || (before === 0 && after === 1);
+          const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: sub.id }, select: { balance: true } });
+          const freshAmount = checkoutAmountGyd({ weeklyFeeGyd: weeklyFeeAmount(fresh), amountDueGyd: await amountDueNow(tx, fresh) });
+          if (!sameRevision || (quotedAuthority.mover?.feeType ?? sub.type) !== (currentAuthority.mover?.feeType ?? fresh.type)
+            || quoteBasis !== checkoutQuoteBasis(fresh) || freshAmount !== amountGyd
+            || Number(wallet?.balance ?? 0) !== priced.walletBalanceGyd
+            || !await mmgCheckoutLive(tx, fresh, input.platform, this.checkout)) return { kind: 'quoteChanged' as const };
+
           const created = await tx.mmgCheckoutIntent.create({
             data: {
               tenantId: authority.tenantId,
@@ -342,10 +369,12 @@ export class MmgCheckoutService {
           });
           await beginConfirmationInTx(tx, sub.id, { checkoutId: created.id }, 'MMG_CHECKOUT_PENDING', now);
           await tx.mmgCheckoutKey.create({ data: { tenantId: authority.tenantId, createdByUserId: input.userId, clientKey, intentId: created.id } });
-          return created;
+          return { kind: 'reserved' as const, intent: created };
         });
+        if (result.kind === 'blocked') throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.');
+        if (result.kind === 'quoteChanged') throw new AppError(409, 'PAYMENT_QUOTE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
         mmgCheckoutEventsCounter.labels('created').inc();
-        return { created: true, checkout: await this.started(intent) };
+        return { created: true, checkout: await this.started(result.intent, input.userId) };
       } catch (err) {
         if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
         // [F3] A concurrent request won: the same key (its answer, for its own
@@ -509,7 +538,7 @@ export class MmgCheckoutService {
       await this.expireUnanswered(intent.id, now);
       intent = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
     }
-    return { created: false, checkout: await this.started(intent) };
+    return { created: false, checkout: await this.started(intent, who.userId) };
   }
 
   /** [F3] Bind this key to the checkout it is being answered with. When the key
@@ -526,7 +555,7 @@ export class MmgCheckoutService {
       // and a page is only ever handed out while the checkout is still OPEN.
       return {
         intentId: intent.id,
-        answer: async () => ({ created: false, checkout: await this.started(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } })) }),
+        answer: async () => ({ created: false, checkout: await this.started(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), who.userId) }),
       };
     } catch (err) {
       if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
@@ -861,16 +890,28 @@ export class MmgCheckoutService {
     });
   }
 
-  private async started(intent: MmgCheckoutIntent): Promise<StartedCheckout> {
-    // Unwrapping may await a key service while the checkout changes state.
-    // Read after that await; never emit a URL from the earlier OPEN snapshot.
+  private async started(intent: MmgCheckoutIntent, userId: string): Promise<StartedCheckout> {
+    // Unsealing can await while another rail or authority changes. The final
+    // locked decision is after that await, for both first handoff and replay.
     const opened = intent.status === 'OPEN' ? await openCheckoutUrl(intent) : null;
-    let current = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
-    const now = new Date();
-    if (current.status === 'OPEN' && current.expiresAt <= now) {
-      await this.expireUnanswered(current.id, now);
-      current = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
-    }
+    const result = await this.prisma.$transaction(async (tx) => {
+      const owner = await lockBillingAuthority(tx, intent.subscriptionId);
+      if (owner.userId !== userId) throw new NotFoundError('Subscription', intent.subscriptionId);
+      const now = new Date();
+      const decision = await lockFeePaymentDecision(tx, intent.subscriptionId, now, { checkoutId: intent.id });
+      await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
+      let current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
+      if (current.status === 'OPEN' && current.expiresAt <= now) {
+        const since = (current.replyAt ?? current.createdAt).getTime();
+        current = await tx.mmgCheckoutIntent.update({ where: { id: current.id }, data: {
+          status: 'EXPIRED', reason: 'NO_REPLY', nextCheckAt: current.candidates.length > 0 && now.getTime() < since + LATE_WINDOW_MS
+            ? new Date(now.getTime() + LATE_CHECK_MS) : null,
+        } });
+      }
+      return { current, blocked: current.status === 'OPEN' && !decision.allowed };
+    });
+    if (result.blocked) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.', { ref: result.current.id });
+    const current = result.current;
     return {
       ref: current.id,
       status: current.status as CheckoutStatus,
