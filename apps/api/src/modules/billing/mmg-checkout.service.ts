@@ -2,7 +2,7 @@ import { readFeeCollectionAuthority } from '../subscription/mover-fee-authority'
 import { lockFeePaymentDecision } from './fee-payment-authority';
 import { amountDueNow } from './amount-due';
 import { weeklyFeeAmount } from './subscription-fee';
-import { beginConfirmationInTx, lockBillingAuthority, markSettlementApplying, resolveConfirmationInTx } from './dunning-clock';
+import { beginConfirmationInTx, lockBillingAuthority, markSettlementApplying, reopenConfirmationForReviewInTx, resolveConfirmationInTx } from './dunning-clock';
 import { Prisma, type MmgCheckoutIntent, type PrismaClient, type Subscription, type SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
@@ -68,6 +68,17 @@ const POLL_BATCH = 50;
 const CLIENT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
 /** Creating a checkout re-reads after a lost race; it never spins. */
 const CREATE_ATTEMPTS = 3;
+/** [DS611] Unmatched observations are pruned in bounded batches, oldest first:
+ *  a reply that did not even decrypt after a week, a decrypted reply that
+ *  names no checkout of ours (a possible security signal) after 90 days. */
+export const MMG_OBSERVATION_PRUNE_BATCH = 1000;
+const UNREADABLE_RETENTION_MS = 7 * 24 * 3_600_000;
+const UNMATCHED_RETENTION_MS = 90 * 24 * 3_600_000;
+/** MMG's official not-paid answers: 1 agent not registered, 2 payment failed, 6 cancelled. */
+const NOT_PAID_CODES: ReadonlySet<string> = new Set(['1', '2', '6']);
+/** Reply observations whose answer is "not paid" (7, timed out, included). */
+const NEGATIVE_ANSWERS = ['MMG_RESULT_1', 'MMG_RESULT_2', 'MMG_RESULT_6', 'MMG_RESULT_7'];
+const SUCCESS_ANSWER = 'MMG_RESULT_0';
 
 /** A quote names an obligation as well as an amount. Equal-price changes of
  * period, eligibility or future tariff still require a fresh instruction. */
@@ -371,7 +382,19 @@ export class MmgCheckoutService {
           await tx.mmgCheckoutKey.create({ data: { tenantId: authority.tenantId, createdByUserId: input.userId, clientKey, intentId: created.id } });
           return { kind: 'reserved' as const, intent: created };
         });
-        if (result.kind === 'blocked') throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.');
+        if (result.kind === 'blocked') {
+          // [F3 · I4] The hold that blocked this tap may be a concurrent tap's
+          // checkout: the same key keeps that answer, and any other tap is
+          // handed the open one (the next pass binds this key to it). Anything
+          // else is another payment being confirmed: nothing new is issued.
+          const again = await this.answerForKey(who, now);
+          if (again) return again;
+          const open = await this.prisma.mmgCheckoutIntent.findFirst({
+            where: { subscriptionId: sub.id, status: { in: ['OPEN', 'CONFIRMING'] } }, select: { id: true },
+          });
+          if (open) continue;
+          throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.');
+        }
         if (result.kind === 'quoteChanged') throw new AppError(409, 'PAYMENT_QUOTE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
         mmgCheckoutEventsCounter.labels('created').inc();
         return { created: true, checkout: await this.started(result.intent, input.userId) };
@@ -448,27 +471,54 @@ export class MmgCheckoutService {
       if (intent.status === 'CONFIRMED') return 'CONFIRMED';
       if (intent.status === 'HELD') return 'CONFIRMING';
       const configFailure = CONFIG_FAILURES[parsed.resultCode];
-      if (configFailure) return returnStateFor(await this.hold(intent, configFailure));
+      if (configFailure) {
+        // 3, 4, 5: MMG refused OUR request (secret key, merchant id, token). A
+        // configuration or security fault, never a payment state: written down
+        // above, operators paged once per checkout and code, and the checkout
+        // itself is never touched. Nothing is looked up, held or credited.
+        await this.alertRefusedRequest(intent, parsed.resultCode, configFailure, input.source);
+        return 'UNKNOWN';
+      }
 
       // Return, notify and poll can overlap. Merge against the locked current
-      // row, preserving both candidates and the first reply's timestamp.
-      await this.prisma.$transaction(async (tx) => {
+      // row, preserving both candidates and the first reply's timestamp. MMG's
+      // own not-paid answer for THIS checkout releases the confirmation pause
+      // in the same transaction, unless a success answer was ever given for it.
+      const released = await this.prisma.$transaction(async (tx) => {
         await lockBillingAuthority(tx, intent.subscriptionId);
         await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
-        if (current.status === 'CONFIRMED' || current.status === 'HELD') return;
+        if (current.status === 'CONFIRMED' || current.status === 'HELD') return false;
         const named = parsed.transactionId ? [parsed.transactionId] : [];
+        const candidates = [...new Set([...current.candidates, ...named])].slice(0, MAX_CANDIDATES);
+        const replyAt = !current.replyAt || now < current.replyAt ? now : current.replyAt;
+        const outcomeHint = current.outcomeHint ?? resultHint;
+        if (await this.answerProvesUnpaid(tx, current, parsed)) {
+          const moved = await tx.mmgCheckoutIntent.updateMany({
+            where: { id: current.id, status: current.status },
+            data: {
+              status: 'NOT_PAID', reason: `MMG_RESULT_${parsed.resultCode}`, candidates, replyAt, outcomeHint,
+              // A transaction the answer named is still looked at: a late
+              // confirmation credits once, a late paid record is held [I8].
+              nextCheckAt: candidates.length > 0 && now.getTime() < replyAt.getTime() + LATE_WINDOW_MS ? new Date(now.getTime() + LATE_CHECK_MS) : null,
+            },
+          });
+          if (moved.count !== 1) throw new Error(`Locked checkout ${current.id} changed under its reply`);
+          await resolveConfirmationInTx(tx, current.subscriptionId, { checkoutId: current.id }, 'PROVEN_UNPAID',
+            { actor: 'mmg-checkout-reply', reference: `${current.merchantTransactionId}:MMG_RESULT_${parsed.resultCode}` }, now);
+          return true;
+        }
         await tx.mmgCheckoutIntent.updateMany({
           where: { id: current.id, status: current.status },
-          data: {
-            candidates: [...new Set([...current.candidates, ...named])].slice(0, MAX_CANDIDATES),
-            replyAt: !current.replyAt || now < current.replyAt ? now : current.replyAt,
-            outcomeHint: current.outcomeHint ?? resultHint,
-            nextCheckAt: now,
-            ...(current.status === 'OPEN' ? { status: 'CONFIRMING' } : {}),
-          },
+          data: { candidates, replyAt, outcomeHint, nextCheckAt: now, ...(current.status === 'OPEN' ? { status: 'CONFIRMING' } : {}) },
         });
+        return false;
       });
+      if (released) {
+        mmgCheckoutEventsCounter.labels('not_paid').inc();
+        await this.tellPartner(intent, 'NOT_PAID');
+        return 'NOT_PAID';
+      }
       return returnStateFor(await this.verify(intent.id, now));
     });
   }
@@ -491,6 +541,11 @@ export class MmgCheckoutService {
         }
       } catch (err) {
         log().error({ err }, '[MMG checkout] the provider-identity backfill failed; checkout crediting stays off until it completes');
+      }
+      try {
+        await this.pruneUnmatchedObservations(now);
+      } catch (err) {
+        log().error({ err }, '[MMG checkout] pruning unmatched observations failed; it is retried on the next poll');
       }
       const stale = await this.prisma.mmgCheckoutIntent.findMany({
         where: { status: 'OPEN', expiresAt: { lte: now } },
@@ -516,7 +571,78 @@ export class MmgCheckoutService {
     });
   }
 
+  /**
+   * [DS611] A reply that decrypts to no checkout of ours, or not at all, is
+   * written down like any other [I9], so garbage posts grow the table. Those
+   * unmatched rows are pruned here in one bounded batch per call, oldest
+   * first. A checkout's own replies and lookups are its evidence (audit, a
+   * held payment, a late confirmation) and are never pruned.
+   */
+  async pruneUnmatchedObservations(now: Date = new Date(), batch = MMG_OBSERVATION_PRUNE_BATCH): Promise<number> {
+    return runAsSystem('mmg-checkout-prune', async () => {
+      const rows = await this.prisma.mmgCheckoutObservation.findMany({
+        where: { intentId: null, OR: [
+          { failure: 'NO_TOKEN', createdAt: { lt: new Date(now.getTime() - UNREADABLE_RETENTION_MS) } },
+          { createdAt: { lt: new Date(now.getTime() - UNMATCHED_RETENTION_MS) } },
+        ] },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: batch,
+        select: { id: true },
+      });
+      if (rows.length === 0) return 0;
+      const { count } = await this.prisma.mmgCheckoutObservation.deleteMany({ where: { id: { in: rows.map((row) => row.id) }, intentId: null } });
+      if (count > 0) mmgCheckoutEventsCounter.labels('observations_pruned').inc(count);
+      return count;
+    });
+  }
+
   // ---------------------------------------------------------------------------
+
+  /** MMG's own not-paid answer for THIS checkout (the reply named our
+   *  reference, whole): 1 not registered, 2 failed, 6 cancelled, or 7 timed
+   *  out naming no transaction when none was ever named. It releases only an
+   *  unresolved checkout, and never once a success answer was given for it:
+   *  then MMG's lookup decides. */
+  private async answerProvesUnpaid(tx: Prisma.TransactionClient, current: MmgCheckoutIntent, reply: MmgCheckoutReply): Promise<boolean> {
+    if (current.status !== 'OPEN' && current.status !== 'CONFIRMING' && current.status !== 'EXPIRED') return false;
+    const timedOutEmpty = reply.resultCode === '7' && !reply.transactionId && current.candidates.length === 0;
+    if (!NOT_PAID_CODES.has(reply.resultCode) && !timedOutEmpty) return false;
+    const success = await tx.mmgCheckoutObservation.findFirst({
+      where: { intentId: current.id, source: { in: ['RETURN', 'NOTIFY'] }, detail: SUCCESS_ANSWER }, select: { id: true },
+    });
+    return !success;
+  }
+
+  /** [7] "Not paid unless the lookup says paid": every transaction was named
+   *  by MMG's own not-paid or timed-out answer for this checkout, none by a
+   *  success answer, and MMG's lookup declines each one. Anything uncertain
+   *  (pending, unknown, an error) keeps the checkout confirming. */
+  private async declinedAsAnswered(intent: MmgCheckoutIntent, verdicts: Verdict[]): Promise<Declined | undefined> {
+    const declined = verdicts.filter((v): v is Declined => v.verdict === 'DECLINED');
+    if (declined.length === 0 || declined.length !== verdicts.length) return undefined;
+    const answers = await this.prisma.mmgCheckoutObservation.findMany({
+      where: { intentId: intent.id, source: { in: ['RETURN', 'NOTIFY'] }, detail: { in: [...NEGATIVE_ANSWERS, SUCCESS_ANSWER] } },
+      select: { detail: true, body: true },
+    });
+    const namedBy = (txnId: string, details: readonly string[]) => answers.some((answer) => details.includes(answer.detail ?? '')
+      && !!answer.body && typeof answer.body === 'object' && !Array.isArray(answer.body)
+      && (answer.body as Record<string, unknown>)['transactionId'] === txnId);
+    return declined.every((v) => namedBy(v.txnId, NEGATIVE_ANSWERS) && !namedBy(v.txnId, [SUCCESS_ANSWER])) ? declined[0] : undefined;
+  }
+
+  /** 3, 4, 5: MMG could not accept our request. Operators are paged once per
+   *  checkout and code; the answer carries no provider message or HTML. */
+  private async alertRefusedRequest(intent: MmgCheckoutIntent, code: MmgResultCode, reason: string, source: 'RETURN' | 'NOTIFY'): Promise<void> {
+    mmgCheckoutEventsCounter.labels('reply_alert').inc();
+    log().error({ checkoutId: intent.id, resultCode: code, source }, `[MMG checkout] MMG refused a checkout request (${reason}); configuration or security, nothing was credited and the checkout was not changed`);
+    await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: intent.tenantId,
+      title: 'MMG checkout: request refused by MMG',
+      body: `MMG answered result code ${code} for checkout ${intent.id}. This is a configuration or security problem with the checkout request, not a payment. Nothing was credited; the checkout was not changed.`,
+      data: { kind: 'billing_invariants', alert: 'mmg-checkout-reply-code', resultCode: code, reason, checkoutId: intent.id, source },
+      dedupeKey: `mmg-checkout-reply-code:${intent.id}:${code}`,
+    }).catch((err) => log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about a refused request'));
+  }
 
   /** [F3] The answer a key already has, if it has one: the checkout it was
    *  bound to, as it stands now, and only for the subscription it was bound for. */
@@ -611,16 +737,20 @@ export class MmgCheckoutService {
       if (!(await providerIdentityBackfillDone(this.prisma))) return this.reschedule(intent, now, 'IDENTITY_BACKFILL_PENDING');
       return this.confirm(intent, confirmed.txnId, now);
     }
-    // Late checks (EXPIRED / NOT_PAID) only ever look for a confirmation.
-    if (status !== 'CONFIRMING') return this.reschedule(intent, now, intent.reason);
-
     const decisive = verdicts.find((v): v is Hold => v.verdict === 'HOLD' && v.decisive);
-    if (decisive) return this.hold(intent, decisive.reason);
-    // [F5] A payment failed only when MMG's answer for THIS checkout says so.
-    // A redirect's error path, a transaction MMG does not know, or a decline MMG
-    // does not tie to this checkout is never "not paid": the checkout keeps
-    // confirming, then expires without declaring failure.
-    const failed = verdicts.find((v): v is Declined => v.verdict === 'DECLINED' && v.bound);
+    // Late checks (EXPIRED / NOT_PAID) look for a confirmation, and put any
+    // record MMG shows as paid that cannot be tied to this checkout in front
+    // of a person: money MMG may hold for the partner is never dropped.
+    if (status !== 'CONFIRMING') return decisive ? this.hold(intent, decisive.reason, now) : this.reschedule(intent, now, intent.reason);
+
+    if (decisive) return this.hold(intent, decisive.reason, now);
+    // [F5] A payment failed only when MMG's answer for THIS checkout says so:
+    // its lookup ties the decline to this checkout, or MMG's own not-paid or
+    // timed-out answer for this checkout named every transaction and MMG's
+    // lookup declines them all. A redirect's error path, a transaction MMG does
+    // not know, or a decline after a success answer is never "not paid": the
+    // checkout keeps confirming, then expires without declaring failure.
+    const failed = verdicts.find((v): v is Declined => v.verdict === 'DECLINED' && v.bound) ?? await this.declinedAsAnswered(intent, verdicts);
     if (failed) return this.notPaid(intent, failed.reason, now);
 
     // Nothing is certain yet. A mismatch that may concern another transaction
@@ -735,14 +865,19 @@ export class MmgCheckoutService {
   }
 
   /** [I6] A person must look: nothing credits, and a reversal is a two-person decision. */
-  private async hold(intent: MmgCheckoutIntent, reason: string): Promise<CheckoutStatus> {
+  private async hold(intent: MmgCheckoutIntent, reason: string, now: Date = new Date()): Promise<CheckoutStatus> {
     const moved = await this.prisma.$transaction(async (tx) => {
       await lockBillingAuthority(tx, intent.subscriptionId);
       const changed = await tx.mmgCheckoutIntent.updateMany({
         where: { id: intent.id, status: { in: ['OPEN', 'CONFIRMING', 'EXPIRED', 'NOT_PAID'] } },
         data: { status: 'HELD', reason, nextCheckAt: null },
       });
-      if (changed.count) await beginConfirmationInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, reason);
+      if (changed.count) {
+        const confirmation = await beginConfirmationInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, reason, now);
+        // An MMG negative released this checkout's pause; a later paid-looking
+        // record takes it again, for the same obligation only (owner decision 2).
+        if (confirmation.status === 'PROVEN_UNPAID') await reopenConfirmationForReviewInTx(tx, intent.subscriptionId, { checkoutId: intent.id }, reason, now);
+      }
       return changed;
     });
     if (moved.count === 1) {

@@ -240,9 +240,17 @@ BEGIN
       (NEW."tenantId",NEW."fromSubscriptionId",NEW."fromEpoch",NEW."fromDue")
     OR NOT billing_clock_source_matches(c.id,s.id)
     OR p."subscriptionId"<>s.id OR p.status<>'CAPTURED' OR p."paidAt" IS NULL OR p."externalRef" IS NULL
-    OR (p.amount,p."periodStart",p."periodEnd",s."currencyCode") IS DISTINCT FROM (NEW.amount,NEW."periodStart",NEW."periodEnd",NEW."currencyCode")
-    OR (e."subscriptionId",e.type::text,e.amount,e."currencyCode",e."paymentRef",e."idempotencyKey") IS DISTINCT FROM
-      (s.id,'CHARGE_SUCCESS',p.amount,s."currencyCode",p."externalRef",'success:'||s.id||':'||to_char(p."periodStart",'YYYY-MM-DD'))
+    OR (p.amount,p."periodStart",p."periodEnd",e."currencyCode") IS DISTINCT FROM (NEW.amount,NEW."periodStart",NEW."periodEnd",NEW."currencyCode")
+    OR (e."subscriptionId",e.type::text,e.amount,e."paymentRef",e."idempotencyKey") IS DISTINCT FROM
+      (s.id,'CHARGE_SUCCESS',p.amount,p."externalRef",'success:'||s.id||':'||to_char(p."periodStart",'YYYY-MM-DD'))
+    -- The settled currency is the subscription currency or the exact issue pin of
+    -- this payment: its hosted card session or its charge attempt record.
+    OR NOT (COALESCE(NEW."currencyCode"=s."currencyCode",false)
+      OR EXISTS (SELECT 1 FROM card_sessions cs WHERE p."clientKey"='cardpay:'||cs.id AND cs."paymentId"=p.id
+        AND cs."subscriptionId"=s.id AND cs."currencyCode"=NEW."currencyCode")
+      OR EXISTS (SELECT 1 FROM billing_events att WHERE att."subscriptionId"=s.id AND att.type='CHARGE_ATTEMPT'
+        AND att."currencyCode"=NEW."currencyCode" AND ((p."clientKey" LIKE 'sub:%' AND att."idempotencyKey"='charge:'||substr(p."clientKey",5))
+          OR (p."clientKey" LIKE 'card:%' AND att."idempotencyKey"='charge:'||substr(p."clientKey",6)))))
     OR (a.entity,a."entityId",a.action) IS DISTINCT FROM ('BillingDunningClock',c.id,
       CASE WHEN NEW.kind='PAID' THEN 'BILLING_CLOCK_PAID_ADVANCE' ELSE 'BILLING_CLOCK_VOLUNTARY_RESUME' END)
     OR (a.changes->>'clockId',a.changes->>'tenantId',a.changes->>'fromSubscriptionId',a.changes->>'subscriptionId',
@@ -445,6 +453,14 @@ BEGIN
     END IF;
     IF OLD.status NOT IN ('ACTIVE','SETTLEMENT_APPLY_PENDING') AND NEW IS DISTINCT FROM OLD THEN
       correction:=NEW."resolutionHistory"->-1;
+      -- A later MMG record that may be money for a checkout an MMG negative had
+      -- released reopens the pause for a person, for the same obligation only.
+      IF COALESCE(OLD.status='PROVEN_UNPAID' AND NEW.status='ACTIVE' AND NEW."checkoutId" IS NOT NULL
+        AND NEW."sourceEpoch"=c.epoch AND jsonb_array_length(NEW."resolutionHistory")=old_length+1
+        AND correction->>'status'='LATE_POSITIVE_REVIEW'
+        AND EXISTS (SELECT 1 FROM mmg_checkout_intents m WHERE m.id=NEW."checkoutId" AND m.status='HELD'), false) THEN
+        RETURN NEW;
+      END IF;
       IF OLD.status<>'PROVEN_UNPAID' OR NEW.status<>'SETTLEMENT_APPLY_PENDING' OR NEW."checkoutId" IS NULL
         OR NEW."sourceEpoch"<>c.epoch OR jsonb_array_length(NEW."resolutionHistory")<>old_length+1
         OR correction->>'status'<>'VERIFIED_POSITIVE_CORRECTION'
@@ -641,8 +657,13 @@ REVOKE DELETE ON billing_dunning_clocks,payment_confirmation_holds,billing_fee_n
 CREATE FUNCTION billing_confirmation_source_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_TABLE_NAME='subscription_payments' THEN
-    IF ((NEW."subscriptionId",NEW."paymentMethod",NEW.amount,NEW."periodStart",NEW."periodEnd",NEW."clientKey") IS DISTINCT FROM
-      (OLD."subscriptionId",OLD."paymentMethod",OLD.amount,OLD."periodStart",OLD."periodEnd",OLD."clientKey")
+    IF ((NEW."subscriptionId",NEW."paymentMethod",NEW.amount,NEW."periodStart",NEW."periodEnd") IS DISTINCT FROM
+      (OLD."subscriptionId",OLD."paymentMethod",OLD.amount,OLD."periodStart",OLD."periodEnd")
+      -- The only key change: a card charge proven never sent releases its attempt key.
+      OR (NEW."clientKey" IS DISTINCT FROM OLD."clientKey" AND NOT COALESCE(OLD."paymentMethod"='CARD'
+        AND OLD."externalRef" IS NULL AND NEW."externalRef" IS NULL AND NEW.status='EXPIRED'
+        AND NEW."failureCode" IS NOT DISTINCT FROM 'DISPATCH_REVOKED' AND OLD."clientKey" IS NOT NULL
+        AND NEW."clientKey" IS NOT DISTINCT FROM OLD."clientKey"||':void:'||OLD.id, false))
       OR (OLD."paymentMethod"='MOBILE_MONEY' AND OLD."externalRef" IS NOT NULL AND NEW."externalRef" IS DISTINCT FROM OLD."externalRef")
       OR (OLD."paidAt" IS NOT NULL AND NEW."paidAt" IS DISTINCT FROM OLD."paidAt")) AND EXISTS (SELECT 1 FROM payment_confirmation_holds WHERE "paymentId"=OLD.id) THEN
       RAISE EXCEPTION 'Confirmation source ownership is immutable' USING ERRCODE='check_violation';

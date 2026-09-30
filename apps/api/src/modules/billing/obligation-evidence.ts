@@ -3,15 +3,18 @@ import type { BillingDunningClock, Prisma, Subscription } from '@prisma/client';
 type Tx = Prisma.TransactionClient;
 
 /** A settled period requires its captured original payment and matching
- * successful charge record, including durably recorded zero-fee periods. */
-export async function settledFeePeriodInTx(tx: Tx, sub: Subscription, start: Date, end: Date) {
+ * successful charge record, including durably recorded zero-fee periods.
+ * `currencyCode` is the currency the settlement booked: a capture keeps the
+ * currency it was issued in (its card session or charge attempt), which can
+ * differ from the subscription's current currency after a re-denomination. */
+export async function settledFeePeriodInTx(tx: Tx, sub: Subscription, start: Date, end: Date, currencyCode = sub.currencyCode) {
   const payments = await tx.subscriptionPayment.findMany({ where: { subscriptionId: sub.id,
     status: 'CAPTURED', paidAt: { not: null }, externalRef: { not: null }, periodStart: start, periodEnd: end } });
   const matches = [];
   for (const payment of payments) {
     const event = await tx.billingEvent.findFirst({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS',
       idempotencyKey: `success:${sub.id}:${start.toISOString().slice(0, 10)}`, paymentRef: payment.externalRef,
-      amount: payment.amount, currencyCode: sub.currencyCode } });
+      amount: payment.amount, currencyCode } });
     if (event) matches.push({ payment, event });
   }
   return matches.length === 1 ? matches[0]! : null;

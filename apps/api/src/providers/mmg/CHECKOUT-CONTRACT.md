@@ -50,15 +50,15 @@ Only these root fields have documented meaning:
 | ResultCode | MMG meaning | Swift action |
 |---|---|---|
 | `0` | Transaction Successful | Check MMG's server record before crediting. |
-| `1` | Agent Not Registered | Check server record; only a bound authoritative failure permits NOT_PAID/retry. |
-| `2` | Payment Failed | Same authoritative failure rule. |
-| `3` | Invalid Secret Key | Hold uncredited checkout; alert operators once; no credit. |
-| `4` | Merchant ID Mismatch | Hold uncredited checkout; alert operators once; no credit. |
-| `5` | Token Decryption Failed | Hold uncredited checkout; alert operators once; no credit. |
-| `6` | Transaction Cancelled | Check server record; only a bound authoritative failure permits NOT_PAID/retry. |
-| `7` | Request Timed Out | Check server record; a confirmed payment wins over the timeout hint. |
+| `1` | Agent Not Registered | Not paid: NOT_PAID, the confirmation pause is released, the partner may retry. A named transaction is still checked later. |
+| `2` | Payment Failed | Same not-paid rule. |
+| `3` | Invalid Secret Key | Configuration or security alert to operators, once per checkout; the checkout is not touched; no lookup, no credit. |
+| `4` | Merchant ID Mismatch | Same configuration alert rule. |
+| `5` | Token Decryption Failed | Same configuration alert rule. |
+| `6` | Transaction Cancelled | Same not-paid rule. |
+| `7` | Request Timed Out | Not paid unless the server record says paid: no transaction is NOT_PAID; a named transaction is decided by MMG's lookup (declined is NOT_PAID; pending or unknown keeps the pause). |
 
-Unknown/malformed result fields do not change a checkout. A failure can omit transactionId; without an authoritative transaction record it remains confirming, then expires. A success requires transactionId. A previously confirmed credit is never reversed by a later response.
+Unknown/malformed result fields do not change a checkout. A success requires transactionId. After a success answer for a checkout, a later not-paid answer releases nothing: the server record decides. A previously confirmed credit is never reversed by a later response.
 
 `merchantTransactionId` in this browser response is not the lookup reference field. `MMG_LOOKUP_REFERENCE_FIELDS` stays empty until lookup UAT identifies that field. Credit still requires a matching server-side transaction, amount, currency, payee and checkout reference.
 

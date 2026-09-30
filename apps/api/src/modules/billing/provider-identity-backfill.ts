@@ -153,10 +153,11 @@ export async function runProviderIdentityBackfill(
 export async function ensureProviderIdentityBackfill(prisma: PrismaClient): Promise<ProviderIdentityBackfillResult | null> {
   if (await providerIdentityBackfillDone(prisma)) return null;
   const result = await runProviderIdentityBackfill(prisma);
-  if (result.conflicts > 0) {
-    log().error({ conflicts: result.conflicts }, 'Provider identity backfill needs finance review; new checkout settlement remains held');
-    return result;
-  }
+  // A conflict is a historical transaction on record for more than one
+  // claimant, tenant or amount. It stays exactly as it is, and every later
+  // claim of that transaction is refused under the identity lock by the same
+  // historical-evidence check. It is recorded once and paged once (the caller),
+  // never re-run and re-paged on every poll: completion is recorded either way.
   const value = { completedAt: new Date().toISOString(), ...result };
   await prisma.platformConfig.upsert({
     where: { key: PROVIDER_IDENTITY_BACKFILL_KEY },

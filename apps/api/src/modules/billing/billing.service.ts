@@ -37,7 +37,7 @@ import {
 import { toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
-import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, readDunningClock, resolveConfirmationInTx, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
+import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, readDunningClock, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
 import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
 
@@ -2130,7 +2130,9 @@ export class BillingService {
       },
     });
 
-    await advanceDunningObligation(tx, sub.id, periodEnd, now);
+    // The obligation advances on the success record just booked, in the
+    // currency this settlement was pinned to (never relabelled).
+    await advanceDunningObligation(tx, sub.id, periodEnd, now, sub.currencyCode);
 
     if (amount > 0) {
       const rail = paymentRef === 'prepaid' ? 'prepaid' : sub.billingMethod === 'CARD' ? 'CARD' : 'EXTERNAL';
@@ -3555,7 +3557,7 @@ export class BillingService {
       if (clock.pausedAt || authority.bankInsteadOfAdvance || !fresh.autoRenew) return 'pending' as const;
       await tx.billingDunningClock.update({ where: { subscriptionId: sub.id }, data: { retryAtMs: BigInt(FULL_FEE_GRACE_MS) } });
       await tx.subscription.update({ where: { id: sub.id }, data: { nextRetryAt: activeDeadline(clock, FULL_FEE_GRACE_MS, now) } });
-      if (activeOverdueMs(clock, now) < FULL_FEE_GRACE_MS || clock.resumedAt?.getTime() === now.getTime()) return 'pending' as const;
+      if (activeOverdueMs(clock, now) < FULL_FEE_GRACE_MS || resumedNoEarlierThan(clock, now)) return 'pending' as const;
       await tx.subscription.update({ where: { id: sub.id }, data: { status: 'SUSPENDED', suspendedAt: now, isInGracePeriod: false } });
       await this.suspendAccessRows(tx, { ...sub, ...fresh }, fresh.nextBillingDate.toISOString().slice(0, 10), now);
       return 'suspended' as const;
@@ -3832,7 +3834,7 @@ export class BillingService {
     await requireBillingEffectsReady(tx);
     const clock = await currentDunningClock(tx, sub.id, now);
     const elapsed = activeOverdueMs(clock, now);
-    if (clock.pausedAt || elapsed < FULL_FEE_GRACE_MS || clock.resumedAt?.getTime() === now.getTime()) {
+    if (clock.pausedAt || elapsed < FULL_FEE_GRACE_MS || resumedNoEarlierThan(clock, now)) {
       throw new AppError(409, 'BILLING_GRACE_ACTIVE', 'Weekly-fee grace is still active.');
     }
     await tx.billingDunningClock.update({ where: { subscriptionId: sub.id }, data: {
@@ -4152,7 +4154,12 @@ export class BillingService {
     const usd = await this.loadUsdPricing();
     let recovered = 0;
     for (const candidate of pending) {
-      const done = await this.prisma.$transaction(async (tx) => {
+      // One subscription's failure never kills the batch (or the billing cycle
+      // that runs this first): its credit stays recorded and protected by its
+      // SETTLEMENT_APPLY_PENDING hold, and the next pass retries it whole.
+      let done = false;
+      try {
+      done = await this.prisma.$transaction(async (tx) => {
         const clock = await currentDunningClock(tx, candidate.subscriptionId, now);
         const hold = await tx.paymentConfirmationHold.findUnique({ where: { id: candidate.id } });
         if (hold?.status !== 'SETTLEMENT_APPLY_PENDING' || !hold.checkoutId) return false;
@@ -4183,6 +4190,10 @@ export class BillingService {
         if (result !== 'advanced') throw new Error('Verified checkout balance was not applied');
         return true;
       });
+      } catch (err) {
+        log().error({ err, confirmationId: candidate.id, subscriptionId: candidate.subscriptionId },
+          '[billing] a verified checkout settlement could not be applied yet; its hold stays and it is retried');
+      }
       if (done) recovered += 1;
     }
     return recovered;

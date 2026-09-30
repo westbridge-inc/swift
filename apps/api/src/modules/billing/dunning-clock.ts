@@ -31,6 +31,19 @@ export function activeOverdueMs(clock: Pick<BillingDunningClock, 'elapsedMs' | '
   return value;
 }
 
+/** A resume is never stamped before its own pause. Callers pass their own
+ * clock; an earlier (skewed) caller time resumes at the pause instant and so
+ * counts no overdue time for the gap. The database refuses anything else. */
+export function resumeInstant(clock: Pick<BillingDunningClock, 'pausedAt'>, now: Date): Date {
+  return clock.pausedAt && clock.pausedAt.getTime() > now.getTime() ? clock.pausedAt : now;
+}
+
+/** A resolution never suspends in its own instant, and a caller whose time is
+ * not after the last resume (clock skew) never suspends either. */
+export function resumedNoEarlierThan(clock: Pick<BillingDunningClock, 'resumedAt'>, now: Date): boolean {
+  return !!clock.resumedAt && clock.resumedAt.getTime() >= now.getTime();
+}
+
 export function activeDeadline(clock: BillingDunningClock, position: bigint | number, _now: Date): Date | null {
   if (clock.pausedAt) return null;
   if (!clock.runningSince) throw new Error('Running billing clock has no anchor');
@@ -65,6 +78,8 @@ export async function projectDunningClock(tx: Tx, clock: BillingDunningClock, no
 type SettledProof = NonNullable<Awaited<ReturnType<typeof settledFeePeriodInTx>>>;
 async function recordObligationTransition(tx: Tx, previous: BillingDunningClock, sub: Subscription,
   proof: SettledProof, kind: 'PAID' | 'VOLUNTARY_RESUME', nextDue: Date, now: Date, lapseEventId: string | null = null) {
+  // The settled money keeps the currency its success record was booked in.
+  const currencyCode = proof.event.currencyCode;
   const audit = await tx.auditLog.create({ data: {
     action: kind === 'PAID' ? 'BILLING_CLOCK_PAID_ADVANCE' : 'BILLING_CLOCK_VOLUNTARY_RESUME',
     entity: 'BillingDunningClock', entityId: previous.id,
@@ -72,14 +87,14 @@ async function recordObligationTransition(tx: Tx, previous: BillingDunningClock,
       subscriptionId: sub.id, previousEpoch: previous.epoch, nextEpoch: previous.epoch + 1,
       previousDue: previous.dueAt.toISOString(), nextDue: nextDue.toISOString(),
       paymentId: proof.payment.id, successEventId: proof.event.id, lapseEventId,
-      currencyCode: sub.currencyCode, amount: proof.payment.amount.toString() },
+      currencyCode, amount: proof.payment.amount.toString() },
   } });
   return tx.billingObligationTransition.create({ data: {
     tenantId: previous.tenantId, clockId: previous.id, fromSubscriptionId: previous.subscriptionId,
     subscriptionId: sub.id, kind, fromEpoch: previous.epoch, toEpoch: previous.epoch + 1,
     fromDue: previous.dueAt, toDue: nextDue, effectiveAt: now, paymentId: proof.payment.id,
     successEventId: proof.event.id, lapseEventId, auditId: audit.id, amount: proof.payment.amount,
-    currencyCode: sub.currencyCode, periodStart: proof.payment.periodStart, periodEnd: proof.payment.periodEnd,
+    currencyCode, periodStart: proof.payment.periodStart, periodEnd: proof.payment.periodEnd,
   } });
 }
 
@@ -159,7 +174,8 @@ export async function syncMoverDunningAuthorityInTx(tx: Tx, authority: MoverFeeR
     clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: {
       authorityHoldReason: reason, authorityRevision: authority.revision, version: { increment: 1 },
       ...(pause && !clock.pausedAt ? { elapsedMs: BigInt(activeOverdueMs(clock, now)), runningSince: null, pausedAt: now } : {}),
-      ...(!pause && clock.pausedAt ? { runningSince: new Date(Math.max(now.getTime(), clock.dueAt.getTime())), pausedAt: null, resumedAt: now } : {}),
+      ...(!pause && clock.pausedAt ? { runningSince: new Date(Math.max(resumeInstant(clock, now).getTime(), clock.dueAt.getTime())),
+        pausedAt: null, resumedAt: resumeInstant(clock, now) } : {}),
     } });
   }
   await projectDunningClock(tx, clock, now);
@@ -318,13 +334,38 @@ export async function resolveConfirmationInTx(
   } });
   if (!clock.authorityHoldReason && !await tx.paymentConfirmationHold.findFirst({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } }, select: { id: true } })) {
     const prior = await tx.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId } });
+    const resumed = resumeInstant(prior, now);
     const resumedClock = prior.pausedAt ? await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
-      pausedAt: null, runningSince: new Date(Math.max(now.getTime(), prior.dueAt.getTime())),
-      resumedAt: now, version: { increment: 1 },
+      pausedAt: null, runningSince: new Date(Math.max(resumed.getTime(), prior.dueAt.getTime())),
+      resumedAt: resumed, version: { increment: 1 },
     } }) : prior;
     await projectDunningClock(tx, resumedClock, now);
   }
   return resolved;
+}
+
+/** An MMG record that may be this partner's money, for a checkout whose pause
+ * an MMG negative already released, takes the pause again for a person: owner
+ * decision 2, a HELD payment is never dunned. Only the SAME obligation is
+ * paused again; an older instruction never restarts or extends a newer one.
+ * The database admits exactly this transition (LATE_POSITIVE_REVIEW). */
+export async function reopenConfirmationForReviewInTx(tx: Tx, subscriptionId: string, source: { checkoutId: string }, reason: string, now: Date) {
+  const clock = await clockRow(tx, subscriptionId, now);
+  const hold = await tx.paymentConfirmationHold.findFirst({ where: sourceWhere(source) });
+  if (!hold || hold.clockId !== clock.id || hold.status !== 'PROVEN_UNPAID' || hold.sourceEpoch !== clock.epoch) return hold;
+  const reopened = await tx.paymentConfirmationHold.update({ where: { id: hold.id }, data: {
+    status: 'ACTIVE', reason: 'LATE_POSITIVE_REVIEW', resolvedAt: null, resolvedBy: null, resolutionEvidence: null,
+    reviewDueAt: new Date(now.getTime() + FEE_RETRY_MS), reviewNotifiedAt: null,
+    resolutionHistory: [...(Array.isArray(hold.resolutionHistory) ? hold.resolutionHistory : []),
+      { status: 'LATE_POSITIVE_REVIEW', at: now.toISOString(), reason, epoch: hold.sourceEpoch }] as Prisma.InputJsonValue,
+  } });
+  if (!clock.pausedAt) {
+    const paused = await tx.billingDunningClock.update({ where: { id: clock.id }, data: {
+      elapsedMs: BigInt(activeOverdueMs(clock, now)), runningSince: null, pausedAt: now, version: { increment: 1 },
+    } });
+    await projectDunningClock(tx, paused, now);
+  }
+  return reopened;
 }
 
 export async function markSettlementApplying(tx: Tx, subscriptionId: string, source: ConfirmationSource, now: Date) {
@@ -355,11 +396,13 @@ export async function markSettlementApplying(tx: Tx, subscriptionId: string, sou
   }
 }
 
-export async function advanceDunningObligation(tx: Tx, subscriptionId: string, nextDue: Date, now: Date) {
+/** `settledCurrency` is the currency the settlement booked its success record
+ * in (its issue pin); the database repeats that pin check. */
+export async function advanceDunningObligation(tx: Tx, subscriptionId: string, nextDue: Date, now: Date, settledCurrency?: string) {
   const previous = await clockRow(tx, subscriptionId, now);
   if (previous.subscriptionId !== subscriptionId) throw new AppError(409, 'MOVER_FEE_SOURCE_CHANGED', 'Use the current shared weekly fee.');
   const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
-  const proof = await settledFeePeriodInTx(tx, sub, previous.dueAt, nextDue);
+  const proof = await settledFeePeriodInTx(tx, sub, previous.dueAt, nextDue, settledCurrency ?? sub.currencyCode);
   if (!proof || sub.currentPeriodStart.getTime() !== previous.dueAt.getTime()
     || sub.currentPeriodEnd.getTime() !== nextDue.getTime() || sub.nextBillingDate.getTime() !== nextDue.getTime()) {
     throw new AppError(409, 'BILLING_OBLIGATION_REVIEW_REQUIRED', 'The weekly-fee obligation needs verified coverage before it can advance.');
@@ -402,7 +445,7 @@ export async function scheduleDunningFailure(tx: Tx, subscriptionId: string, now
   const elapsed = activeOverdueMs(current, now);
   const clock = await tx.billingDunningClock.update({ where: { subscriptionId }, data: { retryAtMs: BigInt(elapsed + FEE_RETRY_MS) } });
   await projectDunningClock(tx, clock, now);
-  return { clock, elapsed, maySuspend: elapsed >= FULL_FEE_GRACE_MS && current.resumedAt?.getTime() !== now.getTime() };
+  return { clock, elapsed, maySuspend: elapsed >= FULL_FEE_GRACE_MS && !resumedNoEarlierThan(current, now) };
 }
 
 /** A hosted session and its payment are one external instruction. */
