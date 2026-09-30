@@ -4,6 +4,7 @@ import { assertDisabledCardRailConfig } from './card-rail';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
+import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 
 /**
  * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
@@ -72,6 +73,11 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
       throw new Error(`FATAL: ORDER_HOLD_MINUTES must be a number of minutes no shorter than the ${FREE_CANCEL_WINDOW_MIN}-minute free-cancel window when LIFECYCLE_V2=1 — an invalid value silently disables the order hold, and a shorter one shows orders to the vendor while the customer may still cancel free. Set ORDER_HOLD_MINUTES=${FREE_CANCEL_WINDOW_MIN} or unset it. Refusing to start.`);
     }
   }
+
+  // [AX352] SETTLEMENT_PUBLICATION_LEASE_MS is a test and drill setting: a
+  // shorter settlement publication lease can lapse while a slow row replays,
+  // before any progress is written, and strand the unpaid tail of a file.
+  assertSettlementPublicationLeaseConfig(env);
 
   // OTP records are only six digits; an unkeyed hash is recoverable offline in
   // seconds. Require a strong HMAC key (dedicated, or the already load-bearing

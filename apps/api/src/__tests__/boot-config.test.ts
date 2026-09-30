@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { PUBLICATION_LEASE_MS } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
@@ -353,6 +354,35 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'test', DEV_OTP_BYPASS: '1' })).not.toThrow();
+  });
+});
+
+// [AX352] SETTLEMENT_PUBLICATION_LEASE_MS shortens the settlement publication
+// lease so it can lapse inside a test or a drill. In production a short lease
+// could lapse while a slow row replays, before any progress is written, and
+// strand the unpaid tail of a settlement file: production refuses to boot with
+// any override below the 5-minute default.
+describe('[AX352] the settlement publication lease override is test and drill only', () => {
+  it('refuses to boot production with the lease shortened: 1000 ms, anything under 5 minutes, or unreadable', () => {
+    expect(PUBLICATION_LEASE_MS).toBe(5 * 60_000);
+    expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }))
+      .toThrow(/FATAL: SETTLEMENT_PUBLICATION_LEASE_MS .*Refusing to start/);
+    for (const value of ['299999', '0', '-1', 'abc', ' ']) {
+      expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: value }), value)
+        .toThrow(/SETTLEMENT_PUBLICATION_LEASE_MS/);
+    }
+  });
+
+  it('boots production with the override unset, or no shorter than the default', () => {
+    for (const value of [undefined, '', '300000', '600000']) {
+      expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: value }), String(value)).not.toThrow();
+    }
+  });
+
+  it('allows the short lease in the test, drill and development postures', () => {
+    for (const mode of ['test', 'loadtest', 'development']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }), mode).not.toThrow();
+    }
   });
 });
 

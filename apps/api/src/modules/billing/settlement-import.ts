@@ -5,8 +5,10 @@ import type { AgentCashService, IngestResult } from './agent-cash.service';
 import { settlementImportsRejectedCounter, settlementBatchesUnbalancedGauge } from '../../plugins/observability';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
-import { positiveDurationMs } from '../../utils/async-lifecycle';
 import { log } from '../../utils/logger';
+import { publicationHeartbeatMs as heartbeatMs, publicationLeaseMs as leaseMs } from './settlement-publication-lease';
+
+export { PUBLICATION_LEASE_MS } from './settlement-publication-lease';
 
 // Channel B — settlement-file import [san spec 4.3]. A configurable header map
 // (MMG's real format lands via PlatformConfig, no redeploy). Every row rides
@@ -61,19 +63,10 @@ import { log } from '../../utils/logger';
 //      whose attempt just failed waits out a backoff, so imports that fail
 //      every time cannot starve the rest.
 
-/** [G5-F6] A publisher renews its lease at least this often while it credits
- *  rows (timed on its own monotonic clock; the lease itself is database
- *  time)... */
-const PUBLICATION_HEARTBEAT_MS = 15_000;
-/** ...so one silent this long has died, and its import may be taken over.
- *  Far above the heartbeat and above any one row of ingest. */
-export const PUBLICATION_LEASE_MS = 5 * 60_000;
-/** [AX337-F2] The lease in force: PUBLICATION_LEASE_MS, unless
- *  SETTLEMENT_PUBLICATION_LEASE_MS sets another (a drill, a test), read at
- *  call time like the hold and never under a second. The heartbeat always
- *  beats at a quarter of it or faster. */
-const leaseMs = () => Math.max(1_000, positiveDurationMs(process.env['SETTLEMENT_PUBLICATION_LEASE_MS'], PUBLICATION_LEASE_MS));
-const heartbeatMs = () => Math.min(PUBLICATION_HEARTBEAT_MS, Math.floor(leaseMs() / 4));
+// [G5-F6 · AX337 · AX352] The lease (5 min) and the heartbeat (15 s, timed on
+// the publisher's own monotonic clock; the lease itself is database time) live
+// in settlement-publication-lease.ts, with SETTLEMENT_PUBLICATION_LEASE_MS: a
+// TEST AND DRILL override that production refuses at boot below the default.
 /** [AX314-F3] The repair pass leaves an import whose attempt just failed alone
  *  this long, and always tries the least recently attempted first. */
 export const PUBLICATION_RETRY_BACKOFF_MS = 5 * 60_000;
