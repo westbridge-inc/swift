@@ -15,6 +15,14 @@ export function formatAppointmentSlot(value: string | Date): string {
   }).format(new Date(value));
 }
 
+/** A calendar date, "Sep 24", in the market zone — the day a service job
+ *  was requested, printed beside its slot: never the device's day [Q12]. */
+export function formatAppointmentDate(value: string | Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: GUYANA_TZ, month: 'short', day: 'numeric',
+  }).format(new Date(value));
+}
+
 export function appointmentDayKey(value: string | Date): string {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: GUYANA_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
