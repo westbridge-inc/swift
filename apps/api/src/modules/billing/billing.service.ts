@@ -91,6 +91,13 @@ const POLL_BACKOFF_CAP_SEC = 300;
 const nextBackoff = (current: number) => Math.min(POLL_BACKOFF_CAP_SEC, Math.max(30, current * 2));
 const jitter = (sec: number) => Math.round(sec * (0.8 + Math.random() * 0.4));
 const PRESERVED_NO_DUNNING = 'PRESERVED_NO_DUNNING';
+/** [AX318 R1] A v2 intent still AUTHORIZED this long after it was created
+ *  belongs to a run that died between authorization and handoff (the two are
+ *  milliseconds apart in a live run). */
+const UNSENT_INTENT_GRACE_MS = 10 * 60 * 1000;
+const isNeverHandedOff = (row: Pick<SubscriptionPayment, 'failureRaw' | 'externalRef'>): boolean =>
+  !row.externalRef && !!row.failureRaw && typeof row.failureRaw === 'object' && !Array.isArray(row.failureRaw)
+  && (row.failureRaw as Record<string, unknown>)['providerEffect'] === 'AUTHORIZED';
 const MMG_APPROVAL_HOLD = 'MMG_APPROVAL_MISMATCH';
 const MMG_HISTORY_HOLD = 'MMG_HISTORY_APPROVAL_UNVERIFIED';
 /** [PT-1] A hosted Pay-now payment's clientKey: `cardpay:<card session id>`.
@@ -218,6 +225,61 @@ export interface BillingObserver {
    *  is locked. Test-only. */
   beforeInstrumentChargeAuthorization?: (subscriptionId: string, instrumentId: string) => Promise<void>;
   afterInstrumentChargeLocked?: (subscriptionId: string, instrumentId: string, tx: Prisma.TransactionClient) => Promise<void>;
+  /** [AX318 R1] Around the handoff (phase two): before its transaction, and
+   *  after it committed HANDED_OFF, immediately before the provider is asked.
+   *  Test-only. */
+  beforeInstrumentChargeHandoff?: (subscriptionId: string, intentId: string) => Promise<void>;
+  afterInstrumentChargeHandedOff?: (subscriptionId: string, intentId: string) => Promise<void>;
+}
+
+/** Why a v2 card intent that was never handed to the provider was closed. */
+export type UnsentCardIntentReason = 'CARD_REMOVED' | 'CARD_REPLACED' | 'CARD_OUT_OF_SERVICE' | 'DISPATCH_REVOKED' | 'NEVER_HANDED_OFF';
+
+/**
+ * [PT-1 · AX318 R1] Close v2 card intents that were AUTHORIZED but never
+ * handed to the provider. Nothing was sent under them: the provider is asked
+ * only after the handoff CAS (AUTHORIZED -> HANDED_OFF) won, and these rows
+ * still say AUTHORIZED, which is the CAS condition. Each ends EXPIRED /
+ * DISPATCH_REVOKED / NOT_SENT with no strike (PRESERVED_NO_DUNNING) and its
+ * key is released (`<key>:void:<id>`), so the attempt is billed again from
+ * the top on whatever card is on file; the row keeps its evidence and the
+ * key it had. The provider never saw that key, so it is free to reuse.
+ * Returns how many rows were closed.
+ */
+export async function closeUnsentCardIntents(
+  tx: Prisma.TransactionClient,
+  target: { intentId: string } | { instrumentId: string },
+  reason: UnsentCardIntentReason,
+  now: Date,
+): Promise<number> {
+  const marker = JSON.stringify({
+    providerEffect: 'NOT_SENT', cancelledBy: reason, revokedAt: now.toISOString(),
+    subscriptionOutcome: 'PRESERVED_NO_DUNNING', recoveryDisposition: 'NO_PROVIDER_EFFECT',
+  });
+  if ('intentId' in target) {
+    return tx.$executeRaw`
+      UPDATE "subscription_payments"
+      SET "status" = 'EXPIRED', "failureCode" = 'DISPATCH_REVOKED', "clientKey" = "clientKey" || ':void:' || "id",
+          "failureRaw" = COALESCE("failureRaw", '{}'::jsonb) || ${marker}::jsonb || jsonb_build_object('voidedKey', "clientKey")
+      WHERE "id" = ${target.intentId} AND "paymentMethod" = 'CARD' AND "instrumentId" IS NOT NULL
+        AND "status" = 'UNKNOWN' AND "externalRef" IS NULL AND "failureRaw"->>'providerEffect' = 'AUTHORIZED'`;
+  }
+  return tx.$executeRaw`
+    UPDATE "subscription_payments"
+    SET "status" = 'EXPIRED', "failureCode" = 'DISPATCH_REVOKED', "clientKey" = "clientKey" || ':void:' || "id",
+        "failureRaw" = COALESCE("failureRaw", '{}'::jsonb) || ${marker}::jsonb || jsonb_build_object('voidedKey', "clientKey")
+    WHERE "instrumentId" = ${target.instrumentId} AND "paymentMethod" = 'CARD'
+      AND "status" = 'UNKNOWN' AND "externalRef" IS NULL AND "failureRaw"->>'providerEffect' = 'AUTHORIZED'`;
+}
+
+/** [AX318 R1] Charges on a card that were HANDED to the provider and have no
+ *  final answer yet: money that is moving, or may have moved. */
+export async function cardChargesInFlight(tx: Prisma.TransactionClient, instrumentId: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: bigint }>>`
+    SELECT COUNT(*)::bigint AS n FROM "subscription_payments"
+    WHERE "instrumentId" = ${instrumentId} AND "status" = 'UNKNOWN'
+      AND COALESCE("failureRaw"->>'providerEffect', '') <> 'AUTHORIZED'`;
+  return Number(row?.n ?? 0);
 }
 
 /** [M-08] What a top-up command answers — stored with the command, replayed verbatim. */
@@ -380,7 +442,7 @@ export class BillingService {
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
-    const priced = await this.priceEligibleFor(sub, usd);
+    let priced = await this.priceEligibleFor(sub, usd);
 
     if (!reclaimedAttempt) try {
       await this.prisma.billingEvent.create({
@@ -456,6 +518,30 @@ export class BillingService {
         return 'skipped'; // someone (or a concurrent run) already attempted this
       }
       throw error;
+    }
+
+    // [PT-1 · AX318 R2] A reclaimed attempt is dispatched, checked and settled
+    // exactly as it was ISSUED: its own CHARGE_ATTEMPT record's amount,
+    // currency and pinned USD trio, never today's price or the subscription's
+    // current currency. So what is sent, what the answer is checked against
+    // and what is booked are one record. A new price applies to the next
+    // attempt, which gets its own key.
+    if (reclaimedAttempt) {
+      const issued = await this.prisma.billingEvent.findUnique({
+        where: { idempotencyKey: attemptKey },
+        select: { amount: true, currencyCode: true, amountUsd: true, fxRateId: true, fxRateUsed: true },
+      });
+      if (!issued || issued.amount === null) {
+        log().error({ subscriptionId: sub.id, attemptKey }, '[PT-1 AX318-R2] reclaimed attempt has no issued amount — nothing dispatched');
+        return 'skipped';
+      }
+      priced = {
+        amount: issued.amount,
+        ...(issued.amountUsd !== null && issued.fxRateId && issued.fxRateUsed !== null
+          ? { usdTrio: { amountUsd: Number(issued.amountUsd), fxRateId: issued.fxRateId, fxRateUsed: Number(issued.fxRateUsed) } }
+          : {}),
+      };
+      sub = { ...sub, currencyCode: issued.currencyCode };
     }
 
     const amount = Number(priced.amount);
@@ -819,6 +905,22 @@ export class BillingService {
     }
     const reserved = { id: authorized.intentId };
 
+    // [AX318 R1] Phase two, immediately before the provider is asked: the
+    // handoff (AUTHORIZED -> HANDED_OFF) under the same payer -> subscription
+    // -> card locks, re-checking the card and the lifecycle there. A removal
+    // or replacement that committed after phase one closed this intent (or
+    // left the card out of service): nothing is sent. Only a won handoff calls.
+    const handoff = await this.handOffInstrumentCharge(sub, { intentId: reserved.id, instrumentId: instrument.id, now });
+    switch (handoff) {
+      case 'handed_off': break;
+      case 'revoked': return { ok: false, dispatchRevoked: true, intentId: reserved.id, rail: 'CARD' };
+      case 'card_changed':
+      case 'lost':
+        log().warn({ subscriptionId: sub.id, instrumentId: instrument.id, intentId: reserved.id, handoff }, '[PT-1 AX318-R1] charge not handed to the provider — nothing sent, nobody penalised');
+        return { ok: false, deferred: true };
+      default: return assertNever(handoff, 'instrument charge handoff');
+    }
+
     const result = await cardRail.chargeInstrument({ binding, vaultToken, idempotencyKey: key, ...intended });
     await this.observer.afterProviderReturned?.({ status: result.status, providerRef: result.providerRef ?? '' });
     const verdict = await this.judgeInstrumentAnswer(sub, instrument, reserved.id, 'CHARGE', result, intended, now);
@@ -934,11 +1036,57 @@ export class BillingService {
   }
 
   /**
-   * [PT-1 · AX297 F1] The linearization point of a weekly card charge. ONE
-   * transaction locks payer -> subscription -> card (the order a partner
-   * removing a card and an enrolment replacing one also take), re-reads the
-   * card there, and creates this attempt's intent already AUTHORIZED; the
-   * provider is asked only after it commits.
+   * [PT-1 · AX318 R1] Phase two of a weekly card charge: the handoff. Under
+   * payer -> subscription -> card -> payment (the order removal and
+   * replacement take for the first three), and only if the card is still this
+   * subscription's ACTIVE card and the lifecycle still allows sending, the
+   * intent moves AUTHORIZED -> HANDED_OFF by compare-and-set; that commit is
+   * the point after which the charge is in flight. Otherwise the intent is
+   * closed as NOT_SENT and its key released (closeUnsentCardIntents).
+   * `lost`: the intent was no longer AUTHORIZED (a removal or the reconciler
+   * closed it first). The caller asks the provider only on `handed_off`.
+   */
+  private async handOffInstrumentCharge(
+    sub: SubWithRelations,
+    input: { intentId: string; instrumentId: string; now: Date },
+  ): Promise<'handed_off' | 'card_changed' | 'revoked' | 'lost'> {
+    await this.observer.beforeInstrumentChargeHandoff?.(sub.id, input.intentId);
+    const { intentId, instrumentId, now } = input;
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
+      const [card] = await tx.$queryRaw<Array<{ status: string; subscriptionId: string }>>`
+        SELECT "status", "subscriptionId" FROM "payment_instruments" WHERE "id" = ${instrumentId} FOR UPDATE
+      `;
+      await tx.$queryRaw`SELECT "id" FROM "subscription_payments" WHERE "id" = ${intentId} FOR UPDATE`;
+      if (!card || card.subscriptionId !== sub.id || card.status !== 'ACTIVE') {
+        await closeUnsentCardIntents(tx, { intentId }, 'CARD_OUT_OF_SERVICE', now);
+        return 'card_changed' as const;
+      }
+      const maySend = !await this.subscriptionHasMmgApprovalHold(tx, sub.id)
+        && !authority.bankInsteadOfAdvance
+        && !authority.suppressNotice
+        && ['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status);
+      if (!maySend) {
+        await closeUnsentCardIntents(tx, { intentId }, 'DISPATCH_REVOKED', now);
+        return 'revoked' as const;
+      }
+      const won = await tx.$executeRaw`
+        UPDATE "subscription_payments"
+        SET "failureRaw" = COALESCE("failureRaw", '{}'::jsonb) || jsonb_build_object('providerEffect', 'HANDED_OFF', 'handedOffAt', ${now.toISOString()}::text)
+        WHERE "id" = ${intentId} AND "status" = 'UNKNOWN' AND "externalRef" IS NULL AND "failureRaw"->>'providerEffect' = 'AUTHORIZED'`;
+      return won === 1 ? 'handed_off' as const : 'lost' as const;
+    });
+    if (outcome === 'handed_off') await this.observer.afterInstrumentChargeHandedOff?.(sub.id, intentId);
+    return outcome;
+  }
+
+  /**
+   * [PT-1 · AX297 F1] Phase one of a weekly card charge. ONE transaction
+   * locks payer -> subscription -> card (the order a partner removing a card
+   * and an enrolment replacing one also take), re-reads the card there, and
+   * creates this attempt's intent AUTHORIZED. The provider is not asked yet:
+   * phase two, the handoff (handOffInstrumentCharge), decides that, under
+   * the same locks, immediately before the call [AX318 R1].
    *
    *  - The card is no longer this subscription's ACTIVE card (a removal or
    *    replacement committed after the unlocked read): no intent at all, no
@@ -1233,8 +1381,18 @@ export class BillingService {
    *  The kill switch never stops this. */
   async reconcileUnknownCardCharges(now = new Date()): Promise<{ settled: number; declined: number; reissued: number; expired: number; stillUnknown: number; actionRequired: number; oldestMinutes: number }> {
     const out = { settled: 0, declined: 0, reissued: 0, expired: 0, stillUnknown: 0, actionRequired: 0, oldestMinutes: 0 };
+    // [AX318 R4] Rows this process will not act on are left out BEFORE any
+    // write: a hosted Pay now belongs to its session's sweep, and with no card
+    // rail v2 provider wired (CARD_RAIL_V2 off and not draining) a v2 intent
+    // is not even stamped. The gauges below still count every unknown row.
+    const v2Wired = this.resolveCardRail() !== null;
     const rows = await this.prisma.subscriptionPayment.findMany({
-      where: { paymentMethod: 'CARD', status: 'UNKNOWN' },
+      where: {
+        paymentMethod: 'CARD',
+        status: 'UNKNOWN',
+        OR: [{ clientKey: null }, { NOT: { clientKey: { startsWith: CARD_PAY_NOW_KEY_PREFIX } } }],
+        ...(v2Wired ? {} : { instrumentId: null }),
+      },
       // Durable least-recently-polled order rotates an indefinitely unknown
       // authorized instruction behind later captures. Stable ties prevent a
       // fixed first page from starving row 201 and beyond.
@@ -1262,11 +1420,20 @@ export class BillingService {
         },
       });
       if (!sub || !row.clientKey) { out.stillUnknown += 1; continue; }
-      // [PT-1] A hosted Pay-now payment settles through its card session (the
-      // session sweep asks the provider), and a charge held because the
-      // provider reported a different amount waits for a person.
-      if (row.clientKey.startsWith(CARD_PAY_NOW_KEY_PREFIX)) continue;
+      // [PT-1] A charge held because the provider reported a different amount
+      // waits for a person.
       if (row.failureCode === 'AMOUNT_MISMATCH') { out.stillUnknown += 1; continue; }
+      // [AX318 R1] A v2 intent still AUTHORIZED was never handed to the
+      // provider (its run died between the two phases): nothing was sent, so
+      // nobody is asked. Past a grace no live run could still be inside, it is
+      // closed as NOT_SENT and its key released; the attempt is billed again.
+      if (row.instrumentId && isNeverHandedOff(row)) {
+        if (now.getTime() - row.createdAt.getTime() >= UNSENT_INTENT_GRACE_MS) {
+          const closed = await this.prisma.$transaction((tx) => closeUnsentCardIntents(tx, { intentId: row.id }, 'NEVER_HANDED_OFF', now));
+          if (closed === 1) out.expired += 1; else out.stillUnknown += 1;
+        } else out.stillUnknown += 1;
+        continue;
+      }
       const periodKey = row.periodStart.toISOString().slice(0, 10);
       const amount = Number(row.amount);
       const ttlAt = row.expiresAt ?? new Date(row.createdAt.getTime() + MMG_REQUEST_TTL_MS);
@@ -1657,9 +1824,30 @@ export class BillingService {
       if (!event) throw new Error('Successful charge has no durable success event');
       return { disposition, amount: Number(event.amount), currencyCode: event.currencyCode, periodKey: settledPeriodKey };
     });
+    if (settled.disposition === 'held' && settlePaymentId) await this.pageUnpinnedCardCapture(sub, settlePaymentId);
     if (settled.disposition === 'skipped' || settled.disposition === 'held') return false;
     if (settled.disposition === 'advanced') await this.afterSuccessfulCharge({ ...sub, currencyCode: settled.currencyCode! }, settled.amount!, settled.periodKey!);
     return true;
+  }
+
+  /** [PT-1 · AX318 R3] A weekly card capture held because its attempt record
+   *  cannot vouch for its currency (CURRENCY_UNPINNED) is put in front of the
+   *  tenant's admins, once per payment, exactly as a held Pay now is (that
+   *  one is paged by its session's hold). Resolution: the admin card-hold
+   *  queue (PT-2). */
+  private async pageUnpinnedCardCapture(sub: SubWithRelations, paymentId: string): Promise<void> {
+    const payment = await this.prisma.subscriptionPayment.findUnique({
+      where: { id: paymentId }, select: { paymentMethod: true, failureCode: true, clientKey: true, amount: true, externalRef: true },
+    });
+    if (!payment || payment.paymentMethod !== 'CARD' || payment.failureCode !== 'CURRENCY_UNPINNED') return;
+    if (payment.clientKey?.startsWith(CARD_PAY_NOW_KEY_PREFIX)) return;
+    await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: await tenantOfSubscription(this.prisma, sub.id),
+      title: '💳 Card payment held — its currency cannot be confirmed',
+      body: `A weekly card payment for subscription ${sub.id} was captured by the card provider (payment ${paymentId}, ${Number(payment.amount).toLocaleString()} in its issued currency), but its charge-attempt record is missing, so the currency it was issued in cannot be confirmed. Nothing was booked and the partner was not penalised. Reconcile it against the provider before any further action.`,
+      data: { kind: 'billing_invariants', alert: 'card-capture-currency-unpinned', subscriptionId: sub.id, paymentId },
+      dedupeKey: `card-unpinned:${paymentId}`,
+    }).catch(() => {});
   }
 
   /** The transactional core of a successful charge — callable inside a LARGER

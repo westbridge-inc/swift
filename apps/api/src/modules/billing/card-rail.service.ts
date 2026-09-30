@@ -6,7 +6,7 @@ import { toProviderMinor } from '../../utils/currency-amount';
 import { log } from '../../utils/logger';
 import { getTenantContext } from '../../plugins/tenant-context';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
-import { CARD_PAY_NOW_KEY_PREFIX, cardExpiredAt, type BillingService } from './billing.service';
+import { CARD_PAY_NOW_KEY_PREFIX, cardChargesInFlight, cardExpiredAt, closeUnsentCardIntents, type BillingService } from './billing.service';
 import { sealVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import {
@@ -80,6 +80,9 @@ export interface CardConfirmResult {
   status: CardSessionStatus;
   instrument?: PaymentInstrumentDto;
   settlement?: 'advanced' | 'banked';
+  /** [AX318 R1] ENROLL replacing a card: a weekly charge on the replaced card
+   *  was already handed to the provider; it finishes and is reconciled. */
+  paymentInProgress?: boolean;
 }
 
 const sha256Hex = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -432,6 +435,11 @@ export class CardRailService {
       `;
       await this.opts.observer?.afterCardLocked?.(fresh.subscriptionId, tx);
       if (previous) await tx.paymentInstrument.update({ where: { id: previous.id }, data: { status: 'REPLACED', replacedAt: now } });
+      // [AX318 R1] A weekly charge on the replaced card: authorized but never
+      // handed off -> closed, never sent (the attempt is billed again on the
+      // new card); already handed off -> in flight, reported.
+      if (previous) await closeUnsentCardIntents(tx, { instrumentId: previous.id }, 'CARD_REPLACED', now);
+      const previousInFlight = previous ? await cardChargesInFlight(tx, previous.id) : 0;
       const instrument = await tx.paymentInstrument.create({
         data: {
           tenantId: fresh.tenantId,
@@ -475,10 +483,13 @@ export class CardRailService {
           },
         },
       });
-      return { instrument };
+      return { instrument, previousInFlight };
     });
     if ('lost' in result) return this.resultOf(result.lost ?? session);
-    return { sessionId: session.id, purpose: 'ENROLL', status: 'SUCCEEDED', instrument: result.instrument };
+    return {
+      sessionId: session.id, purpose: 'ENROLL', status: 'SUCCEEDED', instrument: result.instrument,
+      ...(result.previousInFlight > 0 ? { paymentInProgress: true } : {}),
+    };
   }
 
   private async settlePayNow(
@@ -707,23 +718,29 @@ export class CardRailService {
   /**
    * Remove a card: REVOKED, at once, and nothing ever charges it again. There
    * is no silent fallback to another rail — the weekly fee stays due, and the
-   * partner adds a card or chooses another way to pay. An intent already sent
-   * on this card keeps being reconciled. Not stopped by the flag or the kill
-   * switch: taking a card out of service only ever lowers risk.
+   * partner adds a card or chooses another way to pay. Not stopped by the
+   * flag or the kill switch: taking a card out of service only ever lowers risk.
+   *
+   * [AX318 R1] A weekly charge on this card that was authorized but not yet
+   * handed to the provider is closed here as NOT_SENT: it is never sent. One
+   * already handed off is in flight: it finishes and is reconciled like any
+   * other, and the answer says so (`paymentInProgress`), never silently.
+   * `subscriptionId` scopes the card to the caller's selected subscription.
    */
-  async removeInstrument(input: { userId: string; instrumentId: string; now?: Date }): Promise<PaymentInstrumentDto> {
+  async removeInstrument(input: { userId: string; instrumentId: string; subscriptionId?: string; now?: Date }): Promise<{ card: PaymentInstrumentDto; paymentInProgress: boolean }> {
     const now = input.now ?? new Date();
     const found = await this.prisma.paymentInstrument.findUnique({ where: { id: input.instrumentId }, select: { id: true, subscriptionId: true } });
-    if (!found) throw new NotFoundError('Card', input.instrumentId);
+    if (!found || (input.subscriptionId !== undefined && found.subscriptionId !== input.subscriptionId)) {
+      throw new NotFoundError('Card', input.instrumentId);
+    }
     await this.ownedSubscription(input.userId, found.subscriptionId).catch(() => {
       throw new NotFoundError('Card', input.instrumentId);
     });
-    await this.prisma.$transaction(async (tx) => {
+    const inFlight = await this.prisma.$transaction(async (tx) => {
       await this.opts.observer?.beforeCardLocks?.(found.subscriptionId, tx);
       // [AX297 F1] payer -> subscription -> card, the order billing's dispatch
-      // authorization takes: a charge being authorized on this card finishes
-      // first (and is reconciled like any other), or it sees the card REVOKED
-      // and sends nothing.
+      // authorization and handoff take: a charge being authorized or handed
+      // off on this card finishes that step first, or sees the card REVOKED.
       await lockCardAuthority(tx, found.subscriptionId);
       await tx.$queryRaw`SELECT "id" FROM "payment_instruments" WHERE "id" = ${found.id} FOR UPDATE`;
       await this.opts.observer?.afterCardLocked?.(found.subscriptionId, tx);
@@ -731,7 +748,10 @@ export class CardRailService {
         where: { id: found.id, status: 'ACTIVE' },
         data: { status: 'REVOKED', revokedAt: now, revokedBy: input.userId },
       });
-      if (revoked.count !== 1) return; // already out of service: nothing to do, nothing to record twice
+      // [AX318 R1] Authorized, never handed off: closed, never sent. Handed off: in flight.
+      const unsent = await closeUnsentCardIntents(tx, { instrumentId: found.id }, 'CARD_REMOVED', now);
+      const moving = await cardChargesInFlight(tx, found.id);
+      if (revoked.count !== 1) return moving; // already out of service: nothing to record twice
       const card = await tx.paymentInstrument.findUniqueOrThrow({ where: { id: found.id }, select: { brand: true, last4: true } });
       const sub = await tx.subscription.findUniqueOrThrow({ where: { id: found.subscriptionId }, select: { currencyCode: true } });
       await tx.billingEvent.create({
@@ -744,10 +764,15 @@ export class CardRailService {
         },
       });
       await tx.auditLog.create({
-        data: { userId: input.userId, action: 'CARD_REMOVED', entity: 'PaymentInstrument', entityId: found.id, changes: { subscriptionId: found.subscriptionId, status: 'REVOKED' } },
+        data: {
+          userId: input.userId, action: 'CARD_REMOVED', entity: 'PaymentInstrument', entityId: found.id,
+          changes: { subscriptionId: found.subscriptionId, status: 'REVOKED', unsentChargesClosed: unsent, chargesInFlight: moving },
+        },
       });
+      return moving;
     });
-    return this.prisma.paymentInstrument.findUniqueOrThrow({ where: { id: found.id }, select: INSTRUMENT_DTO_SELECT });
+    const card = await this.prisma.paymentInstrument.findUniqueOrThrow({ where: { id: found.id }, select: INSTRUMENT_DTO_SELECT });
+    return { card, paymentInProgress: inFlight > 0 };
   }
 }
 

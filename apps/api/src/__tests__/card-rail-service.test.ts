@@ -1,9 +1,9 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import Redis from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { nanoid } from 'nanoid';
-import type { Prisma, SubscriptionStatus, UserRole } from '@prisma/client';
+import type { Prisma, SubscriptionPayment, SubscriptionStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -203,12 +203,12 @@ describe('ENROLL: the provider’s answer adds the card — sealed, bound, shown
     expect(replaced.instrument?.id).toBe(current!.id);
 
     const removed = await card.removeInstrument({ userId: p.userId, instrumentId: current!.id });
-    expect(removed).toEqual({ id: current!.id, brand: 'SIMULATED', last4: '3155', expMonth: 12, expYear: current!.expYear, status: 'REVOKED' });
+    expect(removed).toEqual({ card: { id: current!.id, brand: 'SIMULATED', last4: '3155', expMonth: 12, expYear: current!.expYear, status: 'REVOKED' }, paymentInProgress: false });
     const list = await card.listInstruments(p.userId, p.subId);
     expect(list.map((i) => i.status).sort()).toEqual(['REPLACED', 'REVOKED']);
     for (const i of list) expect(Object.keys(i).sort()).toEqual(['brand', 'expMonth', 'expYear', 'id', 'last4', 'status']);
     // Removing again is a no-op, and another partner cannot remove (or even see) it.
-    expect(await card.removeInstrument({ userId: p.userId, instrumentId: current!.id })).toMatchObject({ status: 'REVOKED' });
+    expect(await card.removeInstrument({ userId: p.userId, instrumentId: current!.id })).toMatchObject({ card: { status: 'REVOKED' }, paymentInProgress: false });
     const stranger = await partner();
     await expect(card.removeInstrument({ userId: stranger.userId, instrumentId: old!.id })).rejects.toMatchObject({ statusCode: 404 });
     await expect(card.listInstruments(stranger.userId, p.subId)).rejects.toMatchObject({ statusCode: 404 });
@@ -223,6 +223,15 @@ describe('ENROLL: the provider’s answer adds the card — sealed, bound, shown
     expect(await card.confirm(session.sessionId)).toMatchObject({ status: 'FAILED' });
     expect((await money(p.subId)).instruments).toHaveLength(0);
     expect((await money(p.subId)).sub.billingMethod).toBe('CASH');
+  });
+
+  it('a removal that names a subscription acts only on that subscription’s cards: another’s is not found there and stays ACTIVE', async () => {
+    const p = await partner();
+    const x = await enrolled(p);
+    const elsewhere = await partner();
+    await expect(card.removeInstrument({ userId: p.userId, instrumentId: x.id, subscriptionId: elsewhere.subId })).rejects.toMatchObject({ statusCode: 404 });
+    expect((await money(p.subId)).instruments.map((i) => i.status), 'removed through a subscription it does not belong to').toEqual(['ACTIVE']);
+    expect(await card.removeInstrument({ userId: p.userId, instrumentId: x.id, subscriptionId: p.subId })).toMatchObject({ card: { status: 'REVOKED' }, paymentInProgress: false });
   });
 });
 
@@ -465,17 +474,19 @@ describe('[C2] a session belongs to the provider setup that opened it', () => {
 // suites below.
 // ---------------------------------------------------------------------------
 
-/** The partner adds a card through the real loop; the ACTIVE row and its token. */
+/** The partner adds a card through the real loop; the ACTIVE row, its token,
+ *  and what the confirmation answered. */
 async function enrolled(p: { userId: string; subId: string }, scenario: SimulatorScenario = 'APPROVE', svc: CardRailService = card) {
   const s = await svc.startSession({ userId: p.userId, subscriptionId: p.subId, purpose: 'ENROLL', consentVersion: CARD_ON_FILE_CONSENT_VERSION });
   await returnWith(await press(s.sessionId, scenario));
   const done = await svc.confirm(s.sessionId);
   const row = await app.prisma.paymentInstrument.findUniqueOrThrow({ where: { id: done.instrument!.id } });
-  return { id: row.id, token: await openVaultToken(row) };
+  return { id: row.id, token: await openVaultToken(row), confirmed: done };
 }
 
-/** The simulator, watched: every instrument charge that reaches the provider. */
-function watched(inner: CardRailProvider) {
+/** The simulator, watched: every instrument charge that reaches the provider.
+ *  `hooks.beforeCharge` runs as a charge arrives, before the provider acts on it. */
+function watched(inner: CardRailProvider, hooks: { beforeCharge?: () => Promise<void> } = {}) {
   const charges: Array<{ vaultToken: string; idempotencyKey: string }> = [];
   const provider: CardRailProvider = {
     binding: inner.binding,
@@ -484,6 +495,7 @@ function watched(inner: CardRailProvider) {
     parseReturn: (params) => inner.parseReturn(params),
     confirm: (i) => inner.confirm(i),
     chargeInstrument: async (i) => {
+      await hooks.beforeCharge?.();
       charges.push({ vaultToken: i.vaultToken, idempotencyKey: i.idempotencyKey });
       return inner.chargeInstrument(i);
     },
@@ -501,6 +513,22 @@ const billable = async (subId: string) => (await app.prisma.subscription.findUni
 
 const failureNotes = async (subId: string) =>
   (await app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' }, orderBy: { createdAt: 'asc' }, select: { note: true } })).map((e) => e.note);
+
+/** [AX318 R1] Runs `fn` once, the moment phase one (authorization) has
+ *  committed its AUTHORIZED intent and before phase two (the handoff). */
+function afterAuthorization(billing: BillingService, fn: (intentId: string) => Promise<void>) {
+  const target = billing as unknown as { authorizeInstrumentCharge: (...args: unknown[]) => Promise<{ outcome: string; intentId?: string }> };
+  const original = target.authorizeInstrumentCharge.bind(billing);
+  let ran = false;
+  vi.spyOn(target, 'authorizeInstrumentCharge').mockImplementation(async (...args: unknown[]) => {
+    const authorized = await original(...args);
+    if (!ran && authorized.intentId) {
+      ran = true;
+      await fn(authorized.intentId);
+    }
+    return authorized;
+  });
+}
 
 /** Past the reclaim window: the cycle takes a waiting attempt from the top. */
 const pastReclaim = () => new Date(Date.now() + 31 * 60_000);
@@ -690,7 +718,7 @@ describe('[AX297 F1] a card that leaves service after billing read it is never c
     expect((await money(p.subId)).sub.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
   });
 
-  it('[lock order] the AUTHORIZATION holds the card: a removal waits for it; the charge authorized while the card was ACTIVE goes out once, and the card is REVOKED after', async () => {
+  it('[lock order] the AUTHORIZATION holds the card: a removal waits for it, then wins at the handoff: the authorized charge closes NOT_SENT and nothing is sent [AX318 R1]', async () => {
     const due = new Date(Date.now() - DAY);
     const p = await partner({ due });
     const x = await enrolled(p);
@@ -717,13 +745,154 @@ describe('[AX297 F1] a card that leaves service after billing read it is never c
     }
     const outcomes = await Promise.allSettled([bill, removal!]);
     expect(outcomes.map((o) => o.status), JSON.stringify(outcomes.map((o) => (o.status === 'rejected' ? String(o.reason) : 'ok')))).toEqual(['fulfilled', 'fulfilled']);
-    expect((outcomes[0] as PromiseFulfilledResult<string>).value).toBe('succeeded');
-    expect(charges.map((c) => c.vaultToken)).toEqual([x.token]);
+    // The removal queued behind phase one takes the locks the moment it
+    // commits, before the handoff can: the authorized charge is closed, never sent.
+    expect(charges, 'the REMOVED card was charged').toEqual([]);
+    expect((outcomes[0] as PromiseFulfilledResult<string>).value).toBe('pending');
+    expect((outcomes[1] as PromiseFulfilledResult<unknown>).value).toMatchObject({ card: { status: 'REVOKED' }, paymentInProgress: false });
     const after = await money(p.subId);
     expect(after.instruments.map((i) => i.status)).toEqual(['REVOKED']);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'EXPIRED', failureCode: 'DISPATCH_REVOKED', clientKey: expect.stringContaining(':void:') })]);
+    expect([after.successes, (await failureNotes(p.subId)).length, after.sub.failedAttempts]).toEqual([0, 0, 0]);
+    expect(after.sub.nextBillingDate.getTime()).toBe(due.getTime());
+  });
+});
+
+describe('[AX318 R1] the charge is handed to the provider only by a compare-and-set under the card lock', () => {
+  it('REMOVED after the charge was authorized and before it was handed off: never charged; the removal closes the authorized charge NOT_SENT and the attempt is billed again from the top', async () => {
+    const p = await partner({ due: new Date(Date.now() - DAY) });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {}, () => provider);
+    const cards = new CardRailService(app.prisma, notifications, racing, () => provider);
+    let removal: unknown;
+    let intentAfterRemoval: SubscriptionPayment | null = null;
+    afterAuthorization(racing, async (intentId) => {
+      removal = await cards.removeInstrument({ userId: p.userId, instrumentId: x.id });
+      intentAfterRemoval = await app.prisma.subscriptionPayment.findUnique({ where: { id: intentId } });
+    });
+
+    const outcome = await racing.billSubscription(await billable(p.subId));
+    expect(charges, 'the REMOVED card was charged').toEqual([]);
+    expect(removal).toMatchObject({ card: { status: 'REVOKED' }, paymentInProgress: false });
+    expect(intentAfterRemoval, 'the removal left the authorized charge open').toMatchObject({
+      status: 'EXPIRED', failureCode: 'DISPATCH_REVOKED', clientKey: expect.stringContaining(':void:'),
+      failureRaw: expect.objectContaining({ providerEffect: 'NOT_SENT', cancelledBy: 'CARD_REMOVED' }),
+    });
+    expect(outcome).toBe('pending');
+    const after = await money(p.subId);
+    expect([after.successes, (await failureNotes(p.subId)).length, after.sub.failedAttempts]).toEqual([0, 0, 0]);
+    // Not stuck on the closed charge's key: the next cycle bills the card on file (none: the ordinary outcome).
+    expect(await racing.billSubscription(await billable(p.subId), pastReclaim())).toBe('failed');
+    expect(charges).toEqual([]);
+  });
+
+  it('REMOVED after the charge was handed off: it is in flight, so that one charge finishes, exactly once, and the removal says a payment is in progress', async () => {
+    const due = new Date(Date.now() - DAY);
+    const p = await partner({ due });
+    const x = await enrolled(p);
+    let cards: CardRailService | undefined;
+    let removal: unknown;
+    const { provider, charges } = watched(sim, {
+      beforeCharge: async () => { if (!removal) removal = await cards!.removeInstrument({ userId: p.userId, instrumentId: x.id }); },
+    });
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {}, () => provider);
+    cards = new CardRailService(app.prisma, notifications, racing, () => provider);
+
+    expect(await racing.billSubscription(await billable(p.subId))).toBe('succeeded');
+    expect(removal, 'the removal did not report the charge in flight').toMatchObject({ card: { status: 'REVOKED' }, paymentInProgress: true });
+    expect(charges.map((c) => c.vaultToken)).toEqual([x.token]);
+    const after = await money(p.subId);
     expect(after.payments).toEqual([expect.objectContaining({ status: 'CAPTURED', instrumentId: x.id })]);
     expect([after.successes, after.ledger]).toEqual([1, 1]);
     expect(after.sub.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
+    expect(after.instruments.map((i) => i.status)).toEqual(['REVOKED']);
+  });
+
+  it('the card leaves service between authorization and handoff by ANY path (here another run retires it as expired): the handoff re-checks it under the lock and sends nothing', async () => {
+    const p = await partner({ due: new Date(Date.now() - DAY) });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {}, () => provider);
+    afterAuthorization(racing, async () => {
+      await app.prisma.paymentInstrument.updateMany({ where: { id: x.id, status: 'ACTIVE' }, data: { status: 'EXPIRED', expiredAt: new Date() } });
+    });
+
+    expect(await racing.billSubscription(await billable(p.subId))).toBe('pending');
+    expect(charges, 'a card that left service was charged').toEqual([]);
+    expect((await money(p.subId)).payments).toEqual([expect.objectContaining({
+      status: 'EXPIRED', failureCode: 'DISPATCH_REVOKED', clientKey: expect.stringContaining(':void:'),
+      failureRaw: expect.objectContaining({ providerEffect: 'NOT_SENT', cancelledBy: 'CARD_OUT_OF_SERVICE' }),
+    })]);
+  });
+
+  it('an authorization that aborts (a deadlock victim, a lost connection) leaves no intent and sends nothing; the attempt is billed again later, once', async () => {
+    const p = await partner({ due: new Date(Date.now() - DAY) });
+    const x = await enrolled(p);
+    const { provider, charges } = watched(sim);
+    let aborted = false;
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {
+      afterInstrumentChargeLocked: async () => {
+        if (aborted) return;
+        aborted = true;
+        throw Object.assign(new Error('deadlock detected (a simulated abort of the authorization transaction)'), { code: '40P01' });
+      },
+    }, () => provider);
+
+    await expect(racing.billSubscription(await billable(p.subId))).rejects.toThrow(/deadlock detected/);
+    expect(charges).toEqual([]);
+    expect((await money(p.subId)).payments).toEqual([]);
+    expect(await racing.billSubscription(await billable(p.subId), pastReclaim())).toBe('succeeded');
+    expect(charges.map((c) => c.vaultToken)).toEqual([x.token]);
+  });
+
+  it('REPLACED after the charge was authorized and before it was handed off: the old card is never charged; the replacement closes the authorized charge NOT_SENT, reports nothing in progress, and the attempt is billed once, on the new card', async () => {
+    const p = await partner({ due: new Date(Date.now() - DAY) });
+    await enrolled(p);
+    const { provider, charges } = watched(sim);
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {}, () => provider);
+    let freshToken = '';
+    let replacement: unknown;
+    let intentAfterReplacement: SubscriptionPayment | null = null;
+    afterAuthorization(racing, async (intentId) => {
+      const fresh = await enrolled(p);
+      freshToken = fresh.token;
+      replacement = fresh.confirmed;
+      intentAfterReplacement = await app.prisma.subscriptionPayment.findUnique({ where: { id: intentId } });
+    });
+
+    expect(await racing.billSubscription(await billable(p.subId))).toBe('pending');
+    expect(charges, 'the REPLACED card was charged').toEqual([]);
+    expect(intentAfterReplacement, 'the replacement left the authorized charge open').toMatchObject({
+      status: 'EXPIRED', failureCode: 'DISPATCH_REVOKED', clientKey: expect.stringContaining(':void:'),
+      failureRaw: expect.objectContaining({ providerEffect: 'NOT_SENT', cancelledBy: 'CARD_REPLACED' }),
+    });
+    expect(replacement).toMatchObject({ purpose: 'ENROLL', status: 'SUCCEEDED' });
+    expect(replacement, 'a charge that was never sent was reported as in progress').not.toHaveProperty('paymentInProgress');
+    const mid = await money(p.subId);
+    expect([mid.successes, (await failureNotes(p.subId)).length, mid.sub.failedAttempts]).toEqual([0, 0, 0]);
+    expect(await racing.billSubscription(await billable(p.subId), pastReclaim())).toBe('succeeded');
+    expect(charges.map((c) => c.vaultToken), 'not billed once, on the new card').toEqual([freshToken]);
+  });
+
+  it('REPLACED after the charge was handed off: that one charge finishes on the replaced card, exactly once, and the new card’s confirmation says a payment is in progress', async () => {
+    const due = new Date(Date.now() - DAY);
+    const p = await partner({ due });
+    const x = await enrolled(p);
+    let replacement: unknown;
+    const { provider, charges } = watched(sim, {
+      beforeCharge: async () => { if (!replacement) replacement = (await enrolled(p)).confirmed; },
+    });
+    const racing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), {}, () => provider);
+
+    expect(await racing.billSubscription(await billable(p.subId))).toBe('succeeded');
+    expect(replacement, 'the replacement did not report the charge in flight').toMatchObject({ purpose: 'ENROLL', status: 'SUCCEEDED', paymentInProgress: true });
+    expect(charges.map((c) => c.vaultToken)).toEqual([x.token]);
+    const after = await money(p.subId);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'CAPTURED', instrumentId: x.id })]);
+    expect([after.successes, after.ledger]).toEqual([1, 1]);
+    expect(after.sub.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
+    expect(after.instruments.map((i) => i.status)).toEqual(['REPLACED', 'ACTIVE']);
   });
 });
 

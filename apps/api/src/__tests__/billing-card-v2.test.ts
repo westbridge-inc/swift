@@ -431,18 +431,110 @@ describe('[AX297 F5] CARD_RAIL_V2 off: the worker billing asks no v2 provider ab
     expect(await bill(p.subId)).toBe('pending'); // captured at the provider; the answer was lost
     fake.retrieves.length = 0;
 
+    // [AX318 R4] A legacy card intent in the same pass: the flag-off pass must still work it (stamp it).
+    const legacyRow = await cardSub();
+    await app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: legacyRow.subId, amount: WEEKLY, status: 'UNKNOWN', paymentMethod: 'CARD', clientKey: `card:${legacyRow.subId}:${legacyRow.periodKey}:a0`,
+      periodStart: legacyRow.due, periodEnd: new Date(legacyRow.due.getTime() + 7 * DAY), failureRaw: { providerEffect: 'AUTHORIZED', providerRail: 'CARD' },
+    } });
+    expect((await facts(p.subId)).payments[0]!.lastPolledAt).toBeNull();
+
     const workerOff = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), legacy, {}, cardRailWorkerSource({ redis: {} as never }, { CARD_RAIL_V2: '0' }));
     await workerOff.reconcileUnknownCardCharges();
     expect(fake.retrieves).toEqual([]);
     let after = await facts(p.subId);
     expect(after.payments).toEqual([expect.objectContaining({ status: 'UNKNOWN' })]);
     expect(after.successes).toBe(0);
+    expect(after.payments[0]!.lastPolledAt, 'the flag-off worker wrote to a v2 row [AX318 R4]').toBeNull();
+    expect((await facts(legacyRow.subId)).payments[0]!.lastPolledAt, 'the pass did not run at all').not.toBeNull();
 
     const workerDraining = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), legacy, {}, () => fake);
     await workerDraining.reconcileUnknownCardCharges();
     expect(fake.retrieves).toContain(`card:${p.subId}:${p.periodKey}:a0`);
     after = await facts(p.subId);
     expect(after.payments).toEqual([expect.objectContaining({ status: 'CAPTURED' })]);
+    expect([after.successes, after.ledger]).toEqual([1, 1]);
+  });
+});
+
+describe('[AX318 R2] a reclaimed attempt is dispatched, checked and settled from ONE record: the one it was issued with', () => {
+  it('a GYD attempt defers, the subscription becomes USD, the attempt is reclaimed: GYD is sent and GYD is booked, never a USD capture labelled GYD', async () => {
+    const p = await cardSub();
+    const x = await card(p);
+    let replaced = false;
+    const racing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), legacy, {
+      // The first dispatch defers: the card is replaced after the cycle read it.
+      beforeInstrumentChargeAuthorization: async () => {
+        if (replaced) return;
+        replaced = true;
+        await app.prisma.paymentInstrument.update({ where: { id: x.id }, data: { status: 'REPLACED', replacedAt: new Date() } });
+        await card(p);
+      },
+    }, () => fake);
+    expect(await racing.billSubscription((await load(p.subId)) as never)).toBe('pending');
+    expect(fake.charges).toEqual([]);
+    await app.prisma.subscription.update({ where: { id: p.subId }, data: { currencyCode: 'USD' } });
+
+    expect(await racing.billSubscription((await load(p.subId)) as never, new Date(Date.now() + 31 * 60_000))).toBe('succeeded');
+    expect(fake.charges).toHaveLength(1);
+    const success = await app.prisma.billingEvent.findFirstOrThrow({ where: { subscriptionId: p.subId, type: 'CHARGE_SUCCESS' } });
+    expect(fake.charges[0]!.currencyCode, 'dispatched in one currency, booked in another').toBe(success.currencyCode);
+    expect(fake.charges[0]).toMatchObject({ currencyCode: 'GYD', amountMinor: MINOR });
+    expect([success.currencyCode, Number(success.amount)]).toEqual(['GYD', WEEKLY]);
+  });
+});
+
+describe('[AX318 R3] a weekly capture that cannot be pinned is held AND put in front of the tenant admins', () => {
+  it('its attempt record is gone at settlement: held CURRENCY_UNPINNED, nothing booked, the admins paged', async () => {
+    const p = await cardSub();
+    await card(p);
+    const racing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), legacy, {
+      afterProviderReturned: async () => {
+        await app.prisma.billingEvent.deleteMany({ where: { idempotencyKey: `charge:${p.subId}:${p.periodKey}:a0` } });
+      },
+    }, () => fake);
+    expect(await racing.billSubscription((await load(p.subId)) as never)).toBe('skipped');
+    const after = await facts(p.subId);
+    expect(after.payments).toEqual([expect.objectContaining({ status: 'UNKNOWN', failureCode: 'CURRENCY_UNPINNED', externalRef: expect.stringMatching(/^fk_/) })]);
+    expect(after.successes).toBe(0);
+    expect(await pagedFor('card-capture-currency-unpinned', 'paymentId', after.payments[0]!.id), 'only an error log').toBeGreaterThan(0);
+  });
+});
+
+describe('[AX318 R1] a run that dies between authorization and handoff sent nothing: nobody is asked, and past a grace the attempt is billed again, once', () => {
+  it('inside the grace the AUTHORIZED intent is left alone; past it, it is closed NOT_SENT with no question to the provider and no strike, and the next cycle charges once', async () => {
+    const p = await cardSub();
+    const x = await card(p);
+    const dying = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), legacy, {
+      beforeInstrumentChargeHandoff: async () => { throw new Error('failpoint: the process died between authorization and handoff'); },
+    }, () => fake);
+    await expect(dying.billSubscription((await load(p.subId)) as never)).rejects.toThrow(/died between authorization and handoff/);
+    expect(fake.charges).toEqual([]);
+    const [intent] = (await facts(p.subId)).payments;
+    expect(intent).toMatchObject({ status: 'UNKNOWN', instrumentId: x.id, failureRaw: expect.objectContaining({ providerEffect: 'AUTHORIZED' }) });
+    const key = intent!.clientKey!;
+
+    // Inside the grace a live run could still be between its two phases: left alone, and nobody is asked.
+    await billing.reconcileUnknownCardCharges();
+    expect((await facts(p.subId)).payments).toEqual([expect.objectContaining({ id: intent!.id, status: 'UNKNOWN', failureRaw: expect.objectContaining({ providerEffect: 'AUTHORIZED' }) })]);
+    expect(fake.retrieves, 'a charge that was never sent was asked about').not.toContain(key);
+
+    // Past the grace (only this row is aged, and it is due a poll again): closed, key released, nobody asked, nobody penalised.
+    await app.prisma.subscriptionPayment.update({ where: { id: intent!.id }, data: { createdAt: new Date(intent!.createdAt.getTime() - 11 * 60_000), lastPolledAt: null } });
+    await billing.reconcileUnknownCardCharges();
+    let after = await facts(p.subId);
+    expect(after.payments).toEqual([expect.objectContaining({
+      id: intent!.id, status: 'EXPIRED', failureCode: 'DISPATCH_REVOKED', clientKey: `${key}:void:${intent!.id}`,
+      failureRaw: expect.objectContaining({ providerEffect: 'NOT_SENT', cancelledBy: 'NEVER_HANDED_OFF' }),
+    })]);
+    expect(fake.retrieves, 'a charge that was never sent was asked about').not.toContain(key);
+    expect([fake.charges.length, after.successes, after.failures, after.sub.failedAttempts]).toEqual([0, 0, 0, 0]);
+
+    // Billed again from the top, once, under the key the provider never saw.
+    expect(await bill(p.subId, new Date(Date.now() + 31 * 60_000))).toBe('succeeded');
+    expect(fake.charges.map((c) => c.idempotencyKey)).toEqual([key]);
+    after = await facts(p.subId);
+    expect(after.payments.map((r) => r.status)).toEqual(['EXPIRED', 'CAPTURED']);
     expect([after.successes, after.ledger]).toEqual([1, 1]);
   });
 });
