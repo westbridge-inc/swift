@@ -17,7 +17,15 @@ export default function robots(): MetadataRoute.Robots {
         // The deletion page MUST stay crawlable — Google Play's policy requires a
         // publicly reachable URL, and a bare `Disallow: /account` would swallow it
         // as a prefix. The longer Allow wins, so it is listed explicitly first.
-        allow: ['/', '/account/delete'],
+        allow: [
+          '/',
+          '/account/delete',
+          // Public catalogue pages share /order/ with private addresses. The
+          // longer Allow keeps these crawlable without exposing that sibling.
+          '/order/browse',
+          '/order/search',
+          '/order/vendor/',
+        ],
         disallow: [
           '/dashboard/',   // vendor operator console
           '/portal/',      // mover document portal
