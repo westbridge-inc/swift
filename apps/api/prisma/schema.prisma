@@ -3071,10 +3071,25 @@ model ProviderPayment {
   updatedAt         DateTime  @updatedAt
 
   // Raw migration owns the partial unique expression index using mmg_txn_canon.
+  historicalAliases ProviderPaymentAlias[]
+
   @@index([provider, providerTxnId])
   @@index([tenantId])
   @@index([status])
   @@map("provider_payments")
+}
+
+/// Immutable historical SQL-canonical references reserved before identity rekey.
+/// Global routing metadata; no public API. Raw SQL prevents all runtime mutations.
+model ProviderPaymentAlias {
+  provider          String
+  aliasKey          String
+  providerPaymentId String
+  providerPayment   ProviderPayment @relation(fields: [providerPaymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([provider, aliasKey])
+  @@index([providerPaymentId])
+  @@map("provider_payment_aliases")
 }
 
 /// Bank-truth reconciliation [san spec PART 25]: ledger truth vs what MMG

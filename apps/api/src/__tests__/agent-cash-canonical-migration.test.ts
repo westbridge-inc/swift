@@ -18,6 +18,10 @@ describe('[AX384] canonical identity migration on pre-migration money facts', ()
     await expect(prisma.$transaction(async (tx) => {
       // Reconstruct the old schema inside this transaction. Every DDL and
       // fixture change rolls back, including when an assertion fails.
+      await tx.$executeRawUnsafe('DROP TRIGGER IF EXISTS provider_payments_historical_alias_guard ON provider_payments');
+      await tx.$executeRawUnsafe('DROP TABLE IF EXISTS provider_payment_aliases');
+      await tx.$executeRawUnsafe('DROP FUNCTION IF EXISTS provider_payments_guard_historical_alias()');
+      await tx.$executeRawUnsafe('DROP FUNCTION IF EXISTS provider_payment_aliases_immutable()');
       await tx.$executeRawUnsafe('DROP INDEX provider_payments_one_live_canonical');
       await tx.$executeRawUnsafe('DROP INDEX "provider_payments_provider_providerTxnId_idx"');
       await tx.$executeRawUnsafe('DROP FUNCTION mmg_txn_canon(text)');
@@ -82,8 +86,11 @@ describe('[AX384] canonical identity migration on pre-migration money facts', ()
       expect(await snapshots()).toEqual(before);
       // The index is exercised, not merely inspected. A second live spelling
       // is rejected without aborting this transaction, using ON CONFLICT.
+      // Use a post-migration key so the historical reservation trigger does
+      // not intercept this independent unique-index proof.
+      await tx.providerPayment.create({ data: { provider: 'MMG', providerTxnId: `${prefix}-NEW`, amount: 2100, currencyCode: 'GYD' } });
       expect(await tx.$executeRaw`INSERT INTO provider_payments (id, provider, "providerTxnId", amount, "currencyCode", "updatedAt")
-        VALUES (${nanoid()}, 'MMG', ${` ${prefix}-ONE `}, 2100, 'GYD', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING`).toBe(0);
+        VALUES (${nanoid()}, 'MMG', ${` ${prefix}-NEW `}, 2100, 'GYD', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING`).toBe(0);
       throw rollback;
     }, { timeout: 30_000 })).rejects.toBe(rollback);
     expect(await prisma.providerPayment.count({ where: { providerTxnId: { contains: prefix } } })).toBe(0);

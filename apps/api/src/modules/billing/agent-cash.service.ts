@@ -306,7 +306,7 @@ export class AgentCashService {
   private async identityFor(
     row: Pick<MmgAgentPayment, 'id' | 'tenantId' | 'channel' | 'externalId' | 'mmgTxnId' | 'amount' | 'currencyCode' | 'providerPaymentId' | 'status' | 'failureCode'>,
     channel: string,
-  ): Promise<{ payment: { id: string; status: string; creditedPaymentId: string | null }; conflict: boolean }> {
+  ): Promise<{ payment: { id: string; status: string; creditedPaymentId: string | null }; conflict: false } | { payment: ProviderPayment | null; conflict: true }> {
     const raw = providerTxnRaw(row);
     const resolved = await this.prisma.$transaction(async (tx) => {
       await bindTenantTransaction(tx);
@@ -320,7 +320,24 @@ export class AgentCashService {
         // Never redirect a linked observation, including one the migration held.
         [payment] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${row.providerPaymentId}`;
       } else {
-        [payment] = await readLive();
+        // [SX394] A survivor may no longer store its old key. Permanent SQL
+        // reservations include singletons and held/transitive siblings. They
+        // are global even if this caller cannot read the target tenant's row.
+        const [alias] = await tx.$queryRaw<Array<{ providerPaymentId: string }>>`
+          SELECT "providerPaymentId" FROM "provider_payment_aliases"
+           WHERE "provider" = ${PROVIDER} AND "aliasKey" = mmg_txn_canon(${raw})`;
+        if (alias) {
+          const [reserved] = await tx.$queryRaw<Array<ProviderPayment & { canonicalMatches: boolean }>>`
+            SELECT p.*, mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${raw}) AS "canonicalMatches"
+              FROM "provider_payments" p WHERE p."id" = ${alias.providerPaymentId}`;
+          if (!reserved) return { payment: null, conflict: true as const };
+          payment = reserved;
+          historicalConflict = !reserved.canonicalMatches || reserved.status === 'HELD_DUPLICATE'
+            || reserved.tenantId !== row.tenantId || Number(reserved.amount) !== Number(row.amount)
+            || reserved.currencyCode !== row.currencyCode;
+        } else {
+          [payment] = await readLive();
+        }
         if (!payment) {
           // Legacy JS keys sometimes collapsed several SQL spellings into one
           // identity. If the migration retained a different raw spelling, the
@@ -355,7 +372,7 @@ export class AgentCashService {
           if (linked !== 1) {
             const current = await tx.mmgAgentPayment.findUniqueOrThrow({ where: { id: row.id } });
             if (current.status !== row.status) throw new Error(row.status === 'UNMATCHED' ? 'NOT_UNMATCHED' : 'NOT_RECEIVED');
-            if (current.failureCode === 'PROVIDER_ID_CONFLICT') return { payment, conflict: true };
+            if (current.failureCode === 'PROVIDER_ID_CONFLICT') return { payment, conflict: true as const };
             if (!current.providerPaymentId) throw new Error('PROVIDER_IDENTITY_MISSING');
             [payment] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${current.providerPaymentId}`;
           }
@@ -368,11 +385,11 @@ export class AgentCashService {
         || payment.status === 'HELD_DUPLICATE' || payment.provider !== PROVIDER
         || payment.tenantId !== row.tenantId || !canonical?.matches
         || Number(payment.amount) !== Number(row.amount) || payment.currencyCode !== row.currencyCode;
-      return { payment, conflict };
+      return conflict ? { payment, conflict: true as const } : { payment, conflict: false as const };
     });
     if (resolved.conflict) {
       agentCashProviderIdConflictsCounter.labels(channel).inc();
-      log().error({ paymentId: row.id, providerPaymentId: resolved.payment.id },
+      log().error({ paymentId: row.id },
         '[AX384] provider identity conflicts with this observation; held for finance review');
       await this.page('agent-cash-provider-id-conflict', 'Payment needs finance review',
         `Observation ${row.id} conflicts with its provider identity. No money was credited.`,
@@ -751,4 +768,3 @@ export async function scanDuplicateCredits(prisma: PrismaClient): Promise<Array<
   }
   return found;
 }
-
