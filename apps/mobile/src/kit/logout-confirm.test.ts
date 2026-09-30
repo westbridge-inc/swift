@@ -203,7 +203,7 @@ function elements(node: unknown, found: Element[] = []): Element[] {
   return found;
 }
 
-const CUSTOMER_BODY = 'Your cart and session leave this device; your account keeps everything.';
+const CUSTOMER_BODY = 'You’ll be signed out on this device. Your cart and account details stay with your account.';
 
 function Host(options: LogoutConfirmOptions): LogoutConfirm {
   return useLogoutConfirm(options);
