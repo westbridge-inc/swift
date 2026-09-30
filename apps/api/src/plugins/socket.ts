@@ -32,6 +32,7 @@ import {
   joinStoreRoomCluster,
   listenForStoreRoomRevocations,
   storeRoomSubscribeHandler,
+  storeRoomTiming,
   type StoreRoomConvergeOptions,
 } from '../modules/notification/store-room';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
@@ -110,12 +111,14 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     process.env['SOCKET_AUTH_RECHECK_TIMEOUT_MS'],
     Math.min(4_000, socketAuthorityRecheckMs),
   );
-  // [AX317 F03] How often every store-room membership on this instance is
-  // read again (store-room.ts): the bound on how long a member whose
-  // revocation never arrived can stay in a store room. Never above 60 s.
-  const storeRoomRecheckMs = Math.min(
+  // [AX317 F03 · AX368 R3-01] How often every store-room membership on this
+  // instance is read again, and how long one membership read (a pass's or a
+  // subscription's) may take (store-room.ts storeRoomTiming): a member whose
+  // revocation never arrived is out of the store room within the two added
+  // together, from the removal's commit, and that is never above 60 s.
+  const { intervalMs: storeRoomRecheckMs, readTimeoutMs: storeRoomReadTimeoutMs } = storeRoomTiming(
     positiveDurationMs(process.env['SOCKET_STORE_ROOM_RECHECK_MS'], 30_000),
-    60_000,
+    socketAuthorityRecheckTimeoutMs,
   );
   // Keep one complete authority-store pass inside one configured deadline.
   // The database statement timeout is shorter than the outer deadline, so a
@@ -296,7 +299,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   // stream after an interruption if the reconnect's own pass could not.
   const storeRoomConvergeOptions: StoreRoomConvergeOptions = {
     readMembers: (pairs) => storeRoomMemberships(app.prisma, pairs),
-    timeoutMs: socketAuthorityRecheckTimeoutMs,
+    timeoutMs: storeRoomReadTimeoutMs,
     log: app.log,
   };
   // A pass fails closed on its own (store-room.ts); anything it throws past
@@ -679,13 +682,16 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     // by the cross-instance stream being whole (store-room.ts): no
     // subscription joins after this process applied a revocation, or while
     // it cannot know it would have heard one. An epoch that moved during the
-    // read gets one fresh read. There is no join-then-recheck: a socket that
-    // is not a member is never in the room, not even for the length of a
-    // query. An optional ack reports the outcome.
+    // read gets one fresh read, and so does an answer that came after the
+    // read timeout or after a re-validation pass ran while it was pending
+    // (AX368 R3-01). There is no join-then-recheck: a socket that is not a
+    // member is never in the room, not even for the length of a query. An
+    // optional ack reports the outcome.
     socket.on('vendor:subscribe', storeRoomSubscribeHandler(
       io,
       socket,
       (vendorId) => isStoreRoomMember(app.prisma, vendorId, userId, tenantId),
+      storeRoomReadTimeoutMs,
     ));
 
     const failPendingPackets = () => {

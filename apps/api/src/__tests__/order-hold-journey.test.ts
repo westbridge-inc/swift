@@ -275,7 +275,10 @@ const mentions = (payload: Record<string, unknown>, orderId: string) =>
 /** Everything that could have TOLD the store about this order: its room,
  *  and each member of its team — the owner and the member of staff [Q10
  *  loud alerts 2/4]: their own socket rooms, inboxes and phones. `told` names
- *  every member anything reached. */
+ *  every member anything reached. [AX368 R3-03] Every delivery is kept against
+ *  its recipient (the store's room, or ONE member's own room, phone, inbox and
+ *  receipt): a total across the team could hide one member told twice and the
+ *  other never. */
 async function storeHeard(store: Store, order: Placed) {
   const team = [
     { who: 'owner', userId: store.owner.userId, device: store.device },
@@ -295,17 +298,35 @@ async function storeHeard(store: Store, order: Placed) {
     ...heardSockets.flatMap((s) => rooms.get(s.room) ?? []),
     ...pushes.map((e) => devices.get(e.to)!),
   ]);
+  const socketsTo = (who: string | null) => heardSockets.filter((s) => rooms.get(s.room) === who).map((s) => s.event).sort();
+  const pushesTo = (who: string) => pushes.filter((e) => devices.get(e.to) === who).map((e) => e.title);
+  const receipts = await app.prisma.alertDelivery.findMany({ where: { kind: 'VENDOR_ORDER', subjectId: order.id }, select: { recipientId: true } });
   return {
-    sockets: heardSockets.map((s) => s.event),
+    sockets: { store: socketsTo(null), owner: socketsTo('owner'), staff: socketsTo('staff') },
     inbox: inbox.map((n) => ({ who: whoIs.get(n.userId), title: n.title, kind: (n.data as Record<string, unknown> | null)?.['kind'] ?? null, isRead: n.isRead })),
-    deliveries: await app.prisma.alertDelivery.count({ where: { kind: 'VENDOR_ORDER', subjectId: order.id } }),
-    pushes: pushes.map((e) => e.title),
+    // A receipt for anyone outside the team is named by id, never folded in.
+    deliveries: receipts.map((r) => whoIs.get(r.recipientId) ?? r.recipientId).sort(),
+    pushes: { owner: pushesTo('owner'), staff: pushesTo('staff') },
     // The owner's number, and the store phone the ladder texts [Q10].
     sms: devChannelLog.filter((e) => e.channel === 'sms' && (e.to === store.owner.phone || e.to === store.phone) && e.body.includes(order.orderNumber)).map((e) => e.body),
     told: [...told].sort(),
   };
 }
-const HEARD_NOTHING = { sockets: [], inbox: [], deliveries: 0, pushes: [], sms: [], told: [] };
+const HEARD_NOTHING = {
+  sockets: { store: [] as string[], owner: [] as string[], staff: [] as string[] },
+  inbox: [], deliveries: [], pushes: { owner: [] as string[], staff: [] as string[] }, sms: [], told: [],
+};
+/** [AX368 R3-03] The new-order alert, per recipient: the board's order:new
+ *  once in the store's room; and to the owner and to the member of staff
+ *  EACH exactly once the inbox row's live copy and the ringing banner on their
+ *  own socket room, and one push to their phone. */
+const NEW_ORDER_SOCKETS = { store: ['order:new'], owner: ['notification', 'vendor:order_alert'], staff: ['notification', 'vendor:order_alert'] };
+const NEW_ORDER_PUSHES = { owner: ['New Order!'], staff: ['New Order!'] };
+/** How many times each recipient's socket room carried `event`. */
+const socketCount = (heard: { sockets: Record<string, string[]> }, event: string) =>
+  Object.fromEntries(Object.entries(heard.sockets).map(([who, events]) => [who, events.filter((e) => e === event).length]));
+/** The store's room alone carried one order:status_changed. */
+const STATUS_CHANGED_ONCE = { ...HEARD_NOTHING, sockets: { ...HEARD_NOTHING.sockets, store: ['order:status_changed'] } };
 
 /** Everything the store can SEE of this order on its own surfaces. */
 async function storeSees(store: Store, orderId: string) {
@@ -618,14 +639,14 @@ describe.each([
     const heard = await storeHeard(store, order);
     // The board's order:new, and for each member of the team [Q10] the inbox
     // row's live copy and the ringing banner, the inbox row, its receipt and
-    // one push to their phone.
-    expect([...heard.sockets].sort()).toEqual(['notification', 'notification', 'order:new', 'vendor:order_alert', 'vendor:order_alert']);
+    // one push to their phone — each asserted per recipient [AX368 R3-03].
+    expect(heard.sockets).toEqual(NEW_ORDER_SOCKETS);
     expect(heard.inbox).toEqual([
       { who: 'owner', title: 'New Order!', kind: 'vendor_order_alert', isRead: false },
       { who: 'staff', title: 'New Order!', kind: 'vendor_order_alert', isRead: false },
     ]);
-    expect(heard.deliveries).toBe(2);
-    expect(heard.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(heard.deliveries).toEqual(['owner', 'staff']);
+    expect(heard.pushes).toEqual(NEW_ORDER_PUSHES);
     expect(heard.sms).toEqual([]);
     expect(heard.told).toEqual(['owner', 'staff']);
     // The ladder is armed once — by the release, at rung 0 — as the release's
@@ -683,9 +704,10 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     expect(row.releasedToVendorAt).toBeNull();
     expect(await stockOf(store.itemId)).toBe(4);
     const heard = await storeHeard(store, order);
-    expect({ inbox: heard.inbox, deliveries: heard.deliveries, pushes: heard.pushes, sms: heard.sms }).toEqual({ inbox: [], deliveries: 0, pushes: [], sms: [] });
-    expect(heard.sockets).not.toContain('order:new');
-    expect(heard.sockets).not.toContain('vendor:order_alert');
+    expect({ inbox: heard.inbox, deliveries: heard.deliveries, pushes: heard.pushes, sms: heard.sms })
+      .toEqual({ inbox: [], deliveries: [], pushes: HEARD_NOTHING.pushes, sms: [] });
+    expect(socketCount(heard, 'order:new')).toEqual({ store: 0, owner: 0, staff: 0 });
+    expect(socketCount(heard, 'vendor:order_alert')).toEqual({ store: 0, owner: 0, staff: 0 });
     expect(jobsFor(order.id).map((j) => j.name)).toEqual(['auto-cancel']);
     expect(await ladderRows(order.id)).toEqual([]);
   });
@@ -718,7 +740,7 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     // One outcome: the store's board is told the order died — and it is never
     // told the dead order is new: no order:new, no "New Order!" push, no
     // inbox alert, no receipt, no ladder.
-    expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
+    expect(await storeHeard(store, order)).toEqual(STATUS_CHANGED_ONCE);
     expect(jobsFor(order.id).map((j) => j.name)).toEqual(['auto-cancel']);
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, cancelledTab: true, detail: 200, banner: false });
 
@@ -728,7 +750,7 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     expect((await ladderRows(order.id)).map((r) => r.processedAt)).toEqual([null]);
     expect(await outboxSweep(order.id)).toMatchObject({ processed: 1, failed: 0 });
     expect(await runJobsFor(order.id, ['vendor-alert-escalate'])).toEqual(['vendor-alert-escalate:ring1:stopped']);
-    expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
+    expect(await storeHeard(store, order)).toEqual(STATUS_CHANGED_ONCE);
   });
 
   it('release first, then the cancel: the store was alerted once, the normal cancel rules apply — and the ladder never rings for a dead order', async () => {
@@ -738,7 +760,7 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
     await travel(order.id, HOLD_MS + 1_000);
     expect(await releaseSweep()).toContain(order.id);
     const alerted = await storeHeard(store, order);
-    expect(alerted.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(alerted.pushes).toEqual(NEW_ORDER_PUSHES);
     expect(alerted.told).toEqual(['owner', 'staff']);
 
     // The window has closed: the cancel is still honoured, with the recorded
@@ -752,12 +774,12 @@ describe('Q12 · the cancel and the release sweep at the same moment', () => {
 
     // The store that saw it is told it died (its board refreshes)…
     const told = await storeHeard(store, order);
-    expect(told.sockets.filter((e) => e === 'order:status_changed')).toHaveLength(1);
+    expect(socketCount(told, 'order:status_changed')).toEqual({ store: 1, owner: 0, staff: 0 });
     // …and the alert ladder the release armed stops at its first rung: no
     // "still waiting" push, no SMS about an order that no longer exists.
     expect(await runJobsFor(order.id)).toEqual(['vendor-alert-escalate:ring1:stopped', 'auto-cancel:false']);
     const after = await storeHeard(store, order);
-    expect(after.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(after.pushes).toEqual(NEW_ORDER_PUSHES);
     expect(after.sms).toEqual([]);
     // The store saw it, so it stays in its history — as cancelled.
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, cancelledTab: true, detail: 200 });
@@ -825,7 +847,7 @@ describe('Q12 · the alert ladder a release arms is durable', () => {
       queues.notificationQueue.add = add;
     }
     // The store was told, once — and its ladder is owed, not lost.
-    expect((await storeHeard(store, order)).pushes).toEqual(['New Order!', 'New Order!']);
+    expect((await storeHeard(store, order)).pushes).toEqual(NEW_ORDER_PUSHES);
     expect(jobsFor(order.id).filter((j) => j.name === 'vendor-alert-escalate')).toEqual([]);
     const [owed] = await ladderRows(order.id);
     expect({ published: owed!.processedAt !== null, attempts: owed!.attempts, lastError: owed!.lastError })
@@ -844,7 +866,8 @@ describe('Q12 · the alert ladder a release arms is durable', () => {
     ]);
     const heard = await storeHeard(store, order);
     // Each rung rings every phone of the team as it is now.
-    expect(heard.pushes).toEqual(['New Order!', 'New Order!', ...Array<string>(4).fill('Order still waiting!')]);
+    const rung = ['New Order!', 'Order still waiting!', 'Order still waiting!'];
+    expect(heard.pushes).toEqual({ owner: rung, staff: rung });
     expect(heard.sms).toHaveLength(1);
     expect(heard.told).toEqual(['owner', 'staff']);
   });
@@ -876,7 +899,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
     // Out of the sweep's reach: nothing released, counted, alerted or armed.
     expect(await releaseSweep()).not.toContain(order.id);
     expect(await storeDashboard(store)).toMatchObject(COUNTED);
-    expect((await storeHeard(store, order)).pushes).toEqual([]);
+    expect((await storeHeard(store, order)).pushes).toEqual(HEARD_NOTHING.pushes);
     expect(await ladderRows(order.id)).toEqual([]);
   });
 
@@ -919,11 +942,11 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
     expect(accepted?.statusCode, accepted?.body).toBe(200);
     expect((await orderRow(order.id)).status).toBe('ACCEPTED');
     expect(await storeDashboard(store)).toMatchObject(COUNTED);
-    expect((await storeHeard(store, order)).pushes).toEqual([]);
+    expect((await storeHeard(store, order)).pushes).toEqual(HEARD_NOTHING.pushes);
     // A ladder the release wrote before the acceptance stops at its first rung.
     await outboxSweep(order.id);
     expect(await runJobsFor(order.id, ['vendor-alert-escalate'])).toEqual(ladder);
-    expect((await storeHeard(store, order)).pushes).toEqual([]);
+    expect((await storeHeard(store, order)).pushes).toEqual(HEARD_NOTHING.pushes);
   });
 });
 
@@ -1046,8 +1069,8 @@ describe('Q12 · express — never held, so the store sees it at once; a cancel 
     expect(row.holdExpiresAt).toBeNull(); // the customer paid 1.5x to skip the wait
 
     const alerted = await storeHeard(store, order);
-    expect([...alerted.sockets].sort()).toEqual(['notification', 'notification', 'order:new', 'vendor:order_alert', 'vendor:order_alert']);
-    expect(alerted.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(alerted.sockets).toEqual(NEW_ORDER_SOCKETS);
+    expect(alerted.pushes).toEqual(NEW_ORDER_PUSHES);
     expect(alerted.told).toEqual(['owner', 'staff']);
     // The express checkout arms the ladder itself — there is no release.
     expect(jobsFor(order.id).map((j) => j.name).sort()).toEqual(['auto-cancel', 'vendor-alert-escalate']);
@@ -1057,12 +1080,12 @@ describe('Q12 · express — never held, so the store sees it at once; a cancel 
     const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, buyer.token, { reason: 'Ordered twice' });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().data).toEqual({ message: 'Order cancelled — no charge', cancellationFee: 0 });
-    expect((await storeHeard(store, order)).sockets.filter((e) => e === 'order:status_changed')).toHaveLength(1);
+    expect(socketCount(await storeHeard(store, order), 'order:status_changed')).toEqual({ store: 1, owner: 0, staff: 0 });
 
     // The ladder the checkout armed stops: no "Order still waiting!", no SMS.
     expect(await runJobsFor(order.id)).toEqual(['vendor-alert-escalate:ring1:stopped', 'auto-cancel:false']);
     const after = await storeHeard(store, order);
-    expect(after.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(after.pushes).toEqual(NEW_ORDER_PUSHES);
     expect(after.sms).toEqual([]);
     expect(await storeSees(store, order.id)).toMatchObject({ cancelledTab: true });
   });
@@ -1107,9 +1130,10 @@ describe('Q12 · MMG — the one thing the store is told about an order cancelle
 
     const heard = await storeHeard(store, order);
     expect(heard.inbox).toEqual([{ who: 'owner', title: 'Cancelled order may hold an MMG payment', kind: 'mmg_unattested_cancellation', isRead: false }]);
-    expect(heard.deliveries).toBe(0);
-    expect(heard.sockets).toEqual(['notification']); // the refund notice's live copy — no order:new, no banner
-    expect(heard.pushes).toEqual(['Cancelled order may hold an MMG payment']);
+    expect(heard.deliveries).toEqual([]);
+    // The refund notice's live copy, to the owner — no order:new, no banner.
+    expect(heard.sockets).toEqual({ store: [], owner: ['notification'], staff: [] });
+    expect(heard.pushes).toEqual({ owner: ['Cancelled order may hold an MMG payment'], staff: [] });
     expect(heard.sms).toEqual([]);
 
     await travel(order.id, HOLD_MS + 1_000);
@@ -1220,10 +1244,10 @@ describe('Q10 · AX291 F01 — the store hears of an order only once it has been
     await travel(order.id, HOLD_MS + 1_000);
     expect(await releaseSweep()).toContain(order.id);
     const heard = await storeHeard(store, order);
-    expect(heard.sockets.filter((e) => e === 'order:new')).toHaveLength(1);
+    expect(heard.sockets).toEqual(NEW_ORDER_SOCKETS);
     expect(heard.inbox.map((n) => [n.who, n.title])).toEqual([['owner', 'New Order!'], ['staff', 'New Order!']]);
-    expect(heard.deliveries).toBe(2);
-    expect(heard.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(heard.deliveries).toEqual(['owner', 'staff']);
+    expect(heard.pushes).toEqual(NEW_ORDER_PUSHES);
     expect(heard.told).toEqual(['owner', 'staff']);
     // ONE ladder: the release's own row, published once.
     expect((await ladderRows(order.id)).map((r) => r.dedupeKey)).toEqual([`order:${order.id}:vendor-alert-escalate`]);
@@ -1239,10 +1263,10 @@ describe('Q10 · AX291 F01 — the store hears of an order only once it has been
       expect(await releaseSweep()).toContain(orderId);
     });
     const heard = await storeHeard(store, order);
-    expect(heard.sockets.filter((e) => e === 'order:new')).toHaveLength(1);
+    expect(heard.sockets).toEqual(NEW_ORDER_SOCKETS);
     expect(heard.inbox.map((n) => [n.who, n.title])).toEqual([['owner', 'New Order!'], ['staff', 'New Order!']]);
-    expect(heard.deliveries).toBe(2);
-    expect(heard.pushes).toEqual(['New Order!', 'New Order!']);
+    expect(heard.deliveries).toEqual(['owner', 'staff']);
+    expect(heard.pushes).toEqual(NEW_ORDER_PUSHES);
     expect(await storeDashboard(store)).toMatchObject({ totalOrders: 1, itemTotalOrdered: 1 });
   });
 
@@ -1257,10 +1281,10 @@ describe('Q10 · AX291 F01 — the store hears of an order only once it has been
     expect({ express: row.isExpress, hold: row.holdExpiresAt, status: row.status }).toEqual({ express: true, hold: null, status: 'CANCELLED' });
     expect(cancelled?.statusCode, cancelled?.body).toBe(200);
     // The cancel refreshed the store's board; nothing announced the order.
-    expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
+    expect(await storeHeard(store, order)).toEqual(STATUS_CHANGED_ONCE);
     // Its ladder, armed at checkout, stops at its first rung.
     expect(await runJobsFor(order.id)).toEqual(['vendor-alert-escalate:ring1:stopped', 'auto-cancel:false']);
-    expect(await storeHeard(store, order)).toEqual({ ...HEARD_NOTHING, sockets: ['order:status_changed'] });
+    expect(await storeHeard(store, order)).toEqual(STATUS_CHANGED_ONCE);
   });
 
   it('"seen" for an order whose hold lapsed but that no release has shown is refused and writes nothing; the ladder the release arms rings, and a seen after it ends it', async () => {
@@ -1287,7 +1311,7 @@ describe('Q10 · AX291 F01 — the store hears of an order only once it has been
       'vendor-alert-escalate:ring2:stopped', 'vendor-alert-escalate:sms:stopped', 'vendor-alert-escalate:admin:stopped',
     ]);
     const heard = await storeHeard(store, order);
-    expect(heard.pushes).toEqual(['New Order!', 'New Order!', 'Order still waiting!', 'Order still waiting!']);
+    expect(heard.pushes).toEqual({ owner: ['New Order!', 'Order still waiting!'], staff: ['New Order!', 'Order still waiting!'] });
     expect(heard.sms).toEqual([]);
   });
 });

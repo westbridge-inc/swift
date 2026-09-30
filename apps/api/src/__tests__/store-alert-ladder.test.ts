@@ -6,7 +6,7 @@ import { join, relative } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { io as ioClient, type Socket } from 'socket.io-client';
 import { Prisma, type FulfillmentType, type UserRole, type UserStatus } from '@prisma/client';
-import type { Server, Socket as ServerSocket } from 'socket.io';
+import { Server as SocketIoServer, type Server, type Socket as ServerSocket } from 'socket.io';
 import type Redis from 'ioredis';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -30,7 +30,16 @@ import {
   type LadderRung,
 } from '../modules/notification/store-alert-ladder';
 import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
-import { STORE_ROOM_REVOKED, revokeStoreRoom, setStoreRoomCluster, storeRoomEpoch, subscribeToStoreRoom } from '../modules/notification/store-room';
+import {
+  STORE_ROOM_EVICTION_BOUND_MS as STORE_ROOM_STRICT_BOUND_MS,
+  STORE_ROOM_REVOKED,
+  convergeStoreRooms,
+  revokeStoreRoom,
+  setStoreRoomCluster,
+  storeRoomEpoch,
+  storeRoomTiming,
+  subscribeToStoreRoom,
+} from '../modules/notification/store-room';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
 import { SmsNotSubmittedError, devChannelLog, getChannels, type DevChannelEntry, type PushProvider } from '../providers/notifications/channels';
 import { STORE_ALERT_SMS_DAILY_PREFIX, checkOtpDailyBudget } from '../utils/sms-budget';
@@ -73,13 +82,21 @@ vi.mock('../modules/notification/store-alert-recipients', async (importOriginal)
 
 const DAY = 24 * 60 * 60 * 1000;
 const PHONE_PREFIX = '+5920418';
-// [AX317 F03] The store-room re-validation interval of the one instance that
-// proves it (production default 30 s, never above 60 s; the rest of this file
-// keeps the default, so its removal tests prove the revocation itself), and
-// the bound a member whose revocation never arrived is evicted within: a pass
-// that read just before the removal, the next pass, and its read.
-const STORE_ROOM_RECHECK_MS = 400;
-const STORE_ROOM_EVICTION_BOUND_MS = 2 * STORE_ROOM_RECHECK_MS + 1_500;
+// [AX317 F03] The store-room re-validation interval of the instances that
+// prove it (production default 30 s; the rest of this file keeps the default,
+// so its removal tests prove the revocation itself), and [AX368 R3-01] the
+// bound a member whose revocation never arrived is evicted within, from the
+// removal's commit: one interval plus one read timeout, as the socket plugin
+// derives them (storeRoomTiming cuts that instance's 4 s default read timeout
+// to its interval).
+const STORE_ROOM_RECHECK_MS = 1_000;
+const STORE_ROOM_TIMING = storeRoomTiming(STORE_ROOM_RECHECK_MS, 4_000);
+const STORE_ROOM_EVICTION_BOUND_MS = STORE_ROOM_TIMING.intervalMs + STORE_ROOM_TIMING.readTimeoutMs;
+// A subscription read timeout the tests that hold a read open never reach.
+const HELD_READ_TIMEOUT_MS = 60_000;
+// [AX368 R3-01] How long the reviewer's stalled subscription read is held:
+// past two passes and past the eviction bound.
+const STORE_ROOM_STALL_MS = 2 * STORE_ROOM_RECHECK_MS + 1_000;
 const OTHER_TENANT = `q10b-other-${nanoid(8).toLowerCase().replace(/[^a-z0-9]/g, '0')}`;
 
 let app: FastifyInstance;
@@ -236,6 +253,24 @@ const inRoom = async (room: string) => (await app.io.in(room).fetchSockets()).ma
 async function membershipVerdictsFrom(from: number): Promise<Array<{ userId: string; verdict: boolean }>> {
   const mock = vi.mocked(isStoreRoomMember).mock;
   return Promise.all(mock.calls.slice(from).map(async (args, i) => ({ userId: args[2], verdict: await (mock.results[from + i]!.value as Promise<boolean>) })));
+}
+
+/** [AX317 F03] Start `instance` as an API instance of its own whose store-room
+ *  re-validation runs every STORE_ROOM_RECHECK_MS; returns its URL. */
+async function listenWithStoreRoomRecheck(instance: FastifyInstance): Promise<string> {
+  const previous = process.env['SOCKET_STORE_ROOM_RECHECK_MS'];
+  process.env['SOCKET_STORE_ROOM_RECHECK_MS'] = String(STORE_ROOM_RECHECK_MS);
+  try {
+    await instance.register(prismaPlugin);
+    await instance.register(redisPlugin);
+    await instance.register(authPlugin);
+    await instance.register(socketPlugin);
+    await instance.listen({ port: 0, host: '127.0.0.1' });
+  } finally {
+    if (previous === undefined) delete process.env['SOCKET_STORE_ROOM_RECHECK_MS'];
+    else process.env['SOCKET_STORE_ROOM_RECHECK_MS'] = previous;
+  }
+  return `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
 }
 
 /** Texts counted today against one store phone (a refund leaves 0, not nothing). */
@@ -654,9 +689,15 @@ describe('the whole store hears a new order, and only that store', () => {
     const told = vi.spyOn(app.io, 'serverSideEmit').mockReturnValue(true);
     // [AX317 R2-02] The epoch is kept only while a subscription for the pair
     // is in flight: one is held open (its read never answers until the end).
-    let answer!: (member: boolean) => void;
+    // [AX368 R3-02] Its epoch moves, so its closing "no" is not taken as it
+    // is: the one fresh read it then makes answers no at once.
+    let closing = false;
+    const answers: Array<(member: boolean) => void> = [];
     const phone = { id: `q10b-${nanoid(6)}`, connected: true, data: { userId, tenantId: 'swift-default' }, join: vi.fn() };
-    const decided = subscribeToStoreRoom(app.io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => { answer = settle; }));
+    const decided = subscribeToStoreRoom(app.io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => {
+      if (closing) settle(false);
+      else answers.push(settle);
+    }), HELD_READ_TIMEOUT_MS);
     try {
       expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(0);
       revokeStoreRoom(app.io, vendorId, userId);
@@ -668,7 +709,8 @@ describe('the whole store hears a new order, and only that store', () => {
     } finally {
       setStoreRoomCluster(app.io, false);
       told.mockRestore();
-      answer(false);
+      closing = true;
+      for (const settle of answers) settle(false);
       await decided;
     }
     expect(phone.join).not.toHaveBeenCalled();
@@ -724,6 +766,70 @@ describe('the whole store hears a new order, and only that store', () => {
     }
   });
 
+  it('a member removed and added back while their subscription is being decided is admitted even when its read saw the removal: a no is weighed only after the epoch, and the one fresh read says yes (AX368 R3-02)', async () => {
+    const sockets: Socket[] = [];
+    const room = `vendor:${storeA}`;
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    let membership = await joinTeam(storeA, member, ownerA);
+    const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
+    try {
+      const memberSocket = await socketFor(member.token, sockets);
+      // The subscription's first read runs only once the removal committed
+      // (so it says no), and its answer comes back only once the member is
+      // on the team again.
+      let started!: () => void;
+      const inFlight = new Promise<void>((done) => { started = done; });
+      let removalCommitted!: () => void;
+      const removed = new Promise<void>((done) => { removalCommitted = done; });
+      let answered!: () => void;
+      const firstAnswer = new Promise<void>((done) => { answered = done; });
+      let resume!: () => void;
+      const parked = new Promise<void>((done) => { resume = done; });
+      const verdicts: boolean[] = [];
+      let reads = 0;
+      vi.mocked(isStoreRoomMember).mockImplementation(async (...args) => {
+        if (args[2] !== member.userId) return real(...args);
+        reads += 1;
+        if (reads === 1) {
+          started();
+          await removed;
+        }
+        const verdict = await real(...args);
+        verdicts.push(verdict);
+        if (reads === 1) {
+          answered();
+          await parked;
+        }
+        return verdict;
+      });
+      const decided = new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        memberSocket.emit('vendor:subscribe', { vendorId: storeA }, resolve);
+        setTimeout(() => resolve('no-answer'), 4_000);
+      });
+      await inFlight;
+      // Removed (the revocation moves this subscription's epoch) ...
+      const removal = await call('DELETE', `/api/v1/vendor/staff/${membership.id}`, ownerA.token);
+      expect(removal.statusCode, removal.body).toBe(200);
+      removalCommitted();
+      await firstAnswer;
+      // ... and added back before that read's "no" returns.
+      membership = await joinTeam(storeA, member, ownerA);
+      resume();
+
+      expect(await decided).toEqual({ joined: true });
+      expect(verdicts).toEqual([false, true]); // the stale no, then one fresh read
+      expect(await inRoom(room)).toContain(memberSocket.id);
+      const heard: string[] = [];
+      memberSocket.on('order:new', (p: { orderId: string }) => heard.push(p.orderId));
+      app.io.to(room).emit('order:new', { orderId: 'q10b-re-added-after-a-no', vendorId: storeA });
+      await vi.waitFor(() => expect(heard).toEqual(['q10b-re-added-after-a-no']), { timeout: 5_000, interval: 25 });
+    } finally {
+      vi.mocked(isStoreRoomMember).mockImplementation(real);
+      for (const socket of sockets) socket.disconnect();
+      await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+
   it('a subscription whose epoch moves again during its fresh read is refused: one retry, never a loop (AX317 R2-01)', async () => {
     const sockets: Socket[] = [];
     const room = `vendor:${storeA}`;
@@ -767,7 +873,7 @@ describe('the whole store hears a new order, and only that store', () => {
     const userId = userIds[0]!;
     const phone = { id: `q10b-${nanoid(6)}`, connected: true, data: { userId, tenantId: 'swift-default' }, join: vi.fn() };
     const answers: Array<(member: boolean) => void> = [];
-    const decided = subscribeToStoreRoom(app.io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => { answers.push(settle); }));
+    const decided = subscribeToStoreRoom(app.io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => { answers.push(settle); }), HELD_READ_TIMEOUT_MS);
     expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(0);
     revokeStoreRoom(app.io, vendorId, userId);
     expect(storeRoomEpoch(app.io, vendorId, userId)).toBe(1);
@@ -790,20 +896,8 @@ describe('the whole store hears a new order, and only that store', () => {
     const membership = await joinTeam(storeA, member, ownerA);
     // An API instance of its own, with a short re-validation interval.
     const instance = Fastify({ logger: false });
-    const previous = process.env['SOCKET_STORE_ROOM_RECHECK_MS'];
     try {
-      process.env['SOCKET_STORE_ROOM_RECHECK_MS'] = String(STORE_ROOM_RECHECK_MS);
-      try {
-        await instance.register(prismaPlugin);
-        await instance.register(redisPlugin);
-        await instance.register(authPlugin);
-        await instance.register(socketPlugin);
-        await instance.listen({ port: 0, host: '127.0.0.1' });
-      } finally {
-        if (previous === undefined) delete process.env['SOCKET_STORE_ROOM_RECHECK_MS'];
-        else process.env['SOCKET_STORE_ROOM_RECHECK_MS'] = previous;
-      }
-      const at = `http://127.0.0.1:${(instance.server.address() as AddressInfo).port}`;
+      const at = await listenWithStoreRoomRecheck(instance);
       const inInstanceRoom = async () => (await instance.io.in(room).fetchSockets()).map((s) => s.id);
       const ownerSocket = await socketFor(ownerA.token, sockets, at);
       const memberSocket = await socketFor(member.token, sockets, at);
@@ -848,6 +942,171 @@ describe('the whole store hears a new order, and only that store', () => {
       for (const socket of sockets) socket.disconnect();
       await instance.close();
       await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+
+  it('a yes that stalls past a removal whose revocation is lost never admits the member: passes ran and the read timeout passed while it was pending, so it is void, and the one fresh read refuses; they hear nothing (AX368 R3-01)', async () => {
+    const sockets: Socket[] = [];
+    const room = `vendor:${storeA}`;
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const membership = await joinTeam(storeA, member, ownerA);
+    const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
+    const instance = Fastify({ logger: false });
+    try {
+      const at = await listenWithStoreRoomRecheck(instance);
+      const inInstanceRoom = async () => (await instance.io.in(room).fetchSockets()).map((s) => s.id);
+      const ownerSocket = await socketFor(ownerA.token, sockets, at);
+      const ownerJoined = await new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        ownerSocket.emit('vendor:subscribe', { vendorId: storeA }, resolve);
+        setTimeout(() => resolve('no-answer'), 4_000);
+      });
+      expect(ownerJoined).toEqual({ joined: true });
+      const memberSocket = await socketFor(member.token, sockets, at);
+      const ownerHeard: string[] = [];
+      const heard: string[] = [];
+      ownerSocket.on('order:new', (p: { orderId: string }) => ownerHeard.push(p.orderId));
+      memberSocket.on('order:new', (p: { orderId: string }) => heard.push(p.orderId));
+      const broadcast = (orderId: string) => { instance.io.to(room).emit('order:new', { orderId, vendorId: storeA }); };
+
+      // The member's subscription reads yes, and that answer stalls.
+      let resume!: () => void;
+      const parked = new Promise<void>((done) => { resume = done; });
+      let readDone!: () => void;
+      const firstRead = new Promise<void>((done) => { readDone = done; });
+      const verdicts: boolean[] = [];
+      vi.mocked(isStoreRoomMember).mockImplementation(async (...args) => {
+        const verdict = await real(...args);
+        if (args[2] !== member.userId) return verdict;
+        verdicts.push(verdict);
+        if (verdicts.length === 1) {
+          readDone();
+          await parked;
+        }
+        return verdict;
+      });
+      let answeredAt = Number.POSITIVE_INFINITY;
+      const decided = new Promise<{ joined: boolean } | 'no-answer'>((resolve) => {
+        memberSocket.emit('vendor:subscribe', { vendorId: storeA }, (result: { joined: boolean }) => {
+          answeredAt = Date.now();
+          resolve(result);
+        });
+        setTimeout(() => resolve('no-answer'), STORE_ROOM_STALL_MS + 5_000);
+      });
+      await firstRead;
+      // The removal commits on another instance and its revocation is lost on
+      // the way: here the team row is gone and nothing else happened.
+      await app.prisma.vendorStaff.delete({ where: { id: membership.id } });
+      // Passes run while that yes is pending (the reviewer's 30 s and 60 s
+      // passes), and the eviction bound from the removal passes too.
+      await new Promise((settle) => setTimeout(settle, STORE_ROOM_STALL_MS));
+      broadcast('q10b-r301-while-stalled');
+      // Only now does the stale yes come back.
+      const resumedAt = Date.now();
+      resume();
+      const outcome = await decided;
+      broadcast('q10b-r301-after');
+      await vi.waitFor(() => expect(ownerHeard).toEqual(['q10b-r301-while-stalled', 'q10b-r301-after']), { timeout: 5_000, interval: 25 });
+      // A barrier on the member's own connection: its reply comes after any
+      // broadcast the server had already sent that socket.
+      await new Promise<void>((done) => {
+        memberSocket.emit('vendor:subscribe', {}, () => done());
+        setTimeout(done, 1_000);
+      });
+
+      expect(outcome).toEqual({ joined: false });
+      expect(verdicts).toEqual([true, false]); // the stale yes, then one fresh read: removed
+      // Answered while that yes still stalled: this instance's read timeout
+      // (its interval, storeRoomTiming) gave up on it for the fresh read.
+      expect(answeredAt).toBeLessThan(resumedAt);
+      expect(heard).toEqual([]);
+      expect(await inInstanceRoom()).not.toContain(memberSocket.id);
+      expect(await inInstanceRoom()).toContain(ownerSocket.id);
+    } finally {
+      vi.mocked(isStoreRoomMember).mockImplementation(real);
+      for (const socket of sockets) socket.disconnect();
+      await instance.close();
+      await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+});
+
+describe('a store-room membership answer holds for a bounded time only (AX368 R3-01)', () => {
+  // A Socket.IO server of its own: no socket plugin, so no pass ever runs on
+  // it unless the test runs one.
+  const phoneFor = () => ({
+    id: `q10b-${nanoid(6)}`, connected: true, data: { userId: `q10b-r301-${nanoid(6)}`, tenantId: 'swift-default' }, join: vi.fn(),
+  });
+
+  it('a convergence pass that runs while a subscription read is pending takes it into its snapshot: that answer is never acted on, and the one fresh read decides', async () => {
+    const io = new SocketIoServer();
+    const vendorId = `q10b-r301-${nanoid(6)}`;
+    const phone = phoneFor();
+    const answers: Array<(member: boolean) => void> = [];
+    const decided = subscribeToStoreRoom(io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => { answers.push(settle); }), HELD_READ_TIMEOUT_MS);
+    // Nobody is in a store room on this server: the pending subscription is
+    // all the pass's snapshot holds.
+    const pass = await convergeStoreRooms(io, { readMembers: async () => new Set<string>(), timeoutMs: 1_000 });
+    expect(pass).toMatchObject({ outcome: 'idle', superseded: 1 });
+    answers[0]!(true); // the yes of a member removed meanwhile, revocation lost
+    await vi.waitFor(() => expect(answers).toHaveLength(2), { timeout: 2_000, interval: 5 });
+    answers[1]!(false); // the fresh read sees the removal
+    expect(await decided).toBe(false);
+    expect(phone.join).not.toHaveBeenCalled();
+
+    // The control: with no pass in between, the same yes admits on its read.
+    const other = phoneFor();
+    expect(await subscribeToStoreRoom(io, other as unknown as ServerSocket, vendorId, async () => true, HELD_READ_TIMEOUT_MS)).toBe(true);
+    expect(other.join).toHaveBeenCalledWith(`vendor:${vendorId}`);
+  });
+
+  it('a read that has not answered within the read timeout is given up for one fresh read; when both are late the subscription is refused, never left hanging', async () => {
+    const io = new SocketIoServer();
+    const vendorId = `q10b-r301-${nanoid(6)}`;
+    const phone = phoneFor();
+    const answers: Array<(member: boolean) => void> = [];
+    const decided = subscribeToStoreRoom(io, phone as unknown as ServerSocket, vendorId, () => new Promise<boolean>((settle) => { answers.push(settle); }), 50);
+    await vi.waitFor(() => expect(answers).toHaveLength(2), { timeout: 2_000, interval: 5 });
+    answers[0]!(true); // the stale yes comes back late: nobody listens any more
+    answers[1]!(false);
+    expect(await decided).toBe(false);
+    expect(phone.join).not.toHaveBeenCalled();
+
+    const stalled = phoneFor();
+    const startedAt = performance.now();
+    expect(await subscribeToStoreRoom(io, stalled as unknown as ServerSocket, vendorId, () => new Promise<boolean>(() => {}), 50)).toBe(false);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(stalled.join).not.toHaveBeenCalled();
+  });
+
+  it('an answer that arrives more than the read timeout after its read began is void even when it beats the timer (the process stalled)', async () => {
+    const io = new SocketIoServer();
+    const vendorId = `q10b-r301-${nanoid(6)}`;
+    const phone = phoneFor();
+    let reads = 0;
+    const decided = subscribeToStoreRoom(io, phone as unknown as ServerSocket, vendorId, async () => {
+      reads += 1;
+      if (reads > 1) return false; // the fresh read: removed
+      // The process stalls past the read timeout while this read answers yes.
+      const until = performance.now() + 120;
+      while (performance.now() < until) { /* stalled */ }
+      return true;
+    }, 50);
+    expect(await decided).toBe(false);
+    expect(reads).toBe(2);
+    expect(phone.join).not.toHaveBeenCalled();
+  });
+
+  it('the eviction bound counts the read: interval + read timeout never exceeds 60 s, and the read timeout never exceeds the interval', () => {
+    expect(STORE_ROOM_STRICT_BOUND_MS).toBe(60_000);
+    expect(storeRoomTiming(30_000, 4_000)).toEqual({ intervalMs: 30_000, readTimeoutMs: 4_000 }); // the defaults stand
+    expect(storeRoomTiming(60_000, 4_000)).toEqual({ intervalMs: 56_000, readTimeoutMs: 4_000 }); // the read fits inside
+    expect(storeRoomTiming(120_000, 60_000)).toEqual({ intervalMs: 30_000, readTimeoutMs: 30_000 });
+    expect(storeRoomTiming(1_000, 4_000)).toEqual({ intervalMs: 1_000, readTimeoutMs: 1_000 });
+    for (const [interval, read] of [[1, 1], [59_999, 1], [60_000, 60_000], [45_000, 20_000], [5, 90_000], [90_000, 5]] as const) {
+      const timing = storeRoomTiming(interval, read);
+      expect(timing.intervalMs + timing.readTimeoutMs).toBeLessThanOrEqual(STORE_ROOM_STRICT_BOUND_MS);
+      expect(timing.readTimeoutMs).toBeLessThanOrEqual(timing.intervalMs);
+      expect(Math.min(timing.intervalMs, timing.readTimeoutMs)).toBeGreaterThan(0);
     }
   });
 });
