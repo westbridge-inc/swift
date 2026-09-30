@@ -39,7 +39,7 @@ import {
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '@/lib/app-rules';
-import { cartErrorMessage, cartStoreGroups } from '@/lib/cart-presentation';
+import { cartErrorMessage, cartStockRefusal, cartStoreGroups, type CartStockRefusal } from '@/lib/cart-presentation';
 import styles from './cart.module.css';
 
 const TIPS = [0, 200, 500, 1000];
@@ -61,6 +61,7 @@ export default function CartPage() {
   const mixedStores = groups.length > 1;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stockRefusal, setStockRefusal] = useState<CartStockRefusal | null>(null);
   const [noRiders, setNoRiders] = useState(false);
   const [addingAddr, setAddingAddr] = useState(false);
   const [newAddr, setNewAddr] = useState({ label: '', addressLine1: '', city: '', region: '' });
@@ -97,6 +98,8 @@ export default function CartPage() {
     const c = cartResult.value;
     const a = addressResult.status === 'fulfilled' ? addressResult.value : [];
     setCart(c); setAddresses(a); setError(null);
+    setStockRefusal((current) => current && c.items.some((line) => line.itemId === current.itemId
+      && line.quantity > current.available) ? current : null);
     setAddressError(addressResult.status === 'rejected'
       ? cartErrorMessage(addressResult.reason, 'Could not load your delivery addresses. Please try again.')
       : null);
@@ -404,6 +407,7 @@ export default function CartPage() {
       const definiteRejection = e instanceof ApiRequestError
         && e.status >= 400
         && e.status < 500
+        && e.status !== 408
         && e.code !== 'DUPLICATE_REQUEST';
       let cartReconciled = false;
       try {
@@ -426,7 +430,10 @@ export default function CartPage() {
         setPaySelection(selectCartPaymentMethod('CASH', paymentCapabilities));
       }
       if (message.includes('No delivery riders') || message.includes('NO_RIDERS')) setNoRiders(true);
-      else setError(cartErrorMessage(e, 'Could not confirm your order. Check Your orders before trying again.'));
+      else {
+        setStockRefusal(cartStockRefusal(e, cart));
+        setError(cartErrorMessage(e, 'Could not confirm your order. Check Your orders before trying again.', cart));
+      }
       window.requestAnimationFrame(() => (errorMessage.current ?? checkoutRail.current)?.focus());
     } finally { checkoutBusy.current = false; setBusy(false); }
   }
@@ -472,9 +479,10 @@ export default function CartPage() {
         {groups.map((group, index) => <section key={group.id ?? 'unknown'} aria-labelledby={`store-${index}`} className={styles.panelStack}>
           <h2 id={`store-${index}`} className={styles.panelTitle}>{group.name}</h2>
           {group.items.map((l) => (
-          <article key={l.id} className={styles.itemCard}>
+          <article key={l.id} className={styles.itemCard} aria-describedby={stockRefusal?.itemId === l.itemId ? `stock-${l.id}` : undefined}>
             <div className={styles.itemCopy}>
               <p className={styles.itemName}>{l.name}</p>
+              {stockRefusal?.itemId === l.itemId ? <p id={`stock-${l.id}`} className={styles.errorMessage}>{stockRefusal.message}</p> : null}
               {l.vendorName ? <p className={styles.itemMeta}>{l.vendorName}</p> : null}
               {(l.selectedOptionNames?.length ?? 0) > 0 ? <p className={styles.itemMeta}>{l.selectedOptionNames?.join(' · ')}</p> : null}
               <p className={styles.itemPrice}>{money(l.customerPrice)}</p>

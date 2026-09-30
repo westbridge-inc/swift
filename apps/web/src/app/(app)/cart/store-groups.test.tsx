@@ -186,3 +186,99 @@ describe('store cart recovery', () => {
     await screen.findByText('Your cart is empty');
   });
 });
+
+
+describe('AX341 refusal details and recovery', () => {
+  it('keeps an HTTP timeout ambiguous and locks changes until the order is resolved', async () => {
+    cart.items = [cart.items[1]!]; cart.subtotalCustomer = 800;
+    special = ({ url }) => url.pathname.endsWith('/checkout') ? {
+      status: 408, body: { success: false, error: { code: 'REQUEST_TIMEOUT', message: 'Request timed out' } },
+    } : null;
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$900' }));
+    await screen.findByText('Could not confirm your order. Check Your orders before trying again.');
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Second Store items' }));
+    await screen.findByText('Your last order is still being confirmed. Check Your orders or retry it before changing your cart.');
+    expect(requests.filter((r) => r.method === 'DELETE')).toHaveLength(0);
+    expect(cart.items.map((item) => item.id)).toEqual(['l2']);
+  });
+
+  it.each([
+    ['VENDOR_AT_CAPACITY', 'Second Store is at capacity — try again in a few minutes', 'Second Store is very busy right now — try again in a few minutes'],
+    ['VENDOR_TIER_CAP', "Second Store has reached today's order limit for an unregistered seller (20 a day). Try again tomorrow.", "Second Store has reached today's order limit for an unregistered seller (20 a day). Try again tomorrow."],
+    ['VENDOR_TIER_CAP', "Second Store has reached this week's sales limit for an unregistered seller. Try again later this week.", "Second Store has reached this week's sales limit for an unregistered seller. Try again later this week."],
+    ['NEW_STORE_REFUSAL', 'Second Store cannot deliver today. Choose pickup tomorrow.', 'Second Store cannot deliver today. Choose pickup tomorrow.'],
+  ])('explains %s and retries only after a fresh quote', async (code, message, copy) => {
+    cart.items = [cart.items[1]!]; cart.subtotalCustomer = 800;
+    special = ({ url }) => url.pathname.endsWith('/checkout') ? {
+      status: 409, body: { success: false, error: { code, message } },
+    } : null;
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$900' }));
+    await screen.findByText(copy);
+    expect(document.body.textContent).not.toContain('Could not confirm your order');
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(cart.items[0]?.selectedOptionNames).toEqual(['Large']);
+    const refusalIndex = requests.findIndex((r) => r.path.endsWith('/checkout'));
+    expect(requests.slice(refusalIndex + 1).some((r) => r.method === 'GET' && r.path.endsWith('/cart'))).toBe(true);
+    special = () => null;
+    fireEvent.click(screen.getByRole('button', { name: 'Place cash order · GY$900' }));
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/orders/o1'));
+    expect(orderedItems).toEqual(['l2']);
+    expect(requests.filter((r) => r.path.endsWith('/checkout')).map((r) => r.body)).toEqual([
+      { paymentMethod: 'CASH', tipAmount: 0 }, { paymentMethod: 'CASH', tipAmount: 0 },
+    ]);
+  });
+
+  it.each([1, 0])('marks only Rice with %i available and recovers with a server-priced cart', async (available) => {
+    cart.items = [
+      { ...cart.items[1]!, id: 'rice', itemId: 'i2', name: 'Rice', quantity: 3, customerPrice: 400, isAvailable: true },
+      { ...cart.items[1]!, id: 'juice', itemId: 'i2-juice', name: 'Juice', quantity: 2, customerPrice: 100, isAvailable: true },
+    ];
+    cart.subtotalCustomer = 1400;
+    special = ({ url, method, init }) => {
+      if (url.pathname.endsWith('/vendors/s2')) return ok({ ...menu, categories: [{ items: [{ id: 'i2' }, { id: 'i2-juice' }] }] });
+      if (url.pathname.endsWith('/checkout') && cart.items.some((item) => item.id === 'rice' && item.quantity > available)) return {
+        status: 409, body: { success: false, error: {
+          code: 'INSUFFICIENT_STOCK',
+          message: available ? 'Only 1 of Rice left — reduce the quantity' : 'Rice is sold out',
+          details: { itemId: 'i2', available },
+        } },
+      };
+      if (url.pathname.endsWith('/cart/items/rice')) {
+        const quantity = method === 'DELETE' ? 0 : JSON.parse(String(init?.body)).quantity;
+        cart = { ...cart, items: cart.items.flatMap((item) => item.id !== 'rice' ? [item] : quantity ? [{ ...item, quantity }] : []), subtotalCustomer: quantity * 400 + 200 };
+        return ok({ cart });
+      }
+      return null;
+    };
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$1,500' }));
+    const copy = available ? 'Only 1 Rice left — change the quantity' : 'Rice is sold out — remove it to continue';
+    await screen.findAllByText(copy);
+    const rice = screen.getByText('Rice').closest('article')!;
+    const juice = screen.getByText('Juice').closest('article')!;
+    expect(within(rice).getByText(copy)).toBeTruthy();
+    expect(rice.getAttribute('aria-describedby')).toBe(within(rice).getByText(copy).id);
+    expect(within(juice).queryByText(copy)).toBeNull();
+    expect(juice.hasAttribute('aria-describedby')).toBe(false);
+    if (available) {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove one Rice' }));
+      await screen.findByRole('button', { name: 'Place cash order · GY$1,100' });
+      expect(within(rice).getByText(copy)).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Remove one Rice' }));
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove Rice from cart' }));
+    }
+    const place = await screen.findByRole('button', { name: available ? 'Place cash order · GY$700' : 'Place cash order · GY$300' });
+    expect(screen.queryByText(copy)).toBeNull();
+    expect(cart.items.find((item) => item.id === 'juice')?.quantity).toBe(2);
+    expect(cart.items.find((item) => item.id === 'juice')?.selectedOptionNames).toEqual(['Large']);
+    fireEvent.click(place);
+    await waitFor(() => expect(navigation.push).toHaveBeenCalledWith('/orders/o1'));
+    expect(orderedItems).toEqual(available ? ['rice', 'juice'] : ['juice']);
+    expect(requests.filter((r) => r.path.endsWith('/checkout')).map((r) => r.body)).toEqual([
+      { paymentMethod: 'CASH', tipAmount: 0 }, { paymentMethod: 'CASH', tipAmount: 0 },
+    ]);
+  });
+});

@@ -98,11 +98,13 @@ function responseContextIsCurrent(snapshot: AuthSnapshot, storeId: string | null
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly details?: unknown;
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, details?: unknown) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
+    this.details = details;
     if (code !== undefined) this.code = code;
   }
 }
@@ -288,6 +290,7 @@ export async function apiFetch(
         : 'We couldn’t complete that. Please try again.'),
       res.status,
       typeof json?.error?.code === 'string' ? json.error.code : undefined,
+      json?.error?.details,
     );
   }
   return json;
