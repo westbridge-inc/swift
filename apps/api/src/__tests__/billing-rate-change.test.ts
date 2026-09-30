@@ -363,6 +363,35 @@ describe('AX332 F2: due now is the charge already issued', () => {
     expect((await feeScreen(rider.httpToken)).amountDueGyd).toBe(6000);
   });
 
+  it('the suspended nudge states what is owed: an 8,000 request pending across the re-tier is nudged as 8,000, not the new 6,000 fee [AX349]', async () => {
+    const now = new Date();
+    const owedWeek = new Date(now.getTime() - 3 * DAY);
+    const rider = await makeRiderSub({ due: owedWeek, status: 'SUSPENDED', msisdn: '6091274' });
+    await app.prisma.subscription.update({ where: { id: rider.subId }, data: { suspendedAt: new Date(now.getTime() - DAY) } });
+    await paymentRow(rider.subId, 8000, 'PENDING', owedWeek, `mmgtx_pending_${nanoid(8)}`);
+
+    await billing.recalculateMoverTiers();
+    expect(await rate(rider.subId)).toBe(6000);
+
+    await billing.sweepSuspended(now);
+    // The committed notice (the audit record of what the partner was told is
+    // owed) says the same as the fee screen: what approving the request
+    // settles, never the new weekly rate in its place.
+    const event = await app.prisma.billingEvent.findFirstOrThrow({
+      where: { subscriptionId: rider.subId, type: 'REMINDER', idempotencyKey: { startsWith: `nudge:${rider.subId}:` } },
+    });
+    const committed = JSON.parse(event.note!) as { body: string };
+    expect(committed.body).toContain('You owe $8,000 GYD.');
+    expect(committed.body).not.toContain('6,000');
+    expect((await feeScreen(rider.httpToken)).amountDueGyd).toBe(8000);
+    // What is delivered is rendered as history and names no amount at all, so
+    // no push can quote a figure the fee screen does not.
+    const pushed = await app.prisma.notification.findFirstOrThrow({
+      where: { userId: rider.userId, data: { path: ['kind'], equals: 'billing_suspended_nudge' } },
+    });
+    expect(pushed.body).not.toMatch(/\d,\d{3}/);
+  });
+
   it('only a live charge for the week now owed is due now: not a dead one, not a request for a week already paid', async () => {
     const due = new Date(Date.now() + 2 * DAY);
     const rider = await makeRiderSub({ due, weeklyRate: 6000, msisdn: '6091273' });

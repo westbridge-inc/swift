@@ -14,7 +14,8 @@ import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure
 import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
-import { weeklyFeeFor, weeklyFeeAmount } from './subscription-fee';
+import { weeklyFeeFor } from './subscription-fee';
+import { amountDueNow } from './amount-due';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice, type BillingNoticeLeaseGuard } from './billing-notice-delivery';
 import { AGENT_PAY_WAY, FEE_RESTORE_LINE, feePayWays } from './fee-notice-copy';
 import { cardRailKilled } from '../../utils/card-rail';
@@ -2923,10 +2924,14 @@ export class BillingService {
           // A SUSPENDED account is still retried daily, so the MMG request is
           // real where the rail sends one (fee-notice-copy.ts).
           const ways = feePayWays(sub);
+          // [AX349] What is owed is what the fee screen says is due, from the
+          // same helper: a request already issued at 8,000 is owed at 8,000
+          // after the rate moves to 6,000. The weekly fee is not named here.
+          const owed = await amountDueNow(tx, sub);
           const notice: BillingNotice = {
             noticeVersion: 1, target: 'payer', userId: this.payerUserId(sub), audience: this.payerAudience(sub),
             title: 'Suspended — pay to restore access',
-            body: `Your weekly fee of $${weeklyFeeAmount(sub).toLocaleString()} ${sub.currencyCode} is unpaid. ${ways}. ${FEE_RESTORE_LINE}`,
+            body: `You owe $${owed.toLocaleString()} ${sub.currencyCode}. ${ways}. ${FEE_RESTORE_LINE}`,
             sms: `Swift: your account is still suspended. ${ways}. ${FEE_RESTORE_LINE}`,
             data: { kind: 'billing_suspended_nudge', subscriptionId: sub.id },
           };
