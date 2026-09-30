@@ -30,6 +30,8 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 //   · [E01] the cart quote prices every vendor it will charge (fixed by #1285)
 // The MMG half of CUST-02 (MMG checkout, dispute hold) is proven through the
 // same routes in gold-2-mmg.test.ts.
+// Provider/device-only: live MMG wallet acceptance and real SMS/push delivery
+// are excluded; the in-app link, claim and dispute boundaries are automated.
 // ---------------------------------------------------------------------------
 
 // This file's own fixture block (+5920321nnn, 11 characters): audited against

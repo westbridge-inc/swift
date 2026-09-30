@@ -20,6 +20,10 @@ import { autoCancelUnresponsiveOrder } from '../../jobs/queue';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { grantStepUp } from '../helpers/step-up';
 
+// Provider/device-only: opening the real wallet, live MMG acceptance and real
+// SMS/push delivery are excluded. In-app link/claim/refusal/hold cases below
+// use mounted routes; expiry invokes the production auto-cancel executor,
+// proving its transition rather than BullMQ delay timing.
 // ---------------------------------------------------------------------------
 // GOLD-2 · VEND-03 + MONEY-02 — the vendor's own MMG pay-link rail, where
 // Swift holds nothing (and the MMG half of CUST-02).
