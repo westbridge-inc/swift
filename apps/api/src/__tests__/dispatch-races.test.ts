@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import { readFileSync } from 'node:fs';
@@ -124,6 +125,7 @@ async function makeDriver(at = SPOT): Promise<DriverActor> {
       acceptanceRate: 50,
     },
   }));
+  await sys(() => currentMoverDocuments(app.prisma, u.userId, 'CAR', true));
   driverIds.push(driver.id);
   return { ...u, driverId: driver.id };
 }
