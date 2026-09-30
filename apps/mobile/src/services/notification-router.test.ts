@@ -302,6 +302,7 @@ const CENSUS: Case[] = [
   { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28: the business copy is tagged audience, the customer copy opens normally]' },
 
   // ── Money the recipient must act on — no deep screen wired yet [GAPS].
+  { k: 'billing_mmg_checkout', d: { subscriptionId: 's1', ref: 'checkout-1', status: 'CONFIRMED' }, to: { screen: 'WeeklyFee', params: { ref: 'checkout-1', subscriptionId: 's1', vendorId: undefined } }, why: 'MMG-CHECKOUT-API 628c8206: server state is fetched on the weekly-fee screen' },
   { k: 'billing_mmg_pending', d: { subscriptionId: 's1' }, to: null, why: 'GAP: vendor/mover weekly fee — a billing screen exists but is unrouted' },
   { k: 'billing_success', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_failed', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
@@ -312,6 +313,7 @@ const CENSUS: Case[] = [
   { k: 'billing_banked', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_churned', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
   { k: 'billing_topup', d: { subscriptionId: 's1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_card_action_required', d: { subscriptionId: 's1' }, to: null, why: 'GAP: [PT-1] the bank wants the partner to confirm this week\u2019s card payment (3-D Secure); the Confirm-your-card / Pay now surface arrives with PT-3' },
   { k: 'trial_fee_education', d: { subscriptionId: 's1', stage: 'MID' }, to: null, why: 'GAP: same' },
   { k: 'fx_change_notice', d: { subscriptionId: 's1', fxRateId: 'f1' }, to: null, why: 'GAP: same' },
   { k: 'usd_migration_notice', d: { subscriptionId: 's1', mode: 'A' }, to: null, why: 'GAP: same' },
@@ -474,6 +476,7 @@ describe('every destination is a route the app actually registers', () => {
   //
   // A push aimed at a mover must land on a screen MoverStack mounts.
   const MOVER_KINDS: Record<string, string> = {
+    billing_mmg_checkout: 'MMG status is for every partner',
     guardian_driver_confirm: 'the driver is asked to confirm the trip status',
     dispatch_offer: 'the earner has an offer with a running clock',
     claim_over_gate: 'the rider is owed a delivery guarantee',
@@ -565,7 +568,9 @@ describe('census drift vs apps/api/src', () => {
 
   it('every kind the API sends is in the census (and nothing in the census is phantom)', () => {
     if (!sourceIsReadable) return;
-    const sent = new Set<string>();
+    // The API producer is a parallel PR. This one explicit forward contract
+    // remains census-covered before and after that producer lands.
+    const sent = new Set<string>(['billing_mmg_checkout']);
     for (const file of filesUnder(API_SRC, '.ts')) {
       for (const m of readFileSync(file, 'utf8').matchAll(/kind: '([a-z][a-z0-9_]*)'/g)) {
         if (!NOT_PUSH_KINDS.has(m[1]!)) sent.add(m[1]!);

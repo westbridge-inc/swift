@@ -61,6 +61,10 @@ const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> 
   // Only exactly '1' turns it on (providers/mmg/mmg-checkout.ts); the boot
   // guard refuses any other non-zero spelling.
   { name: 'MMG_CHECKOUT_ENABLED', whenUnset: '0', what: 'whether partners may pay the weekly fee on the MMG hosted checkout page' },
+  // [PT-1] Unset reads as OFF (utils/card-rail.ts cardRailV2Enabled), and production refuses 1 until a real v2 provider exists.
+  { name: 'CARD_RAIL_V2', whenUnset: '0', what: 'whether partners can add a card and pay the weekly fee by card (card rail v2)' },
+  // [AX297 F5] Unset reads as OFF (utils/card-rail.ts cardRailV2DrainEnabled); production refuses 1.
+  { name: 'CARD_RAIL_V2_DRAIN', whenUnset: '0', what: 'whether the worker still settles card rail v2 work already in flight after v2 is switched off' },
 ];
 
 /**
@@ -142,4 +146,30 @@ describe('the two env examples agree on how the product behaves', () => {
       expect(exemptNames.has(flag.name), `${flag.name} cannot be both compared and exempt`).toBe(false);
     }
   });
+});
+
+/**
+ * [PT-1 · AX297 F6] Card rail v2 is configured by six settings, and an operator
+ * finds them in the templates or nowhere. The comparison above reads an ABSENT
+ * flag as its code default, so it could not notice a missing entry: this
+ * requires each one to be written, in both files, with a safe value.
+ */
+describe('[AX297 F6] every card rail v2 setting is in both templates, with a safe value', () => {
+  const CARD_RAIL_SETTINGS = ['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_PROVIDER', 'CARD_RAIL_ENVIRONMENT', 'CARD_RAIL_ACCOUNT', 'API_PUBLIC_URL'];
+
+  for (const [label, file] of [['apps/api/.env.example', api], ['deploy/.env.deploy.example', deploy]] as const) {
+    it(`${label} declares each of them`, () => {
+      for (const name of CARD_RAIL_SETTINGS) {
+        expect(declared(file, name), `${label} does not declare ${name}`).not.toBeUndefined();
+      }
+    });
+
+    it(`${label}: both switches OFF, no provider chosen for anyone, tokens bound to sandbox, and an account LABEL rather than a number`, () => {
+      expect(declared(file, 'CARD_RAIL_V2')).toBe('0');
+      expect(declared(file, 'CARD_RAIL_V2_DRAIN')).toBe('0');
+      expect(declared(file, 'CARD_RAIL_PROVIDER')).toBe('');
+      expect(declared(file, 'CARD_RAIL_ENVIRONMENT')).toBe('sandbox');
+      expect(declared(file, 'CARD_RAIL_ACCOUNT')).toBe('');
+    });
+  }
 });

@@ -47,10 +47,10 @@ describe('[PR1270-S2-04] signup commits only to a fetched, current, on-screen qu
 });
 
 describe('[H7] a preview with no quote says so — never $0, never covered', () => {
-  it('the vendor Swift Number hero renders a dash for an unknown amount', () => {
-    const screen = src('src/modules/vendor/screens/VendorSwiftNumberScreen.tsx');
-    expect(screen).toContain('moneyOrDash(state.amountGyd)');
-    expect(screen).not.toMatch(/\{money\(state\.amountGyd\)\}/);
+  it('the shared weekly fee screen says when the amount is unknown', () => {
+    const screen = src('src/modules/billing/screens/WeeklyFeeScreen.tsx');
+    expect(screen).toContain('dueLine(sub)');
+    expect(src('src/lib/weeklyFee.ts')).toContain("if (!Number.isFinite(due)) return 'Amount due unavailable.'");
   });
 
   it.each(['src/hooks/vendorops.ts', 'src/hooks/mover.ts'])('%s carries the price list\'s loading and error state into the preview subscription', (file) => {

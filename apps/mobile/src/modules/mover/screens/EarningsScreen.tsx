@@ -522,11 +522,11 @@ export function EarningsScreen({ navigation }: any) {
             )
           ) : null}
 
-          <WeeklyFeeCard sub={subQ.data} onPay={() => navigation?.navigate?.('MySwiftNumber')} />
+          <WeeklyFeeCard sub={subQ.data} onPay={() => navigation?.navigate?.('WeeklyFee')} />
 
           <EarningsTools
             sub={subQ.data}
-            onTopUp={() => navigation?.navigate?.('MySwiftNumber')}
+            onTopUp={() => navigation?.navigate?.('WeeklyFee')}
             onStatement={() => statement.mutate()}
             statementLoading={statement.isPending}
             statementError={statement.isError}

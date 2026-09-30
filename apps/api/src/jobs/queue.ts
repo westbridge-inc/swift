@@ -497,11 +497,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { SubscriptionService } = await import('../modules/subscription/subscription.service');
       const { NotificationService } = await import('../modules/notification/notification.service');
       const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+      const { cardRailWorkerSource, sweepCardSessions } = await import('../modules/billing/card-rail-worker');
 
+      // [PT-1 · AX297 F5] Card rail v2: nothing at all unless CARD_RAIL_V2=1
+      // (or CARD_RAIL_V2_DRAIN=1 to drain what exists). When wired, the
+      // provider is resolved lazily on this worker's own Redis, where the
+      // simulator keeps its state.
+      const cardRail = cardRailWorkerSource({ redis: ctx.redis });
       const billing = new BillingService(
         ctx.prisma,
         new NotificationService(ctx.prisma, ctx.io),
         getPaymentProvider(),
+        undefined,
+        cardRail,
       );
       const subscriptions = new SubscriptionService(ctx.prisma);
 
@@ -585,17 +593,27 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
           }
           await billing.scanUnkeyedTopUpDuplicates();
-          // [M-20] Settlement imports a person must see: unbalanced publications
-          // and rejected files with a credited row. Reported, never reversed.
-          const { scanSettlementImports } = await import('../modules/billing/settlement-import');
+          // [G5-F6] A settlement publication that stopped part-way (interrupted,
+          // or its publisher silent past the lease) is finished here, one winner
+          // per import; every row goes back through the same ingest, so none
+          // credits twice. The hold stops it.
+          const { resumeInterruptedSettlementImports, scanSettlementImports } = await import('../modules/billing/settlement-import');
+          const { AgentCashService } = await import('../modules/billing/agent-cash.service');
+          const resumedImports = await resumeInterruptedSettlementImports(ctx.prisma, new AgentCashService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)));
+          if (resumedImports.resumed.length + resumedImports.failed.length > 0) {
+            ctx.log.warn(resumedImports, '[G5-F6] settlement publications that stopped part-way — resumed');
+          }
+          // [M-20] Settlement imports a person must see: unbalanced publications,
+          // rejected files with a credited row, and publications the pass above
+          // could not finish. Reported, never reversed.
           const imports = await scanSettlementImports(ctx.prisma);
-          if (imports.unbalanced.length + imports.rejectedButCredited.length > 0) {
+          if (imports.unbalanced.length + imports.rejectedButCredited.length + imports.stuck.length > 0) {
             const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
                 title: '📄 Settlement imports need a person',
-                body: `${imports.unbalanced.length} published import(s) do not balance and ${imports.rejectedButCredited.length} rejected file(s) have a credited row. Reconcile against the MMG statement; nothing is reversed automatically.`,
+                body: `${imports.unbalanced.length} published import(s) do not balance, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
             ).catch(() => {});
@@ -604,9 +622,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // settled, declined, re-sent under the same key, or expired — the
           // kill switch stops new instructions, never this.
           const cards = await billing.reconcileUnknownCardCharges();
-          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown > 0) {
+          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown + cards.actionRequired > 0) {
             ctx.log.warn(cards, '[M-01] unknown card charge intents reconciled');
           }
+          // [PT-1] Card rail v2 sessions: an unused page past its window closes,
+          // and a Pay now that may have moved money is asked again. The kill
+          // switch never stops this [C7]; with CARD_RAIL_V2 off it runs only
+          // under the explicit CARD_RAIL_V2_DRAIN=1 [AX297 F5].
+          const cardSessions = await sweepCardSessions({ prisma: ctx.prisma, notifications: new NotificationService(ctx.prisma, ctx.io), billing, cardRail });
+          if (cardSessions && cardSessions.checked > 0) ctx.log.info(cardSessions, '[PT-1] card sessions swept');
           // [M-18] The historical double credits: one provider transaction
           // credited by more than one channel before the identity existed.
           // Reported and paged for human reconciliation, never reversed here.

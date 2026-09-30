@@ -97,7 +97,8 @@ describe('F05 — the discriminator travels typed, and an unknown value is not a
     expect(hooks).toMatch(/export function useHome<T = HomeFeed>/);
     expect(hooks).toMatch(/activeOrder: LiveOrderProjection \| null/);
     const home = readFileSync(join(process.cwd(), 'src/modules/shop/screens/HomeScreen.tsx'), 'utf8');
-    expect(home).toMatch(/function LiveOrderCard\(\{ order, navigation \}: \{ order: LiveOrderProjection; navigation: any \}\)/);
+    expect(home).toMatch(/function LiveOrderCard\(\{ order, navigation, statusNote \}: \{ order: LiveOrderProjection; navigation: any; statusNote: string \}\)/);
+    expect(home).toContain("statusNote={home.isFetching || home.isPlaceholderData ? 'Updating order…' : home.isError || home.fetchStatus === 'paused' ? 'Last known' : ''}");
     expect(home).toMatch(/useHome<HomeFeed>\(/);
     const history = readFileSync(join(process.cwd(), 'src/modules/orders/screens/OrdersHistoryScreen.tsx'), 'utf8');
     expect(history).toMatch(/function statusPill\(o: OrderVerticalFacts & \{ status: string \}\)/);

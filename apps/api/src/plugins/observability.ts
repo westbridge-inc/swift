@@ -434,7 +434,7 @@ export const dispatchTimeToAssign = new client.Histogram({
 // the "is OSRM actually up?" signal. Labels: op = eta|route, outcome = ok|fallback.
 export const osrmOutcomeCounter = new client.Counter({
   name: 'swift_osrm_calls_total',
-  help: 'OSRM routing calls by operation and outcome (ok vs haversine fallback)',
+  help: 'OSRM routing calls by operation and outcome (ok, haversine fallback, or refused: an answer with an invalid number)',
   labelNames: ['op', 'outcome'] as const,
   registers: [registry],
 });
@@ -564,7 +564,7 @@ export const settlementImportsRejectedCounter = new client.Counter({
 });
 export const settlementBatchesUnbalancedGauge = new client.Gauge({
   name: 'swift_settlement_batches_unbalanced',
-  help: 'Published settlement imports whose credited total disagrees with the validated file total, or rejected imports with a credited row',
+  help: 'Published settlement imports whose credited total disagrees with the validated file total, rejected imports with a credited row, or publications stopped part-way (kind=stuck_publication)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });
