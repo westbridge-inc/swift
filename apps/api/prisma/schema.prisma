@@ -3131,12 +3131,19 @@ model MmgAgentPayment {
   /// RECEIVED | MATCHED | UNMATCHED | RECONCILED | RESOLVED | REFUND_FLAGGED
   status         String
   /// SAN_MALFORMED | SAN_CHECKSUM_FAILED | SAN_UNKNOWN | ACCOUNT_CLOSED | TOMBSTONED | BAD_CURRENCY | AMOUNT_OUT_OF_RANGE
+  /// | UNFINISHED ([MMG-RECV] stranded RECEIVED, and the repair pass could not finish it: a person must)
   failureCode    String?
   raw            Json
   resolvedBy     String?
   resolvedAt     DateTime?
   note           String?
-  createdAt      DateTime  @default(now())
+  /// [MMG-RECV] Stamped by the INSERT itself on the database clock (UTC),
+  /// never by an app server clock: the age that tells an observation stranded
+  /// RECEIVED from one still inside its first delivery.
+  createdAt      DateTime  @default(dbgenerated("timezone('UTC'::text, clock_timestamp())"))
+  /// [MMG-RECV] When the repair pass last tried, and failed, to finish this
+  /// observation while it stayed RECEIVED (database clock). Null: never.
+  finishAttemptAt DateTime?
 
   @@unique([channel, externalId])
   @@index([status, createdAt])
@@ -3156,7 +3163,7 @@ model ProviderPayment {
   provider          String
   /// The provider's transaction id, normalized (trimmed, upper-cased)
   providerTxnId     String
-  /// OPEN | CREDITED
+  /// OPEN | CREDITED | HELD_DUPLICATE (requires finance review; never credits)
   status            String    @default("OPEN")
   creditedPaymentId String?
   subscriptionId    String?
@@ -3166,7 +3173,10 @@ model ProviderPayment {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  @@unique([provider, providerTxnId])
+  // Raw migration owns the partial unique expression index using mmg_txn_canon.
+  historicalAliases ProviderPaymentAlias[]
+
+  @@index([provider, providerTxnId])
   @@index([tenantId])
   @@index([status])
   @@map("provider_payments")
@@ -3275,6 +3285,19 @@ model MmgCheckoutObservation {
   @@index([tenantId])
   @@index([intentId, createdAt])
   @@map("mmg_checkout_observations")
+}
+
+/// Immutable historical SQL-canonical references reserved before identity rekey.
+/// Global routing metadata; no public API. Raw SQL prevents all runtime mutations.
+model ProviderPaymentAlias {
+  provider          String
+  aliasKey          String
+  providerPaymentId String
+  providerPayment   ProviderPayment @relation(fields: [providerPaymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([provider, aliasKey])
+  @@index([providerPaymentId])
+  @@map("provider_payment_aliases")
 }
 
 /// Bank-truth reconciliation [san spec PART 25]: ledger truth vs what MMG
