@@ -155,21 +155,18 @@ export async function escalateVendorAlert(
  *  mover. Stamped across the whole (order, mover) pair, a delayed decline or
  *  accept of an expired attempt marked an unseen successor as seen, and that
  *  successor's lapse then cost the mover acceptance rate. So a MOVER_OFFER
- *  acknowledgment always names its attempt: `null` is the legacy pre-attempt
- *  row, never "every attempt". */
-export function acknowledgeAlert(prisma: PrismaClient, kind: 'VENDOR_ORDER', subjectId: string, recipientId?: string): Promise<void>;
-export function acknowledgeAlert(prisma: PrismaClient, kind: 'MOVER_OFFER', subjectId: string, recipientId: string, offerAttemptId: string | null): Promise<void>;
-export async function acknowledgeAlert(
-  prisma: PrismaClient,
-  kind: 'VENDOR_ORDER' | 'MOVER_OFFER',
-  subjectId: string,
-  recipientId?: string,
-  offerAttemptId?: string | null,
-): Promise<void> {
+ *  acknowledgment always names its attempt (the type requires it): `null` is
+ *  the legacy pre-attempt row, never "every attempt". */
+type AlertAcknowledgment =
+  | [kind: 'VENDOR_ORDER', subjectId: string, recipientId?: string]
+  | [kind: 'MOVER_OFFER', subjectId: string, recipientId: string, offerAttemptId: string | null];
+
+export async function acknowledgeAlert(prisma: PrismaClient, ...ack: AlertAcknowledgment): Promise<void> {
+  const [kind, subjectId, recipientId] = ack;
   await prisma.alertDelivery.updateMany({
     where: {
       kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null,
-      ...(kind === 'MOVER_OFFER' ? { offerAttemptId: offerAttemptId ?? null } : {}),
+      ...(ack[0] === 'MOVER_OFFER' ? { offerAttemptId: ack[3] ?? null } : {}),
     },
     data: { acknowledgedAt: new Date() },
   });
