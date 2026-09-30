@@ -34,7 +34,7 @@ const MAY_END_A_SESSION: Record<string, string> = {
 
 /** Every sign-out control this census must find (a floor, so a broken walker
  *  cannot pass by finding nothing). */
-const KNOWN_CONTROLS = ['app/dashboard/dashboard-shell.tsx', 'app/portal/portal-shell.tsx', 'app/(app)/account/page.tsx'];
+const KNOWN_CONTROLS = ['components/console-shell.tsx', 'app/(app)/account/page.tsx'];
 
 const LABEL = /^\s*(log|sign)[\s-]?out\b/i;
 const LABEL_PROPS = new Set(['label', 'title', 'aria-label']);
@@ -124,6 +124,11 @@ describe('every web sign-out control asks first', () => {
       const file = FILES.find(({ rel }) => rel === known);
       expect(file, `${known} exists`).toBeTruthy();
       expect(usesConfirm(file!.source), `${known} signs out through SignOutButton`).toBe(true);
+    }
+    for (const console of ['app/dashboard/dashboard-shell.tsx', 'app/portal/portal-shell.tsx']) {
+      const file = FILES.find(({ rel }) => rel === console);
+      expect(file, `${console} exists`).toBeTruthy();
+      expect(file!.source.getFullText(), `${console} delegates to the guarded control`).toMatch(/<ConsoleShell\b/);
     }
   });
 

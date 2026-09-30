@@ -552,7 +552,7 @@ export const settlementImportsRejectedCounter = new client.Counter({
 });
 export const settlementBatchesUnbalancedGauge = new client.Gauge({
   name: 'swift_settlement_batches_unbalanced',
-  help: 'Published settlement imports whose credited total disagrees with the validated file total, or rejected imports with a credited row',
+  help: 'Published settlement imports whose credited total disagrees with the validated file total, rejected imports with a credited row, or publications stopped part-way (kind=stuck_publication)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });

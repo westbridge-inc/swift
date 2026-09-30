@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
@@ -263,7 +263,23 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // `preparingAt` / `readyAt` / `paymentStatus` are declared on VendorOrder now
   // (the detail route returns the whole Order row) — no local re-declaration.
   const o = order.data;
-  if (!o) return <div className="rounded-2xl border border-black/5 bg-white p-6 text-sm text-[var(--swift-muted)]">Loading…</div>;
+  const closeButton = (
+    <button onClick={onClose} aria-label="Close order detail" className="flex min-h-11 min-w-11 items-center justify-center rounded-lg text-xl text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
+  );
+  if (!o) return (
+    <div className="rounded-2xl border border-black/5 bg-white p-6 text-sm text-[var(--swift-muted)]">
+      <div className="flex items-center justify-between gap-3">
+        <p className="font-semibold text-[var(--swift-ink)]">Order detail</p>
+        {closeButton}
+      </div>
+      {order.isError ? (
+        <div className="mt-3" role="alert">
+          <p>Could not load this order. Try again.</p>
+          <button onClick={() => void order.refetch()} aria-label="Retry order detail" className="mt-3 min-h-11 rounded-lg border border-black/10 px-4 font-semibold text-[var(--swift-ink)]">Retry</button>
+        </div>
+      ) : <p className="mt-3">Loading…</p>}
+    </div>
+  );
 
   const s = (o.status || '').toUpperCase();
   const actions = actionsFor(o);
@@ -328,7 +344,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         </div>
         <div className="flex items-center gap-2">
           {statusChip(s)}
-          <button onClick={onClose} className="text-sm text-[var(--swift-muted)] hover:text-[var(--swift-ink)]">✕</button>
+          {closeButton}
         </div>
       </div>
 
@@ -519,6 +535,17 @@ export default function OrdersPage() {
   const storeId = useStoreId();
   const [bucket, setBucket] = useState<BucketKey>('new');
   const [selected, setSelected] = useState<string | null>(null);
+  useEffect(() => {
+    if (!selected || !window.matchMedia('(max-width: 1279px)').matches) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setSelected(null); };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.body.style.overflow = previous;
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [selected]);
 
   // One poll feeds every lane — the queue is the live surface, keep it fresh.
   const orders = useQuery({
@@ -610,7 +637,9 @@ export default function OrdersPage() {
             </button>
           ))}
         </div>
-        <div className="xl:sticky xl:top-6 xl:self-start">
+        <div className={selected
+          ? 'fixed inset-0 z-40 overflow-y-auto bg-[var(--swift-subtle)] p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] pb-[calc(env(safe-area-inset-bottom)_+_1rem)] xl:sticky xl:inset-auto xl:top-6 xl:z-auto xl:self-start xl:overflow-visible xl:bg-transparent xl:p-0'
+          : 'hidden xl:sticky xl:top-6 xl:block xl:self-start'}>
           {selected ? (
             <OrderDetail id={selected} onClose={() => setSelected(null)} />
           ) : (

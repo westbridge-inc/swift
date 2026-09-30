@@ -21,8 +21,8 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { SwiftLogo } from '@/components/swift-logo';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
+import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
   addToCart,
   checkoutAttemptSignature,
@@ -171,8 +171,20 @@ function optionGuidance(group: OptionGroup): string {
   return `Choose up to ${group.maxSelect}`;
 }
 
-export function StorefrontExperience({ store, returnPath }: { store: StorefrontDetail; returnPath: string }) {
+export function StorefrontExperience({ store, returnPath, fromQr = false }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean }) {
   const router = useRouter();
+  const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
+  const diningNoticeDismissed = dismissedDiningStore === store.id;
+  const diningNoticeStorageKey = `swift:dining-notice:${store.id}`;
+  useEffect(() => {
+    if (!fromQr) return;
+    try {
+      setDismissedDiningStore(sessionStorage.getItem(diningNoticeStorageKey) === 'dismissed' ? store.id : null);
+    } catch {
+      // Storage can be blocked. The notice remains dismissible in memory.
+    }
+  }, [fromQr, store.id, diningNoticeStorageKey]);
+  const menu = useRef<HTMLDivElement | null>(null);
   const [catalog, setCatalog] = useState<DisplayVendor>(() => publicCatalog(store));
   const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const [catalogCheckedAt, setCatalogCheckedAt] = useState<Date | null>(null);
@@ -205,6 +217,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
   const railHeading = useRef<HTMLHeadingElement | null>(null);
 
   const closeOptions = useCallback(() => {
+    clearStorefrontContinuation();
     setModalItem(null);
     setModalError(null);
     window.requestAnimationFrame(() => modalReturnFocus.current?.focus());
@@ -459,6 +472,9 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
   };
 
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
+    if (!signedIn) {
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: selectedDefaults(item.optionGroups ?? []), returnPath });
+    }
     if (!requireCustomerSession() || !orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
     const groups = item.optionGroups ?? [];
     if (groups.length > 0) {
@@ -478,6 +494,26 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
       `${item.name} added to your order.`,
     );
   };
+
+  useEffect(() => {
+    if (!signedIn || !cartHydrated || catalogState !== 'ready') return;
+    const intent = takeStorefrontContinuation(store.slug);
+    if (!intent) return;
+    const item = catalog.categories.flatMap(category => category.items).find(item => item.id === intent.itemId);
+    if (!catalog.isCurrentlyOpen || !catalog.acceptingOrders || !item?.isAvailable
+      || item.fulfillment !== 'DELIVERY' || itemPrice(item) === null) {
+      setError('This item is not available to order right now. Please check the menu.');
+      return;
+    }
+    // Reopen even items without options: resuming sign-in never silently
+    // changes a cart, and the customer sees the current server price.
+    const choices = Object.fromEntries((item.optionGroups ?? []).map(group => [group.id,
+      (intent.selectedOptions[group.id] ?? []).filter(id => group.options.some(option => option.id === id && option.isAvailable)).slice(0, group.maxSelect),
+    ]));
+    setSelectedOptions(choices);
+    setModalError(null);
+    setModalItem(item);
+  }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
 
   const subtractItem = (item: DisplayItem) => {
     if (!requireCustomerSession()) return;
@@ -511,12 +547,24 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
 
   const confirmOptions = () => {
     if (!modalItem) return;
+    if (!signedIn) {
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, returnPath });
+      requireCustomerSession();
+      return;
+    }
     const liveItem = categoryItems.find((item) => item.id === modalItem.id);
-    if (!orderable || !liveItem?.isAvailable) {
+    if (!orderable || !liveItem?.isAvailable || liveItem.fulfillment !== 'DELIVERY' || optionPrice(liveItem, selectedOptions) === null) {
       setModalError('This item is no longer verified as orderable on the live menu. Close this panel and check the menu again.');
       return;
     }
-    for (const group of modalItem.optionGroups ?? []) {
+    for (const [groupId, ids] of Object.entries(selectedOptions)) {
+      const group = liveItem.optionGroups?.find(group => group.id === groupId);
+      if (ids.length && (!group || ids.length > group.maxSelect || ids.some(id => !group.options.some(option => option.id === id && option.isAvailable)))) {
+        setModalError('These choices have changed. Close this panel and check the menu again.');
+        return;
+      }
+    }
+    for (const group of liveItem.optionGroups ?? []) {
       const minimum = group.isRequired ? Math.max(1, group.minSelect) : group.minSelect;
       if ((selectedOptions[group.id] ?? []).length < minimum) {
         setModalError(`Choose ${minimum === 1 ? 'an option' : `${minimum} options`} for ${group.name}.`);
@@ -696,13 +744,14 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
       <header className={styles.topbar}>
         <div className={styles.topbarInner}>
           <div className={styles.brandGroup}>
-            <Link href="/" aria-label="Swift home" className={styles.brandHome}>
-              <SwiftLogo />
-            </Link>
-            <span className={styles.verticalChip}>
+            <div className={styles.storeBrand}>
+              <a href="#store-name" className={styles.brandHome}>{catalog.name}</a>
+              <Link href="/" className={styles.poweredBy}>powered by Swift</Link>
+            </div>
+            {!fromQr ? <span className={styles.verticalChip}>
               <VerticalIcon size={18} aria-hidden="true" />
               <span>{verticalLabel[currentVertical]}</span>
-            </span>
+            </span> : null}
           </div>
           <nav className={styles.topActions} aria-label="Order navigation">
             <Link href={signedIn ? '/orders' : `/login?next=${encodeURIComponent('/orders')}`} className={styles.topLink}>
@@ -720,7 +769,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         </div>
       </header>
 
-      {catalog.coverImageUrl ? (
+      {!fromQr && catalog.coverImageUrl ? (
         <div className={styles.hero}>
           <Image
             src={catalog.coverImageUrl}
@@ -733,7 +782,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         </div>
       ) : null}
 
-      <div className={`${styles.content} ${catalog.coverImageUrl ? styles.withHero : ''}`}>
+      <div className={`${styles.content} ${!fromQr && catalog.coverImageUrl ? styles.withHero : ''}`}>
         <section className={styles.storeCard} aria-labelledby="store-name">
           {catalog.logoUrl ? (
             <span className={styles.logo}>
@@ -745,10 +794,10 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
             </span>
           )}
           <div>
+            <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
             <p className={styles.eyebrow}>
               {[catalog.addressLine1, catalog.cuisineTypes?.[0] ?? catalog.vendorType].filter(Boolean).join(' · ')}
             </p>
-            <h1 id="store-name" className={styles.storeName}>{catalog.name}</h1>
             <div className={styles.meta}>
               {/* [M-D6] displayRating is null below the rating-display floor,
                   which is a different thing from having no ratings — but both
@@ -787,6 +836,30 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
           </div>
         </section>
 
+        {fromQr ? (
+          // Present in the server render. Hiding keeps its space, so neither
+          // hydration nor dismissal moves the menu under a visitor's finger.
+          <div className={styles.diningNotice} aria-hidden={diningNoticeDismissed ? true : undefined}>
+            <p role="status" aria-live="polite">Dining in? Browse our menu here and place your order with your server.</p>
+            <button
+              type="button"
+              className={styles.diningDismiss}
+              aria-label="Dismiss dining-in message"
+              onClick={() => {
+                setDismissedDiningStore(store.id);
+                try {
+                  sessionStorage.setItem(diningNoticeStorageKey, 'dismissed');
+                } catch {
+                  // Browsing and ordering must also work without storage.
+                }
+                menu.current?.focus({ preventScroll: true });
+              }}
+            >
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
+
         {catalog.description ? <p className={styles.description}>{catalog.description}</p> : null}
 
         {catalogState === 'ready' && catalogCheckedAt ? (
@@ -815,7 +888,7 @@ export function StorefrontExperience({ store, returnPath }: { store: StorefrontD
         ) : null}
 
         <div className={styles.layout}>
-          <div className={styles.menu}>
+          <div ref={menu} className={styles.menu} role="region" aria-label="Menu" tabIndex={-1}>
             {catalog.categories.length === 0 || categoryItems.length === 0 ? (
               <p className={styles.emptyMenu}>
                 This store has no orderable menu items right now. Check again later.

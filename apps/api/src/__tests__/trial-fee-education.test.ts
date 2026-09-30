@@ -61,7 +61,7 @@ afterAll(async () => {
 });
 
 describe('the trial fee-education sweep', () => {
-  it('day-10 trials get the how-to (with SAN); day-13 get the exact amount; each stage once', async () => {
+  it('day-10 trials learn how they will pay (MMG in the app, never an agent or the Swift Number); day-13 get the exact amount; each stage once', async () => {
     const early = await makeTrial(3.5); // ~4 days left → d10 stage
     const late = await makeTrial(0.8); // <1 day → d13 stage
 
@@ -69,15 +69,18 @@ describe('the trial fee-education sweep', () => {
     expect(first.day10).toBeGreaterThanOrEqual(1);
     expect(first.day13).toBeGreaterThanOrEqual(1);
 
+    // The owner, 29 Sep: partners pay the weekly fee on the checkout page, with
+    // MMG, in the app. Its MMG action is not live yet, so the notice says it
+    // opens soon; it never names an agent, cash or the Swift Number, and never
+    // prints the number (`123 456 7890`) for a counter.
+    const closedDoors = /\bagents?\b|swift number|\bcash\b|\d{3}\D\d{3}\D\d{4}/i;
     const earlyNotif = await prisma.notification.findFirst({ where: { userId: early.userId }, orderBy: { createdAt: 'desc' } });
-    expect(earlyNotif?.body).toContain('MMG agent');
-    // The SAN, grouped `123 456 7890` — the same punctuation the pay screen and
-    // the printable counter card use. This assertion is why the format change
-    // was worth making: the number a vendor reads to an MMG agent arrives here,
-    // inside a message, and it has to match the card in their hand.
-    expect(earlyNotif?.body).toMatch(/\d{3} \d{3} \d{4}/);
+    expect(earlyNotif?.body).toContain('Payment with MMG opens in the app soon');
+    expect(earlyNotif?.body).not.toMatch(closedDoors);
     const lateNotif = await prisma.notification.findFirst({ where: { userId: late.userId }, orderBy: { createdAt: 'desc' } });
     expect(lateNotif?.body).toContain('GY$2,100');
+    expect(lateNotif?.body).toContain('Payment with MMG opens in the app soon');
+    expect(lateNotif?.body).not.toMatch(closedDoors);
 
     // Idempotent: a second sweep sends nothing new for these subs.
     const again = await sweepTrialFeeEducation(prisma, notifications);

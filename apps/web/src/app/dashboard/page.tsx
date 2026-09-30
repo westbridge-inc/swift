@@ -9,9 +9,9 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="rounded-2xl border border-black/5 bg-white p-5">
-      <p className="text-xs font-medium uppercase tracking-wide text-[var(--swift-muted)]">{label}</p>
-      <p className="mt-2 text-2xl font-extrabold">{value}</p>
+    <div className="min-w-0 rounded-2xl border border-black/5 bg-white p-5">
+      <p className="break-words text-xs font-medium uppercase tracking-wide text-[var(--swift-muted)]">{label}</p>
+      <p className="mt-2 break-words text-2xl font-extrabold">{value}</p>
       {sub && <p className="mt-1 text-xs text-[var(--swift-muted)]">{sub}</p>}
     </div>
   );
@@ -80,7 +80,7 @@ export default function TodayPage() {
         </Link>
       )}
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Orders today" value={String(d.today.orders)} sub={`${d.week.orders} this week`} />
         <Stat label="Revenue today" value={money(d.today.revenue)} sub={`${money(d.week.revenue)} this week`} />
         <Stat label="Revenue · 30 days" value={money(d.month.revenue)} sub={`${d.month.orders} orders`} />

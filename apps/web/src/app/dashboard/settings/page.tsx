@@ -73,8 +73,8 @@ function HoursEditor() {
       <h2 className="font-bold">Operating hours</h2>
       <div className="mt-4 space-y-2">
         {rows.map((r) => (
-          <div key={r.dayOfWeek} className="flex items-center gap-3 text-sm">
-            <span className="w-24 font-medium">{DAYS[r.dayOfWeek]}</span>
+          <div key={r.dayOfWeek} className="flex flex-wrap items-center gap-3 border-b border-black/5 py-3 text-sm last:border-0 sm:flex-nowrap sm:py-0">
+            <span className="w-24 shrink-0 font-medium">{DAYS[r.dayOfWeek]}</span>
             <label className="flex items-center gap-1.5">
               <input
                 type="checkbox"
@@ -85,7 +85,7 @@ function HoursEditor() {
               Open
             </label>
             {!r.isClosed && (
-              <>
+              <span className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
                 <input
                   type="time"
                   value={r.openTime}
@@ -99,7 +99,7 @@ function HoursEditor() {
                   onChange={(e) => set(r.dayOfWeek, { closeTime: e.target.value })}
                   className="rounded-lg border border-black/10 px-2 py-1"
                 />
-              </>
+              </span>
             )}
           </div>
         ))}
