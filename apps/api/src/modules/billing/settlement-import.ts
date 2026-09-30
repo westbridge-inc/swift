@@ -1,9 +1,11 @@
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
-import type { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import type { AgentCashService, IngestResult } from './agent-cash.service';
 import { settlementImportsRejectedCounter, settlementBatchesUnbalancedGauge } from '../../plugins/observability';
-import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
+import { positiveDurationMs } from '../../utils/async-lifecycle';
 import { log } from '../../utils/logger';
 
 // Channel B — settlement-file import [san spec 4.3]. A configurable header map
@@ -51,7 +53,10 @@ import { log } from '../../utils/logger';
 //      does every heartbeat, INTERRUPTED and PUBLISHED write. A publisher
 //      that lost the lease stops cleanly and marks nothing;
 //   8. a lease is judged on the DATABASE clock only: no app server clock can
-//      authorise a takeover or delay a recovery;
+//      authorise a takeover or delay a recovery. [AX337] Every lease write
+//      reads that clock INSIDE the one guarded statement that judges and
+//      stamps it, never in an earlier one, so a publisher paused in between
+//      cannot stamp an old heartbeat; one whose lease lapsed is refused;
 //   9. the repair pass is FAIR: least recently attempted first, and an import
 //      whose attempt just failed waits out a backoff, so imports that fail
 //      every time cannot starve the rest.
@@ -63,6 +68,12 @@ const PUBLICATION_HEARTBEAT_MS = 15_000;
 /** ...so one silent this long has died, and its import may be taken over.
  *  Far above the heartbeat and above any one row of ingest. */
 export const PUBLICATION_LEASE_MS = 5 * 60_000;
+/** [AX337-F2] The lease in force: PUBLICATION_LEASE_MS, unless
+ *  SETTLEMENT_PUBLICATION_LEASE_MS sets another (a drill, a test), read at
+ *  call time like the hold and never under a second. The heartbeat always
+ *  beats at a quarter of it or faster. */
+const leaseMs = () => Math.max(1_000, positiveDurationMs(process.env['SETTLEMENT_PUBLICATION_LEASE_MS'], PUBLICATION_LEASE_MS));
+const heartbeatMs = () => Math.min(PUBLICATION_HEARTBEAT_MS, Math.floor(leaseMs() / 4));
 /** [AX314-F3] The repair pass leaves an import whose attempt just failed alone
  *  this long, and always tries the least recently attempted first. */
 export const PUBLICATION_RETRY_BACKOFF_MS = 5 * 60_000;
@@ -309,27 +320,55 @@ class PublicationLeaseLost extends Error {
   }
 }
 
-/** [AX314-F2] The ONE clock of the lease is the database clock. Every lease
- *  timestamp written, and every expiry compared, is a reading of it: never
- *  an app server clock, which may run minutes ahead or behind. */
+/** [AX314-F2] The ONE clock of the lease is the database clock: never an app
+ *  server clock, which may run minutes ahead or behind. [AX337-F2] A lease
+ *  WRITE reads it inside its own guarded statement (`DB_NOW`): a time sampled
+ *  in one statement and written in a later one can be stale by the time it
+ *  lands. `clock_timestamp()`, not `now()`, because inside a transaction now()
+ *  is the time the transaction began. `updatedAt` is a timestamp(3) holding
+ *  UTC, as Prisma writes it, so the clock is read as UTC in any session time
+ *  zone. The repair pass and the scan only READ with `databaseNow`: the
+ *  takeover's own statement decides. */
+const DB_NOW = Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`;
+const LEASE = () => Prisma.sql`(${leaseMs()} * interval '1 millisecond')`;
+/** A JS instant as the UTC wall time the column holds. */
+const asColumn = (at: Date) => Prisma.sql`(${at}::timestamptz AT TIME ZONE 'UTC')`;
 async function databaseNow(db: Pick<PrismaClient, '$queryRaw'>): Promise<Date> {
   const [row] = await db.$queryRaw<Array<{ now: Date }>>`SELECT now() AS now`;
   return row!.now;
 }
 
-/** The token after `previous`: database time, and strictly later, so an
- *  owner change always moves it, even within one millisecond. */
-const nextToken = (now: Date, previous: Date) => new Date(Math.max(now.getTime(), previous.getTime() + 1));
+/** [AX337-F2 · TEN-03] One guarded statement on the import row, inside `tx`,
+ *  bound to the tenant in context as a model query is (a raw statement
+ *  bypasses the query extension, so it binds and scopes itself), answering
+ *  the token it wrote: the new updatedAt. Null: the guard refused. */
+type GuardedStatement = (tenantOnly: Prisma.Sql) => Prisma.Sql;
+async function guardedImportWriteIn(tx: Prisma.TransactionClient, statement: GuardedStatement): Promise<Date | null> {
+  const tenantId = getTenantId();
+  await bindTenantTransaction(tx);
+  const [row] = await tx.$queryRaw<Array<{ token: Date }>>(statement(tenantId ? Prisma.sql`AND "tenantId" = ${tenantId}` : Prisma.empty));
+  return row?.token ?? null;
+}
+const guardedImportWrite = (prisma: PrismaClient, statement: GuardedStatement) =>
+  prisma.$transaction((tx) => guardedImportWriteIn(tx, statement));
 
-/** A write to the import that lands only while `lease` still owns it, and
- *  renews the lease with it. False: the lease is gone. */
-async function writeWhileOwned(prisma: PrismaClient, lease: PublicationLease, data: Prisma.SettlementImportUpdateManyMutationInput): Promise<boolean> {
-  const token = nextToken(await databaseNow(prisma), lease.token);
-  const held = await prisma.settlementImport.updateMany({
-    where: { id: lease.importId, status: 'PUBLISHING', updatedAt: lease.token },
-    data: { ...data, updatedAt: token },
-  });
-  if (held.count !== 1) return false;
+/** A write to the import that lands only while `lease` still owns it and the
+ *  lease is alive, judged on the database clock in the same statement, and
+ *  that renews the lease with a token strictly after the one it replaces.
+ *  With `close`, it also writes the outcome: INTERRUPTED with the rows that
+ *  landed, or PUBLISHED. False: the lease is gone (taken over, or lapsed). */
+async function writeWhileOwned(prisma: PrismaClient, lease: PublicationLease, close?: { status: 'INTERRUPTED' | 'PUBLISHED'; results: RowResult[] }): Promise<boolean> {
+  const outcome = close
+    ? Prisma.sql`, "status" = ${close.status}, "results" = ${JSON.stringify(close.results)}::jsonb, "credited" = ${creditedIn(close.results)}${close.status === 'PUBLISHED' ? Prisma.sql`, "publishedAt" = ${DB_NOW}` : Prisma.empty}`
+    : Prisma.empty;
+  const token = await guardedImportWrite(prisma, (tenantOnly) => Prisma.sql`
+    UPDATE "settlement_imports"
+       SET "updatedAt" = GREATEST(${DB_NOW}, ${asColumn(lease.token)} + interval '1 millisecond')${outcome}
+     WHERE "id" = ${lease.importId} ${tenantOnly}
+       AND "status" = 'PUBLISHING' AND "updatedAt" = ${asColumn(lease.token)}
+       AND "updatedAt" >= ${DB_NOW} - ${LEASE()}
+    RETURNING "updatedAt" AS "token"`);
+  if (!token) return false;
   lease.token = token;
   return true;
 }
@@ -365,8 +404,10 @@ export async function publishSettlementImport(prisma: PrismaClient, svc: AgentCa
   try {
     for (const row of rows) {
       results.push(await publishRow(prisma, svc, current, row, fence));
-      if (performance.now() - lastBeat >= PUBLICATION_HEARTBEAT_MS) {
-        if (!(await writeWhileOwned(prisma, lease, {}))) throw new PublicationLeaseLost(importId);
+      if (performance.now() - lastBeat >= heartbeatMs()) {
+        // [AX337-F2] Refused once the lease has lapsed, even if nobody has
+        // taken the import over yet: a publisher that woke up late stops.
+        if (!(await writeWhileOwned(prisma, lease))) throw new PublicationLeaseLost(importId);
         lastBeat = performance.now();
       }
     }
@@ -378,7 +419,7 @@ export async function publishSettlementImport(prisma: PrismaClient, svc: AgentCa
     // If even that write fails (the database is gone), the lease lapses.
     const owned = err instanceof PublicationLeaseLost
       ? false
-      : await writeWhileOwned(prisma, lease, { status: 'INTERRUPTED', results: results as never, credited: creditedIn(results) }).catch(() => null);
+      : await writeWhileOwned(prisma, lease, { status: 'INTERRUPTED', results }).catch(() => null);
     if (owned === false) {
       log().warn({ importId, landed: results.length }, '[G5-F6] settlement publisher lost its lease part-way — stopped; the owner finishes the file');
       return reportFor(await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } }), true);
@@ -387,7 +428,7 @@ export async function publishSettlementImport(prisma: PrismaClient, svc: AgentCa
     throw err;
   }
   // Only the owner that ran every row closes the import.
-  const closed = await writeWhileOwned(prisma, lease, { status: 'PUBLISHED', results: results as never, credited: creditedIn(results), publishedAt: new Date() });
+  const closed = await writeWhileOwned(prisma, lease, { status: 'PUBLISHED', results });
   const published = await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } });
   return reportFor(published, !closed);
 }
@@ -395,38 +436,43 @@ export async function publishSettlementImport(prisma: PrismaClient, svc: AgentCa
 const creditedIn = (results: RowResult[]) => results.filter((r) => r.status === 'accepted').length;
 
 /** [G5-F6] INTERRUPTED said so; PUBLISHING silent past the lease died without
- *  a word. Either may be taken over. [AX314-F2] `now` is the database clock. */
-function stoppedPublication(imp: { status: string; updatedAt: Date }, now: Date): boolean {
-  return imp.status === 'INTERRUPTED' || (imp.status === 'PUBLISHING' && imp.updatedAt.getTime() < now.getTime() - PUBLICATION_LEASE_MS);
-}
-/** The same as a query. [AX314-F3] With a backoff, an import stays out of it
- *  for that long after its last attempt stopped. */
+ *  a word. Either may be taken over. As a query for the repair pass and the
+ *  scan, which only READ: the takeover's own statement decides [AX337-F2].
+ *  [AX314-F3] With a backoff, an import stays out of it for that long after
+ *  its last attempt stopped. */
 const stoppedPublicationWhere = (now: Date, retryBackoffMs = 0) => ({
   OR: [
     { status: 'INTERRUPTED', ...(retryBackoffMs > 0 ? { updatedAt: { lt: new Date(now.getTime() - retryBackoffMs) } } : {}) },
-    { status: 'PUBLISHING', updatedAt: { lt: new Date(now.getTime() - PUBLICATION_LEASE_MS) } },
+    { status: 'PUBLISHING', updatedAt: { lt: new Date(now.getTime() - leaseMs()) } },
   ],
 });
 
 /** ONE publisher at a time. A STAGED import is claimed fresh. [G5-F6] A
  *  stopped one is taken over by a compare-and-set on the exact version read,
  *  so of two resumers one runs and the other is answered; a live publisher
- *  is never taken over. [AX314] Staleness is judged on the database clock,
- *  and the takeover moves the token strictly forward: the old owner is fenced
- *  out of every later write. */
+ *  is never taken over. [AX314] The takeover moves the token strictly
+ *  forward: the old owner is fenced out of every later write. [AX337-F2]
+ *  Each claim is judged and stamped in ONE statement on the database clock,
+ *  and the token is what that statement wrote. */
 async function claimPublication(prisma: PrismaClient, importId: string, onAudit?: OnAudit): Promise<PublicationLease | null> {
-  const now = await databaseNow(prisma);
-  const fresh = await prisma.settlementImport.updateMany({ where: { id: importId, status: 'STAGED' }, data: { status: 'PUBLISHING', updatedAt: now } });
-  if (fresh.count === 1) return { importId, token: now };
+  const fresh = await guardedImportWrite(prisma, (tenantOnly) => Prisma.sql`
+    UPDATE "settlement_imports" SET "status" = 'PUBLISHING', "updatedAt" = ${DB_NOW}
+     WHERE "id" = ${importId} ${tenantOnly} AND "status" = 'STAGED'
+    RETURNING "updatedAt" AS "token"`);
+  if (fresh) return { importId, token: fresh };
   const seen = await prisma.settlementImport.findUnique({ where: { id: importId }, select: { status: true, updatedAt: true, fileHash: true } });
-  if (!seen || !stoppedPublication(seen, now)) return null;
-  const token = nextToken(now, seen.updatedAt);
+  if (!seen || (seen.status !== 'INTERRUPTED' && seen.status !== 'PUBLISHING')) return null;
   return prisma.$transaction(async (tx) => {
-    const took = await tx.settlementImport.updateMany({
-      where: { id: importId, status: seen.status, updatedAt: seen.updatedAt },
-      data: { status: 'PUBLISHING', updatedAt: token },
-    });
-    if (took.count !== 1) return null; // another resumer took it first
+    // INTERRUPTED may be taken over at once; PUBLISHING only once its lease
+    // has lapsed on the database clock, judged in this statement.
+    const token = await guardedImportWriteIn(tx, (tenantOnly) => Prisma.sql`
+      UPDATE "settlement_imports"
+         SET "status" = 'PUBLISHING', "updatedAt" = GREATEST(${DB_NOW}, "updatedAt" + interval '1 millisecond')
+       WHERE "id" = ${importId} ${tenantOnly}
+         AND "status" = ${seen.status} AND "updatedAt" = ${asColumn(seen.updatedAt)}
+         AND ("status" = 'INTERRUPTED' OR "updatedAt" < ${DB_NOW} - ${LEASE()})
+      RETURNING "updatedAt" AS "token"`);
+    if (!token) return null; // live, or another resumer took it first
     // [ADM-002] A person resuming the file is the admin action: its audit row
     // commits with the takeover and names the import.
     await onAudit?.(tx, { importId, fileHash: seen.fileHash, status: 'RESUMED', resumedFrom: seen.status });

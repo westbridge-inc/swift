@@ -87,7 +87,10 @@ beforeAll(async () => {
   svc = new AgentCashService(app.prisma, new BillingService(app.prisma, notifications, getPaymentProvider()), notifications);
 });
 
-afterEach(() => { delete process.env['SETTLEMENT_PUBLISH_KILL']; });
+afterEach(() => {
+  delete process.env['SETTLEMENT_PUBLISH_KILL'];
+  delete process.env['SETTLEMENT_PUBLICATION_LEASE_MS'];
+});
 
 afterAll(async () => {
   delete process.env['SETTLEMENT_PUBLISH_KILL'];
@@ -446,5 +449,82 @@ describe('[G5-F6 · operations] the repair pass finishes a publication that stop
       failing.mockRestore();
     }
     expect((await prisma.settlementImport.findUniqueOrThrow({ where: { id: id! } })).status).toBe('INTERRUPTED');
+  });
+
+  // ── AX337-F2: every lease write judges and stamps itself on the database clock
+  /** A lease short enough to lapse inside a test (heartbeat: a quarter of it). */
+  const TEST_LEASE_MS = 3_000;
+  /** Wait until `since` is older than the lease, on the database clock. */
+  const untilLapsed = async (since: Date) => {
+    const deadline = Date.now() + 15_000;
+    while ((await dbNow()).getTime() - since.getTime() <= TEST_LEASE_MS + 250) {
+      if (Date.now() > deadline) throw new Error('the lease never lapsed on the database clock');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+
+  it('[AX337-F2] a publisher paused past its lease wakes to a refused heartbeat: it stops cleanly and stamps nothing, and the repair pass finishes the file, every row once', async () => {
+    process.env['SETTLEMENT_PUBLICATION_LEASE_MS'] = String(TEST_LEASE_MS);
+    const { sub, importId } = await stagedThreeRows('paused-heartbeat');
+    const stall = door();
+    let calls = 0;
+    // Row 1 is credited; then the publisher stalls (a long pause, a frozen
+    // process) before it can write its heartbeat.
+    const stalling = vi.spyOn(AgentCashService.prototype, 'ingest').mockImplementation(async function (this: AgentCashService, ...args: Parameters<AgentCashService['ingest']>) {
+      const res = await realIngest.apply(this, args);
+      if ((calls += 1) === 1) { stall.reached(); await stall.opened; }
+      return res;
+    });
+    try {
+      const a = publishSettlementImport(prisma, svc, importId);
+      a.catch(() => undefined); // awaited below; a failed run must not leave it unhandled
+      await within(stall.isReached);
+      const claimed = await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } });
+      expect(claimed.status).toBe('PUBLISHING');
+      // Nobody takes it over; its lease simply lapses on the database clock.
+      await untilLapsed(claimed.updatedAt);
+      stall.open();
+      expect(await within(a)).toMatchObject({ importId, replayed: true, credited: 0 });
+      // Refused, not stamped with an old time: the import is exactly as the
+      // publisher left it when it stalled.
+      const after = await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } });
+      expect({ status: after.status, updatedAt: after.updatedAt.toISOString() }).toEqual({ status: 'PUBLISHING', updatedAt: claimed.updatedAt.toISOString() });
+    } finally {
+      stall.open();
+      stalling.mockRestore();
+    }
+    expect(await money(sub.id)).toEqual({ credits: 1, ledger: 1, observations: 1 });
+    // Its lapsed lease is plain to see: the repair pass takes it over and finishes it.
+    expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [importId] })).toEqual({ resumed: [importId], failed: [] });
+    const done = await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } });
+    expect({ status: done.status, credited: done.credited, results: (done.results as Array<{ status: string }>).map((r) => r.status) })
+      .toEqual({ status: 'PUBLISHED', credited: 3, results: ['accepted', 'accepted', 'accepted'] });
+    expect(await money(sub.id)).toEqual({ credits: 3, ledger: 3, observations: 3 });
+  });
+
+  it('[AX337-F2] a live publisher renews its lease with every heartbeat: a file that outlasts the lease finishes under one owner, and the repair pass never takes it over', async () => {
+    process.env['SETTLEMENT_PUBLICATION_LEASE_MS'] = String(TEST_LEASE_MS);
+    const { sub, importId } = await stagedThreeRows('live-heartbeat');
+    let claimedAt: Date | undefined;
+    // Every row takes almost half the lease, so the file outlasts it: only
+    // the heartbeats keep the lease alive.
+    const slow = vi.spyOn(AgentCashService.prototype, 'ingest').mockImplementation(async function (this: AgentCashService, ...args: Parameters<AgentCashService['ingest']>) {
+      claimedAt ??= (await prisma.settlementImport.findUniqueOrThrow({ where: { id: importId } })).updatedAt;
+      const res = await realIngest.apply(this, args);
+      await new Promise((resolve) => setTimeout(resolve, TEST_LEASE_MS * 0.45));
+      return res;
+    });
+    try {
+      const a = publishSettlementImport(prisma, svc, importId);
+      a.catch(() => undefined);
+      await within((async () => { while (!claimedAt) await new Promise((resolve) => setTimeout(resolve, 20)); })());
+      // Longer than the lease since the claim, with the publisher still at work.
+      await untilLapsed(claimedAt!);
+      expect(await resumeInterruptedSettlementImports(prisma, svc, { importIds: [importId] })).toEqual({ resumed: [], failed: [] });
+      expect(await within(a)).toMatchObject({ importId, status: 'PUBLISHED', replayed: false, credited: 3 });
+    } finally {
+      slow.mockRestore();
+    }
+    expect(await money(sub.id)).toEqual({ credits: 3, ledger: 3, observations: 3 });
   });
 });
