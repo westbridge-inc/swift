@@ -425,9 +425,12 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 **You:**
 
 1. Tap **Accept delivery** on the offer.
-2. At the pickup, the screen says "The sender pays: collect {fee} BEFORE taking the parcel". Tap **Collected {fee} from the sender**. No real money changes hands in this test.
-3. Tap **Capture pickup photo & confirm pickup** and take a photo.
-4. Go on to the drop-off. Tap **Capture proof & deliver** and take a photo.
+2. Open the **ACTIVE JOB** card.
+3. Tap **I'm on the way to pick up**, then, at the pickup, **I've arrived at pickup**.
+4. The screen says "The sender pays: collect {fee} BEFORE taking the parcel". Tap **Collected {fee} from the sender**. No real money changes hands in this test.
+5. Tap **Capture pickup photo & confirm pickup** and take a photo.
+6. Tap **I'm on the way to the customer**, then, at the drop-off, **I've arrived at the customer**.
+7. Tap **Capture proof & deliver** and take a photo.
 
 **Pass:** both photos are required and saved, the fee is collected once, and the parcel ends delivered.
 **Fail:** a step works without its photo, or the fee is asked for twice.
@@ -454,8 +457,8 @@ The fan-out part of SAFE-01 (the alert reaching your contacts) stays **not run**
 
 **You:**
 
-1. "NEW RIDE REQUEST" arrives. Tap **Accept ride**, then **I'm on the way**, then **I've arrived**. That is TAXI-02.
-2. Tap **Verify rider PIN** and type the PIN the coordinator reads you. You see **Code accepted — locked in.** Tap **Start trip**, then **Fare collected — complete trip**. That is TAXI-03 and TAXI-04 (paid).
+1. "NEW RIDE REQUEST" arrives. Tap **Accept ride**, open the **ACTIVE JOB** card, then tap **I'm on the way**, then **I've arrived**. That is TAXI-02.
+2. Type the PIN the coordinator reads you, then tap **Verify rider PIN**. You see **Code accepted — locked in.** Tap **Start trip**, then **Fare collected — complete trip**. That is TAXI-03 and TAXI-04 (paid).
 3. **Trip complete** appears. Tap **Rate passenger** or **Skip**.
 
 **Pass:** each step moves the ride, a wrong PIN is refused, and the fare closes the trip.
@@ -508,6 +511,7 @@ All paths are in build 8 (`c950da9b`), under `apps/mobile/src/`.
 **Rider**
 - `GO` / `You're online` — modules/mover/screens/MoverHomeScreen.tsx:721, 742
 - `Accept delivery` — MoverHomeScreen.tsx:272
+- `ACTIVE JOB` card — MoverHomeScreen.tsx:911-916
 - leg steps — lib/riderLeg.ts:23-27
 - `Confirm payment & hand over` — modules/mover/screens/ActiveJobScreen.tsx:999
 
@@ -520,6 +524,8 @@ All paths are in build 8 (`c950da9b`), under `apps/mobile/src/`.
 - the 911 dial — modules/safety/SosCeremony.tsx:124-125, lib/emergencyPolicy.ts:51
 
 **Courier**
+- pickup and customer arrival steps — lib/riderLeg.ts:23-27; ActiveJobScreen.tsx:809-835
+- sender collection becomes available at pickup — ActiveJobScreen.tsx:360, 828-834
 - `Collected {fee} from the sender` — ActiveJobScreen.tsx:829
 - `Capture pickup photo & confirm pickup` — ActiveJobScreen.tsx:831
 - `Capture proof & deliver` — ActiveJobScreen.tsx:937
