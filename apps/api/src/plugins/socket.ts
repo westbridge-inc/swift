@@ -24,6 +24,7 @@ import { guardRedisCommandPromises } from '../utils/redis-command-guard';
 import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
+import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -622,23 +623,26 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     });
 
     // Vendor order feed — only if the authenticated user owns the vendor or
-    // is on its team. [Q10 loud alerts 2/4] Staff used to be refused here, so
-    // the new-order takeover (order:new) never opened on a staff phone even
-    // with the app in hand. Membership is read at join time; removing a
-    // member (DELETE /vendor/staff/:id) takes their sockets out of the room.
+    // is on its team, inside this socket's own tenant. [Q10 loud alerts 2/4]
+    // Staff used to be refused here, so the new-order takeover (order:new)
+    // never opened on a staff phone even with the app in hand.
+    // [AX291 F02] Membership is the tenant-bound store rule (isStoreRoomMember):
+    // a team row pointing across tenants admits nobody.
+    // [AX291 F03] A removal can overtake the first read: the member is deleted
+    // and evicted (DELETE /vendor/staff/:id) after the read said yes and before
+    // the join, and the join would let them back in. So the rule is read again
+    // once the join is done, and a no leaves the room at once.
     socket.on('vendor:subscribe', async (raw: unknown) => {
       const parsed = vendorEvent.safeParse(raw);
       if (!parsed.success) return;
+      const room = `vendor:${parsed.data.vendorId}`;
       try {
-        const vendor = await app.prisma.vendor.findFirst({
-          where: { id: parsed.data.vendorId, OR: [{ owner: { userId } }, { staff: { some: { userId } } }] },
-          select: { id: true },
-        });
-        if (vendor) {
-          socket.join(`vendor:${parsed.data.vendorId}`);
-        }
+        if (!(await isStoreRoomMember(app.prisma, parsed.data.vendorId, userId, tenantId))) return;
+        await socket.join(room);
+        if (!(await isStoreRoomMember(app.prisma, parsed.data.vendorId, userId, tenantId))) await socket.leave(room);
       } catch {
-        // Non-fatal
+        // Non-fatal, and never left joined on a failed check.
+        await Promise.resolve(socket.leave(room)).catch(() => {});
       }
     });
 

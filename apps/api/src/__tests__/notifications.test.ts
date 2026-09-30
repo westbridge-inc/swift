@@ -314,8 +314,9 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
     // The last rung fails at the provider. It must NOT throw (the ladder still
     // "completes"), but the failure must be visible — the counter moves.
     // [Q10 loud alerts 2/4] A rung goes out once per order, so this is a FRESH
-    // order's own text (the order above already had its SMS rung), and a text
-    // that failed is 'sms_unsent': it used to report 'sms_sent'.
+    // order's own text (the order above already had its SMS rung). A provider
+    // 500 may still have sent and billed it, so it is 'sms_uncertain' [AX291
+    // F06]: it used to report 'sms_sent'.
     // (No alert row: the rung reads the order, and a second unread row would
     // sit in this store's pending banner for the ack test below.)
     const fresh = await pendingOrder('S11F');
@@ -326,7 +327,7 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
 
     const before = await failuresCount('sms', 'escalation');
     const outcome = await runLadderRung({ ...ladder(), channels: failingChannels }, fresh, 'sms');
-    expect(outcome).toBe('sms_unsent'); // fail-soft — never throws, and never read as sent
+    expect(outcome).toBe('sms_uncertain'); // fail-soft — never throws, and never read as sent
     expect((await failuresCount('sms', 'escalation')) - before).toBe(1); // but no longer silent
   });
 

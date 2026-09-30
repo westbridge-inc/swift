@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getChannels } from '../providers/notifications/channels';
+import { SmsNotSubmittedError, getChannels } from '../providers/notifications/channels';
 
 const accountSid = `AC${'a'.repeat(32)}`;
 const keySid = `SK${'b'.repeat(32)}`;
@@ -230,6 +230,42 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // [Q10 loud alerts 2/4 · AX291 F06] A caller holding an SMS budget may give
+  // it back only when the text PROVABLY never went out: Twilio refused it
+  // (4xx), or the request never left (the name did not resolve, the connection
+  // was refused). A timeout, a 5xx, a reset mid-flight or an unreadable reply
+  // may still have been sent and billed. The messages stay exactly as above.
+  const failWith = (code: string) =>
+    Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(`connect ${code}`), { code }) });
+  const outcomeOf = async () => (await getChannels().sms.sendSms('+5926000000', 'test').catch((err: unknown) => err)) as Error;
+
+  it.each([
+    ['a 400 refusal', () => vi.fn().mockResolvedValue(new Response('{}', { status: 400 })), 'Twilio SMS failed (400)'],
+    ['a 429 refusal', () => vi.fn().mockResolvedValue(new Response('{}', { status: 429 })), 'Twilio SMS failed (429)'],
+    ['a refused connection', () => vi.fn().mockRejectedValue(failWith('ECONNREFUSED')), 'Twilio SMS request failed'],
+    ['a name that did not resolve', () => vi.fn().mockRejectedValue(failWith('ENOTFOUND')), 'Twilio SMS request failed'],
+  ])('%s is a proven non-submission', async (_label, fetchImpl, message) => {
+    configure();
+    vi.stubGlobal('fetch', fetchImpl());
+    const err = await outcomeOf();
+    expect(err).toBeInstanceOf(SmsNotSubmittedError);
+    expect(err.message).toBe(message);
+  });
+
+  it.each([
+    ['a 503', () => vi.fn().mockResolvedValue(new Response('{}', { status: 503 })), 'Twilio SMS failed (503)'],
+    ['a reset mid-flight', () => vi.fn().mockRejectedValue(failWith('ECONNRESET')), 'Twilio SMS request failed'],
+    ['a fetch failure with no cause', () => vi.fn().mockRejectedValue(new Error('network-private-body')), 'Twilio SMS request failed'],
+    ['an unreadable reply', () => vi.fn().mockResolvedValue(new Response('not json', { status: 201 })), 'Twilio SMS response invalid'],
+  ])('%s is ambiguous: it may have been sent', async (_label, fetchImpl, message) => {
+    configure();
+    vi.stubGlobal('fetch', fetchImpl());
+    const err = await outcomeOf();
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(SmsNotSubmittedError);
+    expect(err.message).toBe(message);
   });
 });
 

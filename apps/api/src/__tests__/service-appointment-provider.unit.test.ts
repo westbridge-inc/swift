@@ -62,6 +62,13 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     const store = orderStore(rows);
     const prisma = prismaDouble(store, {
       vendorOwner: { findUnique: async (args: { where: { id: string } }) => (args.where.id === 'owner-svc' ? { id: 'owner-svc', userId: 'user-provider' } : null) },
+      // [Q10 loud alerts 2/4] The release alerts the store's whole team
+      // (newOrderForStore reads it from the vendor row): this provider works alone.
+      vendor: {
+        findUnique: async (args: { where: { id: string } }) => (args.where.id === 'vendor-svc'
+          ? { tenantId: 'swift-default', owner: { userId: 'user-provider' }, staff: [] }
+          : null),
+      },
     });
     const io = recordingIo();
     const svc = new OrderService(prisma, io);

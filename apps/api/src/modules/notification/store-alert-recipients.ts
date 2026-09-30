@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import { runWithTenant } from '../../plugins/tenant-context';
 
 /**
  * [Q10 loud alerts 2/4] Who hears a store's new-order alert: the store's
@@ -33,4 +34,28 @@ export async function storeAlertRecipients(prisma: PrismaClient, vendorId: strin
     if (!recipients.includes(member.userId)) recipients.push(member.userId);
   }
   return recipients;
+}
+
+/**
+ * [Q10 loud alerts 2/4 · AX291 F02] May this signed-in user hear the store's
+ * live room (`vendor:<id>`: every new order, every status change)? Only the
+ * store's owner or an ACTIVE member of its team, and only inside the caller's
+ * own tenant: the store must be in that tenant and so must the account. It is
+ * the same rule storeAlertRecipients applies to pushes, so a team row pointing
+ * across tenants admits nobody. The lookup runs with the tenant bound, so the
+ * tenant wall scopes it as well as the explicit predicate.
+ */
+export async function isStoreRoomMember(prisma: PrismaClient, vendorId: string, userId: string, tenantId: string): Promise<boolean> {
+  const vendor = await runWithTenant(tenantId, () => prisma.vendor.findFirst({
+    where: {
+      id: vendorId,
+      tenantId,
+      OR: [
+        { owner: { userId, user: { tenantId } } },
+        { staff: { some: { userId, user: { tenantId, status: 'ACTIVE' } } } },
+      ],
+    },
+    select: { id: true },
+  }));
+  return vendor !== null;
 }

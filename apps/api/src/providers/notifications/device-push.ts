@@ -30,17 +30,28 @@ export interface DevicePushResult {
   sent: number;
   /** Tokens the provider reported dead: the caller deactivates them. */
   invalidTokens: string[];
-  /** True when `stillWanted` answered no before every group was sent. */
+  /** True when `stillWanted` answered no before some request went out. */
   withdrawn: boolean;
 }
 
+/** What a stored device reported. Anything that is not a whole number reads
+ *  as 0, today's builds: a channel is named only to a device that positively
+ *  said it has the channels, and no device is ever left out of both groups
+ *  (the column is NOT NULL DEFAULT 0, but a partial select or a test double
+ *  can hand over a row without it). */
+function alertsVersionOf(device: PushDevice): number {
+  return Number.isInteger(device.alertsVersion) ? device.alertsVersion : 0;
+}
+
 /**
- * Send one push to `devices`. `stillWanted`, when given, is asked before
- * EACH provider request, as the last thing before it: a push that stops
- * meaning anything while the fan-out runs (the store answered the order) is
- * withdrawn rather than delivered late. A provider failure in one group does
- * not stop the other group; the first failure is rethrown once both were
- * tried, so a caller that retries or counts failures still sees it.
+ * Send one push to `devices`. `stillWanted`, when given, travels with the
+ * options to the provider, which asks it right before EVERY request it makes:
+ * each chunk, and each retry after a failure (channels.ts, AX291 F04). A push
+ * that stops meaning anything while it goes out (the store answered the
+ * order) is withdrawn rather than delivered late, and no later group is
+ * tried. A provider failure in one group does not stop the other group; the
+ * first failure is rethrown once both were tried, so a caller that retries
+ * or counts failures still sees it.
  */
 export async function pushToDevices(
   push: PushProvider,
@@ -51,27 +62,30 @@ export async function pushToDevices(
   opts: { stillWanted?: () => Promise<boolean> } = {},
 ): Promise<DevicePushResult> {
   const groups = [
-    devices.filter((device) => device.alertsVersion < CHANNELS_ALERTS_VERSION),
-    devices.filter((device) => device.alertsVersion >= CHANNELS_ALERTS_VERSION),
+    devices.filter((device) => alertsVersionOf(device) < CHANNELS_ALERTS_VERSION),
+    devices.filter((device) => alertsVersionOf(device) >= CHANNELS_ALERTS_VERSION),
   ];
   const result: DevicePushResult = { sent: 0, invalidTokens: [], withdrawn: false };
   let failure: { err: unknown } | undefined;
   for (const group of groups) {
     if (group.length === 0) continue;
-    if (opts.stillWanted && !(await opts.stillWanted())) {
-      result.withdrawn = true;
-      break;
-    }
     try {
       const sent = await push.sendPush(
         group.map((device) => device.token),
         title,
         body,
         data,
-        pushOptionsForDevice(data, group[0]!.alertsVersion),
+        {
+          ...pushOptionsForDevice(data, alertsVersionOf(group[0]!)),
+          ...(opts.stillWanted ? { stillWanted: opts.stillWanted } : {}),
+        },
       );
       result.sent += sent.sent;
       if (sent.invalidTokens?.length) result.invalidTokens.push(...sent.invalidTokens);
+      if (sent.withdrawn) {
+        result.withdrawn = true;
+        break;
+      }
     } catch (err) {
       failure ??= { err };
     }

@@ -16,10 +16,12 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
-import { NotificationService } from '../modules/notification/notification.service';
+import { NotificationService, dedupedOpsAlertId } from '../modules/notification/notification.service';
 import {
   LADDER,
+  RUNG_SENDING_TTL_MS,
   ladderJobId,
+  rungClaimKey,
   rungOf,
   runLadderJob,
   runLadderRung,
@@ -27,11 +29,19 @@ import {
   type LadderDeps,
   type LadderRung,
 } from '../modules/notification/store-alert-ladder';
+import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
-import { devChannelLog, getChannels, type PushProvider } from '../providers/notifications/channels';
+import { SmsNotSubmittedError, devChannelLog, getChannels, type DevChannelEntry, type PushProvider } from '../providers/notifications/channels';
 import { STORE_ALERT_SMS_DAILY_PREFIX, checkOtpDailyBudget } from '../utils/sms-budget';
 import { guyanaDayKey } from '../utils/guyana-day';
 import { storeAlertRungsCounter } from '../plugins/observability';
+
+// The store-room membership rule runs for real; the mock only lets a test
+// observe its calls and park one of them (the AX291 F03 interleaving).
+vi.mock('../modules/notification/store-alert-recipients', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../modules/notification/store-alert-recipients')>();
+  return { ...real, isStoreRoomMember: vi.fn(real.isStoreRoomMember) };
+});
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 2/4] THE STORE NEW-ORDER LADDER, end to end on the real
@@ -182,16 +192,16 @@ async function rungCount(rung: LadderRung, outcome: string): Promise<number> {
   return metric.values.find((v) => v.labels['rung'] === rung && v.labels['outcome'] === outcome)?.value ?? 0;
 }
 
-/** A Redis whose rung claim (SET NX, the step between the first read and the
- *  provider call) runs `onClaim` right after claiming: the race DS276 F1 is
- *  about, injected, not pre-arranged. */
+/** A Redis whose rung claim (the "sending" SET NX, the step between the
+ *  first read and the provider call) runs `onClaim` right after claiming: the
+ *  race DS276 F1 is about, injected, not pre-arranged. */
 function redisRacingAtClaim(onClaim: () => Promise<void>): Redis {
   return new Proxy(app.redis, {
     get(target, prop) {
       if (prop === 'set') {
         return async (...args: Parameters<Redis['set']>) => {
           const result = await (target.set as (...a: unknown[]) => Promise<unknown>)(...args);
-          if (String(args[0]).startsWith('store_ladder:')) await onClaim();
+          if (String(args[0]).startsWith('store_ladder:') && String(args[1]).startsWith('sending:')) await onClaim();
           return result;
         };
       }
@@ -202,6 +212,23 @@ function redisRacingAtClaim(onClaim: () => Promise<void>): Redis {
 }
 
 const jobCtx = (): JobContext => ({ prisma: app.prisma, io: ioRecorder, redis: app.redis, log: app.log });
+
+/** A real client socket for `token`, ready once the server's authority check has run. */
+function socketFor(token: string, opened: Socket[]): Promise<Socket> {
+  return new Promise<Socket>((resolve, reject) => {
+    const socket = ioClient(url, { auth: { token }, transports: ['websocket'], reconnection: false, timeout: 3000 });
+    opened.push(socket);
+    const timer = setTimeout(() => reject(new Error('socket did not become ready')), 7_500);
+    socket.on('auth:ready', () => { clearTimeout(timer); resolve(socket); });
+    socket.on('connect_error', (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+const inRoom = async (room: string) => (await app.io.in(room).fetchSockets()).map((s) => s.id);
+/** Every store-room membership verdict the server reached from call `from` on. */
+async function membershipVerdictsFrom(from: number): Promise<Array<{ userId: string; verdict: boolean }>> {
+  const mock = vi.mocked(isStoreRoomMember).mock;
+  return Promise.all(mock.calls.slice(from).map(async (args, i) => ({ userId: args[2], verdict: await (mock.results[from + i]!.value as Promise<boolean>) })));
+}
 
 /** Texts counted today against one store phone (a refund leaves 0, not nothing). */
 const textsCounted = async (phone: string) =>
@@ -229,6 +256,23 @@ async function purgeFixtures() {
   await runWithoutTenant(purgeFixturesUnbound);
 }
 
+/** [AX291 F07] The operator-page receipts THIS suite caused, and nothing
+ *  else: one per (page, operator), derived exactly as notifyAdmins derives
+ *  them from the page's dedupe key and the operator it reached (the inbox
+ *  rows say who that was). Read before the inbox rows go. */
+async function operatorReceiptIdsFor(orderIds: string[]): Promise<string[]> {
+  if (orderIds.length === 0) return [];
+  const pages = await app.prisma.$queryRaw<Array<{ userId: string; orderId: string }>>`
+    SELECT "userId", "data"->>'orderId' AS "orderId" FROM "notifications"
+    WHERE "data"->>'kind' = 'ops_order_unanswered' AND "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
+  return pages.map((page) => dedupedOpsAlertId(`order-unanswered:${page.orderId}`, page.userId));
+}
+
+async function purgeOperatorReceipts(orderIds: string[]) {
+  const ids = await operatorReceiptIdsFor(orderIds);
+  if (ids.length > 0) await app.prisma.alertDelivery.deleteMany({ where: { kind: 'ADMIN_OPS', id: { in: ids } } });
+}
+
 async function purgeFixturesUnbound() {
   const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
   const ids = users.map((u) => u.id);
@@ -238,12 +282,13 @@ async function purgeFixturesUnbound() {
     where: { OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } }] },
     select: { id: true },
   })).map((o) => o.id);
+  await purgeOperatorReceipts(orderIds);
   if (orderIds.length > 0) {
     // Operator pages reach platform operators outside this fixture: remove every row about these orders.
     await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
   }
   await app.prisma.alertDelivery.deleteMany({
-    where: { OR: [{ subjectId: { in: orderIds.length ? orderIds : ['-'] } }, { recipientId: { in: ids.length ? ids : ['-'] } }, { kind: 'ADMIN_OPS', subjectId: 'ops_order_unanswered' }] },
+    where: { OR: [{ subjectId: { in: orderIds.length ? orderIds : ['-'] } }, { recipientId: { in: ids.length ? ids : ['-'] } }] },
   });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.deviceToken.deleteMany({ where: { userId: { in: ids } } });
@@ -403,14 +448,7 @@ describe('the whole store hears a new order, and only that store', () => {
 
   it('staff join the store live room, a stranger cannot, and a removed member is taken out of it', async () => {
     const sockets: Socket[] = [];
-    const connect = (token: string) => new Promise<Socket>((resolve, reject) => {
-      const socket = ioClient(url, { auth: { token }, transports: ['websocket'], reconnection: false, timeout: 3000 });
-      sockets.push(socket);
-      const timer = setTimeout(() => reject(new Error('socket did not become ready')), 7_500);
-      socket.on('auth:ready', () => { clearTimeout(timer); resolve(socket); });
-      socket.on('connect_error', (err) => { clearTimeout(timer); reject(err); });
-    });
-    const inRoom = async (room: string) => (await app.io.in(room).fetchSockets()).map((s) => s.id);
+    const connect = (token: string) => socketFor(token, sockets);
     const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const membership = await joinTeam(storeA, member, ownerA);
     try {
@@ -443,6 +481,81 @@ describe('the whole store hears a new order, and only that store', () => {
       app.io.to(`vendor:${storeA}`).emit('order:new', { orderId: 'after-removal', vendorId: storeA });
       await vi.waitFor(() => expect(ownerHeard).toEqual(['after-removal']), { timeout: 5_000, interval: 25 });
       expect(heard).toEqual(['before-removal']);
+    } finally {
+      for (const socket of sockets) socket.disconnect();
+      await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
+    }
+  });
+
+  it('a team row that points across tenants admits nobody to the store room (AX291 F02)', async () => {
+    const sockets: Socket[] = [];
+    try {
+      const from = vi.mocked(isStoreRoomMember).mock.calls.length;
+      const foreignSocket = await socketFor(foreignA.token, sockets);
+      const ownerSocket = await socketFor(ownerA.token, sockets);
+      foreignSocket.emit('vendor:subscribe', { vendorId: storeA });
+      ownerSocket.emit('vendor:subscribe', { vendorId: storeA });
+      await vi.waitFor(async () => expect(await inRoom(`vendor:${storeA}`)).toContain(ownerSocket.id), { timeout: 5_000, interval: 25 });
+      await vi.waitFor(async () => {
+        const verdicts = await membershipVerdictsFrom(from);
+        expect(verdicts.filter((v) => v.userId === foreignA.userId)).toEqual([{ userId: foreignA.userId, verdict: false }]);
+      }, { timeout: 5_000, interval: 25 });
+      expect(await inRoom(`vendor:${storeA}`)).not.toContain(foreignSocket.id);
+
+      const foreignHeard: string[] = [];
+      const ownerHeard: string[] = [];
+      foreignSocket.on('order:new', (p: { orderId: string }) => foreignHeard.push(p.orderId));
+      ownerSocket.on('order:new', (p: { orderId: string }) => ownerHeard.push(p.orderId));
+      app.io.to(`vendor:${storeA}`).emit('order:new', { orderId: 'q10b-tenant-wall', vendorId: storeA });
+      await vi.waitFor(() => expect(ownerHeard).toEqual(['q10b-tenant-wall']), { timeout: 5_000, interval: 25 });
+      expect(foreignHeard).toEqual([]);
+    } finally {
+      for (const socket of sockets) socket.disconnect();
+    }
+  });
+
+  it('a removal that overtakes a subscription in flight still leaves the member out of the room (AX291 F03)', async () => {
+    const sockets: Socket[] = [];
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const membership = await joinTeam(storeA, member, ownerA);
+    try {
+      const memberSocket = await socketFor(member.token, sockets);
+      // Park the subscription right after its membership read said yes...
+      const real = vi.mocked(isStoreRoomMember).getMockImplementation()!;
+      let resume!: () => void;
+      const parked = new Promise<void>((done) => { resume = done; });
+      let readDone!: () => void;
+      const firstRead = new Promise<void>((done) => { readDone = done; });
+      vi.mocked(isStoreRoomMember).mockImplementationOnce(async (...args) => {
+        const verdict = await real(...args);
+        readDone();
+        await parked;
+        return verdict;
+      });
+      const from = vi.mocked(isStoreRoomMember).mock.calls.length;
+      memberSocket.emit('vendor:subscribe', { vendorId: storeA });
+      await firstRead;
+      // ...land the removal (and its eviction, with nothing yet to evict)...
+      const removed = await call('DELETE', `/api/v1/vendor/staff/${membership.id}`, ownerA.token);
+      expect(removed.statusCode, removed.body).toBe(200);
+      // ...then let the stale yes reach the join.
+      resume();
+      await vi.waitFor(async () => expect(await membershipVerdictsFrom(from)).toEqual([
+        { userId: member.userId, verdict: true },
+        { userId: member.userId, verdict: false },
+      ]), { timeout: 5_000, interval: 20 });
+      await vi.waitFor(async () => expect(await inRoom(`vendor:${storeA}`)).not.toContain(memberSocket.id), { timeout: 5_000, interval: 20 });
+
+      const heard: string[] = [];
+      memberSocket.on('order:new', (p: { orderId: string }) => heard.push(p.orderId));
+      const ownerSocket = await socketFor(ownerA.token, sockets);
+      ownerSocket.emit('vendor:subscribe', { vendorId: storeA });
+      await vi.waitFor(async () => expect(await inRoom(`vendor:${storeA}`)).toContain(ownerSocket.id), { timeout: 5_000, interval: 25 });
+      const ownerHeard: string[] = [];
+      ownerSocket.on('order:new', (p: { orderId: string }) => ownerHeard.push(p.orderId));
+      app.io.to(`vendor:${storeA}`).emit('order:new', { orderId: 'q10b-after-race', vendorId: storeA });
+      await vi.waitFor(() => expect(ownerHeard).toEqual(['q10b-after-race']), { timeout: 5_000, interval: 25 });
+      expect(heard).toEqual([]);
     } finally {
       for (const socket of sockets) socket.disconnect();
       await app.prisma.vendorStaff.deleteMany({ where: { id: membership.id } });
@@ -526,6 +639,37 @@ describe('every rung stops the moment the order no longer waits, read at send ti
     expect(outcome).toBe('realerted');
     expect(stillWaitingPushesTo(ownerA0, o.orderId)).toHaveLength(1);
     expect(stillWaitingPushesTo(ownerA1, o.orderId)).toEqual([]);
+  });
+
+  it('an accept during a push retry backoff: the retry never goes out (AX291 F04)', async () => {
+    const o = await placeAndAlert(storeA);
+    // The relay fails the first attempt, and the order is accepted while the
+    // production retry (withPushRetry, 2 s) waits.
+    const deliver = Array.prototype.push;
+    let attempts = 0;
+    let accepted: Promise<unknown> | undefined;
+    const outage = vi.spyOn(devChannelLog, 'push').mockImplementation(function (this: DevChannelEntry[], ...entries: DevChannelEntry[]) {
+      if (entries.some((e) => e.title === 'Order still waiting!' && (e.data as { orderId?: string } | undefined)?.orderId === o.orderId)) {
+        attempts += 1;
+        if (attempts === 1) {
+          // Started now (a Prisma query runs once something awaits it), done
+          // long before the 2 s backoff ends.
+          accepted = app.prisma.order.update({ where: { id: o.orderId }, data: { status: 'ACCEPTED' } }).then(() => undefined);
+          throw new Error('push relay 503');
+        }
+      }
+      return deliver.apply(devChannelLog, entries);
+    });
+    let outcome: string;
+    try {
+      outcome = await runLadderRung(deps(), o.orderId, 'ring1');
+    } finally {
+      outage.mockRestore();
+    }
+    await accepted;
+    expect(outcome!).toBe('stopped');
+    expect(attempts).toBe(1);
+    for (const token of teamDevices()) expect(stillWaitingPushesTo(token, o.orderId), token).toEqual([]);
   });
 
   it('rungs already queued read the answer when they run: nothing goes out after it', async () => {
@@ -634,12 +778,70 @@ describe('a rung that reached nobody is recorded as that, never as delivered (DS
     expect(await runLadderRung(deps(), o.orderId, 'sms')).toBe('window_closed');
   });
 
-  it('a text the provider failed is sms_unsent, and its budget is given back', async () => {
+  it('a text the provider PROVABLY never took is sms_unsent, and its budget is given back (AX291 F06)', async () => {
     const o = await placeAndAlert(storeA);
     const counted = await textsCounted(ownerA.phone);
-    const failing = { ...getChannels(), sms: { sendSms: async () => { throw new Error('sms gateway 503'); } } };
-    expect(await runLadderRung(deps({ channels: failing }), o.orderId, 'sms')).toBe('sms_unsent');
+    // A definitive refusal (a 4xx), or a request that never left the process.
+    const refused = { ...getChannels(), sms: { sendSms: async () => { throw new SmsNotSubmittedError('Twilio SMS failed (400)'); } } };
+    expect(await runLadderRung(deps({ channels: refused }), o.orderId, 'sms')).toBe('sms_unsent');
     expect(await textsCounted(ownerA.phone)).toBe(counted);
+  });
+
+  it('a text whose outcome is unknown keeps its place in the day count, so the cap can never be passed (AX291 F06)', async () => {
+    // A timeout, a 5xx or an unreadable reply after the request went out: the
+    // text may have been sent and billed. It is never reported as sent, and it
+    // is never refunded.
+    for (const ambiguous of ['Twilio SMS timed out', 'Twilio SMS failed (503)', 'Twilio SMS response invalid']) {
+      const o = await placeAndAlert(storeA);
+      const counted = await textsCounted(ownerA.phone);
+      const lost = { ...getChannels(), sms: { sendSms: async () => { throw new Error(ambiguous); } } };
+      expect(await runLadderRung(deps({ channels: lost }), o.orderId, 'sms'), ambiguous).toBe('sms_uncertain');
+      expect(await textsCounted(ownerA.phone), ambiguous).toBe(counted + 1);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('a rung whose worker died mid-send is sent later, never lost (AX291 F05)', () => {
+  it('the claim is short while a send is in flight and becomes a day-long "done" only once it finished', async () => {
+    const o = await placeAndAlert(storeA);
+    const key = rungClaimKey(o.orderId, 'sms');
+    let during: { value: string | null; pttl: number } | undefined;
+    const real = getChannels().sms;
+    const probing = { ...getChannels(), sms: { sendSms: async (to: string, body: string) => {
+      during = { value: await app.redis.get(key), pttl: await app.redis.pttl(key) };
+      return real.sendSms(to, body);
+    } } };
+    expect(await runLadderRung(deps({ channels: probing }), o.orderId, 'sms')).toBe('sms_sent');
+    expect(during!.value).toMatch(/^sending:/);
+    expect(during!.pttl).toBeGreaterThan(0);
+    expect(during!.pttl).toBeLessThanOrEqual(RUNG_SENDING_TTL_MS);
+    expect(await app.redis.get(key)).toBe('done:sms_sent');
+    expect(await app.redis.ttl(key)).toBeGreaterThan(23 * 3600);
+    expect(await runLadderRung(deps(), o.orderId, 'sms')).toBe('already_sent');
+  });
+
+  it('a claim left by a crash holds the rung only until it lapses; the job re-arms itself and then sends', async () => {
+    const o = await placeAndAlert(storeA);
+    const key = rungClaimKey(o.orderId, 'sms');
+    // What a worker that died between claiming and sending leaves behind.
+    await app.redis.set(key, 'sending:a-worker-that-died', 'PX', 400);
+    const texts = smsTo(ownerA.phone).length;
+    const queue = recordingQueue();
+    expect(await runLadderJob({ ...deps(), queue }, { orderId: o.orderId, rung: 'sms' })).toBe('in_progress');
+    expect(smsTo(ownerA.phone)).toHaveLength(texts);
+    expect(queue.jobs.map((j) => ({ name: j.name, data: j.data, jobId: j.opts['jobId'] }))).toEqual([
+      { name: 'vendor-alert-escalate', data: { orderId: o.orderId, rung: 'sms', retry: 1 }, jobId: `${ladderJobId(o.orderId, 'sms')}-retry-1` },
+    ]);
+    const delay = queue.jobs[0]!.opts['delay'] as number;
+    expect(delay).toBeGreaterThan(0);
+    expect(delay).toBeLessThanOrEqual(400 + 1_000);
+    // The lapse comes and the re-armed job runs: the text goes out once.
+    await vi.waitFor(async () => expect(await app.redis.exists(key)).toBe(0), { timeout: 5_000, interval: 50 });
+    expect(await runLadderJob({ ...deps(), queue }, queue.jobs[0]!.data)).toBe('sms_sent');
+    expect(smsTo(ownerA.phone)).toHaveLength(texts + 1);
+    expect(await runLadderJob({ ...deps(), queue }, queue.jobs[0]!.data)).toBe('already_sent');
+    expect(smsTo(ownerA.phone)).toHaveLength(texts + 1);
   });
 });
 
@@ -918,6 +1120,27 @@ describe('DeviceToken.alertsVersion: a channel only for an app that has it', () 
     await notifications.send({ userId: ownerA.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Hello', body: 'plain', data: { orderId: 'q10b-plain' } });
     for (const token of [ownerA0, ownerA1]) {
       expect(pushesTo(token).find((e) => (e.data as { orderId?: string }).orderId === 'q10b-plain')!.options).not.toHaveProperty('channelId');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('this suite cleans up only what it made (AX291 F07)', () => {
+  it('an operator receipt this suite did not cause survives its cleanup', async () => {
+    const unrelated = await app.prisma.alertDelivery.create({
+      data: { kind: 'ADMIN_OPS', subjectId: 'ops_order_unanswered', recipientId: `q10b-unrelated-${nanoid(10)}` },
+    });
+    try {
+      const o = await placeAndAlert(storeA);
+      expect(await runLadderRung(deps(), o.orderId, 'admin')).toBe('admin_paged');
+      const mine = await operatorReceiptIdsFor([o.orderId]);
+      expect(mine.length).toBeGreaterThanOrEqual(2); // the tenant admin and the platform operator
+      expect(await app.prisma.alertDelivery.count({ where: { id: { in: mine } } })).toBe(mine.length);
+      await purgeOperatorReceipts([o.orderId]);
+      expect(await app.prisma.alertDelivery.count({ where: { id: { in: mine } } })).toBe(0);
+      expect(await app.prisma.alertDelivery.findUnique({ where: { id: unrelated.id } })).not.toBeNull();
+    } finally {
+      await app.prisma.alertDelivery.deleteMany({ where: { id: unrelated.id } });
     }
   });
 });

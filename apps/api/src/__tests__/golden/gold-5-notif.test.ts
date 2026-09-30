@@ -546,9 +546,10 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     }
     // The ladder completes (fail-soft), but the miss is counted and nothing
     // claims it was sent. [Q10 loud alerts 2/4] Not even the outcome: it was
-    // 'sms_sent' for a text that never left; a rung that reached nobody is
-    // its own outcome now (DS276 F2).
-    expect(outcome).toBe('sms_unsent');
+    // 'sms_sent' for a text that may never have left. A gateway 503 may still
+    // have sent it, so it is 'sms_uncertain' and keeps its budget (DS276 F2,
+    // AX291 F06).
+    expect(outcome).toBe('sms_uncertain');
     expect(await failures('sms', 'escalation')).toBe(counted + 1);
     expect(smsTo(owner.phone)).toHaveLength(texts);
     expect((await alertRow(o3.orderId)).isRead).toBe(false);

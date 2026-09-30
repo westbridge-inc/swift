@@ -128,8 +128,9 @@ export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId:
 }
 
 /** The tracking row of one deduped ops page to one admin — derived from the
- *  notice and the recipient, so the same page sent again maps onto it. */
-function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
+ *  notice and the recipient, so the same page sent again maps onto it.
+ *  Exported so a suite can remove exactly the receipts of its own pages. */
+export function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
   return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 

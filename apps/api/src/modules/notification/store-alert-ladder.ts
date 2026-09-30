@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type Redis from 'ioredis';
 import type { Server } from 'socket.io';
-import type { NotificationChannels } from '../../providers/notifications/channels';
+import { SmsNotSubmittedError, type NotificationChannels } from '../../providers/notifications/channels';
 import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { checkStoreAlertSmsBudget } from '../../utils/sms-budget';
 import { normalizePhone } from '../../utils/phone';
@@ -38,7 +38,10 @@ import { storeAlertRecipients } from './store-alert-recipients';
 // check, so nothing has to be dequeued. A booking rings only while its store
 // is open [ruling 09-24]. A rung goes out at most once per order however
 // often its job runs: a Redis claim per order and rung, taken just before
-// sending.
+// sending, in two phases [AX291 F05]. "Sending" lives 2 minutes; only a send
+// that finished turns it into "done" for a day. A worker that dies mid-send
+// leaves a claim that expires, and the rung's retry then sends it: the backup
+// is never lost to a crash.
 //
 // Every rung is logged and counted by outcome (swift_store_alert_rungs_total).
 // A rung that reached nobody is its own outcome (DS276 F2), never a delivered
@@ -74,13 +77,21 @@ export type RungOutcome =
   | 'store_closed'
   /** This rung already went out for this order. */
   | 'already_sent'
+  /** Another attempt holds this rung's "sending" claim (it may have died
+   *  mid-send): the job tries again once that claim can have expired. */
+  | 'in_progress'
   /** At least one device accepted the re-ring. */
   | 'realerted'
   /** No device accepted the re-ring (none registered, all dead, dropped). */
   | 'unsent'
   | 'sms_sent'
-  /** The provider failed; nothing was sent and the budget was refunded. */
+  /** The provider PROVABLY did not take the text (it never left, or a 4xx
+   *  refusal); nothing was billed, so the budget was given back. */
   | 'sms_unsent'
+  /** The provider failed in a way that may still have sent and billed the
+   *  text (a timeout, a 5xx, an unreadable reply): the budget keeps it
+   *  [AX291 F06], and it is never reported as sent. */
+  | 'sms_uncertain'
   /** The store phone has had its texts for the day. */
   | 'sms_over_budget'
   /** Neither the store phone nor the owner number can take a text. */
@@ -92,7 +103,7 @@ export type RungOutcome =
 /** Outcomes where a rung that was due reached nobody: warned, never counted
  *  as delivered. */
 const MISSED: ReadonlySet<RungOutcome> = new Set<RungOutcome>([
-  'window_closed', 'unsent', 'sms_unsent', 'sms_over_budget', 'sms_no_phone', 'admin_unreached',
+  'window_closed', 'unsent', 'sms_unsent', 'sms_uncertain', 'sms_over_budget', 'sms_no_phone', 'admin_unreached',
 ]);
 
 export interface LadderDeps {
@@ -246,8 +257,44 @@ function windowClosed(respondBy: string | undefined, now: number): boolean {
   return Number.isFinite(deadline) && deadline - now < MIN_WINDOW_MS;
 }
 
-const RUNG_CLAIM_TTL_SECONDS = 24 * 60 * 60;
-const rungClaimKey = (orderId: string, rung: LadderRung) => `store_ladder:${orderId}:${rung}`;
+/** [AX291 F05] How long a "sending" claim lives. Longer than any one send
+ *  takes (the push adapter gives up after its retries within seconds, the
+ *  text after 8 s), short enough that a rung whose worker died is retried
+ *  well inside the response window. */
+export const RUNG_SENDING_TTL_MS = 2 * 60_000;
+const RUNG_DONE_TTL_SECONDS = 24 * 60 * 60;
+/** How many times a job waits out another attempt's "sending" claim. */
+const MAX_IN_PROGRESS_RETRIES = 3;
+export const rungClaimKey = (orderId: string, rung: LadderRung) => `store_ladder:${orderId}:${rung}`;
+
+type RungClaim = { token: string } | { held: 'done' } | { held: 'sending'; retryInMs: number };
+
+/** Phase 1: take this rung's short "sending" claim, or say who holds it. */
+async function claimRung(redis: Redis, orderId: string, rung: LadderRung): Promise<RungClaim> {
+  const key = rungClaimKey(orderId, rung);
+  const token = `sending:${randomUUID()}`;
+  if ((await redis.set(key, token, 'PX', RUNG_SENDING_TTL_MS, 'NX')) === 'OK') return { token };
+  const [value, pttl] = await Promise.all([redis.get(key), redis.pttl(key)]);
+  if (value !== null && !value.startsWith('sending:')) return { held: 'done' };
+  // Held by another attempt (or it expired a moment ago): try after it lapses.
+  return { held: 'sending', retryInMs: Math.max(0, pttl) + 1_000 };
+}
+
+/** Phase 2: the send finished (whatever it reached), so the rung is done for
+ *  the day. */
+async function finishRung(redis: Redis, orderId: string, rung: LadderRung, outcome: RungOutcome): Promise<void> {
+  await redis.set(rungClaimKey(orderId, rung), `done:${outcome}`, 'EX', RUNG_DONE_TTL_SECONDS);
+}
+
+/** A send that threw is retried by the queue: free the claim, if still ours. */
+async function releaseRung(redis: Redis, orderId: string, rung: LadderRung, token: string): Promise<void> {
+  await redis.eval(
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0",
+    1,
+    rungClaimKey(orderId, rung),
+    token,
+  );
+}
 
 function settle(rung: LadderRung, outcome: RungOutcome, orderId: string, reason?: string): RungOutcome {
   storeAlertRungsCounter.inc({ rung, outcome });
@@ -268,36 +315,49 @@ export async function runLadderRung(
   rung: LadderRung,
   beforeSend?: (order: WaitingOrder) => Promise<void>,
 ): Promise<RungOutcome> {
+  return (await runRung(deps, orderId, rung, beforeSend)).outcome;
+}
+
+async function runRung(
+  deps: LadderDeps,
+  orderId: string,
+  rung: LadderRung,
+  beforeSend?: (order: WaitingOrder) => Promise<void>,
+): Promise<{ outcome: RungOutcome; retryInMs?: number }> {
   const waiting = await readWaitingOrder(deps.prisma, orderId);
-  if (!('order' in waiting)) return settle(rung, 'stopped', orderId, waiting.stop);
+  if (!('order' in waiting)) return { outcome: settle(rung, 'stopped', orderId, waiting.stop) };
   const { order } = waiting;
   const rows = await alertRowsFor(deps.prisma, orderId);
   const respondBy = respondByOf(rows);
-  if (windowClosed(respondBy, Date.now())) return settle(rung, 'window_closed', orderId);
+  if (windowClosed(respondBy, Date.now())) return { outcome: settle(rung, 'window_closed', orderId) };
   await beforeSend?.(order);
   // Bookings ring only while the store is open [ruling 09-24]. Any other
   // order still needs its answer when the store closes behind it.
   if (order.fulfillment === 'APPOINTMENT' && !order.vendor.isCurrentlyOpen) {
-    return settle(rung, 'store_closed', orderId);
+    return { outcome: settle(rung, 'store_closed', orderId) };
   }
-  const claim = rungClaimKey(orderId, rung);
-  if ((await deps.redis.set(claim, '1', 'EX', RUNG_CLAIM_TTL_SECONDS, 'NX')) !== 'OK') {
-    return settle(rung, 'already_sent', orderId);
+  const claim = await claimRung(deps.redis, orderId, rung);
+  if (!('token' in claim)) {
+    return claim.held === 'done'
+      ? { outcome: settle(rung, 'already_sent', orderId) }
+      : { outcome: settle(rung, 'in_progress', orderId), retryInMs: claim.retryInMs };
   }
+  let outcome: RungOutcome;
   try {
-    const outcome = rung === 'sms'
+    outcome = rung === 'sms'
       ? await textTheStore(deps, order)
       : rung === 'admin'
         ? await tellTheOperators(deps, order)
         : await ringAgain(deps, order, rows, respondBy);
-    return settle(rung, outcome, orderId);
   } catch (err) {
     // A rung that threw is retried by the queue: free its claim so the retry
     // can send it. (An operator already paged is not paged twice: the page
     // carries a dedupe key.)
-    await deps.redis.del(claim).catch(() => {});
+    await releaseRung(deps.redis, orderId, rung, claim.token).catch(() => {});
     throw err;
   }
+  await finishRung(deps.redis, orderId, rung, outcome);
+  return { outcome: settle(rung, outcome, orderId) };
 }
 
 /** ring1 and ring2: push "still waiting" to every device of the team as it
@@ -381,10 +441,18 @@ async function textTheStore(deps: LadderDeps, order: WaitingOrder): Promise<Rung
   } catch (err) {
     // The last rung that reaches the store itself failed: never silent
     // [SWIFT-100]. The number and the text are never logged.
-    await refund();
-    log().warn({ err, orderId: order.id }, 'store ladder: the text to the store failed');
     notificationFailuresCounter.inc({ channel: 'sms', stage: 'escalation' });
-    return 'sms_unsent';
+    // [AX291 F06] Only a text the provider PROVABLY never took gives its
+    // budget back. A timeout or an unreadable reply may still have been sent
+    // and billed, so it keeps its place in the day's count: the cap can
+    // never be passed by texts that went out while their replies were lost.
+    if (err instanceof SmsNotSubmittedError) {
+      await refund();
+      log().warn({ err, orderId: order.id }, 'store ladder: the text to the store was not submitted');
+      return 'sms_unsent';
+    }
+    log().warn({ err, orderId: order.id }, 'store ladder: the text to the store may or may not have gone out');
+    return 'sms_uncertain';
   }
 }
 
@@ -433,7 +501,24 @@ export async function runLadderJob(deps: LadderDeps & { queue: LadderQueue }, da
     log().warn({ orderId, rung: data['rung'], level: data['level'] }, 'store ladder: a job with no order or no known rung was dropped');
     return 'stopped';
   }
-  return runLadderRung(deps, orderId, rung, rung === 'ring1' ? (order) => scheduleLaterRungs(deps.queue, order) : undefined);
+  const { outcome, retryInMs } = await runRung(deps, orderId, rung, rung === 'ring1' ? (order) => scheduleLaterRungs(deps.queue, order) : undefined);
+  if (outcome === 'in_progress' && retryInMs !== undefined) {
+    // [AX291 F05] Another attempt holds this rung's "sending" claim, perhaps
+    // a worker that died mid-send. Try again once that claim can have lapsed:
+    // if the other attempt finished, the rung is done; if it died, this sends.
+    const retry = typeof data['retry'] === 'number' ? data['retry'] : 0;
+    if (retry < MAX_IN_PROGRESS_RETRIES) {
+      await deps.queue.add(LADDER_JOB, { orderId, rung, retry: retry + 1 }, {
+        jobId: `${ladderJobId(orderId, rung)}-retry-${retry + 1}`,
+        delay: retryInMs,
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      });
+    } else {
+      log().warn({ orderId, rung, retry }, 'store ladder: a rung stayed claimed through every retry and was given up');
+    }
+  }
+  return outcome;
 }
 
 /** The receipt a team member gets when they saw an alert they were never
