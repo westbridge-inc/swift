@@ -78,7 +78,14 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
         inTransaction = true;
         try { return await fn(self.prisma); } finally { inTransaction = false; }
       },
-      vendor: counter('vendor'),
+      vendor: {
+        ...counter('vendor'),
+        // [Q10 loud alerts 2/4] The release alerts the store's whole team
+        // (newOrderForStore reads it from the vendor row): this provider works alone.
+        findUnique: async (args: { where: { id: string } }) => (args.where.id === 'vendor-svc'
+          ? { tenantId: 'swift-default', owner: { userId: 'user-provider' }, staff: [] }
+          : null),
+      },
       item: counter('item'),
       orderOutbox: {
         createMany: async (args: { data: Array<Record<string, unknown>>; skipDuplicates?: boolean }) => {
@@ -105,7 +112,7 @@ describe('OrderService.releaseDueHeldOrders — a released booking goes to its p
     expect(h.store.rows[0]!['releasedToVendorAt']).toBeInstanceOf(Date);
     expect(h.io.emits).toEqual([{ room: 'vendor:vendor-svc', event: 'order:new', payload: { orderId: 'bk-held', vendorId: 'vendor-svc', orderNumber: 'ORD-BK-HELD' } }]);
     expect(h.vendorAlert).toHaveBeenCalledTimes(1);
-    expect(h.vendorAlert).toHaveBeenCalledWith('user-provider', 'ORD-BK-HELD', 1, 2000, 'bk-held', expect.any(Date));
+    expect(h.vendorAlert).toHaveBeenCalledWith('user-provider', 'ORD-BK-HELD', 1, 2000, 'bk-held', expect.any(Date), 'vendor-svc');
     // [Q10] ...carrying the booking's own response deadline, which its alert
     // push rings until: the auto-cancel cut-off, slot-relative for a booking
     // (the earlier of placement + 24 h and slot - 60 min; here the 24 h cap).

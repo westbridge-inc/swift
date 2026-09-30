@@ -451,6 +451,18 @@ export const notificationFailuresCounter = new client.Counter({
   registers: [registry],
 });
 
+// [Q10 loud alerts 2/4] Every rung of the store new-order ladder, by what it
+// did (store-alert-ladder.ts RungOutcome). A rung that reached nobody is its
+// own outcome ('unsent', 'window_closed', 'sms_unsent', 'sms_over_budget',
+// 'admin_unreached'), never folded into the delivered ones, so "the store was
+// rung" can only be read off rungs that actually went out.
+export const storeAlertRungsCounter = new client.Counter({
+  name: 'swift_store_alert_rungs_total',
+  help: 'Store new-order ladder rungs, by rung and outcome',
+  labelNames: ['rung', 'outcome'] as const,
+  registers: [registry],
+});
+
 /** [M-04] Terminal MMG payments (FAILED/EXPIRED) whose subscription carries no
  *  recorded outcome for that period — the state a crash between the terminal
  *  CAS and the dunning application used to leave behind. Set by the repair

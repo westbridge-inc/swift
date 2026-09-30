@@ -1,7 +1,9 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ALERT_CLASS_KINDS, alertClassOf, pushOptionsFor, type AlertClass } from '../providers/notifications/alert-class';
+import {
+  ALERT_CHANNEL, ALERT_CLASS_KINDS, CHANNELS_ALERTS_VERSION, alertClassOf, pushOptionsFor, pushOptionsForDevice, type AlertClass,
+} from '../providers/notifications/alert-class';
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 1/4] THE ALERT-CLASS CENSUS. How loudly a push travels is
@@ -153,5 +155,39 @@ describe('the delivery each class asks for', () => {
     // a late check-in still reaches the passenger.
     expect(pushOptionsFor({ kind: 'guardian_checkin', level: 'HARD', respondBy: '2020-01-01T00:00:00.000Z' }))
       .toEqual({ alertClass: 'standard', priority: 'high', sound: 'default' });
+  });
+});
+
+describe('[Q10 loud alerts 2/4] the Android channel each class posts to', () => {
+  it('is the plan table: one versioned channel per class, and standard keeps the device default', () => {
+    // A channel id is a contract with the app build that creates it (loud
+    // alerts 3/4). Android never lets a created channel change its sound or
+    // importance, so a change here ships as a new _v2 id, never an edit.
+    expect(ALERT_CHANNEL).toEqual({
+      ring_order: 'swift_orders_v1',
+      ring_offer: 'swift_offers_v1',
+      job_update: 'swift_jobs_v1',
+      standard: undefined,
+      quiet: 'swift_quiet_v1',
+    });
+    expect(CHANNELS_ALERTS_VERSION).toBe(1);
+  });
+
+  it('is named only to a device whose app reported the channels (alertsVersion >= 1)', () => {
+    const cases: Array<[Record<string, unknown>, string | undefined]> = [
+      [{ kind: 'vendor_order_alert', orderId: 'o1', respondBy: '2026-09-24T20:10:00.000Z' }, 'swift_orders_v1'],
+      [{ kind: 'dispatch_offer', orderId: 'o1', expiresAt: '2026-09-24T20:00:20.000Z' }, 'swift_offers_v1'],
+      [{ kind: 'prep_ready', orderId: 'o1', audience: 'earner' }, 'swift_jobs_v1'],
+      [{ kind: 'RATING_REMINDER', orderId: 'o1' }, 'swift_quiet_v1'],
+      [{ orderId: 'o1', status: 'ACCEPTED' }, undefined],
+    ];
+    for (const [data, channel] of cases) {
+      // Every build in people's hands today: exactly what it got before.
+      expect(pushOptionsForDevice(data, 0), String(data['kind'])).toEqual(pushOptionsFor(data));
+      for (const version of [1, 2]) {
+        expect(pushOptionsForDevice(data, version), `${String(data['kind'])} v${version}`)
+          .toEqual(channel ? { ...pushOptionsFor(data), channelId: channel } : pushOptionsFor(data));
+      }
+    }
   });
 });

@@ -11,7 +11,9 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { NotificationService, escalateVendorAlert } from '../modules/notification/notification.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { runLadderRung } from '../modules/notification/store-alert-ladder';
+import { STORE_ALERT_SMS_DAILY_PREFIX } from '../utils/sms-budget';
 import { OrderService } from '../modules/order/order.service';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
 import { notificationFailuresCounter } from '../plugins/observability';
@@ -223,7 +225,24 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
   let vendorId: string;
   let orderId: string;
   let vendorDeviceToken: string;
+  let customerId: string;
   const ioStub = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
+  // [Q10 loud alerts 2/4] The rungs run in the store ladder, one rung per call.
+  const ladder = () => ({ prisma: app.prisma, io: ioStub, redis: app.redis, channels: getChannels() });
+  const pendingOrder = async (tag: string) => (await app.prisma.order.create({
+    data: {
+      orderNumber: `${tag}-${nanoid(8)}`,
+      orderType: 'FOOD_DELIVERY',
+      customerId,
+      vendorId,
+      status: 'PENDING',
+      fulfillment: 'PICKUP',
+      deliveryAddress: 'counter', deliveryLat: 7.31, deliveryLng: -58.72,
+      pickupAddress: 'counter', pickupLat: 7.31, pickupLng: -58.72,
+      subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+      deliveryFee: 0, totalAmount: 1000, paymentMethod: 'CASH',
+    },
+  })).id;
 
   beforeAll(async () => {
     vendorUser = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
@@ -243,7 +262,12 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
       data: { userId: vendorUser.userId, token: vendorDeviceToken, platform: 'android' },
     });
 
+    // The ladder counts its texts per store phone per day: start this phone clean.
+    const smsCounts = await app.redis.keys(`${STORE_ALERT_SMS_DAILY_PREFIX}*:${vendorUser.phone}`);
+    if (smsCounts.length > 0) await app.redis.del(...smsCounts);
+
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    customerId = customer.userId;
     const order = await app.prisma.order.create({
       data: {
         orderNumber: `S11-${nanoid(8)}`,
@@ -262,7 +286,7 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
   });
 
   it('a new order creates the persistent alert (unread = banner state)', async () => {
-    await notifications.newOrderForVendor(vendorUser.userId, 'S11-TEST', 2, 2000, orderId);
+    await notifications.newOrderForVendor(vendorUser.userId, 'S11-TEST', 2, 2000, orderId, undefined, vendorId);
 
     const pending = await app.inject({
       method: 'GET',
@@ -276,11 +300,11 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
   });
 
   it('unacknowledged: re-alert fires, then the SMS fallback', async () => {
-    const first = await escalateVendorAlert(app.prisma, ioStub, getChannels(), orderId, 0);
+    const first = await runLadderRung(ladder(), orderId, 'ring1');
     expect(first).toBe('realerted');
     expect(pushEntriesTo(vendorDeviceToken).some((e) => e.title === 'Order still waiting!')).toBe(true);
 
-    const second = await escalateVendorAlert(app.prisma, ioStub, getChannels(), orderId, 1);
+    const second = await runLadderRung(ladder(), orderId, 'sms');
     expect(second).toBe('sms_sent');
     const sms = smsEntriesTo(vendorUser.phone);
     expect(sms.at(-1)!.body).toContain('still waiting');
@@ -289,14 +313,21 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
   it('a failed escalation SMS is counted, never swallowed silently [SWIFT-100]', async () => {
     // The last rung fails at the provider. It must NOT throw (the ladder still
     // "completes"), but the failure must be visible — the counter moves.
+    // [Q10 loud alerts 2/4] A rung goes out once per order, so this is a FRESH
+    // order's own text (the order above already had its SMS rung). A provider
+    // 500 may still have sent and billed it, so it is 'sms_uncertain' [AX291
+    // F06]: it used to report 'sms_sent'.
+    // (No alert row: the rung reads the order, and a second unread row would
+    // sit in this store's pending banner for the ack test below.)
+    const fresh = await pendingOrder('S11F');
     const failingChannels = {
       sms: { sendSms: async () => { throw new Error('SMS provider 500'); } },
-      push: { sendPush: async () => ({ invalidTokens: [] }) },
+      push: { sendPush: async () => ({ sent: 0, invalidTokens: [] }) },
     } as unknown as ReturnType<typeof getChannels>;
 
     const before = await failuresCount('sms', 'escalation');
-    const outcome = await escalateVendorAlert(app.prisma, ioStub, failingChannels, orderId, 1);
-    expect(outcome).toBe('sms_sent'); // fail-soft — never throws
+    const outcome = await runLadderRung({ ...ladder(), channels: failingChannels }, fresh, 'sms');
+    expect(outcome).toBe('sms_uncertain'); // fail-soft — never throws, and never read as sent
     expect((await failuresCount('sms', 'escalation')) - before).toBe(1); // but no longer silent
   });
 
@@ -316,7 +347,7 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
     expect(pending.json().data).toHaveLength(0);
 
     const before = devChannelLog.length;
-    const outcome = await escalateVendorAlert(app.prisma, ioStub, getChannels(), orderId, 0);
+    const outcome = await runLadderRung(ladder(), orderId, 'ring2');
     expect(outcome).toBe('stopped');
     expect(devChannelLog.length).toBe(before); // nothing new sent
   });
@@ -337,7 +368,7 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
         deliveryFee: 0, totalAmount: 1000, paymentMethod: 'CASH',
       },
     });
-    await notifications.newOrderForVendor(vendorUser.userId, order.orderNumber, 1, 1000, order.id);
+    await notifications.newOrderForVendor(vendorUser.userId, order.orderNumber, 1, 1000, order.id, undefined, vendorId);
 
     const accept = await app.inject({
       method: 'PUT',
@@ -346,7 +377,7 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
     });
     expect(accept.statusCode).toBe(200);
 
-    const outcome = await escalateVendorAlert(app.prisma, ioStub, getChannels(), order.id, 0);
+    const outcome = await runLadderRung(ladder(), order.id, 'ring1');
     expect(outcome).toBe('stopped');
   });
 });

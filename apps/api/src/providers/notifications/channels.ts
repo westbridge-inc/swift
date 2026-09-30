@@ -14,6 +14,27 @@ export interface SmsProvider {
   sendSms(to: string, body: string): Promise<{ ref: string }>;
 }
 
+/**
+ * [Q10 loud alerts 2/4 · AX291 F06] The provider PROVABLY did not take the
+ * text: the request never left this process (the name did not resolve, the
+ * connection was refused), or the provider answered with a definitive 4xx
+ * rejection. Nothing was sent or billed, so a caller holding a budget may
+ * give it back. Every other failure (a timeout, a 5xx, a reply that cannot be
+ * read) is AMBIGUOUS: the text may have gone out and been billed, so it is a
+ * plain Error and must be treated as possibly sent.
+ */
+export class SmsNotSubmittedError extends Error {
+  readonly notSubmitted = true as const;
+}
+
+/** A push request was rejected or could not reach the provider. */
+export class PushNotSubmittedError extends Error {
+  readonly notSubmitted = true as const;
+}
+
+/** Network failures that happen before a request can leave this process. */
+const NEVER_LEFT_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
+
 /** Hard cap on an outbound SMS call — a hung provider must never hang the
  *  login request that is awaiting it. */
 const SMS_TIMEOUT_MS = 8000;
@@ -28,7 +49,12 @@ const pushProviderTimeoutMs = () => {
 /** How urgently ONE push travels [Q10 loud alerts 1/4]. Chosen per alert
  *  class (alert-class.ts, pushOptionsFor) and passed through every layer to
  *  the adapter, which maps it onto its own wire fields. */
+/** Starts the request under current authority; undefined means no handoff. */
+export type SubmissionGuard = <T>(submit: () => Promise<T>) => Promise<T | undefined>;
+
 export interface PushOptions {
+  /** Server-only authority carried to every actual provider request. */
+  submit?: SubmissionGuard;
   /** The class these options came from: recorded, never sent. */
   alertClass: AlertClass;
   /** high = delivered at once, even to a dozing Android; normal = the
@@ -42,6 +68,16 @@ export interface PushOptions {
    *  response window closed). It is never sent at or after this moment, its
    *  ttl never reaches past it, and it is never retried past it. */
   deadlineMs?: number;
+  /** [Q10 loud alerts 2/4] The Android channel to post to. Set only for a
+   *  device whose app reported it created the channel (pushOptionsForDevice):
+   *  Android drops a push that names a channel the app never made. */
+  channelId?: string;
+  /** [Q10 loud alerts 2/4 · AX291 F04] Asked right before EVERY provider
+   *  request: by each adapter before each request it makes (every Expo
+   *  chunk), and by withPushRetry before each retry. A push that stopped
+   *  meaning anything while it was being delivered (the order was answered
+   *  during a retry backoff) is withdrawn, never sent late. Never on the wire. */
+  stillWanted?: () => Promise<boolean>;
 }
 
 /** The options a push gets when a caller passes none: the standard class. */
@@ -68,14 +104,15 @@ export function pushWindow(options: PushOptions, now: number): { ttl?: number } 
 export interface PushProvider {
   /** `invalidTokens` = tokens the provider says are dead (app uninstalled) —
    *  the caller deactivates them so we stop pushing at ghosts. `options`
-   *  carries the alert class delivery; omitted = the standard class. */
+   *  carries the alert class delivery; omitted = the standard class.
+   *  `withdrawn` = `options.stillWanted` answered no before a request. */
   sendPush(
     deviceTokens: string[],
     title: string,
     body: string,
     data?: Record<string, unknown>,
     options?: PushOptions,
-  ): Promise<{ sent: number; invalidTokens?: string[] }>;
+  ): Promise<{ sent: number; invalidTokens?: string[]; withdrawn?: boolean }>;
 }
 
 export interface EmailProvider {
@@ -117,13 +154,23 @@ class DevSms implements SmsProvider {
 
 class DevPush implements PushProvider {
   async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH) {
-    // The log is what WOULD have been sent: a push whose deadline has passed
-    // is dropped here exactly as the Expo adapter drops it.
+    // The log is what WOULD have been sent: a push whose reason ended before
+    // this request is dropped [AX291 F04], and so is one whose deadline has
+    // passed, measured after that awaited guard [AX308], exactly as the Expo
+    // adapter measures it.
+    if (options.stillWanted && !(await options.stillWanted())) return { sent: 0, withdrawn: true };
     if (!pushWindow(options, Date.now())) return { sent: 0 };
-    for (const token of deviceTokens) {
-      devChannelLog.push({ channel: 'push', to: token, title, body, data, options: { ...options }, at: new Date() });
-    }
-    return { sent: deviceTokens.length };
+    const deliver = async () => {
+      if (!pushWindow(options, Date.now())) return { sent: 0 };
+      const logged: PushOptions = { ...options };
+      delete logged.submit;
+      delete logged.stillWanted; // a guard, not a delivery option
+      for (const token of deviceTokens) {
+        devChannelLog.push({ channel: 'push', to: token, title, body, data, options: { ...logged }, at: new Date() });
+      }
+      return { sent: deviceTokens.length };
+    };
+    return options.submit ? (await options.submit(deliver)) ?? { sent: 0, withdrawn: true } : deliver();
   }
 }
 
@@ -201,11 +248,18 @@ class TwilioSmsProvider implements SmsProvider {
           body: new URLSearchParams({ To: to, ...sender, Body: body }).toString(),
           signal: controller.signal,
         });
-      } catch {
-        throw new Error(controller.signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS request failed');
+      } catch (err) {
+        if (controller.signal.aborted) throw new Error('Twilio SMS timed out');
+        // [AX291 F06] Only a failure that provably happened before the request
+        // left is "not submitted"; a reset mid-flight may still have sent it.
+        const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+        if (typeof code === 'string' && NEVER_LEFT_CODES.has(code)) throw new SmsNotSubmittedError('Twilio SMS request failed');
+        throw new Error('Twilio SMS request failed');
       }
       // Provider bodies can echo request metadata. Keep all response and fetch
       // exception text outside application errors and their downstream logs.
+      // [AX291 F06] A 4xx is Twilio refusing the message: nothing was sent.
+      if (res.status >= 400 && res.status < 500) throw new SmsNotSubmittedError(`Twilio SMS failed (${res.status})`);
       if (!res.ok) throw new Error(`Twilio SMS failed (${res.status})`);
       let data: { sid?: unknown };
       try {
@@ -225,11 +279,12 @@ class TwilioSmsProvider implements SmsProvider {
  * One Expo push message. The field names are Expo's documented push API
  * (docs.expo.dev/push-notifications/sending-notifications): `priority` is
  * default | normal | high, `sound` is iOS-only (default plays the device
- * sound, omitted plays none), `ttl` is seconds. Expo also documents
- * `channelId` (Android) and `interruptionLevel` (iOS); neither is sent. The
- * installed builds only create the default channel, and time-sensitive needs
- * an entitlement they do not have, so both wait for the new build (loud
- * alerts 3/4).
+ * sound, omitted plays none), `ttl` is seconds, `channelId` is the Android
+ * channel. `channelId` is present only when the options carry one, which
+ * pushOptionsForDevice allows only for a device whose app created the
+ * channel [Q10 loud alerts 2/4]. `interruptionLevel` (iOS) is never sent:
+ * time-sensitive needs an entitlement no installed build has (loud alerts
+ * 3/4).
  */
 function expoMessage(
   to: string,
@@ -247,6 +302,7 @@ function expoMessage(
     priority: options.priority,
     ...(options.sound ? { sound: options.sound } : {}),
     ...(window.ttl !== undefined ? { ttl: window.ttl } : {}),
+    ...(options.channelId ? { channelId: options.channelId } : {}),
   };
 }
 
@@ -263,53 +319,55 @@ export class ExpoPushProvider implements PushProvider {
 
   async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH) {
     let sent = 0;
+    let withdrawn = false;
     const invalidTokens: string[] = [];
-
+    type Tickets = { data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }> };
     for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
-      // Measured per request: a later chunk asks for less time, and nothing
-      // leaves once the deadline has no whole second left.
-      const window = pushWindow(options, Date.now());
-      if (!window) break;
+      if (options.stillWanted && !(await options.stillWanted())) { withdrawn = true; break; }
+      if (!pushWindow(options, Date.now())) break;
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
-      const controller = new AbortController();
-      const timeoutMs = pushProviderTimeoutMs();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      timer.unref?.();
-      let res: Response;
-      try {
-        res = await fetch(this.url, {
+      // The callback starts fetch synchronously under any caller's authority
+      // lock. Network response/body completion is awaited AFTER that lock is
+      // released. Its errors stay inside the guarded promise, so an uncertain
+      // response cannot silently become a fresh ladder request on retry.
+      const submit = (): Promise<Tickets | undefined> => {
+        const window = pushWindow(options, Date.now());
+        if (!window) return Promise.resolve(undefined);
+        const controller = new AbortController();
+        const timeoutMs = pushProviderTimeoutMs();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        timer.unref?.();
+        return fetch(this.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify(chunk.map((to) => expoMessage(to, title, body, data, options, window))),
           signal: controller.signal,
-        });
-      } catch (error) {
-        const reason = controller.signal.aborted
-          ? `timed out after ${timeoutMs}ms`
-          : (error as Error).message;
-        throw new Error(`Expo push request failed: ${reason}`);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
-      }
-      // Tickets come back in message order — index maps ticket -> token.
-      const payload = (await res.json()) as {
-        data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }>;
+        }).then(async (res) => {
+          if (!res.ok) {
+            const detail = await res.text().catch(() => '');
+            const ErrorType = res.status >= 400 && res.status < 500 && res.status !== 408 ? PushNotSubmittedError : Error;
+            throw new ErrorType(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
+          }
+          return await res.json() as Tickets;
+        }).catch((error: unknown) => {
+          if (error instanceof PushNotSubmittedError) throw error;
+          const cause = error as { message?: string; code?: string; cause?: { code?: string } };
+          const reason = controller.signal.aborted ? `timed out after ${timeoutMs}ms` : cause.message;
+          if (NEVER_LEFT_CODES.has(cause.code ?? cause.cause?.code ?? '')) throw new PushNotSubmittedError(`Expo push request not submitted: ${reason}`);
+          throw new Error(`Expo push request failed: ${reason}`);
+        }).finally(() => clearTimeout(timer));
       };
+      const payload = options.submit ? await options.submit(submit) : await submit();
+      if (!payload) { withdrawn = pushWindow(options, Date.now()) !== null; break; }
       (payload.data ?? []).forEach((ticket, idx) => {
-        if (ticket.status === 'ok') {
-          sent += 1;
-        } else if (ticket.details?.error === 'DeviceNotRegistered') {
+        if (ticket.status === 'ok') sent += 1;
+        else if (ticket.details?.error === 'DeviceNotRegistered') {
           const token = chunk[idx];
           if (token) invalidTokens.push(token);
         }
       });
     }
-
-    return { sent, ...(invalidTokens.length ? { invalidTokens } : {}) };
+    return { sent, ...(invalidTokens.length ? { invalidTokens } : {}), ...(withdrawn ? { withdrawn } : {}) };
   }
 }
 
@@ -357,6 +415,10 @@ export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY
     async sendPush(deviceTokens, title, body, data, options) {
       let lastErr: unknown;
       for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+        // [Q10 loud alerts 2/4 · AX291 F04] A retry asks again whether the
+        // push still means anything: an order answered during the backoff is
+        // not rung once more. (The adapter asks before its own first request.)
+        if (attempt > 0 && options?.stillWanted && !(await options.stillWanted())) return { sent: 0, withdrawn: true };
         try {
           return await inner.sendPush(deviceTokens, title, body, data, options);
         } catch (err) {

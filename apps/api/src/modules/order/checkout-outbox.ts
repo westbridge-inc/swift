@@ -3,6 +3,7 @@ import { Prisma, type PrismaClient, type FulfillmentType } from '@prisma/client'
 import type { Queue } from 'bullmq';
 import type { FastifyBaseLogger } from 'fastify';
 import { appointmentAutoCancelDelayMs, vendorResponseSlaMinutes } from './response-sla';
+import { FIRST_RUNG_DELAY_MS } from '../notification/store-alert-ladder';
 
 /**
  * [M-11] The checkout command's durable tail and result.
@@ -104,11 +105,13 @@ export function checkoutRequestHash(body: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonical(body ?? {}))).digest('hex');
 }
 
-/** The vendor alert ladder's first re-alert after the store's first alert
- *  (§A1: 30 s when loud, else 60 s) — one number for the ladder checkout arms
- *  and the one a hold release arms [Q12 · AX289 F5]. */
+/** When the store ladder's first rung runs after the store is shown the
+ *  order: at checkout for an order with no hold, at the release for a held
+ *  one. ONE ladder, ONE clock [Q10 loud alerts 2/4 · AX291]: the ladder owns
+ *  its timing (store-alert-ladder.ts, ring1 at +30 s), and this is the number
+ *  both the checkout's and the release's outbox row carry [Q12 · AX289 F5]. */
 export function vendorAlertLadderDelayMs(): number {
-  return process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000;
+  return FIRST_RUNG_DELAY_MS;
 }
 
 /** The delays the two effects carry — computed BEFORE the transaction so the

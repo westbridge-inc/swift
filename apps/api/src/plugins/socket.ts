@@ -24,13 +24,23 @@ import { guardRedisCommandPromises } from '../utils/redis-command-guard';
 import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
+import { isStoreRoomMember, storeRoomMemberships } from '../modules/notification/store-alert-recipients';
+import {
+  closeStoreRooms,
+  convergeStoreRooms,
+  forgetStoreRoomSocket,
+  joinStoreRoomCluster,
+  listenForStoreRoomRevocations,
+  storeRoomSubscribeHandler,
+  storeRoomTiming,
+  type StoreRoomConvergeOptions,
+} from '../modules/notification/store-room';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
 const orderEvent = z.object({ orderId: z.string().min(1).max(64) });
 const chatEvent = z.object({ roomId: z.string().min(1).max(64) });
-const vendorEvent = z.object({ vendorId: z.string().min(1).max(64) });
 const MAX_EARLY_AUTH_PACKETS = 4;
 const MAX_SOCKET_PACKET_BYTES = 64 * 1024;
 
@@ -100,6 +110,15 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   const socketAuthorityRecheckTimeoutMs = positiveDurationMs(
     process.env['SOCKET_AUTH_RECHECK_TIMEOUT_MS'],
     Math.min(4_000, socketAuthorityRecheckMs),
+  );
+  // [AX317 F03 · AX368 R3-01] How often every store-room membership on this
+  // instance is read again, and how long one membership read (a pass's or a
+  // subscription's) may take (store-room.ts storeRoomTiming): a member whose
+  // revocation never arrived is out of the store room within the two added
+  // together, from the removal's commit, and that is never above 60 s.
+  const { intervalMs: storeRoomRecheckMs, readTimeoutMs: storeRoomReadTimeoutMs } = storeRoomTiming(
+    positiveDurationMs(process.env['SOCKET_STORE_ROOM_RECHECK_MS'], 30_000),
+    socketAuthorityRecheckTimeoutMs,
   );
   // Keep one complete authority-store pass inside one configured deadline.
   // The database statement timeout is shorter than the outer deadline, so a
@@ -273,6 +292,29 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   }, socketAuthorityRecheckMs);
   authorityRecheckTimer.unref();
 
+  // [AX317 F03] The periodic authority check covers store rooms too: every
+  // storeRoomRecheckMs, each store-room membership on this instance is read
+  // again and a socket that is no longer a member is evicted, whatever
+  // happened to its revocation. The same pass restores the cross-instance
+  // stream after an interruption if the reconnect's own pass could not.
+  const storeRoomConvergeOptions: StoreRoomConvergeOptions = {
+    readMembers: (pairs) => storeRoomMemberships(app.prisma, pairs),
+    timeoutMs: storeRoomReadTimeoutMs,
+    log: app.log,
+  };
+  // A pass fails closed on its own (store-room.ts); anything it throws past
+  // that is logged here, never left as an unhandled rejection.
+  const convergeStoreRoomsHere = () => convergeStoreRooms(io, storeRoomConvergeOptions).catch((error: unknown) => {
+    app.log.error({ err: error }, '[AX317 F03] store-room re-validation crashed');
+  });
+  let detachStoreRoomCluster: (() => void) | undefined;
+  listenForStoreRoomRevocations(io);
+  const storeRoomRecheckTimer = setInterval(() => {
+    if (authorityRecheckClosing) return;
+    void convergeStoreRoomsHere();
+  }, storeRoomRecheckMs);
+  storeRoomRecheckTimer.unref();
+
   const closeSocketInfrastructure = idempotentAsync(async () => {
     const errors: unknown[] = [];
     try {
@@ -369,6 +411,10 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           // Redis adapter 8.3.0 does not await its ioredis subscriptions. Verify
           // the default namespace subscriptions before plugin readiness.
           await subscriptionGuard.verifyAndStopTracking(['psubscribe', 'subscribe']);
+          // [AX308/AX317 F03] Store-room revocations now reach the other
+          // instances, and a drop of this subscriber closes the store rooms
+          // here until every membership was read again (store-room.ts).
+          detachStoreRoomCluster = joinStoreRoomCluster(io, subClient, convergeStoreRoomsHere);
           socketAdapterHealthy = true;
         })(),
         startupTimeoutMs,
@@ -377,6 +423,8 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     } catch (error) {
       authorityRecheckClosing = true;
       clearInterval(authorityRecheckTimer);
+      clearInterval(storeRoomRecheckTimer);
+      detachStoreRoomCluster?.();
       try {
         await closeSocketInfrastructure();
       } catch (cleanupError) {
@@ -624,22 +672,27 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       socket.to(`chat:${parsed.data.roomId}`).emit('chat:stop-typing', { userId });
     });
 
-    // Vendor order feed — only if the authenticated user owns the vendor
-    socket.on('vendor:subscribe', async (raw: unknown) => {
-      const parsed = vendorEvent.safeParse(raw);
-      if (!parsed.success) return;
-      try {
-        const vendor = await app.prisma.vendor.findFirst({
-          where: { id: parsed.data.vendorId, owner: { userId } },
-          select: { id: true },
-        });
-        if (vendor) {
-          socket.join(`vendor:${parsed.data.vendorId}`);
-        }
-      } catch {
-        // Non-fatal
-      }
-    });
+    // Vendor order feed — only if the authenticated user owns the vendor or
+    // is on its team, inside this socket's own tenant. [Q10 loud alerts 2/4]
+    // Staff used to be refused here, so the new-order takeover (order:new)
+    // never opened on a staff phone even with the app in hand.
+    // [AX291 F02] Membership is the tenant-bound store rule (isStoreRoomMember):
+    // a team row pointing across tenants admits nobody.
+    // [AX291/AX308/AX317 F03] The join is gated by the revocation epoch and
+    // by the cross-instance stream being whole (store-room.ts): no
+    // subscription joins after this process applied a revocation, or while
+    // it cannot know it would have heard one. An epoch that moved during the
+    // read gets one fresh read, and so does an answer that came after the
+    // read timeout or after a re-validation pass ran while it was pending
+    // (AX368 R3-01). There is no join-then-recheck: a socket that is not a
+    // member is never in the room, not even for the length of a query. An
+    // optional ack reports the outcome.
+    socket.on('vendor:subscribe', storeRoomSubscribeHandler(
+      io,
+      socket,
+      (vendorId) => isStoreRoomMember(app.prisma, vendorId, userId, tenantId),
+      storeRoomReadTimeoutMs,
+    ));
 
     const failPendingPackets = () => {
       authorizationFailed = true;
@@ -650,6 +703,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
 
     socket.on('disconnect', () => {
       activeSocketAuthorities.delete(socket.id);
+      forgetStoreRoomSocket(io, socket.id);
       if (authorizationExpiryTimer) clearTimeout(authorizationExpiryTimer);
       if (!authorizationReady) failPendingPackets();
       app.log.debug(`Socket disconnected: ${socket.id} (user: ${userId})`);
@@ -751,6 +805,8 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   app.addHook('onClose', async () => {
     authorityRecheckClosing = true;
     clearInterval(authorityRecheckTimer);
+    clearInterval(storeRoomRecheckTimer);
+    detachStoreRoomCluster?.();
     activeSocketAuthorities.clear();
     const errors: unknown[] = [];
     if (authorityRecheckPromise) {
@@ -763,6 +819,15 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       } catch (error) {
         errors.push(error);
       }
+    }
+    try {
+      await withTimeout(
+        closeStoreRooms(io),
+        socketShutdownTimeoutMs,
+        'Store-room re-validation shutdown',
+      );
+    } catch (error) {
+      errors.push(error);
     }
     try {
       // Always close Socket.IO and both duplicate Redis clients even when the

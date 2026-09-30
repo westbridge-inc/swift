@@ -124,8 +124,9 @@ vi.mock('bullmq', async () => {
   return { Queue, Worker, __state: state };
 });
 
-vi.mock('../modules/notification/notification.service', () => ({
-  escalateVendorAlert: async () => 'realerted',
+vi.mock('../modules/notification/store-alert-ladder', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/notification/store-alert-ladder')>()),
+  runLadderJob: async () => 'realerted',
 }));
 vi.mock('../providers/notifications/channels', () => ({
   getChannels: () => ({}),
@@ -144,10 +145,10 @@ import {
   QUEUE_NAMES,
   createQueues,
   createWorkers,
-  enqueueVendorAlertFollowup,
   type JobContext,
 } from '../jobs/queue';
 import { initializeJobRuntime } from '../jobs/runtime';
+import { FIRST_RUNG_DELAY_MS, LADDER_JOB, ladderJobId } from '../modules/notification/store-alert-ladder';
 import { closeResourcesBounded } from '../utils/async-lifecycle';
 
 const bullState = (BullModule as unknown as {
@@ -247,8 +248,12 @@ describe('BullMQ lifecycle', () => {
 
     try {
       expect(bullState.queues).toHaveLength(7);
+      // A burst of store-ladder first rungs on the boot-created queue (the
+      // shape the checkout and release outbox rows publish).
       await Promise.all(Array.from({ length: 100 }, (_, index) =>
-        enqueueVendorAlertFollowup(queues, `order-${index}`),
+        queues.notificationQueue.add(LADDER_JOB, { orderId: `order-${index}`, level: 0 }, {
+          jobId: ladderJobId(`order-${index}`, 'ring1'), delay: FIRST_RUNG_DELAY_MS, removeOnComplete: 100, removeOnFail: 50,
+        }),
       ));
       await new Promise<void>((resolve) => setImmediate(resolve));
 

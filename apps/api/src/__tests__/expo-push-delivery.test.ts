@@ -8,6 +8,7 @@ import {
   type PushProvider,
 } from '../providers/notifications/channels';
 import { ALERT_CLASS_KINDS, pushOptionsFor } from '../providers/notifications/alert-class';
+import { pushToDevices, type PushDevice } from '../providers/notifications/device-push';
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 1/4] What actually leaves for Expo, per alert class.
@@ -219,6 +220,153 @@ describe('the dev adapter logs what would have been sent', () => {
     atT0();
     const data = { kind: 'dispatch_offer', orderId: 'o1', expiresAt: iso(-1) };
     expect(await getPushProvider().sendPush(['a'], 'T', 'B', data, pushOptionsFor(data))).toEqual({ sent: 0 });
+    expect(devChannelLog).toEqual([]);
+  });
+});
+
+describe('[Q10 loud alerts 2/4] one push to stored devices: the channel reaches only the builds that have it', () => {
+  const data = { kind: 'vendor_order_alert', orderId: 'o1', orderNumber: 'SW-1', audience: 'business', respondBy: iso(600_000) };
+
+  it('today\'s builds get the message they always got; the channel build gets its class channel, in its own request', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = await pushToDevices(new ExpoPushProvider(), [
+      { token: 'ExponentPushToken[old-a]', alertsVersion: 0 },
+      { token: 'ExponentPushToken[new-b]', alertsVersion: 1 },
+      { token: 'ExponentPushToken[old-c]', alertsVersion: 0 },
+    ], 'T', 'B', data);
+    expect(res).toEqual({ sent: 3, invalidTokens: [], withdrawn: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const base = { title: 'T', body: 'B', data, priority: 'high', sound: 'default', ttl: 600 };
+    expect(messagesOf(fetchMock, 0)).toEqual([
+      { to: 'ExponentPushToken[old-a]', ...base },
+      { to: 'ExponentPushToken[old-c]', ...base },
+    ]);
+    expect(messagesOf(fetchMock, 1)).toEqual([{ to: 'ExponentPushToken[new-b]', ...base, channelId: 'swift_orders_v1' }]);
+  });
+
+  it('asks stillWanted before each request, and stops once the push no longer means anything', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    let asked = 0;
+    const res = await pushToDevices(new ExpoPushProvider(), [
+      { token: 'ExponentPushToken[old-a]', alertsVersion: 0 },
+      { token: 'ExponentPushToken[new-b]', alertsVersion: 1 },
+    ], 'T', 'B', data, { stillWanted: async () => { asked += 1; return asked === 1; } });
+    expect(res).toEqual({ sent: 1, invalidTokens: [], withdrawn: true });
+    expect(asked).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(messagesOf(fetchMock, 0).map((m) => m['to'])).toEqual(['ExponentPushToken[old-a]']);
+  });
+
+  it('a device row that reports no alertsVersion gets today\'s message, and is never dropped', async () => {
+    // The column is NOT NULL DEFAULT 0, but a partial select or a test double
+    // can hand over a row without it. Such a device must still be pushed, as
+    // today's builds are: never named a channel it did not report, and never
+    // silently left out of both groups.
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const res = await pushToDevices(new ExpoPushProvider(), [
+      { token: 'ExponentPushToken[bare-a]' } as unknown as PushDevice,
+      { token: 'ExponentPushToken[odd-b]', alertsVersion: Number.NaN },
+    ], 'T', 'B', data);
+    expect(res).toEqual({ sent: 2, invalidTokens: [], withdrawn: false });
+    const base = { title: 'T', body: 'B', data, priority: 'high', sound: 'default', ttl: 600 };
+    expect(messagesOf(fetchMock, 0)).toEqual([
+      { to: 'ExponentPushToken[bare-a]', ...base },
+      { to: 'ExponentPushToken[odd-b]', ...base },
+    ]);
+  });
+
+  it('a provider failure in one group does not cost the other its push, and is still thrown', async () => {
+    const seen: string[][] = [];
+    const flaky: PushProvider = {
+      async sendPush(tokens) {
+        seen.push(tokens);
+        if (tokens.includes('ExponentPushToken[old-a]')) throw new Error('relay 503');
+        return { sent: tokens.length };
+      },
+    };
+    await expect(pushToDevices(flaky, [
+      { token: 'ExponentPushToken[old-a]', alertsVersion: 0 },
+      { token: 'ExponentPushToken[new-b]', alertsVersion: 1 },
+    ], 'T', 'B', data)).rejects.toThrow('relay 503');
+    expect(seen).toEqual([['ExponentPushToken[old-a]'], ['ExponentPushToken[new-b]']]);
+  });
+});
+
+describe('[Q10 loud alerts 2/4 · AX291 F04] the reason for a push is asked before EVERY provider request', () => {
+  const data = { kind: 'vendor_order_alert', orderId: 'o1', respondBy: iso(600_000) };
+
+  it('a retry is not sent once the push stopped meaning anything during the backoff', async () => {
+    atT0();
+    let wanted = true;
+    let attempts = 0;
+    const flaky: PushProvider = {
+      async sendPush() {
+        attempts += 1;
+        wanted = false; // the order is answered while the retry waits
+        throw new Error('relay 503');
+      },
+    };
+    const res = await withPushRetry(flaky, [1, 1]).sendPush([TOKEN], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: async () => wanted });
+    expect(res).toEqual({ sent: 0, withdrawn: true });
+    expect(attempts).toBe(1);
+  });
+
+  it('the Expo adapter asks before each chunk: a push answered after the first 100 devices goes no further', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    let asked = 0;
+    const tokens = Array.from({ length: 150 }, (_, i) => `ExponentPushToken[chunk-${i}]`);
+    const res = await new ExpoPushProvider().sendPush(tokens, 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: async () => { asked += 1; return asked === 1; } });
+    expect(res).toEqual({ sent: 100, withdrawn: true });
+    expect(asked).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(messagesOf(fetchMock)).toHaveLength(100);
+  });
+
+  it('the dev adapter logs nothing for a withdrawn push, and never logs the guard itself', async () => {
+    atT0();
+    expect(await getPushProvider().sendPush(['a'], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: async () => false })).toEqual({ sent: 0, withdrawn: true });
+    expect(devChannelLog).toEqual([]);
+    expect(await getPushProvider().sendPush(['b'], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: async () => true })).toEqual({ sent: 1 });
+    expect(devChannelLog.map((e) => e.options)).toEqual([pushOptionsFor(data)]);
+  });
+});
+
+describe('[AX308] the delivery window is measured after the awaited guard, right before the request', () => {
+  // The guard is a database read that can take seconds. It says yes here,
+  // and moves the clock 2 s on while it answers.
+  const slowYes = async () => { vi.setSystemTime(T0 + 2_000); return true; };
+
+  it('Expo: a deadline that passed while the guard was answering is not sent', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const data = { kind: 'vendor_order_alert', orderId: 'o1', respondBy: iso(1_500) };
+    const res = await new ExpoPushProvider().sendPush([TOKEN], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: slowYes });
+    expect(res).toEqual({ sent: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('Expo: the ttl asks only for the time left after the guard', async () => {
+    atT0();
+    const fetchMock = okFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const data = { kind: 'vendor_order_alert', orderId: 'o1', respondBy: iso(3_500) };
+    await new ExpoPushProvider().sendPush([TOKEN], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: slowYes });
+    expect(messagesOf(fetchMock).map((m) => m['ttl'])).toEqual([1]);
+  });
+
+  it('dev adapter: measured the same way, so it never logs a push the Expo adapter would drop', async () => {
+    atT0();
+    const data = { kind: 'vendor_order_alert', orderId: 'o1', respondBy: iso(1_500) };
+    expect(await getPushProvider().sendPush(['a'], 'T', 'B', data, { ...pushOptionsFor(data), stillWanted: slowYes })).toEqual({ sent: 0 });
     expect(devChannelLog).toEqual([]);
   });
 });

@@ -183,18 +183,6 @@ export function createQueues(
   }
 }
 
-export async function enqueueVendorAlertFollowup(
-  queues: Pick<SwiftQueues, 'notificationQueue'>,
-  orderId: string,
-): Promise<void> {
-  await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 1 }, {
-    // §A1: SMS at +75s total when loud (30+45); default stays 60+60.
-    delay: process.env['ALERTS_LOUD'] === '1' ? 45_000 : 60_000,
-    removeOnComplete: 100,
-    removeOnFail: 50,
-  });
-}
-
 /** Weekly vendor settlement snapshot [SWIFT-AUD-D6-05 / D7-01].
  *  Exported so tests can drive it directly; the settlement worker delegates
  *  here. BullMQ single-delivery keeps the schedule from double-firing across
@@ -371,12 +359,14 @@ export async function releaseHeldOrdersJob(
     await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
   });
   if (released.length > 0) {
-    // A RELEASED order is the vendor's first sight of it — it deserves the
-    // same escalation ladder a fresh checkout gets (re-alert, then SMS). The
-    // release wrote that ladder as the checkout's own outbox row, inside the
-    // release transaction [Q12 · AX289 F5]; publish those rows now for
-    // latency, exactly as checkout drains its own. A failure here is logged,
-    // never lost: the checkout-outbox sweep publishes whatever this could not.
+    // A RELEASED order is the store's first sight of it — it gets the ONE
+    // store ladder a fresh checkout gets (store-alert-ladder.ts: the team
+    // rung twice, the store texted, the operators told), measured from the
+    // release. The release wrote the ladder's first rung as the checkout's own
+    // outbox row, inside the release transaction [Q12 · AX289 F5]; nothing
+    // else arms it [Q10 · AX291]. Publish those rows now for latency, exactly
+    // as checkout drains its own. A failure here is logged, never lost: the
+    // checkout-outbox sweep publishes whatever this could not.
     const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
     await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { orderIds: released })
       .catch((err: unknown) => ctx.log.error({ err }, '[Q12] release ladder drain failed — the outbox sweep will publish'));
@@ -1166,20 +1156,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     { connection, concurrency: 1 },
   );
 
-  // NOTIFICATIONS: vendor-alert escalation — re-alert, then SMS
+  // NOTIFICATIONS: the store new-order ladder [Q10 loud alerts 2/4] — ring
+  // twice, text the store, tell the operators; every rung decides at send
+  // time (store-alert-ladder.ts), and the first one schedules the rest.
   const notificationWorker = buildWorker(
     QUEUE_NAMES.NOTIFICATION,
     async (job: Job) => {
       if (job.name !== 'vendor-alert-escalate') return;
-      const { escalateVendorAlert } = await import('../modules/notification/notification.service');
+      const { runLadderJob } = await import('../modules/notification/store-alert-ladder');
       const { getChannels } = await import('../providers/notifications/channels');
-
-      const { orderId, level = 0 } = job.data;
-      const outcome = await escalateVendorAlert(ctx.prisma, ctx.io, getChannels(), orderId, level);
-
-      if (outcome === 'realerted') {
-        await enqueueVendorAlertFollowup(queues, orderId);
-      }
+      await runLadderJob(
+        { prisma: ctx.prisma, io: ctx.io, redis: ctx.redis, channels: getChannels(), queue: queues.notificationQueue },
+        job.data,
+      );
     },
     { connection, concurrency: 5 },
   );

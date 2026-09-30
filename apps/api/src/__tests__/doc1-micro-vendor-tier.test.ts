@@ -86,6 +86,15 @@ afterAll(async () => {
   await app.close();
 });
 
+/** A moment a minute before `now` that is still inside `now`'s UTC day, the
+ *  day tierUsage counts. A plain `now - 60 s` fell on the PREVIOUS day in the
+ *  first minute after UTC midnight, which is when CI ran this on 09-30
+ *  (00:00:29 UTC): the checkout saw an empty day and neither refused nor
+ *  nudged. */
+function earlierToday(now: Date): Date {
+  return new Date(Math.max(now.getTime() - 60_000, Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())));
+}
+
 async function placedOrder(gross: number, at: Date, status: 'PENDING' | 'DELIVERED' | 'CANCELLED' = 'DELIVERED') {
   const o = await system(() => app.prisma.order.create({ data: {
     orderNumber: `MV${NUM}${nanoid(4).replace(/[^a-zA-Z0-9]/g, '0').toUpperCase()}`, customerId, vendorId, status, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
@@ -134,7 +143,7 @@ describe('[DOC-1 P3-2] the micro-vendor tier is capped, not bypassed', () => {
   it('the checkout path itself refuses the order that would cross the day cap for an unregistered store, and accepts the same cart once the store is registered', async () => {
     const now = new Date();
     const today = await system(() => tierUsage(app.prisma, vendorId, now));
-    for (let i = today.ordersToday; i < VENDOR_TIER_CAPS_DEFAULTS.ordersPerDay; i += 1) await placedOrder(1000, new Date(now.getTime() - 60_000));
+    for (let i = today.ordersToday; i < VENDOR_TIER_CAPS_DEFAULTS.ordersPerDay; i += 1) await placedOrder(1000, earlierToday(now));
     const inject = (method: 'POST', url: string, payload: unknown) => app.inject({ method, url, payload: payload as Record<string, unknown>, headers: { authorization: `Bearer ${customerToken}`, 'content-type': 'application/json' } });
     const added = await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 });
     expect([200, 201]).toContain(added.statusCode);
@@ -263,7 +272,7 @@ describe('[DOC-1 P3-2] the build against the contract: declaration, requirement 
     await system(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { tier: 'UNREGISTERED' } }));
     await system(() => app.prisma.order.deleteMany({ where: { vendorId, orderNumber: { startsWith: `MV${NUM}` } } }));
     const now = new Date();
-    for (let i = 0; i < Math.ceil(VENDOR_TIER_CAPS_DEFAULTS.ordersPerDay * VENDOR_TIER_CAPS_DEFAULTS.nudgeAtFraction) - 1; i += 1) await placedOrder(1000, new Date(now.getTime() - 60_000));
+    for (let i = 0; i < Math.ceil(VENDOR_TIER_CAPS_DEFAULTS.ordersPerDay * VENDOR_TIER_CAPS_DEFAULTS.nudgeAtFraction) - 1; i += 1) await placedOrder(1000, earlierToday(now));
     const inject = (method: 'POST', url: string, payload: unknown) => app.inject({ method, url, payload: payload as Record<string, unknown>, headers: { authorization: `Bearer ${customerToken}`, 'content-type': 'application/json' } });
     const nudges = () => system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'vendor_tier_nudge' }, AND: [{ data: { path: ['vendorId'], equals: vendorId } }] } }));
     const before = await nudges();

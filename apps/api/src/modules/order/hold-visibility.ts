@@ -44,3 +44,15 @@ export function vendorVisibleFilter(prisma: Pick<PrismaClient, 'order'>): Prisma
     ],
   };
 }
+
+/** [Q10 loud alerts 2/4 · AX291 F01] Prisma WHERE fragment: the STORE has
+ *  been SHOWN this order, so its team may be alerted about it, or say it saw
+ *  that alert. An order the store may see (vendorVisibleFilter) whose hold is
+ *  behind it: never held, or released (the release, the one moment a held
+ *  order reaches the store, clears holdExpiresAt). A held order, and one whose
+ *  hold lapsed but that no release has shown yet, are both refused. Apply it
+ *  to a FRESH read of the order: never to a checkout snapshot, never to the
+ *  clock alone. */
+export function shownToStoreFilter(prisma: Pick<PrismaClient, 'order'>): Prisma.OrderWhereInput {
+  return { AND: [vendorVisibleFilter(prisma), { holdExpiresAt: null }] };
+}

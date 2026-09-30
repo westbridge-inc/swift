@@ -72,7 +72,14 @@ describe('send → ack → health', () => {
     subjectIds.push(orderId);
 
     const notifications = new NotificationService(app.prisma, app.io);
-    await notifications.newOrderForVendor(vendorUser.id, 'SW-TEST-0001', 2, 3500, orderId);
+    const owner = await app.prisma.vendorOwner.create({ data: { userId: vendorUser.id } });
+    const vendor = await app.prisma.vendor.create({ data: {
+      ownerId: owner.id, name: 'Alert Fixture', slug: `alert-fixture-${nanoid(8).toLowerCase()}`,
+      vendorType: 'RESTAURANT', phone: vendorUser.phone,
+      addressLine1: '4 Fixture Lane', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.81, longitude: -58.16,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+    } });
+    await notifications.newOrderForVendor(vendorUser.id, 'SW-TEST-0001', 2, 3500, orderId, undefined, vendor.id);
 
     let row = await app.prisma.alertDelivery.findFirstOrThrow({
       where: { subjectId: orderId, recipientId: vendorUser.id },

@@ -10,8 +10,8 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
-import { escalateVendorAlert } from '../../modules/notification/notification.service';
-import { enqueueVendorAlertFollowup } from '../../jobs/queue';
+import { LADDER, ladderJobId, runLadderJob } from '../../modules/notification/store-alert-ladder';
+import { STORE_ALERT_SMS_DAILY_PREFIX } from '../../utils/sms-budget';
 import { devChannelLog, getChannels, PUSH_RETRY_DELAYS_MS, type DevChannelEntry } from '../../providers/notifications/channels';
 import { notificationFailuresCounter } from '../../plugins/observability';
 
@@ -28,23 +28,25 @@ import { notificationFailuresCounter } from '../../plugins/observability';
 //             another account can neither see, read, read-all nor silence it;
 //             reading drops the unread count by exactly one; a device
 //             deactivated at logout receives nothing more.
-//   NOTIF-02  a REAL checkout arms the vendor alert ladder (the outbox job the
-//             worker consumes, at its production delay); the worker's rung 0
-//             re-alerts by push — one transient provider failure is retried
-//             by the production withPushRetry to exactly ONE receipt — and
-//             arms rung 1, which falls back to SMS; a stranger store's ack is
-//             refused and silences nothing; the store's own ack stops the
-//             ladder; an SMS provider failure on the last rung is counted,
-//             never silent and never receipted.
+//   NOTIF-02  a REAL checkout arms the store alert ladder (the outbox job the
+//             worker consumes, at its production delay: the first rung, 30 s);
+//             the first rung re-rings by push — one transient provider failure
+//             is retried by the production withPushRetry to exactly ONE
+//             receipt — and schedules the rest from the checkout (ring again
+//             +60 s, text the store +90 s, tell the operators +3 min); the text
+//             goes out once; a stranger store's ack is refused and silences
+//             nothing; the store's own ack stops every queued rung; an SMS
+//             provider failure is counted, never silent, never receipted and
+//             never reported as sent. [Q10 loud alerts 2/4]
 //   G5-F1     [it.fails] a stranger's refused ack still stamps the store's
 //             alert-delivery receipt as acknowledged (the stamp runs before
 //             the ownership check).
 //
 // The worker is driven exactly as its processor runs (jobs/queue.ts, the
-// NOTIFICATION worker): escalateVendorAlert(prisma, io, getChannels(), …) and,
-// on 'realerted', enqueueVendorAlertFollowup. The queues are an acknowledged
-// recording double: the checkout's outbox drain publishes into it and the
-// recorded jobs are asserted, then driven. Dispatch is recorded, not run.
+// NOTIFICATION worker): runLadderJob(deps, job.data). The queues are an
+// acknowledged recording double: the checkout's outbox drain and the first
+// rung publish into it, and the recorded jobs are asserted, then driven with
+// their own payloads. Dispatch is recorded, not run.
 //
 // Fixture range: +5920351nnn (this file only; audited range-aware against
 // every phone literal, generator and purge prefix under apps/, packages/ and
@@ -144,10 +146,8 @@ async function failures(channel: string, stage: string): Promise<number> {
 }
 
 /** The worker's NOTIFICATION processor, step for step (jobs/queue.ts). */
-async function runLadderJob(orderId: string, level: number) {
-  const outcome = await escalateVendorAlert(app.prisma, app.io, getChannels(), orderId, level);
-  if (outcome === 'realerted') await enqueueVendorAlertFollowup(queues as never, orderId);
-  return outcome;
+async function runLadder(data: Record<string, unknown>) {
+  return runLadderJob({ prisma: app.prisma, io: app.io, redis: app.redis, channels: getChannels(), queue: queues.notificationQueue }, data);
 }
 
 async function purgeFixtures() {
@@ -183,6 +183,14 @@ async function purgeFixtures() {
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
     await purgeRedis([...ids, ...vendorIds, ...orderIds]);
   });
+  // [Q10 loud alerts 2/4] The ladder counts its texts per store phone per
+  // day: clear this file's, so a rerun on the same day starts clean.
+  let cursor = '0';
+  do {
+    const [next, keys] = await app.redis.scan(cursor, 'MATCH', `${STORE_ALERT_SMS_DAILY_PREFIX}*:${PHONE_PREFIX}*`, 'COUNT', 1000);
+    cursor = next;
+    if (keys.length > 0) await app.redis.del(...keys);
+  } while (cursor !== '0');
 }
 
 async function purgeRedis(ids: string[]) {
@@ -376,7 +384,11 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
   const receipt = (orderId: string) => sys(() => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'VENDOR_ORDER', subjectId: orderId } }));
   const ladderJobs = (orderId: string) => published
     .filter((j) => j.queue === 'notification' && j.name === 'vendor-alert-escalate' && j.data['orderId'] === orderId)
-    .map((j) => ({ level: j.data['level'], delay: j.opts['delay'] }));
+    .map((j) => ({ data: j.data, jobId: j.opts['jobId'], delay: j.opts['delay'] as number }));
+  /** The recorded job of one later rung (scheduled by the first rung). */
+  const rungJob = (orderId: string, rung: string) => ladderJobs(orderId).find((j) => j.data['rung'] === rung);
+  /** The first rung's job: the one the checkout outbox published. */
+  const firstRung = (orderId: string) => ladderJobs(orderId).find((j) => j.data['level'] === 0)!;
 
   beforeAll(async () => {
     owner = await makeUser('Vashti', ['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
@@ -413,14 +425,16 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     const pending = await call('GET', '/api/v1/vendor/alerts/pending', owner.token);
     expect((pending.json().data as Array<{ id: string }>).map((a) => a.id)).toEqual([alert.id]);
 
-    // The checkout's outbox armed rung 0 at the production delay (60 s).
+    // The checkout's outbox armed the first rung at the production delay:
+    // 30 s [Q10 loud alerts 2/4 ruling; it was 60 s].
     const armed = ladderJobs(o2.orderId);
     expect(armed).toHaveLength(1);
-    expect(armed[0]!.level).toBe(0);
-    expect(armed[0]!.delay as number).toBeGreaterThan(55_000);
-    expect(armed[0]!.delay as number).toBeLessThanOrEqual(60_000);
+    expect(armed[0]!.data).toEqual({ orderId: o2.orderId, level: 0 });
+    expect(armed[0]!.delay).toBeGreaterThan(25_000);
+    expect(armed[0]!.delay).toBeLessThanOrEqual(30_000);
+    const placedAt = (await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: o2.orderId }, select: { placedAt: true } }))).placedAt.getTime();
 
-    // RUNG 0 — the provider fails the re-alert push once; the production
+    // RUNG ring1 — the provider fails the re-alert push once; the production
     // withPushRetry backs off and delivers it exactly once.
     let attempts = 0;
     const deliver = Array.prototype.push;
@@ -434,7 +448,7 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     const started = Date.now();
     let outcome: string;
     try {
-      outcome = await runLadderJob(o2.orderId, 0);
+      outcome = await runLadder(armed[0]!.data);
     } finally {
       outage.mockRestore();
     }
@@ -451,11 +465,21 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
       },
     ]);
     expect(smsTo(owner.phone)).toHaveLength(0);
-    // …and the worker armed rung 1, one minute on.
-    expect(ladderJobs(o2.orderId)).toEqual([armed[0], { level: 1, delay: 60_000 }]);
+    // …and the first rung scheduled the rest of the ladder, each due at its
+    // offset from the checkout: ring again +60 s, text +90 s, operators +3 min.
+    const later = ladderJobs(o2.orderId).slice(1);
+    expect(later.map((j) => ({ data: j.data, jobId: j.jobId }))).toEqual(
+      LADDER.slice(1).map((step) => ({ data: { orderId: o2.orderId, rung: step.rung }, jobId: ladderJobId(o2.orderId, step.rung) })),
+    );
+    for (const [i, step] of LADDER.slice(1).entries()) {
+      expect(later[i]!.delay).toBeLessThanOrEqual(placedAt + step.afterMs - started);
+      expect(later[i]!.delay).toBeGreaterThan(step.afterMs - 20_000);
+    }
 
-    // RUNG 1 — still unread: the SMS fallback, exactly once, to the owner's phone.
-    expect(await runLadderJob(o2.orderId, 1)).toBe('sms_sent');
+    // RUNG sms — still waiting: the text, exactly once, to the store phone
+    // (the fixture store's phone is its owner's number).
+    expect(await runLadder(rungJob(o2.orderId, 'sms')!.data)).toBe('sms_sent');
+    expect(await runLadder(rungJob(o2.orderId, 'sms')!.data)).toBe('already_sent');
     expect(smsTo(owner.phone).map((s) => s.body)).toEqual([
       `Swift: order ${o2.orderNumber} is still waiting for your response. Open your dashboard now.`,
     ]);
@@ -490,19 +514,25 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     expect(stamped.getTime()).toBeLessThanOrEqual(ackedAfter + 5);
     expect((await call('GET', '/api/v1/vendor/alerts/pending', owner.token)).json().data).toEqual([]);
 
-    // Every later rung is a no-op: nothing more reaches the store.
+    // Every rung still queued is a no-op: nothing more reaches the store, and
+    // nothing new is scheduled. [Q10 loud alerts 2/4] ring2 and the operator
+    // page were already queued when the ack landed; each reads the ack at send.
     const pushes = pushesTo(vendorDevice).length;
     const texts = smsTo(owner.phone).length;
-    expect(await runLadderJob(o2.orderId, 0)).toBe('stopped');
-    expect(await runLadderJob(o2.orderId, 1)).toBe('stopped');
+    const queued = ladderJobs(o2.orderId).length;
+    expect(queued).toBe(4);
+    for (const rung of ['ring2', 'sms', 'admin']) {
+      expect(await runLadder(rungJob(o2.orderId, rung)!.data), rung).toBe('stopped');
+    }
+    expect(await runLadder(firstRung(o2.orderId).data)).toBe('stopped');
     expect(pushesTo(vendorDevice)).toHaveLength(pushes);
     expect(smsTo(owner.phone)).toHaveLength(texts);
-    expect(ladderJobs(o2.orderId)).toHaveLength(2);
+    expect(ladderJobs(o2.orderId)).toHaveLength(queued);
   });
 
   it('an SMS provider failure on the last rung is counted, never silent and never receipted; accepting the order stops the ladder', async () => {
     const o3 = await placeOrder(customer, store);
-    expect(await runLadderJob(o3.orderId, 0)).toBe('realerted');
+    expect(await runLadder(firstRung(o3.orderId).data)).toBe('realerted');
     const texts = smsTo(owner.phone).length;
     const counted = await failures('sms', 'escalation');
 
@@ -510,12 +540,16 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     const down = vi.spyOn(sms, 'sendSms').mockRejectedValue(new Error('sms gateway 503'));
     let outcome: string;
     try {
-      outcome = await runLadderJob(o3.orderId, 1);
+      outcome = await runLadder(rungJob(o3.orderId, 'sms')!.data);
     } finally {
       down.mockRestore();
     }
-    // The ladder completes (fail-soft), but the miss is counted and nothing claims it was sent.
-    expect(outcome).toBe('sms_sent');
+    // The ladder completes (fail-soft), but the miss is counted and nothing
+    // claims it was sent. [Q10 loud alerts 2/4] Not even the outcome: it was
+    // 'sms_sent' for a text that may never have left. A gateway 503 may still
+    // have sent it, so it is 'sms_uncertain' and keeps its budget (DS276 F2,
+    // AX291 F06).
+    expect(outcome).toBe('sms_uncertain');
     expect(await failures('sms', 'escalation')).toBe(counted + 1);
     expect(smsTo(owner.phone)).toHaveLength(texts);
     expect((await alertRow(o3.orderId)).isRead).toBe(false);
@@ -528,7 +562,7 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     expect(acceptStamp.getTime()).toBeGreaterThanOrEqual(acceptAt - 5);
     expect(acceptStamp.getTime()).toBeLessThanOrEqual(Date.now() + 5);
     const pushes = pushesTo(vendorDevice).length;
-    expect(await runLadderJob(o3.orderId, 0)).toBe('stopped');
+    expect(await runLadder(rungJob(o3.orderId, 'ring2')!.data)).toBe('stopped');
     expect(pushesTo(vendorDevice)).toHaveLength(pushes);
   });
 });
