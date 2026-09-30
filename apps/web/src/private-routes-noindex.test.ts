@@ -46,6 +46,11 @@ const PUBLIC_PAGES = [
 
 const PRIVATE_PAGES = [
   '(app)/account/page.tsx',
+  '(app)/account/addresses/page.tsx',
+  '(app)/account/favourites/page.tsx',
+  '(app)/account/help/page.tsx',
+  '(app)/account/profile/page.tsx',
+  '(app)/account/safety/page.tsx',
   '(app)/cart/page.tsx', // includes checkout/payment; no separate /checkout or /pay
   '(app)/courier/page.tsx',
   '(app)/order/location/page.tsx',
