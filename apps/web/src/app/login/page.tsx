@@ -52,6 +52,7 @@ function LoginInner() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busyNow = useRef(false);
+  const operation = useRef(0);
 
   // Keep the journey hook mounted across our own sign-in, while discarding
   // personal fields before the new epoch commits.
@@ -67,30 +68,42 @@ function LoginInner() {
 
   async function handleSend() {
     if (busyNow.current || currentSessionEpoch() !== formEpoch) return;
+    const owner = ++operation.current;
+    const ownsCompletion = () => operation.current === owner && currentSessionEpoch() === formEpoch;
     busyNow.current = true;
     setError(null); setBusy(true);
     try {
       await sendOtp(phone.trim());
-      if (currentSessionEpoch() === formEpoch) setStep('code');
-    } catch (e) { if (currentSessionEpoch() === formEpoch) setError((e as Error).message); }
-    finally { if (currentSessionEpoch() === formEpoch) { busyNow.current = false; setBusy(false); } }
+      if (ownsCompletion()) setStep('code');
+    } catch (e) { if (ownsCompletion()) setError((e as Error).message); }
+    finally { if (ownsCompletion()) { busyNow.current = false; setBusy(false); } }
   }
 
   async function handleVerify() {
     if (busyNow.current || currentSessionEpoch() !== formEpoch) return;
+    const owner = ++operation.current;
+    let operationEpoch = formEpoch;
+    const ownsCompletion = () => operation.current === owner && currentSessionEpoch() === operationEpoch;
+    // Only this helper's intentional cookie-session adoption can move the
+    // operation to a new epoch. External transitions never transfer ownership.
+    const adopted = (epoch: number) => {
+      if (operation.current === owner && epoch === formEpoch + 1) operationEpoch = epoch;
+    };
     busyNow.current = true;
     setError(null); setBusy(true);
     try {
       if (isCustomer) {
-        await verifyCustomerLogin(phone.trim(), code.trim());
+        await verifyCustomerLogin(phone.trim(), code.trim(), adopted);
+        if (!ownsCompletion()) return;
         continueJourney();
         router.replace(next || '/');
       } else {
-        const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
+        const { home } = await verifyPartnerLogin(phone.trim(), code.trim(), adopted);
+        if (!ownsCompletion()) return;
         router.replace(next === '/weekly-fee' ? next : home);
       }
-    } catch (e) { setError((e as Error).message); }
-    finally { busyNow.current = false; setBusy(false); }
+    } catch (e) { if (ownsCompletion()) setError((e as Error).message); }
+    finally { if (ownsCompletion()) { busyNow.current = false; setBusy(false); } }
   }
 
   return (

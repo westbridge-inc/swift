@@ -38,15 +38,15 @@ let authGeneration = 0;
 /** Who the SERVER says this browser is. Null until probed or signed in. */
 let sessionPrincipal: string | null = null;
 let probeSequence = 0;
-let lastSettledProbe = 0;
 
 /** [Q7b] The customer shell asks the server once per page load, then keeps
  *  its chrome mounted. It learns of every later change here instead: a
  *  sign-in, a sign-out, or a session the server ended mid-visit. Memory only —
  *  nothing about the session is ever written to storage. */
-const sessionListeners = new Set<() => void>();
+type SessionChangeSource = 'local' | 'probe';
+const sessionListeners = new Set<(_source: SessionChangeSource) => void>();
 
-export function subscribeSession(listener: () => void): () => void {
+export function subscribeSession(listener: (_source: SessionChangeSource) => void): () => void {
   ensureSessionEvents();
   sessionListeners.add(listener);
   return () => { sessionListeners.delete(listener); };
@@ -58,8 +58,8 @@ export function currentSessionEpoch(): number {
   return authGeneration;
 }
 
-function announceSessionChange(): void {
-  for (const listener of [...sessionListeners]) listener();
+function announceSessionChange(source: SessionChangeSource = 'local'): void {
+  for (const listener of [...sessionListeners]) listener(source);
   // Store subscribers must see the settled principal/epoch as well as the
   // cleared store, including adoption and a missed cross-tab transition.
   announceStoreChange();
@@ -77,13 +77,13 @@ function ensureSessionEvents(): void {
     forgetSession(false);
   });
 }
-function forgetSession(advanceContinuation = true): void {
+function forgetSession(advanceContinuation = true, source: SessionChangeSource = 'local'): void {
   if (advanceContinuation) invalidateStorefrontContinuations();
   else clearStorefrontContinuation();
   authGeneration += 1;
   sessionPrincipal = null;
   invalidatePrivateCaches();
-  announceSessionChange();
+  announceSessionChange(source);
 }
 
 type AuthSnapshot = { principal: string | null; generation: number };
@@ -169,27 +169,26 @@ async function probeSession(): Promise<SessionAnswer> {
   ensureSessionEvents();
   const generation = authGeneration;
   const probeId = ++probeSequence;
-  const obsolete = () => generation !== authGeneration || probeId < lastSettledProbe;
-  const forget = () => {
-    if (generation === authGeneration && sessionPrincipal !== null) {
-      forgetSession();
-      publishSessionInvalidation();
+  const obsolete = () => generation !== authGeneration || probeId !== probeSequence;
+  const forget = (signedOut = false): SessionAnswer => {
+    if (obsolete()) return { ok: false, obsolete: true };
+    if (sessionPrincipal !== null) {
+      forgetSession(signedOut, 'probe');
+      // Uncertainty retires only this tab's private state.
+      if (signedOut) publishSessionInvalidation();
     }
-    return { ok: false };
+    return signedOut ? { ok: false, signedOut: true } : { ok: false };
   };
   try {
     const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', cache: 'no-store', headers: { ...clientHeaders } });
-    if (obsolete()) return { ok: false };
+    if (obsolete()) return { ok: false, obsolete: true };
     if (!res.ok) {
-      lastSettledProbe = probeId;
-      const answer = forget();
       // Only an explicit 401 proves signed-out cookies. Server failures and
       // rate limits cannot release retained drafts after a resume.
-      return res.status === 401 ? { ...answer, signedOut: true } : answer;
+      return forget(res.status === 401);
     }
     const json = await res.json().catch(() => null);
-    if (obsolete()) return { ok: false };
-    lastSettledProbe = probeId;
+    if (obsolete()) return { ok: false, obsolete: true };
     const user = json?.data?.user as { id?: unknown } | undefined;
     if (!user || typeof user.id !== 'string' || !user.id) return forget();
     if (sessionPrincipal !== user.id) {
@@ -203,17 +202,16 @@ async function probeSession(): Promise<SessionAnswer> {
       invalidatePrivateCaches();
       if (known) publishSessionInvalidation();
       sessionPrincipal = user.id;
-      announceSessionChange();
+      announceSessionChange('probe');
     }
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
-    // A network failure is not "signed out" — say nothing rather than guess.
-    lastSettledProbe = Math.max(lastSettledProbe, probeId);
-    return { ok: false };
+    // A network failure retires local proof without announcing sign-out.
+    return forget();
   }
 }
 
-type SessionAnswer = { ok: boolean; user?: Record<string, unknown>; signedOut?: true };
+type SessionAnswer = { ok: boolean; user?: Record<string, unknown>; signedOut?: true; obsolete?: true };
 let verification: { epoch: number; promise: Promise<SessionAnswer> } | undefined;
 
 /** Force server proof; concurrent callers in this epoch share one request.
@@ -225,10 +223,7 @@ export function verifySessionNow({ fresh = false }: { fresh?: boolean } = {}): P
   if (typeof window === 'undefined') return Promise.resolve({ ok: false });
   const epoch = currentSessionEpoch();
   if (!fresh && verification?.epoch === epoch) return verification.promise;
-  const promise = sessionProbe().then((answer) => {
-    if (!answer.ok && currentSessionEpoch() === epoch && sessionPrincipal !== null) forgetSession();
-    return answer;
-  }).finally(() => {
+  const promise = sessionProbe().finally(() => {
     if (verification?.promise === promise) verification = undefined;
   });
   verification = { epoch, promise };
@@ -388,7 +383,8 @@ export async function apiFetch(
       // A delayed guest request may finish while an OTP journey is open.
       // Null -> null is no account change; explicit logout still clears it.
       if (sessionPrincipal !== null) clearSession();
-      if (policy.redirectOnExpired !== false && window.location.pathname !== '/login') {
+      const guestAuthJourney = requestSession.principal === null && (window.location.pathname === '/login' || window.location.pathname === '/signup');
+      if (policy.redirectOnExpired !== false && window.location.pathname !== '/login' && !guestAuthJourney) {
         const returnPath = `${window.location.pathname}${window.location.search}`;
         window.location.href = `/login?next=${encodeURIComponent(returnPath)}`;
       }
@@ -402,7 +398,12 @@ export async function apiFetch(
   // A resumed tab may be proving new cookies while an old request finishes.
   // Do not settle that request (including a shared pending query) ahead of
   // the proof that can invalidate its captured principal/epoch.
-  if (verification) await verification.promise;
+  while (verification) {
+    const active = verification;
+    await active.promise;
+    // A fresh resume may have replaced the flight while we were waiting.
+    if (verification === active) break;
+  }
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
   }
@@ -430,7 +431,8 @@ export async function sendOtp(phone: string) {
 }
 
 /** OTP login for partners: businesses land on /dashboard, earners on /portal. */
-export async function verifyPartnerLogin(phone: string, code: string): Promise<{ user: unknown; home: string }> {
+export async function verifyPartnerLogin(phone: string, code: string, onAdopt?: (_epoch: number) => void): Promise<{ user: unknown; home: string }> {
+  const epoch = currentSessionEpoch();
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
     credentials: 'include',
@@ -446,9 +448,11 @@ export async function verifyPartnerLogin(phone: string, code: string): Promise<{
   if (data.isNewUser || !data.user?.id) {
     throw new Error('No Swift account is registered to that number.');
   }
+  if (currentSessionEpoch() !== epoch) throw new ApiRequestError('The signed-in account changed. Try again.', 409, 'SESSION_CHANGED');
   // The server has already issued these cookies, even if this account has
   // no partner profile. Invalidate every tab before reporting that mismatch.
   adoptSession(data.user.id);
+  onAdopt?.(currentSessionEpoch());
   const roles: string[] = data.user?.roles ?? [];
   // Same vendor-ness rule as the mobile app's authStore: role string or the
   // vendorOwner relation on the login payload.

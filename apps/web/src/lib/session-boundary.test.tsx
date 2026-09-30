@@ -279,7 +279,11 @@ describe('AX350 A–D: one session boundary for state and pending work', () => {
     expect(tab.deliveries.length).toBeGreaterThan(0);
     expect(auth.getSessionPrincipal()).toBe('a'); // No synchronous delivery.
     const proof = deferred<Response>();
-    tab.fetcher.mockReturnValueOnce(proof.promise);
+    const replacement = deferred<Response>();
+    let proofCount = 0;
+    tab.fetcher.mockImplementation(async (input) => String(input).endsWith('/auth/me')
+      ? ++proofCount === 1 ? proof.promise : replacement.promise
+      : response({ visible: false }));
     act(() => window.dispatchEvent(new Event('focus')));
     view.rerender(<Layout><Detail /></Layout>);
     expect(screen.getByText('Private address a').closest('[hidden][inert]')).not.toBeNull();
@@ -288,6 +292,11 @@ describe('AX350 A–D: one session boundary for state and pending work', () => {
     });
     expect(auth.getSessionPrincipal()).toBeNull();
     await act(async () => proof.resolve(response({ user: { id: 'a' } })));
+    expect(screen.queryByText('Private address a')).toBeNull();
+    expect(screen.getByRole('status').textContent).toBe('Opening this page…');
+    expect(view.container.querySelector('[hidden][inert]')).not.toBeNull();
+    await act(async () => replacement.resolve(response({ user: { id: 'b' } })));
+    await screen.findByText('Private address b');
     expect(screen.queryByText('Private address a')).toBeNull();
   });
 

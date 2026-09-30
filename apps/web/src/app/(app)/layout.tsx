@@ -52,10 +52,13 @@ function useShellSession(): ShellSession & { ensureSignedIn: () => Promise<boole
   // The one probe of this page load. Started by the shell's mount, or by the
   // first page that needs the answer before that — whichever comes first.
   const startProbe = useCallback(() => {
-    probe.current ??= sessionProbe().then((session) => {
-      setState((current) => (session.ok
-        ? { status: 'signed-in', principal: getSessionPrincipal(), restoreTried: current.restoreTried }
-        : { status: 'guest', principal: null, restoreTried: current.restoreTried }));
+    probe.current ??= sessionProbe().then(() => {
+      // An obsolete answer cannot overwrite a newer subscription update.
+      // Derive chrome only from the existing, currently settled principal.
+      setState((current) => {
+        const principal = getSessionPrincipal();
+        return { status: principal ? 'signed-in' : 'guest', principal, restoreTried: current.restoreTried };
+      });
     });
     return probe.current;
   }, []);
@@ -77,12 +80,11 @@ function useShellSession(): ShellSession & { ensureSignedIn: () => Promise<boole
     await startProbe();
     if (getSessionPrincipal()) return true;
     if (restoreSpent.current) return false;
-    restore.current ??= restoreSession().then((session) => {
+    restore.current ??= restoreSession().then(() => {
       restoreSpent.current = true;
-      setState(session.ok
-        ? { status: 'signed-in', principal: getSessionPrincipal(), restoreTried: true }
-        : { status: 'guest', principal: null, restoreTried: true });
-      return session.ok;
+      const principal = getSessionPrincipal();
+      setState({ status: principal ? 'signed-in' : 'guest', principal, restoreTried: true });
+      return principal !== null;
     });
     return restore.current;
   }, [startProbe]);

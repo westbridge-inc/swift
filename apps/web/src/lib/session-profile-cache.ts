@@ -38,10 +38,10 @@ export async function readSessionProfile(read: () => Promise<Profile>): Promise<
   // when a suspended tab missed both transports, /auth/me must attest to the
   // same identity before memory can answer. A fresh GET remains authoritative.
   if (client.getQueryState(key()) !== undefined) {
-    const session = await verifySessionNow();
+    let session = await verifySessionNow();
+    // An obsolete probe says nothing about the newer proof or cached data.
+    while (session.obsolete) session = await verifySessionNow();
     if (!session.ok || session.user?.['id'] !== getSessionPrincipal()) {
-      replacement = undefined;
-      client.clear();
       return read();
     }
   }

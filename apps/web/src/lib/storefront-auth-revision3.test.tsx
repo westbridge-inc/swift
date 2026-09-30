@@ -101,7 +101,7 @@ describe('QR-W-R2-2 cross-tab epoch', () => {
       vi.stubGlobal('sessionStorage', tabB);
       if (action === 'account-change') authB.adoptSession('second-account');
       else {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: action !== 'probe-sign-out', json: async () => ({ data: { user: { id: 'second-account' } } }) }));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: action !== 'probe-sign-out', status: action === 'probe-sign-out' ? 401 : 200, json: async () => ({ data: { user: { id: 'second-account' } } }) }));
         await authB.sessionProbe();
       }
     }
@@ -122,8 +122,9 @@ describe('QR-W-R2-2 cross-tab epoch', () => {
   });
   it('keeps this tab’s deliberate guest login and consumes the selection once', async () => {
     queueStorefrontContinuation(intent);
-    vi.spyOn(customer, 'verifyCustomerLogin').mockImplementation(async () => {
+    vi.spyOn(customer, 'verifyCustomerLogin').mockImplementation(async (_phone, _code, onAdopt) => {
       auth.adoptSession('new-customer');
+      onAdopt?.(auth.currentSessionEpoch());
       return { user: { id: 'new-customer' } };
     });
     const view = render(<LoginPage />);

@@ -37,7 +37,7 @@ export function Providers({ children, preserveShell = false }: { children: React
   if (proof.pathname !== pathname) setProof({ pathname, ready: !hasPrivateQueries(client), checkAt: 0 });
   const ready = proof.pathname === pathname && proof.ready;
 
-  useLayoutEffect(() => subscribeSession(() => {
+  useLayoutEffect(() => subscribeSession((source) => {
     if (currentSessionEpoch() === cache.epoch) return;
     // clear() cancels pending queries synchronously, even without a fetch
     // abort handler, before their promise can populate any observer.
@@ -45,6 +45,9 @@ export function Providers({ children, preserveShell = false }: { children: React
     // A late mutation rollback retains its old client; it must not be able to
     // repopulate the new person's cache after the transition.
     setCache({ epoch: currentSessionEpoch(), client: createClient() });
+    // A sibling/logout/login transition retires the pending masked proof.
+    // A probe's own retirement/adoption is settled by that same proof below.
+    if (source !== 'probe') setProof((current) => current.ready ? current : { ...current, checkAt: 0 });
   }), [client, cache.epoch]);
 
   useEffect(() => {
@@ -77,7 +80,14 @@ export function Providers({ children, preserveShell = false }: { children: React
       void verifySessionNow({ fresh: true }).then((answer) => {
         // Keep the mounted draft hidden after inconclusive proof. A later
         // focus, pageshow, visibility or online event can request fresh proof.
-        if (cancelled || (!answer.ok && !answer.signedOut)) return;
+        if (cancelled) return;
+        if (answer.obsolete) {
+          // Another caller may have replaced this flight without a resume.
+          // Re-prove the current epoch; the obsolete result cannot release it.
+          setProof((current) => current === proof ? { ...current, checkAt: 0 } : current);
+          return;
+        }
+        if (!answer.ok && !answer.signedOut) return;
         // A newer resume owns its own proof; an older result cannot unmask it.
         setProof((current) => current === proof ? { ...current, ready: true } : current);
       });

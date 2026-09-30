@@ -129,7 +129,7 @@ describe('AX329 F1: two browser tabs sharing cookie identity', () => {
     tabs.switchTo(null);
     act(() => tabs.second.clearSession());
     await act(async () => proof.resolve(new Response(JSON.stringify({ data: { user: { id: 'a' } } }))));
-    expect(await checking).toEqual({ ok: false });
+    expect(await checking).toEqual({ ok: false, obsolete: true });
     expect(tabs.first.getSessionPrincipal()).toBeNull();
   });
 
@@ -246,7 +246,7 @@ describe('AX329 F1: two browser tabs sharing cookie identity', () => {
     tabs.switchTo('b');
     await tabs.first.sessionProbe();
     old.resolve(new Response(JSON.stringify({ data: { user: { id: 'a' } } })));
-    expect(await checking).toEqual({ ok: false });
+    expect(await checking).toEqual({ ok: false, obsolete: true });
     expect(tabs.first.getSessionPrincipal()).toBe('b');
   });
 

@@ -57,7 +57,7 @@ describe('[Q7b] signing in from the customer app', () => {
     ['the cart', '/cart'],
   ])('from %s is a customer sign-in that returns there', async (_name, next) => {
     expect(await signIn(`next=${encodeURIComponent(next)}`)).toBe(next);
-    expect(mocked.verifyCustomerLogin).toHaveBeenCalledWith('+5926001001', '246810');
+    expect(mocked.verifyCustomerLogin).toHaveBeenCalledWith('+5926001001', '246810', expect.any(Function));
     expect(mocked.verifyPartnerLogin).not.toHaveBeenCalled();
   });
 

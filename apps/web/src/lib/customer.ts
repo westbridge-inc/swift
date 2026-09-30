@@ -3,7 +3,7 @@
 // Customer ordering client for the web app — talks to the SAME backend the
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
-import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
+import { BROWSER_CLIENT, ApiRequestError, adoptSession, apiFetch, currentSessionEpoch, getSessionPrincipal, sendOtp } from './auth';
 import { formatMoney } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
@@ -12,7 +12,8 @@ export { sendOtp };
 
 // ── Auth (customer) ────────────────────────────────────────────────────────
 /** OTP login that accepts a CUSTOMER account (partner login rejects them). */
-export async function verifyCustomerLogin(phone: string, code: string): Promise<{ user: any }> {
+export async function verifyCustomerLogin(phone: string, code: string, onAdopt?: (_epoch: number) => void): Promise<{ user: any }> {
+  const epoch = currentSessionEpoch();
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
     credentials: 'include',
@@ -27,7 +28,9 @@ export async function verifyCustomerLogin(phone: string, code: string): Promise<
   if (data.isNewUser || !data.user?.id) {
     throw new Error('No Swift account is registered to that number yet. Create your account on this page to continue.');
   }
+  if (currentSessionEpoch() !== epoch) throw new ApiRequestError('The signed-in account changed. Try again.', 409, 'SESSION_CHANGED');
   adoptSession(data.user.id);
+  onAdopt?.(currentSessionEpoch());
   return { user: data.user };
 }
 
