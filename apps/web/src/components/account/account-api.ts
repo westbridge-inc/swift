@@ -20,7 +20,8 @@ export interface Ticket { id: string; subject: string; status: string; adminNote
 export interface TicketInput { category: SupportCategory; subject: string; message: string; orderId?: string }
 
 // The phone's customerApi contracts, using the web's cookie/session guard.
-// Private reads are never cached by the browser; expiry leaves the shell's door visible.
+// Private HTTP reads use no-store; profile memory reuse is scoped below.
+// Expiry leaves the shell's sign-in door visible.
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   try {
     const response = await apiFetch(`/api/v1/customer${path}`, {

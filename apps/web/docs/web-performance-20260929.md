@@ -41,7 +41,7 @@ Header GETs (`curl --compressed -D - -o /dev/null`) found `content-encoding: gzi
 | Cart `/cart` | Shell identity → `cart || addresses` → public storefront → public rich vendor menu. Mutations and final checkout revalidate server quotes. | Unchanged; cart lane owns these files. No cached checkout proof introduced. |
 | Orders `/orders` | Identity → scoped orders query, five-second global freshness. Cached rows could show old status during refresh. | Same scoped list, staleTime zero on entry; active tab polls every 15 seconds. Cached row geometry remains but status/amount are marked checking/offline/unavailable until the server answers. No amount computation changed. |
 | Account `/account` | Identity → profile. Account → settings → Account repeats profile (three HTTP GETs); profile and consent already parallel in settings. | Profile uses an in-memory React Query cache scoped to auth principal and epoch, stale 60 seconds, GC five minutes. Three navigation reads → one HTTP GET. Successful PUT updates the same session cache and supersedes older GETs. Auth changes clear it synchronously. Other account reads remain live. |
-| Explore `/explore` | Entire page is a client component; vendor GET on every mount. | Static content/icons rendered on server; only the live rail hydrates, one scoped five-second query after identity settles. |
+| Explore `/explore` | Entire page is a client component; vendor GET on every mount. | Static content/icons rendered on server; only the live rail hydrates. Its original one-GET-per-mount behavior is retained, without adding a query observer to this route. |
 
 Source anchors: `src/app/(app)/layout.tsx`, `src/components/customer-home.tsx`, `src/components/storefront/storefront-page.tsx`, `src/components/storefront/storefront-experience.tsx`, each named route page, `src/lib/customer.ts`, `src/components/account/account-frame.tsx` and `account-api.ts`. No personal response is serialized by Market: its server reads omit credentials, use `no-store`, time out after three seconds per request, and construct a new QueryClient for every render. Failure leaves the existing browser retry UI in charge. Items are never requested for a closed/unknown depth verdict.
 
@@ -105,3 +105,34 @@ Streaming/offline follow-up: actual React pipeable streaming test delays the Mar
 streaming-active-observer: exit 1; Test Files  1 failed (1) | Tests  1 failed | 7 passed (8) | ⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯ | FAIL  src/lib/market-performance.test.tsx > Market request phases and server rendering > renders catalogue HTML even when the Market segment streams after the shell
 offline-orders-unmarked: exit 1; Test Files  1 failed (1) | Tests  1 failed | 6 passed (7) | ⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯ | FAIL  src/components/cache-performance.test.tsx > per-person reuse without changing live money reads > does not present cached orders as current when a refetch is paused offline
 ```
+
+## Final local verification
+
+All commands ran through `heavy.sh`, using Node 20.19.6 and the existing symlinked dependencies:
+
+- `tsc --noEmit`: exit 0.
+- `vitest run --config vitest.comb.config.ts --maxWorkers=2`: **58 files passed; 665 tests passed**, 17.62 seconds (23:30 local run).
+- An earlier full run was 662 passed / 3 failed: two header tests inherited staging-only build environment variables from the verification wrapper, and the isolated Explore rendering test lacked the app shell's QueryClient provider. The wrapper now applies staging variables only to the build, and the test provides production's context with all assertions retained.
+
+Independent reviewers approved source head `544d0ab15622060d315a95166c0f49d77bb9bb51`; the subsequent test-context/evidence update receives an exact-head follow-up review before publication.
+
+
+Production-server smoke check (local `next start`, staging public GETs only, no browser scripts/cookies): all **24/24** API item names appeared in `/market` HTML after stripping script payloads. The streamed response also includes the transient loading fallback. The completed catalogue is present in HTML, not only in serialized RSC data.
+
+The install prompt's fixed **44×44 CSS px** local icon now uses Next's existing local image optimizer (no new remote host or config). Actual local production GET with `Accept: image/webp`: original 192px PNG **5,736 B**, generated 96px 2× variant **552 B**, both HTTP 200; **90.4% fewer bytes**. Remote catalogue-photo savings remain unverified. Prompt timing, placement and dimensions are unchanged.
+
+Final rebuild after the Explore/icon changes: `tsc --noEmit` exit 0; full suite **58/58 files, 665/665 tests**, 18.39 seconds; `next build` exit 0, Next 15.5.25, compiled in 7.6 seconds, generated 53/53 pages. Same Node/build channel as baseline.
+
+| Route | Final route JS | Final first-load JS |
+| --- | ---: | ---: |
+| / | 7.88 kB | 137 kB |
+| /account | 4.72 kB | 130 kB |
+| /cart | 9.27 kB | 120 kB |
+| /explore | 3.12 kB | 119 kB |
+| /market | 5.72 kB | 135 kB |
+| /order/search | 3.61 kB | 128 kB |
+| /order/vendor/[id] | 6.27 kB | 135 kB |
+| /orders | 2.4 kB | 122 kB |
+| /store/[slug] | 15.5 kB | 131 kB |
+
+Bundle trade-off: Explore drops from 5.14 to 3.12 kB route JS and 121 to 119 kB first-load JS. React Query/hydration support increases Search first-load JS from 119 to 128 kB, Account from 125 to 130 kB, and Home/Market/Orders by 1 kB each. Public store, ordering store and Cart first-load sizes are unchanged. There is no claim that every route got smaller; the request reductions and cache safety are separately proven. No data/commerce cache was extended globally.
