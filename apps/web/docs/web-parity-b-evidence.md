@@ -78,3 +78,27 @@ Local gates: full web suite, standalone typecheck, final build (including lint/t
 Three independent read-only subagents reviewed cart changes, document changes and test/mutation evidence. All six S2 implementation/proof findings were fixed and source-rechecked: preserved money-test guards with new copy, actual checkout error-code guidance, API-hosted agreement URLs, owner-only store checklist no upload link before vehicle provisioning, and a tracked portable mutation-runner configuration for fresh checkouts. No remaining blocking implementation finding in their bounded source reviews. API/cross-lane limitations above remain explicit.
 
 No real account, document upload, order placement, phone simulator, database, live customer data, production system or deployment was accessed. Installed-iPhone/PWA interaction and authenticated staging checklist/order behavior remain UNVERIFIED. No merge was attempted.
+
+## Current-base recheck after main advanced
+
+The required pre-push fetch advanced `origin/main` to `d6a6ed6c50afa8f9fe09eec8aafde003ad1bea0b` (route classification / private noindex / client shell extraction). `git merge origin/main` completed with the ort strategy, no conflicts and no rebase. PR diff remains 22 web-only paths. All three reviewers approved exact merged head `5532559fb91df2d713c008e59c7f5ee894698298`, verifying the reviewed implementation and tests were unchanged and the extracted shells preserve integration boundaries.
+
+Re-ran on this base:
+
+```text
+heavy.sh ./node_modules/.bin/vitest run --config vitest.comb.config.ts --maxWorkers=2
+Test Files  60 passed (60)
+     Tests  749 passed (749)
+  Duration  19.66s
+exit 0
+
+SWIFT_WEB_CHANNEL=staging NEXT_PUBLIC_API_URL=https://api-staging.swiftgy.com API_URL=https://api-staging.swiftgy.com heavy.sh ./node_modules/.bin/next build
+Compiled successfully in 6.5s
+Linting and checking validity of types ...
+Generating static pages (53/53)
+exit 0
+```
+
+Removed `apps/web/.next` after this build. The following evidence-only commit does not change tested code. GitHub required-check counts and final evidence-only review are reported in the PR.
+
+Workflow exception: automatic merge commit `5181ed2642d3865e8cde892cb3dd1c76cfd39096` uses the required Westbridge identity but lacks the requested Codex coauthor trailer. Every authored implementation/evidence commit has that trailer. History was preserved under the no-rewrite rule.
