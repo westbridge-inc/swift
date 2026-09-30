@@ -27,6 +27,11 @@ export class SmsNotSubmittedError extends Error {
   readonly notSubmitted = true as const;
 }
 
+/** A push request was rejected or could not reach the provider. */
+export class PushNotSubmittedError extends Error {
+  readonly notSubmitted = true as const;
+}
+
 /** Network failures that happen before a request can leave this process. */
 const NEVER_LEFT_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
 
@@ -44,7 +49,12 @@ const pushProviderTimeoutMs = () => {
 /** How urgently ONE push travels [Q10 loud alerts 1/4]. Chosen per alert
  *  class (alert-class.ts, pushOptionsFor) and passed through every layer to
  *  the adapter, which maps it onto its own wire fields. */
+/** Starts the request under current authority; undefined means no handoff. */
+export type SubmissionGuard = <T>(submit: () => Promise<T>) => Promise<T | undefined>;
+
 export interface PushOptions {
+  /** Server-only authority carried to every actual provider request. */
+  submit?: SubmissionGuard;
   /** The class these options came from: recorded, never sent. */
   alertClass: AlertClass;
   /** high = delivered at once, even to a dozing Android; normal = the
@@ -150,12 +160,17 @@ class DevPush implements PushProvider {
     // adapter measures it.
     if (options.stillWanted && !(await options.stillWanted())) return { sent: 0, withdrawn: true };
     if (!pushWindow(options, Date.now())) return { sent: 0 };
-    const logged: PushOptions = { ...options };
-    delete logged.stillWanted; // a guard, not a delivery option
-    for (const token of deviceTokens) {
-      devChannelLog.push({ channel: 'push', to: token, title, body, data, options: { ...logged }, at: new Date() });
-    }
-    return { sent: deviceTokens.length };
+    const deliver = async () => {
+      if (!pushWindow(options, Date.now())) return { sent: 0 };
+      const logged: PushOptions = { ...options };
+      delete logged.submit;
+      delete logged.stillWanted; // a guard, not a delivery option
+      for (const token of deviceTokens) {
+        devChannelLog.push({ channel: 'push', to: token, title, body, data, options: { ...logged }, at: new Date() });
+      }
+      return { sent: deviceTokens.length };
+    };
+    return options.submit ? (await options.submit(deliver)) ?? { sent: 0, withdrawn: true } : deliver();
   }
 }
 
@@ -306,59 +321,52 @@ export class ExpoPushProvider implements PushProvider {
     let sent = 0;
     let withdrawn = false;
     const invalidTokens: string[] = [];
-
+    type Tickets = { data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }> };
     for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
-      // [AX291 F04] Nothing leaves once the reason for it ended, asked per request.
-      if (options.stillWanted && !(await options.stillWanted())) {
-        withdrawn = true;
-        break;
-      }
-      // Measured per request, and [AX308] only AFTER the awaited guard, right
-      // before submission: the guard is a database read that can take seconds,
-      // and a window measured before it would send a push already past its
-      // deadline, or ask for time that is gone. A later chunk asks for less
-      // time, and nothing leaves once the deadline has no whole second left.
-      const window = pushWindow(options, Date.now());
-      if (!window) break;
+      if (options.stillWanted && !(await options.stillWanted())) { withdrawn = true; break; }
+      if (!pushWindow(options, Date.now())) break;
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
-      const controller = new AbortController();
-      const timeoutMs = pushProviderTimeoutMs();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      timer.unref?.();
-      let res: Response;
-      try {
-        res = await fetch(this.url, {
+      // The callback starts fetch synchronously under any caller's authority
+      // lock. Network response/body completion is awaited AFTER that lock is
+      // released. Its errors stay inside the guarded promise, so an uncertain
+      // response cannot silently become a fresh ladder request on retry.
+      const submit = (): Promise<Tickets | undefined> => {
+        const window = pushWindow(options, Date.now());
+        if (!window) return Promise.resolve(undefined);
+        const controller = new AbortController();
+        const timeoutMs = pushProviderTimeoutMs();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        timer.unref?.();
+        return fetch(this.url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
           body: JSON.stringify(chunk.map((to) => expoMessage(to, title, body, data, options, window))),
           signal: controller.signal,
-        });
-      } catch (error) {
-        const reason = controller.signal.aborted
-          ? `timed out after ${timeoutMs}ms`
-          : (error as Error).message;
-        throw new Error(`Expo push request failed: ${reason}`);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
-      }
-      // Tickets come back in message order — index maps ticket -> token.
-      const payload = (await res.json()) as {
-        data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }>;
+        }).then(async (res) => {
+          if (!res.ok) {
+            const detail = await res.text().catch(() => '');
+            const ErrorType = res.status >= 400 && res.status < 500 && res.status !== 408 ? PushNotSubmittedError : Error;
+            throw new ErrorType(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
+          }
+          return await res.json() as Tickets;
+        }).catch((error: unknown) => {
+          if (error instanceof PushNotSubmittedError) throw error;
+          const cause = error as { message?: string; code?: string; cause?: { code?: string } };
+          const reason = controller.signal.aborted ? `timed out after ${timeoutMs}ms` : cause.message;
+          if (NEVER_LEFT_CODES.has(cause.code ?? cause.cause?.code ?? '')) throw new PushNotSubmittedError(`Expo push request not submitted: ${reason}`);
+          throw new Error(`Expo push request failed: ${reason}`);
+        }).finally(() => clearTimeout(timer));
       };
+      const payload = options.submit ? await options.submit(submit) : await submit();
+      if (!payload) { withdrawn = pushWindow(options, Date.now()) !== null; break; }
       (payload.data ?? []).forEach((ticket, idx) => {
-        if (ticket.status === 'ok') {
-          sent += 1;
-        } else if (ticket.details?.error === 'DeviceNotRegistered') {
+        if (ticket.status === 'ok') sent += 1;
+        else if (ticket.details?.error === 'DeviceNotRegistered') {
           const token = chunk[idx];
           if (token) invalidTokens.push(token);
         }
       });
     }
-
     return { sent, ...(invalidTokens.length ? { invalidTokens } : {}), ...(withdrawn ? { withdrawn } : {}) };
   }
 }

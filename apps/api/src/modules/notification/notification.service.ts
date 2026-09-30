@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
+import { getChannels, type NotificationChannels, type SubmissionGuard } from '../../providers/notifications/channels';
 import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter } from '../../plugins/observability';
 import { storeAlertRecipients } from './store-alert-recipients';
+import { storeAlertSubmission, withStoreAlertAuthority } from './store-alert-authority';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -161,6 +162,7 @@ export async function notifyAdmins(
     /** [R13] A durable caller's page must reach every admin; otherwise this
      *  throws so the committed obligation stays retryable. */
     requireAll?: boolean;
+    submit?: SubmissionGuard;
   },
 ): Promise<number> {
   // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
@@ -231,7 +233,7 @@ export async function notifyAdmins(
       body: input.body,
       data: input.data,
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-    });
+    }, { submit: input.submit });
     if (id) reached += 1;
   }
   // SWIFT-AUD-D7-03: ops pages get the same ack-tracking as vendor/mover
@@ -256,6 +258,11 @@ export async function notifyAdmins(
   return reached;
 }
 
+interface DeliveryControl {
+  submit?: SubmissionGuard;
+  store?: { vendorId: string; userId: string };
+}
+
 export class NotificationService {
   constructor(
     private prisma: PrismaClient,
@@ -263,7 +270,7 @@ export class NotificationService {
     private channels: NotificationChannels = getChannels(),
   ) {}
 
-  async send(payload: NotificationPayload): Promise<string> {
+  async send(payload: NotificationPayload, control: DeliveryControl = {}): Promise<string> {
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
     // A notification is best-effort: a persistence/fan-out hiccup must NEVER
@@ -274,7 +281,7 @@ export class NotificationService {
     // wrapped separately — every failure is LOGGED, never propagated.
     let notification: { id: string; createdAt: Date };
     try {
-      notification = await this.prisma.notification.create({
+      const write = (db: Prisma.TransactionClient | PrismaClient) => db.notification.create({
         data: {
           userId: payload.userId,
           type: payload.type,
@@ -284,6 +291,11 @@ export class NotificationService {
           dedupeKey: payload.dedupeKey ?? null,
         },
       });
+      const persisted = control.store
+        ? await withStoreAlertAuthority(this.prisma, control.store.vendorId, control.store.userId, (tx) => write(tx))
+        : control.submit ? await control.submit(() => write(this.prisma)) : await write(this.prisma);
+      if (!persisted) return '';
+      notification = persisted;
     } catch (err) {
       // [REPORT-034 #30] A dedupe-key collision is the mechanism WORKING, not
       // a failure: a retried job re-ran a send that already landed. Return the
@@ -308,7 +320,7 @@ export class NotificationService {
       return '';
     }
 
-    await this.publishPersisted(notification.id);
+    await this.publishPersisted(notification.id, control.submit);
     return notification.id;
   }
 
@@ -316,7 +328,7 @@ export class NotificationService {
    * persisted. This is the post-commit half for liability-sensitive workflows:
    * socket/push failures cannot roll back the domain fact, and retrying this
    * method never inserts a duplicate inbox notification. */
-  async publishPersisted(notificationId: string): Promise<boolean> {
+  async publishPersisted(notificationId: string, submit?: SubmissionGuard): Promise<boolean> {
     let notification: Notification | null;
     try {
       notification = await this.prisma.notification.findUnique({ where: { id: notificationId } });
@@ -331,15 +343,19 @@ export class NotificationService {
       : undefined;
 
     try {
-      // Live socket delivery
-      this.io.to(`user:${notification.userId}`).emit('notification', {
-        id: notification.id,
-        type: notification.type,
-        title: notification.title,
-        body: notification.body,
-        data,
-        createdAt: notification.createdAt,
-      });
+      // Live socket delivery: a store guard holds recipient authority only until emit.
+      const emit = async () => {
+        this.io.to(`user:${notification.userId}`).emit('notification', {
+          id: notification.id,
+          type: notification.type,
+          title: notification.title,
+          body: notification.body,
+          data,
+          createdAt: notification.createdAt,
+        });
+        return true;
+      };
+      if (submit ? !(await submit(emit)) : !(await emit())) return false;
 
       // Channel fan-out through the swappable interface, honouring prefs.
       const user = await this.prisma.user.findUnique({
@@ -359,7 +375,7 @@ export class NotificationService {
           // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
           // kind picks how urgently it travels (alert-class.ts), and each
           // device gets only the channel its installed app has (device-push.ts).
-          await pushToDevices(this.channels.push, devices, notification.title, notification.body, data)
+          await pushToDevices(this.channels.push, devices, notification.title, notification.body, data, { submit })
             .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
             .catch((err) => {
               log().warn(
@@ -535,13 +551,14 @@ export class NotificationService {
    * and the store copy is tagged audience business, like the re-alert.
    * [Q10 loud alerts 2/4] newOrderForStore sends this to the whole team.
    */
-  async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string, respondBy?: Date | null): Promise<string> {
+  async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string, respondBy: Date | null | undefined, vendorId: string): Promise<string> {
     // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
     // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
     // must never fail the alert itself.
     await this.prisma.alertDelivery
       .create({ data: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: vendorOwnerId } })
       .catch(() => {});
+    const submit = storeAlertSubmission(this.prisma, vendorId, vendorOwnerId, undefined, () => !respondBy || respondBy.getTime() - Date.now() >= 1_000);
     const notificationId = await this.send({
       userId: vendorOwnerId,
       type: 'ORDER_UPDATE',
@@ -552,16 +569,15 @@ export class NotificationService {
         orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert',
         ...(respondBy ? { respondBy: respondBy.toISOString() } : {}),
       },
-    });
+    }, { submit, store: { vendorId, userId: vendorOwnerId } });
+    if (!notificationId) return '';
 
     // Dedicated persistent-alert event for the vendor dashboard banner + ring
-    this.io.to(`user:${vendorOwnerId}`).emit('vendor:order_alert', {
-      notificationId,
-      orderId,
-      orderNumber,
-      total,
-      persistent: true,
-    });
+    const emit = async () => {
+      this.io.to(`user:${vendorOwnerId}`).emit('vendor:order_alert', { notificationId, orderId, orderNumber, total, persistent: true });
+      return true;
+    };
+    await submit(emit);
 
     return notificationId;
   }
@@ -584,7 +600,7 @@ export class NotificationService {
   }): Promise<string[]> {
     const recipients = await storeAlertRecipients(this.prisma, order.vendorId);
     return Promise.all(recipients.map((userId) =>
-      this.newOrderForVendor(userId, order.orderNumber, order.itemCount, order.total, order.orderId, order.respondBy)));
+      this.newOrderForVendor(userId, order.orderNumber, order.itemCount, order.total, order.orderId, order.respondBy, order.vendorId)));
   }
 
   async newDeliveryForRider(riderId: string, orderNumber: string, vendorName: string, deliveryFee: number, orderId: string): Promise<void> {

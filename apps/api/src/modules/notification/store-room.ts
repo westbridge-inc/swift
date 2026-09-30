@@ -552,10 +552,13 @@ async function convergeOnce(io: Server, state: StoreRoomState, opts: StoreRoomCo
   }
   try {
     let members: Set<string>;
+    const readStartedAt = performance.now();
     try {
       members = pairs.size > 0
         ? await withTimeout(opts.readMembers([...pairs.values()]), opts.timeoutMs, 'Store-room membership re-validation')
         : new Set();
+      // A resolved promise can beat an overdue timer after an event-loop stall.
+      if (performance.now() - readStartedAt >= opts.timeoutMs) throw new Error('Store-room membership deadline elapsed');
     } catch (error) {
       // Fail closed: whoever this pass could not vouch for leaves the room
       // until a read succeeds (a fresher admission is left alone).

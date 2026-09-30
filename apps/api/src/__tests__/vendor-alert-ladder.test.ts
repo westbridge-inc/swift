@@ -104,7 +104,7 @@ async function pendingOrderWithAlert(respondBy = new Date(Date.now() + 10 * 60_0
       deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
     },
   });
-  await notifications.newOrderForVendor(owner.userId, order.orderNumber, 1, 1500, order.id, respondBy);
+  await notifications.newOrderForVendor(owner.userId, order.orderNumber, 1, 1500, order.id, respondBy, vendorId);
   return { orderId: order.id, orderNumber: order.orderNumber, respondBy };
 }
 

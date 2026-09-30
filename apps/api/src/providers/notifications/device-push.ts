@@ -1,4 +1,4 @@
-import type { PushProvider } from './channels';
+import type { PushProvider, SubmissionGuard } from './channels';
 import { CHANNELS_ALERTS_VERSION, pushOptionsForDevice } from './alert-class';
 
 // ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ export async function pushToDevices(
   title: string,
   body: string,
   data: Record<string, unknown> | undefined,
-  opts: { stillWanted?: () => Promise<boolean> } = {},
+  opts: { stillWanted?: () => Promise<boolean>; submit?: SubmissionGuard } = {},
 ): Promise<DevicePushResult> {
   const groups = [
     devices.filter((device) => alertsVersionOf(device) < CHANNELS_ALERTS_VERSION),
@@ -78,6 +78,7 @@ export async function pushToDevices(
         {
           ...pushOptionsForDevice(data, alertsVersionOf(group[0]!)),
           ...(opts.stillWanted ? { stillWanted: opts.stillWanted } : {}),
+          ...(opts.submit ? { submit: opts.submit } : {}),
         },
       );
       result.sent += sent.sent;

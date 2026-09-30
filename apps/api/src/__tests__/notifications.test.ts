@@ -286,7 +286,7 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
   });
 
   it('a new order creates the persistent alert (unread = banner state)', async () => {
-    await notifications.newOrderForVendor(vendorUser.userId, 'S11-TEST', 2, 2000, orderId);
+    await notifications.newOrderForVendor(vendorUser.userId, 'S11-TEST', 2, 2000, orderId, undefined, vendorId);
 
     const pending = await app.inject({
       method: 'GET',
@@ -368,7 +368,7 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
         deliveryFee: 0, totalAmount: 1000, paymentMethod: 'CASH',
       },
     });
-    await notifications.newOrderForVendor(vendorUser.userId, order.orderNumber, 1, 1000, order.id);
+    await notifications.newOrderForVendor(vendorUser.userId, order.orderNumber, 1, 1000, order.id, undefined, vendorId);
 
     const accept = await app.inject({
       method: 'PUT',

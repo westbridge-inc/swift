@@ -29,6 +29,7 @@ import {
   type LadderDeps,
   type LadderRung,
 } from '../modules/notification/store-alert-ladder';
+import { storeAlertSubmission } from '../modules/notification/store-alert-authority';
 import { isStoreRoomMember } from '../modules/notification/store-alert-recipients';
 import {
   STORE_ROOM_EVICTION_BOUND_MS as STORE_ROOM_STRICT_BOUND_MS,
@@ -37,11 +38,12 @@ import {
   revokeStoreRoom,
   setStoreRoomCluster,
   storeRoomEpoch,
+  storeRoomMemberKey,
   storeRoomTiming,
   subscribeToStoreRoom,
 } from '../modules/notification/store-room';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
-import { SmsNotSubmittedError, devChannelLog, getChannels, type DevChannelEntry, type PushProvider } from '../providers/notifications/channels';
+import { SmsNotSubmittedError, ExpoPushProvider, withPushRetry, devChannelLog, getChannels, type DevChannelEntry, type PushProvider } from '../providers/notifications/channels';
 import { STORE_ALERT_SMS_DAILY_PREFIX, checkOtpDailyBudget } from '../utils/sms-budget';
 import { guyanaDayKey } from '../utils/guyana-day';
 import { storeAlertRungsCounter } from '../plugins/observability';
@@ -1690,5 +1692,361 @@ describe('this suite cleans up only what it made (AX291 F07)', () => {
     } finally {
       await app.prisma.alertDelivery.deleteMany({ where: { id: unrelated.id } });
     }
+  });
+});
+
+// SX392: real deletion and delivery boundaries, without auto-cancellation.
+describe('SX392 recipient, deadline and ownership handoffs', () => {
+  const snapshot = (orderId: string) => ({ pushes: [ownerA0, ownerA1, staffA1Device, managerADevice].map((t) => stillWaitingPushesTo(t, orderId).length), texts: smsTo(ownerA.phone).length, sockets: emitted.filter((e) => (e.payload as { orderId?: string }).orderId === orderId).length });
+  for (const phase of ['initial', 'ring1', 'ring2'] as const) {
+    it(`${phase}: a deletion committed after selection prevents subsequent recipient delivery`, async () => {
+      const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const membership = await joinTeam(storeA, member, ownerA);
+      const token = await device(member);
+      const o = await placeAndAlert(storeA, { alert: phase !== 'initial' });
+      const initialCount = pushesTo(token).length;
+      let deleted = false;
+      const drop = async () => {
+        if (deleted) return;
+        deleted = true;
+        await app.prisma.vendorStaff.delete({ where: { id: membership.id } });
+      };
+      const realDevices = app.prisma.deviceToken.findMany.bind(app.prisma.deviceToken);
+      const realReceipt = app.prisma.alertDelivery.create.bind(app.prisma.alertDelivery);
+      const seam = phase === 'initial'
+        ? vi.spyOn(app.prisma.alertDelivery, 'create').mockImplementation((async (args: Parameters<typeof realReceipt>[0]) => {
+          const row = await realReceipt(args);
+          if (args.data.recipientId === member.userId) await drop();
+          return row;
+        }) as unknown as typeof realReceipt)
+        : vi.spyOn(app.prisma.deviceToken, 'findMany').mockImplementation((async (args: Parameters<typeof realDevices>[0]) => {
+          const rows = await realDevices(args);
+          if (rows.some((row) => row.token === token)) await drop();
+          return rows;
+        }) as typeof realDevices);
+      const eventsBefore = emitted.length;
+      try {
+        if (phase === 'initial') await notifications.newOrderForStore({ vendorId: storeA, ...o, itemCount: 1, total: 1500 });
+        else await runLadderRung(deps(), o.orderId, phase);
+      } finally { seam.mockRestore(); }
+      expect(deleted).toBe(true);
+      expect(pushesTo(token)).toHaveLength(initialCount);
+      expect(emitted.slice(eventsBefore).filter((e) => e.room === `user:${member.userId}`)).toEqual([]);
+      if (phase === 'initial') expect(await app.prisma.notification.count({ where: { userId: member.userId, data: { path: ['orderId'], equals: o.orderId } } })).toBe(0);
+      expect(emitted.slice(eventsBefore).some((e) => e.room === `user:${ownerA.userId}`)).toBe(true);
+    });
+  }
+
+  for (const { rung } of LADDER) {
+    it(`${rung}: expiry during the claim await prevents every handoff and refunds unused SMS spend`, async () => {
+      const o = await placeAndAlert(storeA);
+      const counted = await textsCounted(ownerA.phone);
+      const before = snapshot(o.orderId);
+      const now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+      try {
+        const racing = deps({ redis: redisRacingAtClaim(async () => { clock.mockReturnValue(o.respondBy.getTime() + 1); }) });
+        expect(await runLadderRung(racing, o.orderId, rung)).toBe('window_closed');
+        expect(snapshot(o.orderId)).toEqual(before);
+        expect(await opsRowsFor(adminA.userId, o.orderId)).toEqual([]);
+        expect(await textsCounted(ownerA.phone)).toBe(counted);
+      } finally { clock.mockRestore(); }
+    });
+  }
+
+  it('an expired pre-submission claim cannot send after its replacement has sent', async () => {
+    const o = await placeAndAlert(storeA);
+    let resume!: () => void;
+    let paused!: () => void;
+    const held = new Promise<void>((done) => { paused = done; });
+    const wait = new Promise<void>((done) => { resume = done; });
+    const key = rungClaimKey(o.orderId, 'sms');
+    const a = runLadderRung(deps({ redis: redisRacingAtClaim(async () => { paused(); await wait; }) }), o.orderId, 'sms');
+    await held;
+    await app.redis.pexpire(key, 1);
+    await vi.waitFor(async () => expect(await app.redis.exists(key)).toBe(0));
+    expect(await runLadderRung(deps(), o.orderId, 'sms')).toBe('sms_sent');
+    resume();
+    await a;
+    expect(smsTo(ownerA.phone).filter((e) => e.body.includes(o.orderNumber))).toHaveLength(1);
+    expect(await app.redis.get(key)).toBe('done:sms_sent');
+  });
+
+  it('a provider call still in flight cannot become a fresh send when its short claim expires', async () => {
+    const o = await placeAndAlert(storeA);
+    let resume!: () => void;
+    let submitted!: () => void;
+    const called = new Promise<void>((done) => { submitted = done; });
+    const wait = new Promise<void>((done) => { resume = done; });
+    let submissions = 0;
+    const channels = { ...getChannels(), sms: { sendSms: async () => { submissions += 1; submitted(); await wait; throw new Error('response lost after submission'); } } };
+    const a = runLadderRung(deps({ channels }), o.orderId, 'sms');
+    await called;
+    const key = rungClaimKey(o.orderId, 'sms');
+    await app.redis.pexpire(key, 1);
+    await vi.waitFor(async () => expect(await app.redis.exists(key)).toBe(0));
+    const second = await runLadderRung(deps(), o.orderId, 'sms');
+    resume();
+    expect(await a).toBe('sms_uncertain');
+    expect(second).not.toBe('sms_sent');
+    expect(submissions).toBe(1);
+    expect(smsTo(ownerA.phone).filter((e) => e.body.includes(o.orderNumber))).toEqual([]);
+  });
+});
+
+describe('SX392 convergence deadlines', () => {
+  for (const remembered of [false, true]) {
+    it(`a stalled positive cannot ${remembered ? 'readmit a remembered' : 'retain a joined'} socket`, async () => {
+      const io = new SocketIoServer();
+      const vendorId = `q10b-r5-${nanoid(6)}`;
+      const rooms = new Set<string>([`vendor:${vendorId}`]);
+      const phone = { id: `q10b-${nanoid(6)}`, connected: true, data: { userId: ownerA.userId, tenantId: 'swift-default' }, rooms,
+        join: vi.fn((room: string) => { rooms.add(room); }), leave: vi.fn((room: string) => { rooms.delete(room); }) };
+      io.of('/').sockets.set(phone.id, phone as unknown as ServerSocket);
+      if (remembered) {
+        expect((await convergeStoreRooms(io, { readMembers: async () => { throw new Error('temporary failure'); }, timeoutMs: 50 })).outcome).toBe('read_failed');
+        expect(rooms.has(`vendor:${vendorId}`)).toBe(false);
+      }
+      const result = await convergeStoreRooms(io, { timeoutMs: 50, readMembers: async (pairs) => {
+        const until = performance.now() + 120;
+        while (performance.now() < until) { /* a positive answer beats the overdue timer */ }
+        return new Set(pairs.map(storeRoomMemberKey));
+      } });
+      expect(result.outcome).toBe('read_failed');
+      expect(rooms.has(`vendor:${vendorId}`)).toBe(false);
+      expect(phone.join).not.toHaveBeenCalled();
+    });
+  }
+});
+
+
+describe('SX392 actual transport serialization', () => {
+  it('DELETE waits until actual Expo handoff, then commits before the provider reply', async () => {
+    const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const membership = await joinTeam(storeA, member, ownerA);
+    let authorityHeld!: () => void;
+    let permit!: () => void;
+    let reply!: (response: Response) => void;
+    let transportStarted!: () => void;
+    const locked = new Promise<void>((done) => { authorityHeld = done; });
+    const wait = new Promise<void>((done) => { permit = done; });
+    const started = new Promise<void>((done) => { transportStarted = done; });
+    const response = new Promise<Response>((done) => { reply = done; });
+    let removed = false;
+    let submitted = false;
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      submitted = true;
+      expect(removed).toBe(false);
+      transportStarted();
+      return response;
+    });
+    try {
+      const submit = storeAlertSubmission(app.prisma, storeA, member.userId, async () => { authorityHeld(); await wait; return true; });
+      const delivery = new ExpoPushProvider().sendPush(['ExponentPushToken[r5-authority]'], 'Order', 'Body', undefined, { alertClass: 'standard', priority: 'high', submit });
+      await locked;
+      const deletion = app.prisma.vendorStaff.delete({ where: { id: membership.id } }).then(() => { removed = true; });
+      await vi.waitFor(async () => {
+        const waiting = await app.prisma.$queryRaw<Array<{ count: bigint }>>`SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%vendor_staff%'`;
+        expect(Number(waiting[0]!.count)).toBeGreaterThan(0);
+      }, { timeout: 2_000, interval: 10 });
+      expect(submitted).toBe(false);
+      permit();
+      await started;
+      await vi.waitFor(() => expect(removed).toBe(true), { timeout: 1_000, interval: 10 });
+      await deletion;
+      expect(removed).toBe(true); // response remains pending; no lock spans network completion
+      reply(new Response(JSON.stringify({ data: [{ status: 'ok' }] }), { status: 200 }));
+      expect((await delivery).sent).toBe(1);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally { permit?.(); reply?.(new Response('{}')); fetcher.mockRestore(); }
+  });
+
+  for (const phase of ['initial', 'ring1', 'ring2'] as const) {
+    it(`${phase}: deletion after the first real Expo chunk prevents the next chunk`, async () => {
+      const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const membership = await joinTeam(storeA, member, ownerA);
+      const tokens = Array.from({ length: 101 }, (_, i) => `ExponentPushToken[r5-${nanoid(6)}-${i}]`);
+      await app.prisma.deviceToken.createMany({ data: tokens.map((token) => ({ userId: member.userId, token, platform: 'android', alertsVersion: 0 })) });
+      const o = await placeAndAlert(storeA, { alert: phase !== 'initial' });
+      let first!: () => void;
+      let resume!: () => void;
+      const entered = new Promise<void>((done) => { first = done; });
+      const wait = new Promise<void>((done) => { resume = done; });
+      const handed: string[] = [];
+      const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        const messages = JSON.parse(String(options?.body)) as Array<{ to: string }>;
+        const mine = messages.filter((m) => tokens.includes(m.to));
+        handed.push(...mine.map((m) => m.to));
+        if (mine.length) { first(); await wait; }
+        return new Response(JSON.stringify({ data: messages.map(() => ({ status: 'ok' })) }), { status: 200 });
+      });
+      const channels = { ...getChannels(), push: withPushRetry(new ExpoPushProvider(), [1]) };
+      try {
+        const delivery = phase === 'initial'
+          ? new NotificationService(app.prisma, ioRecorder, channels).newOrderForStore({ vendorId: storeA, ...o, itemCount: 1, total: 1500 })
+          : runLadderRung(deps({ channels }), o.orderId, phase);
+        await entered;
+        await app.prisma.vendorStaff.delete({ where: { id: membership.id } });
+        const afterDeletion = emitted.length;
+        resume();
+        await delivery;
+        expect(handed).toHaveLength(100);
+        expect(emitted.slice(afterDeletion).filter((e) => e.room === `user:${member.userId}`)).toEqual([]);
+      } finally { resume?.(); fetcher.mockRestore(); }
+    });
+
+    it(`${phase}: definitive rejection can retry, but a committed deletion cancels that recipient's retry`, async () => {
+      const member = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const membership = await joinTeam(storeA, member, ownerA);
+      const token = await device(member);
+      const o = await placeAndAlert(storeA, { alert: phase !== 'initial' });
+      let attempts = 0;
+      let removed: Promise<unknown> | undefined;
+      const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+        const messages = JSON.parse(String(options?.body)) as Array<{ to: string }>;
+        if (messages.some((m) => m.to === token)) {
+          attempts += 1;
+          removed = app.prisma.vendorStaff.delete({ where: { id: membership.id } }).then(() => undefined);
+          return new Response('rejected', { status: 429 });
+        }
+        return new Response(JSON.stringify({ data: messages.map(() => ({ status: 'ok' })) }), { status: 200 });
+      });
+      const channels = { ...getChannels(), push: withPushRetry(new ExpoPushProvider(), [50]) };
+      try {
+        if (phase === 'initial') await new NotificationService(app.prisma, ioRecorder, channels).newOrderForStore({ vendorId: storeA, ...o, itemCount: 1, total: 1500 });
+        else await runLadderRung(deps({ channels }), o.orderId, phase);
+        await removed;
+        expect(attempts).toBe(1);
+      } finally { fetcher.mockRestore(); }
+    });
+  }
+});
+
+
+describe('SX392 final awaited stages and completion', () => {
+  for (const stage of ['final order read', 'Redis fence'] as const) {
+    for (const { rung } of LADDER) {
+      it(`${rung}: expiry during ${stage} prevents a late handoff`, async () => {
+        const o = await placeAndAlert(storeA);
+        const counted = await textsCounted(ownerA.phone);
+        const before = emitted.length;
+        const now = Date.now();
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+        const realRead = app.prisma.notification.findFirst.bind(app.prisma.notification);
+        let reads = 0;
+        const read = vi.spyOn(app.prisma.notification, 'findFirst').mockImplementation((async (args: Parameters<typeof realRead>[0]) => {
+          const result = await realRead(args);
+          if (stage === 'final order read' && ++reads === 2) clock.mockReturnValue(o.respondBy.getTime() + 1);
+          return result;
+        }) as typeof realRead);
+        const redis = new Proxy(app.redis, { get(target, prop) {
+          if (prop === 'eval') return async (...args: Parameters<Redis['eval']>) => {
+            const result = await (target.eval as (...a: unknown[]) => Promise<unknown>)(...args);
+            if (stage === 'Redis fence' && String(args[0]).includes('PEXPIRE')) clock.mockReturnValue(o.respondBy.getTime() + 1);
+            return result;
+          };
+          const value = Reflect.get(target, prop, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        } }) as Redis;
+        try {
+          expect(await runLadderRung(deps({ redis }), o.orderId, rung)).toBe('window_closed');
+          expect(emitted.slice(before)).toEqual([]);
+          expect(await opsRowsFor(adminA.userId, o.orderId)).toEqual([]);
+          expect(await textsCounted(ownerA.phone)).toBe(counted);
+        } finally { read.mockRestore(); clock.mockRestore(); }
+      });
+    }
+  }
+
+  it('expiry after SMS budget reservation refunds it without submission', async () => {
+    const o = await placeAndAlert(storeA);
+    const counted = await textsCounted(ownerA.phone);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const redis = new Proxy(app.redis, { get(target, prop) {
+      if (prop === 'incr') return async (key: string) => {
+        const result = await target.incr(key);
+        if (key.startsWith(STORE_ALERT_SMS_DAILY_PREFIX)) clock.mockReturnValue(o.respondBy.getTime() + 1);
+        return result;
+      };
+      const value = Reflect.get(target, prop, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    } }) as Redis;
+    try {
+      expect(await runLadderRung(deps({ redis }), o.orderId, 'sms')).toBe('window_closed');
+      expect(await textsCounted(ownerA.phone)).toBe(counted);
+      expect(smsTo(ownerA.phone).filter((e) => e.body.includes(o.orderNumber))).toEqual([]);
+    } finally { clock.mockRestore(); }
+  });
+
+  it('completion cannot overwrite a replacement claim even after a successful submission', async () => {
+    const o = await placeAndAlert(storeA);
+    const key = rungClaimKey(o.orderId, 'sms');
+    const real = getChannels().sms;
+    const channels = { ...getChannels(), sms: { sendSms: async (to: string, body: string) => {
+      const result = await real.sendSms(to, body);
+      await app.redis.set(key, 'sending:replacement', 'PX', RUNG_SENDING_TTL_MS);
+      return result;
+    } } };
+    expect(await runLadderRung(deps({ channels }), o.orderId, 'sms')).toBe('sms_sent');
+    expect(await app.redis.get(key)).toBe('sending:replacement');
+  });
+
+  for (const status of [429, 503]) {
+    it(`Expo ${status}: ${status === 429 ? 'a proven rejection can retry' : 'an uncertain submission cannot retry'}`, async () => {
+      const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const vendor = await makeStore(owner, `R5 ${status}`);
+      await device(owner);
+      const o = await placeAndAlert(vendor);
+      let attempts = 0;
+      const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        attempts += 1;
+        return attempts === 1 ? new Response('failure', { status }) : new Response(JSON.stringify({ data: [{ status: 'ok' }] }), { status: 200 });
+      });
+      try {
+        await runLadderRung(deps({ channels: { ...getChannels(), push: withPushRetry(new ExpoPushProvider(), [1, 1]) } }), o.orderId, 'ring1');
+        expect(attempts).toBe(status === 429 ? 2 : 1);
+      } finally { fetcher.mockRestore(); }
+    });
+  }
+});
+
+
+describe('SX392 handoff boundary controls', () => {
+  it('an expired claim with no replacement still cannot submit', async () => {
+    const o = await placeAndAlert(storeA);
+    const redis = redisRacingAtClaim(async () => {
+      const key = rungClaimKey(o.orderId, 'sms');
+      await app.redis.pexpire(key, 1);
+      await vi.waitFor(async () => expect(await app.redis.exists(key)).toBe(0));
+    });
+    await runLadderRung(deps({ redis }), o.orderId, 'sms');
+    expect(smsTo(ownerA.phone).filter((e) => e.body.includes(o.orderNumber))).toEqual([]);
+  });
+
+  it('the Expo deadline is measured after an awaited submission guard', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ status: 'ok' }] }), { status: 200 }));
+    try {
+      const result = await new ExpoPushProvider().sendPush(['ExponentPushToken[r5-expiry]'], 'Order', 'Body', undefined, {
+        alertClass: 'standard', priority: 'high', deadlineMs: now + 2_000,
+        submit: async (start) => { await Promise.resolve(); clock.mockReturnValue(now + 2_001); return start(); },
+      });
+      expect(result.sent).toBe(0);
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); fetcher.mockRestore(); }
+  });
+
+  it('a stalled authority callback cannot hand off after its bounded transaction window', async () => {
+    const now = performance.now();
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(now);
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ data: [{ status: 'ok' }] }), { status: 200 }));
+    try {
+      const submit = storeAlertSubmission(app.prisma, storeA, ownerA.userId, async () => { clock.mockReturnValue(now + 4_001); return true; });
+      const result = await new ExpoPushProvider().sendPush(['ExponentPushToken[r5-stall]'], 'Order', 'Body', undefined, { alertClass: 'standard', priority: 'high', submit });
+      expect(result.sent).toBe(0);
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); fetcher.mockRestore(); }
   });
 });
