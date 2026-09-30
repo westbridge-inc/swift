@@ -45,7 +45,9 @@ const ADMIN_PHONE = `+5920418${String(Math.floor(Math.random() * 900) + 100)}`;
 const OTHER_BASE = Math.floor(Math.random() * 990);
 const OTHER = (n: number) => `+5920416${String(OTHER_BASE + n).padStart(3, '0')}`;
 // The harness posture, with no system login or RLS binding leaked in from elsewhere.
-const { SYSTEM_DATABASE_URL: _leakedSys, TENANT_RLS_BIND: _leakedBind, ...BASE_ENV } = process.env;
+const BASE_ENV: Record<string, string | undefined> = { ...process.env };
+delete BASE_ENV['SYSTEM_DATABASE_URL'];
+delete BASE_ENV['TENANT_RLS_BIND'];
 const DRILL_ENV: Record<string, string | undefined> = { ...BASE_ENV, SWIFT_STAGING_DRILLS: '1' };
 const DAY = 86_400_000;
 
