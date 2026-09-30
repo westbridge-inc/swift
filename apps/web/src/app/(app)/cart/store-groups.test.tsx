@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiReply, type ApiRequest } from '@/test/test-utils';
-import { clearSession, sessionProbe } from '@/lib/auth';
+import { clearSession, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { persistCheckoutAttempt, readCheckoutAttempt, type Cart } from '@/lib/customer';
 import CartPage from './page';
 
@@ -440,5 +440,46 @@ describe('AX348 retained checkout resolution', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove Rice from cart' }));
     await waitFor(() => expect(screen.queryByText('Rice')).toBeNull());
     expect(screen.queryByText(String(copy))).toBeNull();
+  });
+});
+
+
+describe('AX354 checkout response context changes', () => {
+  it.each(['placed', 'in_flight', 'none'])('probes the sent key after a store change and resolves %s', async (status) => {
+    cart.items = [cart.items[1]!]; cart.subtotalCustomer = 800;
+    let key = '';
+    special = ({ url, init }) => {
+      if (url.pathname.endsWith('/checkout')) {
+        key = (init?.headers as Record<string, string>)['Idempotency-Key']!;
+        // The order response succeeds, but another tab changes the selected
+        // business before apiFetch accepts it. This is NOT a server refusal.
+        setSelectedStore('different-dashboard-store');
+        return ok({ order: { id: 'committed-order' } });
+      }
+      if (url.pathname.startsWith('/api/v1/customer/checkout/receipts/')) {
+        expect(url.pathname).toBe('/api/v1/customer/checkout/receipts/' + key);
+        expect(readCheckoutAttempt()?.key).toBe(key);
+        return ok({ status, ...(status === 'placed' ? { orderIds: ['committed-order'] } : {}) });
+      }
+      return null;
+    };
+    render(<CartPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Place cash order · GY$900' }));
+    await waitFor(() => expect(requests.filter((r) => r.path.startsWith('/api/v1/customer/checkout/receipts/'))).toHaveLength(1));
+    if (status === 'placed') {
+      await screen.findByRole('heading', { name: 'Order placed' });
+      expect(navigation.push).toHaveBeenCalledWith('/orders/committed-order');
+      expect(readCheckoutAttempt()).toBeNull();
+    } else if (status === 'in_flight') {
+      await screen.findByRole('button', { name: 'Retry check' });
+      expect(readCheckoutAttempt()?.key).toBe(key);
+      expect(screen.queryByRole('button', { name: /Place cash order/ })).toBeNull();
+      expect(navigation.push).not.toHaveBeenCalled();
+    } else {
+      await screen.findByRole('button', { name: 'Place cash order · GY$900' });
+      expect(readCheckoutAttempt()).toBeNull();
+      expect(navigation.push).not.toHaveBeenCalled();
+    }
+    expect(requests.filter((r) => r.path.endsWith('/checkout'))).toHaveLength(1);
   });
 });

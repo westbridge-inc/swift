@@ -53,12 +53,14 @@ function announceSessionChange(): void {
 
 type AuthSnapshot = { principal: string | null; generation: number };
 
-function clearStoredCheckoutAttempts(): void {
+function clearStoredCheckoutAttempts(keepPrincipal: string | null = null): void {
   try {
     for (let index = window.sessionStorage.length - 1; index >= 0; index -= 1) {
       const key = window.sessionStorage.key(index);
       if (key === CHECKOUT_ATTEMPT_PREFIX || key?.startsWith(`${CHECKOUT_ATTEMPT_PREFIX}:`)) {
-        window.sessionStorage.removeItem(key);
+        if (!keepPrincipal || key !== `${CHECKOUT_ATTEMPT_PREFIX}:${keepPrincipal}`) {
+          window.sessionStorage.removeItem(key);
+        }
       }
     }
   } catch {
@@ -156,7 +158,9 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
 /** Adopt a session the server has just issued as cookies. No tokens involved. */
 export function adoptSession(principal: string | null) {
   if (typeof window === 'undefined') return;
-  if (!sessionPrincipal || !principal || sessionPrincipal !== principal) clearStoredCheckoutAttempts();
+  // A forced expiry retains only the known principal’s attempt. Login may
+  // restore that entry, but must never adopt another person’s pending order.
+  clearStoredCheckoutAttempts(principal);
   authGeneration += 1;
   sessionPrincipal = principal;
   announceSessionChange();
@@ -202,11 +206,13 @@ export async function logout(): Promise<void> {
   clearSession();
 }
 
-export function clearSession() {
+export function clearSession({ preserveCheckoutAttempt = false }: { preserveCheckoutAttempt?: boolean } = {}) {
   if (typeof window === 'undefined') return;
   authGeneration += 1;
+  // Keep the principal-bound key before forgetting who was signed in.
+  // Explicit logout still clears it; a failed refresh cannot prove no order.
+  clearStoredCheckoutAttempts(preserveCheckoutAttempt ? sessionPrincipal : null);
   sessionPrincipal = null;
-  clearStoredCheckoutAttempts();
   localStorage.removeItem(STORE_KEY);
   announceStoreChange();
   announceSessionChange();
@@ -297,7 +303,7 @@ export async function apiFetch(
       if (!snapshotIsCurrent(requestSession)) {
         throw new ApiRequestError('The signed-in account changed while this request was running. Try again.', 409, 'SESSION_CHANGED');
       }
-      clearSession();
+      clearSession({ preserveCheckoutAttempt: true });
       if (policy.redirectOnExpired !== false && window.location.pathname !== '/login') {
         const returnPath = `${window.location.pathname}${window.location.search}`;
         window.location.href = `/login?next=${encodeURIComponent(returnPath)}`;

@@ -47,7 +47,9 @@ export function cartStockRefusal(error: unknown, cart?: Cart | null): CartStockR
 }
 
 export function isDefiniteCheckoutRefusal(error: unknown): boolean {
-  return error instanceof ApiRequestError && (
+  // SESSION_CHANGED can be raised locally after checkout has committed.
+  // Without proof that nothing was sent, resolve the receipt for its key.
+  return error instanceof ApiRequestError && error.code !== 'SESSION_CHANGED' && (
     (error.status >= 400 && error.status < 500 && error.status !== 408 && error.code !== 'DUPLICATE_REQUEST')
     || (error.status >= 500 && error.status < 600 && Boolean(error.message.trim())
       && (error.code === 'AUTH_UNAVAILABLE' || error.code === 'MMG_PAY_LINKS_NOT_CONFIGURED'))
