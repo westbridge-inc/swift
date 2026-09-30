@@ -15,7 +15,7 @@ beforeEach(() => { clearSession(); sessionStorage.clear(); nav.path = '/'; refre
 
 it('shows a rejected refresh notice once on the next screen, including after remount', async () => {
   adoptSession('test-person'); api();
-  await expect(apiFetch('/api/v1/customer/orders', undefined, { redirectOnExpired: false })).rejects.toThrow('Session expired');
+  await expect(apiFetch('/api/v1/customer/orders', undefined, { redirectOnExpired: false })).rejects.toThrow('You were signed out. Please sign in again.');
   const view = render(<SignedOutNotice />);
   expect(await screen.findByText(message)).toBeTruthy();
   expect(calls.map((c) => [c.method, c.url.pathname])).toEqual([['GET', '/api/v1/customer/orders'], ['POST', '/api/v1/auth/refresh']]);

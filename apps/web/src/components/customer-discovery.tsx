@@ -24,7 +24,9 @@ export function categoryPath(c: Pick<Category, 'slug' | 'name' | 'emoji'>) {
   return `/order/browse?${new URLSearchParams({ category: c.slug, name: c.name, emoji: c.emoji })}`;
 }
 function useCategories(near: NearPoint | null) {
-  return useQuery({ queryKey: ['discovery', 'categories', near?.lat ?? null, near?.lng ?? null],
+  const { scope, epoch } = useCustomerSession();
+  // Visibility is session-specific even when the browsing coordinates stay put.
+  return useQuery({ queryKey: ['discovery', 'categories', scope, epoch, near?.lat ?? null, near?.lng ?? null],
     queryFn: async (): Promise<Discovery> => {
       const query = new URLSearchParams(coordinates(near));
       const data = (await apiFetch(`/api/v1/discovery/categories${query.size ? `?${query}` : ''}`, undefined, { redirectOnExpired: false })).data;
@@ -87,9 +89,10 @@ export function CategoryGrid() {
 }
 
 export function CategoryFeed({ slug, name, emoji }: { slug: string; name: string; emoji: string }) {
+  const { scope, epoch } = useCustomerSession();
   const near = useDiscoveryPoint();
   const rail = useCategories(near);
-  const vendors = useQuery({ queryKey: ['customer', 'category', slug, near?.lat ?? null, near?.lng ?? null],
+  const vendors = useQuery({ queryKey: ['customer', 'category', scope, epoch, slug, near?.lat ?? null, near?.lng ?? null],
     queryFn: async (): Promise<Vendor[]> => {
       const query = new URLSearchParams({ category: slug, ...coordinates(near) });
       return (await apiFetch(`/api/v1/customer/vendors?${query}`, undefined, { redirectOnExpired: false })).data;
