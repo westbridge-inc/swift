@@ -162,7 +162,7 @@ describe('mover fee band — what a mover is actually charged', () => {
     const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
     const seeded = gy.subscriptionTiers as unknown as SubscriptionTiers;
     expect(seeded, 'GY rate card — re-run the seed if this fails').toMatchObject({
-      mover: 8000, moverHeavy: 9000, taxiDriver: 9000, serviceVendor: 8000,
+      mover: 6000, moverHeavy: 9000, taxiDriver: 9000, serviceVendor: 8000,
       smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000,
       largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000,
       franchiseMinLocations: 5, franchiseDiscountPct: 50,
@@ -204,10 +204,10 @@ describe('mover fee band — what a mover is actually charged', () => {
     return app.prisma.rider.create({ data: { userId, riderType, vehicleType } });
   }
 
-  it('a motorbike delivery rider signs up on 8,000', async () => {
+  it('a motorbike delivery rider signs up on 6,000', async () => {
     const rider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
     const sub = await subscriptions.startTrialForRider(rider.id);
-    expect(Number(sub.weeklyRate)).toBe(8000);
+    expect(Number(sub.weeklyRate)).toBe(6000);
   });
 
   it('a canter courier signs up on 9,000 — heavy delivery: the same service, the bigger vehicle', async () => {
@@ -226,10 +226,10 @@ describe('mover fee band — what a mover is actually charged', () => {
 
   it('a rider who buys a canter moves onto the heavy-delivery rate, with an audit event', async () => {
     // The revenue leak this closes: weeklyRate is a snapshot taken at signup,
-    // so without the weekly re-tier a rider who upgrades pays 8,000 forever.
+    // so without the weekly re-tier a rider who upgrades pays 6,000 forever.
     const rider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
     const sub = await subscriptions.startTrialForRider(rider.id);
-    expect(Number(sub.weeklyRate)).toBe(8000);
+    expect(Number(sub.weeklyRate)).toBe(6000);
 
     await app.prisma.rider.update({ where: { id: rider.id }, data: { vehicleType: 'CANTER_LONG' } });
     expect(await billing.recalculateMoverTiers()).toBeGreaterThanOrEqual(1);
@@ -247,7 +247,30 @@ describe('mover fee band — what a mover is actually charged', () => {
     await app.prisma.rider.update({ where: { id: rider.id }, data: { vehicleType: 'MOTORCYCLE' } });
     await billing.recalculateMoverTiers();
     const back = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(Number(back.weeklyRate)).toBe(8000);
+    expect(Number(back.weeklyRate)).toBe(6000);
+  });
+
+  it('a rider still on the old 8,000 moves to 6,000 at the next weekly re-tier, with an audit event — taxi stays 9,000', async () => {
+    // The owner, 2026-09-29: delivery riders pay 6,000 a week, down from 8,000;
+    // taxi drivers are unchanged. A subscription born on the previous card must
+    // not keep paying 8,000: the weekly re-tier moves it, and says so.
+    const rider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
+    const sub = await subscriptions.startTrialForRider(rider.id);
+    await app.prisma.subscription.update({ where: { id: sub.id }, data: { weeklyRate: 8000 } });
+    const driver = await makeDriver(await makeMoverUser(), 'CAR');
+    const taxiSub = await subscriptions.startTrialForDriver(driver.id);
+
+    expect(await billing.recalculateMoverTiers()).toBeGreaterThanOrEqual(1);
+
+    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+    expect(Number(after.weeklyRate)).toBe(6000);
+    const event = await app.prisma.billingEvent.findFirst({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } });
+    expect(event).not.toBeNull();
+    expect(Number(event?.amount)).toBe(6000);
+
+    const taxi = await app.prisma.subscription.findUniqueOrThrow({ where: { id: taxiSub.id } });
+    expect(Number(taxi.weeklyRate)).toBe(9000);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: taxiSub.id, type: 'TIER_CHANGE' } })).toBe(0);
   });
 
   it('a taxi driver who buys a bus stays on the taxi rate — the role decides, not the vehicle', async () => {
@@ -291,6 +314,6 @@ describe('mover fee band — what a mover is actually charged', () => {
     const waived = await app.prisma.subscription.findUniqueOrThrow({ where: { id: waivedSub.id } });
     expect(waived.feeWaived).toBe(true);
     // Untouched: the waiver, not the band, decides what is collected.
-    expect(Number(waived.weeklyRate)).toBe(8000);
+    expect(Number(waived.weeklyRate)).toBe(6000);
   });
 });
