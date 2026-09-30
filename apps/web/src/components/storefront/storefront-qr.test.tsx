@@ -4,13 +4,14 @@ import { readFileSync } from 'node:fs';
 import styles from './storefront.module.css';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import StorePage from '@/app/store/[slug]/page';
+import LoginPage from '@/app/login/page';
 import type { StorefrontDetail } from '@/lib/api';
 import * as api from '@/lib/api';
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 
-const nav = vi.hoisted(() => ({ push: vi.fn() }));
-vi.mock('next/navigation', () => ({ useRouter: () => nav, notFound: () => { throw new Error('not found'); } }));
+const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), query: '' }));
+vi.mock('next/navigation', () => ({ useRouter: () => nav, useSearchParams: () => new URLSearchParams(nav.query), notFound: () => { throw new Error('not found'); } }));
 
 const store: StorefrontDetail = {
   id: 'qr-store', slug: 'garden-kitchen', name: 'Garden Kitchen', description: null,
@@ -39,6 +40,11 @@ afterAll(() => stylesheet.remove());
 beforeEach(() => {
   sessionStorage.clear();
   nav.push.mockReset();
+  nav.replace.mockReset();
+  nav.query = '';
+  vi.spyOn(auth, 'sendOtp').mockResolvedValue(undefined);
+  vi.spyOn(auth, 'verifyPartnerLogin').mockResolvedValue({ home: '/dashboard' } as Awaited<ReturnType<typeof auth.verifyPartnerLogin>>);
+  vi.spyOn(customer, 'verifyCustomerLogin').mockResolvedValue({ user: { id: 'customer' } } as Awaited<ReturnType<typeof customer.verifyCustomerLogin>>);
   vi.spyOn(api, 'fetchStorefront').mockResolvedValue(store);
   vi.spyOn(auth, 'sessionProbe').mockResolvedValue({ ok: false });
   vi.spyOn(customer, 'getPublicStorefront').mockResolvedValue(store);
@@ -151,8 +157,8 @@ describe('the actual /store/[slug] QR arrival', () => {
   });
 
   it('still dismisses and leaves the menu usable when session storage is blocked', async () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    const blocked = vi.fn(() => { throw new Error('blocked'); });
+    vi.stubGlobal('sessionStorage', { getItem: blocked, setItem: blocked, removeItem: blocked });
     render(await page({ src: 'qr' }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss dining-in message' }));
     expect(screen.queryByRole('button', { name: 'Dismiss dining-in message' })).toBeNull();
@@ -191,5 +197,127 @@ describe('the actual /store/[slug] QR arrival', () => {
     await waitFor(() => expect(customer.checkout).toHaveBeenCalledWith({ paymentMethod: 'CASH', tipAmount: 0 }, expect.any(String)));
     expect(nav.push).toHaveBeenCalledWith('/orders/qr-order');
     expect(screen.getByText(copy)).toBeTruthy();
+  });
+});
+
+
+describe('QR-01-W: real guest Add → sign-in → same item continuation', () => {
+  it.each(['Add prompt', 'direct sign-in'])('resumes once from %s without another menu Add tap', async startingState => {
+    const first = render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
+    const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
+    await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(add);
+    const loginUrl = String(nav.push.mock.calls[0]?.[0]);
+    first.unmount();
+    nav.query = startingState === 'Add prompt' ? loginUrl.split('?')[1]! : '';
+    const login = render(<LoginPage />);
+    fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
+    fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await waitFor(() => expect(nav.replace).toHaveBeenCalledWith('/store/garden-kitchen?src=qr&c=BCDFGHJKMN'));
+    login.unmount();
+    vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
+    vi.mocked(customer.getCart).mockResolvedValue({ items: [] });
+    vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
+    vi.mocked(customer.addToCart).mockResolvedValue({ items: [] });
+    const resumed = render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
+    expect(await screen.findByRole('dialog', { name: 'Pumpkin roti' })).toBeTruthy();
+    expect(customer.addToCart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /Add to order/ }));
+    await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: store.id, itemId: 'roti', quantity: 1, selectedOptions: {} }));
+    resumed.unmount();
+    render(await page({ src: 'qr' }));
+    await waitFor(() => expect(customer.getCart).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(customer.addToCart).toHaveBeenCalledTimes(1);
+  });
+});
+
+const savedIntent = { storeSlug: store.slug, itemId: 'roti', selectedOptions: { filling: ['chickpea'] }, returnPath: '/store/garden-kitchen?src=qr' };
+const filling: customer.OptionGroup = { id: 'filling', name: 'Filling', isRequired: true, minSelect: 1, maxSelect: 1, options: [
+  { id: 'pumpkin', name: 'Pumpkin', additionalPrice: '0', isDefault: true, isAvailable: true },
+  { id: 'chickpea', name: 'Chickpea', additionalPrice: '100', isDefault: false, isAvailable: true },
+] };
+function signedInWithOptions() {
+  vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
+  vi.mocked(customer.getCart).mockResolvedValue({ items: [] });
+  vi.spyOn(customer, 'getAddresses').mockResolvedValue([]);
+  vi.mocked(customer.addToCart).mockResolvedValue({ items: [] });
+  const vendor = { ...store, description: undefined, categories: [{ id: 'lunch', name: 'Lunch menu', items: [{
+    ...store.categories[0]!.items[0]!, description: undefined, basePrice: 1200, isAvailable: true, optionGroups: [filling],
+  }] }] };
+  vi.mocked(customer.getPublicVendor).mockResolvedValue(vendor);
+  return vendor;
+}
+
+describe('QR-01-W continuation boundaries', () => {
+  it('restores chosen IDs with fresh prices and consumes on dialog cancellation', async () => {
+    signedInWithOptions();
+    sessionStorage.setItem('swift_storefront_add', JSON.stringify({ ...savedIntent, price: 1 }));
+    const resumed = render(await page());
+    const dialog = await screen.findByRole('dialog', { name: 'Pumpkin roti' });
+    expect((screen.getByRole('radio', { name: /Chickpea/ }) as HTMLInputElement).checked).toBe(true);
+    expect(dialog.textContent).toContain('GY$1,300');
+    expect(sessionStorage.getItem('swift_storefront_add')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close item options' }));
+    resumed.unmount();
+    render(await page());
+    await waitFor(() => expect(customer.getCart).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(customer.addToCart).not.toHaveBeenCalled();
+  });
+
+  it('submits only the restored available choice IDs to this store', async () => {
+    signedInWithOptions();
+    sessionStorage.setItem('swift_storefront_add', JSON.stringify(savedIntent));
+    render(await page());
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Add to order' }));
+    await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: store.id, itemId: 'roti', quantity: 1, selectedOptions: { filling: 'chickpea' } }));
+  });
+
+  it('does not substitute another store for the saved store', async () => {
+    signedInWithOptions();
+    sessionStorage.setItem('swift_storefront_add', JSON.stringify({ ...savedIntent, storeSlug: 'other-store', returnPath: '/store/other-store' }));
+    render(await page());
+    await waitFor(() => expect(customer.getCart).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(customer.addToCart).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem('swift_storefront_add')).not.toBeNull();
+  });
+
+  it.each(['sold-out', 'closed', 'removed', 'price-missing', 'pickup'])('does not resume an item that is now %s', async change => {
+    const vendor = signedInWithOptions();
+    const item = vendor.categories[0]!.items[0]!;
+    if (change === 'sold-out') item.isAvailable = false;
+    if (change === 'closed') vendor.isCurrentlyOpen = false;
+    if (change === 'removed') vendor.categories[0]!.items = [];
+    if (change === 'price-missing') item.basePrice = NaN;
+    if (change === 'pickup') item.fulfillment = 'PICKUP';
+    sessionStorage.setItem('swift_storefront_add', JSON.stringify(savedIntent));
+    render(await page());
+    await screen.findByText('This item is not available to order right now. Please check the menu.');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(customer.addToCart).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem('swift_storefront_add')).toBeNull();
+  });
+
+  it('drops a saved choice that is no longer available and requires a new selection', async () => {
+    const vendor = signedInWithOptions();
+    vendor.categories[0]!.items[0]!.optionGroups = [{ ...filling, options: filling.options.map(option => ({ ...option, isAvailable: option.id !== 'chickpea' })) }];
+    sessionStorage.setItem('swift_storefront_add', JSON.stringify(savedIntent));
+    render(await page());
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Add to order' }));
+    expect(await screen.findByText('Choose an option for Filling.')).toBeTruthy();
+    expect(customer.addToCart).not.toHaveBeenCalled();
+  });
+
+  it('cancels the saved Add from the actual sign-in page', async () => {
+    sessionStorage.setItem('swift_storefront_add', JSON.stringify(savedIntent));
+    render(<LoginPage />);
+    fireEvent.click(await screen.findByRole('link', { name: 'Cancel and return to menu' }));
+    expect(sessionStorage.getItem('swift_storefront_add')).toBeNull();
   });
 });

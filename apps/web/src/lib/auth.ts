@@ -1,5 +1,6 @@
 'use client';
 
+import { clearStorefrontContinuation } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // ── The session ──────────────────────────────────────────────────────────────
@@ -201,6 +202,7 @@ export async function logout(): Promise<void> {
 }
 
 export function clearSession() {
+  clearStorefrontContinuation();
   if (typeof window === 'undefined') return;
   authGeneration += 1;
   sessionPrincipal = null;

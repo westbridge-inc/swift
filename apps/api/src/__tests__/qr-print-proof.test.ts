@@ -41,6 +41,7 @@ describe('actual final PDFs: scan and branding bounds', () => {
         const shortUrl = url;
         const pdf = await renderTemplatePdf(template, { vendorName, vendorType: 'RESTAURANT', shortUrl });
         const parser = new PDFParse({ data: new Uint8Array(pdf) });
+        let decoded = 0;
         const copies = template === 'sticker' || template === 'tabletent' ? 2 : 1;
         try {
           const text = await parser.getText();
@@ -57,6 +58,7 @@ describe('actual final PDFs: scan and branding bounds', () => {
               const image = panelImage(png, template, panel, factor);
               expect(jsQR(new Uint8ClampedArray(image.data), image.width, image.height)?.data,
                 `${template} panel ${panel + 1} scale ${factor}`).toBe(shortUrl);
+              decoded += 1;
             }
           }
           // Optional local review artifacts; the ordinary CI test stays in memory.
@@ -116,6 +118,8 @@ describe('actual final PDFs: scan and branding bounds', () => {
         } finally {
           await doc.destroy();
         }
+        expect(decoded).toBe(copies * 2);
+        process.stdout.write(`[qr-print-proof] ${template} name ${nameIndex + 1}: ${copies} panels, ${decoded} successful decodes, branding within trim\n`);
       });
     }
   }

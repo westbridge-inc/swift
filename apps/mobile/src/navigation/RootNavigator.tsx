@@ -9,6 +9,7 @@ import { useCustomerCountry } from '../hooks/useCustomerCountry';
 import { registerIfGranted } from '../services/push';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
+import { QrOutcomeScreen } from '../screens/QrOutcomeScreen';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
@@ -164,6 +165,7 @@ export function RootNavigator() {
           component={CustomerStack}
           navigationKey={wantsAuth && !isAuthenticated ? 'store-auth' : 'store-browse'}
         />
+        <Stack.Screen name="QrOutcome" component={QrOutcomeScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
+import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
   addToCart,
   checkoutAttemptSignature,
@@ -216,6 +217,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   const railHeading = useRef<HTMLHeadingElement | null>(null);
 
   const closeOptions = useCallback(() => {
+    clearStorefrontContinuation();
     setModalItem(null);
     setModalError(null);
     window.requestAnimationFrame(() => modalReturnFocus.current?.focus());
@@ -470,6 +472,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
   };
 
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
+    if (!signedIn) {
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: item.id, selectedOptions: selectedDefaults(item.optionGroups ?? []), returnPath });
+    }
     if (!requireCustomerSession() || !orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
     const groups = item.optionGroups ?? [];
     if (groups.length > 0) {
@@ -489,6 +494,26 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
       `${item.name} added to your order.`,
     );
   };
+
+  useEffect(() => {
+    if (!signedIn || !cartHydrated || catalogState !== 'ready') return;
+    const intent = takeStorefrontContinuation(store.slug);
+    if (!intent) return;
+    const item = catalog.categories.flatMap(category => category.items).find(item => item.id === intent.itemId);
+    if (!catalog.isCurrentlyOpen || !catalog.acceptingOrders || !item?.isAvailable
+      || item.fulfillment !== 'DELIVERY' || itemPrice(item) === null) {
+      setError('This item is not available to order right now. Please check the menu.');
+      return;
+    }
+    // Reopen even items without options: resuming sign-in never silently
+    // changes a cart, and the customer sees the current server price.
+    const choices = Object.fromEntries((item.optionGroups ?? []).map(group => [group.id,
+      (intent.selectedOptions[group.id] ?? []).filter(id => group.options.some(option => option.id === id && option.isAvailable)).slice(0, group.maxSelect),
+    ]));
+    setSelectedOptions(choices);
+    setModalError(null);
+    setModalItem(item);
+  }, [signedIn, cartHydrated, catalogState, catalog, store.slug]);
 
   const subtractItem = (item: DisplayItem) => {
     if (!requireCustomerSession()) return;
@@ -522,12 +547,24 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
 
   const confirmOptions = () => {
     if (!modalItem) return;
+    if (!signedIn) {
+      queueStorefrontContinuation({ storeSlug: store.slug, itemId: modalItem.id, selectedOptions, returnPath });
+      requireCustomerSession();
+      return;
+    }
     const liveItem = categoryItems.find((item) => item.id === modalItem.id);
-    if (!orderable || !liveItem?.isAvailable) {
+    if (!orderable || !liveItem?.isAvailable || liveItem.fulfillment !== 'DELIVERY' || optionPrice(liveItem, selectedOptions) === null) {
       setModalError('This item is no longer verified as orderable on the live menu. Close this panel and check the menu again.');
       return;
     }
-    for (const group of modalItem.optionGroups ?? []) {
+    for (const [groupId, ids] of Object.entries(selectedOptions)) {
+      const group = liveItem.optionGroups?.find(group => group.id === groupId);
+      if (ids.length && (!group || ids.length > group.maxSelect || ids.some(id => !group.options.some(option => option.id === id && option.isAvailable)))) {
+        setModalError('These choices have changed. Close this panel and check the menu again.');
+        return;
+      }
+    }
+    for (const group of liveItem.optionGroups ?? []) {
       const minimum = group.isRequired ? Math.max(1, group.minSelect) : group.minSelect;
       if ((selectedOptions[group.id] ?? []).length < minimum) {
         setModalError(`Choose ${minimum === 1 ? 'an option' : `${minimum} options`} for ${group.name}.`);

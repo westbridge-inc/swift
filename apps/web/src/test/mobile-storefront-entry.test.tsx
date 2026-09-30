@@ -14,6 +14,7 @@ vi.mock('../../../mobile/src/services/notification-router', () => ({ installNoti
 vi.mock('../../../mobile/src/services/deep-links', () => ({ installDeepLinkHandler: () => () => {}, flushPendingDeepLink: vi.fn() }));
 vi.mock('../../../mobile/src/services/attribution', () => ({ ensureFirstLaunchClaim: vi.fn(), flushAttributedDestination: vi.fn() }));
 vi.mock('../../../mobile/src/navigation/navigationRef', () => ({ navigationRef: { isReady: () => false }, safeNavigate: vi.fn() }));
+vi.mock('../../../mobile/src/screens/QrOutcomeScreen', () => ({ QrOutcomeScreen: () => <span>QR outcome</span> }));
 vi.mock('../../../mobile/src/screens/auth/RolePickerScreen', () => ({ RolePickerScreen: () => null }));
 vi.mock('../../../mobile/src/screens/auth/SelfieCaptureScreen', () => ({ SelfieCaptureScreen: () => null }));
 vi.mock('../../../mobile/src/navigation/AuthStack', () => ({ AuthStack: () => null }));
@@ -41,6 +42,7 @@ describe('the public linked-store navigator is registered at every root entry ga
     render(<RootNavigator />);
     // Ordinary launch still opens its original gate; scans alone navigate to Storefront.
     expect(screen.getByTestId('routes').firstElementChild?.getAttribute('data-testid')).toBe(gate);
+    expect(screen.getByTestId('QrOutcome').textContent).toBe('QR outcome');
     expect(screen.getByTestId('Storefront').textContent).toBe('Customer menu navigator');
     expect(screen.getByTestId('Storefront').getAttribute('data-navigation-key')).toBe(wantsAuth ? 'store-auth' : 'store-browse');
   });

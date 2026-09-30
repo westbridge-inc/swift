@@ -1,10 +1,11 @@
 'use client';
 
-import { Suspense, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
+import { clearStorefrontContinuation, readStorefrontContinuation } from '@/lib/storefront-continuation';
 import { SwiftLogo } from '@/components/swift-logo';
 import styles from '../auth-flow.module.css';
 
@@ -23,7 +24,9 @@ function LoginInner() {
   // Only ever honour a clean in-app path as the post-login redirect. Reject
   // absolute/protocol-relative URLs and any '..' traversal so ?next= can't be an
   // open redirect to a phishing site.
-  const rawNext = params.get('next') ?? '';
+  const [pendingReturn, setPendingReturn] = useState('');
+  useEffect(() => { setPendingReturn(readStorefrontContinuation()?.returnPath ?? ''); }, []);
+  const rawNext = params.get('next') ?? pendingReturn;
   const next = /^\/(?!\/)/.test(rawNext) && !rawNext.includes('..') && !rawNext.includes('\\') ? rawNext : '';
   const isCustomer = isCustomerReturn(next);
 
@@ -62,7 +65,7 @@ function LoginInner() {
   return (
     <main className={styles.page}>
       <section className={`${styles.card} ${styles.cardNarrow}`} aria-labelledby="login-title">
-        <Link href="/" aria-label="Swift home" className={styles.brandLink}><SwiftLogo /></Link>
+        <Link href="/" aria-label="Swift home" onClick={clearStorefrontContinuation} className={styles.brandLink}><SwiftLogo /></Link>
         <h1 id="login-title" className={styles.heading}>Sign in to Swift</h1>
         <p className={styles.bodyCopy}>
           {step === 'code' ? `Enter the code sent to ${phone}.`
@@ -98,6 +101,10 @@ function LoginInner() {
         )}
 
         {error ? <p className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
+
+        {pendingReturn ? (
+          <Link href={pendingReturn} onClick={clearStorefrontContinuation} className={styles.textButton}>Cancel and return to menu</Link>
+        ) : null}
 
         <p className={styles.dividerCopy}>
           New to Swift?{' '}

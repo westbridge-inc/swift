@@ -1,12 +1,11 @@
 import { Linking } from 'react-native';
 import { api } from './api';
 import { safeNavigate } from '../navigation/navigationRef';
-import { toast } from '../kit/toast';
 
 // The QR/link DEEP-LINK ROUTER [qr spec Part 6]. Universal links hand the app
 // a full https URL for /store/{slug} or /s/{code}; this module turns it into
-// the storefront screen — or an honest toast + normal open, never a crash,
-// never a guess. Same queue-and-flush shape as the notification tap-router:
+// the storefront screen — or a dedicated QR outcome, never an unrelated
+// store or Home behind a transient toast. Same queue-and-flush shape as the notification tap-router:
 // navigation not ready yet → queued, RootNavigator's onReady flushes.
 //
 // Android note: universal-link INTERCEPTION also needs assetlinks + intent
@@ -24,16 +23,13 @@ function reportAppOpen(code: string | null): void {
   void api.post(`/public/qr/${code}/app-open`, {}).catch(() => undefined);
 }
 
-const FAIL_TOAST = 'That store link could not be opened. Please try again.';
-
 let pendingUrl: string | null = null;
 let installed = false;
 
 /**
  * Why a code did not open a store. The IN-APP SCANNER needs these apart — the
  * person is standing at the counter holding the phone and "replaced" and "not
- * a Swift code" call for different next moves — whereas a deep link that
- * already dumped them on Home only needs one apology.
+ * a Swift code" call for different next moves — and external links use the same truthful outcomes.
  *
  * `unavailable` never says WHY: the server deliberately collapses "no such
  * entity" and "not publicly live" into one verdict so the endpoint cannot be
@@ -70,7 +66,10 @@ export async function resolveDestination(dest: LinkDestination): Promise<Resolve
     const vendorId = (res.data?.data as { id?: string } | undefined)?.id;
     reportAppOpen(dest.code);
     return vendorId ? { ok: true, vendorId } : { ok: false, reason: 'unavailable' };
-  } catch {
+  } catch (error) {
+    const status = (error as { response?: { status?: number } })?.response?.status;
+    if (status === 404) return { ok: false, reason: dest.kind === 'short' ? 'not-a-swift-code' : 'unavailable' };
+    if (status === 410) return { ok: false, reason: 'replaced' };
     // A dead network is NOT a dead code. Saying "this code is invalid" to
     // someone holding a perfectly good printed sign is the lie this separates.
     return { ok: false, reason: 'offline' };
@@ -81,10 +80,10 @@ async function resolveAndGo(dest: LinkDestination, request: number): Promise<voi
   const outcome = await resolveDestination(dest);
   if (request !== latestRequest) return;
   if (outcome.ok) {
-    if (!safeNavigate('Storefront', { screen: 'Restaurant', params: { vendorId: outcome.vendorId } })) throw new Error('nav');
+    safeNavigate('Storefront', { screen: 'Restaurant', params: { vendorId: outcome.vendorId } });
     return;
   }
-  toast.show(FAIL_TOAST);
+  safeNavigate('QrOutcome', { reason: outcome.reason, destination: dest, requestId: request });
 }
 
 let navReady = false;
@@ -99,11 +98,15 @@ function handleUrl(url: string | null): boolean {
     pendingUrl = url;
     return true;
   }
-  resolveAndGo(dest, request).catch(() => {
-    if (request !== latestRequest) return;
-    toast.show(FAIL_TOAST);
-  });
+  void resolveAndGo(dest, request);
   return true;
+}
+
+/** Retry only the currently displayed scan. A later external link or an
+ * uninstalled handler wins over a slow retry, just as it wins over initialURL. */
+export async function retryQrDestination(destination: LinkDestination, requestId: number): Promise<void> {
+  if (!navReady || requestId !== latestRequest) return;
+  await resolveAndGo(destination, ++latestRequest);
 }
 
 /** RootNavigator onReady: deliver the URL that launched a cold start. */
