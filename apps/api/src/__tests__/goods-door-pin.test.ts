@@ -38,6 +38,8 @@ const DOOR = { lat: 7.6007, lng: -58.2007 };
 // [SAFE-B · retained history] A no-show's filing is immutable evidence: its order and everyone it names are
 // kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
 const PHONE_PREFIX = retainedPhonePrefix('10');
+/** [SAFE-B · retained history] A store a filed order names is kept too; its slug is unique, so it carries the run. */
+const RUN_TAG = nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, '0');
 const RESERVE_NOTE = 'goods-door-pin fixture reserve';
 
 let app: FastifyInstance;
@@ -225,7 +227,7 @@ async function makeVendorWithItem(type: 'RESTAURANT' | 'SERVICE', extraItem: obj
     data: {
       ownerId: vendorOwner.id,
       name: `DoorPin ${type} ${seq}`,
-      slug: `doorpin-${type.toLowerCase()}-${seq}`,
+      slug: `doorpin-${type.toLowerCase()}-${RUN_TAG}-${seq}`,
       vendorType: type,
       phone: `${PHONE_PREFIX}99${seq}`,
       addressLine1: '1 Door Street',
