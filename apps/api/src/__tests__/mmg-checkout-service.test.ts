@@ -26,7 +26,7 @@ import {
   runProviderIdentityBackfill,
 } from '../modules/billing/provider-identity-backfill';
 import { getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
-import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, newMerchantTransactionId, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
+import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, newMerchantTransactionId, type MmgCheckoutProvider, type MmgCreationZone, type SandboxCheckoutKeys } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, sandboxAddHistory, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,8 @@ let app: FastifyInstance;
 let billing: BillingService;
 let notifications: NotificationService;
 let sandbox: SandboxMmgCheckoutProvider;
+/** This file's one RSA pair: every sandbox below shares it, so any of them opens any reply. */
+let keys: SandboxCheckoutKeys;
 let service: MmgCheckoutService;
 let checkoutProvider: () => MmgCheckoutProvider;
 let kekBefore: string | undefined;
@@ -177,6 +179,24 @@ async function confirmingWith(ref: string, txn: string) {
     body: { merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0' },
   } });
 }
+/** [DS632] The same sandbox (this file's keys) reading MMG's creationDate in another zone, or in none. */
+const sandboxIn = (zone: MmgCreationZone | null) => new SandboxMmgCheckoutProvider(keys, zone);
+/** MMG's success answer for `txn`, written down as a reply is, as received at `at` through `source`. */
+async function answeredAt(row: { id: string; merchantTransactionId: string; tenantId: string }, txn: string, at: Date, source: 'RETURN' | 'NOTIFY') {
+  const current = await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: row.id } });
+  await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: {
+    status: 'CONFIRMING', candidates: [...new Set([...current.candidates, txn])],
+    replyAt: current.replyAt && current.replyAt < at ? current.replyAt : at, nextCheckAt: new Date(),
+  } });
+  await app.prisma.mmgCheckoutObservation.create({ data: {
+    tenantId: row.tenantId, intentId: row.id, source, detail: 'MMG_RESULT_0', createdAt: at,
+    body: { merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0' },
+  } });
+}
+/** The operator pages of one kind about one checkout. */
+const pagesAbout = async (operatorId: string, checkoutId: string, alert: string) => (await app.prisma.notification.findMany({
+  where: { userId: operatorId, data: { path: ['checkoutId'], equals: checkoutId } },
+})).filter((n) => (n.data as Record<string, unknown>)['alert'] === alert);
 /** A checkout written before the shared confirmation authority existed. Since
  *  then a checkout cannot open while another payment for the same fee is being
  *  confirmed, so a checkout and a live push request together are only a
@@ -213,7 +233,10 @@ beforeAll(async () => {
   const pair = await new Promise<{ publicKey: KeyObject; privateKey: KeyObject }>((resolve, reject) => {
     generateKeyPair('rsa', { modulusLength: 4096 }, (err, publicKey, privateKey) => (err ? reject(err) : resolve({ publicKey, privateKey })));
   });
-  sandbox = new SandboxMmgCheckoutProvider({ request: pair, result: pair });
+  keys = { request: pair, result: pair };
+  // [DS632] Staging and UAT read MMG's creationDate as Guyana wall-clock time
+  // (MMG_CHECKOUT_CREATION_ZONE=GUYANA_WALL_CLOCK, verified 1 Oct).
+  sandbox = new SandboxMmgCheckoutProvider(keys, 'GUYANA_WALL_CLOCK');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -1951,7 +1974,7 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     ['one dollar short', { amount: '2099' }, 'AMOUNT_MISMATCH'],
     ['another currency', { currency: 'USD' }, 'CURRENCY_MISMATCH'],
     ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
-    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'CREATION_AFTER_REPLY'],
     ['no creationDate', { creationDate: undefined }, 'CREATION_DATE_UNREADABLE'],
     ['no ledger number', { transactionReference: undefined }, 'LEDGER_REFERENCE_MISSING'],
   ] as const)('%s: HELD for a person, nothing credited, the pause kept, operators alerted once', async (_label, answer, reason) => {
@@ -2046,5 +2069,110 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await topups(s.subId)).toHaveLength(1);
     expect(await identityOf(ledgerOf(txn))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
     expect(await toldOf(s.userId, 'CONFIRMED')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [DS632] Condition (5) holds only as well as the zone MMG's creationDate is
+// read in: MMG_CHECKOUT_CREATION_ZONE, GUYANA_WALL_CLOCK (what MMG UAT writes,
+// verified 1 Oct) or UTC. Unset, nothing is confirmed automatically. And MMG
+// cannot have created a payment after Swift first heard of it.
+// ---------------------------------------------------------------------------
+describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
+  it('unset: no MMG payment is confirmed automatically; it is HELD (CREATION_ZONE_UNVERIFIED), nothing credited, the pause kept, operators alerted once', async () => {
+    checkoutProvider = () => sandboxIn(null);
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('ZONEUNSET');
+    approved(txn, 2100);
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_ZONE_UNVERIFIED' });
+    expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMING');
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
+    expect(await toldOf(s.userId, 'HELD')).toHaveLength(1);
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toMatch(/MMG_CHECKOUT_CREATION_ZONE/);
+  });
+
+  it.each([
+    ['MMG writes true UTC and Swift is configured UTC', 'UTC', (at: Date) => at.toISOString()],
+    ['MMG writes Guyana time, as in UAT, and Swift is configured GUYANA_WALL_CLOCK', 'GUYANA_WALL_CLOCK', gyStamp],
+  ] as const)('the DS632 scenario, both ways (%s): a real payment made 3h48m before the checkout is HELD and never credited to it; a payment made inside the checkout is credited', async (_label, zone, stampOf) => {
+    checkoutProvider = () => sandboxIn(zone);
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const early = tx(`DSEARLY${zone === 'UTC' ? 'U' : 'G'}`);
+    approved(early, 2100, {}, { creationDate: stampOf(new Date(row.createdAt.getTime() - (3 * 60 + 48) * 60_000)) });
+    expect(await codeReply(row, '0', early)).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(early)).toBeNull();
+    expect(await identityOf(ledgerOf(early))).toBeNull();
+
+    const t = await makeSub();
+    const paidRow = await intentOf((await start(t)).checkout.ref);
+    const paid = tx(`DSINTIME${zone === 'UTC' ? 'U' : 'G'}`);
+    approved(paid, 2100, {}, { creationDate: stampOf(new Date()) });
+    expect(await codeReply(paidRow, '0', paid)).toBe('CONFIRMED');
+    expect(await topups(t.subId)).toHaveLength(1);
+    expect(await identityOf(paid)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${paidRow.id}` });
+  });
+
+  it('CREATION_AFTER_REPLY: a true-UTC stamp read as Guyana time is HELD, nothing credited, and operators are told once that MMG’s stamps may not match the configured zone', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('TRUEUTCREADASGY');
+    approved(txn, 2100, {}, { creationDate: new Date().toISOString() });
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMING');
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toMatch(/may not match/);
+    expect(pages[0]!.body).toMatch(/MMG_CHECKOUT_CREATION_ZONE/);
+  });
+
+  it('the bound is the FIRST reply naming the transaction, whichever door brought it', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 20 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('FIRSTREPLY');
+    // MMG's server named it two minutes in; the browser came back fifteen minutes in.
+    await answeredAt(row, txn, new Date(opened.getTime() + 2 * 60_000), 'NOTIFY');
+    await answeredAt(row, txn, new Date(opened.getTime() + 15 * 60_000), 'RETURN');
+    // MMG's stamp says ten minutes in: inside the window, before the second
+    // reply, but after the first one plus two minutes.
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date(opened.getTime() + 10 * 60_000)) });
+    await service.pollIntents(new Date());
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+  });
+
+  it('the 1 Oct UAT round trip, at its exact times, still confirms with GUYANA_WALL_CLOCK', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    // Opened 15:38:19 Guyana time; MMG's reply read at 15:39:05; MMG's stamp 15:39:36.526, written with a "Z".
+    const opened = new Date('2026-10-01T19:38:19Z');
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('UATEXACT');
+    await answeredAt(row, txn, new Date('2026-10-01T19:39:05Z'), 'RETURN');
+    approved(txn, 2100, {}, { creationDate: '2026-10-01T15:39:36.526Z' });
+    await service.pollIntents(new Date());
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(txn)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
+    expect(await identityOf(ledgerOf(txn))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
   });
 });

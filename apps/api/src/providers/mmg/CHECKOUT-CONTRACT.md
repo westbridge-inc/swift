@@ -60,7 +60,7 @@ Only these root fields have documented meaning:
 
 Unknown/malformed result fields do not change a checkout. A success requires transactionId. After a success answer for a checkout, a later not-paid answer releases nothing, and the disagreement holds a paid record for a person. A previously confirmed credit is never reversed by a later response.
 
-`merchantTransactionId` in this browser response is not a lookup field: UAT (1 Oct) showed MMG's lookup carries neither it nor the product description, so `MMG_LOOKUP_REFERENCE_FIELDS` stays empty. The lookup answers HTTP 200 with `transactionStatus`, a whole-dollar `amount` string, `currency`, `creationDate` (Guyana time, even where it ends in `Z`), `transactionReference` (MMG's ledger number, a different number from the reply's `transactionId`), `creditParty`/`debitParty` as `[{key: "accountid", value}]`, and `metadata` whose `description` is empty. Credit requires MMG's success answer for the checkout plus that record: `successful`, exact amount in GYD, our merchant's `accountid`, created inside the checkout's window, and neither number credited before.
+`merchantTransactionId` in this browser response is not a lookup field: UAT (1 Oct) showed MMG's lookup carries neither it nor the product description, so `MMG_LOOKUP_REFERENCE_FIELDS` stays empty. The lookup answers HTTP 200 with `transactionStatus`, a whole-dollar `amount` string, `currency`, `creationDate` (in UAT, Guyana time even where it ends in `Z`; read in the zone `MMG_CHECKOUT_CREATION_ZONE` names), `transactionReference` (MMG's ledger number, a different number from the reply's `transactionId`), `creditParty`/`debitParty` as `[{key: "accountid", value}]`, and `metadata` whose `description` is empty. Credit requires MMG's success answer for the checkout plus that record: `successful`, exact amount in GYD, our merchant's `accountid`, created inside the checkout's window, and neither number credited before.
 
 ## UNCONFIRMED — requires MMG or a sandbox run
 
@@ -72,6 +72,7 @@ Unknown/malformed result fields do not change a checkout. A success requires tra
 - **U7** The live page host.
 - **U8** How long a checkout session lives.
 - **U9** Whether one merchant can register separate staging and production return URLs.
+- **U10** How MMG production writes the lookup's `creationDate`. UAT writes Guyana time labelled `Z` (1 Oct), so staging sets `MMG_CHECKOUT_CREATION_ZONE=GUYANA_WALL_CLOCK`. Production leaves it unset, so every MMG payment is held for a person, until MMG confirms the format or a real payment proves it.
 
 ## Security posture
 
@@ -95,6 +96,7 @@ Unknown/malformed result fields do not change a checkout. A success requires tra
 | `MMG_CHECKOUT_RETURN_ORIGIN` | https web origin of the registered return pages | enabled + live |
 | `MMG_CHECKOUT_PRIVATE_KEY` | secret file, RSA private key, PEM, unencrypted, ≥ 2048 bits | enabled + live |
 | `MMG_CHECKOUT_SECRET_KEY` | secret file | enabled + live |
+| `MMG_CHECKOUT_CREATION_ZONE` | how the lookup's `creationDate` is read: exactly `GUYANA_WALL_CLOCK` (`Z` or no zone is Guyana time) or `UTC` (`Z` is UTC; no zone cannot be read); an explicit offset is read as stated | optional. Unset, no MMG payment is confirmed automatically (each is held for a person). Any other value refuses to start, in every mode. Staging and UAT: `GUYANA_WALL_CLOCK`; production: unset until U10 is answered |
 
 At boot, the guard also runs the widest request this configuration can produce and proves it fits the configured public key. A key that is too small therefore fails the deploy, not the first partner.
 
