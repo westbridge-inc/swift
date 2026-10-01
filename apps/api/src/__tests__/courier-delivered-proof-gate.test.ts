@@ -13,6 +13,7 @@ import courierRoutes from '../modules/courier/courier.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // [E16-B · S2] A COURIER parcel may enter DELIVERED only with the door-photo
@@ -33,12 +34,15 @@ const UPLOAD_DIR = path.join(os.tmpdir(), `swift-courier-proof-gate-${nanoid(6)}
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
 let seq = 0;
+// [SAFE-B · retained history] A job with an issued drop-off proof is kept with the people it names, so the
+// phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('18');
 
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+592037${String(seq).padStart(4, '0')}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'E16B',
       lastName: `U${seq}`,
       roles,
@@ -173,17 +177,28 @@ afterAll(async () => {
     select: { id: true },
   });
   const ids = rows.map((o) => o.id);
-  await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: ids } } });
-  await app.prisma.strike.deleteMany({ where: { orderId: { in: ids } } });
-  await app.prisma.earning.deleteMany({ where: { orderId: { in: ids } } });
-  await app.prisma.rider.updateMany({ where: { userId: { in: createdUserIds } }, data: { currentOrderId: null } }).catch(() => {});
-  await app.prisma.order.deleteMany({ where: { id: { in: ids } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-  await app.close();
+  // [SAFE-B · retained history] A job with an issued drop-off proof is kept with its earnings and the people it
+  // names; the rest goes as before, in one transaction, and what stays is taken out of service.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { orderIds: ids });
+      const goneOrderIds = without(ids, kept.orderIds);
+      const goneUserIds = without(createdUserIds, kept.userIds);
+      await tx.reimbursementClaim.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+      await tx.strike.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+      await tx.earning.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+      await tx.rider.updateMany({ where: { userId: { in: createdUserIds } }, data: { currentOrderId: null } });
+      await tx.order.deleteMany({ where: { id: { in: goneOrderIds } } });
+      await tx.rider.deleteMany({ where: { userId: { in: goneUserIds } } });
+      await tx.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await tx.session.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await tx.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+      await tx.user.deleteMany({ where: { id: { in: goneUserIds } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
 
 describe('[E16-B] a courier job enters DELIVERED only with the door photo recorded', () => {
@@ -257,7 +272,9 @@ describe('[E16-B] a courier job enters DELIVERED only with the door photo record
 
     const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, { outcome: 'paid', gps: { lat: 6.81, lng: -58.16 } }, mover.token);
     expect(res.statusCode).toBe(409);
-    expect(res.json().error.code).toBe('DELIVERY_PROOF_REQUIRED');
+    // [SAFE-B] The shared cash handover now refuses an unpaid courier job with no issued proof itself, inside
+    // the same transaction, before the canonical seam's own DELIVERY_PROOF_REQUIRED check is reached.
+    expect(res.json().error.code).toBe('PROOF_NOT_ISSUED');
 
     // The capture was staged in the same transaction as the refused terminal:
     // everything rolls back — still ARRIVED, fee still uncollected, no earnings.
@@ -275,7 +292,8 @@ describe('[E16-B] a courier job enters DELIVERED only with the door photo record
     const photo = await postPhoto(`/api/v1/courier/order/${order.id}/proof-photo`, mover.token);
     expect(photo.statusCode).toBe(200);
     const url = photo.json().data.url as string;
-    expect(url).toContain('courier-proof/');
+    // [SAFE-B] The drop-off proof is minted by the shared handover issuer, under its own folder.
+    expect(url).toContain('handover-proof/');
 
     const proof = await inject('POST', `/api/v1/courier/order/${order.id}/proof`, { proofPhotoUrl: url }, mover.token);
     expect(proof.statusCode).toBe(200);

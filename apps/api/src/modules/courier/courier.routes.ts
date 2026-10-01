@@ -1,3 +1,4 @@
+import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { canonicalBillableKm } from '../../utils/billable-distance';
@@ -507,25 +508,10 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}` });
-    // [REPORT-016 F-016-04] Record the SERVER-issued URL + the rider it was
-    // issued to. /proof exact-matches this, so proof is proof of an actual
-    // upload by this rider — not any string that contains the folder name.
-    // Guarded on rider ownership + non-terminal status (matches the read above).
-    await app.prisma.order.updateMany({
-      // THIS is the site that mattered. The three checks above are backstopped
-      // by ORDER_TRANSITIONS (FAILED and REFUNDED are predecessors of neither
-      // DELIVERED nor CANCELLED, so the transition is refused whatever the
-      // guard says) — but this is a direct updateMany, and NO state machine
-      // guards a direct write. With the old three-entry list a rider could
-      // stamp `courierProofIssuedUrl` onto a job that had already FAILED at the
-      // door, putting a delivery photo on the evidence trail of a refused
-      // handover — the same order an admin later reviews a claim against.
-      // Failure evidence has its own path: cash-rules' handover takes photoUrl.
-      where: { id, orderType: 'COURIER', riderId: rider.id, status: { notIn: TERMINAL_ORDER_STATUSES } },
-      data: { courierProofIssuedUrl: url, courierProofIssuedRiderId: rider.id },
+    const data = await issueHandoverPhoto(app.prisma, storage, {
+      orderId: id, actorId: request.user.userId, role: 'RIDER', buffer, mimeType: file.mimetype,
     });
-    return { success: true, data: { url } };
+    return { success: true, data };
   });
 
   /** [M-28] POST /order/:id/collect — a sender-pays job: the rider collects
@@ -565,8 +551,8 @@ export default async function courierRoutes(app: FastifyInstance) {
     // [M-28] The cash outcome governs completion. Sender-pays: the fee must
     // have been collected at pickup (the collect step). Recipient-pays: the
     // outcome is recorded WITH the proof — paid captures and completes in one
-    // commit; refused / nobody there fails the job with the photo as the
-    // claim's evidence, a strike on the customer and the rider's claim.
+    // commit; refused / nobody there records the failed job and filing for
+    // review. The shared evidence policy governs strike and claim eligibility.
     if (order.paymentMethod === 'CASH' && order.paymentStatus !== 'CAPTURED') {
       if (order.courierPayer === 'SENDER') {
         throw new AppError(409, 'PAYMENT_NOT_CAPTURED', 'Collect the fee from the sender first — the collect step records it; the proof then closes the job.');
@@ -574,7 +560,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       if (!body.outcome || !body.gps) {
         throw new AppError(400, 'OUTCOME_REQUIRED', 'Record the cash outcome with the proof: paid, refused or nobody there, with your location.');
       }
-      const result = await cashRules.handover(id, request.user.userId, { outcome: body.outcome, gps: body.gps, photoUrl: body.proofPhotoUrl, courierProofPhotoUrl: body.proofPhotoUrl });
+      const result = await cashRules.handover(id, request.user.userId, { outcome: body.outcome, gps: body.gps, photoUrl: body.proofPhotoUrl, courierProofPhotoUrl: body.proofPhotoUrl, sessionId: request.authSessionId ?? undefined });
       try {
         app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: result.order.status });
       } catch (error) {

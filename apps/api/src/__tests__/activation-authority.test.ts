@@ -294,9 +294,13 @@ describe('F-012-05 — one authority generation [REPORT-012]', () => {
     for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
     await svc.reconcileVendorActivations();
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { acceptingOrders: false } });
-    await app.prisma.subscription.create({
+    // [SAFE-B] Activation starts the store's trial in the same transaction (and identity lock) as the activation
+    // itself, so the store already holds its one subscription: it lapses into PAST_DUE with the grace over.
+    const trial = await app.prisma.subscription.findUniqueOrThrow({ where: { vendorId: vendor.id } });
+    await app.prisma.subscription.update({
+      where: { id: trial.id },
       data: {
-        vendorId: vendor.id, type: 'RESTAURANT', status: 'PAST_DUE', weeklyRate: 20000,
+        status: 'PAST_DUE', weeklyRate: 20000,
         billingMethod: 'CASH', isInGracePeriod: true,
         gracePeriodEnd: new Date(Date.now() - 60_000),
         currentPeriodStart: new Date(Date.now() - 8 * 86_400_000),

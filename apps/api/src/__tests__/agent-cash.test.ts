@@ -6,6 +6,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { ensureSan } from '../modules/billing/san.service';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // Agent-cash ingestion [san spec PARTS 4/13] against the real engine:
 // scenario B (suspended → cash → reactivated through recordTopUp's instant
@@ -21,7 +22,10 @@ const vendorIds: string[] = [];
 const subIds: string[] = [];
 const paymentIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_006_000_000 + Math.floor(Math.random() * 8_000_000);
+// [SAFE-B · retained history] A credited payment records an advisory MMG payer observation: immutable evidence
+// naming its subscription and account, kept after the suite. Owners and stores therefore live in a phone
+// namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('16');
 
 let svc: AgentCashService;
 let billing: BillingService;
@@ -29,14 +33,14 @@ let billing: BillingService;
 async function makeVendorSub(over: Record<string, unknown> = {}) {
   seq += 1;
   const user = await prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Cash', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`, firstName: 'Cash', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   userIds.push(user.id);
   const owner = await prisma.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await prisma.vendor.create({
     data: {
       ownerId: owner.id, name: `Cash Vendor ${seq}`, slug: `cash-${nanoid(8).toLowerCase()}`,
-      vendorType: 'RESTAURANT', phone: `+${phoneBase + 700_000 + seq}`,
+      vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}${String(500 + seq).padStart(3, '0')}`,
       addressLine1: '4 Agent Row', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
     },
@@ -76,19 +80,30 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await prisma.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds } } });
-  await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await prisma.sanTombstone.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-  await prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-  await prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
-  await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await prisma.identityKey.deleteMany({ where: { accountId: { in: userIds } } });
-  await prisma.identityClusterMember.deleteMany({ where: { accountId: { in: userIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  await prisma.$disconnect();
+  // [SAFE-B · retained history] A subscription an MMG payer observation names is kept with its money records,
+  // store and owner; the rest goes as before, in one transaction. What stays is cancelled without renewal and
+  // its store closed, so no later billing cycle reaches it. Identity rows go for everyone, as before.
+  try {
+    await prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { subscriptionIds: subIds });
+      const goneSubs = without(subIds, kept.subscriptionIds);
+      await tx.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds }, OR: [{ subscriptionId: null }, { subscriptionId: { in: goneSubs } }] } });
+      await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.sanTombstone.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.subscription.deleteMany({ where: { id: { in: goneSubs } } });
+      await tx.vendor.deleteMany({ where: { id: { in: without(vendorIds, kept.vendorIds) } } });
+      await tx.vendorOwner.deleteMany({ where: { userId: { in: without(userIds, kept.userIds) } } });
+      await tx.notification.deleteMany({ where: { userId: { in: userIds } } });
+      await tx.identityKey.deleteMany({ where: { accountId: { in: userIds } } });
+      await tx.identityClusterMember.deleteMany({ where: { accountId: { in: userIds } } });
+      await tx.user.deleteMany({ where: { id: { in: without(userIds, kept.userIds) } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await prisma.$disconnect();
+  }
 });
 
 const track = <T extends { paymentId: string }>(r: T): T => { paymentIds.push(r.paymentId); return r; };
