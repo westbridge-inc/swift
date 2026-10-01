@@ -261,7 +261,7 @@ vi.mock('react-native', () => ({
 }));
 vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn(), goBack: vi.fn() }) }));
 vi.mock('@react-navigation/native-stack', () => ({
-  createNativeStackNavigator: () => ({ Navigator: 'Stack.Navigator', Screen: 'Stack.Screen' }),
+  createNativeStackNavigator: () => ({ Navigator: 'Stack.Navigator', Group: 'Stack.Group', Screen: 'Stack.Screen' }),
 }));
 vi.mock('@react-navigation/bottom-tabs', () => ({
   createBottomTabNavigator: () => ({ Navigator: 'Tab.Navigator', Screen: 'Tab.Screen' }),
@@ -383,7 +383,7 @@ function only(node: unknown, type: unknown): Element {
 }
 
 function vendorRoot(): () => unknown {
-  const screen = ofType(VendorStack(), 'Stack.Screen').find((el) => el.props.name === 'VendorRoot');
+  const screen = ofType(fx.mount(VendorStack, {}).output, 'Stack.Screen').find((el) => el.props.name === 'VendorRoot');
   if (!screen) throw new Error('VendorStack no longer registers VendorRoot');
   return screen.props.component;
 }
