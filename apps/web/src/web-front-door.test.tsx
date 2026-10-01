@@ -87,6 +87,24 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     expect((screen.getByRole('button', { name: /Drive & deliver/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it('the footer never says store ordering works in the browser where it does not', async () => {
+    for (const [switchValue, url, note] of [
+      ['', 'https://swiftgy.com/legal/refunds', 'Ordering opens soon in Georgetown.'],
+      ['', 'https://staging.swiftgy.com/legal/refunds', 'Store ordering works in your browser.'],
+      ['live', 'https://swiftgy.com/legal/refunds', 'Store ordering works in your browser.'],
+    ] as const) {
+      await configWith(switchValue);
+      openAt(url);
+      const { SiteFooter } = await import('@/components/site');
+      const view = render(<SiteFooter />);
+      const footerText = view.container.textContent ?? '';
+      expect(footerText, url).toContain(note);
+      expect(footerText, url).toContain('Taxi rides require the Swift mobile app.');
+      if (note.startsWith('Ordering')) expect(footerText, url).not.toContain('works in your browser');
+      view.unmount();
+    }
+  });
+
   it('sign-up on staging, or once live, starts a customer account as before', async () => {
     for (const [switchValue, url] of [['', 'https://staging.swiftgy.com/signup'], ['live', 'https://swiftgy.com/signup']] as const) {
       await configWith(switchValue);

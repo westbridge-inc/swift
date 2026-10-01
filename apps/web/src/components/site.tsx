@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { SwiftLogo } from './swift-logo';
+import { BrowserOrderingNote } from './browser-ordering-note';
 import { site, launch, showAppStoreBadges } from '@/site.config';
 export { SiteNav } from './site-nav';
 
@@ -55,7 +56,7 @@ export function SiteFooter() {
               only switch, and it is driven by the launch config. */}
           {showAppStoreBadges ? null : (
             <p className="mt-4 text-xs text-[var(--swift-muted)]">
-              Store ordering works in your browser. Taxi rides require the Swift mobile app.
+              <BrowserOrderingNote /> Taxi rides require the Swift mobile app.
             </p>
           )}
         </div>

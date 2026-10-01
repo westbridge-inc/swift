@@ -12,8 +12,8 @@ import { launchCity } from '@/lib/web-ordering';
  * does: the introduction, the company and every policy.
  */
 export const metadata: Metadata = {
-  title: `Launching soon in ${launchCity}`,
-  description: `${site.tradeName} is launching in ${launchCity}: food, groceries, shops, parcels and rides, where the people serving you keep 100% of what they earn.`,
+  title: `Launching soon in ${launchCity()}`,
+  description: `${site.tradeName} is launching in ${launchCity()}: food, groceries, shops, parcels and rides, where the people serving you keep 100% of what they earn.`,
   alternates: { canonical: SITE_ORIGIN },
 };
 
@@ -59,7 +59,7 @@ export default function LaunchingSoonPage() {
     <Section>
       <div className="max-w-3xl">
         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--swift-red)]">{site.tradeName}</p>
-        <h1 className="mt-4 text-4xl font-extrabold leading-[1.05] tracking-tight md:text-6xl">Launching soon in {launchCity}</h1>
+        <h1 className="mt-4 text-4xl font-extrabold leading-[1.05] tracking-tight md:text-6xl">Launching soon in {launchCity()}</h1>
         <p className="mt-6 text-lg leading-relaxed text-[var(--swift-muted)]">
           Food, groceries, shops, parcels and rides from local businesses, where the people serving you keep 100% of
           what they earn. Ordering opens on this site soon; nothing can be ordered here yet.

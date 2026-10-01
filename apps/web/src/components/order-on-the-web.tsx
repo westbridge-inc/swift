@@ -20,7 +20,7 @@ export function OrderOnTheWeb({ className }: { className: string }) {
   }
   return (
     <span className="inline-flex items-center rounded-full bg-[var(--swift-subtle)] px-6 py-3 font-semibold text-[var(--swift-ink)]">
-      Launching soon in {launchCity}
+      Launching soon in {launchCity()}
     </span>
   );
 }

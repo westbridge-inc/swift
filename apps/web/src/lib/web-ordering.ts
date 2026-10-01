@@ -28,5 +28,8 @@ export function webOrderingOpen(host: string | null | undefined, state: LaunchSt
   return !publicSite || state === 'live';
 }
 
-/** Where the market is, for the front door's headline: "Georgetown, Guyana" → "Georgetown". */
-export const launchCity: string = (launch.markets[0] ?? '').split(',')[0]!.trim();
+/** Where the market is, for the front door's headline: "Georgetown, Guyana" → "Georgetown".
+ *  A function, so importing this module never reads the launch config. */
+export function launchCity(): string {
+  return (launch.markets[0] ?? '').split(',')[0]!.trim();
+}

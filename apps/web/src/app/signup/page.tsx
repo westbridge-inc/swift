@@ -149,7 +149,7 @@ export default function SignupPage() {
               return (
                 <button key={r} type="button" disabled={closed} onClick={() => { if (r !== 'CUSTOMER') clearStorefrontContinuation(); setRole(r); setStep('phone'); }} className={styles.roleButton}>
                   <span className={styles.roleIcon}><Icon size={22} aria-hidden="true" /></span>
-                  <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{closed ? `Launching soon in ${launchCity}` : desc}</span></span>
+                  <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{closed ? `Launching soon in ${launchCity()}` : desc}</span></span>
                 </button>
               );
             })}
