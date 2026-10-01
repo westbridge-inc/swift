@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
-import { bindPublicMarketTenant, decodeScopedCursor, encodeScopedCursor } from '../search/search-scope';
+import { bindBrowseTenant, decodeScopedCursor, encodeScopedCursor, requireRequestTenant } from '../search/search-scope';
 import { ITEM_HIT_SELECT, toItemHit, type ItemHit } from '../search/item-hit';
 import { AppError } from '../../utils/errors';
 import { marketGate, thresholdsFrom } from './launch-depth';
@@ -83,7 +83,12 @@ export async function marketRoutes(app: FastifyInstance) {
   // public market resolver binds one for every request here — the taxonomy,
   // the join rows and the vendors are tenant-scoped models and partition
   // themselves once bound; items carry no tenant and name it explicitly.
-  app.addHook('preHandler', bindPublicMarketTenant(app));
+  //
+  // [REVIEW-READY] The same binding as search and the Home category rail: a
+  // signed-in customer's OWN tenant, a guest the public catalogue's. Binding the
+  // public catalogue for every request showed a store reviewer (a REVIEW tenant,
+  // the fiction; DL-9: never production data) the operator's real goods.
+  app.addHook('preHandler', bindBrowseTenant(app));
   /**
    * GET /items — the catalogue, across stores.
    *
@@ -104,8 +109,8 @@ export async function marketRoutes(app: FastifyInstance) {
    * describe a different catalogue than the one the shopper would see.
    */
   app.get('/depth', async (request) => {
-    // The preHandler above has already bound the public tenant.
-    const tenantId = request.publicTenantId!;
+    // The preHandler above has already bound the tenant: the customer's own, or the public catalogue's for a guest.
+    const tenantId = request.publicTenantId ?? requireRequestTenant(request);
     // [S2-1] The same hidden-only exclusion the feed applies, so the depth
     // gate counts the catalogue a shopper can actually see — never raw rows.
     const { hiddenOnlyItemIds } = await import('../verification/category-gate');
@@ -126,7 +131,7 @@ export async function marketRoutes(app: FastifyInstance) {
 
   app.get('/items', async (request) => {
     const q = marketQuerySchema.parse(request.query);
-    const tenantId = request.publicTenantId!;
+    const tenantId = request.publicTenantId ?? requireRequestTenant(request);
 
     // Resolve the category slug to an id FIRST, so an unknown slug is an honest
     // 404 rather than a silently empty grid that looks like "we sell nothing".
