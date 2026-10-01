@@ -773,11 +773,13 @@ class Q11PilotUpWebsite(unittest.TestCase):
         self.store = " ".join(sorted(set(re.findall(r"_FILE: /run/secrets/([A-Z][A-Z0-9_]*)", compose))
                                      | {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}))
 
-    def run_pilot(self, web_host=None, **extra):
+    def run_pilot(self, web_host=None, alias=None, **extra):
         settings = (f"PILOT_ENV=staging\nAPI_HOST={API_HOST}\nMAPS_PROVIDER=osrm\nOSRM_URL=http://osrm:5000\n"
                     "BACKUP_BUCKET=test-backups\nNODE_ENV=development\nCORS_ORIGIN=https://staging.example.com\n")
         if web_host is not None:
             settings += f"WEB_HOST={web_host}\n"
+        if alias is not None:
+            settings += f"API_ALIAS_HOST={alias}\n"
         (self.here / ".env").write_text(settings)
         env = os.environ.copy()
         env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
@@ -839,6 +841,30 @@ class Q11PilotUpWebsite(unittest.TestCase):
                 result, calls = self.run_pilot(same)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("WEB_HOST must differ from API_HOST", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_a_valid_api_alias_deploys_like_the_primary_name(self):
+        result, calls = self.run_pilot(WEB_HOST, alias=ALIAS_HOST)
+        self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        self.assertIn(f"STAGING READY at exact SHA {self.SHA}", result.stdout)
+
+    def test_a_malformed_api_alias_is_refused_before_anything_changes(self):
+        for bad in ("https://api.example.com", "api.example.com/", "api.example.com:443", "localhost", "api", "-api.example.com", "api example.com"):
+            with self.subTest(alias=bad):
+                self.log.write_text("")
+                result, calls = self.run_pilot(None, alias=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("API_ALIAS_HOST", result.stderr)
+                self.assertEqual(calls, [], "nothing may run before the settings are accepted")
+
+    def test_api_alias_must_differ_from_the_api_and_website_names(self):
+        for same, web, message in ((API_HOST, None, "must differ from API_HOST"), (API_HOST.upper(), None, "must differ from API_HOST"),
+                                   (WEB_HOST, WEB_HOST, "must differ from WEB_HOST"), (WEB_HOST.upper(), WEB_HOST, "must differ from WEB_HOST")):
+            with self.subTest(alias=same, web_host=web):
+                self.log.write_text("")
+                result, calls = self.run_pilot(web, alias=same)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"API_ALIAS_HOST {message}", result.stderr)
                 self.assertEqual(calls, [])
 
     def test_a_site_that_does_not_build_leaves_the_running_stack_untouched(self):
@@ -917,8 +943,6 @@ class Q11WebsiteDocs(unittest.TestCase):
             self.assertIn(needle, section)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ===========================================================================
@@ -952,3 +976,7 @@ class StoreApiAliasHost(unittest.TestCase):
     def test_caddy_gets_the_alias_with_an_empty_default(self):
         caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
         self.assertIn("API_ALIAS_HOST: ${API_ALIAS_HOST:-}", caddy)
+
+
+if __name__ == "__main__":
+    unittest.main()
