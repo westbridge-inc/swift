@@ -226,6 +226,7 @@ services:
     restart: unless-stopped
     environment:
       API_HOST: ${API_HOST:-localhost}
+      API_ALIAS_HOST: ${API_ALIAS_HOST:-}
       # [Q11] The website's DNS name. Empty (the default) serves no website:
       # the Caddyfile adds it to the API's site only when it is set.
       WEB_HOST: ${WEB_HOST:-}
