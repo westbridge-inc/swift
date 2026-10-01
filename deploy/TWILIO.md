@@ -62,10 +62,21 @@ launch approval. Set the provider account's available spending limit or alerts
 and verify who receives those alerts. Swift's `OTP_PHONE_DAILY_CAP` (default 8),
 `OTP_IP_DAILY_CAP` (default 100, unknown numbers per client IP),
 `OTP_GLOBAL_DAILY_CAP` (default 5000, unknown numbers) and `OTP_KNOWN_DAILY_CAP`
-(default 5000, existing verified accounts and admins) bound OTP volume; they do
-not cap every alert SMS. The worst case for one Guyana day is the global cap
-plus the known cap. Set both to explicit affordable numbers for the launch
-volume, then monitor provider usage.
+(default 5000, existing verified accounts and admins) bound OTP volume. Safety
+texts (a passenger's trip link and an emergency contact's confirmation code)
+have a budget of their own that no login code can spend:
+`SMS_SAFETY_SENDER_DAILY_CAP` (default 30 per account),
+`SMS_SAFETY_RECIPIENT_DAILY_CAP` (default 10 from one account to one number)
+and `SMS_SAFETY_DAILY_CAP` (default 2000 for the whole platform). None of these
+caps every alert SMS: the SOS text to a verified emergency contact, on-call
+pages and account notices are not budgeted. Every budgeted text (login,
+step-up, trip link, emergency-contact code) is refused in the API for a number
+outside the launch market before Twilio is called; the Twilio geo-permission is
+the backstop for everything else, so an `OPS_ONCALL_PHONES` number outside the
++592 range receives nothing while it is Guyana-only. The worst case for one
+Guyana day is the global cap plus the known cap plus the safety cap. Set all
+three to explicit affordable numbers for the launch volume, then monitor
+provider usage.
 
 For rotation, create a new application API key, set its SID in `deploy/.env`
 and its secret with `swift-secrets set` (the previous encrypted version is kept

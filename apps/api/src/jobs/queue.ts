@@ -296,7 +296,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
-    ({ order } = await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'CANCELLED',
       allowedFrom: ['PENDING'],
@@ -366,7 +366,7 @@ export async function releaseHeldOrdersJob(
   queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue' | 'orderQueue'>,
 ): Promise<string[]> {
   const { OrderService } = await import('../modules/order/order.service');
-  const orders = new OrderService(ctx.prisma, ctx.io);
+  const orders = new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis);
   const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
     await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
   });
@@ -392,7 +392,7 @@ export async function releaseHeldOrdersJob(
 export async function autoCompleteDeliveredOrder(ctx: JobContext, orderId: string): Promise<boolean> {
   const { OrderService } = await import('../modules/order/order.service');
   try {
-    await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'COMPLETED',
       allowedFrom: ['DELIVERED'],
@@ -525,6 +525,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       switch (job.name) {
         case 'process-billing': {
+          const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period
           // ends, then turns PAUSED (not operable, owing nothing); resuming
@@ -543,7 +544,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, confirmationReviews, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           // [DS213 F1-1] A stopped plan that fails to pause counts too.
@@ -594,6 +595,17 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const repaired = await billing.reconcileTerminalWithoutOutcome();
           if (repaired.repaired > 0 || repaired.stillOpen > 0) {
             ctx.log.warn(repaired, '[M-04] terminal MMG payments without a recorded outcome — reconciled');
+          }
+          {
+            // [MMG-RECV] Agent-cash payments stranded RECEIVED (the delivery
+            // that saved them died before its verdict) are finished here,
+            // fairly and each exactly once; one that keeps failing goes to
+            // the suspense queue for a person.
+            const { AgentCashService } = await import('../modules/billing/agent-cash.service');
+            const stranded = await new AgentCashService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).finishStrandedPayments();
+            if (stranded.finished.length + stranded.failed.length + stranded.suspensed.length > 0) {
+              ctx.log.warn(stranded, '[MMG-RECV] agent-cash payments stranded RECEIVED — finished');
+            }
           }
           // [M-08] Top-up commands whose notice / re-bill tail is still owed
           // are drained here; historical unkeyed top-ups that look doubled are
@@ -1642,6 +1654,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const report = await runBillingInvariants(ctx.prisma);
         const broken =
           report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+          report.unjudgedSubscriptions.length +
           report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
@@ -1651,7 +1664,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );
@@ -1934,7 +1947,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { OrderService, reconcileMissingEarnings } = await import('../modules/order/order.service');
         const { scanned, healed, taxiUnpaidDelivered, courierUnpaidDelivered } = await reconcileMissingEarnings(
           ctx.prisma,
-          new OrderService(ctx.prisma, ctx.io),
+          new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         );
         // [M-29] A cash ride delivered with no captured fare after the fare
         // outcome became mandatory means a completion bypassed the terminal

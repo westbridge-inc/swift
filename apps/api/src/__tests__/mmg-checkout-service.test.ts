@@ -1,8 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { readFeePaymentDecision } from '../modules/billing/fee-payment-authority';
+import { resolveFinanceConfirmation } from '../modules/billing/confirmation-finance';
+import { readDunningClock } from '../modules/billing/dunning-clock';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { nanoid } from 'nanoid';
-import type { SubscriptionStatus } from '@prisma/client';
+import type { Prisma, SubscriptionStatus } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -21,9 +25,9 @@ import {
   resetProviderIdentityBackfillCacheForTests,
   runProviderIdentityBackfill,
 } from '../modules/billing/provider-identity-backfill';
-import { resetKeyProviderForTests } from '../providers/storage/envelope';
-import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
-import type { MmgLookupClient, MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
+import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, newMerchantTransactionId, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
+import { lookupDetailFrom, sandboxAddHistory, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout against the database (MMG-CHECKOUT-API.md).
@@ -34,8 +38,9 @@ import type { MmgLookupClient, MmgLookupDetail } from '../providers/mmg/mmg-prov
 //   I5 a checkout in flight pauses billing, a credit re-bills at once ·
 //   I6 a mismatch holds for a person · I8 expiry is not failure ·
 //   I9 every reply and lookup is written down first.
-// And the AX353 findings: F1 a credit is bound to MMG's own echo of THIS
-// checkout's reference · F2 every channel claims one identity, history is
+// And the AX353 findings: F1 a credit is tied to THIS checkout by MMG's own
+// success answer for it (the owner's ruling of 1 Oct: six conditions, below)
+// · F2 every channel claims one identity, history is
 // backfilled before checkout credits · F3 a key keeps its answer · F4 an
 // expiry never overwrites a newer state · F5 only MMG's answer for THIS
 // checkout says "not paid" · F6 the page is sealed at rest · F7 evidence is
@@ -53,15 +58,35 @@ let checkoutProvider: () => MmgCheckoutProvider;
 let kekBefore: string | undefined;
 
 const lookups = new Map<string, MmgLookupDetail>();
-const lookup: MmgLookupClient = { transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' } };
+const lookedUp: string[] = [];
+const lookup: MmgLookupClient = { transactionLookupDetail: async (id) => {
+  lookedUp.push(id);
+  return lookups.get(id) ?? { outcome: 'not_found' };
+} };
 type Found = Extract<MmgLookupDetail, { outcome: 'found' }>;
-function approved(txn: string, amountGyd: number, patch: Partial<Found> = {}) {
-  lookups.set(txn, {
-    outcome: 'found', transactionId: txn, status: 'approved', amountMinor: amountGyd * 100, currencyCode: 'GYD',
-    creditParties: [SANDBOX_MERCHANT_ID], createdAt: null, echoedReferences: [], raw: { transactionReference: txn }, ...patch,
-  });
+/** MMG stamps creationDate as Guyana wall-clock time written with a "Z" (UAT, 1 Oct). */
+const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
+/** MMG's own ledger number for a payment: a different number from the reply's transactionId (UAT, 1 Oct). */
+const ledgerOf = (txn: string) => `L${txn}`;
+/** MMG's lookup answer in the exact UAT shape (evidence/mmg-uat/ROUNDTRIP-PROOF-20261001.md):
+ *  transactionStatus, a whole-dollar amount string, currency, creationDate,
+ *  transactionReference, the parties as [{ key: "accountid", value }] and
+ *  metadata whose description is empty. Created now, inside a fresh checkout's window. */
+const uatAnswer = (txn: string, amountGyd: number, patch: Record<string, unknown> = {}): Record<string, unknown> => ({
+  transactionStatus: 'successful', amount: String(amountGyd), currency: 'GYD', creationDate: gyStamp(new Date()),
+  subType: 'subscriber_mpay', transactionReference: ledgerOf(txn),
+  creditParty: [{ key: 'accountid', value: SANDBOX_MERCHANT_ID }], debitParty: [{ key: 'accountid', value: '6000002' }],
+  metadata: [{ key: 'amount', value: String(amountGyd) }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }],
+  descriptionText: null, ...patch,
+});
+/** MMG's lookup of `txn`, read exactly as the live adapter reads it. `answer`
+ *  patches MMG's own fields; `patch` the reading (an echo, a decline). */
+function approved(txn: string, amountGyd: number, patch: Partial<Found> = {}, answer: Record<string, unknown> = {}) {
+  lookups.set(txn, { ...lookupDetailFrom(uatAnswer(txn, amountGyd, answer), txn), ...patch });
 }
-/** [F1] MMG's answer echoing THIS checkout's reference in its confirmed reference field. */
+/** [F1] MMG's answer echoing THIS checkout's reference in a confirmed reference
+ *  field. MMG's lookup carries no such field (UAT, 1 Oct); an echo only ever
+ *  adds a contradiction check, it never confirms. */
 const echoOf = (row: { merchantTransactionId: string }): Partial<Found> => ({ echoedReferences: [row.merchantTransactionId] });
 
 const userIds: string[] = [];
@@ -134,18 +159,37 @@ const walletOf = async (subscriptionId: string) => Number((await app.prisma.prep
 const toldOf = (userId: string, status?: string) => app.prisma.notification.findMany({
   where: { userId, data: { path: ['kind'], equals: 'billing_mmg_checkout' } },
 }).then((rows) => rows.filter((row) => !status || (row.data as Record<string, unknown>)['status'] === status));
-/** A reply as MMG's page would send it back: field names are UNCONFIRMED, so these are deliberately arbitrary. */
-const replyFor = (merchantTransactionId: string, txn: string) => sandbox.sandboxReplyToken({ orderRef: merchantTransactionId, paymentRef: txn, code: 0, secretKey: 'must-not-be-stored' });
+/** The official MMG response fields; only the server lookup is payment evidence. */
+const replyFor = (merchantTransactionId: string, txn: string) => sandbox.sandboxReplyToken({ merchantTransactionId, transactionId: txn, ResultCode: '0', secretKey: 'must-not-be-stored' });
 const reply = (row: { merchantTransactionId: string }, txn: string, outcome = 'success') =>
   service.observeReply({ source: 'RETURN', outcome, params: { token: replyFor(row.merchantTransactionId, txn) } });
-const identityOf = (txn: string) => app.prisma.providerPayment.findUnique({ where: { provider_providerTxnId: { provider: 'MMG', providerTxnId: txn.trim().toUpperCase() } } });
+const identityOf = (txn: string) => app.prisma.providerPayment.findFirst({ where: { provider: 'MMG', providerTxnId: txn.trim().toUpperCase(), status: { not: 'HELD_DUPLICATE' } } });
 const subWithRelations = (subscriptionId: string) => app.prisma.subscription.findUniqueOrThrow({
   where: { id: subscriptionId },
   include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
 });
-/** A checkout MMG sent back naming this transaction (the push rail's ids fail the reply's id shape, so it is set directly). */
+/** A checkout MMG sent back naming this transaction with its success answer,
+ *  written down as a reply is (the push rail's ids fail the reply's id shape, so it is set directly). */
 async function confirmingWith(ref: string, txn: string) {
-  await app.prisma.mmgCheckoutIntent.update({ where: { id: ref }, data: { status: 'CONFIRMING', candidates: [txn], replyAt: new Date(), nextCheckAt: new Date() } });
+  const row = await app.prisma.mmgCheckoutIntent.update({ where: { id: ref }, data: { status: 'CONFIRMING', candidates: [txn], replyAt: new Date(), nextCheckAt: new Date() } });
+  await app.prisma.mmgCheckoutObservation.create({ data: {
+    tenantId: row.tenantId, intentId: row.id, source: 'RETURN', detail: 'MMG_RESULT_0',
+    body: { merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0' },
+  } });
+}
+/** A checkout written before the shared confirmation authority existed. Since
+ *  then a checkout cannot open while another payment for the same fee is being
+ *  confirmed, so a checkout and a live push request together are only a
+ *  pre-cutover pair. Its sealed MMG page is a real one (a donor's). */
+async function legacyCheckoutFor(s: { subId: string; userId: string }) {
+  const donor = await makeSub();
+  const template = await intentOf((await start(donor)).checkout.ref);
+  return app.prisma.mmgCheckoutIntent.create({ data: {
+    tenantId: template.tenantId, subscriptionId: s.subId, merchantTransactionId: newMerchantTransactionId(),
+    amount: template.amount, currencyCode: 'GYD', createdByUserId: s.userId, platform: 'ios',
+    checkoutUrlSealed: template.checkoutUrlSealed, checkoutUrlDek: template.checkoutUrlDek,
+    expiresAt: new Date(Date.now() + MMG_CHECKOUT_TTL_MS),
+  } });
 }
 /** Every credit of one MMG transaction: the push rail's success or bank, and the checkout's top-up. */
 async function creditsOf(subscriptionId: string, txn: string, paymentId?: string) {
@@ -187,11 +231,13 @@ beforeAll(async () => {
 }, 120_000);
 
 beforeEach(() => {
+  lookedUp.length = 0;
   checkoutProvider = () => sandbox;
   resetFeeCheckoutSwitchCache();
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
   await app.prisma.mmgCheckoutObservation.deleteMany({ where: { intentId: { in: intents.map((i) => i.id) } } });
   await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -200,6 +246,7 @@ afterAll(async () => {
   await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+  await app.prisma.cardSession.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
@@ -207,6 +254,7 @@ afterAll(async () => {
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.prisma.receiptCounter.deleteMany({ where: { tenantId: { in: tenantIds } } });
   await app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
   await app.close();
   if (kekBefore === undefined) delete process.env['MASTER_KEK'];
@@ -274,14 +322,22 @@ describe('starting a checkout — server-priced, written down first, one open at
     await expect(start(s)).rejects.toMatchObject({ statusCode: 409, code: 'CHECKOUT_CONFIRMING', details: { ref: checkout.ref } });
   });
 
-  it('an open checkout past its time is expired and a fresh one started', async () => {
+  it('an open checkout past its time is expired; with no answer from MMG it stays a confirmation until MMG or a person says it was not paid, then a fresh one starts', async () => {
     const s = await makeSub();
     const old = (await start(s)).checkout;
     await app.prisma.mmgCheckoutIntent.update({ where: { id: old.ref }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    // An expired page may still be paid on MMG's side: never a second page yet.
+    await expect(start(s)).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_CONFIRMING' });
+    expect((await intentOf(old.ref)).status).toBe('EXPIRED');
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
+    // A person confirms it was not paid (finance review): the partner may pay again.
+    const hold = await holdOf(old.ref);
+    const clock = await clockOf(s.subId);
+    await resolveFinanceConfirmation(app.prisma, { id: hold.id, tenantId: hold.tenantId, actorId: 'finance-test', sourceId: old.ref,
+      epoch: hold.sourceEpoch, clockVersion: clock.version, decision: 'UNPAID', evidenceReference: 'statement checked' }, async () => {});
     const fresh = await start(s);
     expect(fresh.created).toBe(true);
     expect(fresh.checkout.ref).not.toBe(old.ref);
-    expect((await intentOf(old.ref)).status).toBe('EXPIRED');
   });
 
   it('PAY_ACTION_OFF when the checkout is not configured, the platform is switched off, or the plan is stopped', async () => {
@@ -431,15 +487,24 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
     expect(await topups(s.subId)).toHaveLength(0);
   });
 
-  it('[F1] until MMG’s reference field is confirmed, an exact approved payment is held for a person, never credited', async () => {
+  it('[owner, 1 Oct] MMG’s success answer for THIS checkout and an exact successful lookup credit with no echo of our reference; a paid lookup MMG never answered success for is held for a person, never credited', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);
     approved(tx('UNBOUNDTX1'), 2100);
-    expect(await reply(row, tx('UNBOUNDTX1'))).toBe('CONFIRMING');
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'REFERENCE_NOT_ECHOED' });
-    expect(await topups(s.subId)).toHaveLength(0);
-    expect(await identityOf(tx('UNBOUNDTX1'))).toBeNull();
-    expect(await toldOf(s.userId, 'HELD')).toHaveLength(1);
+    expect(await reply(row, tx('UNBOUNDTX1'))).toBe('CONFIRMED');
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(tx('UNBOUNDTX1'))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
+
+    // ResultCode 7 (timed out) names a payment MMG's lookup shows paid: only
+    // MMG's success answer confirms, so a person decides.
+    const t = await makeSub();
+    const row2 = await intentOf((await start(t)).checkout.ref);
+    approved(tx('UNBOUNDTX2'), 2100);
+    expect(await codeReply(row2, '7', tx('UNBOUNDTX2'))).toBe('CONFIRMING');
+    expect(await intentOf(row2.id)).toMatchObject({ status: 'HELD', reason: 'NO_SUCCESS_ANSWER' });
+    expect(await topups(t.subId)).toHaveLength(0);
+    expect(await identityOf(tx('UNBOUNDTX2'))).toBeNull();
+    expect(await toldOf(t.userId, 'HELD')).toHaveLength(1);
   });
 
   it('[F1] a forged reply naming another payer’s transaction is held, and the real payer is still credited', async () => {
@@ -484,11 +549,11 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
     expect(await topups(s.subId)).toHaveLength(0);
   });
 
-  it('a mismatch that may concern another transaction waits instead of holding a payment still arriving; our reference in a description binds nothing', async () => {
+  it('a mismatch on a transaction MMG’s success answer does not name waits instead of holding a payment still arriving; our reference in a description binds nothing', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);
     approved(tx('WEAKTX1'), 2000, { raw: { transactionReference: tx('WEAKTX1'), description: `Swift ${row.merchantTransactionId}` } });
-    await reply(row, tx('WEAKTX1'));
+    await codeReply(row, '7', tx('WEAKTX1'));
     expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMING', reason: 'SEEN:HOLD:AMOUNT_MISMATCH' });
     expect(await topups(s.subId)).toHaveLength(0);
   });
@@ -527,13 +592,600 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
     const seen = await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id }, orderBy: { createdAt: 'asc' } });
     expect(seen.map((o) => o.source)).toEqual(['RETURN', 'LOOKUP']);
     expect(JSON.stringify(seen[0]!.body)).not.toContain('must-not-be-stored');
-    expect(seen[0]!.shape).toMatchObject({ orderRef: 'string', paymentRef: 'string' });
+    expect(seen[0]!.shape).toMatchObject({ merchantTransactionId: 'string', transactionId: 'string', ResultCode: 'string' });
 
     expect(await service.observeReply({ source: 'RETURN', outcome: 'success', params: { token: 'garbage' } })).toBe('UNKNOWN');
-    const stranger = sandbox.sandboxReplyToken({ orderRef: '179000000000054321', paymentRef: 'X1' });
+    const stranger = sandbox.sandboxReplyToken({ merchantTransactionId: '179000000000054321', transactionId: 'X1', ResultCode: '0' });
     expect(await service.observeReply({ source: 'RETURN', outcome: 'success', params: { token: stranger } })).toBe('UNKNOWN');
     const orphans = await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: null, failure: { in: ['NO_TOKEN', 'NO_CHECKOUT'] } }, orderBy: { createdAt: 'desc' }, take: 2 });
     expect(orphans.map((o) => o.failure).sort()).toEqual(['NO_CHECKOUT', 'NO_TOKEN']);
+  });
+});
+
+describe('concurrent checkout replies and URL emission', () => {
+  const deferred = () => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+
+  it.each((['CONFIRMING', 'CONFIRMED', 'HELD', 'EXPIRED'] as const).flatMap((status) => ['same', 'new'].map((kind) => ({ status, kind }))))('does not emit a payable URL for a $kind key when unsealing overlaps $status', async ({ status, kind }) => {
+    const s = await makeSub();
+    const clientKey = key();
+    const row = await intentOf((await start(s, clientKey)).checkout.ref);
+    const keys = getKeyProvider()!;
+    const unwrap = keys.unwrapDek.bind(keys);
+    const entered = deferred();
+    const release = deferred();
+    const spy = vi.spyOn(keys, 'unwrapDek').mockImplementationOnce(async (wrapped) => {
+      entered.resolve();
+      await release.promise;
+      return unwrap(wrapped);
+    });
+    const waiting = start(s, kind === 'same' ? clientKey : key());
+    try {
+      await entered.promise;
+      if (status === 'CONFIRMED') {
+        approved(tx(`UNSEALCONFIRMED${kind.toUpperCase()}`), 2100, echoOf(row));
+        expect(await reply(row, tx(`UNSEALCONFIRMED${kind.toUpperCase()}`))).toBe('CONFIRMED');
+      } else {
+        await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { status } });
+      }
+      release.resolve();
+      expect((await waiting).checkout).toMatchObject({ ref: row.id, status, checkoutUrl: null });
+    } finally {
+      release.resolve();
+      await waiting;
+      spy.mockRestore();
+    }
+  });
+
+  it('a fresh start whose own unsealing overlaps a reply hands out no URL: the answer is the checkout as it now stands', async () => {
+    // [DS386 #1] The first answer for a newly created checkout goes through the
+    // same central responder as every replay: the checkout is written down
+    // before its page is unsealed, so a reply can land during that unseal.
+    const s = await makeSub();
+    const keys = getKeyProvider()!;
+    const unwrap = keys.unwrapDek.bind(keys);
+    const entered = deferred();
+    const release = deferred();
+    const spy = vi.spyOn(keys, 'unwrapDek').mockImplementationOnce(async (wrapped) => {
+      entered.resolve();
+      await release.promise;
+      return unwrap(wrapped);
+    });
+    const waiting = start(s);
+    try {
+      await entered.promise;
+      const row = await app.prisma.mmgCheckoutIntent.findFirstOrThrow({ where: { subscriptionId: s.subId } });
+      expect(row.status).toBe('OPEN');
+      expect(await reply(row, tx('UNSEALFRESH'))).toBe('CONFIRMING');
+      release.resolve();
+      expect(await waiting).toMatchObject({ created: true, checkout: { ref: row.id, status: 'CONFIRMING', checkoutUrl: null } });
+    } finally {
+      release.resolve();
+      await waiting.catch(() => undefined);
+      spy.mockRestore();
+    }
+  });
+
+  it('expires an OPEN checkout whose deadline passes during unsealing', async () => {
+    const s = await makeSub();
+    const clientKey = key();
+    const row = await intentOf((await start(s, clientKey)).checkout.ref);
+    const keys = getKeyProvider()!;
+    const unwrap = keys.unwrapDek.bind(keys);
+    const spy = vi.spyOn(keys, 'unwrapDek').mockImplementationOnce(async (wrapped) => {
+      await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      return unwrap(wrapped);
+    });
+    try {
+      expect((await start(s, clientKey)).checkout).toMatchObject({ status: 'EXPIRED', checkoutUrl: null });
+    } finally { spy.mockRestore(); }
+  });
+
+  it('a duplicate-key binding closure rechecks state when its answer is used', async () => {
+    const s = await makeSub();
+    const clientKey = key();
+    const row = await intentOf((await start(s, clientKey)).checkout.ref);
+    const internal = service as unknown as { bindKey(who: { userId: string; subscriptionId: string; clientKey: string }, intent: typeof row, now: Date): Promise<{ answer(): Promise<{ checkout: { status: string; checkoutUrl: string | null } }> }> };
+    const binding = await internal.bindKey({ userId: s.userId, subscriptionId: s.subId, clientKey }, row, new Date());
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { status: 'HELD' } });
+    expect((await binding.answer()).checkout).toMatchObject({ status: 'HELD', checkoutUrl: null });
+  });
+
+  it('unions concurrent transactions and retains the earliest reply time', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const delegate = app.prisma.mmgCheckoutIntent;
+    const read = delegate.findUnique.bind(delegate);
+    const entered = [deferred(), deferred()];
+    const release = [deferred(), deferred()];
+    let seen = 0;
+    const spy = vi.spyOn(delegate, 'findUnique').mockImplementation((async (args: Parameters<typeof read>[0]) => {
+      const snapshot = await read(args);
+      if (args.where.merchantTransactionId === row.merchantTransactionId) {
+        const index = seen++;
+        entered[index]!.resolve();
+        await release[index]!.promise;
+      }
+      return snapshot;
+    }) as unknown as typeof read);
+    const first = reply(row, tx('UNIONA'));
+    await entered[0]!.promise;
+    const firstEntered = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = reply(row, tx('UNIONB'));
+    try {
+      await entered[1]!.promise;
+      release[0]!.resolve();
+      await first;
+      release[1]!.resolve();
+      await second;
+      const after = await intentOf(row.id);
+      expect(after.candidates.sort()).toEqual([tx('UNIONA'), tx('UNIONB')].sort());
+      expect(after.replyAt!.getTime()).toBeLessThanOrEqual(firstEntered);
+    } finally {
+      release.forEach((gate) => gate.resolve());
+      await Promise.all([first, second]);
+      spy.mockRestore();
+    }
+  });
+
+  it('reply persistence and CONFIRMING are atomic against deadline expiry, fresh taps and billing', async () => {
+    const now = new Date();
+    const s = await makeSub({ due: new Date(now.getTime() - 60_000) });
+    const row = await intentOf((await start(s)).checkout.ref);
+    const deadline = new Date(now.getTime() + 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { expiresAt: deadline } });
+    const persisted = deferred();
+    const release = deferred();
+    const expiryQueued = deferred();
+    const transaction = app.prisma.$transaction.bind(app.prisma);
+    const txSpy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (fn: (db: Prisma.TransactionClient) => Promise<unknown>) => transaction(async (db) => {
+      const update = db.mmgCheckoutIntent.updateMany.bind(db.mmgCheckoutIntent);
+      const hook = vi.spyOn(db.mmgCheckoutIntent, 'updateMany').mockImplementation((async (args: Parameters<typeof update>[0]) => {
+        const result = await update(args);
+        if (args?.where?.id === row.id && args.data.replyAt !== undefined) {
+          persisted.resolve();
+          await release.promise;
+        }
+        return result;
+      }) as unknown as typeof update);
+      try { return await fn(db); } finally { hook.mockRestore(); }
+    })) as unknown as typeof transaction);
+    const update = app.prisma.mmgCheckoutIntent.updateMany.bind(app.prisma.mmgCheckoutIntent);
+    const expirySpy = vi.spyOn(app.prisma.mmgCheckoutIntent, 'updateMany').mockImplementation((async (args: Parameters<typeof update>[0]) => {
+      if (args?.where?.id === row.id && args.data.status === 'EXPIRED') expiryQueued.resolve();
+      return update(args);
+    }) as unknown as typeof update);
+    const response = reply(row, tx('DEADLINERACE'));
+    let expiry: Promise<boolean> | undefined;
+    try {
+      await persisted.promise;
+      const internal = service as unknown as { expireUnanswered(id: string, now: Date): Promise<boolean> };
+      expiry = internal.expireUnanswered(row.id, new Date(deadline.getTime() + 1));
+      await expiryQueued.promise;
+      // Observe the actual database wait, not just a queued JavaScript call.
+      // Only this lane's database is inspected; the expiry must have reached
+      // PostgreSQL before the reply transaction is allowed to commit.
+      let blocked = 0;
+      for (let attempt = 0; attempt < 100 && blocked === 0; attempt += 1) {
+        const rows = await app.prisma.$queryRaw<Array<{ blocked: number }>>`
+          SELECT count(*)::int AS blocked FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%UPDATE%mmg_checkout_intents%'`;
+        blocked = rows[0]?.blocked ?? 0;
+        if (blocked === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBeGreaterThan(0);
+      release.resolve();
+      expect(await expiry).toBe(false);
+      expect(await response).toBe('CONFIRMING');
+      expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMING', candidates: [tx('DEADLINERACE')] });
+    } finally {
+      release.resolve();
+      await Promise.all([response, expiry]);
+      txSpy.mockRestore();
+      expirySpy.mockRestore();
+    }
+    await expect(start(s)).rejects.toMatchObject({ code: 'CHECKOUT_CONFIRMING' });
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
+    await billing.runBillingCycle(new Date(deadline.getTime() + 1));
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
+  });
+
+  it('a concurrent empty failure reply preserves the transaction before either verifier runs', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const transactionId = tx('EMPTYSECOND');
+    approved(transactionId, 2100); // MMG answers success and not-paid for one checkout: a person decides
+    const entered = [deferred(), deferred()];
+    const release = [deferred(), deferred()];
+    const verified = [deferred(), deferred()];
+    const verifyRelease = deferred();
+    const read = app.prisma.mmgCheckoutIntent.findUnique.bind(app.prisma.mmgCheckoutIntent);
+    let reads = 0;
+    const readSpy = vi.spyOn(app.prisma.mmgCheckoutIntent, 'findUnique').mockImplementation((async (args: Parameters<typeof read>[0]) => {
+      const snapshot = await read(args);
+      if (args.where.merchantTransactionId === row.merchantTransactionId) {
+        const index = reads++;
+        entered[index]!.resolve();
+        await release[index]!.promise;
+      }
+      return snapshot;
+    }) as unknown as typeof read);
+    const internal = service as unknown as { verify(id: string, now: Date): Promise<string> };
+    const verify = internal.verify.bind(service);
+    let verifies = 0;
+    const verifySpy = vi.spyOn(internal, 'verify').mockImplementation(async (id, now) => {
+      verified[verifies++]!.resolve();
+      await verifyRelease.promise;
+      return verify(id, now);
+    });
+    const first = reply(row, transactionId);
+    await entered[0]!.promise;
+    const second = service.observeReply({ source: 'NOTIFY', params: { token: sandbox.sandboxReplyToken({ merchantTransactionId: row.merchantTransactionId, ResultCode: '1' }) } });
+    try {
+      await entered[1]!.promise;
+      release[0]!.resolve();
+      await verified[0]!.promise;
+      release[1]!.resolve();
+      await verified[1]!.promise;
+      expect((await intentOf(row.id)).candidates).toEqual([transactionId]);
+      verifyRelease.resolve();
+      await Promise.all([first, second]);
+      expect(lookedUp).toContain(transactionId);
+      expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'MMG_ANSWERS_DISAGREE' });
+      expect(await topups(s.subId)).toHaveLength(0);
+    } finally {
+      release.forEach((gate) => gate.resolve());
+      verifyRelease.resolve();
+      await Promise.all([first, second]);
+      readSpy.mockRestore();
+      verifySpy.mockRestore();
+    }
+  });
+
+  it('a reply read before a hold cannot add candidates or reschedule the held checkout', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const delegate = app.prisma.mmgCheckoutIntent;
+    const read = delegate.findUnique.bind(delegate);
+    const entered = deferred();
+    const release = deferred();
+    const spy = vi.spyOn(delegate, 'findUnique').mockImplementation((async (args: Parameters<typeof read>[0]) => {
+      const snapshot = await read(args);
+      if (args.where.merchantTransactionId === row.merchantTransactionId) {
+        entered.resolve();
+        await release.promise;
+      }
+      return snapshot;
+    }) as unknown as typeof read);
+    const waiting = reply(row, tx('STALEHELD'));
+    try {
+      await entered.promise;
+      await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { status: 'HELD', nextCheckAt: null } });
+      release.resolve();
+      expect(await waiting).toBe('CONFIRMING');
+      expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', candidates: [], replyAt: null, nextCheckAt: null });
+    } finally {
+      release.resolve();
+      await waiting;
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('the official MMG response contract', () => {
+  const send = (merchantTransactionId: unknown, transactionId: unknown, ResultCode: unknown, extra = {}) =>
+    service.observeReply({ source: 'RETURN', outcome: 'success', params: {
+      TOKEN: sandbox.sandboxReplyToken({ merchantTransactionId, transactionId, ResultCode, ResultMessage: 'Provider message', htmlResponse: '<b>Provider content</b>', ...extra }),
+    } });
+
+  it.each(['missing', 'nested', 'padded', 'substring', 'number'] as const)('rejects a %s merchant reference without looking up or changing a checkout', async (kind) => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx(`REF${kind.toUpperCase()}`);
+    approved(txn, 2100, echoOf(row));
+    const ref = kind === 'padded' ? ` ${row.merchantTransactionId} ` : kind === 'substring' ? `prefix${row.merchantTransactionId}` : kind === 'number' ? Number(row.merchantTransactionId) : undefined;
+    expect(await send(ref, txn, '0', { nested: { merchantTransactionId: row.merchantTransactionId }, orderRef: row.merchantTransactionId })).toBe('UNKNOWN');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'OPEN', candidates: [], replyAt: null });
+    expect(lookedUp).toEqual([]);
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
+  it.each([undefined, 0, '8', '00', ' 0', 'success'])('rejects unknown or non-string ResultCode %s', async (code) => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx(`BADCODE${seq}`);
+    approved(txn, 2100, echoOf(row));
+    expect(await send(row.merchantTransactionId, txn, code)).toBe('UNKNOWN');
+    expect((await intentOf(row.id)).status).toBe('OPEN');
+    expect(lookedUp).toEqual([]);
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
+  it('uses only transactionId, ignoring nested ids, messages and HTML', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const known = tx('OTHERFIELD');
+    const official = tx('OFFICIAL');
+    approved(known, 2100, echoOf(row));
+    expect(await send(row.merchantTransactionId, official, '0', {
+      paymentRef: known, nested: { transactionId: known }, ResultMessage: known, htmlResponse: known,
+    })).toBe('CONFIRMING');
+    expect(lookedUp).toEqual([official]);
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
+  it('ResultCode 0 credits only after MMG’s lookup confirms the payment', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('PAIDCODE0');
+    expect(await send(row.merchantTransactionId, txn, '0')).toBe('CONFIRMING'); // MMG does not know it yet
+    expect(await topups(s.subId)).toHaveLength(0);
+    approved(txn, 2100);
+    expect(await send(row.merchantTransactionId, txn, '0')).toBe('CONFIRMED');
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect((await intentOf(row.id)).outcomeHint).toBe('MMG_RESULT_0');
+  });
+
+  it.each(['1', '2', '6', '7'])('[owner, 1 Oct] after ResultCode %s, a lookup that says paid is held for a person, never credited automatically', async (code) => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx(`PAIDCODE${code}`);
+    // 1, 2 and 6 are "not paid" at once; 7 waits for MMG's lookup.
+    const notPaid = ['1', '2', '6'].includes(code);
+    expect(await send(row.merchantTransactionId, txn, code)).toBe(notPaid ? 'NOT_PAID' : 'CONFIRMING');
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(notPaid ? 1 : 0);
+    approved(txn, 2100, echoOf(row));
+    expect(await send(row.merchantTransactionId, txn, code)).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'NO_SUCCESS_ANSWER', outcomeHint: `MMG_RESULT_${code}` });
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+  });
+
+  it.each(['1', '2', '6', '7'])('ResultCode %s declares NOT_PAID once (7 when MMG declines the transaction it named), releases the pause, and credits nothing', async (code) => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx(`FAILED${code}`);
+    approved(txn, 2100, { status: 'declined' });
+    expect(await send(row.merchantTransactionId, txn, code)).toBe('NOT_PAID');
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(1);
+    expect((await holdOf(row.id)).status).toBe('PROVEN_UNPAID');
+    expect(await send(row.merchantTransactionId, txn, code)).toBe('NOT_PAID');
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(1);
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+  });
+
+  it.each([['3', 'INVALID_SECRET_KEY'], ['4', 'MERCHANT_ID_MISMATCH'], ['5', 'TOKEN_DECRYPTION_FAILED']])('ResultCode %s is a configuration alert: the checkout is untouched, nothing is looked up or credited, operators are paged once', async (code, reason) => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const before = await intentOf(row.id);
+    const holdBefore = await holdOf(row.id);
+    const txn = tx(`CONFIGONLY${code}`);
+    approved(txn, 2100, echoOf(row));
+    for (let n = 0; n < 2; n += 1) expect(await codeReply(row, code, txn)).toBe('UNKNOWN');
+    expect(await intentOf(row.id)).toEqual(before);
+    expect(await holdOf(row.id)).toEqual(holdBefore);
+    expect(lookedUp).toEqual([]);
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await toldOf(s.userId)).toHaveLength(0);
+    const seen = await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id, source: 'RETURN' } });
+    expect(seen.map((o) => o.detail)).toEqual([`MMG_RESULT_${code}`, `MMG_RESULT_${code}`]);
+    const alerts = await app.prisma.notification.findMany({ where: { userId: operator.id, data: { path: ['checkoutId'], equals: row.id } } });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.data).toMatchObject({ alert: 'mmg-checkout-reply-code', resultCode: code, reason: `MMG_RESULT_${code}_${reason}` });
+    expect(JSON.stringify(alerts)).not.toContain('Provider content');
+    expect(JSON.stringify(alerts)).not.toContain('Provider message');
+    // The untouched checkout still follows MMG's own lookup for a later answer.
+    expect(await codeReply(row, '0', txn)).toBe('CONFIRMED');
+    expect(await topups(s.subId)).toHaveLength(1);
+  });
+
+  it.each((['CONFIRMED', 'HELD'] as const).flatMap((status) => (['3', '4', '5'] as const).map((code) => ({ status, code }))))(
+    'ResultCode $code for a $status checkout is still a configuration alert: paged once, nothing changed, nothing looked up', async ({ status, code }) => {
+      const s = await makeSub();
+      const operator = await operatorFor();
+      const row = await intentOf((await start(s)).checkout.ref);
+      if (status === 'CONFIRMED') {
+        const paid = tx(`CONFIGPAID${code}`);
+        approved(paid, 2100, echoOf(row));
+        expect(await codeReply(row, '0', paid)).toBe('CONFIRMED');
+      } else {
+        await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { status: 'HELD', reason: 'REFERENCE_NOT_ECHOED', nextCheckAt: null } });
+      }
+      const before = await intentOf(row.id);
+      const credits = (await topups(s.subId)).length;
+      lookedUp.length = 0;
+      const txn = tx(`CONFIGLATE${status}${code}`);
+      for (let n = 0; n < 2; n += 1) expect(await codeReply(row, code, txn)).toBe('UNKNOWN');
+      expect(await intentOf(row.id)).toEqual(before);
+      expect(lookedUp).toEqual([]);
+      expect(await topups(s.subId)).toHaveLength(credits);
+      expect(await identityOf(txn)).toBeNull();
+      const alerts = await app.prisma.notification.findMany({ where: { userId: operator.id, data: { path: ['checkoutId'], equals: row.id } } });
+      expect(alerts.filter((alert) => (alert.data as { alert?: string }).alert === 'mmg-checkout-reply-code')).toHaveLength(1);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// The official ResultCode rules (owner brief, 30 Sep): 1 not registered, 2
+// failed and 6 cancelled are "not paid" and release the confirmation pause so
+// the partner can pay again; 7 timed out is not paid unless MMG's lookup says
+// paid; 3, 4 and 5 are a configuration alert that never touches the checkout.
+// A negative answer after a success answer for the same checkout releases
+// nothing: MMG's own lookup decides. Nothing here ever credits.
+// ---------------------------------------------------------------------------
+const holdOf = (checkoutId: string) => app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { checkoutId } });
+const clockOf = (subscriptionId: string) => app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId } });
+const codeReply = (row: { merchantTransactionId: string }, ResultCode: string, transactionId?: string, source: 'RETURN' | 'NOTIFY' = 'RETURN') =>
+  service.observeReply({ source, outcome: source === 'RETURN' ? 'success' : 'notify', params: { token: sandbox.sandboxReplyToken({
+    merchantTransactionId: row.merchantTransactionId, ...(transactionId ? { transactionId } : {}), ResultCode,
+    ResultMessage: 'Provider message', htmlResponse: '<b>Provider content</b>',
+  }) } });
+const operatorFor = async () => {
+  const operator = await app.prisma.user.create({ data: {
+    phone: `+${phoneBase + 30000 + (seq += 1)}`, firstName: 'Test', lastName: 'Operator', roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN', isPhoneVerified: true,
+  } });
+  userIds.push(operator.id);
+  return operator;
+};
+
+describe('the official ResultCode rules: MMG’s negative answers release the pause; configuration codes touch nothing', () => {
+  it.each(['1', '2', '6'])('ResultCode %s is not paid: NOT_PAID, the confirmation pause is released once, and the partner may pay again', async (code) => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const row = await intentOf((await start(s)).checkout.ref);
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
+
+    expect(await codeReply(row, code)).toBe('NOT_PAID');
+    expect(lookedUp).toEqual([]);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'NOT_PAID', reason: `MMG_RESULT_${code}`, candidates: [], nextCheckAt: null });
+    expect(await holdOf(row.id)).toMatchObject({ status: 'PROVEN_UNPAID', resolvedBy: 'mmg-checkout-reply' });
+    expect((await clockOf(s.subId)).pausedAt).toBeNull();
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).billingConfirmationPausedAt).toBeNull();
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(1);
+    expect(await topups(s.subId)).toHaveLength(0);
+
+    // MMG's server repeating the same answer changes nothing and tells nobody twice.
+    expect(await codeReply(row, code, undefined, 'NOTIFY')).toBe('NOT_PAID');
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(1);
+    expect((await holdOf(row.id)).resolutionHistory).toHaveLength(1);
+    // The partner may try again: a fresh tap opens a new MMG page.
+    const fresh = await start(s);
+    expect(fresh).toMatchObject({ created: true, checkout: { status: 'OPEN' } });
+    expect(fresh.checkout.ref).not.toBe(row.id);
+    expect(fresh.checkout.checkoutUrl).toEqual(expect.any(String));
+  });
+
+  it('a failed reply naming a transaction is released too, and that transaction is still looked at: when MMG then answers success for it and its lookup says paid, the answers disagree and a person decides', async () => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('FAILEDLATEPAID');
+    expect(await codeReply(row, '2', txn)).toBe('NOT_PAID');
+    const released = await intentOf(row.id);
+    expect(released).toMatchObject({ status: 'NOT_PAID', reason: 'MMG_RESULT_2', candidates: [txn] });
+    expect(released.nextCheckAt).not.toBeNull();
+    expect((await holdOf(row.id)).status).toBe('PROVEN_UNPAID');
+    expect((await clockOf(s.subId)).pausedAt).toBeNull();
+
+    approved(txn, 2100, echoOf(row));
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'MMG_ANSWERS_DISAGREE' });
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
+    await service.pollIntents(new Date(released.nextCheckAt!.getTime() + 1000));
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+  });
+
+  it('a late record MMG shows as paid but that cannot be tied to the checkout, after a released negative, is HELD and pauses the same obligation again', async () => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('FAILEDLATEHELD');
+    expect(await codeReply(row, '2', txn)).toBe('NOT_PAID');
+    const released = await intentOf(row.id);
+    expect((await clockOf(s.subId)).pausedAt).toBeNull();
+
+    approved(txn, 2100); // MMG's lookup says paid; MMG never answered success for this checkout
+    await service.pollIntents(new Date(released.nextCheckAt!.getTime() + 1000));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'NO_SUCCESS_ANSWER' });
+    const hold = await holdOf(row.id);
+    expect(hold).toMatchObject({ status: 'ACTIVE', resolvedAt: null, resolvedBy: null });
+    expect((hold.resolutionHistory as Array<Record<string, unknown>>).map((h) => h['status'])).toEqual(['PROVEN_UNPAID', 'LATE_POSITIVE_REVIEW']);
+    expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await toldOf(s.userId, 'HELD')).toHaveLength(1);
+    const alerts = await app.prisma.notification.findMany({ where: { userId: operator.id, data: { path: ['checkoutId'], equals: row.id } } });
+    expect(alerts.map((a) => (a.data as Record<string, unknown>)['alert'])).toEqual(['mmg-checkout-held']);
+    await expect(start(s)).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_CONFIRMING' });
+  });
+
+  it('a late paid-looking record for an OLDER obligation is held for a person but never pauses the newer one', async () => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('OLDEROBLIGATION');
+    expect(await codeReply(row, '6', txn)).toBe('NOT_PAID');
+    const released = await intentOf(row.id);
+    // The partner pays the owed week another way (cash to the wallet, then the
+    // ordinary weekly charge): the obligation moves on.
+    await app.prisma.$transaction((db) => billing.recordTopUpInTransaction(db, { subscriptionId: s.subId, amount: 2100, recordedBy: 'test-cash', eventKey: `older-obligation:${RUN}` }));
+    expect(await billing.billSubscription(await subWithRelations(s.subId) as never)).toBe('succeeded');
+    const moved = await clockOf(s.subId);
+    expect(moved.epoch).toBeGreaterThan((await holdOf(row.id)).sourceEpoch);
+    expect(moved.pausedAt).toBeNull();
+
+    approved(txn, 2100);
+    await service.pollIntents(new Date(released.nextCheckAt!.getTime() + 1000));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'NO_SUCCESS_ANSWER' });
+    expect((await holdOf(row.id)).status).toBe('PROVEN_UNPAID');
+    expect((await clockOf(s.subId)).pausedAt).toBeNull();
+    expect(await topups(s.subId)).toHaveLength(1); // the cash only
+  });
+
+  it('after a success answer, a later negative answer releases nothing; when MMG’s lookup then says paid, the answers disagree and a person decides', async () => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('SUCCESSTHENFAIL');
+    expect(await codeReply(row, '0', txn)).toBe('CONFIRMING'); // MMG does not know it yet
+    expect(await codeReply(row, '2')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMING', candidates: [txn] });
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(0);
+    await expect(start(s)).rejects.toMatchObject({ code: 'CHECKOUT_CONFIRMING', details: { ref: row.id } });
+    approved(txn, 2100);
+    await service.pollIntents(new Date(Date.now() + 5 * 60_000));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'MMG_ANSWERS_DISAGREE' });
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
+  it('ResultCode 7 is not paid unless the lookup says paid: no transaction releases; a declined transaction releases; an unknown one keeps the pause', async () => {
+    const bare = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const b = await intentOf((await start(bare)).checkout.ref);
+    expect(await codeReply(b, '7')).toBe('NOT_PAID');
+    expect(await intentOf(b.id)).toMatchObject({ status: 'NOT_PAID', reason: 'MMG_RESULT_7' });
+    expect((await holdOf(b.id)).status).toBe('PROVEN_UNPAID');
+
+    const declined = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const d = await intentOf((await start(declined)).checkout.ref);
+    approved(tx('TIMEDOUTDECLINED'), 2100, { status: 'declined' }); // not tied to the checkout by MMG's echo
+    expect(await codeReply(d, '7', tx('TIMEDOUTDECLINED'))).toBe('NOT_PAID');
+    expect(await intentOf(d.id)).toMatchObject({ status: 'NOT_PAID', reason: 'MMG_DECLINED' });
+    expect((await holdOf(d.id)).status).toBe('PROVEN_UNPAID');
+    expect((await clockOf(declined.subId)).pausedAt).toBeNull();
+
+    const unknown = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const u = await intentOf((await start(unknown)).checkout.ref);
+    expect(await codeReply(u, '7', tx('TIMEDOUTUNKNOWN'))).toBe('CONFIRMING'); // MMG does not know it
+    await service.pollIntents(new Date(Date.now() + DAY + 60_000));
+    expect(await intentOf(u.id)).toMatchObject({ status: 'EXPIRED', reason: 'LOOKUP_NEVER_CONFIRMED' });
+    expect((await holdOf(u.id)).status).toBe('ACTIVE');
+    expect((await clockOf(unknown.subId)).pausedAt).not.toBeNull();
+    expect(await toldOf(unknown.userId, 'NOT_PAID')).toHaveLength(0);
+    for (const sub of [bare, declined, unknown]) expect(await topups(sub.subId)).toHaveLength(0);
+  });
+
+  it('a late cancelled answer for an expired, unanswered checkout releases it', async () => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const row = await intentOf((await start(s)).checkout.ref);
+    await service.pollIntents(new Date(Date.now() + MMG_CHECKOUT_TTL_MS + 60_000));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'EXPIRED', reason: 'NO_REPLY' });
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect(await codeReply(row, '6')).toBe('NOT_PAID');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'NOT_PAID', reason: 'MMG_RESULT_6' });
+    expect((await holdOf(row.id)).status).toBe('PROVEN_UNPAID');
+    expect((await start(s)).created).toBe(true);
   });
 });
 
@@ -548,12 +1200,18 @@ describe('[F5] only MMG’s answer for THIS checkout says a payment failed', () 
     expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(0);
   });
 
-  it('the error path naming no transaction at all is still confirming, never "not paid"', async () => {
+  it('the error path decides nothing by itself: MMG’s own ResultCode for THIS checkout does', async () => {
+    // A success code arriving on the error path still waits for the lookup.
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);
-    const token = sandbox.sandboxReplyToken({ orderRef: row.merchantTransactionId, code: 1 });
-    expect(await service.observeReply({ source: 'RETURN', outcome: 'error', params: { token } })).toBe('CONFIRMING');
+    expect(await reply(row, tx('ERRORPATHOK'), 'error')).toBe('CONFIRMING');
     expect((await intentOf(row.id)).status).toBe('CONFIRMING');
+    // MMG's not-registered answer for this checkout is "not paid", whatever the path.
+    const t = await makeSub();
+    const row2 = await intentOf((await start(t)).checkout.ref);
+    const token = sandbox.sandboxReplyToken({ merchantTransactionId: row2.merchantTransactionId, ResultCode: '1' });
+    expect(await service.observeReply({ source: 'RETURN', outcome: 'success', params: { token } })).toBe('NOT_PAID');
+    expect(await intentOf(row2.id)).toMatchObject({ status: 'NOT_PAID', reason: 'MMG_RESULT_1' });
   });
 
   it('a decline MMG does not tie to this checkout never says "not paid"', async () => {
@@ -592,7 +1250,7 @@ describe('time — expiry is not failure, and billing waits for money in flight'
     expect(await topups(s.subId)).toHaveLength(1);
   });
 
-  it('[I5] while a checkout is open the fee is not charged or dunned; once it expires, billing resumes', async () => {
+  it('[I5] local checkout expiry keeps collection paused until authoritative confirmation', async () => {
     const now = new Date();
     const s = await makeSub({ due: new Date(now.getTime() - 60_000) });
     const row = await intentOf((await start(s)).checkout.ref);
@@ -603,7 +1261,7 @@ describe('time — expiry is not failure, and billing waits for money in flight'
     await service.pollIntents(later);
     expect((await intentOf(row.id)).status).toBe('EXPIRED');
     await billing.runBillingCycle(later);
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).failedAttempts).toBe(1);
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).toMatchObject({ failedAttempts: 0, billingConfirmationPausedAt: expect.any(Date), nextRetryAt: null });
   });
 
   it('a confirming checkout nobody could verify within a day expires; one MMG says is someone else’s is held', async () => {
@@ -616,8 +1274,8 @@ describe('time — expiry is not failure, and billing waits for money in flight'
 
     const odd = await makeSub();
     const o = await intentOf((await start(odd)).checkout.ref);
-    approved(tx('ODDTX1'), 2100, { creditParties: ['5926999999'] });
-    await reply(o, tx('ODDTX1'));
+    approved(tx('ODDTX1'), 2100, {}, { creditParty: [{ key: 'accountid', value: '5926999999' }] });
+    await codeReply(o, '7', tx('ODDTX1')); // timed out: MMG's success answer never named it
     expect((await intentOf(o.id)).status).toBe('CONFIRMING');
     await service.pollIntents(dayLater);
     expect(await intentOf(o.id)).toMatchObject({ status: 'HELD', reason: 'MERCHANT_MISMATCH' });
@@ -730,6 +1388,42 @@ describe('[F2] one MMG transaction, one credit, across every channel and every e
     expect(again).toMatchObject({ push: 0, topups: 0, agentCash: 0, conflicts: 1 });
   });
 
+  it('the scoped legacy agent-cash backfill keeps each transaction spelling and excludes other subscriptions', async () => {
+    const selected = await makeSub();
+    const outside = await makeSub();
+    const payments: string[] = [];
+    const legacy = async (subscriptionId: string, channel: string, externalId: string, mmgTxnId: string | null = null) => {
+      const payment = await app.prisma.mmgAgentPayment.create({
+        data: { subscriptionId, channel, externalId, mmgTxnId, sanRaw: 'legacy-test', amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'MATCHED', raw: {} },
+      });
+      payments.push(payment.id);
+      return payment;
+    };
+    try {
+      const named = await legacy(selected.subId, 'MMG_AGENT_WEBHOOK', tx('IGNOREDREF'), `\t ${tx('NAMEDTX').toLowerCase()} \n`);
+      const manual = await legacy(selected.subId, 'MANUAL_ADMIN', `MANUAL:${tx('MANUALTX').toLowerCase()} `);
+      const file = await legacy(selected.subId, 'MMG_SETTLEMENT_FILE', ` ${tx('FILETX').toLowerCase()} `);
+      await legacy(outside.subId, 'MMG_AGENT_WEBHOOK', tx('OUTSIDETX'));
+
+      const empty = { push: 0, topups: 0, agentCash: 0, conflicts: 0 };
+      expect(await runProviderIdentityBackfill(app.prisma, { subscriptionIds: [] })).toEqual(empty);
+      // A caller's scope remains a bound value, even when it contains SQL syntax.
+      expect(await runProviderIdentityBackfill(app.prisma, { subscriptionIds: [`${selected.subId}' OR true --`] })).toEqual(empty);
+      expect(await runProviderIdentityBackfill(app.prisma, { subscriptionIds: [selected.subId] }))
+        .toEqual({ ...empty, agentCash: 3 });
+      for (const [transaction, payment] of [[tx('NAMEDTX'), named], [tx('MANUALTX'), manual], [tx('FILETX'), file]] as const) {
+        expect(await identityOf(transaction)).toMatchObject({ status: 'CREDITED', creditedPaymentId: payment.id, subscriptionId: selected.subId, tenantId: 'swift-default' });
+      }
+      expect(await identityOf(tx('IGNOREDREF'))).toBeNull();
+      expect(await identityOf(tx('OUTSIDETX'))).toBeNull();
+      expect(await walletOf(selected.subId)).toBe(0);
+      expect(await topups(selected.subId)).toHaveLength(0);
+      expect(await runProviderIdentityBackfill(app.prisma, { subscriptionIds: [selected.subId] })).toEqual(empty);
+    } finally {
+      await app.prisma.mmgAgentPayment.deleteMany({ where: { id: { in: payments } } });
+    }
+  });
+
   it('a credit an older release wrote after the backfill, with no identity, is still never credited again by checkout', async () => {
     // The rolling-deploy window: an instance still on the previous release
     // settles a push payment, or records a top-up command, without claiming the
@@ -759,20 +1453,24 @@ describe('[F2] one MMG transaction, one credit, across every channel and every e
   });
 
   it('the push rail learning its MMG id after a checkout credited that transaction is held, never credited twice', async () => {
-    const s = await makeSub({ due: new Date(Date.now() - 60_000), mmgPayer: '6091182' });
+    // The push rail's initiate died in transit, so it has not learnt its MMG id (UNKNOWN, no id).
+    const s = await makeSub({ due: new Date(Date.now() - 60_000), mmgPayer: '609initerror2' });
     expect(await billing.billSubscription(await subWithRelations(s.subId) as never)).toBe('pending');
     const push = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: s.subId, paymentMethod: 'MOBILE_MONEY' } });
-    const txn = push.externalRef!;
-    // The push rail's initiate had not learnt its MMG id yet (UNKNOWN, no id).
-    await app.prisma.subscriptionPayment.update({ where: { id: push.id }, data: { status: 'UNKNOWN', externalRef: null } });
+    expect(push).toMatchObject({ status: 'UNKNOWN', externalRef: null });
 
-    const row = await intentOf((await start(s)).checkout.ref);
+    // With the shared confirmation authority a checkout cannot open over that
+    // request; both can only coexist from before the cutover.
+    const row = await legacyCheckoutFor(s);
+    const txn = tx('LEARNTX1');
     approved(txn, Number(row.amount), echoOf(row));
     await confirmingWith(row.id, txn);
     await service.pollIntents(new Date());
     expect((await intentOf(row.id)).status).toBe('CONFIRMED');
 
-    // Now the push rail adopts that same MMG id from history and settles it.
+    // Now the push rail adopts that same MMG id, and MMG's lookup reports it
+    // approved for the push request, and tries to settle it.
+    sandboxAddHistory({ transactionId: txn, status: 'approved', amountMinor: Math.round(Number(push.amount) * 100), currencyCode: 'GYD', reference: push.clientKey! });
     await app.prisma.subscriptionPayment.update({ where: { id: push.id }, data: { status: 'PENDING', externalRef: txn } });
     await billing.pollPendingMmgCharges(new Date());
     const after = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: push.id } });
@@ -788,7 +1486,8 @@ describe('[F2] one MMG transaction, one credit, across every channel and every e
       expect(await billing.billSubscription(await subWithRelations(s.subId) as never)).toBe('pending');
       const push = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: s.subId, paymentMethod: 'MOBILE_MONEY' } });
       const txn = push.externalRef!;
-      const row = await intentOf((await start(s)).checkout.ref);
+      // Both instructions open at once can only be a pre-cutover pair now.
+      const row = await legacyCheckoutFor(s);
       approved(txn, Number(row.amount), echoOf(row));
       await confirmingWith(row.id, txn);
 
@@ -801,6 +1500,165 @@ describe('[F2] one MMG transaction, one credit, across every channel and every e
   });
 });
 
+
+// [SX386 F2 · #1395 canonical identity] A committed historical agent-cash
+// credit is authority whatever its observation says: the delivery that saved
+// it may have died with the observation still RECEIVED, or a repair may have
+// given it up as UNMATCHED, with no identity, an unlinked OPEN identity, or a
+// linked OPEN one, under any of the three event keys agent cash has written.
+// After the backfill, a fresh admin command (or a checkout) naming that same
+// transaction never posts again: no wallet credit, receipt, counter or ledger.
+describe('[SX386 F2] a committed agent credit with a stale observation is never credited twice', () => {
+  type Mode = { observation: 'RECEIVED' | 'UNMATCHED'; identity: 'none' | 'open' | 'linked'; key: 'suffix' | 'agent' | 'pp' };
+  const modes: Array<[string, Mode]> = [
+    ['RECEIVED, no identity, the pre-atomic key', { observation: 'RECEIVED', identity: 'none', key: 'suffix' }],
+    ['UNMATCHED, an unlinked OPEN identity, the pre-atomic key', { observation: 'UNMATCHED', identity: 'open', key: 'suffix' }],
+    ['RECEIVED, no identity, the original agent key', { observation: 'RECEIVED', identity: 'none', key: 'agent' }],
+    ['UNMATCHED, a linked OPEN identity, the original agent key', { observation: 'UNMATCHED', identity: 'linked', key: 'agent' }],
+    ['RECEIVED, a linked OPEN identity, the identity key', { observation: 'RECEIVED', identity: 'linked', key: 'pp' }],
+  ];
+  const adminFor = async () => {
+    const admin = await app.prisma.user.create({ data: { phone: `+${phoneBase + 40000 + (seq += 1)}`, firstName: 'F2', lastName: 'Admin', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true } });
+    userIds.push(admin.id);
+    return admin;
+  };
+  const moneyOf = async (subscriptionId: string) => {
+    const events = await app.prisma.billingEvent.findMany({ where: { subscriptionId, type: 'PREPAID_TOPUP' }, select: { idempotencyKey: true } });
+    return {
+      wallet: await walletOf(subscriptionId),
+      credits: events.length,
+      receipts: await app.prisma.feeReceipt.count({ where: { subscriptionId } }),
+      counter: (await app.prisma.receiptCounter.findMany({ where: { tenantId: 'swift-default' } })).reduce((n, c) => n + c.seq, 0),
+      ledger: await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: { in: events.map((e) => `ledger:${e.idempotencyKey}`) } } }),
+    };
+  };
+  async function committedLegacyCredit(s: { subId: string }, txn: string, mode: Mode) {
+    const identity = mode.identity === 'none' ? null : await app.prisma.providerPayment.create({ data: {
+      provider: 'MMG', providerTxnId: txn.toUpperCase(), status: 'OPEN', amount: 2100, currencyCode: 'GYD' } });
+    const observation = await app.prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, sanRaw: 'legacy-f2', amount: 2100, currencyCode: 'GYD',
+      paidAt: new Date(), status: mode.observation, subscriptionId: s.subId, raw: {},
+      ...(mode.identity === 'linked' ? { providerPaymentId: identity!.id } : {}),
+    } });
+    const eventKey = mode.key === 'pp' ? `agent-cash:pp:${identity!.id}`
+      : mode.key === 'agent' ? `agent-cash:${observation.id}` : `topup:${s.subId}:agent:MMG_AGENT_WEBHOOK:${txn}`;
+    // The credit committed: wallet, receipt, counter, ledger and event, all at once.
+    await app.prisma.$transaction((db) => billing.recordTopUpInTransaction(db, {
+      subscriptionId: s.subId, amount: 2100, recordedBy: 'agent-cash:MMG_AGENT_WEBHOOK', reference: txn, eventKey }));
+    return { observation, identity };
+  }
+
+  it.each(modes)('%s: the backfill then a fresh admin command posts nothing', async (_name, mode) => {
+    const s = await makeSub();
+    const txn = tx(`F2STALE${mode.observation.slice(0, 1)}${mode.identity.toUpperCase()}${mode.key.toUpperCase()}`);
+    const { observation } = await committedLegacyCredit(s, txn, mode);
+    const before = await moneyOf(s.subId);
+    expect(before).toMatchObject({ wallet: 2100, credits: 1, receipts: 1, ledger: 1 });
+
+    await runProviderIdentityBackfill(app.prisma, { subscriptionIds: [s.subId] });
+    const identity = await identityOf(txn);
+    expect(identity).toMatchObject({ status: 'CREDITED', creditedPaymentId: observation.id });
+
+    const admin = await adminFor();
+    await expect(billing.recordTopUpCommand({ adminId: admin.id, idempotencyKey: key(), requestHash: 'h', subscriptionId: s.subId, amount: 2100, reference: txn }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    expect(await moneyOf(s.subId)).toEqual(before);
+  });
+
+  it.each(modes)('%s: without any backfill, racing admin commands and a checkout naming it post nothing', async (_name, mode) => {
+    const s = await makeSub();
+    const txn = tx(`F2RACE${mode.observation.slice(0, 1)}${mode.identity.toUpperCase()}${mode.key.toUpperCase()}`);
+    await committedLegacyCredit(s, txn, mode);
+    const before = await moneyOf(s.subId);
+    const row = await intentOf((await start(s)).checkout.ref);
+    approved(txn, 2100, echoOf(row));
+    await confirmingWith(row.id, txn);
+    const admin = await adminFor();
+    const results = await Promise.allSettled([
+      billing.recordTopUpCommand({ adminId: admin.id, idempotencyKey: key(), requestHash: 'h1', subscriptionId: s.subId, amount: 2100, reference: txn }),
+      billing.recordTopUpCommand({ adminId: admin.id, idempotencyKey: key(), requestHash: 'h2', subscriptionId: s.subId, amount: 2100, reference: txn }),
+      service.pollIntents(new Date()),
+    ]);
+    expect(results.slice(0, 2).every((r) => r.status === 'rejected')).toBe(true);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'ALREADY_CREDITED' });
+    expect(await moneyOf(s.subId)).toEqual(before);
+  });
+});
+
+describe('[F2] a historical conflict never stops the backfill from completing, and never licenses a second credit', () => {
+  it('records completion with the conflict counted, pages operators once, never re-runs, and the conflicted transaction still never credits again', async () => {
+    const operator = await operatorFor();
+    // A transaction two channels credited before identities existed: the push
+    // rail captured it, and an admin top-up receipt names the same transfer.
+    const s = await makeSub({ mmgPayer: '6091189' });
+    const txn = tx('DOUBLEHISTORY');
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: s.subId, amount: 2100, status: 'CAPTURED', paymentMethod: 'MOBILE_MONEY',
+      externalRef: txn, periodStart: new Date(Date.now() - 7 * DAY), periodEnd: new Date(), paidAt: new Date() } });
+    await app.prisma.$transaction((db) => billing.recordTopUpInTransaction(db, {
+      subscriptionId: s.subId, amount: 2100, recordedBy: 'admin-before-identities', reference: txn, eventKey: `topup:${s.subId}:double-${RUN}`,
+    }));
+    await app.prisma.platformConfig.deleteMany({ where: { key: PROVIDER_IDENTITY_BACKFILL_KEY } });
+    resetProviderIdentityBackfillCacheForTests();
+    const pagesBefore = await app.prisma.notification.count({ where: { userId: operator.id, data: { path: ['alert'], equals: 'provider-identity-backfill-conflicts' } } });
+
+    await service.pollIntents(new Date());
+    const record = await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: PROVIDER_IDENTITY_BACKFILL_KEY } });
+    expect(record.value).toMatchObject({ completedAt: expect.any(String), conflicts: expect.any(Number) });
+    expect((record.value as Record<string, number>)['conflicts']).toBeGreaterThanOrEqual(2);
+    await service.pollIntents(new Date());
+    await service.pollIntents(new Date());
+    const pages = await app.prisma.notification.count({ where: { userId: operator.id, data: { path: ['alert'], equals: 'provider-identity-backfill-conflicts' } } });
+    expect(pages - pagesBefore).toBe(1);
+    expect(await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: PROVIDER_IDENTITY_BACKFILL_KEY } })).toMatchObject({ value: record.value });
+
+    // Checkout crediting is on, and that transaction is refused whole.
+    const row = await intentOf((await start(s)).checkout.ref);
+    approved(txn, 2100, echoOf(row));
+    await reply(row, txn);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'ALREADY_CREDITED' });
+    expect(await walletOf(s.subId)).toBe(2100);
+    expect(await topups(s.subId)).toHaveLength(1);
+  });
+});
+
+describe('unmatched reply observations are pruned; a checkout’s own evidence is kept', () => {
+  it('prunes unreadable replies after a week and decrypted-but-unmatched ones after 90 days, never a checkout’s own rows', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const now = new Date();
+    const ago = (days: number) => new Date(now.getTime() - days * DAY);
+    const make = (data: Prisma.MmgCheckoutObservationUncheckedCreateInput) => app.prisma.mmgCheckoutObservation.create({ data });
+    const oldGarbage = await make({ source: 'RETURN', detail: 'success', failure: 'NO_TOKEN', createdAt: ago(8) });
+    const freshGarbage = await make({ source: 'NOTIFY', failure: 'NO_TOKEN', createdAt: ago(6) });
+    const recentStranger = await make({ source: 'RETURN', failure: 'NO_CHECKOUT', body: { merchantTransactionId: '179000000000054321' }, createdAt: ago(30) });
+    const oldStranger = await make({ source: 'RETURN', failure: 'NO_CHECKOUT', body: { merchantTransactionId: '179000000000054322' }, createdAt: ago(91) });
+    const oldInvalid = await make({ source: 'NOTIFY', failure: 'INVALID_RESPONSE', createdAt: ago(91) });
+    const ownReply = await make({ tenantId: row.tenantId, intentId: row.id, source: 'RETURN', detail: 'MMG_RESULT_0', createdAt: ago(400) });
+    const ownLookupMiss = await make({ tenantId: row.tenantId, intentId: row.id, source: 'LOOKUP', failure: 'LOOKUP_NOT_FOUND', createdAt: ago(400) });
+
+    await service.pollIntents(now);
+    const left = new Set((await app.prisma.mmgCheckoutObservation.findMany({ where: { id: { in: [oldGarbage, freshGarbage, recentStranger, oldStranger, oldInvalid, ownReply, ownLookupMiss].map((o) => o.id) } }, select: { id: true } })).map((o) => o.id));
+    expect(left.has(oldGarbage.id)).toBe(false);
+    expect(left.has(oldStranger.id)).toBe(false);
+    expect(left.has(oldInvalid.id)).toBe(false);
+    expect([freshGarbage, recentStranger, ownReply, ownLookupMiss].every((o) => left.has(o.id))).toBe(true);
+  });
+
+  it('one pass deletes at most one bounded batch, oldest first', async () => {
+    const now = new Date();
+    const ids: string[] = [];
+    for (let n = 0; n < 7; n += 1) {
+      ids.push((await app.prisma.mmgCheckoutObservation.create({ data: { source: 'RETURN', failure: 'NO_TOKEN', createdAt: new Date(now.getTime() - (8 + n) * DAY) } })).id);
+    }
+    const pruned = await service.pruneUnmatchedObservations(now, 5);
+    expect(pruned).toBe(5);
+    const left = await app.prisma.mmgCheckoutObservation.findMany({ where: { id: { in: ids } }, select: { id: true } });
+    expect(left.map((o) => o.id).sort()).toEqual(ids.slice(0, 2).sort()); // the two youngest remain
+    expect(await service.pruneUnmatchedObservations(now, 5)).toBeGreaterThanOrEqual(2);
+    expect(await app.prisma.mmgCheckoutObservation.count({ where: { id: { in: ids } } })).toBe(0);
+  });
+});
+
 describe('[F7] payment evidence is filed under the checkout’s own tenant', () => {
   it('its replies, lookups and credit identity carry the checkout’s tenant; another tenant’s identity is never claimed', async () => {
     const tenantId = `ten-f7-${RUN.toLowerCase()}`;
@@ -810,12 +1668,25 @@ describe('[F7] payment evidence is filed under the checkout’s own tenant', () 
     const { checkout } = await runWithTenant(tenantId, () => start(t));
     const row = await intentOf(checkout.ref);
     expect(row.tenantId).toBe(tenantId);
+    const year = new Date().getUTCFullYear();
+    const counter = async (tenant: string) => (await app.prisma.receiptCounter.findUnique({ where: { tenantId_year: { tenantId: tenant, year } } }))?.seq ?? 0;
+    const defaultBefore = await counter('swift-default');
+    const ownBefore = await counter(tenantId);
     approved(tx('TENANTTX1'), 2100, echoOf(row));
     expect(await reply(row, tx('TENANTTX1'))).toBe('CONFIRMED');
     const seen = await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id } });
     expect(seen.length).toBeGreaterThanOrEqual(2);
     expect(new Set(seen.map((o) => o.tenantId))).toEqual(new Set([tenantId]));
     expect(await identityOf(tx('TENANTTX1'))).toMatchObject({ status: 'CREDITED', tenantId });
+    const receipts = await app.prisma.feeReceipt.findMany({ where: { subscriptionId: t.subId } });
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ tenantId, billingEventId: (await topups(t.subId))[0]!.id });
+    expect(await counter(tenantId)).toBe(ownBefore + 1);
+    expect(await counter('swift-default')).toBe(defaultBefore);
+    expect(await reply(row, tx('TENANTTX1'))).toBe('CONFIRMED');
+    expect(await app.prisma.feeReceipt.count({ where: { subscriptionId: t.subId } })).toBe(1);
+    expect(await counter(tenantId)).toBe(ownBefore + 1);
+    expect(await counter('swift-default')).toBe(defaultBefore);
 
     // An identity another tenant's channel minted is never this checkout's to claim.
     const t2 = await makeSub({ tenantId });
@@ -826,6 +1697,43 @@ describe('[F7] payment evidence is filed under the checkout’s own tenant', () 
     expect(await intentOf(row2.id)).toMatchObject({ status: 'HELD', reason: 'TENANT_CONFLICT_ON_RECORD' });
     expect(await identityOf(tx('FOREIGNTX1'))).toMatchObject({ status: 'OPEN', tenantId: 'swift-default' });
     expect(await topups(t2.subId)).toHaveLength(0);
+  });
+});
+
+describe('the shared wallet receipt tenant', () => {
+  it('a matching named tenant owns the receipt and counter, and failure rolls credit and receipt back together', async () => {
+    const tenantId = `ten-rollback-${RUN.toLowerCase()}`;
+    await app.prisma.tenant.create({ data: { id: tenantId, name: 'Receipt rollback test', slug: `rollback-${RUN.toLowerCase()}` } });
+    tenantIds.push(tenantId);
+    const s = await makeSub({ tenantId });
+    const eventKey = `receipt-rollback:${RUN}`;
+    await expect(runWithTenant(tenantId, () => app.prisma.$transaction(async (db) => {
+      await billing.recordTopUpInTransaction(db, { subscriptionId: s.subId, amount: 2100, recordedBy: 'test', eventKey });
+      const receipt = await db.feeReceipt.findFirstOrThrow({ where: { subscriptionId: s.subId } });
+      expect(receipt.tenantId).toBe(tenantId);
+      expect(await db.receiptCounter.count({ where: { tenantId } })).toBe(1);
+      throw new Error('TEST_ROLLBACK_RECEIPT');
+    }))).rejects.toThrow('TEST_ROLLBACK_RECEIPT');
+    expect(await walletOf(s.subId)).toBe(0);
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await app.prisma.feeReceipt.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    expect(await app.prisma.receiptCounter.count({ where: { tenantId } })).toBe(0);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: `ledger:${eventKey}` } })).toBe(0);
+  });
+
+  it('the common credit helper refuses a request tenant that differs from the trusted payer', async () => {
+    const s = await makeSub();
+    const credit = billing as unknown as { creditWalletInTx(db: Prisma.TransactionClient, opts: { subscriptionId: string; amount: number; currencyCode: string; eventKey: string; note: string; channel: string }): Promise<unknown> };
+    await expect(runWithTenant(`wrong-${RUN}`, () => app.prisma.$transaction((db) => credit.creditWalletInTx(db, {
+      subscriptionId: s.subId, amount: 2100, currencyCode: 'GYD', eventKey: `wrong-tenant:${RUN}`, note: 'Test', channel: 'TEST',
+    })))).rejects.toMatchObject({ code: 'SUBSCRIPTION_TENANT_MISMATCH' });
+    expect(await walletOf(s.subId)).toBe(0);
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await app.prisma.feeReceipt.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    await expect(app.prisma.$transaction((db) => billing.recordTopUpInTransaction(db, {
+      subscriptionId: s.subId, amount: 2100, recordedBy: 'test', eventKey: `expected-tenant:${RUN}`, expectedTenantId: `wrong-${RUN}`,
+    }))).rejects.toMatchObject({ code: 'PROVIDER_TXN_TENANT_CONFLICT' });
+    expect(await walletOf(s.subId)).toBe(0);
   });
 });
 
@@ -867,5 +1775,276 @@ describe('what a partner may read about a checkout', () => {
     // Once the checkout is not open, even its own key never hands the MMG page out again.
     await app.prisma.mmgCheckoutIntent.update({ where: { id: checkout.ref }, data: { status: 'CONFIRMING' } });
     expect((await start(s, k)).checkout).toMatchObject({ ref: checkout.ref, status: 'CONFIRMING', checkoutUrl: null });
+  });
+});
+
+
+describe('shared confirmation authority fences a new MMG page', () => {
+  it('the shared PayActions hint is read-only and fails closed on missing clock coverage and undiscovered uncertainty', async () => {
+    const s = await makeSub();
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: false, reason: 'BILLING_REVIEW_REQUIRED' });
+    expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    await readDunningClock(app.prisma, s.subId);
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: true, reason: null });
+    await uncertainCard(s);
+    const before = await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: s.subId } });
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    expect(await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: s.subId } })).toEqual(before);
+    await expect(start(s)).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: s.subId, status: 'ACTIVE' } })).toBe(1);
+  });
+
+  async function uncertainCard(s: Awaited<ReturnType<typeof makeSub>>, session = false) {
+    const sub = await subWithRelations(s.subId);
+    if (session) return app.prisma.cardSession.create({ data: { subscriptionId: s.subId, userId: s.userId,
+      purpose: 'PAY_NOW', provider: 'simulator', environment: 'sandbox', providerAccount: 'synthetic-clock',
+      stateHash: 'a'.repeat(64), amount: 2100, currencyCode: 'GYD', periodStart: sub.nextBillingDate,
+      status: 'OPEN', failureCode: 'REQUIRES_ACTION', expiresAt: new Date(Date.now() + DAY) } });
+    return app.prisma.subscriptionPayment.create({ data: { subscriptionId: s.subId, amount: 2100, paymentMethod: 'CARD',
+      status: 'UNKNOWN', periodStart: sub.nextBillingDate, periodEnd: new Date(+sub.nextBillingDate + 7 * DAY),
+      failureRaw: { providerEffect: 'AUTHORIZED' } } });
+  }
+  it.each(['legacy-card', 'card-3ds', 'mmg-pending', 'mmg-held', 'mmg-expired'] as const)(
+    '%s cannot authorize a second payable MMG instruction', async (kind) => {
+      const s = await makeSub();
+      let originalCount = 0;
+      if (kind === 'legacy-card' || kind === 'card-3ds') await uncertainCard(s, kind === 'card-3ds');
+      else if (kind === 'mmg-pending') {
+        const sub = await subWithRelations(s.subId);
+        await app.prisma.subscriptionPayment.create({ data: { subscriptionId: s.subId, amount: 2100,
+          paymentMethod: 'MOBILE_MONEY', status: 'PENDING', externalRef: tx('HELDPRIOR'), clientKey: key(),
+          periodStart: sub.nextBillingDate, periodEnd: new Date(+sub.nextBillingDate + 7 * DAY), failureRaw: { providerEffect: 'AUTHORIZED' } } });
+      } else {
+        const first = await start(s);
+        await app.prisma.mmgCheckoutIntent.update({ where: { id: first.checkout.ref }, data: { status: kind === 'mmg-held' ? 'HELD' : 'EXPIRED' } });
+        originalCount = 1;
+      }
+      await expect(start(s)).rejects.toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(originalCount);
+      expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: s.subId, status: 'ACTIVE' } })).toBeGreaterThan(0);
+      expect((await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: s.subId } })).pausedAt).not.toBeNull();
+    });
+
+  const barrier = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => { release = resolve; });
+    return { promise, release };
+  };
+  it('a card uncertainty committed during async page sealing wins before MMG reservation', async () => {
+    const s = await makeSub();
+    const keys = getKeyProvider()!;
+    const wrap = keys.wrapDek.bind(keys);
+    const entered = barrier(); const release = barrier();
+    const spy = vi.spyOn(keys, 'wrapDek').mockImplementationOnce(async (dek) => {
+      entered.release(); await release.promise; return wrap(dek);
+    });
+    const pending = start(s).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    try {
+      await entered.promise;
+      await uncertainCard(s);
+      release.release();
+      expect((await pending).error).toMatchObject({ code: 'PAYMENT_CONFIRMING' });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    } finally { release.release(); await pending; spy.mockRestore(); }
+  });
+
+  it.each(['rate', 'wallet', 'period'] as const)('a changed %s during sealing rejects the stale quote before reservation', async (kind) => {
+    const s = await makeSub();
+    const keys = getKeyProvider()!;
+    const wrap = keys.wrapDek.bind(keys);
+    const entered = barrier(); const release = barrier();
+    const spy = vi.spyOn(keys, 'wrapDek').mockImplementationOnce(async (dek) => {
+      entered.release(); await release.promise; return wrap(dek);
+    });
+    const pending = start(s).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    try {
+      await entered.promise;
+      if (kind === 'rate') await app.prisma.subscription.update({ where: { id: s.subId }, data: { weeklyRate: 2500 } });
+      else if (kind === 'wallet') await app.prisma.prepaidBalance.update({ where: { subscriptionId: s.subId }, data: { balance: 600 } });
+      else {
+        const sub = await subWithRelations(s.subId);
+        await app.prisma.subscription.update({ where: { id: s.subId }, data: {
+          nextBillingDate: new Date(+sub.nextBillingDate + 7 * DAY),
+          currentPeriodStart: sub.nextBillingDate, currentPeriodEnd: new Date(+sub.nextBillingDate + 7 * DAY),
+        } });
+      }
+      release.release();
+      expect((await pending).error).toMatchObject({ code: 'PAYMENT_QUOTE_CHANGED' });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    } finally { release.release(); await pending; spy.mockRestore(); }
+    expect((await start(s)).checkout.amountGyd).toBe(kind === 'rate' ? 2500 : kind === 'wallet' ? 1500 : 2100);
+  });
+  it.each(['same-key', 'new-key'] as const)('a %s replay keeps its intent but cannot emit a URL after a cross-rail hold wins during unseal', async (kind) => {
+    const s = await makeSub();
+    const originalKey = key();
+    const first = await start(s, originalKey);
+    const keys = getKeyProvider()!;
+    const unwrap = keys.unwrapDek.bind(keys);
+    const entered = barrier(); const release = barrier();
+    const spy = vi.spyOn(keys, 'unwrapDek').mockImplementationOnce(async (dek) => {
+      entered.release(); await release.promise; return unwrap(dek);
+    });
+    const replayKey = kind === 'same-key' ? originalKey : key();
+    const pending = start(s, replayKey).then((value) => ({ value, error: null }), (error: unknown) => ({ value: null, error }));
+    try {
+      await entered.promise;
+      await uncertainCard(s);
+      release.release();
+      expect((await pending).error).toMatchObject({ code: 'PAYMENT_CONFIRMING', details: { ref: first.checkout.ref } });
+      expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
+      expect(await app.prisma.mmgCheckoutKey.findFirst({ where: { createdByUserId: s.userId, clientKey: replayKey } }))
+        .toMatchObject({ intentId: first.checkout.ref });
+      expect((await intentOf(first.checkout.ref)).status).toBe('OPEN');
+    } finally { release.release(); await pending; spy.mockRestore(); }
+  });
+
+});
+
+// ---------------------------------------------------------------------------
+// [owner, 1 Oct] MMG weekly-fee payments confirm AUTOMATICALLY only when all
+// six hold: (1) MMG answered ResultCode 0 for THIS checkout, naming the
+// transaction, while it was open; (2) MMG's lookup says "successful"; (3) the
+// money went to our merchant's "accountid"; (4) exactly the amount, in GYD;
+// (5) created inside the checkout's window (two minutes' tolerance); (6)
+// neither the transaction nor MMG's ledger number for it was ever credited.
+// Anything else is HELD for a person: nothing credited, no reminders, no
+// suspension, operators alerted once. MMG's answers come through the browser
+// return door or the notify door, whichever is first; both are idempotent.
+// Lookups use the exact UAT shape (evidence/mmg-uat/ROUNDTRIP-PROOF-20261001.md).
+// ---------------------------------------------------------------------------
+describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', () => {
+  const heldAlerts = async (operatorId: string, checkoutId: string) => (await app.prisma.notification.findMany({
+    where: { userId: operatorId, data: { path: ['checkoutId'], equals: checkoutId } },
+  })).filter((n) => (n.data as Record<string, unknown>)['alert'] === 'mmg-checkout-held');
+
+  it('the UAT round trip: MMG’s answer through the notify door, then the return door, credits once; both MMG numbers are claimed once', async () => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const row = await intentOf((await start(s)).checkout.ref);
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    const txn = tx('UATROUNDTRIP');
+    // MMG's lookup answer, field for field as UAT returned it.
+    lookups.set(txn, lookupDetailFrom({
+      transactionStatus: 'successful', amount: '2100', currency: 'GYD', creationDate: gyStamp(new Date()),
+      subType: 'subscriber_mpay', transactionReference: ledgerOf(txn),
+      creditParty: [{ key: 'accountid', value: SANDBOX_MERCHANT_ID }], debitParty: [{ key: 'accountid', value: '6000002' }],
+      metadata: [{ key: 'amount', value: '2100' }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }],
+      descriptionText: null,
+    }, txn));
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMED');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(txn)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}`, subscriptionId: s.subId });
+    expect(await identityOf(ledgerOf(txn))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}`, subscriptionId: s.subId });
+    expect(await toldOf(s.userId, 'CONFIRMED')).toHaveLength(1);
+    expect((await holdOf(row.id)).status).toBe('PAID');
+    expect((await clockOf(s.subId)).pausedAt).toBeNull();
+    expect(lookedUp.filter((id) => id === txn)).toHaveLength(1);
+  });
+
+  it.each([
+    ['MMG’s word for it is not "successful"', { transactionStatus: 'completed' }, 'STATUS_NOT_SUCCESSFUL'],
+    ['the money went to another merchant', { creditParty: [{ key: 'accountid', value: '5926999999' }] }, 'MERCHANT_MISMATCH'],
+    ['our number is not under "accountid"', { creditParty: [{ key: 'msisdn', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_UNCONFIRMED'],
+    ['one dollar short', { amount: '2099' }, 'AMOUNT_MISMATCH'],
+    ['another currency', { currency: 'USD' }, 'CURRENCY_MISMATCH'],
+    ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['no creationDate', { creationDate: undefined }, 'CREATION_DATE_UNREADABLE'],
+    ['no ledger number', { transactionReference: undefined }, 'LEDGER_REFERENCE_MISSING'],
+  ] as const)('%s: HELD for a person, nothing credited, the pause kept, operators alerted once', async (_label, answer, reason) => {
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx(`AUTOHOLD${reason.replace(/_/g, '')}${seq}`);
+    approved(txn, 2100, {}, answer);
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason });
+    // The other door repeats MMG's answer: nothing moves, nobody is told twice.
+    expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMING');
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
+    expect(await toldOf(s.userId, 'HELD')).toHaveLength(1);
+    expect(await heldAlerts(operator.id, row.id)).toHaveLength(1);
+  });
+
+  it('MMG’s success answer that reaches us after the checkout closed is HELD, even with an exact payment made in time', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 40 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('LATEANSWER');
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date(opened.getTime() + 60_000)) });
+    expect(await codeReply(row, '0', txn)).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'SUCCESS_ANSWER_AFTER_CLOSE' });
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
+  it('MMG answering success for two transactions on one checkout is HELD: a person decides which', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    approved(tx('TWOANSWERS2'), 2100);
+    expect(await codeReply(row, '0', tx('TWOANSWERS1'), 'NOTIFY')).toBe('CONFIRMING'); // MMG does not know it yet
+    approved(tx('TWOANSWERS1'), 2100);
+    expect(await codeReply(row, '0', tx('TWOANSWERS2'), 'RETURN')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'MMG_ANSWERS_DISAGREE' });
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
+  it('[6] a payment another channel credited by MMG’s ledger number is HELD, and neither number is claimed', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('LEDGERTAKEN');
+    await app.prisma.providerPayment.create({
+      data: { provider: 'MMG', providerTxnId: ledgerOf(txn), status: 'CREDITED', creditedPaymentId: 'agent-observation', subscriptionId: s.subId, amount: 2100, currencyCode: 'GYD', creditedAt: new Date() },
+    });
+    approved(txn, 2100);
+    expect(await reply(row, txn)).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'ALREADY_CREDITED' });
+    expect(await identityOf(txn)).toBeNull();
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
+  it('[6] the push rail’s captured payment naming MMG’s ledger number is never credited again by checkout', async () => {
+    const s = await makeSub();
+    const txn = tx('LEDGERPUSHED');
+    await app.prisma.subscriptionPayment.create({
+      data: { subscriptionId: s.subId, amount: 2100, status: 'CAPTURED', paymentMethod: 'MOBILE_MONEY', externalRef: ledgerOf(txn), periodStart: new Date(), periodEnd: new Date(Date.now() + 7 * DAY), paidAt: new Date() },
+    });
+    const row = await intentOf((await start(s)).checkout.ref);
+    approved(txn, 2100);
+    await reply(row, txn);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'ALREADY_CREDITED' });
+    expect(await identityOf(txn)).toBeNull();
+  });
+
+  it('[6] an admin top-up naming MMG’s ledger number of a payment a checkout credited is refused', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('LEDGERTOPUP');
+    approved(txn, 2100);
+    expect(await reply(row, txn)).toBe('CONFIRMED');
+    const admin = await app.prisma.user.create({ data: { phone: `+${phoneBase + 9200 + (seq += 1)}`, firstName: 'Ad', lastName: 'Min', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true } });
+    userIds.push(admin.id);
+    await expect(billing.recordTopUpCommand({ adminId: admin.id, idempotencyKey: key(), requestHash: 'h', subscriptionId: s.subId, amount: 2100, reference: ledgerOf(txn) }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'TOPUP_REFERENCE_ALREADY_CREDITED' });
+    expect(await topups(s.subId)).toHaveLength(1);
+  });
+
+  it('the return door and the notify door at once, both carrying MMG’s answer, credit once', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('BOTHDOORS');
+    approved(txn, 2100);
+    const answers = await Promise.all([codeReply(row, '0', txn, 'RETURN'), codeReply(row, '0', txn, 'NOTIFY')]);
+    expect(answers).toEqual(['CONFIRMED', 'CONFIRMED']);
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(ledgerOf(txn))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
+    expect(await toldOf(s.userId, 'CONFIRMED')).toHaveLength(1);
   });
 });

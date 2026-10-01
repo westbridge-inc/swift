@@ -1,5 +1,6 @@
 import type Redis from 'ioredis';
 import { guyanaDayKey } from './guyana-day';
+import { publicLaunchCountryFromPhone } from '../modules/auth/launch-market';
 
 // Cost guardrails for outbound OTP SMS — the dominant, unauthenticated, abusable
 // SMS-cost vector. The per-minute limit (utils/otp.ts) stops bursts; these are
@@ -27,6 +28,18 @@ import { guyanaDayKey } from './guyana-day';
 // A provider failure refunds this call's increments, so failed sends don't
 // permanently burn the day's budget.
 //
+// [AUD-L4-008] Two more rules:
+//   • DESTINATION: nothing budgeted here is ever counted or allowed for a
+//     number outside a public launch market (auth/launch-market.ts, the list
+//     the login guard reads). A number without its leading + is refused too,
+//     so one destination is always one counter.
+//   • SAFETY TEXTS (a passenger's trip link, an emergency contact's
+//     confirmation code) have a budget of their own, checkSafetySmsBudget
+//     below, and never touch the login counters above. They used to share
+//     them, so a flood of login codes to unknown numbers refused them for the
+//     rest of the day. The SOS text to a verified contact is not budgeted at
+//     all (safety/sos-escalation.ts) and never waits on any of this.
+//
 // NOTE: the definitive total-spend ceiling is a Twilio account spending limit +
 // geo-permissions (restrict to the launch market's dial code). Set those too.
 
@@ -34,12 +47,19 @@ const PHONE_DAILY_PREFIX = 'otp_phone_day:';
 const IP_DAILY_PREFIX = 'otp_ip_day:';
 const GLOBAL_DAILY_PREFIX = 'sms_global_day:';
 const KNOWN_DAILY_PREFIX = 'sms_known_day:';
+// Safety texts count only against these. None of them is a login counter.
+const SAFETY_SENDER_DAILY_PREFIX = 'sms_safety_sender_day:';
+const SAFETY_RECIPIENT_DAILY_PREFIX = 'sms_safety_recipient_day:';
+const SAFETY_DAILY_PREFIX = 'sms_safety_day:';
 const DAY_TTL = 86400; // 24h
 
 const DEFAULT_PHONE_DAILY_CAP = 8;
 const DEFAULT_IP_DAILY_CAP = 100;
 const DEFAULT_GLOBAL_DAILY_CAP = 5000;
 const DEFAULT_KNOWN_DAILY_CAP = 5000;
+const DEFAULT_SAFETY_SENDER_DAILY_CAP = 30;
+const DEFAULT_SAFETY_RECIPIENT_DAILY_CAP = 10;
+const DEFAULT_SAFETY_DAILY_CAP = 2000;
 
 function dayStamp(): string {
   // The reset is midnight GYT (America/Guyana), not UTC — the day a
@@ -52,7 +72,20 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
 }
 
-export type SmsBudgetReason = 'phone_daily' | 'ip_daily' | 'global_daily' | 'known_daily';
+export type SmsBudgetReason =
+  | 'destination_country'
+  | 'phone_daily' | 'ip_daily' | 'global_daily' | 'known_daily'
+  | 'sender_daily' | 'recipient_daily' | 'safety_daily';
+
+/**
+ * [AUD-L4-008] The ONE destination rule for every budgeted text: the number is
+ * in a public launch market. It reads the same authority as the login guard
+ * (auth/launch-market.ts), so the two can never disagree. A number without its
+ * leading + resolves to no country and is refused.
+ */
+export function smsDestinationAllowed(phone: string): boolean {
+  return publicLaunchCountryFromPhone(phone) !== null;
+}
 
 export interface SmsBudgetOptions {
   /** The proxy-resolved client IP. When present, a per-IP daily budget trips
@@ -94,6 +127,10 @@ export async function checkOtpDailyBudget(
   phone: string,
   opts: SmsBudgetOptions = {},
 ): Promise<SmsBudgetResult> {
+  // [AUD-L4-008] Before any counter: a number outside the launch market is
+  // never counted and never allowed, whichever caller asks.
+  if (!smsDestinationAllowed(phone)) return deny('destination_country');
+
   const day = dayStamp();
   const phoneCap = intEnv('OTP_PHONE_DAILY_CAP', DEFAULT_PHONE_DAILY_CAP);
   const ipCap = intEnv('OTP_IP_DAILY_CAP', DEFAULT_IP_DAILY_CAP);
@@ -128,6 +165,59 @@ export async function checkOtpDailyBudget(
 
   const refund = () => refundSpend(redis, spent);
   return { allowed: true, refund };
+}
+
+export interface SafetySmsBudgetOptions {
+  /** The account asking for the text. */
+  senderId: string;
+}
+
+/** INCR one daily counter, arm its expiry on first use, and note it for a refund. */
+async function spend(redis: Redis, key: string, spent: string[]): Promise<number> {
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, DAY_TTL);
+  spent.push(key);
+  return count;
+}
+
+/**
+ * [AUD-L4-008] The daily budget for SAFETY texts: a passenger's trip link and
+ * an emergency contact's confirmation code. None of its counters is a login
+ * counter, so no flood of login codes can refuse a safety text, and no safety
+ * text spends anyone's login allowance. Checked in this order:
+ *   1. per sender        — one account sends at most 30 a day, so no single
+ *                          account can use up (3) for everyone;
+ *   2. per sender+number — one account texts one number at most 10 times a
+ *                          day. Keyed on the pair, never on the number alone,
+ *                          so what a stranger sends a number can never stop
+ *                          someone else's text reaching it;
+ *   3. platform-wide     — all safety texts share one ceiling of 2000 a day.
+ * The sender's own counter comes first, so an account over its allowance
+ * spends nothing else. As above, a refusal keeps its increments and an
+ * allowed call returns a refund for a provider failure.
+ * Tunable via SMS_SAFETY_SENDER_DAILY_CAP (30), SMS_SAFETY_RECIPIENT_DAILY_CAP
+ * (10) and SMS_SAFETY_DAILY_CAP (2000).
+ */
+export async function checkSafetySmsBudget(
+  redis: Redis,
+  phone: string,
+  opts: SafetySmsBudgetOptions,
+): Promise<SmsBudgetResult> {
+  if (!smsDestinationAllowed(phone)) return deny('destination_country');
+
+  const day = dayStamp();
+  const spent: string[] = [];
+
+  const senderCount = await spend(redis, `${SAFETY_SENDER_DAILY_PREFIX}${day}:${opts.senderId}`, spent);
+  if (senderCount > intEnv('SMS_SAFETY_SENDER_DAILY_CAP', DEFAULT_SAFETY_SENDER_DAILY_CAP)) return deny('sender_daily');
+
+  const recipientCount = await spend(redis, `${SAFETY_RECIPIENT_DAILY_PREFIX}${day}:${opts.senderId}:${phone}`, spent);
+  if (recipientCount > intEnv('SMS_SAFETY_RECIPIENT_DAILY_CAP', DEFAULT_SAFETY_RECIPIENT_DAILY_CAP)) return deny('recipient_daily');
+
+  const safetyCount = await spend(redis, `${SAFETY_DAILY_PREFIX}${day}`, spent);
+  if (safetyCount > intEnv('SMS_SAFETY_DAILY_CAP', DEFAULT_SAFETY_DAILY_CAP)) return deny('safety_daily');
+
+  return { allowed: true, refund: () => refundSpend(redis, spent) };
 }
 
 async function refundSpend(redis: Redis, keys: string[]): Promise<void> {

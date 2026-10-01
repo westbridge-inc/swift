@@ -243,8 +243,8 @@ export const authApi = {
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   // [ALG-34] Step-up for an existing session — a money surface answers 403
   // STEP_UP_REQUIRED until verify succeeds on THIS session.
-  stepUp: () => api.post('/auth/step-up'),
-  verifyStepUp: (code: string) => api.post('/auth/step-up/verify', { code }),
+  stepUp: (session?: AuthSessionSnapshot) => api.post('/auth/step-up', undefined, capturedAuthConfig(session)),
+  verifyStepUp: (code: string, session?: AuthSessionSnapshot) => api.post('/auth/step-up/verify', { code }, capturedAuthConfig(session)),
   countries: () => api.get('/auth/countries'),
   // Public weekly price list — the pitch partners see BEFORE committing.
   pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
@@ -426,7 +426,7 @@ export const customerApi = {
   // [E01-B] Remove the applied promo from the cart: the quote re-prices
   // without it and checkout stops sending it. (The web cart cannot remove a
   // promotion yet; the phone can.)
-  removeCartPromo: () => api.delete('/customer/cart/promo'),
+  removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message, cancellationFee } } inside the axios
@@ -446,22 +446,22 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
-  }, idempotencyKey: string) =>
+  }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
-    // only when the order is placed or the cart changes. The server refuses
+    // only when the order is placed or an unsent cart intent changes. The server refuses
     // a concurrent twin and replays a finished one — so a double tap, a
     // timed-out response and a reopened app all resolve to ONE order.
-    api.post('/customer/checkout', data, {
+    api.post('/customer/checkout', data, capturedAuthConfig(session, {
       headers: { 'Idempotency-Key': idempotencyKey },
-    }),
+    })),
   /** [MOB-020] What became of a checkout attempt whose answer never arrived:
    *  placed (the receipt), in flight (the key is claimed), or nothing. Asked
    *  BEFORE a different order is placed over an unresolved one. */
-  checkoutReceipt: (idempotencyKey: string) =>
-    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`),
+  checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
-  reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
+  reorder: (id: string, session?: AuthSessionSnapshot) => api.post(`/customer/orders/${id}/reorder`, {}, capturedAuthConfig(session)),
   ratingTags: () => api.get('/customer/rating-tags'),
   itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>
     api.post(`/customer/orders/${id}/item-feedback`, body),
@@ -486,15 +486,16 @@ export const customerApi = {
     quantity?: number;
     selectedOptions?: Record<string, unknown>;
     specialInstructions?: string;
-  }) => api.post('/customer/cart/items', data),
+  }, session?: AuthSessionSnapshot) => api.post('/customer/cart/items', data, capturedAuthConfig(session)),
   updateCartItem: (
     id: string,
     data: { quantity: number; selectedOptions?: Record<string, unknown>; specialInstructions?: string },
-  ) => api.put(`/customer/cart/items/${id}`, data),
-  removeCartItem: (id: string) => api.delete(`/customer/cart/items/${id}`),
-  clearCart: () => api.delete('/customer/cart'),
-  setCartAddress: (addressId: string) => api.put('/customer/cart/address', { addressId }),
-  setCartTip: (amount: number) => api.put('/customer/cart/tip', { amount }),
+    session?: AuthSessionSnapshot,
+  ) => api.put(`/customer/cart/items/${id}`, data, capturedAuthConfig(session)),
+  removeCartItem: (id: string, session?: AuthSessionSnapshot) => api.delete(`/customer/cart/items/${id}`, capturedAuthConfig(session)),
+  clearCart: (session?: AuthSessionSnapshot) => api.delete('/customer/cart', capturedAuthConfig(session)),
+  setCartAddress: (addressId: string, session?: AuthSessionSnapshot) => api.put('/customer/cart/address', { addressId }, capturedAuthConfig(session)),
+  setCartTip: (amount: number, session?: AuthSessionSnapshot) => api.put('/customer/cart/tip', { amount }, capturedAuthConfig(session)),
 };
 
 // Taxi / rides (mounted at /api/v1/rides)
@@ -882,6 +883,8 @@ export const riderApi = {
     body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
+  uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/orders/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
   // Intermediate delivery-leg transitions. The state machine walks
   // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
   // en-route-delivery → arrived → handover/delivered. Without these the rider
@@ -912,8 +915,8 @@ export const riderApi = {
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
-  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
-    api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
+    api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -958,6 +961,8 @@ export const driverApi = {
     body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/driver/rides/${id}/handover`, body, capturedAuthConfig(session)),
+  uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/driver/rides/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
@@ -971,8 +976,8 @@ export const driverApi = {
     api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
   subscription: () => api.get('/driver/subscription'),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
-  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
-    api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
+    api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -997,14 +1002,14 @@ export interface VendorItemInput {
 }
 
 export const vendorApi = {
-  profile: () => api.get('/vendor/profile'),
+  profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
   toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
   toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
-  order: (id: string) => api.get(`/vendor/orders/${id}`),
+  order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   // [W-25] a store's attestation carries the provider reference from its own wallet message
   confirmPayment: (id: string, reference: string) => api.post(`/vendor/orders/${id}/confirm-payment`, { reference }),
@@ -1043,8 +1048,8 @@ export const vendorApi = {
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
-  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
-    api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedVendorAuthConfig(session, storeId)),
   // Menu management
   categories: () => api.get('/vendor/categories'),
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),

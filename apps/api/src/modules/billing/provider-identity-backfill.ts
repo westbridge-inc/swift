@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
+import { claimProviderPaymentInTx, ProviderIdentityError } from './provider-identity';
 import { log } from '../../utils/logger';
 
 /**
@@ -19,7 +20,7 @@ import { log } from '../../utils/logger';
  * that record exists (MmgCheckoutService). The key carries a ':' so the admin
  * config route (keys /^[a-z0-9_.-]{1,64}$/i) can never write it by hand.
  */
-export const PROVIDER_IDENTITY_BACKFILL_KEY = 'system:billing.provider-identity-backfill.v1';
+export const PROVIDER_IDENTITY_BACKFILL_KEY = 'system:billing.provider-identity-backfill.v2';
 
 export interface ProviderIdentityBackfillResult {
   /** Identities filed or marked CREDITED, per source. */
@@ -48,19 +49,19 @@ export async function providerIdentityBackfillDone(prisma: Pick<PrismaClient, 'p
 }
 
 /** The provider transaction id as every channel stores it (normalizeProviderTxnId: trimmed, upper-cased). */
-const keyOf = (column: string) => Prisma.raw(`upper(regexp_replace(${column}, '^[[:space:]]+|[[:space:]]+$', '', 'g'))`);
+const keyOf = (column: Prisma.Sql): Prisma.Sql => Prisma.sql`mmg_txn_canon(${column})`;
 
 /** The payer whose tenant owns a subscription's money (subscriptionTenantInTx). */
-const PAYER = Prisma.raw(`
+const PAYER = Prisma.sql`
     LEFT JOIN "riders" r ON r."id" = s."riderId"
     LEFT JOIN "drivers" d ON d."id" = s."driverId"
     LEFT JOIN "vendors" v ON v."id" = s."vendorId"
     LEFT JOIN "vendor_owners" vo ON vo."id" = v."ownerId"
-    JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")`);
+    JOIN "users" u ON u."id" = COALESCE(r."userId", d."userId", vo."userId")`;
 
 function pushSource(scope: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
-    SELECT ${keyOf('p."externalRef"')} AS "key", 'push:' || p."id" AS "claimant", p."subscriptionId",
+    SELECT ${keyOf(Prisma.sql`p."externalRef"`)} AS "key", 'push:' || p."id" AS "claimant", p."subscriptionId",
            p."amount"::numeric AS "amount", COALESCE(att."currencyCode", s."currencyCode")::text AS "currencyCode",
            COALESCE(p."paidAt", p."createdAt") AS "creditedAt", u."tenantId"
     FROM "subscription_payments" p
@@ -68,13 +69,13 @@ function pushSource(scope: Prisma.Sql): Prisma.Sql {
     ${PAYER}
     LEFT JOIN "billing_events" att ON p."clientKey" LIKE 'sub:%' AND att."idempotencyKey" = 'charge:' || substr(p."clientKey", 5)
     WHERE p."paymentMethod" = 'MOBILE_MONEY' AND p."status" = 'CAPTURED'
-      AND p."externalRef" IS NOT NULL AND ${keyOf('p."externalRef"')} <> ''
+      AND p."externalRef" IS NOT NULL AND ${keyOf(Prisma.sql`p."externalRef"`)} <> ''
       ${scope}`;
 }
 
 function topupSource(scope: Prisma.Sql): Prisma.Sql {
   return Prisma.sql`
-    SELECT ${keyOf('fr."mmgRef"')} AS "key",
+    SELECT ${keyOf(Prisma.sql`fr."mmgRef"`)} AS "key",
            COALESCE('topup:' || tc."adminId" || ':' || tc."idempotencyKey", 'receipt:' || fr."billingEventId") AS "claimant",
            fr."subscriptionId", fr."amount"::numeric AS "amount", ev."currencyCode"::text AS "currencyCode",
            ev."createdAt" AS "creditedAt", u."tenantId"
@@ -83,48 +84,47 @@ function topupSource(scope: Prisma.Sql): Prisma.Sql {
     LEFT JOIN "topup_commands" tc ON tc."billingEventId" = fr."billingEventId"
     JOIN "subscriptions" s ON s."id" = fr."subscriptionId"
     ${PAYER}
-    WHERE fr."channel" = 'ADMIN_TOPUP' AND fr."mmgRef" IS NOT NULL AND ${keyOf('fr."mmgRef"')} <> ''
+    WHERE fr."channel" = 'ADMIN_TOPUP' AND fr."mmgRef" IS NOT NULL AND ${keyOf(Prisma.sql`fr."mmgRef"`)} <> ''
       ${scope}`;
 }
 
 function agentCashSource(scope: Prisma.Sql): Prisma.Sql {
-  const raw = `COALESCE(ap."mmgTxnId", CASE WHEN ap."channel" = 'MANUAL_ADMIN' THEN regexp_replace(ap."externalId", '^MANUAL:', '') ELSE ap."externalId" END)`;
+  const raw = Prisma.sql`COALESCE(ap."mmgTxnId", CASE WHEN ap."channel" = 'MANUAL_ADMIN' THEN regexp_replace(ap."externalId", '^MANUAL:', '') ELSE ap."externalId" END)`;
   return Prisma.sql`
     SELECT ${keyOf(raw)} AS "key", ap."id" AS "claimant", ap."subscriptionId",
            ap."amount"::numeric AS "amount", ap."currencyCode"::text AS "currencyCode", ap."paidAt" AS "creditedAt", ap."tenantId"
     FROM "mmg_agent_payments" ap
-    WHERE ap."providerPaymentId" IS NULL AND ap."status" IN ('MATCHED', 'RESOLVED') AND ap."subscriptionId" IS NOT NULL
+    WHERE ap."subscriptionId" IS NOT NULL AND (ap."status" IN ('MATCHED', 'RESOLVED') OR EXISTS (
+      -- A committed credit is authority whatever its observation says: every
+      -- event key agent cash has written (the same three the historical check of a claim reads).
+      SELECT 1 FROM billing_events ev WHERE ev.type='PREPAID_TOPUP' AND (
+        ev."idempotencyKey"='agent-cash:pp:'||ap."providerPaymentId" OR ev."idempotencyKey"='agent-cash:'||ap.id
+        OR right(ev."idempotencyKey",length(':agent:'||ap.channel||':'||ap."externalId"))=':agent:'||ap.channel||':'||ap."externalId")))
       AND ${keyOf(raw)} <> ''
       ${scope}`;
 }
 
 async function fileIdentities(prisma: PrismaClient, source: Prisma.Sql): Promise<{ filed: number; conflicts: number }> {
-  // One identity per transaction: the earliest credit is the one on record.
-  const filed = await prisma.$executeRaw`
-    INSERT INTO "provider_payments" ("id", "tenantId", "provider", "providerTxnId", "status", "creditedPaymentId",
-                                     "subscriptionId", "creditedAt", "amount", "currencyCode", "createdAt", "updatedAt")
-    SELECT gen_random_uuid()::text, src."tenantId", 'MMG', src."key", 'CREDITED', src."claimant",
-           src."subscriptionId", src."creditedAt", src."amount", src."currencyCode", now(), now()
-    FROM (SELECT DISTINCT ON ("key") * FROM (${source}) credits ORDER BY "key", "creditedAt", "claimant") src
-    ON CONFLICT ("provider", "providerTxnId") DO UPDATE
-      SET "status" = 'CREDITED', "creditedPaymentId" = EXCLUDED."creditedPaymentId", "subscriptionId" = EXCLUDED."subscriptionId",
-          "creditedAt" = EXCLUDED."creditedAt", "updatedAt" = now()
-      WHERE "provider_payments"."status" = 'OPEN'
-        AND "provider_payments"."tenantId" = EXCLUDED."tenantId"
-        AND "provider_payments"."amount" = EXCLUDED."amount"
-        AND btrim("provider_payments"."currencyCode") = btrim(EXCLUDED."currencyCode")
-  `;
-  const rows = await prisma.$queryRaw<Array<{ n: number }>>`
-    SELECT count(*)::int AS "n"
-    FROM (${source}) src
-    JOIN "provider_payments" pp ON pp."provider" = 'MMG' AND pp."providerTxnId" = src."key"
-    WHERE pp."status" <> 'CREDITED'
-       OR pp."creditedPaymentId" IS DISTINCT FROM src."claimant"
-       OR pp."tenantId" <> src."tenantId"
-       OR pp."amount" <> src."amount"
-       OR btrim(pp."currencyCode") <> btrim(src."currencyCode")
-  `;
-  return { filed, conflicts: rows[0]?.n ?? 0 };
+  // Use the same SQL canonical relation, alias reservation and historical
+  // evidence guard as every new credit. An OPEN linked row is not proof that
+  // its cash was never credited.
+  const rows = await prisma.$queryRaw<Array<{ key: string; claimant: string; subscriptionId: string; tenantId: string; amount: Prisma.Decimal; currencyCode: string }>>`
+    SELECT * FROM (${source}) credits ORDER BY "key", "creditedAt", "claimant"`;
+  let filed = 0;
+  let conflicts = 0;
+  for (const row of rows) {
+    try {
+      const result = await prisma.$transaction((tx) => claimProviderPaymentInTx(tx, {
+        provider: 'MMG', providerTxnId: row.key, amount: Number(row.amount), currencyCode: row.currencyCode,
+        subscriptionId: row.subscriptionId, tenantId: row.tenantId, creditedBy: row.claimant,
+      }));
+      if (!result.already) filed += 1;
+    } catch (error) {
+      if (!(error instanceof ProviderIdentityError)) throw error;
+      conflicts += 1;
+    }
+  }
+  return { filed, conflicts };
 }
 
 /**
@@ -135,12 +135,12 @@ export async function runProviderIdentityBackfill(
   prisma: PrismaClient,
   opts: { subscriptionIds?: string[] } = {},
 ): Promise<ProviderIdentityBackfillResult> {
-  const only = (column: string) => (opts.subscriptionIds
-    ? (opts.subscriptionIds.length > 0 ? Prisma.sql`AND ${Prisma.raw(column)} IN (${Prisma.join(opts.subscriptionIds)})` : Prisma.sql`AND false`)
+  const only = (column: Prisma.Sql): Prisma.Sql => (opts.subscriptionIds
+    ? (opts.subscriptionIds.length > 0 ? Prisma.sql`AND ${column} IN (${Prisma.join(opts.subscriptionIds)})` : Prisma.sql`AND false`)
     : Prisma.empty);
-  const push = await fileIdentities(prisma, pushSource(only('p."subscriptionId"')));
-  const topups = await fileIdentities(prisma, topupSource(only('fr."subscriptionId"')));
-  const agentCash = await fileIdentities(prisma, agentCashSource(only('ap."subscriptionId"')));
+  const push = await fileIdentities(prisma, pushSource(only(Prisma.sql`p."subscriptionId"`)));
+  const topups = await fileIdentities(prisma, topupSource(only(Prisma.sql`fr."subscriptionId"`)));
+  const agentCash = await fileIdentities(prisma, agentCashSource(only(Prisma.sql`ap."subscriptionId"`)));
   return {
     push: push.filed,
     topups: topups.filed,
@@ -157,6 +157,11 @@ export async function runProviderIdentityBackfill(
 export async function ensureProviderIdentityBackfill(prisma: PrismaClient): Promise<ProviderIdentityBackfillResult | null> {
   if (await providerIdentityBackfillDone(prisma)) return null;
   const result = await runProviderIdentityBackfill(prisma);
+  // A conflict is a historical transaction on record for more than one
+  // claimant, tenant or amount. It stays exactly as it is, and every later
+  // claim of that transaction is refused under the identity lock by the same
+  // historical-evidence check. It is recorded once and paged once (the caller),
+  // never re-run and re-paged on every poll: completion is recorded either way.
   const value = { completedAt: new Date().toISOString(), ...result };
   await prisma.platformConfig.upsert({
     where: { key: PROVIDER_IDENTITY_BACKFILL_KEY },

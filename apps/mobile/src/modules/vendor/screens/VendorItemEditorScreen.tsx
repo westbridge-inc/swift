@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
+import { useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState } from 'react';
-import { useQueryClient, useMutation } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
@@ -252,7 +253,7 @@ function StockAdjustRow({ item }: { item: any }) {
   const [open, setOpen] = useState(false);
   const [delta, setDelta] = useState('');
   const [reason, setReason] = useState<'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN'>('RECEIVED');
-  const adjust = useMutation({
+  const adjust = useVendorMutation({
     mutationFn: () => vendorApi.adjustStock(item.id, { delta: Number(delta), reason }),
     onSuccess: () => {
       setOpen(false);

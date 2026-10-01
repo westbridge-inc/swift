@@ -1,3 +1,4 @@
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
@@ -17,7 +18,7 @@ import { dueRenewalNotices } from './renewal-schedule';
 import { assertNotRecused } from './recusal';
 import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
-import { clusterMemberIds } from '../integrity/identity.service';
+import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, IdentityReviewRequiredError } from '../integrity/identity-review';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
@@ -141,31 +142,49 @@ export interface VerificationReviewObserver {
 const REMINDER_WINDOW_DAYS = 30;
 
 /** Rejection reason codes (onboarding spec §9.3) — templated openings so
- *  applicants get consistent, actionable messages across reviewers. */
+ *  applicants get consistent, actionable messages across reviewers. These are
+ *  the codes a reviewer may choose for a NEW decision; the reject route accepts
+ *  nothing else. */
 export const REJECTION_REASON_CODES = [
   'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
-  'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'INSURANCE_NOT_HIRE', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
   'WRONG_PLATE_CLASS',
 ] as const;
 export type RejectionReasonCode = (typeof REJECTION_REASON_CODES)[number];
+/**
+ * Retired reason codes: never offered and never applied to a new decision, but
+ * KEPT, because decisions recorded before they were retired carry them
+ * (review_decision.reasonCode and the "[CODE]" opening of a reviewNote) and
+ * that history must stay readable.
+ *  - NOT_YELLOW — retired by the owner's ruling of 2026-10-01: a yellow car is
+ *    not a requirement for a taxi (this overrides DOC-1 §3.7). The H plate stays
+ *    required; a vehicle without one is rejected as WRONG_PLATE_CLASS.
+ */
+export const RETIRED_REJECTION_REASON_CODES = ['NOT_YELLOW'] as const;
+export type RetiredRejectionReasonCode = (typeof RETIRED_REJECTION_REASON_CODES)[number];
+/** Every reason code a recorded decision can carry: the live codes and the retired ones. */
+export type RecordedRejectionReasonCode = RejectionReasonCode | RetiredRejectionReasonCode;
 /** [DOC-1 §13] 24 hours from REVIEW_QUEUED to decision. */
 export const REVIEW_SLA_HOURS = Number(process.env['REVIEW_SLA_HOURS'] ?? 24);
 /**
  * [DOC-1 §8.5] What the actor is told is a CATEGORY — never the reviewer's
  * internal note and never the internal reason. The rows are the spec's table:
  * QUALITY (unreadable / missing page), EXPIRED, REQUIREMENT (the document does
- * not meet the requirement for the account type — wrong type, class, colour,
- * insurance scope), ACCOUNT_MISMATCH (details do not match the account), and
+ * not meet the requirement for the account type — wrong type, class, insurance
+ * scope; the vehicle's colour is no longer one, owner ruling 2026-10-01),
+ * ACCOUNT_MISMATCH (details do not match the account), and
  * UNVERIFIABLE for the fraud class — alteration, duplicate across accounts, not
  * issued to the submitter (a face mismatch is exactly that) — which must read
  * IDENTICALLY: never tell a fraudster which signal caught them.
  */
-export const ACTOR_FACING_CATEGORY: Record<RejectionReasonCode, string> = {
+export const ACTOR_FACING_CATEGORY: Record<RecordedRejectionReasonCode, string> = {
   UNREADABLE: 'QUALITY', INCOMPLETE: 'QUALITY',
   EXPIRED: 'EXPIRED',
-  WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', NOT_YELLOW: 'REQUIREMENT', WRONG_PLATE_CLASS: 'REQUIREMENT',
+  WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', WRONG_PLATE_CLASS: 'REQUIREMENT',
   NAME_MISMATCH: 'ACCOUNT_MISMATCH',
   SUSPECTED_TAMPERING: 'UNVERIFIABLE', DUPLICATE: 'UNVERIFIABLE', FACE_MISMATCH: 'UNVERIFIABLE',
+  // Retired (see RETIRED_REJECTION_REASON_CODES): kept so a decision recorded under it keeps its category.
+  NOT_YELLOW: 'REQUIREMENT',
 };
 
 /** [DOC-1 §24.1 · §8.5] One generic message for the whole fraud class — and the human-review route (DOC-INV-33). */
@@ -183,7 +202,6 @@ const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   FACE_MISMATCH: FRAUD_GENERIC_TEXT,
   NAME_MISMATCH: 'The name on this document does not match your account.',
   INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
-  NOT_YELLOW: 'The vehicle must be Corporate Yellow with the H plate visible.',
   WRONG_PLATE_CLASS: 'A taxi must carry an H registration mark — this vehicle is not registered as a hire car.',
   // [DOC-1 §24.1 · §8.5] The fraud class reads IDENTICALLY and never names the
   // signal: Swift does not tell a person its system believes their document is
@@ -245,6 +263,20 @@ async function walkSubmission(
 }
 
 export class VerificationService {
+  private readonly projectionNotices = new WeakMap<object, string[]>();
+
+  private async projectionTransaction<T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    const notices: string[] = [];
+    const result = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      await lockIdentityAuthority(tx);
+      this.projectionNotices.set(tx, notices);
+      try { return await work(tx); } finally { this.projectionNotices.delete(tx); }
+    });
+    for (const id of notices) await this.notifications.publishPersisted(id);
+    return result;
+  }
+
   private countryConfig: CountryConfigService;
   private subscriptions: SubscriptionService;
 
@@ -271,13 +303,20 @@ export class VerificationService {
     data: Prisma.VerificationDocumentUncheckedCreateInput,
     review: { queue: ReviewQueue; extraction?: ExtractionPlan } = { queue: 'STANDARD' },
   ) {
-    const doc = await this.prisma.$transaction(async (tx) => {
+    const doc = await this.projectionTransaction(async (tx) => {
       const alive = await tx.$queryRaw<{ status: string; tenantId: string; countryCode: string }[]>(
         Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} FOR SHARE`,
       );
       const status = alive[0]?.status;
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
+      }
+      if (data.status === 'APPROVED') {
+        try { await requireIdentityAuthority(tx, data.userId); }
+        catch (err) {
+          if (!(err instanceof IdentityReviewRequiredError)) throw err;
+          data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
+        }
       }
       await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
       // [DOC-1 P5-1] Every submission walks the machine from CAPTURED (T1): the row
@@ -496,7 +535,7 @@ export class VerificationService {
       try {
         await this.assertActivationPriceable(userId, this.prisma);
       } catch (error) {
-        if (!(error instanceof PricingConfigError)) throw error;
+        if (!(error instanceof PricingConfigError) && !(error instanceof IdentityReviewRequiredError)) throw error;
         log().error({ userId, key: error.details?.['key'] }, 'auto-approval held for review: weekly-fee config cannot price this partner');
         result = { ...result, status: 'pending_manual' as const };
       }
@@ -830,7 +869,8 @@ export class VerificationService {
     const doc = await this.prisma.verificationDocument.findUnique({ where: { id: kase.submissionId }, select: { userId: true } });
     if (!doc) throw new NotFoundError('VerificationDocument', kase.submissionId);
     await assertNotRecused(this.prisma, reviewerId, doc.userId);
-    return this.prisma.$transaction(async (tx) => {
+    return this.projectionTransaction(async (tx) => {
+      await assertNotRecused(tx, reviewerId, doc.userId);
       const won = await tx.reviewCase.updateMany({
         where: { id: caseId, closedAt: null, OR: [{ assignedTo: null }, { assignedTo: reviewerId }] },
         data: { assignedTo: reviewerId, assignedAt: new Date() },
@@ -844,7 +884,7 @@ export class VerificationService {
 
   /** Only the reviewer holding a case may hand it back to the queue. */
   async releaseReviewCase(caseId: string, reviewerId: string) {
-    return this.prisma.$transaction(async (tx) => {
+    return this.projectionTransaction(async (tx) => {
       const won = await tx.reviewCase.updateMany({
         where: { id: caseId, closedAt: null, assignedTo: reviewerId },
         data: { assignedTo: null, assignedAt: null },
@@ -863,12 +903,12 @@ export class VerificationService {
    * verdict is recorded as an ESCALATE decision, and the document stays PENDING.
    */
   private async escalateToSecondReview(docId: string, adminId: string, reasonCode: RejectionReasonCode, note?: string): Promise<VerificationDocument> {
-    return this.prisma.$transaction(async (tx) => {
+    return this.projectionTransaction(async (tx) => {
       const doc = await tx.verificationDocument.findUnique({ where: { id: docId } });
       if (!doc) throw new NotFoundError('VerificationDocument', docId);
       if (doc.status !== 'PENDING') throw new AppError(409, 'NOT_PENDING', 'Only a pending document can be escalated');
       // [DOC-1 §8.6] Raising the suspicion is a decision too: a recused reviewer may not make it.
-      await assertNotRecused(this.prisma, adminId, doc.userId);
+      await assertNotRecused(tx, adminId, doc.userId);
       const now = new Date();
       let open = await tx.reviewCase.findFirst({ where: { submissionId: docId, closedAt: null }, orderBy: { createdAt: 'desc' } });
       if (!open) {
@@ -909,7 +949,8 @@ export class VerificationService {
       if (err instanceof AppError && err.code === 'NOTHING_TO_HOLD') return null;
       throw err;
     });
-    const linked = await clusterMemberIds(tx as unknown as PrismaClient, subjectUserId);
+    const authority = await identityAuthority(tx, subjectUserId);
+    const linked = authority.status === 'REVIEW_REQUIRED' ? [] : authority.memberIds;
     const enforcement = await tx.enforcementAction.create({ data: {
       accountId: subjectUserId, level: 'BLOCK_PENDING_FOUNDER', reasonCode: DOC_FRAUD_REASON_CODE,
       signalsFired: [{ type: 'DOC_FRAUD', reasonCode, submissionId: docId, caseId, at: now.toISOString() }] as never,
@@ -937,7 +978,8 @@ export class VerificationService {
     await assertNotRecused(this.prisma, review.reviewerId, candidate.userId);
     await this.reviewObserver?.afterPendingRead?.({ docId, userId: candidate.userId, requestedStatus });
 
-    const outcome = await this.prisma.$transaction(async (tx) => {
+    const outcome = await this.projectionTransaction(async (tx) => {
+      await assertNotRecused(tx, review.reviewerId, candidate.userId);
       const users = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT "id" FROM "users"
         WHERE "id" = ${candidate.userId}
@@ -1051,7 +1093,7 @@ export class VerificationService {
   async revokeDocument(docId: string, adminId: string, reason: string): Promise<VerificationDocument> {
     const doc = await this.prisma.verificationDocument.findUnique({ where: { id: docId }, select: { id: true, userId: true, docType: true } });
     if (!doc) throw new NotFoundError('VerificationDocument', docId);
-    const revoked = await this.prisma.$transaction(async (tx) => {
+    const revoked = await this.projectionTransaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${doc.userId} FOR UPDATE /* verification-document-decision-authority */`;
       const won = await hopDocState(tx, { id: docId, userId: doc.userId }, 'COMMITTED', 'REVOKED', {
         status: 'REJECTED', reviewedBy: adminId, reviewedAt: new Date(), reviewNote: `REVOKED: ${reason}`,
@@ -1089,7 +1131,7 @@ export class VerificationService {
       await writeDeletionReceipt(this.prisma, receipt);
       return 'PROBE_FAILED';
     }
-    const done = await this.prisma.$transaction(async (tx) => {
+    const done = await this.projectionTransaction(async (tx) => {
       const won = await tx.verificationDocument.updateMany({
         where: { id: doc.id, imagePurgedAt: null, legalHoldId: null, state: 'COMMITTED' },
         data: { imagePurgedAt: now, fileUrl: '' },
@@ -1408,22 +1450,39 @@ export class VerificationService {
     db: Prisma.TransactionClient | PrismaClient,
     userId: string,
   ): Promise<void> {
+    // A root client opens the one projection transaction. A client already inside one is used as is: a Prisma
+    // transaction client has no `$transaction`, and a client this service is already projecting through is
+    // registered in projectionNotices — so the projection can never re-enter itself, whatever the client shape.
+    if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
+      return this.projectVendorActivation(tx, userId);
+    });
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
-      include: { vendors: { select: { id: true, vendorType: true, isVerified: true, status: true } } },
+      include: {
+        vendors: {
+          // [STA-1 Part 6] A REVIEW tenant's stores are the store-review
+          // fiction (review/content-pack.ts): they hold no documents by
+          // design, so document authority neither lights nor darkens them —
+          // without this the daily belt took the reviewer's stores down. Every
+          // other tenant's store is projected exactly as before.
+          where: { tenant: { kind: { not: 'REVIEW' } } },
+          select: { id: true, vendorType: true, isVerified: true, status: true },
+        },
+      },
     });
     if (!owner) return;
     // [DOC-1 §3.6 · P3-2] A VALID registration record promotes every UNREGISTERED store the
     // owner holds — automatic, audited, once. Runs before the activation projection so the
     // promoted store's checklist is read at its new tier.
     await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
-      await this.notifications.send({
+      const notice = await db.notification.create({ data: {
         userId: ownerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your store is now a registered seller',
         body: 'Your business registration is on file. The unregistered-seller limits on orders and weekly sales are lifted, and promoted placement is open to you.',
         data: { kind: 'vendor_tier_promoted', vendorId },
-      });
+      } });
+      this.projectionNotices.get(db)?.push(notice.id);
     });
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
     // store cannot go live with an incomplete disclosure block: it joins the checklist as a
@@ -1441,7 +1500,7 @@ export class VerificationService {
         // transaction it rides in — instead of leaving an ACTIVE store with no
         // subscription. An already-live store is not re-priced here.
         if (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL') {
-          await this.subscriptions.priceForActivation({ vendorId: vendor.id }, db);
+          await this.subscriptions.startTrialForVendor(vendor.id, db);
         }
         const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db);
         await db.vendor.update({
@@ -1685,7 +1744,7 @@ export class VerificationService {
 
     let expired = 0;
     for (const doc of lapsed) {
-      const transitioned = await this.prisma.$transaction(async (tx) => {
+      const transitioned = await this.projectionTransaction(async (tx) => {
         const users = await tx.$queryRaw<Array<{ id: string }>>`
           SELECT "id" FROM "users"
           WHERE "id" = ${doc.userId}
@@ -1790,7 +1849,7 @@ export class VerificationService {
       const ruling = await retentionDaysFor(this.prisma, { countryCode: user.countryCode, docType: d.docType, role: d.role, countryDefaultDays: config.dataRetentionDays });
       deadlines.push({ id: d.id, at: new Date(Date.now() + ruling.days * 24 * 60 * 60 * 1000), amlRecord: ruling.amlRecord });
     }
-    return this.prisma.$transaction(async (tx) => {
+    return this.projectionTransaction(async (tx) => {
       // [F-224-01] Serialize with account cutoff and final purge, including a
       // scheduler whose policy reads began before deletion committed.
       const locked = await tx.$queryRaw<Array<{ id: string }>>`
@@ -1901,7 +1960,7 @@ export class VerificationService {
       await writeDeletionReceipt(this.prisma, receipt);
       return 'PROBE_FAILED';
     }
-    const transitioned = await this.prisma.$transaction(async (tx) => {
+    const transitioned = await this.projectionTransaction(async (tx) => {
       const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
         SELECT "id", "phone" FROM "users"
         WHERE "id" = ${doc.userId}

@@ -29,10 +29,6 @@ export class ProviderIdentityError extends AppError {
   }
 }
 
-/** The provider transaction id as every channel stores it: trimmed, upper-cased. */
-export function normalizeProviderTxnId(raw: string): string {
-  return raw.trim().toUpperCase();
-}
 
 /**
  * [F7] The tenant a subscription's money belongs to: its payer's. A
@@ -82,23 +78,60 @@ export async function claimProviderPaymentInTx(
     creditedBy: string;
   },
 ): Promise<{ id: string; already: boolean }> {
-  const key = normalizeProviderTxnId(input.providerTxnId);
+  const raw = input.providerTxnId;
+  const [canonical] = await tx.$queryRaw<Array<{ key: string }>>`SELECT mmg_txn_canon(${raw}) AS key`;
+  const key = canonical?.key;
   if (!key) throw new AppError(400, 'PROVIDER_TXN_REQUIRED', 'A credit must name the provider transaction it is evidence of.');
   if (!input.tenantId) throw new AppError(500, 'PROVIDER_TXN_TENANT_REQUIRED', 'A provider identity is always filed under a named tenant.');
-  // Mint without a race: a concurrent claimant's insert collapses on the unique key.
-  await tx.$executeRaw`
-    INSERT INTO "provider_payments" ("id", "tenantId", "provider", "providerTxnId", "status", "amount", "currencyCode", "createdAt", "updatedAt")
-    VALUES (gen_random_uuid()::text, ${input.tenantId}, ${input.provider}, ${key}, 'OPEN', ${input.amount}, ${input.currencyCode}, now(), now())
-    ON CONFLICT ("provider", "providerTxnId") DO NOTHING
-  `;
-  const rows = await tx.$queryRaw<Array<{ id: string; tenantId: string; status: string; amount: Prisma.Decimal; currencyCode: string; creditedPaymentId: string | null }>>`
-    SELECT "id", "tenantId", "status", "amount", "currencyCode", "creditedPaymentId"
-    FROM "provider_payments"
-    WHERE "provider" = ${input.provider} AND "providerTxnId" = ${key}
-    FOR UPDATE
-  `;
-  const identity = rows[0];
-  if (!identity) throw new Error('provider identity vanished after it was minted');
+  // Historical reservations remain visible when RLS hides the owning money
+  // row. Such a reservation fails closed; it never licenses another identity.
+  const [alias] = await tx.$queryRaw<Array<{ providerPaymentId: string }>>`
+    SELECT "providerPaymentId" FROM provider_payment_aliases
+    WHERE provider=${input.provider} AND "aliasKey"=mmg_txn_canon(${raw})`;
+  type Identity = { id: string; tenantId: string; status: string; amount: Prisma.Decimal; currencyCode: string; creditedPaymentId: string | null; canonicalMatches: boolean };
+  const readLive = () => tx.$queryRaw<Identity[]>`
+    SELECT p.*,mmg_txn_canon(p."providerTxnId")=mmg_txn_canon(${raw}) AS "canonicalMatches"
+    FROM provider_payments p WHERE p.provider=${input.provider}
+      AND mmg_txn_canon(p."providerTxnId")=mmg_txn_canon(${raw}) AND p.status<>'HELD_DUPLICATE' FOR UPDATE`;
+  let identity: Identity | undefined;
+  if (alias) {
+    [identity] = await tx.$queryRaw<Identity[]>`
+      SELECT p.*,mmg_txn_canon(p."providerTxnId")=mmg_txn_canon(${raw}) AS "canonicalMatches"
+      FROM provider_payments p WHERE p.id=${alias.providerPaymentId} FOR UPDATE`;
+    if (!identity || !identity.canonicalMatches || identity.status==='HELD_DUPLICATE') {
+      throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'That payment requires finance review. Nothing was credited.');
+    }
+  } else {
+    [identity] = await readLive();
+    if (!identity) {
+      await tx.$executeRaw`
+        INSERT INTO provider_payments (id,"tenantId",provider,"providerTxnId",status,amount,"currencyCode","createdAt","updatedAt")
+        VALUES (gen_random_uuid()::text,${input.tenantId},${input.provider},mmg_txn_canon(${raw}),'OPEN',${input.amount},${input.currencyCode},now(),now())
+        ON CONFLICT (provider,mmg_txn_canon("providerTxnId")) WHERE status<>'HELD_DUPLICATE' DO NOTHING`;
+      [identity] = await readLive();
+    }
+  }
+  if (!identity) throw new Error('Provider identity unavailable');
+  // A committed historical credit is authority even when its observation is
+  // stale and the linked identity still says OPEN. Check the money evidence,
+  // including the original pre-atomic agent-event suffix, under this lock.
+  const historical = await tx.$queryRaw<Array<{ claimant: string }>>`
+    SELECT ap.id AS claimant FROM mmg_agent_payments ap
+    WHERE (ap."providerPaymentId"=${identity.id} OR mmg_txn_canon(COALESCE(ap."mmgTxnId",
+      CASE WHEN ap.channel='MANUAL_ADMIN' THEN regexp_replace(ap."externalId",'^MANUAL:','') ELSE ap."externalId" END))=mmg_txn_canon(${raw}))
+      AND EXISTS (SELECT 1 FROM billing_events ev WHERE ev.type='PREPAID_TOPUP' AND (
+        ev."idempotencyKey"='agent-cash:pp:'||ap."providerPaymentId" OR ev."idempotencyKey"='agent-cash:'||ap.id OR
+        right(ev."idempotencyKey",length(':agent:'||ap.channel||':'||ap."externalId"))=':agent:'||ap.channel||':'||ap."externalId"))
+    UNION ALL
+    SELECT 'push:'||p.id FROM subscription_payments p WHERE p."paymentMethod"='MOBILE_MONEY' AND p.status='CAPTURED'
+      AND mmg_txn_canon(p."externalRef")=mmg_txn_canon(${raw})
+    UNION ALL
+    SELECT COALESCE('topup:'||tc."adminId"||':'||tc."idempotencyKey",'receipt:'||fr."billingEventId")
+    FROM fee_receipts fr LEFT JOIN topup_commands tc ON tc."billingEventId"=fr."billingEventId"
+    WHERE fr.channel='ADMIN_TOPUP' AND mmg_txn_canon(fr."mmgRef")=mmg_txn_canon(${raw})`;
+  if (historical.some((credit) => credit.claimant !== input.creditedBy)) {
+    throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'That payment is already recorded or requires finance review. Nothing was credited.');
+  }
   // [F7] Ownership first: another tenant's evidence is never ours to credit.
   if (identity.tenantId !== input.tenantId) {
     throw new ProviderIdentityError('PROVIDER_TXN_TENANT_CONFLICT', 'That transaction is on record for another account. Nothing was credited; reconcile it against the MMG statement.');
@@ -106,6 +139,7 @@ export async function claimProviderPaymentInTx(
   if (Number(identity.amount) !== input.amount || identity.currencyCode.trim() !== input.currencyCode) {
     throw new ProviderIdentityError('PROVIDER_TXN_AMOUNT_CONFLICT', 'That transaction is already on record with a different amount or currency. Nothing was credited; reconcile it against the MMG statement.');
   }
+  if (identity.status !== 'OPEN' && identity.status !== 'CREDITED') throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'That payment requires finance review. Nothing was credited.');
   if (identity.status === 'CREDITED') {
     if (identity.creditedPaymentId === input.creditedBy) return { id: identity.id, already: true };
     throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'That transaction has already been credited. Nothing was credited again.');

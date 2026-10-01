@@ -12,6 +12,7 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { riderRoutes } from '../../modules/rider/rider.routes';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // GOLD-2 · RIDE-04 — the door handover: PIN + GPS + outcome (H-3).
@@ -40,7 +41,9 @@ import { riderRoutes } from '../../modules/rider/rider.routes';
 
 // This file's own fixture block (+5920323nnn, 11 characters); phones and the
 // crash-recovery purge share this ONE constant.
-const PHONE_PREFIX = '+5920323';
+// [SAFE-B · retained history] A failed door's filing is immutable evidence: the order and everyone it names
+// are kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('09');
 const FIXTURE = 'gold2-rides-fixture';
 const DAY = 24 * 60 * 60 * 1000;
 const DOOR = { lat: 6.8045, lng: -58.1553 };
@@ -193,6 +196,13 @@ async function purgeFixtures() {
       where: { OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } }, { riderId: { in: riderIds } }] },
       select: { id: true },
     })).map((o) => o.id);
+    // [SAFE-B · retained history] A filed door keeps its order, claim and strike, and the people and store
+    // they name. Everything else goes as before; what stays is taken out of service at the end.
+    const kept = await retainedCohort(app.prisma, { orderIds });
+    const goneOrderIds = without(orderIds, kept.orderIds);
+    const goneUserIds = without(ids, kept.userIds);
+    const goneRiderIds = without(riderIds, kept.riderIds);
+    const goneVendorIds = without(vendorIds, kept.vendorIds);
     if (orderIds.length > 0) {
       await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
     }
@@ -200,22 +210,23 @@ async function purgeFixtures() {
     await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
     await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
-    await app.prisma.reimbursementClaim.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
-    await app.prisma.strike.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { userId: { in: ids } }] } });
-    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
-    await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
-    await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+    await app.prisma.reimbursementClaim.deleteMany({ where: { OR: [{ orderId: { in: goneOrderIds } }, { riderId: { in: goneRiderIds } }] } });
+    await app.prisma.strike.deleteMany({ where: { OR: [{ orderId: { in: goneOrderIds } }, { userId: { in: goneUserIds } }] } });
+    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: goneOrderIds } }, { riderId: { in: goneRiderIds } }] } });
+    await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+    await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: goneOrderIds } } });
     await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
-    await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
-    await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-    await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.address.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await app.prisma.rider.deleteMany({ where: { id: { in: goneRiderIds } } });
+    await app.prisma.item.deleteMany({ where: { vendorId: { in: goneVendorIds } } });
+    await app.prisma.category.deleteMany({ where: { vendorId: { in: goneVendorIds } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: goneVendorIds } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: goneUserIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: goneUserIds } } });
+    await retireKeptScaffolding(app.prisma, kept);
     await purgeRedis([...ids, ...vendorIds, ...riderIds, ...orderIds]);
   });
 }
@@ -346,7 +357,7 @@ describe('GOLD-2 · RIDE-04 — the cash door', () => {
     expect((await riderRow(rider.riderId)).totalDeliveries).toBe(1);
   });
 
-  it('a customer who will not pay: an early no-show is refused; the refusal is recorded with GPS evidence, strikes the customer and opens the rider’s guarantee claim — once', async () => {
+  it('a customer who will not pay: an early no-show is refused; the refusal is recorded with GPS evidence and opens the rider’s guarantee claim for review — once; without an issued door photo it strikes nobody', async () => {
     const rider = await makeRider('Cleo');
     const order = await orderAtTheDoor(rider);
     await riderStep(rider, order.id, 'arrived', 'ARRIVED');
@@ -369,8 +380,9 @@ describe('GOLD-2 · RIDE-04 — the cash door', () => {
     expect(await doorFacts(order.id)).toMatchObject({ status: 'FAILED', paymentStatus: 'FAILED', deliveredAt: null });
     const failedLog = (await statusLog(order.id)).filter((l) => l.status === 'FAILED');
     expect(failedLog).toEqual([{ status: 'FAILED', note: 'refused — gps:6.80450,-58.15530', changedBy: rider.userId }]);
+    // [SAFE-B] No issued door photo: nothing the server holds supports punishment, so nobody is struck.
     const strikes = await sys(() => app.prisma.strike.findMany({ where: { orderId: order.id }, select: { userId: true, reason: true } }));
-    expect(strikes).toEqual([{ userId: customer.userId, reason: 'failed_payment_refused' }]);
+    expect(strikes).toEqual([]);
     const claims = await sys(() => app.prisma.reimbursementClaim.findMany({ where: { orderId: order.id } }));
     expect(claims).toHaveLength(1);
     expect(claims[0]).toMatchObject({ id: claim.id, riderId: rider.riderId, status: claim.status });
@@ -379,12 +391,13 @@ describe('GOLD-2 · RIDE-04 — the cash door', () => {
     expect(notice).toHaveLength(1);
     expect(await riderRow(rider.riderId)).toMatchObject({ currentOrderId: null, isAvailable: true, committedFloat: new Prisma.Decimal(0) });
 
-    // A retried outcome answers the facts already written: one claim, one strike.
+    // A retried outcome answers the facts already written: one claim, one filing, still no strike.
     const retried = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'refused', gps: DOOR }, { 'idempotency-key': `ride04-ref2-${nanoid(10)}` });
     expect(retried.statusCode).toBe(200);
     expect(retried.json().data.claim.id).toBe(claim.id);
     expect(await sys(() => app.prisma.reimbursementClaim.count({ where: { orderId: order.id } }))).toBe(1);
-    expect(await sys(() => app.prisma.strike.count({ where: { orderId: order.id } }))).toBe(1);
+    expect(await sys(() => app.prisma.cashHandoverEvidence.count({ where: { orderId: order.id } }))).toBe(1);
+    expect(await sys(() => app.prisma.strike.count({ where: { orderId: order.id } }))).toBe(0);
     // A failed door can never be turned into a paid one afterwards.
     const lateCash = await call('POST', `/api/v1/rider/orders/${order.id}/handover`, rider.token, { outcome: 'paid', gps: DOOR });
     expect(lateCash.statusCode).toBe(409);
