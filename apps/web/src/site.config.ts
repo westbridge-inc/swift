@@ -47,6 +47,28 @@ export const site = {
    *  Declared in site.domain.ts so next.config can read it without tripping
    *  the unfilled-token guard below. */
   domain: SITE_DOMAIN,
+
+  // ── [Q36] What the card bank requires the site to state ─────────────────
+  //  The bank is sent a screenshot of each of these and may visit the site.
+  //  /about, /legal/refunds, /legal/delivery and every footer read them here.
+
+  /** The name the service trades under, and the other way it is written. */
+  tradeName: 'Swift',
+  tradeNameAlt: 'SwiftGY',
+
+  /** Where the company is officially registered and located. */
+  registeredCity: 'Georgetown',
+
+  /** The domicile country, and the only country Swift operates in. */
+  country: 'Guyana',
+  countryCode: 'GY',
+
+  /** The transaction currency: every price on Swift is in Guyana dollars. */
+  currencyCode: 'GYD',
+  currencyName: 'Guyana dollars',
+
+  /** How soon support answers a question about a Swift charge, in business days. */
+  supportReplyBusinessDays: 2,
 } as const;
 
 export { SITE_ORIGIN };
@@ -79,6 +101,13 @@ export const launch = {
     courier: 'live' as LaunchState,
     services: 'live' as LaunchState,
   },
+
+  /** [Q36] Visa and Mastercard, through the bank's card gateway, for Swift's
+   *  OWN charge — the weekly partner fee. Orders are never paid by card: the
+   *  API accepts only cash or the store's own MMG for an order. Flip to 'live'
+   *  only when a partner can pay the weekly fee by card end to end; until then
+   *  every card mark on the site says "coming soon". */
+  cardPayments: 'soon' as LaunchState,
 } as const;
 
 /** True only when a real, installable app exists in that store. Gates the

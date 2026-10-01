@@ -38,7 +38,9 @@ const PUBLIC_PAGES = [
   '(marketing)/vendors/page.tsx',
   '(marketing)/welcome/page.tsx',
   'legal/child-safety/page.tsx',
+  'legal/delivery/page.tsx', // [Q36] the card bank's delivery policy
   'legal/privacy/page.tsx',
+  'legal/refunds/page.tsx', // [Q36] the card bank's refund and cancellation policy
   'legal/terms/page.tsx',
   'signup/page.tsx', // public business acquisition door [AX295 F1]
   'store/[slug]/page.tsx',
