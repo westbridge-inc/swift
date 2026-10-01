@@ -149,6 +149,7 @@ describe('a held payment keeps its attempt key, except the release of a card cha
   it.each([
     ['any other key', { status: 'EXPIRED', failureCode: 'DISPATCH_REVOKED', key: 'card:rewritten' }],
     ['the release key without closing the charge', { status: 'UNKNOWN', failureCode: null, key: 'void' }],
+    ['the release key with the revocation recorded but the charge left open', { status: 'UNKNOWN', failureCode: 'DISPATCH_REVOKED', key: 'void' }],
     ['the release key under another failure', { status: 'EXPIRED', failureCode: 'PROVIDER_ERROR', key: 'void' }],
     ['the release key with no failure recorded', { status: 'EXPIRED', failureCode: null, key: 'void' }],
   ] as const)('%s is refused', async (_name, change) => {
