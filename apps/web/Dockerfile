@@ -41,6 +41,10 @@ ARG SWIFT_WEB_CHANNEL
 # Unset or empty keeps src/site.config.ts refusing to build while a company
 # detail is still a {{TOKEN}}; only an explicit 1 lets such a build through.
 ARG NEXT_PUBLIC_ALLOW_SITE_TOKENS
+# [Item 7] The pre-launch switch for the public site: `live` opens ordering on
+# the apex and www; unset or empty shows the "Launching soon" front door there.
+# Other hosts this image answers (staging) keep the full marketplace either way.
+ARG NEXT_PUBLIC_WEB_ORDERING
 # next.config.ts: the standalone server, and the type check and lint stay
 # with CI (the reason is written there).
 ENV SWIFT_WEB_IMAGE_BUILD=1

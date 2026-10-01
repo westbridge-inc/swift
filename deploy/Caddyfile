@@ -17,7 +17,15 @@
 # certificate like any site address, and it MUST be in the @api matcher: any
 # host missing from the matcher is served the website. Unset or empty, it
 # expands to nothing and this file is exactly what it was without it.
-{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {
+#
+# [Item 8] WEB_ALIAS_HOSTS (optional, deploy/.env) is a space-separated list of
+# extra DNS names for the WEBSITE — the public swiftgy.com and www.swiftgy.com
+# while no production stack exists. Each gets its own certificate and, being
+# absent from the @api matcher, reaches the website. www is redirected to the
+# apex by the website itself (apps/web/next.config.ts), which keeps the app-link
+# files on www unredirected; no redirect belongs here. Unset or empty, it
+# expands to nothing and this file is exactly what it was without it.
+{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {
     encode zstd gzip
     @api host {$API_HOST} {$API_ALIAS_HOST}
     handle @api {
