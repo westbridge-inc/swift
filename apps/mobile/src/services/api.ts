@@ -261,8 +261,8 @@ export const authApi = {
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   // [ALG-34] Step-up for an existing session — a money surface answers 403
   // STEP_UP_REQUIRED until verify succeeds on THIS session.
-  stepUp: () => api.post('/auth/step-up'),
-  verifyStepUp: (code: string) => api.post('/auth/step-up/verify', { code }),
+  stepUp: (session?: AuthSessionSnapshot) => api.post('/auth/step-up', undefined, capturedAuthConfig(session)),
+  verifyStepUp: (code: string, session?: AuthSessionSnapshot) => api.post('/auth/step-up/verify', { code }, capturedAuthConfig(session)),
   countries: () => api.get('/auth/countries'),
   // Public weekly price list — the pitch partners see BEFORE committing.
   pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
@@ -901,6 +901,8 @@ export const riderApi = {
     body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
+  uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/orders/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
   // Intermediate delivery-leg transitions. The state machine walks
   // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
   // en-route-delivery → arrived → handover/delivered. Without these the rider
@@ -931,8 +933,8 @@ export const riderApi = {
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
-  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
-    api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
+    api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -977,6 +979,8 @@ export const driverApi = {
     body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/driver/rides/${id}/handover`, body, capturedAuthConfig(session)),
+  uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/driver/rides/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
@@ -990,8 +994,8 @@ export const driverApi = {
     api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
   subscription: () => api.get('/driver/subscription'),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
-  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
-    api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
+    api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -1062,8 +1066,8 @@ export const vendorApi = {
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
-  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string) =>
-    api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }),
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedVendorAuthConfig(session, storeId)),
   // Menu management
   categories: () => api.get('/vendor/categories'),
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),

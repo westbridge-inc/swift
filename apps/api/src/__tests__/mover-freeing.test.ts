@@ -12,6 +12,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { OrderService } from '../modules/order/order.service';
 import { DispatchService, sweepStaleMovers } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
@@ -38,13 +39,15 @@ let seq = 0;
 
 // Per-run random base keeps phones from colliding with other test files or
 // leftovers from a prior interrupted run (parallel vitest, shared dev DB).
-const phoneBase = 592_200_000_000 + Math.floor(Math.random() * 700_000_000);
+// [SAFE-B · retained history] A failed handover's filing keeps its order and the
+// people it names, so the phones live in a namespace no other suite uses or purges.
+const PHONE_PREFIX = retainedPhonePrefix('05');
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Freeing',
       lastName: `User${seq}`,
       roles,
@@ -78,7 +81,7 @@ async function makeVendor() {
       name: `Freeing Vendor ${seq}`,
       slug: `freeing-vendor-${nanoid(10).toLowerCase()}`,
       vendorType: 'RESTAURANT',
-      phone: `+${phoneBase + 900 + seq}`,
+      phone: `${PHONE_PREFIX}${String(900 + seq).padStart(3, '0')}`,
       addressLine1: '1 Freeing Way',
       city: 'Georgetown',
       region: 'Demerara-Mahaica',
@@ -238,10 +241,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-  await app.close();
+  // [SAFE-B · retained history] A failed handover's filing is evidence: its order and everyone it names
+  // stay. Everything else is removed as before, in one transaction, and what stays is taken out of
+  // service. Nothing is swallowed and nothing half-commits.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { orderIds: createdOrderIds });
+      await tx.order.deleteMany({ where: { id: { in: without(createdOrderIds, kept.orderIds) } } });
+      await tx.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await tx.user.deleteMany({ where: { id: { in: without(createdUserIds, kept.userIds) } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
 
 // ---------------------------------------------------------------------------
