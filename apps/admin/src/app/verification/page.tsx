@@ -13,6 +13,18 @@ import {
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import {
+  REJECTION_REASONS,
+  SECOND_REVIEW_CODES,
+  isRejectionReasonCode,
+  rejectionLabel,
+  type RejectionReasonCode,
+} from '@/lib/rejection-reasons';
+
+/** [DOC-1 §24.2] What the reviewer is told after a fraud-class verdict: the
+ *  server escalated it, so the document is still pending, NOT rejected. */
+const SENT_FOR_SECOND_REVIEW =
+  'Sent for a second review: a different reviewer must confirm it. It is not rejected until they do.';
 
 const STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 type Status = (typeof STATUSES)[number];
@@ -63,6 +75,11 @@ export default function VerificationPage() {
   const [lane, setLane] = useState<Lane>('operator');
   const [selected, setSelected] = useState<any>(null);
   const [reason, setReason] = useState('');
+  // [ADMIN-CONSOLE] Every rejection names one of the server's reason codes.
+  const [reasonCode, setReasonCode] = useState<RejectionReasonCode | ''>('');
+  // What the last decision did, when the server did something other than
+  // what was asked (a fraud-class verdict escalates instead of rejecting).
+  const [decisionNotice, setDecisionNotice] = useState<string | null>(null);
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [mutationError, setMutationError] = useState<unknown>(null);
   // [A-19] Which document has actually been OPENED in this session, and the
@@ -80,6 +97,7 @@ export default function VerificationPage() {
     queryClient.invalidateQueries({ queryKey: ['verification'] });
     setSelected(null);
     setReason('');
+    setReasonCode('');
     setInsurance(EMPTY_INSURANCE);
     setExpiresAt('');
     setMutationError(null);
@@ -92,15 +110,23 @@ export default function VerificationPage() {
     onSuccess: refresh,
   });
   const rejectMutation = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => rejectDoc(id, reason),
+    mutationFn: ({ id, reason, reasonCode }: { id: string; reason: string; reasonCode: RejectionReasonCode }) =>
+      rejectDoc(id, reason, reasonCode),
     onMutate: () => setMutationError(null),
     onError: (error) => setMutationError(error),
-    onSuccess: refresh,
+    onSuccess: (result) => {
+      refresh();
+      // [DOC-1 §24.2] The server's answer decides what happened, not the code
+      // that was sent: a first fraud-class verdict leaves the document PENDING.
+      setDecisionNotice(result?.data?.status === 'PENDING' ? SENT_FOR_SECOND_REVIEW : null);
+    },
   });
 
   const select = (doc: any) => {
     setSelected(doc);
     setReason('');
+    setReasonCode('');
+    setDecisionNotice(null);
     setInsurance(EMPTY_INSURANCE);
     setExpiresAt('');
     setMutationError(null);
@@ -146,6 +172,7 @@ export default function VerificationPage() {
   const documentLabel = selected ? String(selected.docType).replaceAll('_', ' ') : '';
 
   const rows: any[] = data?.data ?? [];
+  const secondReview = reasonCode !== '' && SECOND_REVIEW_CODES.has(reasonCode);
 
   return (
     <div>
@@ -154,6 +181,12 @@ export default function VerificationPage() {
         Review submitted documents. Drivers cannot carry passengers until a hire-class
         insurance is confirmed here.
       </p>
+
+      {decisionNotice && (
+        <p role="status" className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+          {decisionNotice}
+        </p>
+      )}
 
       <div className="flex gap-2 mb-4">
         {STATUSES.map((s) => (
@@ -382,6 +415,28 @@ export default function VerificationPage() {
                   >
                     Approve
                   </button>
+                  <label htmlFor="rejection-reason-code" className="block text-xs font-medium text-[var(--muted)]">
+                    Reason code
+                  </label>
+                  <select
+                    id="rejection-reason-code"
+                    value={reasonCode}
+                    onChange={(e) => setReasonCode(isRejectionReasonCode(e.target.value) ? e.target.value : '')}
+                    className="w-full px-3 py-2 bg-[var(--panel-2)] rounded-lg text-sm border border-[var(--border)]"
+                  >
+                    <option value="">Choose why it is rejected…</option>
+                    {REJECTION_REASONS.map((option) => (
+                      <option key={option.code} value={option.code}>
+                        {option.label} ({option.code})
+                      </option>
+                    ))}
+                  </select>
+                  {secondReview && (
+                    <p className="text-xs text-amber-400">
+                      This does not reject it yet: a different reviewer must confirm it on the second-review queue.
+                      The applicant is only told the document could not be verified.
+                    </p>
+                  )}
                   <textarea
                     placeholder="Rejection reason"
                     value={reason}
@@ -390,11 +445,15 @@ export default function VerificationPage() {
                     rows={2}
                   />
                   <button
-                    disabled={decisionPending || reasonTooShort(reason)}
+                    disabled={decisionPending || reasonTooShort(reason) || reasonCode === ''}
                     onClick={() => {
+                      if (reasonCode === '') return;
                       const visibleReason = reason.trim();
-                      if (window.confirm(`Reject ${documentLabel} for ${applicantName} with reason: "${visibleReason}"?`)) {
-                        rejectMutation.mutate({ id: selected.id, reason: visibleReason });
+                      const question = SECOND_REVIEW_CODES.has(reasonCode)
+                        ? `Send ${documentLabel} for ${applicantName} to a second reviewer as "${rejectionLabel(reasonCode)}"? It is not rejected until a different reviewer confirms it. Your reason: "${visibleReason}"`
+                        : `Reject ${documentLabel} for ${applicantName} with reason: "${visibleReason}"?`;
+                      if (window.confirm(question)) {
+                        rejectMutation.mutate({ id: selected.id, reason: visibleReason, reasonCode });
                       }
                     }}
                     className="w-full px-3 py-2 bg-red-500/20 text-red-400 rounded-lg text-sm hover:bg-red-500/30 disabled:opacity-40"
