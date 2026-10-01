@@ -83,7 +83,7 @@ const TOKEN_DISALLOWED_PAGES = [
 ];
 
 // Token-bearing HTML route handlers carry response headers instead of metadata.
-const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[outcome]/route.ts'];
+const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[...path]/route.ts'];
 
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
@@ -242,12 +242,12 @@ describe('[DS288] every route has a reviewed search classification', () => {
 
   it.each(TOKEN_DISALLOWED_HANDLERS)('%s stays disallowed AND sends noindex for GET and POST', async (handler) => {
     expect(crawlable(urlOf(handler))).toBe(false);
-    const { GET, POST } = await import('./app/pay/mmg/[outcome]/route');
+    const { GET, POST } = await import('./app/pay/mmg/[...path]/route');
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }));
     try {
       for (const method of ['GET', 'POST'] as const) {
         const request = new Request('https://example.test/pay/mmg/success', { method });
-        const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ outcome: 'success' }) });
+        const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ path: ['success'] }) });
         expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
         expect(await response.text()).toContain('<meta name="robots" content="noindex">');
       }
