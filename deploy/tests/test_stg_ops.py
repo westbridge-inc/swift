@@ -1008,6 +1008,22 @@ class Q11WebsiteDocs(unittest.TestCase):
                        '--resolve "$WEB_HOST:443:127.0.0.1"', "X-Robots-Tag"):
             self.assertIn(needle, section)
 
+    def test_the_runbook_says_how_to_serve_the_public_names_and_what_the_front_door_is(self):
+        # [Item 8 · DS628] Serving swiftgy.com and www from this stack, whether they are indexed,
+        # the pre-launch switch, and the plain fact that the front door is presentation-only.
+        runbook = (DEPLOY / "PILOT-RUNBOOK.md").read_text()
+        start = runbook.index("Serving the public site from this stack")
+        end = runbook.find("\n## ", start)
+        section = runbook[start:end if end != -1 else len(runbook)]
+        for needle in ("WEB_ALIAS_HOSTS=swiftgy.com www.swiftgy.com", "WEB_ORDERING=live", "presentation-only",
+                       "open to the apps", "CORS_ORIGIN", "does not open ordering", "x-robots-tag",
+                       "301", ".well-known"):
+            self.assertIn(needle, section)
+        # Section 3b no longer claims the image marks every name noindex.
+        start_3b = runbook.index("Serving the website on staging")
+        section_3b = runbook[start_3b:runbook.find("\n## ", start_3b)]
+        self.assertIn("only on the staging name", section_3b)
+
 
 
 
