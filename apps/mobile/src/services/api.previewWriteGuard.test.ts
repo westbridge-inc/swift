@@ -88,8 +88,9 @@ describe('the earner preview cannot write through the app client', () => {
   });
 
   it('a preview flag left behind never blocks another part of the app', async () => {
-    // Only the mover stack shows the preview. If the flag were ever stale while
-    // the customer app is open, checkout and every other write must go through.
+    // The guard's own condition: only the mover app shows the preview. (The
+    // preview also ENDS when anything takes the person out of it — proven
+    // through the real router in navigation/RootNavigator.moverPreview.navigation.test.ts.)
     useMoverPreview.setState({ preview: true, kind: 'RIDER' });
     useAuthStore.setState({ intent: 'customer' });
     await api.post('/customer/orders', {});

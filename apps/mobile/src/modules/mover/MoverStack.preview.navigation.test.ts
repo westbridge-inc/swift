@@ -23,6 +23,8 @@ const fx = vi.hoisted(() => ({
   toast: { show: vi.fn(), error: vi.fn(), success: vi.fn() },
   requestLogout: vi.fn(),
   storage: new Map<string, string>(),
+  openURL: vi.fn(async (_url: string) => undefined),
+  sosMutate: vi.fn(),
 }));
 
 vi.mock('react-native', async () => {
@@ -51,7 +53,7 @@ vi.mock('react-native', async () => {
     useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1, scale: 1 }),
     Keyboard: { addListener: () => ({ remove() {} }), dismiss() {} }, Vibration: { vibrate: () => undefined },
     AppState: { currentState: 'active', addEventListener: () => ({ remove() {} }) },
-    Linking: { openURL: async () => undefined, canOpenURL: async () => true, getInitialURL: async () => null, addEventListener: () => ({ remove() {} }) },
+    Linking: { openURL: fx.openURL, canOpenURL: async () => true, getInitialURL: async () => null, addEventListener: () => ({ remove() {} }) },
     Share: { share: async () => undefined }, Alert: { alert: () => undefined },
     AccessibilityInfo: { isReduceMotionEnabled: async () => true, addEventListener: () => ({ remove() {} }), announceForAccessibility() {} },
     TurboModuleRegistry: { get: () => null },
@@ -207,7 +209,7 @@ vi.mock('../../hooks', async () => {
   const mover = await vi.importActual<Record<string, unknown>>('../../hooks/mover');
   const verification = await vi.importActual<Record<string, unknown>>('../../hooks/verification');
   const courier = await vi.importActual<Record<string, unknown>>('../../hooks/courier');
-  return { ...mover, ...verification, ...courier, useRideSos: () => ({ mutate: () => undefined, isPending: false }) };
+  return { ...mover, ...verification, ...courier, useRideSos: () => ({ mutate: fx.sosMutate, isPending: false }) };
 });
 vi.mock('../chat/screens/ConversationScreen', () => ({ ConversationScreen: () => null }));
 vi.mock('../billing/screens/WeeklyFeeRouteScreen', () => ({ WeeklyFeeRouteScreen: () => null }));
@@ -489,6 +491,24 @@ describe('the rider preview renders through the real rider screens', () => {
     for (const spy of attempted) expect(spy, spy.getMockName()).not.toHaveBeenCalled();
     expect(writes()).toEqual([]);
     expect(useMoverPreview.getState().preview).toBe(true);
+  });
+
+  it('[DS624 S3] the emergency button in the preview says it calls no one, and it dials and records nothing', async () => {
+    signIn('RIDER');
+    await mount();
+    await press('Preview your dashboard');
+    await pressContaining('tap to manage');
+    wire.length = 0;
+
+    await press('Emergency — get help now');
+    expect(text()).toContain('This is a preview: this button calls no one and Swift records nothing.');
+    expect(text()).not.toContain('Swift also saves the alert');
+    expect(hasButton('Yes — get help now')).toBe(false);
+    await press('OK');
+
+    expect(fx.openURL.mock.calls.filter(([url]) => String(url).startsWith('tel:'))).toEqual([]);
+    expect(fx.sosMutate).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
   });
 
   it('the fee follows the price list: a re-price reaches the preview untouched', async () => {
