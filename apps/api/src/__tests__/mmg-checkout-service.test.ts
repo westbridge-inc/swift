@@ -1971,6 +1971,8 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     ['MMG’s word for it is not "successful"', { transactionStatus: 'completed' }, 'STATUS_NOT_SUCCESSFUL'],
     ['the money went to another merchant', { creditParty: [{ key: 'accountid', value: '5926999999' }] }, 'MERCHANT_MISMATCH'],
     ['our number is not under "accountid"', { creditParty: [{ key: 'msisdn', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_UNCONFIRMED'],
+    ['[DS632] an "accountid" entry with an empty value beside ours', { creditParty: [{ key: 'accountid', value: '' }, { key: 'accountid', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_MISMATCH'],
+    ['[DS632] an "accountid" entry with no value beside ours', { creditParty: [{ key: 'accountid' }, { key: 'accountid', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_MISMATCH'],
     ['one dollar short', { amount: '2099' }, 'AMOUNT_MISMATCH'],
     ['another currency', { currency: 'USD' }, 'CURRENCY_MISMATCH'],
     ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
