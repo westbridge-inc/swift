@@ -194,8 +194,11 @@ async function clockRow(tx: Tx, subscriptionId: string, now: Date) {
   return canonicalClockRow(tx, subscriptionId, payer.tenantId, now);
 }
 
+/** How long a plan may stay SUSPENDED before it is CHURNED: the operator's
+ * BILLING_SUSPENSION_MAX_DAYS (the setting the billing service always read),
+ * else 30 days. */
 export function suspensionRetentionMs() {
-  const days = Number(process.env['SUSPENSION_MAX_DAYS'] ?? '30');
+  const days = Number(process.env['BILLING_SUSPENSION_MAX_DAYS'] ?? '30');
   return (Number.isFinite(days) && days > 0 ? days : 30) * FEE_RETRY_MS;
 }
 

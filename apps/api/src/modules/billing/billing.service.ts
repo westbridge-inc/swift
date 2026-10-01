@@ -36,7 +36,7 @@ import {
 import { toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
-import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, readDunningClock, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
+import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
 import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
 
@@ -91,7 +91,6 @@ type InstrumentLookup =
   | { status: 'unknown'; reason: string }
   | { status: 'held' };
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 /** Local request review threshold. It cannot expire an authorized provider
  * instruction: only a confirmed terminal provider outcome can do that. */
 const MMG_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
@@ -195,12 +194,6 @@ const SUB_TYPE_TRIAL_ROLE: Record<string, string> = {
   DELIVERY_RIDER: 'RIDER',
   COURIER_RIDER: 'RIDER',
   TAXI_DRIVER: 'DRIVER',
-};
-/** §11 — how long a subscription may sit SUSPENDED before it goes CHURNED
- *  (terminal: dunning stops, the daily MMG re-request stops; paying rejoins). */
-const suspensionMaxDays = () => {
-  const v = Number(process.env['BILLING_SUSPENSION_MAX_DAYS']);
-  return Number.isFinite(v) && v > 0 ? v : 30;
 };
 /** Catalogue size (active listings) at which a vendor moves to the large tier —
  *  1000+ items. Config can override per country. */
