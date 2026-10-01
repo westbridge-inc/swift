@@ -1,3 +1,5 @@
+import { runBillingMutation } from '../lib/billingMutation';
+import type { MutationGuard } from './useStepUp';
 import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -448,7 +450,7 @@ export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'ha
 export type DriverActionInput =
   | { id: string; action: Exclude<DriverAction, 'handover' | 'handback'>; pin?: string }
   /** [M-29] The fare outcome is explicit — never defaulted — because it moves money. */
-  | { id: string; action: 'handover'; outcome: FareOutcome }
+  | { id: string; action: 'handover'; outcome: FareOutcome; photoUrl?: string; authSession?: AuthSessionSnapshot }
   /** A driver handback always carries the human reason the server requires. */
   | { id: string; action: 'handback'; reason: string };
 
@@ -466,6 +468,17 @@ export async function evidenceFix(owner: AuthSessionSnapshot) {
   return { gps: { lat: pos.coords.latitude, lng: pos.coords.longitude }, current };
 }
 
+/** Server-issued artifact only. The returned URL is never a local camera URI. */
+export async function uploadHandoverPhoto(kind: MoverKind, orderId: string, uri: string, owner: AuthSessionSnapshot): Promise<string> {
+  const session = requireAuthSessionForPrincipal(owner);
+  const form = new FormData();
+  form.append('file', { uri, name: 'handover.jpg', type: 'image/jpeg' } as any);
+  const result = await unwrap<{ url: string }>(svc(kind).uploadHandoverPhoto(orderId, form, session));
+  requireAuthSessionForPrincipal(owner);
+  if (!result?.url) throw new Error('Photo upload did not return an issued artifact.');
+  return result.url;
+}
+
 export function useDriverAction() {
   const pv = usePreview();
   const qc = useQueryClient();
@@ -478,9 +491,10 @@ export function useDriverAction() {
         // 'paid' captures and completes in one commit; 'refused' / 'no_show'
         // fail it with this GPS as evidence, strike the passenger and open the
         // driver's guarantee claim. No bare "complete" exists any more.
-        const owner = requireAuthSessionSnapshot();
+        const owner = input.authSession ?? requireAuthSessionSnapshot();
+        requireAuthSessionForPrincipal(owner);
         const { gps, current } = await evidenceFix(owner);
-        const result = await unwrap(driverApi.handover(id, { outcome: input.outcome, gps }, current));
+        const result = await unwrap(driverApi.handover(id, { outcome: input.outcome, gps, ...(input.photoUrl ? { photoUrl: input.photoUrl } : {}) }, current));
         requireAuthSessionForPrincipal(owner);
         return result;
       }
@@ -510,11 +524,13 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin }: {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin, photoUrl, authSession }: {
       id: string;
       action: RiderAction;
       reason?: string;
       outcome?: FareOutcome;
+      photoUrl?: string;
+      authSession?: AuthSessionSnapshot;
       handoverVersion?: string;
       /** [MKT-F057] The customer-held delivery PIN the rider enters at the door.
        *  Omitted when empty so the server answers MISSING_PIN rather than a
@@ -533,13 +549,14 @@ export function useRiderAction() {
         }));
         case 'handback': return unwrap(riderApi.handback(id, reason ?? 'unable to continue'));
         case 'handover': {
-          const owner = requireAuthSessionSnapshot();
+          const owner = authSession ?? requireAuthSessionSnapshot();
+          requireAuthSessionForPrincipal(owner);
           // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
           // it's the evidence a guarantee claim stands on). 'paid' is the door's
           // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
           // unpaid sheet sends explicitly.
           const { gps, current } = await evidenceFix(owner);
-          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(pin ? { ridePin: pin } : {}) }, current));
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}) }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }
@@ -630,12 +647,15 @@ export function useMoverSubscription(kind: MoverKind | null) {
 /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the mover's weekly fee,
  *  then re-read the subscription so the screen's autoRenew state is server
  *  truth. Preview is read-only: the mutation is a no-op there. */
-export function useSetMoverBillingMethod(kind: MoverKind | null) {
+export function useSetMoverBillingMethod(kind: MoverKind | null, guard: MutationGuard) {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
-      unwrap<any>(svc(kind as MoverKind).setBillingMethod(method, mmgPayerMsisdn)),
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) => {
+      const family = kind;
+      if (!family) throw new AuthSessionBoundaryError();
+      return runBillingMutation(guard, (session) => unwrap<any>(svc(family).setBillingMethod(method, mmgPayerMsisdn, session)));
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: ['mover', 'subscription', kind] }),
   });
   return pv ? PV.previewMutation() : m;

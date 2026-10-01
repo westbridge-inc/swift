@@ -23,9 +23,13 @@ import { cleanupSecondApprovers, injectWithApproval } from './helpers/admin-appr
 // mover through EITHER local profile.
 //
 // This suite proves the claim is visible to its own tenant's admins, hidden
-// from — and unchangeable by — a foreign tenant's admin, and approved and paid
-// exactly once through the real two-person flow. Fixture range: +59242nnnnn
-// (this file only).
+// from — and unchangeable by — a foreign tenant's admin, and approved through
+// the real two-person flow. [SAFE-B] It is not paid: a payout needs a complete
+// durable evidence bundle, and a taxi filing cannot be complete while the
+// destination-wait policy is undecided (this claim has no filing at all), so the
+// spent two-person payout is refused and nothing is drawn. When that policy is
+// decided, a filed taxi claim's paid path belongs back here. Fixture range:
+// +59242nnnnn (this file only).
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -165,8 +169,8 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to its admins, hidden from strangers, payable once', () => {
-  it('is in the queue, is refused to a foreign tenant unchanged, and completes approve → paid through the real two-person flow exactly once', async () => {
+describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to its admins, hidden from strangers, never paid without complete evidence', () => {
+  it('is in the queue, is refused to a foreign tenant unchanged, and completes approve through the real two-person flow; the payout is refused and draws nothing', async () => {
     const requester = await makeAdmin('ADMIN');
     const approver = await makeAdmin('SUPER_ADMIN');
     const foreign = await makeForeignAdmin();
@@ -247,7 +251,8 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     expect(await claimState(claim.id)).toMatchObject({ status: 'APPROVED', reviewedBy: requester.userId });
     expect(await inQueue(requester.token, 'APPROVED', claim.id)).toBe(true);
 
-    // 4. Paid: the same ceremony, then durable money facts.
+    // 4. Paid: the same ceremony. [SAFE-B] Two people cannot supply evidence that does not exist: the
+    //    payout is refused inside its transaction and no money fact is written.
     const reference = `TAXI${nanoid(10).replace(/[^A-Za-z0-9]/g, '0').toUpperCase()}`;
     const payAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 });
     expect(payAsk.statusCode, payAsk.body).toBe(202);
@@ -256,26 +261,22 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const payDecided = await call(approver.token, 'POST', `/api/v1/admin/approvals/${payId}/decide`, { approve: true, reason: REASON });
     expect(payDecided.statusCode, payDecided.body).toBe(200);
     const paid = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 }, { [APPROVAL_HEADER]: payId! });
-    expect(paid.statusCode, paid.body).toBe(200);
-    expect(paid.json().data.status).toBe('PAID');
+    expect(paid.statusCode, paid.body).toBe(409);
+    expect(paid.json().error.code).toBe('RLP_EVIDENCE_INCOMPLETE');
 
     const after = await claimState(claim.id);
-    expect({ ...after, paidAmount: Number(after.paidAmount) }).toMatchObject({
-      status: 'PAID', paymentRef: reference, paidAmount: 2000, paidById: requester.userId, reviewedBy: requester.userId,
-    });
-    expect(after.paidAt).toBeTruthy();
+    expect(after).toMatchObject({ status: 'APPROVED', paymentRef: null, paidAt: null, paidById: null, reviewedBy: requester.userId });
 
-    // 5. Paid exactly once: one reserve draw, and the DRIVER — not a rider —
-    //    was told at each step.
+    // 5. Nothing moved: no reserve draw, and the DRIVER — not a rider — was told of the approval only.
     const payouts = await runWithoutTenant(() => app.prisma.rlpReserveEntry.findMany({ where: { claimId: claim.id } }));
-    expect(payouts.map((e) => ({ kind: e.kind, amount: Number(e.amount) }))).toEqual([{ kind: 'PAYOUT', amount: -2000 }]);
+    expect(payouts).toEqual([]);
     const told = await runWithoutTenant(() => app.prisma.notification.findMany({ where: { userId: mover.id }, select: { title: true }, orderBy: { createdAt: 'asc' } }));
-    expect(told.map((n) => n.title)).toEqual(['Claim approved', 'Guarantee paid']);
+    expect(told.map((n) => n.title)).toEqual(['Claim approved']);
 
-    // The spent approval cannot be spent again: no second draw, no second PAID.
+    // The approval was spent at the gate on the refused attempt: it cannot be spent again.
     const replay = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 }, { [APPROVAL_HEADER]: payId! });
     expect(replay.statusCode, replay.body).toBe(403);
-    expect(await effects(claim.id, mover.id)).toMatchObject({ reserve: 1 });
+    expect(await effects(claim.id, mover.id)).toMatchObject({ reserve: 0 });
     expect(await claimState(claim.id)).toEqual(after);
   });
 });
