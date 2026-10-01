@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { Section } from '@/components/site';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
 
@@ -23,14 +24,14 @@ function organizationJsonLd() {
     url: SITE_ORIGIN,
     email: site.supportEmail,
     telephone: site.phone,
-    address: { '@type': 'PostalAddress', streetAddress: site.address, addressCountry: 'GY' },
+    address: { '@type': 'PostalAddress', streetAddress: site.address, addressLocality: site.registeredCity, addressCountry: site.countryCode },
     areaServed: launch.markets.map((m) => ({ '@type': 'Place', name: m })),
     contactPoint: {
       '@type': 'ContactPoint',
       contactType: 'customer support',
       email: site.supportEmail,
       telephone: site.phone,
-      areaServed: 'GY',
+      areaServed: site.countryCode,
       availableLanguage: 'en',
     },
   };
@@ -64,7 +65,8 @@ export default function AboutPage() {
               Most delivery platforms take a percentage of every sale. Swift does not, and it is not
               a promotion that expires. Businesses and movers pay one flat weekly subscription and
               keep <b className="font-semibold text-[var(--swift-ink)]">100%</b> of every sale, fare
-              and tip. The subscription is the entire business model — there is no commission line,
+              and tip. Apart from advertising a business can choose to buy, the subscription is the entire
+              business model — there is no commission line,
               no service fee taken from a driver, and no markup added to a customer&apos;s bill.
             </p>
             <p>
@@ -75,27 +77,91 @@ export default function AboutPage() {
             </p>
           </div>
 
+          {/* [Q36] A complete description of the service, as the card bank asks.
+              Every sentence is traced to the code in the lane evidence; the fee
+              amounts are not repeated here — /pricing reads them live from the
+              same rates Swift bills by, so there is one source, not two. */}
+          <section aria-labelledby="what-swift-does" className="mt-12">
+            <h2 id="what-swift-does" className="text-2xl font-bold tracking-tight">What Swift does</h2>
+            <ul className="mt-5 space-y-4 text-[var(--swift-muted)]">
+              <li>
+                <b className="font-semibold text-[var(--swift-ink)]">Customers</b> order food, groceries and goods from
+                local businesses for delivery or pickup, send parcels across town, book services, and book taxi rides
+                in the {site.tradeName} mobile app. They pay for an order in cash when it is handed over, or by MMG
+                straight to the business. {site.tradeName} never holds order money and charges customers nothing.
+              </li>
+              <li>
+                <b className="font-semibold text-[var(--swift-ink)]">Businesses</b> (restaurants, supermarkets, shops
+                and service providers) list what they sell, take orders and bookings, and keep every dollar of every sale.
+              </li>
+              <li>
+                <b className="font-semibold text-[var(--swift-ink)]">Delivery riders</b> collect orders and parcels and
+                deliver them. Every delivery fee and tip is theirs.
+              </li>
+              <li>
+                <b className="font-semibold text-[var(--swift-ink)]">Taxi drivers</b> take rides booked in the{' '}
+                {site.tradeName} mobile app. Every fare and tip is theirs.
+              </li>
+            </ul>
+            <h3 className="mt-7 text-lg font-bold text-[var(--swift-ink)]">What {site.tradeName} charges</h3>
+            <p className="mt-2 text-[var(--swift-muted)]">
+              Businesses, riders and drivers pay {site.tradeName} a flat weekly fee for the software, in advance,
+              after a free trial. A business can also choose to buy advertising on {site.tradeName}, under separate
+              advertising terms. There is no commission on any sale, fare or tip, and nothing is added to a
+              customer&apos;s bill. The current weekly fee for each kind of partner is on the{' '}
+              <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/pricing">
+                pricing page
+              </Link>
+              , in {site.currencyCode}.
+            </p>
+          </section>
+
           {/* AC-3: the legal entity name appears on About, on Contact, and in every
-              footer. Read from site.config so it can never drift between pages. */}
-          <div className="mt-10 rounded-2xl border border-[var(--swift-border)] bg-white p-6">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.1em] text-[var(--swift-muted)]">
-              Company
+              footer. [Q36] Beside it, every company fact the card bank asks the
+              site to state. All read from site.config, so no page can drift. */}
+          <section
+            aria-labelledby="company-facts"
+            className="mt-10 rounded-2xl border border-[var(--swift-border)] bg-white p-6"
+          >
+            <h2 id="company-facts" className="text-sm font-semibold uppercase tracking-[0.1em] text-[var(--swift-muted)]">
+              Company facts
             </h2>
-            <p className="mt-3 text-lg">
-              Swift is operated by{' '}
-              <b className="font-semibold text-[var(--swift-ink)]">{site.legalEntityName}</b>.
-            </p>
-            <p className="mt-2 text-[var(--swift-muted)]">{site.address}</p>
-            <p className="mt-1 text-[var(--swift-muted)]">
-              <a className="hover:text-[var(--swift-ink)]" href={`tel:${site.phone.replace(/\s/g, '')}`}>
-                {site.phone}
-              </a>
-              {' · '}
-              <a className="hover:text-[var(--swift-ink)]" href={`mailto:${site.supportEmail}`}>
-                {site.supportEmail}
-              </a>
-            </p>
-          </div>
+            <dl className="mt-4 grid gap-x-6 gap-y-3 text-[var(--swift-muted)] sm:grid-cols-[max-content_1fr]">
+              <dt className="font-semibold text-[var(--swift-ink)]">Trade name</dt>
+              <dd>
+                {site.tradeName} (also written {site.tradeNameAlt})
+              </dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Operated by</dt>
+              <dd>{site.legalEntityName}</dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Registered and located in</dt>
+              <dd>
+                {site.registeredCity}, {site.country}
+              </dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Registered office</dt>
+              <dd>{site.address}</dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Domicile country</dt>
+              <dd>{site.country}</dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Transaction currency</dt>
+              <dd>
+                {site.currencyName} ({site.currencyCode})
+              </dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Export restrictions</dt>
+              <dd>
+                {site.tradeName} operates only in {site.country} and does not export goods. Nothing is delivered
+                outside {site.country}.
+              </dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Customer service</dt>
+              <dd>
+                <a className="hover:text-[var(--swift-ink)]" href={`tel:${site.phone.replace(/[^\d+]/g, '')}`}>
+                  {site.phone}
+                </a>
+                {' · '}
+                <a className="hover:text-[var(--swift-ink)]" href={`mailto:${site.supportEmail}`}>
+                  {site.supportEmail}
+                </a>
+              </dd>
+            </dl>
+          </section>
 
           {/* Truth rule [SITE-1.1 Part 5]: every availability claim matches the
               launch config. The site states exactly where Swift operates — no
