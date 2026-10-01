@@ -61,6 +61,8 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     expect(facts.textContent).toContain(site.tradeNameAlt);
     expect(facts.textContent).toContain(site.legalEntityName);
     expect(footer().textContent).toContain(`${site.tradeName} is a trade name of ${site.legalEntityName}`);
+    // The legal name ends in a full stop ("Inc."); no line may add a second one.
+    expect(footer().textContent).not.toContain('..');
   });
 
   it('2 · a complete description of the goods and services, including what Swift charges', async () => {

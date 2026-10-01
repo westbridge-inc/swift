@@ -115,7 +115,9 @@ export function SiteFooter() {
             {site.country}. Prices in {site.currencyCode}.
           </p>
           <p>
-            © {new Date().getFullYear()} {site.legalEntityName}. All rights reserved.
+            © {new Date().getFullYear()} {site.legalEntityName}
+            {/* "Inc." already ends the sentence; never print a second full stop. */}
+            {site.legalEntityName.endsWith('.') ? '' : '.'} All rights reserved.
           </p>
         </div>
       </div>
