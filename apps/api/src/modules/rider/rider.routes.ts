@@ -65,6 +65,7 @@ import {
   RIDER_IN_CUSTODY_STATUSES,
   RIDER_PICKUP_FROM,
 } from '../order/order-status';
+import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -2080,6 +2081,8 @@ export async function riderRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     await requireStepUp(app, request);
     const sub = await app.prisma.subscription.findFirst({ where: { riderId: rider.id } });
     if (!sub) throw new NotFoundError('Subscription');

@@ -2225,3 +2225,47 @@ export class VerificationService {
     return { code: row?.code ?? `${countryCode}.${legacyCode}`, externalProcessingAllowed: row?.externalProcessingAllowed ?? null };
   }
 }
+
+/**
+ * [STA-1 Part 6 · REVIEW-PARTNER] One approved document for the store-review
+ * fiction's demo partner (review/partner-pack.ts). Written HERE because this
+ * service is the one writer of VerificationDocument (DOC-1 hard limit [7]).
+ *
+ * The legacy APPROVED-insert shape the state machine documents: COMMITTED on
+ * insert, its VALID document_record and renewal schedule written by the
+ * database's own triggers in the account's tenant. Deliberately NO review case
+ * and NO decision row — no human reviewed a fiction, and a decision would
+ * append a fictional reviewer to the platform-wide audit chain, outside the
+ * tenant. NO file (fileUrl '' is the code's "nothing stored" state: no image
+ * of any ID exists, and a purge touches no storage), NO consent row (no person
+ * consented to anything), NO notification, NO trial (afterApproval never runs).
+ *
+ * Refused for any account that is not a synthetic person of a REVIEW tenant,
+ * before anything is written.
+ */
+export async function commitReviewFixtureDocument(
+  db: Prisma.TransactionClient | PrismaClient,
+  input: {
+    userId: string;
+    docType: string;
+    expiresAt: Date | null;
+    reviewedBy: string;
+    reviewedAt: Date;
+    reviewNote: string;
+    insurance?: Pick<Prisma.VerificationDocumentUncheckedCreateInput, 'insurerName' | 'policyNumber' | 'coverageClass' | 'hireClassConfirmed' | 'plateCrossChecked'>;
+  },
+): Promise<string> {
+  const owner = await db.user.findUnique({ where: { id: input.userId }, select: { isSynthetic: true, tenant: { select: { kind: true } } } });
+  if (!owner || owner.tenant.kind !== 'REVIEW' || !owner.isSynthetic) {
+    throw new AppError(403, 'REVIEW_FIXTURE_REFUSED', 'Review fixture documents are written only for the store-review fiction.');
+  }
+  const doc = await db.verificationDocument.create({
+    data: {
+      userId: input.userId, role: 'MOVER', docType: input.docType, fileUrl: '', status: 'APPROVED',
+      expiresAt: input.expiresAt, reviewedBy: input.reviewedBy, reviewedAt: input.reviewedAt, reviewNote: input.reviewNote,
+      ...(input.insurance ?? {}),
+    },
+    select: { id: true },
+  });
+  return doc.id;
+}

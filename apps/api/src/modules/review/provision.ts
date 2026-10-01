@@ -2,16 +2,21 @@
  * [STA-1 Parts 3, 6.3, operator runbook] Provisioning the store-review fiction.
  *
  * `review:provision` creates the REVIEW tenant (purge-protected, DL-8), one
- * ReviewSession with a TTL (DL-9), and the reviewer's login: a synthetic
- * CUSTOMER (DL-4) with a ReviewCredential whose static code is minted here,
- * printed ONCE for the store notes, and stored only as a salted hash.
+ * ReviewSession with a TTL (DL-9), and the reviewer's logins: a synthetic
+ * CUSTOMER, a synthetic delivery RIDER and a synthetic taxi DRIVER (DL-4),
+ * each with its own fictional identifier and a ReviewCredential whose static
+ * code is minted here, printed ONCE for the store notes, and stored only as a
+ * salted hash (DL-6: no SMS is ever sent to any of them; each code is accepted
+ * only for its own identifier, and only inside this tenant).
  * `review:rotate` mints new codes (run before every resubmission);
  * `review:expire` forces DL-9; `review:status` says what exists.
  *
  * The CONTENT PACK (Part 6: fictional vendors, catalogue, images with licence
- * provenance, NAME-DENYLIST) is seeded by `review:seed` (content-pack.ts), not
- * here; `provision` and `status` report it from the pack's own rows —
- * ABSENT, INCOMPLETE or PRESENT — rather than pretending.
+ * provenance, NAME-DENYLIST) and the rider's and driver's partner profiles
+ * (review/partner-pack.ts: vehicles, verification documents, the drawn
+ * profile photo) are seeded by `review:seed` (content-pack.ts), not here;
+ * `provision` and `status` report them from the pack's own rows — ABSENT,
+ * INCOMPLETE or PRESENT — rather than pretending.
  *
  * Fictional identifiers: E.164 under REVIEW_PHONE_PREFIX (default
  * `+59200099`). Whether a prefix is truly undialable is a carrier fact the
@@ -26,7 +31,27 @@ import { REVIEW_SLUG_PATTERN, reviewContentPackFacts, type ContentPackState, typ
 
 export const DEFAULT_REVIEW_TTL_DAYS = 14;
 export const DEFAULT_REVIEW_PHONE_PREFIX = '+59200099';
-export const REVIEW_ROLES = ['CUSTOMER'] as const;
+export const REVIEW_ROLES = ['CUSTOMER', 'RIDER', 'DRIVER'] as const;
+export type ReviewRole = typeof REVIEW_ROLES[number];
+
+/**
+ * The account each credential opens, shaped exactly as production shapes it:
+ * a customer signs up CUSTOMER; a mover signs up MOVER + CUSTOMER and
+ * onboarding adds the profile's role (partner.service ensureRoles) and makes
+ * it the active, remembered mover role (mover-authority). `roles` must hold
+ * the active role — the app signs out a persisted session whose roles do not
+ * (authHydration "invalid_roles").
+ */
+const REVIEW_ACCOUNTS: Record<ReviewRole, {
+  lastName: string;
+  roles: Array<'CUSTOMER' | 'MOVER' | 'RIDER' | 'DRIVER'>;
+  activeRole: 'CUSTOMER' | 'RIDER' | 'DRIVER';
+  lastMoverRole: 'RIDER' | 'DRIVER' | null;
+}> = {
+  CUSTOMER: { lastName: 'Reviewer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', lastMoverRole: null },
+  RIDER: { lastName: 'Rider', roles: ['MOVER', 'CUSTOMER', 'RIDER'], activeRole: 'RIDER', lastMoverRole: 'RIDER' },
+  DRIVER: { lastName: 'Driver', roles: ['MOVER', 'CUSTOMER', 'DRIVER'], activeRole: 'DRIVER', lastMoverRole: 'DRIVER' },
+};
 
 export interface ProvisionInput {
   slug: string;
@@ -69,10 +94,10 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
   for (const role of REVIEW_ROLES) {
     let identifier = identifierFor(prefix);
     for (let i = 0; i < 20 && await prisma.user.findUnique({ where: { phone: identifier }, select: { id: true } }); i++) identifier = identifierFor(prefix);
+    const account = REVIEW_ACCOUNTS[role];
     const user = await prisma.user.create({ data: {
-      // `roles` must hold the active role: the app signs out a persisted
-      // session whose roles are empty (authHydration "invalid_roles").
-      phone: identifier, firstName: 'Demo', lastName: 'Reviewer', roles: [role], activeRole: role, tenantId: tenant.id, isSynthetic: true, isPhoneVerified: true,
+      phone: identifier, firstName: 'Demo', lastName: account.lastName, roles: account.roles, activeRole: account.activeRole,
+      lastMoverRole: account.lastMoverRole, tenantId: tenant.id, isSynthetic: true, isPhoneVerified: true,
     } });
     const code = sixDigits();
     const id = `rc_${crypto.randomBytes(8).toString('hex')}`;
@@ -109,6 +134,8 @@ export interface ReviewStatus {
   tenant: { id: string; kind: string; purgeProtected: boolean; isActive: boolean } | null;
   sessions: Array<{ id: string; status: string; anchored: boolean; anchorSource: string | null; expiresAt: Date; lastSeenAt: Date | null }>;
   credentials: number;
+  /** Logins per role (CUSTOMER / RIDER / DRIVER). */
+  credentialsByRole: Record<string, number>;
   syntheticUsers: number;
   syntheticVendors: number;
   /** PRESENT only when every pack store is live and every pack item is on sale. */
@@ -128,11 +155,13 @@ export async function reviewStatus(prisma: PrismaClient, tenantId: string): Prom
     ])
     : [0, 0, 0];
   const pack = tenant ? await reviewContentPackFacts(prisma, tenantId) : null;
+  const byRole = tenant ? await prisma.reviewCredential.groupBy({ by: ['role'], where: { tenantId }, _count: { _all: true } }) : [];
   const prefix = process.env['REVIEW_PHONE_PREFIX'] ?? DEFAULT_REVIEW_PHONE_PREFIX;
   return {
     tenant,
     sessions: sessions.map((s) => ({ id: s.id, status: s.status, anchored: s.anchoredAt !== null, anchorSource: s.anchorSource, expiresAt: s.expiresAt, lastSeenAt: s.lastSeenAt })),
     credentials,
+    credentialsByRole: Object.fromEntries(byRole.map((r) => [r.role, r._count._all])),
     syntheticUsers,
     syntheticVendors,
     contentPack: pack?.state ?? 'ABSENT',

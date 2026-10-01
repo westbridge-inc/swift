@@ -5,6 +5,7 @@ import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
 import { getChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
+import { reviewCredentialFor, reviewCodeMatches, REVIEW_CODE_TTL } from '../review/credentials';
 
 /**
  * [ALG-34] Step-up: "confirm it's you" for an EXISTING session, before a
@@ -56,10 +57,37 @@ async function assertNotLocked(redis: Redis, userId: string): Promise<void> {
   }
 }
 
+/** [REVIEW-PARTNER · DL-6] Armed by a step-up "send" for a store-review login (the account's own bucket). */
+export const reviewStepUpKey = (userId: string) => `stepup:review:${userId}`;
+
+/**
+ * [REVIEW-PARTNER · DL-6] The account's store-review credential, when it is
+ * one: its phone is a fictional identifier no text can reach, so the static
+ * review code from the store notes confirms it instead — exactly as it signs
+ * in. Only a credential of a REVIEW tenant, and only for an account IN that
+ * tenant (a credential written for a production number confirms nothing).
+ */
+async function reviewStepUpCredential(app: FastifyInstance, user: { phone: string; tenantId: string }) {
+  const credential = await reviewCredentialFor(app.prisma, user.phone);
+  return credential && credential.tenantId === user.tenantId ? credential : null;
+}
+
 /** Text a confirmation code to the phone on the account. */
 export async function sendStepUpOtp(app: FastifyInstance, userId: string): Promise<{ sentTo: string; validForSeconds: number }> {
-  const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
+  const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, tenantId: true } });
   if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This account is no longer active');
+
+  // [REVIEW-PARTNER · DL-6] A store-review login: NO SMS, no budget spent. The
+  // window opens exactly as a real send's would (same rate limit, same five
+  // minutes, same answer), single use, behind the same failure lock.
+  if (await reviewStepUpCredential(app, user)) {
+    await assertNotLocked(app.redis, userId);
+    if (!(await checkOtpRateLimit(app.redis, stepUpCodeKey(userId)))) {
+      throw new AppError(429, 'RATE_LIMITED', 'Please wait a minute before requesting another code');
+    }
+    await app.redis.set(reviewStepUpKey(userId), '1', 'EX', REVIEW_CODE_TTL);
+    return { sentTo: maskPhone(user.phone), validForSeconds: 300 };
+  }
   // [AUD-L4-008] A code is texted only to a launch-market number, checked
   // before anything is counted.
   if (!smsDestinationAllowed(user.phone)) {
@@ -92,10 +120,21 @@ export async function sendStepUpOtp(app: FastifyInstance, userId: string): Promi
   return { sentTo: maskPhone(user.phone), validForSeconds: 300 };
 }
 
+/** [REVIEW-PARTNER · DL-6] The static review code, only when a review "send" armed the window; single use. */
+async function verifyReviewStepUp(app: FastifyInstance, userId: string, code: string): Promise<{ valid: boolean; reason?: string } | null> {
+  if (!(await app.redis.get(reviewStepUpKey(userId)))) return null;
+  const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, tenantId: true } });
+  const credential = user ? await reviewStepUpCredential(app, user) : null;
+  if (!credential) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
+  if (!reviewCodeMatches(credential, code)) return { valid: false, reason: 'Invalid OTP code' };
+  await app.redis.del(reviewStepUpKey(userId));
+  return { valid: true };
+}
+
 /** Check the code; on success the SESSION is stepped up for STEP_UP_TTL_S. */
 export async function verifyStepUp(app: FastifyInstance, who: { userId: string; sessionId: string }, code: string): Promise<{ validForSeconds: number }> {
   await assertNotLocked(app.redis, who.userId);
-  const result = await verifyOtp(app.redis, stepUpCodeKey(who.userId), code);
+  const result = (await verifyReviewStepUp(app, who.userId, code)) ?? await verifyOtp(app.redis, stepUpCodeKey(who.userId), code);
   if (!result.valid) {
     const failures = await app.redis.incr(failKey(who.userId));
     if (failures === 1) await app.redis.expire(failKey(who.userId), STEP_UP_FAIL_WINDOW_S);
