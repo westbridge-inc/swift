@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { Section } from '@/components/site';
 import { OrderOnTheWeb } from '@/components/order-on-the-web';
+import { BrowserOrderingNote } from '@/components/browser-ordering-note';
 import { launch, showAppStoreBadges, SITE_ORIGIN } from '@/site.config';
 
 /**
@@ -109,7 +110,8 @@ export default function WelcomePage() {
               confidence; a dead badge reads as carelessness — and is a review flag. */}
           {!showAppStoreBadges && (
             <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              Order from stores in your phone&apos;s browser, tracking included. Taxi rides require the Swift mobile app.
+              <BrowserOrderingNote open="Order from stores in your phone's browser, tracking included." /> Taxi rides
+              require the Swift mobile app.
             </p>
           )}
         </div>

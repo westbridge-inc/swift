@@ -105,6 +105,32 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     }
   });
 
+  it('/welcome and the FAQ claim browser ordering only where it works', async () => {
+    for (const [route, openClaim] of [
+      ['@/app/(marketing)/welcome/page', "Order from stores in your phone's browser, tracking included."],
+      ['@/app/(marketing)/faq/page', "Store ordering and order tracking work in your phone's browser."],
+    ] as const) {
+      for (const [switchValue, url, open] of [
+        ['', 'https://swiftgy.com/', false],
+        ['', 'https://staging.swiftgy.com/', true],
+        ['live', 'https://swiftgy.com/', true],
+      ] as const) {
+        await configWith(switchValue);
+        openAt(url);
+        const { default: Page } = (await import(/* @vite-ignore */ route)) as { default: () => React.ReactNode };
+        const view = render(<>{Page()}</>);
+        const words = view.container.textContent ?? '';
+        if (open) expect(words, `${route} at ${url}`).toContain(openClaim);
+        else {
+          expect(words, `${route} at ${url}`).not.toContain("phone's browser");
+          expect(words, `${route} at ${url}`).toContain('Ordering opens soon in Georgetown.');
+        }
+        expect(words, `${route} at ${url}`).toMatch(/Taxi rides require the Swift mobile app/);
+        view.unmount();
+      }
+    }
+  });
+
   it('sign-up on staging, or once live, starts a customer account as before', async () => {
     for (const [switchValue, url] of [['', 'https://staging.swiftgy.com/signup'], ['live', 'https://swiftgy.com/signup']] as const) {
       await configWith(switchValue);
