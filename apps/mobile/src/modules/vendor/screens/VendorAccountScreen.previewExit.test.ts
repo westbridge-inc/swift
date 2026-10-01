@@ -279,7 +279,7 @@ vi.mock('../../../services/api', () => ({
   vendorApi: { addStaff: fx.addStaff, updateProfile: fx.updateProfile, setHours: fx.setHours, subscription: fx.subscription },
   vendorDiscoveryApi: {},
 }));
-vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), getSocket: vi.fn(() => null) }));
+vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), reconnectSocketForStoreHandoff: vi.fn(), getSocket: vi.fn(() => null) }));
 vi.mock('../../../services/push', () => ({ preparePushTokenForLogout: vi.fn(async () => null) }));
 vi.mock('../../../services/backgroundLocation', () => ({ stopMoverLocation: vi.fn(async () => undefined) }));
 vi.mock('../../../lib/storage', () => {

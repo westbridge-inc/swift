@@ -2,6 +2,7 @@ import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
 import { getAuthSessionSnapshot } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
+import { selectionStillCurrent } from '../lib/storeSelection';
 
 // The push TAP-ROUTER [first-open spec 2.4 / rides R-06 / QR Part 6]. Until
 // now every notification the backend sent opened the app on whatever screen
@@ -230,14 +231,8 @@ function isVendorDestination({ dest, data }: Tap): boolean {
 
 function currentVendorTap(tap: Tap): boolean {
   const owner = getAuthSessionSnapshot();
-  const selection = useStoreSwitcher.getState();
-  const initial = tap.selection.selectedStoreId === null
-    && selection.initialSelectionGeneration === selection.storeGeneration
-    && selection.storeGeneration === tap.selection.storeGeneration + 1;
   return tap.attempt === routing && !!tap.owner && owner?.userId === tap.owner.userId
-    && owner.generation === tap.owner.generation
-    && (initial || (selection.selectedStoreId === tap.selection.selectedStoreId
-      && selection.storeGeneration === tap.selection.storeGeneration));
+    && owner.generation === tap.owner.generation && selectionStillCurrent(tap.selection, useStoreSwitcher.getState());
 }
 
 async function resolveVendorDestination(tap: Tap): Promise<boolean> {
@@ -290,13 +285,19 @@ async function go(tap: Tap) {
   } else if (dest.screen === 'WeeklyFee' && typeof dest.params?.['vendorId'] === 'string') {
     const { resolveFeeNotification } = await import('./weekly-fee-notification');
     if (!currentVendorTap(tap)) return;
-    const selection = useStoreSwitcher.getState();
-    const params = await resolveFeeNotification(dest.params, (resolved) => { safeNavigate('WeeklyFee', { ...resolved, feeFamily: 'vendor' }); });
-    const owner = getAuthSessionSnapshot();
-    const now = useStoreSwitcher.getState();
-    if (!params || owner?.userId !== tap.owner?.userId || owner?.generation !== tap.owner?.generation
-      || now.selectedStoreId !== params['vendorId']
-      || now.storeGeneration !== selection.storeGeneration + (params['vendorId'] === selection.selectedStoreId ? 0 : 1)) return;
+    // The tap's exact authority fences every fee effect, not only the final
+    // route: a newer tap, account or explicit choice retires the lookup before
+    // it can publish a store, cycle the socket, recover or navigate. The fee
+    // lookup's own authorized handoff becomes the tap's new selection.
+    const authority = {
+      current: () => currentVendorTap(tap),
+      adopt: () => {
+        const { selectedStoreId, storeGeneration } = useStoreSwitcher.getState();
+        tap.selection = { selectedStoreId, storeGeneration };
+      },
+    };
+    const params = await resolveFeeNotification(dest.params, (resolved) => { safeNavigate('WeeklyFee', { ...resolved, feeFamily: 'vendor' }); }, authority);
+    if (!params || !authority.current() || useStoreSwitcher.getState().selectedStoreId !== params['vendorId']) return;
     dest = { ...dest, params: { ...params, feeFamily: 'vendor' } };
   } else if (dest.screen === 'WeeklyFee') {
     dest = { ...dest, params: { ...dest.params, feeFamily: 'mover' } };

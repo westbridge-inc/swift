@@ -297,7 +297,10 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
     if (!vendorId || previewType) return; // preview: no socket, no live buzz
     connectSocket();
     const s = getSocket();
-    const join = () => s.emit('vendor:subscribe', { vendorId });
+    // Only the selected store's layer may (re)join its room: a store handoff
+    // reconnects the shared socket, and a retired layer's handler can run
+    // before React unmounts it.
+    const join = () => { if (useStoreSwitcher.getState().selectedStoreId === vendorId) s.emit('vendor:subscribe', { vendorId }); };
     join();
     s.on('connect', join); // rooms are per-connection — re-join after reconnects
     const refresh = () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });

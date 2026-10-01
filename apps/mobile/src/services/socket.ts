@@ -70,6 +70,28 @@ export function disconnectSocket(expectedOwner?: AuthPrincipalBoundary): boolean
   return true;
 }
 
+/** A same-account store handoff must leave the old store's server room WITHOUT
+ *  discarding the shared socket other mounted layers hold: a mover's dispatch
+ *  offers, a customer's live tracking. Rooms belong to one connection and the
+ *  server has no vendor-room leave, so reconnect THIS instance. socket.io keeps
+ *  listeners on the instance across disconnect()/connect(), and every layer's
+ *  'connect' handler re-joins what it still needs. Emits buffered for the
+ *  retired connection are dropped, never replayed into the new one. */
+export function reconnectSocketForStoreHandoff(): void {
+  const current = socket;
+  if (!current || !socketOwner) return;
+  if (!samePrincipalBoundary(socketOwner, getAuthSessionSnapshot())) {
+    // Never reconnect another account's socket under this session.
+    disconnectSocket();
+    return;
+  }
+  current.sendBuffer = [];
+  current.receiveBuffer = [];
+  if (!current.active) return;
+  current.disconnect();
+  current.connect();
+}
+
 // Joins the order's socket room (server verifies the order belongs to this
 // user) — the entry point for live `rider:location` / `driver:location` events
 // on the tracking screens. GPS UPLOAD stays on the REST PUT /location routes,

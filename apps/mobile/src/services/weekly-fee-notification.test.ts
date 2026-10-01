@@ -308,3 +308,52 @@ describe('DS390 recovery state finalizer ownership', () => {
     expect(useStoreSwitcher.getState().feeContextError).toBe(newer);
   });
 });
+
+// [AX449 #2] A cold fee tap waits on subscription validation while the shell's
+// first profile makes the automatic null -> first-store selection. Only that
+// automatic handoff may land under the lookup; the notice keeps its intent.
+describe('R3 cold fee notification across the automatic first store', () => {
+  it.each(['store-A', 'store-C'])('preserves only automatic cold hydration while resolving %s', async target => {
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    let finish!: () => void;
+    const request = vi.spyOn(vendorApi, 'subscription').mockImplementation(async () => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { data: { data: { id: `subscription-${target}` } } } as never;
+    });
+    try {
+      const params = { vendorId: target, subscriptionId: `subscription-${target}`, ref: 'cold-ref' };
+      const result = resolveFeeNotification(params);
+      await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+      useStoreSwitcher.getState().initializeSelectedStore('store-A');
+      // The automatic handoff is not a choice: Pay stays blocked for the notice.
+      expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
+      finish();
+      expect(await result).toEqual(params);
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe(target);
+      expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    } finally { request.mockRestore(); }
+  });
+
+  it.each(['explicit', 'roundtrip'] as const)('an %s first choice while the lookup waits retires the cold notice', async change => {
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    let finish!: () => void;
+    const request = vi.spyOn(vendorApi, 'subscription').mockImplementation(async () => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { data: { data: { id: 'subscription-C' } } } as never;
+    });
+    try {
+      const result = resolveFeeNotification({ vendorId: 'store-C', subscriptionId: 'subscription-C', ref: 'cold-ref' });
+      await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+      if (change === 'explicit') useStoreSwitcher.getState().setSelectedStore('store-A');
+      else {
+        useStoreSwitcher.getState().initializeSelectedStore('store-A');
+        useStoreSwitcher.getState().setSelectedStore('store-B');
+        useStoreSwitcher.getState().setSelectedStore('store-A');
+      }
+      finish();
+      expect(await result).toBeNull();
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+      expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    } finally { request.mockRestore(); }
+  });
+});

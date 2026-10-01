@@ -14,11 +14,13 @@ import { QueryClientProvider } from '@tanstack/react-query';
 const fx = vi.hoisted(() => ({
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
   hours: [{ dayOfWeek: 0, openTime: '08:00', closeTime: '22:00', isClosed: false }],
-  get: vi.fn(), post: vi.fn(), profile: vi.fn(), order: vi.fn(),
+  get: vi.fn(), post: vi.fn(), profile: vi.fn(), order: vi.fn(), subscription: vi.fn(),
   realProfile: false, owner: { userId: 'owner', generation: 1 },
   listener: undefined as undefined | ((response: any) => void), cold: null as any, lastResponse: vi.fn(),
   sockets: [] as Array<{
-    connected: boolean; rooms: string[]; listeners: Map<string, Set<(payload?: unknown) => void>>;
+    connected: boolean; active: boolean; connections: number; rooms: Set<string>;
+    sendBuffer: Array<[string, any]>; receiveBuffer: unknown[];
+    listeners: Map<string, Set<(payload?: unknown) => void>>; fire: (event: string, payload?: unknown) => void;
     connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn>;
     emit: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; off: ReturnType<typeof vi.fn>;
   }>,
@@ -109,7 +111,7 @@ vi.mock('../../stores/authStore', () => ({
   getAuthSessionSnapshot: () => ({ ...fx.owner }),
   useAuthStore: (selector: (state: unknown) => unknown) => selector({ isAuthenticated: true, user: { id: 'owner' } }),
 }));
-vi.mock('../../services/api', () => ({ API_URL: 'https://example.test', api: { get: fx.get, post: fx.post }, vendorApi: { profile: fx.profile, order: fx.order }, vendorDiscoveryApi: {} }));
+vi.mock('../../services/api', () => ({ API_URL: 'https://example.test', api: { get: fx.get, post: fx.post }, vendorApi: { profile: fx.profile, order: fx.order, subscription: fx.subscription }, vendorDiscoveryApi: {} }));
 vi.mock('@tanstack/react-query', async (original) => {
   const actual = await original<typeof import('@tanstack/react-query')>();
   return { ...actual, useQuery: (options: any) => fx.realProfile && options.queryKey[1] === 'profile'
@@ -130,12 +132,31 @@ vi.mock('../../hooks/vendorops', async (original) => {
     useVendorHours: () => ({ data: fx.hours, isSuccess: true }),
   };
 });
+// socket.io-client 4.8 semantics: listeners live on the Socket instance across
+// disconnect()/connect(); server rooms belong to ONE connection; emits made
+// while disconnected wait in sendBuffer for the next connect. Real sockets
+// connect asynchronously; firing 'connect' synchronously here is the worst
+// case, a reconnect that lands before React has retired the old layers.
 vi.mock('socket.io-client', () => ({ io: () => {
   const socket = {
-    connected: false, rooms: [] as string[], listeners: new Map<string, Set<(payload?: unknown) => void>>(),
-    connect: vi.fn(() => { socket.connected = true; }),
-    disconnect: vi.fn(() => { socket.connected = false; }),
-    emit: vi.fn((_event: string, { vendorId }: { vendorId: string }) => { socket.rooms.push(vendorId); }),
+    connected: false, active: false, connections: 0, rooms: new Set<string>(),
+    sendBuffer: [] as Array<[string, any]>, receiveBuffer: [] as unknown[],
+    listeners: new Map<string, Set<(payload?: unknown) => void>>(),
+    fire: (event: string, payload?: unknown) => { for (const listener of [...(socket.listeners.get(event) ?? [])]) listener(payload); },
+    connect: vi.fn(() => {
+      if (socket.connected) return;
+      socket.active = true; socket.connected = true; socket.connections++;
+      for (const [, payload] of socket.sendBuffer.splice(0)) socket.rooms.add(payload.vendorId);
+      socket.fire('connect');
+    }),
+    disconnect: vi.fn(() => {
+      const was = socket.connected;
+      socket.active = false; socket.connected = false; socket.rooms = new Set();
+      if (was) socket.fire('disconnect');
+    }),
+    emit: vi.fn((event: string, payload: { vendorId: string }) => {
+      if (socket.connected) socket.rooms.add(payload.vendorId); else socket.sendBuffer.push([event, payload]);
+    }),
     on: vi.fn((event: string, listener: (payload?: unknown) => void) => {
       if (!socket.listeners.has(event)) socket.listeners.set(event, new Set());
       socket.listeners.get(event)!.add(listener);
@@ -184,10 +205,10 @@ const qr = { shortCode: 'qr-A', shortUrl: 'https://example.test/q/qr-A', svg: '<
 beforeEach(() => {
   vi.clearAllMocks();
   fx.lastResponse.mockImplementation(async () => fx.cold);
-  fx.realProfile = false; fx.profile.mockReset(); fx.order.mockReset(); fx.owner = { userId: 'owner', generation: 1 }; fx.cold = null;
+  fx.realProfile = false; fx.profile.mockReset(); fx.order.mockReset(); fx.subscription.mockReset(); fx.owner = { userId: 'owner', generation: 1 }; fx.cold = null;
   fx.order.mockResolvedValue({ data: { data: { id: 'order-B', vendorId: 'store-B' } } });
   disconnectSocket(); fx.sockets.length = 0;
-  useStoreSwitcher.setState({ selectedStoreId: 'store-A', storeGeneration: 0, initialSelectionGeneration: null });
+  useStoreSwitcher.setState({ selectedStoreId: 'store-A', storeGeneration: 0, initialSelectionGeneration: null, feeContextPending: false, feeContextError: null });
   fx.get.mockImplementation(async (url: string) => ({ data: { data: url.startsWith('/public/') ? { verdict: 'WEB_RENDER', vendorId: 'store-A' } : url.includes('analytics') ? { totals: { scans: 0, approxUniqueScanners: 0, installsAttributed: 0 } } : qr } }));
   fx.post.mockResolvedValue({ data: {} });
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
@@ -209,22 +230,35 @@ function button(label: string) {
 describe('SX383 real navigation container and vendor handoffs', () => {
   it('reconnects A after a batched A → B → A and receives a new order', async () => {
     await mount();
-    const oldSocket = fx.sockets.at(-1)!;
-    expect(oldSocket.connected).toBe(true);
+    const socket = fx.sockets.at(-1)!;
+    expect(socket.connected).toBe(true);
+    expect([...socket.rooms]).toEqual(['store-A']);
+    const connections = socket.connections;
     await act(async () => {
       useStoreSwitcher.getState().setSelectedStore('store-B');
       useStoreSwitcher.getState().setSelectedStore('store-A');
     });
-    const liveSocket = fx.sockets.at(-1)!;
-    expect(oldSocket.connected).toBe(false);
-    expect(liveSocket.connected).toBe(true);
-    expect(liveSocket).not.toBe(oldSocket);
-    expect(liveSocket.rooms).toContain('store-A');
-    expect(oldSocket.listeners.get('order:new')?.size).toBe(0);
-    await act(async () => {
-      if (liveSocket.connected) for (const listener of liveSocket.listeners.get('order:new') ?? []) listener({ orderId: 'new-A-order' });
-    });
+    // [AX449 #4] ONE shared socket: the connection that held the old room was
+    // closed and replaced in place, so no other mounted layer loses its socket.
+    expect(fx.sockets).toHaveLength(1);
+    expect(socket.disconnect).toHaveBeenCalled();
+    expect(socket.connections).toBeGreaterThan(connections);
+    expect(socket.connected).toBe(true);
+    expect([...socket.rooms]).toEqual(['store-A']);
+    expect(socket.listeners.get('order:new')?.size, 'only the live A layer listens').toBe(1);
+    await act(async () => { if (socket.connected) socket.fire('order:new', { orderId: 'new-A-order' }); });
     expect(host.querySelector('output')?.textContent).toBe('new-A-order');
+  });
+
+  it('a retired store layer never re-joins its room when the shared socket reconnects', async () => {
+    await mount();
+    const socket = fx.sockets.at(-1)!;
+    expect([...socket.rooms]).toEqual(['store-A']);
+    await act(async () => useStoreSwitcher.getState().setSelectedStore('store-B'));
+    expect(fx.sockets).toHaveLength(1);
+    expect(socket.connected).toBe(true);
+    expect([...socket.rooms], 'A’s reconnect handler ran before its layer retired, and stayed out').toEqual(['store-B']);
+    expect(socket.listeners.get('order:new')?.size).toBe(1);
   });
 
   it('the real navigator retires the open Account editor and its dirty draft', async () => {
@@ -516,4 +550,125 @@ it('DS390 rejects an explicitly notified store outside the current membership', 
     expect(navigation.getCurrentRoute()?.name).toBe('Orders');
     expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
   } finally { unsubscribe(); uninstall(); }
+});
+
+
+const feeNotice = (target: string) => ({ kind: 'billing_mmg_checkout', vendorId: target, subscriptionId: `subscription-${target}`, ref: `ref-${target}` });
+
+describe('R3 cold fee notification and the automatic first store (AX449 #2)', () => {
+  it.each([
+    ['store-A', 'profile-first'], ['store-B', 'profile-first'], ['store-A', 'subscription-first'], ['store-B', 'subscription-first'],
+  ] as const)('opens the notified fee for %s whichever of profile or subscription lands first (%s)', async (target, order) => {
+    fx.realProfile = true;
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    let profileReady!: (value: unknown) => void; let subscriptionReady!: (value: unknown) => void;
+    fx.profile.mockResolvedValue({ data: { data: profile } }).mockImplementationOnce(() => new Promise(resolve => { profileReady = resolve; }));
+    fx.subscription.mockImplementationOnce(() => new Promise(resolve => { subscriptionReady = resolve; }));
+    fx.cold = response(feeNotice(target));
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await mount(); flushPendingNavigation(); await settleRouter();
+      expect(subscriptionReady, 'the fee lookup is in flight').toBeTypeOf('function');
+      expect(profileReady, 'the shell profile is in flight').toBeTypeOf('function');
+      expect(useStoreSwitcher.getState().feeContextPending).toBe(true);
+      const profileLands = () => profileReady({ data: { data: profile } });
+      const subscriptionLands = () => subscriptionReady({ data: { data: { id: `subscription-${target}` } } });
+      await act(async () => (order === 'profile-first' ? profileLands : subscriptionLands)());
+      await settleRouter();
+      if (order === 'profile-first') {
+        // The shell's automatic first choice landed under the lookup; Pay stays held.
+        expect(useStoreSwitcher.getState()).toMatchObject({ selectedStoreId: 'store-A', initialSelectionGeneration: 1, feeContextPending: true });
+      }
+      await act(async () => (order === 'profile-first' ? subscriptionLands : profileLands)());
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('WeeklyFee');
+      expect(navigation.getCurrentRoute()?.params).toEqual({ vendorId: target, subscriptionId: `subscription-${target}`, ref: `ref-${target}`, feeFamily: 'vendor' });
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe(target);
+      expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    } finally { uninstall(); }
+  });
+
+  it.each(['explicit', 'roundtrip'] as const)('an %s first choice while the fee lookup waits retires the cold notice', async change => {
+    fx.realProfile = true;
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    let profileReady!: (value: unknown) => void; let subscriptionReady!: (value: unknown) => void;
+    fx.profile.mockResolvedValue({ data: { data: profile } }).mockImplementationOnce(() => new Promise(resolve => { profileReady = resolve; }));
+    fx.subscription.mockImplementationOnce(() => new Promise(resolve => { subscriptionReady = resolve; }));
+    fx.cold = response(feeNotice('store-B'));
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await mount(); flushPendingNavigation(); await settleRouter();
+      expect(subscriptionReady).toBeTypeOf('function');
+      if (change === 'explicit') await act(async () => useStoreSwitcher.getState().setSelectedStore('store-A'));
+      else {
+        await act(async () => profileReady({ data: { data: profile } }));
+        await settleRouter();
+        expect(useStoreSwitcher.getState()).toMatchObject({ selectedStoreId: 'store-A', initialSelectionGeneration: 1 });
+        await act(async () => { useStoreSwitcher.getState().setSelectedStore('store-B'); useStoreSwitcher.getState().setSelectedStore('store-A'); });
+      }
+      await settleRouter();
+      await act(async () => subscriptionReady({ data: { data: { id: 'subscription-store-B' } } }));
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).not.toBe('WeeklyFee');
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+      expect(useStoreSwitcher.getState().feeContextPending).toBe(false);
+    } finally { uninstall(); }
+  });
+});
+
+describe('R3 an older fee lookup in the real shell (AX449 #3)', () => {
+  const orderA = { kind: 'vendor_order_alert', orderId: 'order-A', vendorId: 'store-A' };
+  it('cannot publish its store, retire the newer route, cycle the socket or navigate after a newer order tap', async () => {
+    await mount();
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    fx.order.mockResolvedValue({ data: { data: { id: 'order-A', vendorId: 'store-A' } } });
+    let feeReady!: (value: unknown) => void;
+    fx.subscription.mockImplementationOnce(() => new Promise(resolve => { feeReady = resolve; }));
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => fx.listener!(response(feeNotice('store-B'))));
+      await act(async () => { await vi.waitFor(() => expect(feeReady).toBeTypeOf('function')); });
+      await act(async () => fx.listener!(response(orderA)));
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('VendorOrderDetail');
+      const route = navigation.getCurrentRoute()!.key;
+      const { storeGeneration } = useStoreSwitcher.getState();
+      const socket = fx.sockets.at(-1)!;
+      const connections = socket.connections;
+      await act(async () => feeReady({ data: { data: { id: 'subscription-store-B' } } }));
+      await settleRouter();
+      expect(useStoreSwitcher.getState()).toMatchObject({ selectedStoreId: 'store-A', storeGeneration, feeContextPending: false });
+      expect(navigation.getCurrentRoute()?.key, 'the newer route is not retired').toBe(route);
+      expect(fx.sockets).toHaveLength(1);
+      expect(socket.connections).toBe(connections);
+      expect(socket.connected).toBe(true);
+    } finally { uninstall(); }
+  });
+
+  it.each(['retry', 'cancel'] as const)('a retained fee %s cannot select, retire the newer route or navigate', async action => {
+    await mount();
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    fx.order.mockResolvedValue({ data: { data: { id: 'order-A', vendorId: 'store-A' } } });
+    fx.subscription.mockRejectedValueOnce({ response: { status: 503 } });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => fx.listener!(response(feeNotice('store-B'))));
+      await settleRouter();
+      const recovery = useStoreSwitcher.getState().feeContextError;
+      expect(recovery).not.toBeNull();
+      expect(navigation.getCurrentRoute()?.name).toBe('WeeklyFee');
+      await act(async () => fx.listener!(response(orderA)));
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('VendorOrderDetail');
+      const route = navigation.getCurrentRoute()!.key;
+      fx.subscription.mockResolvedValue({ data: { data: { id: 'subscription-store-B' } } });
+      await act(async () => { await recovery![action](); });
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.key).toBe(route);
+      expect(useStoreSwitcher.getState()).toMatchObject({ selectedStoreId: 'store-A', feeContextPending: false, feeContextError: null });
+      expect(fx.subscription).toHaveBeenCalledOnce();
+    } finally { uninstall(); }
+  });
 });
