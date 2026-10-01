@@ -1,3 +1,4 @@
+import './helpers/synthetic-verification-storage';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
@@ -12,7 +13,6 @@ import { verificationRoutes } from '../modules/verification/verification.routes'
 import { customerRoutes } from '../modules/user/customer.routes';
 import { looksLikeDocument } from '../utils/images';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
-import { getStorageProvider } from '../providers/storage/storage-provider';
 
 // ---------------------------------------------------------------------------
 // Security-spec gaps (task #16): uploads sniff content, checkout is idempotent.
@@ -117,9 +117,7 @@ afterAll(async () => {
     await app.prisma.cartItem.deleteMany({ where: { cart: { customerId: userId } } });
     await app.prisma.cart.deleteMany({ where: { customerId: userId } });
     await app.prisma.address.deleteMany({ where: { userId } });
-    const encryptedObjects = await app.prisma.encryptedObject.findMany({ where: { createdBy: userId }, select: { fileKey: true } });
-    for (const { fileKey } of encryptedObjects) await getStorageProvider().delete(fileKey).catch(() => {});
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: userId } });
+    // Source-name reservations survive fixture teardown. Storage is synthetic.
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
     await app.prisma.user.deleteMany({ where: { id: userId } });

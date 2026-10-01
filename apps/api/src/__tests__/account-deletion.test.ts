@@ -9,7 +9,6 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -65,20 +64,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.adsAuditLog.deleteMany({ where: { entityId: { in: advertiserIds } } });
-  await app.prisma.adCampaign.deleteMany({ where: { advertiserId: { in: advertiserIds } } });
-  await app.prisma.advertiserMember.deleteMany({ where: { advertiserId: { in: advertiserIds } } });
-  await app.prisma.advertiser.deleteMany({ where: { id: { in: advertiserIds } } });
-  await app.prisma.adPlacement.deleteMany({ where: { id: { in: placementIds } } });
-  await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await purgeAuditLogs(app.prisma, { userId: { in: createdUserIds } }, 'test-cleanup:account-deletion');
-  await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: createdUserIds } } });
-  await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
-  await app.prisma.address.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  // Claims, holds and source-name reservations are permanent custody evidence.
   await app.close();
 });
 

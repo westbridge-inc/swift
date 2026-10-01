@@ -1,3 +1,7 @@
+import './helpers/synthetic-verification-storage';
+import { purgeDocumentWithClaim } from '../modules/verification/purge-fence';
+import { getStorageProvider } from '../providers/storage/storage-provider';
+import { randomInt } from 'node:crypto';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -36,6 +40,7 @@ let app: FastifyInstance;
 let svc: VerificationService;
 let adminToken: string;
 const marker = nanoid(6).toLowerCase();
+const phoneRun = randomInt(10000, 100000);
 const userIds: string[] = [];
 let seq = 0;
 
@@ -46,7 +51,7 @@ async function makeUser(first: string) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59267${String((marker.charCodeAt(0) + seq) % 10)}${String(seq).padStart(4, '0')}`,
+      phone: `+59267${phoneRun}${String(seq).padStart(3, '0')}`,
       firstName: first, lastName: `Act${seq}`,
       roles: ['VENDOR_OWNER', 'MOVER', 'CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true, countryCode: 'GY',
@@ -59,11 +64,21 @@ async function makeUser(first: string) {
 async function approvedDoc(userId: string, docType: string, extra: Record<string, unknown> = {}) {
   return app.prisma.verificationDocument.create({
     data: {
-      userId, role: 'VENDOR_OWNER' as never, docType, fileUrl: `test/${marker}/${docType}`,
+      userId, role: 'VENDOR_OWNER' as never, docType, fileUrl: await ownedVerificationFixture(app.prisma, userId, docType),
       status: 'APPROVED', expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
       ...extra,
     } as never,
   });
+}
+
+
+/** Establish a real completed purge while retaining deliberate projection drift.
+ * These cases grade the subsequent reconciler, independently of finalization. */
+async function purgeWithoutProjection(userId: string, docType: string) {
+  const docs = await app.prisma.verificationDocument.findMany({ where: { userId, docType, purgedAt: null }, include: { user: { select: { tenantId: true } } } });
+  for (const doc of docs) expect(await purgeDocumentWithClaim(app.prisma, getStorageProvider(), {
+    documentId: doc.id, userId, tenantId: doc.user.tenantId, mode: 'FULL_RETENTION', initiatedBy: 'activation-fixture',
+  }, async () => undefined)).toBe('PURGED');
 }
 
 async function makePendingVendor(ownerUserId: string, status: 'PENDING_APPROVAL' | 'SUSPENDED' = 'PENDING_APPROVAL') {
@@ -106,17 +121,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (userIds.length > 0) {
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.subscription.deleteMany({ where: { OR: [{ rider: { userId: { in: userIds } } }, { driver: { userId: { in: userIds } } }, { vendor: { owner: { userId: { in: userIds } } } }] } });
-    await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: userIds } } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  }
+  // Retain the completed purge claims and their required owner/source custody.
   await app.close();
 });
 
@@ -128,7 +133,7 @@ describe('STRAND-1 — checklist completion IS vendor activation, atomically', (
     const last = await app.prisma.verificationDocument.create({
       data: {
         userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'storefront_photo',
-        fileUrl: `test/${marker}/storefront`, status: 'PENDING',
+        fileUrl: `verification/${owner.id}/storefront-${marker}.enc`, status: 'PENDING',
       },
     });
 
@@ -149,7 +154,7 @@ describe('STRAND-1 — checklist completion IS vendor activation, atomically', (
     const last = await app.prisma.verificationDocument.create({
       data: {
         userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'storefront_photo',
-        fileUrl: `test/${marker}/storefront2`, status: 'PENDING',
+        fileUrl: `verification/${owner.id}/storefront2-${marker}.enc`, status: 'PENDING',
       },
     });
     await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
@@ -164,7 +169,7 @@ describe('STRAND-1 — checklist completion IS vendor activation, atomically', (
     for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
     // Verify through the projection (any decision run projects):
     const extra = await app.prisma.verificationDocument.create({
-      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'owner_national_id', fileUrl: `test/${marker}/renewal`, status: 'PENDING' },
+      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'owner_national_id', fileUrl: `verification/${owner.id}/renewal-${marker}.enc`, status: 'PENDING' },
     });
     await svc.approveDocument(extra.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).isVerified).toBe(true);
@@ -172,12 +177,9 @@ describe('STRAND-1 — checklist completion IS vendor activation, atomically', (
     // Now the ONLY storefront photo is administratively invalidated: simulate
     // purge (retention) then run any decision for this user — the projection
     // must follow document truth DOWN as well.
-    await app.prisma.verificationDocument.updateMany({
-      where: { userId: owner.id, docType: 'storefront_photo' },
-      data: { purgedAt: new Date(), fileUrl: '' },
-    });
+    await purgeWithoutProjection(owner.id, 'storefront_photo');
     const again = await app.prisma.verificationDocument.create({
-      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'tin_certificate', fileUrl: `test/${marker}/tin2`, status: 'PENDING' },
+      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'tin_certificate', fileUrl: `verification/${owner.id}/tin2-${marker}.enc`, status: 'PENDING' },
     });
     await svc.approveDocument(again.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
@@ -207,10 +209,7 @@ describe('STRAND-2 belt — the daily reconciler heals projection drift', () => 
     for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { status: 'ACTIVE', isVerified: true } });
     // Evidence dies outside any decision path (retention purge).
-    await app.prisma.verificationDocument.updateMany({
-      where: { userId: owner.id, docType: 'business_registration' },
-      data: { purgedAt: new Date(), fileUrl: '' },
-    });
+    await purgeWithoutProjection(owner.id, 'business_registration');
     await svc.reconcileVendorActivations();
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(fresh.isVerified).toBe(false); // cache follows document truth down
@@ -228,10 +227,7 @@ describe('F-012-05 — one authority generation [REPORT-012]', () => {
     expect(fresh.acceptingOrders).toBe(true);
 
     // Evidence dies outside any decision path (retention purge shape)…
-    await app.prisma.verificationDocument.updateMany({
-      where: { userId: owner.id, docType: 'business_registration' },
-      data: { purgedAt: new Date(), fileUrl: '' },
-    });
+    await purgeWithoutProjection(owner.id, 'business_registration');
     await svc.reconcileVendorActivations();
     fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(fresh.isVerified).toBe(false);
@@ -267,10 +263,7 @@ describe('F-012-05 — one authority generation [REPORT-012]', () => {
     // Evidence dies by a path whose projection never landed (the stale-flag
     // shape REPORT-012 exploited), while the owner had commerce paused.
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { acceptingOrders: false } });
-    await app.prisma.verificationDocument.updateMany({
-      where: { userId: owner.id, docType: 'storefront_photo' },
-      data: { purgedAt: new Date(), fileUrl: '' },
-    });
+    await purgeWithoutProjection(owner.id, 'storefront_photo');
     const cached = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(cached.isVerified).toBe(true); // the lie this test kills
 

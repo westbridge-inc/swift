@@ -1,3 +1,5 @@
+import './helpers/synthetic-verification-storage';
+import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
 /**
  * [DOC-1 §9.4 · P9-4] test_legal_hold_blocks_purge · test_legal_holds_have_owner_and_review_date
  *
@@ -48,10 +50,15 @@ async function person(n: number, role: 'VENDOR_OWNER' | 'CUSTOMER' = 'VENDOR_OWN
   return u.id;
 }
 /** A document whose bytes are gone from storage (fileUrl empty → NOTHING_STORED), due for purge yesterday unless told otherwise. */
-const doc = (userId: string, extra: Record<string, unknown> = {}) => runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: {
-  userId, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: '', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1',
-  retentionExpiresAt: new Date(Date.now() - DAY), ...extra,
-} }));
+const doc = async (userId: string, extra: Record<string, unknown> = {}) => {
+  const { purgedAt, ...rest } = extra;
+  const row = await runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: {
+    userId, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: '', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1',
+    retentionExpiresAt: new Date(Date.now() - DAY), ...rest,
+  } }));
+  if (purgedAt) await system(() => verification.purgeDocumentNow({ ...row, user: { tenantId: 'swift-default' } }, userId, { requireRetentionElapsed: false, shredFields: true }));
+  return row;
+};
 const place = (payload: Record<string, unknown>, headers: Record<string, string> = { 'x-swift-reason': REASON }) => adminApp.inject({
   method: 'POST', url: '/api/v1/admin/verification/legal-holds', payload,
   headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', ...headers },
@@ -73,7 +80,7 @@ beforeAll(async () => {
   await adminApp.register(prismaPlugin); await adminApp.register(redisPlugin); await adminApp.register(authPlugin); await adminApp.register(socketPlugin);
   await adminApp.register(adminRoutes, { prefix: '/api/v1/admin' });
   await adminApp.ready();
-  verification = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  verification = new VerificationService(documentMaintenanceScope(app.prisma, users), new NotificationService(app.prisma, app.io), new SandboxKycProvider());
   const admin = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59273${NUM}9`, firstName: 'Hold', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } },
@@ -84,17 +91,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
-    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
-    // deletion_receipt is append-only by design — the receipts stay.
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.notification.deleteMany({ where: { userId: adminId } });
-    // audit_logs is append-only by design — the rows stay.
-    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.admin.deleteMany({ where: { userId: adminId } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  });
+  // Keep immutable synthetic custody records; close only the test connections.
   await adminApp.close();
   await app.close();
 });
@@ -171,12 +168,14 @@ describe('[DOC-1 P9-4] legal holds on document submissions', () => {
     await expect(system(() => app.prisma.$executeRaw`
       INSERT INTO doc_legal_hold ("subjectUserId", reason, "ownerId", "reviewBy", "placedBy", "placedAt")
       VALUES (${u}, ${REASON}, ${adminId}, now(), ${adminId}, now())`)).rejects.toThrow(/doc_legal_hold_review_after_placed/);
-    // A hold whose review date has passed (set directly: the endpoint refuses to create one) alarms every admin of the tenant.
-    const ok = await place({ subjectUserId: u, reviewBy: new Date(Date.now() + 2 * DAY).toISOString() });
-    expect(ok.statusCode).toBe(201);
-    const holdId = ok.json().data.hold.id as string;
-    // Age the hold: placement three days ago, review due yesterday (the CHECK keeps reviewBy after placedAt).
-    await system(() => app.prisma.$executeRaw`UPDATE doc_legal_hold SET "placedAt" = now() - interval '3 days', "reviewBy" = now() - interval '1 day' WHERE id = ${holdId}::uuid`);
+    // Create historically using the public service clock seam. Provenance is
+    // immutable; a test must not rewrite placedAt after the fact.
+    const oldNow = new Date(Date.now() - 3 * DAY);
+    const ok = await system(() => placeDocLegalHold(app.prisma, {
+      subjectUserId: u, reason: REASON, ownerId: adminId, placedBy: adminId,
+      reviewBy: new Date(Date.now() - DAY),
+    }, oldNow));
+    const holdId = ok.hold.id;
     const overdue = await alertOverdueDocLegalHolds(app.prisma, new NotificationService(app.prisma, app.io));
     expect(overdue).toBeGreaterThanOrEqual(1);
     const notes = await system(() => app.prisma.notification.findMany({ where: { userId: adminId } }));

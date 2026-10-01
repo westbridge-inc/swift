@@ -2,11 +2,12 @@ import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
   openAvatarErasureObligationIds,
   queueStorageOrphan,
-  recordStorageOrphan,
   retryStorageOrphan,
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { VerificationService } from '../verification/verification.service';
+import { NotificationService } from '../notification/notification.service';
+import { SandboxKycProvider } from '../../providers/kyc/kyc-provider';
 import type { FastifyInstance } from 'fastify';
 import type { ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -16,6 +17,7 @@ import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion
 import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { isOwnedAvatarKey } from '../verification/object-authority';
+import { eraseFaceRecordsUnlessHeld } from '../verification/face-evidence';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -155,7 +157,7 @@ export class AccountService {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
         // late write landed — fall through and RE-SWEEP (every purge step is
         // idempotent), instead of short-circuiting on the marker.
-        await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
+        await tx.verificationDocument.updateMany({ where: { userId, fieldsPurgedAt: null }, data: { retentionExpiresAt: new Date() } });
         const avatarOrphan = await queueAvatarBeforePointerClear();
         if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
         return { alreadyComplete: false, resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
@@ -224,7 +226,7 @@ export class AccountService {
       // it cannot retire a newly due document as ordinary image retention.
       // Status alone is insufficient: a later admin ban can replace it. Safety
       // escrow above has already captured any needed contact authority.
-      await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
+      await tx.verificationDocument.updateMany({ where: { userId, fieldsPurgedAt: null }, data: { retentionExpiresAt: new Date() } });
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await tx.user.update({
@@ -321,53 +323,65 @@ export class AccountService {
     // 1. Crypto-shred every verification document: delete the object, null the
     //    wrapped DEK (unrecoverable even from a ciphertext backup), mark purged.
     const storage = getStorageProvider();
+    // [DS625] Face evidence first: the biometric face template and the liveness
+    // checks are kept, and recorded against the hold, while any legal hold names
+    // the person; otherwise they go now. (The selfie object follows in 1a, under
+    // the same rule.)
+    const face = await eraseFaceRecordsUnlessHeld(prisma, userId);
     // [DOC-1 §9.4 · DOC-INV-14] A document under a legal hold is NOT purged by
     // erasure: it stays, due for purge the moment the hold is released (its
     // retention clock is set to now), and the deferral is written to the audit
     // trail — erasure deferred by a legal obligation is recorded, never silent.
+    // A whole-person hold covers every document of the person, stamped or not.
+    const subjectWideHold = await prisma.docLegalHold.count({ where: { subjectUserId: userId, releasedAt: null, subjectWide: true } }) > 0;
     const deferred = await prisma.verificationDocument.updateMany({
-      where: { userId, purgedAt: null, legalHoldId: { not: null } },
+      where: { userId, purgedAt: null, ...(subjectWideHold ? {} : { legalHoldId: { not: null } }) },
       data: { retentionExpiresAt: new Date() },
     });
-    if (deferred.count > 0) {
+    const avatarObligation = (preflight as { avatarOrphanId?: string | null }).avatarOrphanId;
+    const heldFaceEvidence = face.held && (face.faceTemplates || face.livenessChecks || avatarObligation)
+      ? { avatarObject: avatarObligation ? 1 : 0, livenessChecks: face.livenessChecks, faceTemplates: face.faceTemplates, holdIds: face.holdIds }
+      : null;
+    if (deferred.count > 0 || heldFaceEvidence) {
       await prisma.auditLog.create({ data: {
         userId, action: 'ERASURE_DEFERRED_LEGAL_HOLD', entity: 'User', entityId: userId,
-        changes: { heldDocuments: deferred.count, reason: 'DOC-1 §9.4: a legal hold blocks purge until released' },
+        changes: {
+          heldDocuments: deferred.count, reason: 'DOC-1 §9.4: a legal hold blocks purge until released',
+          ...(heldFaceEvidence && { heldFaceEvidence }),
+        },
       } });
     }
     const docs = await prisma.verificationDocument.findMany({
-      where: { userId, purgedAt: null, legalHoldId: null },
-      select: { id: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
+      where: { userId, fieldsPurgedAt: null, legalHoldId: null },
+      select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
     });
-    let pendingDocuments = 0;
+    const verification = new VerificationService(prisma, new NotificationService(prisma, this.app.io), new SandboxKycProvider());
     for (const doc of docs) {
-      // [DOC-INV-7] Passing evidence closes the document with its receipt in
-      // one transaction. An authority refusal or FAILED probe retains the
-      // due pointer; it cannot prevent the other personal-data cleanup.
-      let evidence;
       try {
-        evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
-      } catch (error) {
-        if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
-        // Refusal is an unresolved obligation, never proof of destruction.
-        // The retained row + due clock committed above are the retry census.
-        pendingDocuments += 1;
-        this.app.log.warn({ userId, documentId: doc.id }, 'account document erasure pending: object authority unavailable');
-        continue;
+        await verification.purgeDocumentNow(doc, userId, { requireRetentionElapsed: false, shredFields: true });
+      } catch {
+        // One failed/quarantined source must not stop unrelated account cleanup.
+        // The committed claim or remaining document is the durable obligation.
+        this.app.log.warn({ userId, documentId: doc.id }, 'account document erasure remains pending');
       }
-      if (evidence.probe === 'FAILED' && doc.fileUrl) {
-        await recordStorageOrphan(prisma, this.app.log, { key: doc.fileUrl, reason: 'ERASURE_PURGE_PROBE_FAILED', userId, tenantId: doc.user.tenantId });
-        await writeDeletionReceipt(prisma, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
-        pendingDocuments += 1;
-        continue;
+    }
+
+    // Uploads can exist before submission. The cutoff also fences new source
+    // reservations, while unfinished uploads remain pending rather than being
+    // deleted underneath a late storage write.
+    const sourceOwner = await prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } });
+    const uploads = await prisma.encryptedObject.findMany({ where: { createdBy: userId, retiredClaimId: null } }).catch(() => []);
+    for (const upload of uploads) {
+      const attached = await prisma.verificationDocument.findFirst({ where: { fileUrl: upload.fileKey } });
+      if (attached) continue;
+      try {
+        const orphan = await queueStorageOrphan(prisma, {
+          key: upload.fileKey, userId, tenantId: sourceOwner.tenantId, reason: 'ACCOUNT_VERIFICATION_DELETE_PENDING',
+        });
+        await retryStorageOrphan(prisma, storage, this.app.log, orphan.id);
+      } catch {
+        this.app.log.warn({ userId, sourceId: upload.sourceId }, 'account upload erasure remains pending');
       }
-      await prisma.$transaction(async (tx) => {
-        await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
-        // [DOC-1 Part XXV] Erasure takes the extracted VALUES with the image: shred the run DEKs (rows stay as the custody record).
-        await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
-        await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
-        await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
-      });
     }
 
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
@@ -417,9 +431,10 @@ export class AccountService {
     //     IntegritySettings.tombstoneRetentionEnabled (default OFF). When ON,
     //     the salted hashes + membership remain (legitimate-interest fraud
     //     prevention, the documented sole exception); the raw-embedding face
-    //     template is deleted in EVERY case — it is not a hash.
+    //     template is deleted in EVERY case — it is not a hash — unless a legal
+    //     hold names the person [DS625]: it went, or was kept, with the liveness
+    //     checks before step 1.
     const integrity = await prisma.integritySettings.findUnique({ where: { id: 'platform' } });
-    await prisma.faceTemplate.deleteMany({ where: { accountId: userId } });
     if (!integrity?.tombstoneRetentionEnabled) {
       await prisma.$transaction(async (tx) => {
         await lockIdentityAuthority(tx);
@@ -440,9 +455,9 @@ export class AccountService {
     //     shares, third-party emergency contacts, exact-location queue/watch
     //     rows, and the cart. None has a continuing purpose once the person
     //     leaves; case-bound safety evidence lives elsewhere under its own
-    //     hold rules.
+    //     hold rules. The biometric liveness rows went, or were kept under a legal
+    //     hold, with the face template before step 1 [DS625].
     await prisma.accountRecovery.deleteMany({ where: { userId } });
-    await prisma.livenessCheck.deleteMany({ where: { userId } });
     await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
     await prisma.emergencyContact.deleteMany({ where: { userId } });
     await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });
@@ -471,10 +486,23 @@ export class AccountService {
       },
     });
 
-    if (pendingDocuments > 0 || pendingAvatarObjects > 0) {
+    // Recount AFTER all work: includes a hold that won after candidate selection,
+    // retained extracted values after image retention, and incomplete claims.
+    const pendingDocuments = await prisma.verificationDocument.count({ where: { userId, OR: [{ fieldsPurgedAt: null }, { activePurgeClaimId: { not: null } }] } });
+    let pendingVerificationObjects = 1; // Unknown census is an outstanding obligation.
+    try {
+      const sources = await prisma.encryptedObject.findMany({ where: { createdBy: userId }, select: { sourceId: true } });
+      const completedSources = await prisma.documentPurgeClaim.count({ where: {
+        userId, tenantId: sourceOwner.tenantId, sourceId: { in: sources.map((s) => s.sourceId) }, state: 'COMPLETE',
+      } });
+      pendingVerificationObjects = sources.length - completedSources;
+    } catch {
+      this.app.log.warn({ userId }, 'account upload completion census unavailable');
+    }
+    if (pendingDocuments > 0 || pendingAvatarObjects > 0 || pendingVerificationObjects > 0) {
       return {
         deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const,
-        pendingDocuments, pendingAvatarObjects,
+        pendingDocuments, pendingAvatarObjects, pendingVerificationObjects,
         message: 'Your account is closed. Some personal-data erasure is pending; no further sign-in is needed.',
         ...(preflight.hold && { holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }),
       };

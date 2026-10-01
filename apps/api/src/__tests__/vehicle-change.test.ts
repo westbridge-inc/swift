@@ -66,13 +66,13 @@ const change = (token: string, body: Record<string, unknown>) => send('PUT', '/a
 
 /** An approved paper, filed the way the review pipeline leaves it (the INSERT trigger derives COMMITTED + a VALID record). */
 const approved = (userId: string, docType: string, extra: Record<string, unknown> = {}) => system(() => app.prisma.verificationDocument.create({ data: {
-  userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/vc/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'vehicle-change-test',
+  userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${userId}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'vehicle-change-test',
   reviewedAt: new Date(), expiresAt: new Date(Date.now() + 200 * DAY), ...extra,
 } }));
 /** A paper still waiting on a human, with its one open review case. */
 async function inReview(userId: string, docType: string) {
   const doc = await system(() => app.prisma.verificationDocument.create({ data: {
-    userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/vc/${docType}-${nanoid(4)}.enc`, status: 'PENDING',
+    userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${userId}/${docType}-${nanoid(4)}.enc`, status: 'PENDING',
   } }));
   const kase = await system(() => app.prisma.reviewCase.create({ data: { submissionId: doc.id, slaDueAt: new Date(Date.now() + DAY) } }));
   return { doc, kase };
@@ -108,20 +108,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
-    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
-    const docs = await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } });
-    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
-    await app.prisma.subscription.deleteMany({ where: { OR: [{ rider: { userId: { in: users } } }, { driver: { userId: { in: users } } }] } });
-    await app.prisma.rider.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.driver.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  });
+  // Preserve custody while withdrawing this suite's synthetic supply.
+  await system(() => app.prisma.driver.updateMany({ where: { userId: { in: users } }, data: { isOnline: false, isAvailable: false, locationSessionId: null } }));
+  await system(() => app.prisma.rider.updateMany({ where: { userId: { in: users } }, data: { isOnline: false, isAvailable: false, locationSessionId: null } }));
   await app.close();
 });
 

@@ -54,7 +54,7 @@ async function approveProviderChecklist(userId: string) {
   for (const docType of ['national_id', 'police_clearance']) {
     await app.prisma.verificationDocument.create({
       data: {
-        userId, role: 'MOVER' as never, docType, fileUrl: `test/book/${docType}`,
+        userId, role: 'MOVER' as never, docType, fileUrl: `verification/${userId}/${docType}.enc`,
         status: 'APPROVED', expiresAt: new Date(Date.now() + 365 * DAY),
       },
     });

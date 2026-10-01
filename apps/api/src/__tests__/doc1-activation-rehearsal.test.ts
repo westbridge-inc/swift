@@ -34,7 +34,7 @@ async function user(role: 'VENDOR_OWNER' | 'RIDER') {
   users.push(u.id); return u.id;
 }
 const doc = (userId: string, docType: string, extra: Record<string, unknown> = {}) => runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: {
-  userId, role: 'VENDOR_OWNER', docType, fileUrl: `verification/${RUN}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'seed', reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1', ...extra,
+  userId, role: 'VENDOR_OWNER', docType, fileUrl: `verification/${userId}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'seed', reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1', ...extra,
 } }));
 async function verifiedStore(docTypes: string[], lapsed = false) {
   const ownerUserId = await user('VENDOR_OWNER');

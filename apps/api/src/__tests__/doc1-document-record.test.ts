@@ -93,15 +93,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.admin.deleteMany({ where: { userId: adminId } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  });
+  // Permanent claim/source and hold provenance are retained in the isolated test database.
   await adminApp.close();
   await app.close();
 });
@@ -123,7 +115,7 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     const rec = await recordOf(doc.id);
     expect(rec).toMatchObject({ status: 'VALID', accountId: u, docType: 'business_registration', approvedBy: adminId, subjectId: (await docOf(doc.id)).subjectId, tenantId: 'swift-default', recheckBy: null });
     expect(rec!.expiresOn!.getTime()).toBeGreaterThan(Date.now() + 99 * DAY);
-    const legacy = await system(() => app.prisma.verificationDocument.create({ data: { userId: u, role: 'VENDOR_OWNER', docType: 'tin_certificate', fileUrl: `x/${RUN}/tin`, status: 'APPROVED', reviewedBy: 'legacy' } }));
+    const legacy = await system(() => app.prisma.verificationDocument.create({ data: { userId: u, role: 'VENDOR_OWNER', docType: 'tin_certificate', fileUrl: `/uploads/verification/${u}/${RUN}-tin.enc`, status: 'APPROVED', reviewedBy: 'legacy' } }));
     expect(await recordOf(legacy.id)).toMatchObject({ status: 'VALID', approvedBy: 'legacy', expiresOn: null });
   });
 

@@ -57,7 +57,7 @@ async function store(n: number) {
   return { userId: u.id, vendorId: owner.vendors[0]!.id };
 }
 const approved = (userId: string, docType: string, extra: Record<string, unknown> = {}) => system(() => app.prisma.verificationDocument.create({ data: {
-  userId, role: 'VENDOR_OWNER', docType, fileUrl: `/uploads/verification/${RUN}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'disclosure-test', reviewedAt: new Date(), expiresAt: new Date(Date.now() + 200 * DAY), ...extra,
+  userId, role: 'VENDOR_OWNER', docType, fileUrl: `/uploads/verification/${userId}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'disclosure-test', reviewedAt: new Date(), expiresAt: new Date(Date.now() + 200 * DAY), ...extra,
 } }));
 const vendorOf = (id: string) => system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id }, select: { isVerified: true, status: true } }));
 const checklistFor = async (userId: string) => (service as unknown as { checklistFor: (u: string, c: string, r: string) => Promise<string[]> }).checklistFor(userId, 'GY', 'RESTAURANT');

@@ -10,7 +10,10 @@ import { runWithTenant } from '../plugins/tenant-context';
 process.env['DATABASE_URL'] = process.env['DATABASE_URL']
   || 'postgresql://swift:swift@localhost:5434/swift_test2';
 
-const prisma = new PrismaClient();
+const rootPrisma = new PrismaClient();
+const prisma = rootPrisma.$extends({ query: { storageOrphan: { async findMany({ args, query }) {
+  return query({ ...args, where: { AND: [args.where ?? {}, { userId: { in: [userId, otherUserId] } }] } });
+} } } }) as unknown as PrismaClient;
 const scopedPrisma = prisma.$extends(tenantScopeExtensionFor(prisma)) as unknown as PrismaClient;
 const log = { error: () => undefined };
 const marker = nanoid(8).toLowerCase();
@@ -24,8 +27,12 @@ const previousRlsBind = process.env['TENANT_RLS_BIND'];
 const verificationKey = (name: string) => verificationKeys.get(name)!;
 
 afterAll(async () => {
-  await prisma.storageOrphan.deleteMany({ where: { key: { contains: marker } } });
-  await prisma.user.deleteMany({ where: { id: { in: [userId, otherUserId] } } });
+  // Retain immutable claims, orphan identities and owner lineage. The foreign
+  // account and its tenant hold none of them, so they go: a second active
+  // tenant left behind changes every later suite on this database. Should that
+  // account ever hold purge authority, the database refuses these deletes.
+  await prisma.storageOrphan.deleteMany({ where: { userId: otherUserId } });
+  await prisma.user.delete({ where: { id: otherUserId } });
   await prisma.tenant.delete({ where: { id: foreignTenantId } });
   await prisma.$disconnect();
   if (previousRlsBind === undefined) delete process.env['TENANT_RLS_BIND'];
@@ -33,7 +40,8 @@ afterAll(async () => {
 });
 
 afterEach(async () => {
-  await prisma.storageOrphan.deleteMany({ where: { userId: { in: [userId, otherUserId] } } });
+  const claimed = await prisma.documentPurgeClaim.findMany({ where: { userId: { in: [userId, otherUserId] }, orphanId: { not: null } }, select: { orphanId: true } });
+  await prisma.storageOrphan.deleteMany({ where: { userId: { in: [userId, otherUserId] }, id: { notIn: claimed.map((c) => c.orphanId!) } } });
 });
 
 beforeAll(async () => {
@@ -84,6 +92,7 @@ describe('storage-orphan census', () => {
     });
     const absent = new Set<string>();
     const storage = {
+      purgeNamespace: async () => 'synthetic:document-lifecycle',
       delete: async (key: string) => { absent.add(key); },
       getObject: async (key: string) => {
         if (absent.has(key)) throw Object.assign(new Error('absent'), { code: 'ENOENT' });
@@ -115,6 +124,7 @@ describe('storage-orphan census', () => {
     const absent = new Set<string>();
     let badDeleteFails = true;
     const storage = {
+      purgeNamespace: async () => 'synthetic:document-lifecycle',
       delete: async (key: string) => {
         if (key === verificationKey('bad') && badDeleteFails) return;
         absent.add(key);

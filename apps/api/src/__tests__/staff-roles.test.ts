@@ -109,7 +109,7 @@ beforeAll(async () => {
     await app.prisma.verificationDocument.create({
       data: {
         userId: owner.userId, role: 'VENDOR_OWNER' as never, docType,
-        fileUrl: `test/staff-roles/${docType}`, status: 'APPROVED',
+        fileUrl: `verification/${owner.userId}/${docType}.enc`, status: 'APPROVED',
         expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
       } as never,
     });

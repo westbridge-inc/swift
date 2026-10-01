@@ -45,7 +45,7 @@ async function mover(n: number, vehicleType: 'CAR' | 'MOTORCYCLE') {
   }
   return u.id;
 }
-const pending = (userId: string) => system(() => app.prisma.verificationDocument.create({ data: { userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING' } }));
+const pending = (userId: string) => system(() => app.prisma.verificationDocument.create({ data: { userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: `/uploads/verification/${userId}/${nanoid(5)}.enc`, status: 'PENDING' } }));
 const approve = (docId: string, insurance?: Record<string, unknown>) => adminApp.inject({
   method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload: { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), ...(insurance ? { insurance } : {}) },
   headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON },

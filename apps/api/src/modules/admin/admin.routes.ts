@@ -5007,6 +5007,7 @@ export async function adminRoutes(app: FastifyInstance) {
     ownerId: z.string().min(1).optional(),
     reviewBy: z.coerce.date(),
     incidentCaseId: z.string().min(1).optional(),
+    preserveRemainingData: z.boolean().optional(),
   });
   const releaseHoldSchema = z.object({ reason: z.string().trim().min(1).max(2000).optional() });
   const statedReasonOf = (request: any, bodyReason: string | undefined): string => {
@@ -5028,10 +5029,11 @@ export async function adminRoutes(app: FastifyInstance) {
     const result = await placeDocLegalHold(tenantPrisma as unknown as PrismaClient, {
       subjectUserId: body.subjectUserId, documentIds: body.documentIds, reason,
       ownerId: body.ownerId ?? request.user.userId, reviewBy: body.reviewBy,
-      placedBy: request.user.userId, incidentCaseId: body.incidentCaseId,
+      placedBy: request.user.userId, incidentCaseId: body.incidentCaseId, preserveRemainingData: body.preserveRemainingData,
     });
     await audit(request.user.userId, 'PLACE_DOC_LEGAL_HOLD', 'DocLegalHold', result.hold.id, {
       subjectUserId: body.subjectUserId, documents: result.documents, ownerId: result.hold.ownerId,
+      scope: result.scope, missingImageDocumentIds: result.missingImageDocumentIds, priorReceiptIds: result.priorReceiptIds,
       reviewBy: result.hold.reviewBy, reason, incidentCaseId: body.incidentCaseId ?? null,
     }, request);
     reply.code(201);

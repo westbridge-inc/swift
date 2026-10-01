@@ -105,16 +105,7 @@ afterAll(async () => {
     await app.prisma.docType.update({ where: { code: AML_CODE }, data: { amlRecordClass: 'NOT_APPLICABLE' } });
     await app.prisma.docField.deleteMany({ where: { docTypeCode: CODE, fieldCode: 'doc_number' } });
     await app.prisma.rectificationRequest.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
-    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
-    const docs = await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } });
-    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs.map((d) => d.id) } } } });
-    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.identityKey.deleteMany({ where: { accountId: { in: users } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
+    // Retain synthetic hold/claim/source records required by permanent authority.
   });
   if (prevKek === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = prevKek;
   resetKeyProviderForTests();
@@ -154,8 +145,8 @@ describe('[DOC-1 P25] data-subject rights against documents', () => {
   });
 
   it('erase: already destroyed → the receipt; held → refused LEGAL_HOLD; AML class → refused AML_RECORD; free → destroyed now with the values crypto-shredded and a receipt', async () => {
-    const destroyed = await runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId: me, role: 'VENDOR_OWNER', docType: 'storefront_photo', fileUrl: '', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1', purgedAt: new Date() } }));
-    await runWithTenant('swift-default', () => app.prisma.deletionReceipt.create({ data: { submissionId: destroyed.id, subjectId: me, docTypeCode: 'storefront_photo', bytesDeleted: 0n, deletedBy: 'reaper', storeLocations: [], verificationProbeResult: 'CONFIRMED_ABSENT' } }));
+    const destroyed = await runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId: me, role: 'VENDOR_OWNER', docType: 'storefront_photo', fileUrl: '', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' } }));
+    expect(await runWithTenant('swift-default', () => service.purgeDocumentNow({ ...destroyed, user: { tenantId: 'swift-default' } }, me, { requireRetentionElapsed: false, shredFields: true }))).toBe('PURGED');
     const held = (await submit(me, 'gra_restaurant_licence')).id;
     const hold = await runWithTenant('swift-default', () => app.prisma.docLegalHold.create({ data: { subjectUserId: me, reason: `enquiry ${RUN}`, ownerId: adminId, placedBy: adminId, reviewBy: new Date(Date.now() + 30 * DAY) } }));
     await runWithTenant('swift-default', () => app.prisma.verificationDocument.update({ where: { id: held }, data: { legalHoldId: hold.id } }));
@@ -163,7 +154,7 @@ describe('[DOC-1 P25] data-subject rights against documents', () => {
     const res = await erase(me);
     expect(res.statusCode).toBe(200);
     const byId = new Map((res.json().data as Array<{ documentId: string; outcome: string; ground?: string; receipt?: { probe: string } }>).map((o) => [o.documentId, o]));
-    expect(byId.get(destroyed.id)).toMatchObject({ outcome: 'ALREADY_DESTROYED', receipt: { probe: 'CONFIRMED_ABSENT' } });
+    expect(byId.get(destroyed.id)).toMatchObject({ outcome: 'ALREADY_DESTROYED', receipt: { probe: 'NOT_APPLICABLE' } });
     expect(byId.get(held)).toMatchObject({ outcome: 'REFUSED', ground: 'LEGAL_HOLD' });
     expect(byId.get(aml)).toMatchObject({ outcome: 'REFUSED', ground: 'AML_RECORD' });
     expect(byId.get(mine)).toMatchObject({ outcome: 'DESTROYED', receipt: { probe: 'CONFIRMED_ABSENT' } });
@@ -198,7 +189,7 @@ describe('[DOC-1 P25] data-subject rights against documents', () => {
     expect((await get(other)).json().data.documents.some((d: { id: string }) => d.id === approved)).toBe(false);
   });
 
-  it('test_no_direct_document_record_mutation: no code path writes an extracted value outside the ledger; the only writers of extracted_field are the two crypto-shreds, and they only null it', () => {
+  it('test_no_direct_document_record_mutation: no code path writes an extracted value outside the ledger; the only writer of extracted_field is the committed full-erasure finalizer, and they only null it', () => {
     const walk = (dir: string, out: string[] = []): string[] => {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
@@ -215,10 +206,9 @@ describe('[DOC-1 P25] data-subject rights against documents', () => {
       if (hits.length || raw.length) writers[relative(API_SRC, f)] = [...hits, ...raw].sort();
     }
     expect(writers).toEqual({
-      'modules/user/account.service.ts': ['updateMany'],
-      'modules/verification/verification.service.ts': ['updateMany'],
+      'modules/verification/purge-fence.ts': ['updateMany'],
     });
-    for (const f of ['modules/user/account.service.ts', 'modules/verification/verification.service.ts']) {
+    for (const f of ['modules/verification/purge-fence.ts']) {
       const src = readFileSync(join(API_SRC, f), 'utf8');
       for (const m of src.matchAll(/extractedField\.updateMany\(\{[^}]*data:\s*\{([^}]*)\}/g)) expect(m[1]!.trim()).toBe('valueCt: null');
     }

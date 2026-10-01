@@ -1,3 +1,4 @@
+import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
 /**
  * [DOC-1 §9.2 · P9-2] test_reaper_failure_alarms — silence is not success.
  *
@@ -60,7 +61,7 @@ describe('[DOC-1 P9-2] reaper failure or lag alarms', () => {
   });
 
   it('a completed sweep writes the heartbeat, and a fresh heartbeat is not stale; two cycles of silence is', async () => {
-    const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+    const service = new VerificationService(documentMaintenanceScope(app.prisma, [adminId]), new NotificationService(app.prisma, app.io), new SandboxKycProvider());
     const before = new Date();
     await service.purgeExpiredDocuments();
     const row = await system(() => app.prisma.platformConfig.findUniqueOrThrow({ where: { key: LAST_REAPER_RUN_KEY } }));

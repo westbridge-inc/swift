@@ -108,7 +108,6 @@ afterAll(async () => {
     await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } }); // runs, fields, verdicts cascade
     await app.prisma.identityKey.deleteMany({ where: { accountId: { in: users } } });
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
     await app.prisma.docField.deleteMany({ where: { docTypeCode: DECLARED_CODE, fieldCode: { in: ['doc_number', 'expiry_date'] } } });
   });

@@ -66,7 +66,6 @@ afterAll(async () => {
     const users = Object.values(ids);
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.identityKey.deleteMany({ where: { accountId: { in: users } } });
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   });
   await app.close();

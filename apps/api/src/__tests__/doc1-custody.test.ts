@@ -72,19 +72,8 @@ beforeAll(async () => {
   await app.prisma.session.create({ data: { userId: adminId, token: adminToken, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `cust-${RUN}`, deviceType: 'test', expiresAt: new Date(Date.now() + 3_600_000) } as never });
 });
 afterAll(async () => {
-  await system(async () => {
-    const docs = await app.prisma.verificationDocument.findMany({ where: { userId: ownerId }, select: { id: true } });
-    const ids = docs.map((d) => d.id);
-    // deletion_receipt is append-only [DOC-INV-7]: the receipt outlives the fixture, as evidence should
-    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: ids } } } });
-    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: ids } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: ownerId } });
-    await app.prisma.identityKey.deleteMany({ where: { accountId: { in: users } } });
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
-    await app.prisma.admin.deleteMany({ where: { userId: adminId } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-    await app.prisma.docField.deleteMany({ where: { docTypeCode: CODE, fieldCode: 'doc_number' } });
-  });
+  await system(() => app.prisma.docField.deleteMany({ where: { docTypeCode: CODE, fieldCode: 'doc_number' } }));
+  // Keep permanent document/claim custody; restore the test encryption setting.
   if (prevKek === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = prevKek;
   resetKeyProviderForTests();
   await app.close();
@@ -97,10 +86,8 @@ describe('[DOC-1 P20-2] the custody narrative', () => {
     expect(doc.status).toBe('PENDING');
     await runWithTenant('swift-default', () => service.approveDocument(doc.id, adminId, new Date(Date.now() + 200 * 86_400_000)));
     await system(() => app.prisma.reviewDecision.updateMany({ where: { case: { submissionId: doc.id } }, data: { internalNote: NOTE } }));
-    await system(() => app.prisma.deletionReceipt.create({ data: {
-      submissionId: doc.id, subjectId: ownerId, docTypeCode: CODE, contentSha256: crypto.createHash('sha256').update(RUN).digest(), bytesDeleted: BigInt(40_960), deletedAt: new Date(),
-      deletedBy: 'image-policy', storeLocations: ['storage:verification/x', 'encrypted_object:verification/x'], verificationProbeResult: 'CONFIRMED_ABSENT',
-    } as never }));
+    const source = await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: doc.fileUrl } }));
+    expect(await system(() => service.purgeImageAfterReview(doc.id, 'image-policy'))).toBe('PURGED');
 
     const n = await system(() => custodyNarrative(app.prisma, doc.id));
     expect(n.submission).toMatchObject({ id: doc.id, docType: TYPE, accountId: ownerId, status: 'APPROVED' });
@@ -112,7 +99,7 @@ describe('[DOC-1 P20-2] the custody narrative', () => {
     expect(n.review).toHaveLength(1);
     expect(n.review[0]!.decisions.at(-1)).toMatchObject({ reviewerId: adminId, outcome: 'APPROVE' });
     expect(n.record).toMatchObject({ status: 'VALID', approvedBy: adminId });
-    expect(n.destruction).toEqual([expect.objectContaining({ by: 'image-policy', probe: 'CONFIRMED_ABSENT', bytesDeleted: 40_960, stores: ['storage:verification/x', 'encrypted_object:verification/x'] })]);
+    expect(n.destruction).toEqual([expect.objectContaining({ by: 'image-policy', probe: 'CONFIRMED_ABSENT', bytesDeleted: source.sizeBytes, stores: [`storage:${source.fileKey}`, `encrypted_object:${source.sourceId}`] })]);
     const whats = n.timeline.map((e) => e.what);
     // Extraction runs BEFORE the row is created (ledger first), so the submission is not necessarily the first line — it is present, and the timeline is time-ordered.
     expect(whats.some((w) => /^SUBMITTED food_handler_cert/.test(w))).toBe(true);

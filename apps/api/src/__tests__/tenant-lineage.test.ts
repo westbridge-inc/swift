@@ -20,7 +20,7 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   Session: ['User'],
   DeviceToken: ['User'],
   Address: ['User'],
-  VerificationDocument: ['User', 'DocLegalHold', 'Subject'],
+  VerificationDocument: ['User', 'DocLegalHold', 'Subject', 'DocumentPurgeClaim'],
   ComplianceViolation: ['User'],
   ComplianceReviewCase: ['User'],
   Strike: ['User'],
@@ -68,6 +68,7 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
  * checked by the same census as the ordinary tenant wall. */
 const GLOBAL_RESERVATION_PARENTS: Record<string, readonly string[]> = {
   ProviderPaymentAlias: ['ProviderPayment'],
+  EncryptedObject: ['DocumentPurgeClaim'],
 };
 
 /** Walled through a parent that is itself only walled by lineage — two or more hops from the tenant. */
@@ -131,7 +132,7 @@ export const PLATFORM_WIDE: Record<string, string> = {
   LedgerAccount: 'platform ledger accounts',
   LedgerTransaction: 'platform ledger transactions',
   ChatRoom: 'chat rooms are addressed by participants (ChatRoomParticipant <- User)',
-  EncryptedObject: 'envelope-encrypted blobs addressed by key; the owning row is the wall',
+  EncryptedObject: 'envelope-encrypted blobs addressed by key; the owning row is the wall, and the RESTRICT retirement FK to a document purge claim is a permanent reservation of the source that must keep blocking reuse when RLS hides the claim',
 };
 
 /** Honestly PENDING: reachable from a tenant only through FK-less string references.

@@ -23,6 +23,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
+import { releaseDocLegalHold } from '../modules/verification/legal-hold';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
@@ -57,14 +58,14 @@ async function owner(n: number) {
 }
 /** A row a LEGACY writer would insert (status only) or a row planted at a machine state (state only). */
 const plant = (userId: string, data: Record<string, unknown>) => runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: {
-  userId, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`,
+  userId, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: `/uploads/verification/${userId}/${nanoid(5)}.enc`,
   consentAt: new Date(), privacyNoticeVersion: 'v1', ...data,
 } }));
 const at = (userId: string, state: DocState, extra: Record<string, unknown> = {}) => plant(userId, { state, ...extra });
 const move = (id: string, state: DocState) => system(() => app.prisma.$executeRawUnsafe('UPDATE verification_documents SET state = $1::"DocState" WHERE id = $2', state, id));
 const setStatus = (id: string, status: string) => system(() => app.prisma.$executeRawUnsafe('UPDATE verification_documents SET status = $1::"VerificationDocumentStatus" WHERE id = $2', status, id));
 const read = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { state: true, status: true, purgedAt: true, reviewNote: true } }));
-const submit = (userId: string, url = `/uploads/verification/${RUN}/${nanoid(5)}.enc`) =>
+const submit = (userId: string, url = `/uploads/verification/${userId}/${nanoid(5)}.enc`) =>
   runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', 'business_registration', await ownedVerificationFixture(app.prisma, userId, url), 'v1'));
 const decideApprove = (docId: string, reviewerId: string, outcome: 'APPROVE' | 'REJECT' = 'APPROVE') => system(async () => {
   const kase = await app.prisma.reviewCase.create({ data: { submissionId: docId, tenantId: 'swift-default', queue: 'STANDARD', slaDueAt: new Date() } });
@@ -99,15 +100,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
-    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.admin.deleteMany({ where: { userId: adminId } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  });
+  // Permanent claim/source and hold provenance are retained in the isolated test database.
   await adminApp.close();
   await app.close();
 });
@@ -190,12 +183,12 @@ describe('[DOC-1 §5.2] the five illegal transitions are refused by the database
   it('test_legal_hold_blocks_purge — a held document cannot reach PURGED by state or by purgedAt; released, it can', async () => {
     const u = await owner(5);
     const hold = await system(() => app.prisma.docLegalHold.create({ data: { subjectUserId: u, reason: `Enquiry ${RUN}`, ownerId: adminId, placedBy: adminId, reviewBy: new Date(Date.now() + 30 * 86_400_000) } }));
-    const d = await at(u, 'COMMITTED', { legalHoldId: hold.id });
+    const d = await at(u, 'COMMITTED', { legalHoldId: hold.id, fileUrl: '' });
     await expect(move(d.id, 'PURGED')).rejects.toThrow(/DOC_STATE_ILLEGAL: PURGED under a legal hold/);
     await expect(system(() => app.prisma.verificationDocument.update({ where: { id: d.id }, data: { purgedAt: new Date(), fileUrl: '' } }))).rejects.toThrow(/DOC_STATE_ILLEGAL: PURGED under a legal hold/);
     expect(await read(d.id)).toMatchObject({ state: 'COMMITTED', purgedAt: null });
-    await system(() => app.prisma.verificationDocument.update({ where: { id: d.id }, data: { legalHoldId: null } }));
-    await system(() => app.prisma.verificationDocument.update({ where: { id: d.id }, data: { purgedAt: new Date(), fileUrl: '' } }));
+    await system(() => releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: adminId, reason: REASON }));
+    await system(() => service.purgeDocumentNow({ ...d, user: { tenantId: 'swift-default' } }, adminId, { requireRetentionElapsed: false, shredFields: false }));
     expect(await read(d.id)).toMatchObject({ state: 'PURGED', status: 'APPROVED' });
   });
 

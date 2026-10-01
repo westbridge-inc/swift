@@ -91,7 +91,7 @@ async function makeVerifiedProvider(trade = 'carpenter') {
   expect(checklist.length).toBeGreaterThan(0);
   for (const docType of checklist) {
     await runWithoutTenant(() => app.prisma.verificationDocument.create({
-      data: { userId: u.userId, role: 'CUSTOMER', docType, fileUrl: `storage://t/${docType}.jpg`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
+      data: { userId: u.userId, role: 'CUSTOMER', docType, fileUrl: `verification/${u.userId}/${docType}.enc`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
     }));
   }
   const res = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Experienced' }, u.token);

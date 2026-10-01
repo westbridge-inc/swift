@@ -33,7 +33,7 @@ let ownerId = '';
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-renewal-schedule-test');
 const scheduleOf = (documentId: string) => system(() => app.prisma.renewalSchedule.findUnique({ where: { documentId } }));
 const notices = (docId: string) => system(() => app.prisma.notification.findMany({ where: { userId: ownerId }, orderBy: { createdAt: 'asc' } })).then((rows) => rows.filter((n) => (n.data as { kind?: string; docId?: string } | null)?.kind === 'verification_expiry_reminder' && (n.data as { docId?: string }).docId === docId));
-const pending = (docType: string, fileUrl = `verification/${RUN}/${docType}-${nanoid(4)}.enc`) => runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId: ownerId, role: 'VENDOR_OWNER', docType, fileUrl, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1' } }));
+const pending = (docType: string, fileUrl = `verification/${ownerId}/${docType}-${nanoid(4)}.enc`) => runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId: ownerId, role: 'VENDOR_OWNER', docType, fileUrl, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1' } }));
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
@@ -78,7 +78,7 @@ describe('[DOC-1 P4-7] renewal schedules the database keeps', () => {
 
   it('test_expiry_always_scheduled: the database keeps it — a row written straight into the table gets its schedule, and no approved document with an expiry lacks one', async () => {
     const direct = await runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: {
-      userId: ownerId, role: 'VENDOR_OWNER', docType: 'gra_restaurant_licence', fileUrl: `verification/${RUN}/direct.enc`, status: 'APPROVED', reviewedBy: 'seed', reviewedAt: new Date(),
+      userId: ownerId, role: 'VENDOR_OWNER', docType: 'gra_restaurant_licence', fileUrl: `verification/${ownerId}/direct.enc`, status: 'APPROVED', reviewedBy: 'seed', reviewedAt: new Date(),
       consentAt: new Date(), privacyNoticeVersion: 'v1', expiresAt: new Date(Date.now() + 100 * DAY),
     } }));
     expect(await scheduleOf(direct.id)).not.toBeNull();

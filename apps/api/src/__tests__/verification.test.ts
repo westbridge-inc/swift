@@ -1,3 +1,4 @@
+import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
 import { readFileSync } from 'node:fs';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { join } from 'node:path';
@@ -62,9 +63,16 @@ let serviceCategoryId: string;
 
 async function cleanup() {
   const users = await app.prisma.user.findMany({ where: { phone: { in: ALL_PHONES } }, select: { id: true } });
-  const ids = users.map((u) => u.id);
+  const candidates = users.map((u) => u.id);
+  // Retained purge custody must not keep this suite's synthetic supply online.
+  await app.prisma.driver.updateMany({ where: { userId: { in: candidates } }, data: { isOnline: false, isAvailable: false, locationSessionId: null } });
+  await app.prisma.rider.updateMany({ where: { userId: { in: candidates } }, data: { isOnline: false, isAvailable: false, locationSessionId: null } });
+  const claims = await app.prisma.documentPurgeClaim.findMany({ where: { userId: { in: candidates } }, select: { userId: true } });
+  const permanent = new Set(claims.map((c) => c.userId));
+  const ids = candidates.filter((id) => !permanent.has(id));
   if (ids.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
 }
@@ -168,7 +176,7 @@ beforeAll(async () => {
     data: {
       ownerId: owner.id,
       name: 'Step4 Spa',
-      slug: 'step4-spa',
+      slug: `step4-spa-${runBase}`,
       vendorType: 'SERVICE',
       phone: VENDOR_PHONE,
       addressLine1: '1 Test Lane',
@@ -450,7 +458,7 @@ describe('Expiry automation', () => {
         userId: moverUserId,
         role: 'MOVER',
         docType: 'vehicle_insurance',
-        fileUrl: 'storage://t/lapsing.jpg',
+        fileUrl: `verification/${moverUserId}/lapsing.enc`,
         status: 'PENDING',
         expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
       },
@@ -554,7 +562,8 @@ describe('Document storage & DPA compliance', () => {
       },
     });
 
-    const purged = await sweepService.purgeExpiredDocuments();
+    const scoped = new VerificationService(documentMaintenanceScope(app.prisma, [moverUserId]), new NotificationService(app.prisma, app.io), getKycProvider());
+    const purged = await scoped.purgeExpiredDocuments();
     expect(purged).toBeGreaterThanOrEqual(1);
 
     const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
@@ -571,7 +580,7 @@ describe('Document storage & DPA compliance', () => {
         userId: moverUserId,
         role: 'MOVER',
         docType: 'national_id',
-        fileUrl: '/uploads/verification/retain-me.jpg',
+        fileUrl: `/uploads/verification/${moverUserId}/retain-me.enc`,
         status: 'APPROVED',
         consentAt: new Date(),
         privacyNoticeVersion: 'v1',
@@ -949,7 +958,7 @@ describe('Taxi hire-class insurance — the manual 5-point check is enforced', (
         userId: taxiUserId,
         role: 'MOVER' as const,
         docType,
-        fileUrl: `storage://t/taxi/${docType}.jpg`,
+        fileUrl: `verification/${taxiUserId}/${docType}.enc`,
         status: 'APPROVED' as const,
         reviewedBy: 'test',
         reviewedAt: new Date(),

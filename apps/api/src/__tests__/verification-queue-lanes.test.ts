@@ -79,7 +79,7 @@ beforeAll(async () => {
   const mover = await makeUser(3, ['MOVER']);
   const vendor = await makeUser(4, ['VENDOR_OWNER']);
   const doc = (userId: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR_OWNER', docType: string) =>
-    app.prisma.verificationDocument.create({ data: { userId, role, docType, fileUrl: `storage://t/${nanoid(6)}.jpg`, status: 'PENDING' } });
+    app.prisma.verificationDocument.create({ data: { userId, role, docType, fileUrl: `verification/${userId}/${nanoid(6)}.enc`, status: 'PENDING' } });
   customerDocId = (await doc(customer.id, 'CUSTOMER', 'national_id')).id;
   moverDocId = (await doc(mover.id, 'MOVER', 'police_clearance')).id;
   vendorDocId = (await doc(vendor.id, 'VENDOR_OWNER', 'business_registration')).id;

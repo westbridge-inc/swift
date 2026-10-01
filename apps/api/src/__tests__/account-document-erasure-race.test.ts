@@ -22,6 +22,7 @@ import type { KycProvider } from '../providers/kyc/kyc-provider';
 const objects = vi.hoisted(() => new Map<string, Buffer>());
 vi.mock('../providers/storage/storage-provider', () => ({
   getStorageProvider: () => ({
+    purgeNamespace: async () => 'synthetic:account-document-erasure',
     getObject: async (key: string) => {
       const bytes = objects.get(key);
       if (!bytes) throw Object.assign(new Error('synthetic object absent'), { code: 'ENOENT' });
@@ -51,10 +52,7 @@ beforeAll(async () => {
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); objects.clear(); });
 afterAll(async () => {
   if (!app?.prisma || users.length === 0) { await app?.close(); return; }
-  await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
-  await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  await app.prisma.docType.deleteMany({ where: { code: { in: policyCodes } } });
+  // Retain permanent purge/source provenance in this isolated fixture namespace.
   await app.close();
 });
 
@@ -66,12 +64,13 @@ async function fixture(metadataAvailable = true) {
   users.push(user.id);
   const fileKey = `/uploads/verification/${user.id}/${nanoid(24)}.enc`;
   const bytes = Buffer.from('synthetic image ciphertext'); objects.set(fileKey, bytes);
-  const metadata = () => app.prisma.encryptedObject.create({ data: {
+  await app.prisma.encryptedObject.create({ data: {
+    storageNamespace: 'synthetic:account-document-erasure', uploadState: metadataAvailable ? 'READY' : 'PENDING',
     fileKey, createdBy: user.id, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2),
     wrappedDek: Buffer.alloc(60, 3), mimeType: 'image/jpeg', sizeBytes: bytes.length,
     sha256: createHash('sha256').update(bytes).digest('hex'),
   } });
-  if (metadataAvailable) await metadata();
+  const metadata = () => app.prisma.encryptedObject.update({ where: { fileKey }, data: { uploadState: 'READY' } });
   const doc = await app.prisma.verificationDocument.create({ data: {
     userId: user.id, role: 'CUSTOMER', docType: 'national_id', status: 'APPROVED',
     fileUrl: fileKey, retentionExpiresAt: new Date(Date.now() + 86_400_000),
@@ -89,6 +88,9 @@ async function fixture(metadataAvailable = true) {
     verificationDocument: { async findMany({ args, query }) {
       if (args.where?.retentionExpiresAt) args.where = { ...args.where, userId: user.id };
       return query(args);
+    } },
+    documentPurgeClaim: { async findMany({ args, query }) {
+      return query({ ...args, where: { ...args.where, userId: user.id } });
     } },
     storageOrphan: { async findMany({ args, query }) {
       if (pauseCleanup) { pauseCleanup = false; cleanupReached.release(); await resumeCleanup.reached; }
@@ -199,7 +201,7 @@ describe('F-220-01 account erasure/reaper PostgreSQL barriers', () => {
       await expect(h.verification().purgeExpiredDocuments()).resolves.toBe(1);
       await h.assertErased();
     } finally { h.resumeCleanup.release(); await deleting; }
-    await expect(deleting).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
+    await expect(deleting).resolves.toMatchObject({ deleted: true });
     await expect(h.verification().purgeExpiredDocuments()).resolves.toBe(0);
   });
 
@@ -240,8 +242,9 @@ describe('F-220-01 account erasure/reaper PostgreSQL barriers', () => {
     expect(row.extractionRuns[0]!.wrappedDek).not.toBeNull();
     expect(row.extractionRuns[0]!.fields[0]!.valueCt).not.toBeNull();
     expect(await app.prisma.deletionReceipt.count({ where: { submissionId: h.doc.id } })).toBe(0);
-    // The already-shredded image remains an explicit unresolved obligation;
-    // this test does not claim the separate partial-shred recovery is solved.
+    // The claim survives the failed field transaction and recovers the already-shredded image.
+    await expect(h.verification().purgeExpiredDocuments()).resolves.toBe(1);
+    await h.assertErased();
   });
 });
 

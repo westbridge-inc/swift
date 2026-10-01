@@ -9,6 +9,7 @@
  * fills rows that predate subjects and is idempotent; the tenant wall binds the new
  * tables to the account's tenant.
  */
+import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -145,23 +146,23 @@ describe('[DOC-1 P1-2] every new submission writes a subject and a link', () => 
   it('legacy rows are backfilled, idempotently; a plate-less vehicle document stays unresolved and is counted', async () => {
     const u = await person(6);
     const legacy = await system(() => app.prisma.verificationDocument.createMany({ data: [
-      { userId: u, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: `x/${RUN}/1`, status: 'APPROVED' },
-      { userId: u, role: 'VENDOR_OWNER', docType: 'owner_national_id', fileUrl: `x/${RUN}/2`, status: 'PENDING' },
+      { userId: u, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: `/uploads/verification/${u}/${RUN}-1.enc`, status: 'APPROVED' },
+      { userId: u, role: 'VENDOR_OWNER', docType: 'owner_national_id', fileUrl: `/uploads/verification/${u}/${RUN}-2.enc`, status: 'PENDING' },
     ] }));
     expect(legacy.count).toBe(2);
     const m = await person(7, 'MOVER');
     await system(() => app.prisma.rider.create({ data: { userId: m, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }));
-    await system(() => app.prisma.verificationDocument.create({ data: { userId: m, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: `x/${RUN}/3`, status: 'APPROVED' } }));
+    await system(() => app.prisma.verificationDocument.create({ data: { userId: m, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: `/uploads/verification/${m}/${RUN}-3.enc`, status: 'APPROVED' } }));
     const before = await system(() => app.prisma.verificationDocument.count({ where: { userId: { in: [u, m] }, subjectId: null } }));
     expect(before).toBe(3);
-    const first = await system(() => backfillSubjects(app.prisma));
+    const first = await system(() => backfillSubjects(documentMaintenanceScope(app.prisma, users)));
     expect(first.resolved).toBeGreaterThanOrEqual(2);
     expect(first.unresolved).toBeGreaterThanOrEqual(1);
     const rows = await system(() => app.prisma.verificationDocument.findMany({ where: { userId: u }, select: { docType: true, subjectId: true } }));
     expect(rows.every((r) => r.subjectId)).toBe(true);
     expect(new Set(rows.map((r) => r.subjectId)).size).toBe(2); // business + person
     expect((await system(() => app.prisma.verificationDocument.findFirst({ where: { userId: m } })))!.subjectId).toBeNull();
-    const second = await system(() => backfillSubjects(app.prisma));
+    const second = await system(() => backfillSubjects(documentMaintenanceScope(app.prisma, users)));
     expect(second.resolved).toBe(0);
   });
 

@@ -59,6 +59,7 @@ async function purgeFixtures() {
   await app.prisma.rating.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
 
@@ -132,7 +133,7 @@ async function makeDriverEligibleForGo(driver: { userId: string; driverId: strin
       userId: driver.userId,
       role: 'MOVER',
       docType: 'vehicle_insurance',
-      fileUrl: 'storage://t/ins.jpg',
+      fileUrl: `verification/${driver.userId}/insurance.enc`,
       status: 'APPROVED',
       coverageClass: 'HIRE',
       hireClassConfirmed: true,
@@ -899,7 +900,7 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
         userId,
         role: 'MOVER',
         docType: 'vehicle_insurance',
-        fileUrl: 'storage://t/ins.jpg',
+        fileUrl: `verification/${userId}/insurance.enc`,
         status: 'APPROVED',
         coverageClass,
         hireClassConfirmed,
