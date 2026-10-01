@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { User } from '@swift/types';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const nativeRequire = createRequire(require.resolve('@react-navigation/native'));
+const coreRequire = createRequire(nativeRequire.resolve('@react-navigation/core'));
+const { CommonActions, StackRouter } = await import(/* @vite-ignore */ coreRequire.resolve('@react-navigation/routers')) as Pick<typeof import('@react-navigation/native'), 'CommonActions' | 'StackRouter'>;
 
 // ---------------------------------------------------------------------------
 // Independent review VP-R2-01. A signed-out guest taps "Preview a business
@@ -172,6 +177,11 @@ const fx = vi.hoisted(() => {
       for (const view of [...mounted]) view.unmount();
     },
     token,
+    hours: { data: undefined as unknown, isSuccess: false },
+    runMutations: false,
+    addStaff: vi.fn(async () => ({ data: { data: {} } })),
+    setHours: vi.fn(async (_days: unknown) => ({ data: { data: {} } })),
+    subscription: vi.fn(async () => ({ data: { data: { id: 'subscription-b' } } })),
     profile: { data: null as unknown, error: null as unknown },
     queryClient: {
       clear: vi.fn(),
@@ -209,12 +219,14 @@ vi.mock('zustand', async () => {
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => fx.queryClient,
   useMutation: (options: NonNullable<typeof fx.lastMutation>) => {
-    const result = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false, isError: false, isSuccess: false };
+    const invoke = (variables: unknown) => fx.runMutations ? options.mutationFn?.(variables) : undefined;
+    const result = { mutate: vi.fn(invoke), mutateAsync: vi.fn(invoke), isPending: false, isError: false, isSuccess: false };
     fx.lastMutation = options;
     fx.lastMutationResult = result;
     return result;
   },
   useQuery: (options: { queryKey: readonly unknown[]; enabled?: boolean }) => {
+    if (options.queryKey[0] === 'vendor' && options.queryKey[1] === 'hours') return { ...fx.hours, isLoading: false, isError: false };
     if (options.enabled !== false && options.queryKey[0] === 'vendor' && options.queryKey[1] === 'profile') {
       const { data, error } = fx.profile;
       return { data, error, isLoading: false, isFetched: true, refetch: vi.fn() };
@@ -238,7 +250,7 @@ vi.mock('expo-image', () => ({ Image: 'Image' }));
 vi.mock('expo-crypto', () => ({ randomUUID: () => `scope-${Math.random().toString(36).slice(2)}` }));
 vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn(), goBack: vi.fn() }) }));
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather', MaterialCommunityIcons: 'MaterialCommunityIcons' }));
-vi.mock('@swift/ui', () => ({ color: fx.token, font: fx.token, fontSize: fx.token, radius: fx.token, space: fx.token }));
+vi.mock('@swift/ui', () => ({ elevation: fx.token, color: fx.token, font: fx.token, fontSize: fx.token, radius: fx.token, space: fx.token }));
 vi.mock('../../../kit', () =>
   Object.fromEntries(
     ['Card', 'Chip', 'DecorativeIcon', 'IconChip', 'LoadingBlock', 'Pictogram', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'SettingsRow', 'T', 'TonePill']
@@ -264,10 +276,10 @@ vi.mock('../../../services/api', () => ({
   customerApi: { switchRole: fx.switchRole },
   revokeAuthSession: vi.fn(async () => undefined),
   riderApi: {},
-  vendorApi: { updateProfile: fx.updateProfile },
+  vendorApi: { addStaff: fx.addStaff, updateProfile: fx.updateProfile, setHours: fx.setHours, subscription: fx.subscription },
   vendorDiscoveryApi: {},
 }));
-vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), getSocket: vi.fn(() => null) }));
+vi.mock('../../../services/socket', () => ({ connectSocket: vi.fn(), disconnectSocket: vi.fn(), reconnectSocketForStoreHandoff: vi.fn(), getSocket: vi.fn(() => null) }));
 vi.mock('../../../services/push', () => ({ preparePushTokenForLogout: vi.fn(async () => null) }));
 vi.mock('../../../services/backgroundLocation', () => ({ stopMoverLocation: vi.fn(async () => undefined) }));
 vi.mock('../../../lib/storage', () => {
@@ -285,6 +297,32 @@ vi.mock('../../../lib/adsQueue', () => ({ retireAdEventScope: vi.fn() }));
 vi.mock('../../../lib/analytics', () => ({ track: vi.fn() }));
 vi.mock('../../../lib/haptics', () => ({ haptic: { select: vi.fn(), success: vi.fn(), warning: vi.fn(), error: vi.fn() } }));
 
+// Native navigators are element containers; the test reconciles their real navigationKey.
+vi.mock('@react-navigation/native-stack', () => ({ createNativeStackNavigator: () => ({ Navigator: 'Stack.Navigator', Group: 'Stack.Group', Screen: 'Stack.Screen' }) }));
+vi.mock('@react-navigation/bottom-tabs', () => ({ createBottomTabNavigator: () => ({ Navigator: 'Tabs.Navigator', Screen: 'Tabs.Screen' }) }));
+vi.mock('../../../components/onboarding/WentLive', () => ({ useWentLive: () => ({}), WentLivePopup: 'WentLivePopup' }));
+vi.mock('../../../components/onboarding/DocumentUploadCard', () => ({ docLabel: (value: string) => value }));
+vi.mock('../../../kit/after-dismiss', () => ({ afterDismiss: (fn: () => void) => fn() }));
+vi.mock('../../../kit/switch', () => ({ Switch: 'Switch' }));
+vi.mock('../../profile/screens/GetHelpScreen', () => ({ GetHelpScreen: 'GetHelpScreen' }));
+vi.mock('../NewOrderTakeover', () => ({ NewOrderTakeover: 'NewOrderTakeover' }));
+vi.mock('./BusinessSetup', () => ({ BusinessSetup: 'BusinessSetup', VendorOnboarding: 'VendorOnboarding' }));
+vi.mock('./VendorBulkImportScreen', () => ({ VendorBulkImportScreen: 'VendorBulkImportScreen' }));
+vi.mock('./VendorCategoryReviewScreen', () => ({ VendorCategoryReviewScreen: 'VendorCategoryReviewScreen' }));
+vi.mock('./VendorInsightsScreen', () => ({ VendorInsightsScreen: 'VendorInsightsScreen' }));
+vi.mock('./VendorItemEditorScreen', () => ({ VendorItemEditorScreen: 'VendorItemEditorScreen' }));
+vi.mock('./VendorMenuScreen', () => ({ VendorMenuScreen: 'VendorMenuScreen' }));
+vi.mock('./VendorMyQrScreen', () => ({ VendorMyQrScreen: 'VendorMyQrScreen' }));
+vi.mock('./VendorOrderDetailScreen', () => ({ VendorOrderDetailScreen: 'VendorOrderDetailScreen' }));
+vi.mock('./VendorOrderHistoryScreen', () => ({ VendorOrderHistoryScreen: 'VendorOrderHistoryScreen' }));
+vi.mock('./VendorScheduleScreen', () => ({ VendorScheduleScreen: 'VendorScheduleScreen' }));
+vi.mock('./VendorTierScreen', () => ({ VendorTierScreen: 'VendorTierScreen' }));
+vi.mock('../../billing/screens/WeeklyFeeRouteScreen', () => ({ WeeklyFeeRouteScreen: 'WeeklyFeeRouteScreen' }));
+import { VendorStack } from '../VendorStack';
+import { VendorOps } from './VendorOps';
+import { VendorBillingSuspended } from './VendorBillingSuspended';
+import { resolveFeeNotification } from '../../../services/weekly-fee-notification';
+import { useAddStaff } from '../../../hooks/vendorops';
 import { VendorAccountScreen } from './VendorAccountScreen';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { RolePickerScreen } from '../../../screens/auth/RolePickerScreen';
@@ -441,6 +479,9 @@ beforeEach(async () => {
   // A fresh device: no market chosen yet (sign-out keeps the device's market).
   useAuthStore.setState({ countryCode: null, dialCode: null, currencyCode: null, currencySymbol: null });
   fx.profile = { data: null, error: null };
+  fx.hours = { data: undefined, isSuccess: false };
+  fx.runMutations = false;
+  fx.queryClient.removeQueries.mockReset();
   vi.clearAllMocks();
 });
 
@@ -615,5 +656,89 @@ describe('[Q8] the Account tab moves the store pin', () => {
     const account = fx.mount(VendorAccountScreen, {});
 
     expect(named(account.output, 'StoreLocationCard')).toHaveLength(0);
+  });
+});
+
+
+describe('AX360: store handoff retires Account drafts and callbacks', () => {
+  it.each(['notification', 'switcher', 'paused switcher'] as const)('%s never submits A’s hours draft for B', async (entry) => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    const storeB = { ...liveStore, id: 'store-b', name: 'B Store' };
+    fx.profile = { data: ownerOf(liveStore, storeB), error: null };
+    useStoreSwitcher.getState().setSelectedStore('store-a');
+    fx.hours = { data: [{ dayOfWeek: 0, openTime: '08:00', closeTime: '22:00', isClosed: false }], isSuccess: true };
+    fx.runMutations = true;
+    const navigator = fx.mount(VendorStack, {});
+    const oldKey = (ofType(navigator.output, 'Stack.Group')[0]?.props.navigationKey ?? only(navigator.output, 'Stack.Navigator').key);
+    const router = StackRouter({ initialRouteName: 'VendorRoot' });
+    const routes = { routeNames: ofType(navigator.output, 'Stack.Screen').map((el) => el.props.name as string), routeParamList: {}, routeGetIdList: {} };
+    let routeState = router.getInitialState(routes);
+    routeState = router.getRehydratedState(router.getStateForAction(routeState, CommonActions.navigate('VendorOrderDetail', { orderId: 'A-order' }), routes)!, routes);
+    fx.queryClient.removeQueries.mockImplementation(({ queryKey }: { queryKey: string[] }) => {
+      if (queryKey[0] === 'vendor') fx.hours = { data: undefined, isSuccess: false };
+    });
+    let account = fx.mount(VendorAccountScreen, {});
+    named(account.output, 'InlineInput')[0]!.props.onChangeText('03:17');
+    account.render();
+    expect(named(account.output, 'InlineInput')[0]!.props.value).toBe('03:17');
+    const oldSave = ofType(account.output, 'PillButton').find((el) => el.props.label === 'Save hours')!.props.onPress;
+
+    if (entry === 'notification') {
+      const params = await resolveFeeNotification({ vendorId: 'store-b', subscriptionId: 'subscription-b' });
+      // Notification navigation may dispatch BEFORE React commits the new group.
+      routeState = router.getRehydratedState(router.getStateForAction(routeState, CommonActions.navigate('WeeklyFee', params!), routes)!, routes);
+    } else {
+      const switcher = entry === 'switcher'
+        ? fx.mount(VendorOps, { store: liveStore, navigation: { navigate: vi.fn() } })
+        : fx.mount(VendorBillingSuspended, { store: liveStore, stores: [liveStore, storeB], myRole: 'OWNER' });
+      ofType(switcher.output, 'Chip').find((el) => el.props.label === 'B Store')!.props.onPress();
+    }
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-b');
+    navigator.render();
+    const newKey = (ofType(navigator.output, 'Stack.Group')[0]?.props.navigationKey ?? only(navigator.output, 'Stack.Navigator').key);
+    // Reconcile like React: only a changed store group key retires its editors.
+    if (newKey !== oldKey) {
+      account.unmount();
+      account = fx.mount(VendorAccountScreen, {});
+    } else account.render();
+    expect(named(account.output, 'InlineInput').map((el) => el.props.value), 'A’s dirty draft must be gone').not.toContain('03:17');
+    expect(newKey).toBe(`store-b:${useStoreSwitcher.getState().storeGeneration}`);
+    expect(ofType(only(navigator.output, 'Stack.Group'), 'Stack.Screen').some((el) => el.props.name === 'WeeklyFee'),
+      'the notification destination survives the store route reset').toBe(false);
+    const routeKeyChanges = ofType(only(navigator.output, 'Stack.Group'), 'Stack.Screen').map((el) => el.props.name as string);
+    routeState = router.getStateForRouteNamesChange(routeState, { ...routes, routeKeyChanges });
+    expect(routeState.routes.some((route) => route.name === 'VendorOrderDetail')).toBe(false);
+    expect(routeState.routes[routeState.index]!.name).toBe(entry === 'notification' ? 'WeeklyFee' : 'VendorRoot');
+    await expect(oldSave()).rejects.toThrow('store changed');
+    expect(fx.setHours).not.toHaveBeenCalled();
+    // Until B's own hours arrive, Save cannot submit a fabricated schedule.
+    expect(ofType(account.output, 'PillButton').find((el) => el.props.label === 'Save hours')!.props.disabled).toBe(true);
+    fx.hours = { data: [{ dayOfWeek: 0, openTime: '09:30', closeTime: '18:00', isClosed: false }], isSuccess: true };
+    account.render();
+    // A freshly seeded B editor remains writable.
+    const saveB = ofType(account.output, 'PillButton').find((el) => el.props.label === 'Save hours')!;
+    await saveB.props.onPress();
+    expect(fx.setHours).toHaveBeenCalledOnce();
+    expect(fx.setHours.mock.calls[0]![0]).toEqual(expect.arrayContaining([expect.objectContaining({ openTime: '09:30' })]));
+    expect(fx.setHours.mock.calls[0]![0]).not.toEqual(expect.arrayContaining([expect.objectContaining({ openTime: '03:17' })]));
+  });
+
+  it('a staff grant waiting for step-up refuses its retry after A → B → A', async () => {
+    useStoreSwitcher.getState().setSelectedStore('store-a');
+    let retry!: () => Promise<unknown>;
+    // Capture the callback held by the real hook’s step-up wrapper. Calling
+    // it after the switch must reject before the API method is even entered.
+    const guard = <A extends unknown[], R>(fn: (...args: A) => Promise<R>) => (...args: A) => {
+      retry = () => fn(...args);
+      return Promise.resolve(undefined as R);
+    };
+    fx.runMutations = true;
+    const hook = fx.mount(() => useAddStaff(guard), {});
+    const result = hook.output as { mutateAsync: (data: unknown) => Promise<unknown> };
+    await result.mutateAsync({ phone: 'test-phone', role: 'STAFF' });
+    useStoreSwitcher.getState().setSelectedStore('store-b');
+    useStoreSwitcher.getState().setSelectedStore('store-a');
+    await expect(retry()).rejects.toThrow('store changed');
+    expect(fx.addStaff).not.toHaveBeenCalled();
   });
 });
