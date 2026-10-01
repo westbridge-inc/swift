@@ -58,6 +58,7 @@ const scoped = { $allOperations: tenantScope };
  */
 const TENANT_QUERY_EXTENSIONS = {
   user: scoped, vendor: scoped, order: scoped,
+  handoverPhotoProof: scoped, cashHandoverEvidence: scoped, mmgPayerEvidence: scoped, identityReviewCase: scoped,
   // QR growth engine: codes + scan analytics are tenant-owned rows. The public
   // /s/:code resolver runs pre-auth (no context) and stays unscoped by design —
   // a shortCode is globally unique and names its own tenant.
@@ -94,7 +95,9 @@ const TENANT_QUERY_EXTENSIONS = {
   providerPayment: scoped,
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it.
   mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped,
+  billingDunningClock: scoped, billingObligationTransition: scoped, paymentConfirmationHold: scoped, billingFeeNotice: scoped, billingNoticeHandoff: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
+  moverFeeAuthority: scoped, moverFeeSubscription: scoped,
   // [M-08] The prepaid top-up as one persisted command.
   topUpCommand: scoped,
   // [PT-1] Card rail v2: an enrolled card, a hosted session, and the evidence

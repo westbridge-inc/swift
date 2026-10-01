@@ -26,6 +26,7 @@
  */
 
 export const TENANT_TABLES = [
+  'handover_photo_proofs', 'cash_handover_evidence', 'mmg_payer_evidence', 'identity_review_cases',
   'EmergencyContact', 'EvidenceBundle', 'IncidentCase', 'LivenessCheck',
   'SafetyAccessLog', 'SosAlert', 'TripSafetySession', 'actor_rating_stats',
   // [S-01] The SOS escalation outbox belongs to the alert's tenant.
@@ -108,6 +109,9 @@ export const TENANT_TABLES = [
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
   // walled like the provider payment that credits it.
   'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
+  // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
+  'billing_obligation_transitions',
   'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',
@@ -122,6 +126,7 @@ export const TENANT_TABLES = [
   // [M-20] A settlement file as one staged, validated import.
   'settlement_imports', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency',
+  'mover_fee_authorities', 'mover_fee_subscriptions',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
   // [PT-1] Card rail v2: enrolled cards, hosted sessions and their evidence.

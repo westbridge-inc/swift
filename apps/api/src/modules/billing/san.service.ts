@@ -107,13 +107,39 @@ export type SanResolution =
   | { ok: true; subscription: Subscription }
   | { ok: false; code: SanValidationFailure | 'SAN_UNKNOWN' | 'TOMBSTONED' | 'ACCOUNT_CLOSED'; san?: string };
 
+/** [AX363-F2] The tenant that owns a subscription, by the one ownership rule
+ *  the admin tenant scope uses: exactly one owner, a vendor (its tenant) or a
+ *  rider or driver (their user's tenant). Read explicitly, whatever query
+ *  extension the caller's client carries. Null: missing, or ownership
+ *  ambiguous; a caller comparing it to a tenant then fails closed. */
+export async function subscriptionOwnerTenant(db: Db, subscriptionId: string): Promise<string | null> {
+  const sub = await db.subscription.findUnique({
+    where: { id: subscriptionId },
+    select: {
+      vendorId: true, riderId: true, driverId: true,
+      vendor: { select: { tenantId: true } },
+      rider: { select: { user: { select: { tenantId: true } } } },
+      driver: { select: { user: { select: { tenantId: true } } } },
+    },
+  });
+  if (!sub) return null;
+  if ([sub.vendorId, sub.riderId, sub.driverId].filter((owner) => owner !== null).length !== 1) return null;
+  return sub.vendor?.tenantId ?? sub.rider?.user.tenantId ?? sub.driver?.user.tenantId ?? null;
+}
+
 /** The DB half of the validation pipeline [spec 2.2]. In payment paths these
  *  codes route to suspense — never reject the money (SO-6); entry/inquiry
- *  paths may surface them directly. */
-export async function resolveSan(db: Db, raw: string): Promise<SanResolution> {
+ *  paths may surface them directly. [AX363-F2] With `tenantId` (every
+ *  payment path), the number resolves only to an account of that tenant:
+ *  another tenant's account is, for this payment, nobody's (SAN_UNKNOWN),
+ *  so the money is held for a person and never crosses a tenant. */
+export async function resolveSan(db: Db, raw: string, opts: { tenantId?: string } = {}): Promise<SanResolution> {
   const shape = validateSanShape(raw);
   if (!shape.ok) return { ok: false, code: shape.code };
   const sub = await db.subscription.findUnique({ where: { san: shape.san } });
+  if (sub && opts.tenantId !== undefined && (await subscriptionOwnerTenant(db, sub.id)) !== opts.tenantId) {
+    return { ok: false, code: 'SAN_UNKNOWN', san: shape.san };
+  }
   if (!sub) {
     const dead = await db.sanTombstone.findUnique({ where: { san: shape.san } });
     return { ok: false, code: dead ? 'TOMBSTONED' : 'SAN_UNKNOWN', san: shape.san };

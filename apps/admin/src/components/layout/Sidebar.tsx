@@ -28,7 +28,7 @@ import {
   Radar,
   Globe,
   Scale,
-  ListRestart, Compass,
+  ListRestart, Compass, Receipt,
 } from 'lucide-react';
 
 // Grouped by what the operator is doing, not by table name. Sections only list
@@ -62,6 +62,8 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Finance', href: '/finance', icon: DollarSign },
       { label: 'Subscriptions', href: '/subscriptions', icon: RefreshCw },
       { label: 'Cash rail', href: '/cash', icon: Banknote },
+      // Support finds a partner's MMG weekly-fee payment by either id or their phone.
+      { label: 'MMG payments', href: '/mmg-payments', icon: Receipt },
       { label: 'Claims', href: '/claims', icon: ShieldAlert },
       { label: 'Promos', href: '/promos', icon: Tag },
     ],

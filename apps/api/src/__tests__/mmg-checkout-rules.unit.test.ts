@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Prisma, type PrismaClient } from '@prisma/client';
-import { bindingOf, candidatesFrom, judge, sameMsisdn } from '../modules/billing/mmg-checkout.service';
+import { bindingOf, checkoutReplyFrom, judge, mmgCreationInstant, sameMsisdn, successAnswerOf } from '../modules/billing/mmg-checkout.service';
 import {
   FEE_CHECKOUT_PLATFORMS_KEY,
   checkoutAmountGyd,
@@ -13,7 +13,7 @@ import {
 } from '../modules/billing/fee-pay-actions';
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, guyanaDay, mmgPayLine } from '../modules/billing/fee-notice-copy';
 import type { MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
-import { MMG_LOOKUP_REFERENCE_FIELDS, echoedReferencesFrom, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { MMG_LOOKUP_REFERENCE_FIELDS, echoedReferencesFrom, lookupDetailFrom, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 import { PROVIDER_IDENTITY_BACKFILL_KEY } from '../modules/billing/provider-identity-backfill';
 
 // ---------------------------------------------------------------------------
@@ -27,32 +27,44 @@ import { PROVIDER_IDENTITY_BACKFILL_KEY } from '../modules/billing/provider-iden
 const REF = '179000000000012345';
 const OTHER_REF = '179000000000099999';
 const MERCHANT = '5926000001';
-const intent = { merchantTransactionId: REF, amount: new Prisma.Decimal(1500), currencyCode: 'GYD', createdAt: new Date('2026-09-29T12:00:00Z') };
-const found = (patch: Partial<Extract<MmgLookupDetail, { outcome: 'found' }>> = {}): MmgLookupDetail => ({
-  outcome: 'found', transactionId: 'MMGTX1', status: 'approved', amountMinor: 150_000, currencyCode: 'GYD',
-  creditParties: [MERCHANT], createdAt: '2026-09-29T12:05:00Z', echoedReferences: [], raw: { transactionReference: 'MMGTX1' }, ...patch,
+const CREATED = new Date('2026-09-29T12:00:00Z');
+const intent = { merchantTransactionId: REF, amount: new Prisma.Decimal(1500), currencyCode: 'GYD', createdAt: CREATED, expiresAt: new Date(CREATED.getTime() + 30 * 60_000) };
+/** MMG stamps creationDate as Guyana wall-clock time written with a "Z" (UAT, 1 Oct). */
+const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
+/** MMG's lookup answer in the exact UAT shape (evidence/mmg-uat/ROUNDTRIP-PROOF-20261001.md). */
+const uatAnswer = (patch: Record<string, unknown> = {}) => ({
+  transactionStatus: 'successful', amount: '1500', currency: 'GYD', creationDate: gyStamp(new Date(CREATED.getTime() + 5 * 60_000)),
+  subType: 'subscriber_mpay', transactionReference: 'MMGLEDGER1',
+  creditParty: [{ key: 'accountid', value: MERCHANT }], debitParty: [{ key: 'accountid', value: '6000002' }],
+  metadata: [{ key: 'amount', value: '1500' }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }],
+  descriptionText: null, ...patch,
 });
-/** MMG's answer echoing THIS checkout's reference in the confirmed field [F1]. */
+const found = (patch: Partial<Extract<MmgLookupDetail, { outcome: 'found' }>> = {}): MmgLookupDetail => ({ ...lookupDetailFrom(uatAnswer(), 'MMGTX1'), ...patch });
+/** MMG's success answer for THIS checkout (ResultCode 0) naming the transaction. */
+const answered = { txnId: 'MMGTX1' } as const;
+/** MMG's answer echoing THIS checkout's reference in a confirmed field [F1]: never present in UAT. */
 const echo = { echoedReferences: [REF] };
 
-describe('which MMG transaction a reply may be naming (reply field names are unconfirmed)', () => {
-  it('takes id-shaped values, id-like keys first, and never our reference, the amount, the merchant, a date or a secret', () => {
-    const reply = {
-      merchantTransactionId: REF,
-      amount: '1500',
-      merchant: MERCHANT,
-      when: '2026-09-29T12:00:00Z',
-      secretKey: 'SECRET999999',
-      note: 'ZZ12345678',
-      nested: { transactionId: 'MMG-TX-777' },
-      message: 'Payment successful',
-    };
-    expect(candidatesFrom(reply, { merchantTransactionId: REF, amountGyd: 1500 }, [MERCHANT])).toEqual(['MMG-TX-777', 'ZZ12345678']);
+describe('the official MMG response fields', () => {
+  it('reads only root fields and keeps the exact transaction string', () => {
+    expect(checkoutReplyFrom({ merchantTransactionId: REF, transactionId: 'MMG-TX-777', ResultCode: '0', nested: { transactionId: 'OTHER999' }, htmlResponse: 'NO888' }))
+      .toEqual({ merchantTransactionId: REF, transactionId: 'MMG-TX-777', resultCode: '0' });
   });
 
-  it('is bounded: at most five candidates', () => {
-    const reply = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`transactionId${i}`, `TX${100000 + i}`]));
-    expect(candidatesFrom(reply, { merchantTransactionId: REF, amountGyd: 1500 }, [])).toHaveLength(5);
+  it('does not guess candidates from arbitrary fields, even if many look like ids', () => {
+    const ids = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`transactionId${i}`, `TX${100000 + i}`]));
+    expect(checkoutReplyFrom({ ...ids, merchantTransactionId: REF, ResultCode: '0' })).toBeNull();
+  });
+
+  it('failure codes can omit transactionId; a success without one is malformed', () => {
+    for (const ResultCode of ['1', '2', '3', '4', '5', '6', '7']) {
+      expect(checkoutReplyFrom({ merchantTransactionId: REF, ResultCode })).toEqual({ merchantTransactionId: REF, transactionId: null, resultCode: ResultCode });
+    }
+    expect(checkoutReplyFrom({ merchantTransactionId: REF, ResultCode: '0' })).toBeNull();
+  });
+
+  it.each([123, [], {}, ' TX1', 'TX1 ', 'TX1\n', 'TX/1', 'X'.repeat(129)])('rejects malformed transactionId %s', (transactionId) => {
+    expect(checkoutReplyFrom({ merchantTransactionId: REF, ResultCode: '0', transactionId })).toBeNull();
   });
 
   it('one MSISDN spelled with or without 592', () => {
@@ -63,16 +75,33 @@ describe('which MMG transaction a reply may be naming (reply field names are unc
   });
 });
 
-describe('what a lookup answer means for a checkout [I2 · F1]', () => {
-  it('credits only an approved transaction of exactly the amount asked, in GYD, paid to our merchant, that MMG ties to THIS checkout', () => {
-    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT])).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1' });
-    expect(judge(intent, 'MMGTX1', found({ ...echo, creditParties: ['6000001'] }), [MERCHANT]).verdict).toBe('CONFIRM');
-    // The same reference in two confirmed fields is still one reference.
-    expect(judge(intent, 'MMGTX1', found({ echoedReferences: [REF, REF] }), [MERCHANT]).verdict).toBe('CONFIRM');
+describe('what a lookup answer means for a checkout [owner, 1 Oct · I2 · F1]', () => {
+  it('confirms automatically only when MMG answered success for THIS checkout naming the transaction, and its lookup says "successful", exactly the amount, in GYD, to our merchant, inside the checkout window, with its ledger number', () => {
+    expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], answered)).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+    // Our merchant MSISDN spelled without the country code; MMG's echo changes nothing.
+    expect(judge(intent, 'MMGTX1', found({ creditAccounts: ['6000001'] }), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
+    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
   });
 
-  it('[F1] an exact approved payment MMG does not tie to this checkout is held for a person at once, never credited', () => {
-    expect(judge(intent, 'MMGTX1', found(), [MERCHANT])).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'REFERENCE_NOT_ECHOED', decisive: true });
+  it('the UAT round trip of 1 Oct confirms: MMG’s Guyana-time creationDate falls inside the checkout window', () => {
+    // Checkout opened 15:38:19 Guyana time (its reference was that epoch second);
+    // MMG answered ResultCode 0 naming 20402048536279; the lookup answered:
+    const opened = new Date(1790883499 * 1000);
+    const uatIntent = { merchantTransactionId: REF, amount: new Prisma.Decimal(500), currencyCode: 'GYD', createdAt: opened, expiresAt: new Date(opened.getTime() + 30 * 60_000) };
+    const detail = lookupDetailFrom(uatAnswer({ amount: '500', creationDate: '2026-10-01T15:39:36.526Z', transactionReference: '20402048601581', metadata: [{ key: 'amount', value: '500' }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }] }), '20402048536279');
+    expect(judge(uatIntent, '20402048536279', detail, [MERCHANT], [], { txnId: '20402048536279' }))
+      .toEqual({ verdict: 'CONFIRM', txnId: '20402048536279', ledgerReference: '20402048601581' });
+    // Read as UTC, that stamp would be four hours before the checkout existed.
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526Z')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+  });
+
+  it('without MMG’s success answer naming it, an exact successful payment is held for a person at once, never credited; MMG’s echo alone included', () => {
+    expect(judge(intent, 'MMGTX1', found(), [MERCHANT])).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'NO_SUCCESS_ANSWER', decisive: true });
+    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT])).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'NO_SUCCESS_ANSWER', decisive: true });
+    for (const reason of ['MMG_ANSWERS_DISAGREE', 'SUCCESS_ANSWER_AFTER_CLOSE', 'CHECKOUT_NOT_OPEN']) {
+      expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], { txnId: null, reason })).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
+    }
+    expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], { txnId: 'MMGTX2' })).toMatchObject({ verdict: 'HOLD', reason: 'NOT_THE_ANSWERED_TRANSACTION', decisive: true });
   });
 
   it.each([
@@ -80,31 +109,52 @@ describe('what a lookup answer means for a checkout [I2 · F1]', () => {
     ['ours and another', [REF, OTHER_REF], 'REFERENCE_AMBIGUOUS'],
     ['our reference padded', [` ${REF}`], 'REFERENCE_MISMATCH'],
     ['our reference with a digit more', [`${REF}0`], 'REFERENCE_MISMATCH'],
-  ] as const)('[F1] a lookup echoing %s is held at once', (_label, echoedReferences, reason) => {
-    expect(judge(intent, 'MMGTX1', found({ echoedReferences: [...echoedReferences] }), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
+  ] as const)('[F1] a lookup echoing %s is held at once, even after MMG’s success answer', (_label, echoedReferences, reason) => {
+    expect(judge(intent, 'MMGTX1', found({ echoedReferences: [...echoedReferences] }), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
   });
 
   it('[F1] our reference inside some other text binds nothing: there is no substring binding', () => {
     const verdict = judge(intent, 'MMGTX1', found({ raw: { description: `Swift ${REF}`, merchantTransactionId: REF } }), [MERCHANT]);
-    expect(verdict).toMatchObject({ verdict: 'HOLD', reason: 'REFERENCE_NOT_ECHOED' });
+    expect(verdict).toMatchObject({ verdict: 'HOLD', reason: 'NO_SUCCESS_ANSWER' });
   });
 
-  it('[F1] a lookup that names another of our checkouts is held, even when it echoes this one', () => {
-    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT], [OTHER_REF])).toMatchObject({ verdict: 'HOLD', reason: 'REFERENCE_OF_ANOTHER_CHECKOUT', decisive: true });
+  it('[F1] a lookup that names another of our checkouts is held, even when MMG answered success for this one', () => {
+    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT], [OTHER_REF], answered)).toMatchObject({ verdict: 'HOLD', reason: 'REFERENCE_OF_ANOTHER_CHECKOUT', decisive: true });
   });
 
   it.each([
+    ['MMG’s word is "completed", not "successful"', { statusText: 'completed' }, 'STATUS_NOT_SUCCESSFUL'],
+    ['MMG’s word in capitals', { statusText: 'SUCCESSFUL' }, 'STATUS_NOT_SUCCESSFUL'],
     ['one cent short', { amountMinor: 149_999 }, 'AMOUNT_MISMATCH'],
     ['one dollar more', { amountMinor: 150_100 }, 'AMOUNT_MISMATCH'],
     ['an amount MMG did not send', { amountMinor: null }, 'AMOUNT_MISMATCH'],
     ['another currency', { currencyCode: 'USD' }, 'CURRENCY_MISMATCH'],
     ['no currency', { currencyCode: null }, 'CURRENCY_MISMATCH'],
-    ['someone else’s merchant', { creditParties: ['5926999999'] }, 'MERCHANT_MISMATCH'],
-    ['no merchant named', { creditParties: null }, 'MERCHANT_UNCONFIRMED'],
-    ['a transaction a week before the checkout', { createdAt: '2026-09-22T12:00:00Z' }, 'OLDER_THAN_CHECKOUT'],
-  ] as const)('holds %s for a person, never credits: at once when MMG ties it to this checkout, after the window otherwise', (_label, patch, reason) => {
+    ['someone else’s merchant', { creditAccounts: ['5926999999'] }, 'MERCHANT_MISMATCH'],
+    ['a foreign account beside ours', { creditAccounts: [MERCHANT, '5926999999'] }, 'MERCHANT_MISMATCH'],
+    ['our number under a key that is not "accountid"', { creditAccounts: [], creditParties: [MERCHANT] }, 'MERCHANT_UNCONFIRMED'],
+    ['no merchant named', { creditAccounts: null }, 'MERCHANT_UNCONFIRMED'],
+    ['a transaction a week before the checkout', { createdAt: gyStamp(new Date(CREATED.getTime() - 7 * 86_400_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['paid three minutes before the checkout opened', { createdAt: gyStamp(new Date(CREATED.getTime() - 3 * 60_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['paid three minutes after it closed', { createdAt: gyStamp(new Date(CREATED.getTime() + 33 * 60_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['a creationDate that cannot be read', { createdAt: 'yesterday' }, 'CREATION_DATE_UNREADABLE'],
+    ['no creationDate', { createdAt: null }, 'CREATION_DATE_UNREADABLE'],
+    ['no ledger number', { ledgerReference: null }, 'LEDGER_REFERENCE_MISSING'],
+    ['a malformed ledger number', { ledgerReference: ' 20402048601581' }, 'LEDGER_REFERENCE_MISSING'],
+  ] as const)('holds %s for a person, never credits: at once when MMG’s answer ties it to this checkout, after the window otherwise', (_label, patch, reason) => {
     expect(judge(intent, 'MMGTX1', found(patch as never), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: false });
+    expect(judge(intent, 'MMGTX1', found(patch as never), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
     expect(judge(intent, 'MMGTX1', found({ ...(patch as object), ...echo } as never), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
+  });
+
+  it('the checkout window carries two minutes of clock tolerance on each side, and no more', () => {
+    const at = (ms: number) => found({ createdAt: gyStamp(new Date(ms)) });
+    const opened = CREATED.getTime();
+    const closed = intent.expiresAt.getTime();
+    expect(judge(intent, 'MMGTX1', at(opened - 120_000), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
+    expect(judge(intent, 'MMGTX1', at(opened - 121_000), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
+    expect(judge(intent, 'MMGTX1', at(closed + 120_000), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
+    expect(judge(intent, 'MMGTX1', at(closed + 121_000), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
   });
 
   it('declined, expired and reversed are not payments, and only MMG’s answer for THIS checkout says a payment failed [F5]', () => {
@@ -127,8 +177,79 @@ describe('what a lookup answer means for a checkout [I2 · F1]', () => {
   });
 });
 
-describe('the reference MMG’s lookup echoes [F1] (the field is UNCONFIRMED until UAT)', () => {
-  it('no field is confirmed yet, so no lookup answer, whatever it carries, binds to a checkout', () => {
+describe('MMG’s own success answer for a checkout [owner, 1 Oct]', () => {
+  const open = { merchantTransactionId: REF, expiresAt: intent.expiresAt, status: 'CONFIRMING' as const };
+  const answer = (detail: string, transactionId: string | undefined, minutesAfterOpen = 2, ref = REF) => ({
+    detail, createdAt: new Date(CREATED.getTime() + minutesAfterOpen * 60_000),
+    body: { merchantTransactionId: ref, ...(transactionId === undefined ? {} : { transactionId }), ResultCode: detail.slice(-1) },
+  });
+
+  it('is ResultCode 0 naming this checkout and one transaction, received while the checkout was open', () => {
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1')])).toEqual({ txnId: 'T1' });
+    // The return door and the notify door may both carry it, in either order.
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1', 3), answer('MMG_RESULT_0', 'T1', 1)])).toEqual({ txnId: 'T1' });
+    // An expired checkout whose success answer came in time still has it.
+    expect(successAnswerOf({ ...open, status: 'EXPIRED' }, [answer('MMG_RESULT_0', 'T1')])).toEqual({ txnId: 'T1' });
+    // A configuration alert (3, 4, 5) is not a payment answer.
+    expect(successAnswerOf(open, [answer('MMG_RESULT_3', 'T1'), answer('MMG_RESULT_0', 'T1')])).toEqual({ txnId: 'T1' });
+  });
+
+  it('is absent when MMG never answered success for this checkout', () => {
+    expect(successAnswerOf(open, [])).toEqual({ txnId: null, reason: 'NO_SUCCESS_ANSWER' });
+    expect(successAnswerOf(open, [answer('MMG_RESULT_7', 'T1')])).toEqual({ txnId: null, reason: 'NO_SUCCESS_ANSWER' });
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1', 2, OTHER_REF)])).toEqual({ txnId: null, reason: 'NO_SUCCESS_ANSWER' });
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', undefined)])).toEqual({ txnId: null, reason: 'NO_SUCCESS_ANSWER' });
+    expect(successAnswerOf(open, [{ detail: 'MMG_RESULT_0', createdAt: CREATED, body: null }])).toEqual({ txnId: null, reason: 'NO_SUCCESS_ANSWER' });
+  });
+
+  it.each(['1', '2', '6', '7'])('disagrees when MMG also answered %s for the same checkout', (code) => {
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1'), answer(`MMG_RESULT_${code}`, undefined, 3)]))
+      .toEqual({ txnId: null, reason: 'MMG_ANSWERS_DISAGREE' });
+    expect(successAnswerOf(open, [answer(`MMG_RESULT_${code}`, 'T1', 1), answer('MMG_RESULT_0', 'T1')]))
+      .toEqual({ txnId: null, reason: 'MMG_ANSWERS_DISAGREE' });
+  });
+
+  it('disagrees when MMG answered success naming two transactions', () => {
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1'), answer('MMG_RESULT_0', 'T2')])).toEqual({ txnId: null, reason: 'MMG_ANSWERS_DISAGREE' });
+  });
+
+  it('counts only an answer that reached us by the deadline, with two minutes of clock tolerance', () => {
+    const closeMin = 30;
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1', closeMin + 2)])).toEqual({ txnId: 'T1' });
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1', closeMin + 2.02)])).toEqual({ txnId: null, reason: 'SUCCESS_ANSWER_AFTER_CLOSE' });
+    expect(successAnswerOf(open, [answer('MMG_RESULT_0', 'T1', closeMin + 60), answer('MMG_RESULT_0', 'T1', 5)])).toEqual({ txnId: 'T1' });
+  });
+
+  it.each(['OPEN', 'NOT_PAID', 'HELD', 'CONFIRMED'] as const)('a %s checkout has no answer that can confirm it', (status) => {
+    expect(successAnswerOf({ ...open, status }, [answer('MMG_RESULT_0', 'T1')])).toEqual({ txnId: null, reason: 'CHECKOUT_NOT_OPEN' });
+  });
+});
+
+describe('MMG’s creationDate is Guyana time [owner, 1 Oct · UAT]', () => {
+  it('reads the wall-clock stamp as Guyana time (UTC−4), with or without the "Z" MMG writes', () => {
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526Z')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36Z')).toBe(Date.parse('2026-10-01T19:39:36.000Z'));
+    expect(mmgCreationInstant('2026-12-31T22:30:00.000Z')).toBe(Date.parse('2027-01-01T02:30:00.000Z'));
+    // Fractions of a second are read as written, never through floating point.
+    expect(mmgCreationInstant('2026-10-01T15:39:36.29Z')).toBe(Date.parse('2026-10-01T19:39:36.290Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.1Z')).toBe(Date.parse('2026-10-01T19:39:36.100Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.123456789Z')).toBe(Date.parse('2026-10-01T19:39:36.123Z'));
+  });
+
+  it('honours an explicit numeric offset as stated', () => {
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526-04:00')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T19:39:36.526+00:00')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+  });
+
+  it.each([null, '', 'yesterday', '2026-10-01', '2026-02-30T10:00:00Z', '2026-10-01T24:00:00Z', '2026-10-01T15:39:36.526Zjunk', ' 2026-10-01T15:39:36Z', '2026-10-01 15:39:36'])(
+    'cannot read %s', (stamp) => {
+      expect(mmgCreationInstant(stamp)).toBeNull();
+    });
+});
+
+describe('the reference MMG’s lookup echoes [F1] (UAT, 1 Oct: no lookup field carries it)', () => {
+  it('no field carries it, so no lookup answer, whatever it carries, binds to a checkout', () => {
     expect(MMG_LOOKUP_REFERENCE_FIELDS).toEqual([]);
     const answer = { merchantTransactionId: REF, reference: REF, merchantReference: REF, externalReference: REF, orderId: REF, description: REF };
     expect(echoedReferencesFrom(answer)).toEqual([]);

@@ -14,6 +14,7 @@ import courierRoutes from '../../modules/courier/courier.routes';
 import { riderRoutes } from '../../modules/rider/rider.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · COUR-01 / COUR-02 — the courier "Send" journey, through the REAL
@@ -40,7 +41,9 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONE_PREFIX = '+5920332';
+// [SAFE-B · retained history] A courier drop-off proof is immutable evidence: its job and everyone it names
+// are kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('11');
 const FIXTURE = 'gold3-courier-fixture';
 const PICKUP = { lat: 6.81462, lng: -58.13718 };
 const DROP = { lat: 6.79875, lng: -58.12944 };
@@ -185,19 +188,26 @@ async function purgeFixtures() {
       where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
       select: { id: true },
     })).map((o) => o.id);
+    // [SAFE-B · retained history] An issued drop-off proof keeps its job, its earnings and the people it names.
+    // Everything else goes as before; what stays is taken out of service at the end.
+    const kept = await retainedCohort(app.prisma, { orderIds });
+    const goneOrderIds = without(orderIds, kept.orderIds);
+    const goneUserIds = without(ids, kept.userIds);
+    const goneRiderIds = without(riderIds, kept.riderIds);
     await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
     await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
-    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
+    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: goneOrderIds } }, { riderId: { in: goneRiderIds } }] } });
     if (orderIds.length > 0) {
       await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
     }
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: goneOrderIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.rider.deleteMany({ where: { id: { in: goneRiderIds } } });
+    await app.prisma.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: goneUserIds } } });
+    await retireKeptScaffolding(app.prisma, kept);
     await purgeRedis([...ids, ...riderIds, ...orderIds]);
   });
 }
@@ -385,7 +395,8 @@ describe('GOLD-3 · COUR-01 — courier "Send": create → offer → collect →
     const uploaded = await postPhoto(orderId, courier.token);
     expect(uploaded.statusCode, uploaded.body).toBe(200);
     const proofUrl = uploaded.json().data.url as string;
-    expect(proofUrl).toMatch(new RegExp(`^/uploads/courier-proof/${orderId}/[A-Za-z0-9_-]{16}\\.png$`));
+    // [SAFE-B] The drop-off proof is minted by the shared handover issuer, under its own folder.
+    expect(proofUrl).toMatch(new RegExp(`^/uploads/handover-proof/${orderId}/[A-Za-z0-9_-]{16}\\.png$`));
     const issued = await orderRow(orderId);
     expect({ url: issued.courierProofIssuedUrl, by: issued.courierProofIssuedRiderId }).toEqual({ url: proofUrl, by: courier.riderId });
     const onDisk = path.join(UPLOAD_DIR, proofUrl.replace(/^\/uploads\//, ''));

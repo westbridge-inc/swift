@@ -1,5 +1,5 @@
+import { lockIdentityAuthority, identityAuthority, IdentityReviewRequiredError } from './identity-review';
 import type { PrismaClient } from '@prisma/client';
-import { IdentityService } from './identity.service';
 
 // The enforcement ladder's read side (spec Part 4). Rungs 2–3 bite at
 // ACTIVATION, not at signup: a held account's documents are never
@@ -53,8 +53,9 @@ export async function previewTrial(
   tenantId: string,
   weeklyRateLabel?: string,
 ): Promise<TrialPreview> {
-  const identity = new IdentityService(prisma);
-  const clusterId = await identity.resolveCluster(accountId);
+  const authority = await identityAuthority(prisma, accountId);
+  if (authority.status === 'REVIEW_REQUIRED') return { willTrial: false, reason: 'REVIEW_REQUIRED', message: new IdentityReviewRequiredError().message };
+  const clusterId = authority.clusterId;
   if (!clusterId) return { willTrial: true, reason: 'FIRST_TRIAL', message: null };
 
   // Same matrix decide() runs, minus every write. Kept in step by the shared
@@ -102,7 +103,9 @@ export async function openAppeal(prisma: PrismaClient, accountId: string, note: 
   // §24.1 says the system is often wrong and the accusation is defamatory in tone,
   // so every such suspension exposes a human-review route — this one. The founder
   // resolves it (resolveAppeal), consistent with FD-DOC-16: preserve and refer.
-  const action = await prisma.enforcementAction.findFirst({
+  return prisma.$transaction(async (tx) => {
+    await lockIdentityAuthority(tx);
+  const action = await tx.enforcementAction.findFirst({
     where: {
       accountId, appeal: 'NONE',
       OR: [{ level: { in: ['DENY_TRIAL', 'REVIEW_FIRST'] } }, { level: 'BLOCK_PENDING_FOUNDER', reasonCode: DOC_FRAUD_REASON_CODE }],
@@ -110,9 +113,10 @@ export async function openAppeal(prisma: PrismaClient, accountId: string, note: 
     orderBy: { createdAt: 'desc' },
   });
   if (!action) return null;
-  return prisma.enforcementAction.update({
+  return tx.enforcementAction.update({
     where: { id: action.id },
     data: { appeal: 'OPEN', appealNote: note },
+  });
   });
 }
 
@@ -127,21 +131,24 @@ export async function resolveAppeal(
   outcome: 'OVERTURNED' | 'UPHELD',
   note: string,
 ) {
-  const action = await prisma.enforcementAction.findUniqueOrThrow({ where: { id: enforcementId } });
-  const updated = await prisma.enforcementAction.update({
+  return prisma.$transaction(async (tx) => {
+    await lockIdentityAuthority(tx);
+  const action = await tx.enforcementAction.findUniqueOrThrow({ where: { id: enforcementId } });
+  const updated = await tx.enforcementAction.update({
     where: { id: enforcementId },
     data: { appeal: outcome, appealNote: [action.appealNote, `${outcome} by admin: ${note}`].filter(Boolean).join(' | ') },
   });
   if (outcome === 'OVERTURNED') {
-    const identity = new IdentityService(prisma);
-    const clusterId = action.clusterId ?? (await identity.resolveCluster(action.accountId));
+    const authority = await identityAuthority(tx, action.accountId);
+    const clusterId = authority.status === 'REVIEW_REQUIRED' ? null : authority.clusterId;
     if (clusterId) {
-      await prisma.exceptionGrant.create({
+      await tx.exceptionGrant.create({
         data: { clusterId, scope: 'FOUNDER_OVERRIDE', note: `Appeal overturned: ${note}`, grantedBy: adminUserId },
       });
     }
   }
   return updated;
+  });
 }
 
 /** Part 10 — the false-positive alarm: overturns / resolved appeals. */

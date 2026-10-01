@@ -11,6 +11,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // Lifecycle/billing spec §11 — dunning DEPTH (G-BILL-02). The retry engine and
 // auto-suspend already exist and are tested in billing.test.ts; this suite
@@ -93,6 +94,7 @@ beforeAll(async () => {
 beforeEach(() => resetDevChannelLog());
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
@@ -162,9 +164,13 @@ describe('§11 stages 6..N — suspended nudges and the CHURNED terminal', () =>
     // Every assertion here is scoped to THIS subscription.)
     const nudges = () => app.prisma.billingEvent.count({ where: { subscriptionId: v.subId, type: 'REMINDER', idempotencyKey: { startsWith: 'nudge:' } } });
 
-    // Day 3: first nudge fires push + SMS.
+    // Day 3: first nudge fires push + SMS. [#1393] The nudges run on the shared
+    // clock's unpaused time: the first comes one full day after the suspension
+    // notice (t0 + 74 h here), never in the same breath as it.
     resetDevChannelLog();
-    const day3 = new Date(t0.getTime() + 3 * DAY);
+    await billing.sweepSuspended(new Date(suspendedAt.getTime() + DAY - 60_000));
+    expect(await nudges()).toBe(0);
+    const day3 = new Date(suspendedAt.getTime() + DAY);
     await billing.sweepSuspended(day3);
     expect(await nudges()).toBe(1);
     expect(devChannelLog.find((e) => e.channel === 'sms' && e.to === v.phone)?.body).toContain('suspended');

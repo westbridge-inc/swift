@@ -1,3 +1,4 @@
+import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
 import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -44,7 +45,10 @@ type NotificationType =
  *  kind deny-list for those. */
 export type NotificationAudience = 'customer' | 'earner' | 'business';
 
-interface NotificationPayload {
+export interface NotificationPayload {
+  /** Durable weekly-fee stage and optional SMS, never used by other notices. */
+  feeStageKey?: string;
+  feeSms?: string;
   userId: string;
   type: NotificationType;
   title: string;
@@ -148,15 +152,26 @@ export async function escalateVendorAlert(
  *  not a dashboard someone remembers to open. Fans one notification (row +
  *  live socket) to every active ADMIN/SUPER_ADMIN account. */
 /** Stamp acknowledgment on an alert delivery — the recipient ACTED. Idempotent,
- *  fire-and-caught at call sites (tracking never blocks the action). */
-export async function acknowledgeAlert(
-  prisma: PrismaClient,
-  kind: 'VENDOR_ORDER' | 'MOVER_OFFER',
-  subjectId: string,
-  recipientId?: string,
-): Promise<void> {
+ *  fire-and-caught at call sites (tracking never blocks the action).
+ *
+ *  [AX323 RR2-1] A mover-offer acknowledgment is evidence about ONE offer
+ *  attempt, and the offer timeout reads it as proof that the card reached the
+ *  mover. Stamped across the whole (order, mover) pair, a delayed decline or
+ *  accept of an expired attempt marked an unseen successor as seen, and that
+ *  successor's lapse then cost the mover acceptance rate. So a MOVER_OFFER
+ *  acknowledgment always names its attempt (the type requires it): `null` is
+ *  the legacy pre-attempt row, never "every attempt". */
+type AlertAcknowledgment =
+  | [kind: 'VENDOR_ORDER', subjectId: string, recipientId?: string]
+  | [kind: 'MOVER_OFFER', subjectId: string, recipientId: string, offerAttemptId: string | null];
+
+export async function acknowledgeAlert(prisma: PrismaClient, ...ack: AlertAcknowledgment): Promise<void> {
+  const [kind, subjectId, recipientId] = ack;
   await prisma.alertDelivery.updateMany({
-    where: { kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null },
+    where: {
+      kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null,
+      ...(ack[0] === 'MOVER_OFFER' ? { offerAttemptId: ack[3] ?? null } : {}),
+    },
     data: { acknowledgedAt: new Date() },
   });
 }
@@ -333,6 +348,21 @@ export class NotificationService {
   ) {}
 
   async send(payload: NotificationPayload): Promise<string> {
+    if (isFeeDemand(payload)) {
+      // A fee demand that cannot be recorded for THIS recipient is logged and
+      // counted, never thrown into the caller: an admin fan-out must still
+      // reach the next admin. A recorded demand's delivery outcome (an
+      // UNKNOWN handoff included) still reaches the caller unchanged.
+      let notice: Awaited<ReturnType<typeof enqueueFeeDemand>>;
+      try {
+        notice = await enqueueFeeDemand(this.prisma, payload);
+      } catch (err) {
+        log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
+        notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
+        return '';
+      }
+      return this.deliverFeeDemand(notice.id);
+    }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
     // A notification is best-effort: a persistence/fan-out hiccup must NEVER
@@ -381,6 +411,41 @@ export class NotificationService {
     return notification.id;
   }
 
+  async deliverFeeDemand(noticeId: string): Promise<string> {
+    const notice = await this.prisma.billingFeeNotice.findUnique({ where: { id: noticeId } });
+    if (!notice || notice.status === 'OBSOLETE') return '';
+    const inboxId = await persistFeeDemandInbox(this.prisma, noticeId);
+    if (!inboxId) return '';
+    await this.publishPersisted(inboxId);
+    const payload = notice.payload as unknown as NotificationPayload;
+    if (payload.feeSms) {
+      const user = await this.prisma.user.findUnique({ where: { id: notice.userId }, select: { phone: true } });
+      if (!user?.phone) return inboxId;
+      const handoff = <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, noticeId, 'sms', part, effect);
+      if (this.channels.sms.supportsHandoff) await this.channels.sms.sendSms(user.phone, payload.feeSms, { handoff });
+      else await handoff('message', () => this.channels.sms.sendSms(user.phone, payload.feeSms!));
+    }
+    if (!await feeDemandOutstanding(this.prisma, noticeId)) {
+      await this.prisma.billingFeeNotice.updateMany({ where: { id: noticeId, status: 'PENDING' }, data: { status: 'DELIVERED' } });
+    }
+    return inboxId;
+  }
+
+  async drainFeeDemands(): Promise<{ attempted: number; delivered: number }> {
+    const rows = await this.prisma.billingFeeNotice.findMany({ where: { status: 'PENDING' }, orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }], take: 200 });
+    let delivered = 0;
+    for (const row of rows) {
+      try { if (await this.deliverFeeDemand(row.id)) delivered += 1; }
+      catch (err) { log().warn({ err, noticeId: row.id }, 'Fee demand remains pending or needs handoff review'); }
+      finally {
+        // Held or UNKNOWN handoffs retain their evidence without starving
+        // later subscriptions on every capped drain.
+        await this.prisma.billingFeeNotice.updateMany({ where: { id: row.id, status: 'PENDING' }, data: { updatedAt: new Date() } });
+      }
+    }
+    return { attempted: rows.length, delivered };
+  }
+
   /** Fan out an inbox row that another atomic domain transaction already
    * persisted. This is the post-commit half for liability-sensitive workflows:
    * socket/push failures cannot roll back the domain fact, and retrying this
@@ -400,8 +465,9 @@ export class NotificationService {
       : undefined;
 
     try {
-      // Live socket delivery
-      this.io.to(`user:${notification.userId}`).emit('notification', {
+      const feeDemandId = typeof data?.['feeDemandId'] === 'string' ? data['feeDemandId'] : null;
+      // Actual socket submission shares the same payer lock as pause creation.
+      const socketEffect = async () => this.io.to(`user:${notification.userId}`).emit('notification', {
         id: notification.id,
         type: notification.type,
         title: notification.title,
@@ -409,6 +475,8 @@ export class NotificationService {
         data,
         createdAt: notification.createdAt,
       });
+      if (feeDemandId) await handOffFeeDemand(this.prisma, feeDemandId, 'socket', 'notification', socketEffect);
+      else await socketEffect();
 
       // Channel fan-out through the swappable interface, honouring prefs.
       const user = await this.prisma.user.findUnique({
@@ -420,16 +488,19 @@ export class NotificationService {
       if (prefs.push) {
         const tokens = await this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
-          select: { token: true },
+          select: { token: true }, orderBy: { token: 'asc' },
         });
         if (tokens.length > 0) {
           // Channel failures must never break the request path — but after the
           // provider-level retries (withPushRetry) a final failure is LOGGED,
           // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
           // kind picks how urgently it travels (alert-class.ts).
-          await this.channels.push
-            .sendPush(tokens.map((t) => t.token), notification.title, notification.body, data, pushOptionsFor(data))
-            .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
+          const options = pushOptionsFor(data);
+          const handoff = feeDemandId ? <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, feeDemandId, 'push', part, effect) : undefined;
+          const effect = () => this.channels.push.sendPush(tokens.map((t) => t.token), notification!.title, notification!.body, data,
+            { ...options, ...(this.channels.push.supportsHandoff ? { handoff } : {}) });
+          await (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
+            .then((r) => deactivateDeadTokens(this.prisma, r?.invalidTokens))
             .catch((err) => {
               log().warn(
                 { err, userId: notification.userId, type: notification.type },
@@ -660,13 +731,13 @@ export class NotificationService {
     });
   }
 
-  async subscriptionReminder(userId: string, dueDate: string, amount: number): Promise<void> {
+  async subscriptionReminder(userId: string, dueDate: string, amount: number, subscriptionId: string): Promise<void> {
     await this.send({
       userId,
       type: 'SUBSCRIPTION_REMINDER',
       title: 'Subscription Due Soon',
       body: `Your weekly subscription of $${amount.toLocaleString()} GYD is due on ${dueDate}.`,
-      data: { dueDate, amount },
+      data: { kind: 'billing_reminder', subscriptionId, dueDate, amount },
     });
   }
 

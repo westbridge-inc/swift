@@ -16,6 +16,7 @@ import { makeDispatchService } from '../../modules/dispatch/dispatch.service';
 import { NotificationService } from '../../modules/notification/notification.service';
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../../modules/auth/browser-session';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · TAXI-01..05 — the taxi journey, end to end through the REAL mounted
@@ -54,14 +55,16 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 //
 // NOT asserted here (reported with probes, no contract yet): G3-F4 the taxi
 // assignment notice is the delivery copy ("Rider On The Way!", RIDER_ASSIGNED),
-// and a direct accept sends "Driver Found!" beside it; G3-F5 a driver's pre-pickup cancel
-// re-offers the ride to that same driver; G3-F6 a fare-collected retry under a
-// NEW idempotency key re-sends "Ride Complete". E19 (no arrival location gate)
+// and a direct accept sends "Driver Found!" beside it; G3-F6 a fare-collected retry under a
+// NEW idempotency key re-sends "Ride Complete". (G3-F5, a pre-pickup cancel re-offering
+// the ride to that same driver, is fixed and asserted in TAXI-02.) E19 (no arrival location gate)
 // has no agreed contract — the arrival assertions here hold either way.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONE_PREFIX = '+5920333';
+// [SAFE-B · retained history] A failed fare's filing is immutable evidence: the ride and everyone it names
+// are kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('07');
 const FIXTURE = 'gold3-taxi-fixture';
 const CENTRAL = { lat: 6.81213, lng: -58.15482 };
 const SOUTH = { lat: 6.75517, lng: -58.15532 };
@@ -235,18 +238,23 @@ async function purgeFixtures() {
       where: { OR: [{ customerId: { in: ids } }, { driverId: { in: driverIds } }] },
       select: { id: true },
     })).map((o) => o.id);
-    const claimIds = (await app.prisma.reimbursementClaim.findMany({
+    const allClaimIds = (await app.prisma.reimbursementClaim.findMany({
       where: { OR: [{ orderId: { in: orderIds } }, { driverId: { in: driverIds } }, { customerId: { in: ids } }] },
       select: { id: true },
     })).map((c) => c.id);
-    await app.prisma.rlpReserveEntry.deleteMany({ where: { OR: [{ claimId: { in: claimIds } }, { createdById: { in: ids } }] } });
+    // [SAFE-B · retained history] A filed ride keeps its order, claim and strike, and the people they name;
+    // reserve entries are money records and are never deleted. Everything else goes as before.
+    const subscriptionIds = (await app.prisma.subscription.findMany({ where: { driverId: { in: driverIds } }, select: { id: true } })).map((s) => s.id);
+    const kept = await retainedCohort(app.prisma, { orderIds, subscriptionIds });
+    const keptClaimIds = new Set((await app.prisma.reimbursementClaim.findMany({ where: { orderId: { in: [...kept.orderIds] } }, select: { id: true } })).map((c) => c.id));
+    const claimIds = without(allClaimIds, keptClaimIds);
     await app.prisma.reimbursementClaim.deleteMany({ where: { id: { in: claimIds } } });
     await app.prisma.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: ids } }, { approvedBy: { in: ids } }] } });
     await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
     await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...driverIds] } } });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
-    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { driverId: { in: driverIds } }] } });
-    await app.prisma.strike.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { userId: { in: ids } }] } });
+    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: without(orderIds, kept.orderIds) } }, { driverId: { in: without(driverIds, kept.driverIds) } }] } });
+    await app.prisma.strike.deleteMany({ where: { OR: [{ orderId: { in: without(orderIds, kept.orderIds) } }, { userId: { in: without(ids, kept.userIds) } }] } });
     if (orderIds.length > 0) {
       await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
     }
@@ -256,13 +264,15 @@ async function purgeFixtures() {
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.rideQueueEntry.deleteMany({ where: { customerId: { in: ids } } });
     await app.prisma.supplyWatch.deleteMany({ where: { customerId: { in: ids } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-    await app.prisma.subscription.deleteMany({ where: { driverId: { in: driverIds } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: without(orderIds, kept.orderIds) } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: without(subscriptionIds, kept.subscriptionIds) } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } });
+    await app.prisma.driver.deleteMany({ where: { id: { in: without(driverIds, kept.driverIds) } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.customer.deleteMany({ where: { userId: { in: without(ids, kept.userIds) } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: without(ids, kept.userIds) } } });
+    // What stays is taken out of service: kept drivers go offline with no ride pointer.
+    await retireKeptScaffolding(app.prisma, kept);
     await purgeRedis([...ids, ...driverIds, ...orderIds]);
   });
 }
@@ -531,9 +541,11 @@ describe('GOLD-3 · TAXI-02 — accept → en-route → arrived', () => {
     const trail = await logs(ride.id);
     expect(trail.map((l) => [l.status, l.note])).toContainEqual(['PENDING', 'Driver cancelled: vehicle broke down']);
     expect(await sys(() => app.prisma.notification.count({ where: { userId: customer.userId, title: 'Finding you another driver' } }))).toBe(1);
-    // The ride went straight back to dispatch.
+    // The ride went straight back to dispatch — and to the NEXT driver: the one
+    // who just gave it up is excluded from its re-dispatch [DISPATCH 1/3 · B2,
+    // formerly probe G3-F5], even though Fola is still the closest.
     expect(jobs.slice(jobsBefore)[0]).toMatchObject({ name: 'dispatch-order', data: { orderId: ride.id } });
-    expect(await app.redis.get(offerKey(ride.id))).not.toBeNull();
+    expect((await app.redis.get(offerKey(ride.id)))!.split(':')[0]).toBe(second.driverId);
 
     // Another driver takes the ride.
     const take = await call('POST', `/api/v1/driver/rides/${ride.id}/accept`, second.token, {});
@@ -543,7 +555,9 @@ describe('GOLD-3 · TAXI-02 — accept → en-route → arrived', () => {
     expect(await app.redis.get(offerKey(ride.id))).toBeNull();
     const stale = await call('POST', '/api/v1/driver/offers/accept', first.token, { orderId: ride.id });
     expect(stale.statusCode).toBe(409);
-    expect(stale.json().error.code).toBe('OFFER_EXPIRED');
+    // [DISPATCH 1/3] The refusal says why: another driver holds this ride now.
+    expect(stale.json().error.code).toBe('OFFER_TAKEN');
+    expect(stale.json().error.message).toBe('Another driver took this ride.');
     // The passenger's live card shows the NEW driver, with the NEW pin to share.
     const active = await call('GET', '/api/v1/rides/active', customer.token);
     expect(active.json().data).toMatchObject({ id: ride.id, ridePin: released.ridePin, driver: { licensePlate: second.plate } });
@@ -700,14 +714,14 @@ describe('GOLD-3 · TAXI-04 — cash / no-show outcome → guarantee claim → s
     expect(await sys(() => app.prisma.strike.count({ where: { orderId: ride.id } }))).toBe(0);
   });
 
-  it('no-show: FAILED + strike + auto-approved claim + freed driver in one commit; the replay answers the same claim; the driver cannot settle it', async () => {
+  it('no-show: FAILED + no strike + review claim + freed driver in one commit; the replay answers the same claim; the driver cannot settle it', async () => {
     const customer = await makeUser('Abi', ['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver('Bram', CENTRAL);
     const ride = await rideTo(customer, driver, 'IN_PROGRESS', NOSHOW_DOOR);
 
     const gone = await call('POST', `/api/v1/driver/rides/${ride.id}/handover`, driver.token, { outcome: 'no_show', gps: NOSHOW_DOOR });
     expect(gone.statusCode, gone.body).toBe(200);
-    expect(gone.json().data).toMatchObject({ orderId: ride.id, status: 'FAILED', claim: { amount: SEEDED_ZONE_FARE, status: 'AUTO_APPROVED', flags: [] } });
+    expect(gone.json().data).toMatchObject({ orderId: ride.id, status: 'FAILED', claim: { amount: SEEDED_ZONE_FARE, status: 'PENDING_REVIEW' } });
     const claimId = gone.json().data.claim.id as string;
 
     const [order, claim, strikes, row, earnings, failedLogs] = await Promise.all([
@@ -720,8 +734,8 @@ describe('GOLD-3 · TAXI-04 — cash / no-show outcome → guarantee claim → s
     ]);
     expect({ status: order.status, payment: order.paymentStatus }).toEqual({ status: 'FAILED', payment: 'FAILED' });
     expect({ order: claim.orderId, driver: claim.driverId, rider: claim.riderId, customer: claim.customerId, reason: claim.reason, gps: [claim.gpsLat, claim.gpsLng], amount: Number(claim.amount), status: claim.status, complete: claim.evidenceComplete })
-      .toEqual({ order: ride.id, driver: driver.driverId, rider: null, customer: customer.userId, reason: 'no_show', gps: [NOSHOW_DOOR.lat, NOSHOW_DOOR.lng], amount: SEEDED_ZONE_FARE, status: 'AUTO_APPROVED', complete: true });
-    expect(strikes.map((s) => ({ user: s.userId, reason: s.reason, phone: s.phone }))).toEqual([{ user: customer.userId, reason: 'failed_payment_no_show', phone: customer.phone }]);
+      .toEqual({ order: ride.id, driver: driver.driverId, rider: null, customer: customer.userId, reason: 'no_show', gps: [NOSHOW_DOOR.lat, NOSHOW_DOOR.lng], amount: SEEDED_ZONE_FARE, status: 'PENDING_REVIEW', complete: false });
+    expect(strikes).toEqual([]);
     expect({ available: row.isAvailable, pointer: row.currentRideId }).toEqual({ available: true, pointer: null });
     expect(earnings).toBe(0);
     expect(failedLogs.map((l) => l.note)).toEqual(['no_show — gps:6.76321,-58.16147']);
@@ -730,13 +744,13 @@ describe('GOLD-3 · TAXI-04 — cash / no-show outcome → guarantee claim → s
     expect(replay.statusCode).toBe(200);
     expect(replay.json().data.claim.id).toBe(claimId);
     expect(await sys(() => app.prisma.reimbursementClaim.count({ where: { orderId: ride.id } }))).toBe(1);
-    expect(await sys(() => app.prisma.strike.count({ where: { orderId: ride.id } }))).toBe(1);
+    expect(await sys(() => app.prisma.strike.count({ where: { orderId: ride.id } }))).toBe(0);
     expect(await sys(() => app.prisma.orderStatusLog.count({ where: { orderId: ride.id, status: 'FAILED' } }))).toBe(1);
 
     // The money is an admin's to move, never the claimant's.
     const driverPays = await call('PUT', `/api/v1/admin/cash-rules/claims/${claimId}/paid`, driver.token, { reference: 'GOLD3DRV0001', amount: String(SEEDED_ZONE_FARE) }, REASON);
     expect(driverPays.statusCode).toBe(403);
-    expect((await sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } }))).status).toBe('AUTO_APPROVED');
+    expect((await sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } }))).status).toBe('PENDING_REVIEW');
   });
 });
 
@@ -769,16 +783,29 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
     expect(gone.statusCode, gone.body).toBe(200);
     claimId = gone.json().data.claim.id as string;
     const claim = await sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } }));
-    expect({ status: claim.status, complete: claim.evidenceComplete, driver: claim.driverId }).toEqual({ status: 'AUTO_APPROVED', complete: true, driver: driver.driverId });
+    expect({ status: claim.status, complete: claim.evidenceComplete, driver: claim.driverId }).toEqual({ status: 'PENDING_REVIEW', complete: false, driver: driver.driverId });
     for (const who of [admin, approver]) {
-      const queue = await adminInject({ method: 'GET', url: '/api/v1/admin/cash-rules/claims?status=AUTO_APPROVED&limit=100', token: who.token });
+      const queue = await adminInject({ method: 'GET', url: '/api/v1/admin/cash-rules/claims?status=PENDING_REVIEW&limit=100', token: who.token });
       expect(queue.statusCode, queue.body).toBe(200);
     }
   });
 
-  it('[G3-F1] the claim is in the admin queue and a two-person payout settles it from the funded reserve, once', async () => {
-    const queue = await adminInject({ method: 'GET', url: '/api/v1/admin/cash-rules/claims?status=AUTO_APPROVED&limit=100', token: admin.token });
-    expect((queue.json().data as Array<{ id: string }>).map((c) => c.id)).toContain(claimId);
+  /** [SAFE-B · retained history] The review queue is oldest-first and pages at 50: on a database that keeps
+   *  history (every suite's retained claims), page until this claim appears. */
+  async function reviewQueueIds(token: string): Promise<string[]> {
+    const ids: string[] = [];
+    for (let page = 1; page <= 200; page += 1) {
+      const res = await adminInject({ method: 'GET', url: `/api/v1/admin/cash-rules/claims?status=PENDING_REVIEW&limit=50&page=${page}`, token });
+      expect(res.statusCode, res.body).toBe(200);
+      const rows = res.json().data as Array<{ id: string }>;
+      ids.push(...rows.map((c) => c.id));
+      if (rows.length < 50 || ids.includes(claimId)) break;
+    }
+    return ids;
+  }
+
+  it('[G3-F1] the claim is visible but two-person authorization cannot pay incomplete taxi evidence', async () => {
+    expect(await reviewQueueIds(admin.token)).toContain(claimId);
 
     const fund = await withApproval(admin, approver, {
       method: 'POST',
@@ -793,8 +820,8 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
       url: `/api/v1/admin/cash-rules/claims/${claimId}/paid`,
       payload: { reference, amount: String(SEEDED_ZONE_FARE) },
     });
-    expect(pay.res.statusCode, pay.res.body).toBe(200);
-    expect(pay.res.json().data.status).toBe('PAID');
+    expect(pay.res.statusCode, pay.res.body).toBe(409);
+    expect(pay.res.json().error.code).toBe('RLP_EVIDENCE_INCOMPLETE');
 
     const [paid, draw, told] = await Promise.all([
       sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } })),
@@ -802,13 +829,13 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
       sys(() => app.prisma.notification.findMany({ where: { userId: driverUserId, title: 'Guarantee paid' } })),
     ]);
     expect({ status: paid.status, paidAmount: Number(paid.paidAmount), paidBy: paid.paidById, ref: paid.paymentRef })
-      .toEqual({ status: 'PAID', paidAmount: SEEDED_ZONE_FARE, paidBy: admin.userId, ref: reference });
-    expect(draw.map((e) => ({ kind: e.kind, amount: Number(e.amount) }))).toEqual([{ kind: 'PAYOUT', amount: -SEEDED_ZONE_FARE }]);
-    expect(told).toHaveLength(1);
+      .toEqual({ status: 'PENDING_REVIEW', paidAmount: 0, paidBy: null, ref: null });
+    expect(draw).toEqual([]);
+    expect(told).toHaveLength(0);
     // The spent approval cannot be spent again.
     const reuse = await adminInject({ method: 'PUT', url: `/api/v1/admin/cash-rules/claims/${claimId}/paid`, token: admin.token, payload: { reference, amount: String(SEEDED_ZONE_FARE) }, headers: { 'x-swift-approval': pay.approvalId } });
     expect(reuse.statusCode).toBe(403);
-    expect(await sys(() => app.prisma.rlpReserveEntry.count({ where: { claimId } }))).toBe(1);
+    expect(await sys(() => app.prisma.rlpReserveEntry.count({ where: { claimId } }))).toBe(0);
   });
 });
 

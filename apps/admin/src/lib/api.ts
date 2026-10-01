@@ -1,3 +1,5 @@
+import type { MmgCheckoutSupportDetail, MmgCheckoutSupportPage, MmgCheckoutSupportStatus } from '@swift/types';
+
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 /** The header the server reads first for the reason law (ADM-006). */
 const REASON_HEADER = 'x-swift-reason';
@@ -772,3 +774,24 @@ export const recordCollectionContact = (
     method: 'POST',
     body: JSON.stringify(body),
   });
+
+// ── MMG payments: support lookup [MMG-CHECKOUT-API.md section 11] ───────────
+// Support finds a partner's MMG weekly-fee payment by the Swift reference,
+// MMG's transaction ID, MMG's reference number or the partner's phone. Both
+// reads are C1: the server records each one (who, which identifier matched,
+// the checkout ids). The shapes are the shared contract in @swift/types.
+export interface MmgCheckoutSearch {
+  q?: string;
+  status?: MmgCheckoutSupportStatus | '';
+  cursor?: string | null;
+}
+export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success: boolean } & MmgCheckoutSupportPage> => {
+  const params = new URLSearchParams();
+  if (search.q?.trim()) params.set('q', search.q.trim());
+  if (search.status) params.set('status', search.status);
+  if (search.cursor) params.set('cursor', search.cursor);
+  const query = params.toString();
+  return apiFetch(`/api/v1/admin/billing/mmg-checkouts${query ? `?${query}` : ''}`);
+};
+export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
