@@ -34,11 +34,15 @@ const held: MmgCheckoutSupportRow = {
   partner: { kind: 'RIDER', displayName: 'Devon Persaud', maskedPhone: '+592•••••7788', subscriptionId: 'sub_rider_1' },
   createdAt: '2026-10-01T18:10:00.000Z', replyAt: '2026-10-01T18:11:00.000Z', confirmedAt: null, reason: 'AMOUNT_MISMATCH', matchedBy: [],
 };
-const { matchedBy: _unused, ...confirmedBase } = confirmed;
-const detailOf = (row: MmgCheckoutSupportRow, extra: Partial<MmgCheckoutSupportDetail> = {}): MmgCheckoutSupportDetail => {
-  const { matchedBy: _m, ...base } = row;
-  return { ...base, timeline: [], timelineTruncated: false, creditedPeriod: null, ...extra };
+/** A row as the detail route carries it: everything but matchedBy. */
+const withoutMatch = (row: MmgCheckoutSupportRow): Omit<MmgCheckoutSupportRow, 'matchedBy'> => {
+  const base: Partial<MmgCheckoutSupportRow> = { ...row };
+  delete base.matchedBy;
+  return base as Omit<MmgCheckoutSupportRow, 'matchedBy'>;
 };
+const confirmedBase = withoutMatch(confirmed);
+const detailOf = (row: MmgCheckoutSupportRow, extra: Partial<MmgCheckoutSupportDetail> = {}): MmgCheckoutSupportDetail =>
+  ({ ...withoutMatch(row), timeline: [], timelineTruncated: false, creditedPeriod: null, ...extra });
 const confirmedDetail: MmgCheckoutSupportDetail = {
   ...confirmedBase,
   timeline: [
@@ -68,7 +72,7 @@ describe('the fixtures are the API contract', () => {
 
 describe('MMG payments: find a payment by any id', () => {
   it('opens on the newest payments, as the server answered them, and draws nothing before it answers', async () => {
-    let answer!: (reply: ReturnType<typeof page>) => void;
+    let answer!: (_reply: ReturnType<typeof page>) => void;
     const fetchMock = mockApi(() => new Promise((resolve) => { answer = resolve; }));
     renderWithQuery(<MmgPaymentsPage />);
     expect(screen.getByRole('searchbox', { name: 'Search MMG payments' }).getAttribute('placeholder'))

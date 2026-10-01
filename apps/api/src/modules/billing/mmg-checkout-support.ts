@@ -249,12 +249,9 @@ async function partnersOf(db: PrismaClient, subscriptionIds: string[]): Promise<
   }));
 }
 
-async function rowsOf(
-  db: PrismaClient,
-  tenantId: string,
-  intents: IntentRow[],
-  matchedBy: (row: IntentRow) => MmgCheckoutSupportMatch[],
-): Promise<MmgCheckoutSupportRow[]> {
+type SupportRowBase = Omit<MmgCheckoutSupportRow, 'matchedBy'>;
+
+async function rowsOf(db: PrismaClient, tenantId: string, intents: IntentRow[]): Promise<SupportRowBase[]> {
   const [partners, references] = await Promise.all([
     partnersOf(db, intents.map((row) => row.subscriptionId)),
     ledgerReferencesOf(db, tenantId, intents.map((row) => row.id)),
@@ -273,7 +270,6 @@ async function rowsOf(
     replyAt: iso(row.replyAt),
     confirmedAt: iso(row.confirmedAt),
     reason: row.reason,
-    matchedBy: matchedBy(row),
   }));
 }
 
@@ -339,7 +335,7 @@ export async function searchMmgCheckouts(db: PrismaClient, input: SupportSearchI
     if (phoneSubscriptions.has(row.subscriptionId)) found.push('PARTNER_PHONE');
     return found;
   };
-  const data = await rowsOf(db, input.tenantId, page, matchesOf);
+  const data: MmgCheckoutSupportRow[] = (await rowsOf(db, input.tenantId, page)).map((row, i) => ({ ...row, matchedBy: matchesOf(page[i]!) }));
   const kinds = [...new Set(data.flatMap((row) => row.matchedBy))];
   return {
     data,
@@ -379,7 +375,7 @@ export async function mmgCheckoutSupportDetail(db: PrismaClient, input: { tenant
   const row = await db.mmgCheckoutIntent.findFirst({ where: { id: input.id, tenantId: input.tenantId }, select: ROW_SELECT });
   if (!row) return null;
   const [rows, observations] = await Promise.all([
-    rowsOf(db, input.tenantId, [row], () => []),
+    rowsOf(db, input.tenantId, [row]),
     db.mmgCheckoutObservation.findMany({
       where: { intentId: row.id, tenantId: input.tenantId },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -387,9 +383,8 @@ export async function mmgCheckoutSupportDetail(db: PrismaClient, input: { tenant
       select: { source: true, detail: true, failure: true, createdAt: true, body: true },
     }),
   ]);
-  const { matchedBy: _matchedBy, ...base } = rows[0]!;
   return {
-    ...base,
+    ...rows[0]!,
     timeline: observations.slice(0, MMG_SUPPORT_TIMELINE_MAX).map((o) => timelineEntryOf(row, o)),
     timelineTruncated: observations.length > MMG_SUPPORT_TIMELINE_MAX,
     creditedPeriod: row.status === 'CONFIRMED' ? await creditedPeriodOf(db, row) : null,
