@@ -13,8 +13,8 @@ import type { User } from '@swift/types';
 // dashboard for riders and taxi guys there".
 //
 // REAL: the MoverStack and its navigator, MoverRoot, the documents screen
-// (MoverOnboardingScreen + DocumentChecklist + PricingCard), Home, Account,
-// Earnings, Job history, Documents and Vehicle screens, every mover and
+// (MoverOnboardingScreen + DocumentChecklist + PricingCard), Home, Active job,
+// Account, Earnings, Job history, Documents and Vehicle screens, every mover and
 // verification hook, the auth and preview stores, React Query and the app's
 // `api` client with its interceptors. FAKE: native drawing (views, map, sheet,
 // icons, the design kit's paint), device APIs, and the HTTP transport, which
@@ -214,7 +214,7 @@ vi.mock('../billing/screens/WeeklyFeeRouteScreen', () => ({ WeeklyFeeRouteScreen
 vi.mock('../profile/screens/GetHelpScreen', () => ({ GetHelpScreen: () => null }));
 vi.mock('../safety/screens/LivenessCheckScreen', () => ({ LivenessCheckScreen: () => null }));
 vi.mock('../safety/screens/GuardianDriverConfirmScreen', () => ({ GuardianDriverConfirmScreen: () => null }));
-vi.mock('./screens/ActiveJobScreen', () => ({ ActiveJobScreen: () => null }));
+vi.mock('../safety/SosCeremony', () => ({ SosCeremony: () => null }));
 
 import { useAuthStore } from '../../stores/authStore';
 import { useMoverPreview } from '../../stores/moverPreview';
@@ -323,6 +323,14 @@ async function press(label: string, scope: Element = host) {
   await settle();
 }
 const topScreenNode = (): Element => { const all = host.querySelectorAll('[data-screen]'); return all[all.length - 1] ?? host; };
+/** Press the one control whose text contains `fragment` (an unlabelled card). */
+async function pressContaining(fragment: string) {
+  const hits = buttons().filter((b) => b.textContent?.includes(fragment));
+  expect(hits, `exactly one control containing "${fragment}"`).toHaveLength(1);
+  expect(hits[0]!.disabled).toBe(false);
+  await act(async () => { hits[0]!.click(); });
+  await settle();
+}
 async function pressTestId(id: string) {
   const el = host.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement | null;
   if (!el) throw new Error(`no element with testID ${id}`);
@@ -463,6 +471,24 @@ describe('the rider preview renders through the real rider screens', () => {
     // The only thing the preview fetched is the public price list.
     expect(wire.map((r) => `${r.method} ${r.url}`).every((r) => r === 'GET /auth/pricing')).toBe(true);
     expect(writes()).toEqual([]);
+  });
+
+  it('the delivery in progress opens the real active-job screen, and its next step writes nothing', async () => {
+    const attempted = [vi.spyOn(riderApi, 'enRouteDelivery'), vi.spyOn(riderApi, 'handover'), vi.spyOn(riderApi, 'delivered'), vi.spyOn(riderApi, 'handback')];
+    signIn('RIDER');
+    await mount();
+    await press('Preview your dashboard');
+    wire.length = 0;
+
+    await pressContaining('tap to manage');
+    expect(routes()).toEqual(['MoverRoot', 'ActiveJob']);
+    expect(text()).toContain('ORDER #SW-8872');
+    expect(text()).toContain('Lamaha Gardens');
+    await press("I'm on the way to the customer");
+
+    for (const spy of attempted) expect(spy, spy.getMockName()).not.toHaveBeenCalled();
+    expect(writes()).toEqual([]);
+    expect(useMoverPreview.getState().preview).toBe(true);
   });
 
   it('the fee follows the price list: a re-price reaches the preview untouched', async () => {
