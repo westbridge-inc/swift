@@ -13,6 +13,7 @@
     "doc1:rehearse": "tsx scripts/doc1-rehearse-activation.ts",
     "doc1:backfill-subjects": "tsx scripts/doc1-backfill-subjects.ts",
     "review:provision": "tsx scripts/review-provision.ts provision",
+    "review:seed": "tsx scripts/review-provision.ts seed",
     "review:status": "tsx scripts/review-provision.ts status",
     "review:rotate": "tsx scripts/review-provision.ts rotate",
     "review:expire": "tsx scripts/review-provision.ts expire",
