@@ -248,6 +248,108 @@ serving the name), then remove the idle container:
 
     docker compose -f deploy/docker-compose.yml --profile web rm --stop --force web
 
+## 3c. Serving the admin console on staging
+
+The admin console (apps/admin) is where partner documents are approved and
+rejected. It can run on this host at its own name, against this host's API.
+It is optional and off until ADMIN_HOST is set; without it the stack is
+exactly the stack above.
+
+Who gets in: the console's own sign-in is a phone and the one-time code texted
+to it, and the API admits only an account holding ADMIN or SUPER_ADMIN, on
+every admin route. A document decision also needs a stated reason, and a
+fraud-class rejection needs a second, different reviewer. The optional gate
+below adds a password in front of that sign-in.
+
+Use a separate browser profile for the console, used for nothing else. The
+console and the website keep their sign-in in the same cookies on the API's
+name, so in one browser profile a console sign-in also becomes the website's
+session there (and the other way round): any page that browser opens on the
+website would then act with admin rights.
+
+1. DNS: in the swiftgy.com zone, add an A record `admin-staging` pointing to
+   this host's public IPv4 (the same address as the API's record), with the
+   DNS provider's proxy OFF (DNS only). Caddy obtains the certificate itself
+   over ports 80/443, which needs the record to reach this host directly.
+2. In deploy/.env (settings only, never a secret):
+
+       ADMIN_HOST=admin-staging.swiftgy.com
+
+   and add the console's origin to CORS_ORIGIN, keeping every origin already
+   there (comma-separated):
+
+       CORS_ORIGIN=<the current value>,https://admin-staging.swiftgy.com
+
+   The console signs in with the API's HttpOnly cookies, which the API honours
+   only from an origin in CORS_ORIGIN; pilot-up.sh refuses an ADMIN_HOST whose
+   https:// origin is missing there, before anything changes. The API reads
+   CORS_ORIGIN at boot, which this deploy restarts anyway.
+3. Optional second gate (recommended while the console is on the internet):
+   HTTP basic authentication on every page of the console, before its own
+   sign-in. The owner chooses the password and makes its hash on their own
+   Mac, so the password never leaves it:
+
+       htpasswd -nBC 12 admin
+
+   It asks for the password twice without showing it and prints
+   `admin:$2y$12$…`. Only the part after `admin:` (the hash, never the
+   password) goes into deploy/.env, in single quotes:
+
+       ADMIN_BASIC_AUTH_HASH='$2y$12$…'
+
+   The single quotes matter: without them Compose reads the `$` signs as
+   variables. pilot-up.sh refuses anything but a quoted bcrypt hash of cost 10
+   or more and never prints the value. The browser then asks for the user
+   `admin` and that password; a password manager can keep it. Empty means no
+   gate. To change the password, replace the hash and redeploy.
+4. Deploy as usual: `./deploy/pilot-up.sh "$APPROVED_SHA"`. With ADMIN_HOST
+   set it builds `swift-admin:<SHA>` from apps/admin/Dockerfile for the same
+   commit BEFORE anything is stopped (a console that fails to build leaves the
+   running stack untouched), starts it once the API is ready, and waits until
+   the container reports healthy and Caddy answers
+   `https://$ADMIN_HOST/login` on this host with 200, or with 401 when the gate
+   is on. A console that answers without the gate it was configured with fails
+   the deploy.
+
+What the image is: Next's standalone server as a non-root user, with no
+secret, no settings file, no volume and no published port; Caddy reaches it on
+the private network and strips the gate's credential before it.
+`https://$API_HOST` is fixed into it at build time (the build refuses anything
+but an https origin). It sends its own security headers: a CSP with
+`frame-ancestors 'none'`, `Referrer-Policy: no-referrer`, HSTS and
+`X-Robots-Tag: noindex, nofollow`.
+
+Verify:
+
+    ADMIN_HOST='admin-staging.swiftgy.com'
+    docker compose -f deploy/docker-compose.yml --profile admin ps admin
+    curl -sSI --resolve "$ADMIN_HOST:443:127.0.0.1" "https://$ADMIN_HOST/login" |
+      grep -iE '^HTTP|^x-robots-tag|^referrer-policy|^www-authenticate'
+
+With the gate on, the first line is `HTTP/2 401` and `www-authenticate` names
+Basic; without it, `HTTP/2 200` with the console's own headers. Then, from a
+laptop, open https://admin-staging.swiftgy.com (the gate's user and password
+first, if it is on), sign in with an admin phone and its code, and open
+Verification. Approve and reject a test document: a rejection names one of the
+server's reason codes, and each decision is audited
+(APPROVE_VERIFICATION_DOC or REJECT_VERIFICATION_DOC in the audit log).
+
+Making the owner an admin: the console admits a phone whose account holds
+ADMIN or SUPER_ADMIN. Once a SUPER_ADMIN exists (staging has one from its
+seed), the only way to promote another phone is the two-person break-glass
+ceremony in 6b, with the owner's phone as SEED_ADMIN_PHONE:
+two different people each sign their own half with SEED_SIGN_APPROVER, and the
+operator promotes with both halves in SEED_PROMOTION_APPROVALS. Nobody signs both
+halves, and no step prints the key. The promotion SETS that account's roles to
+SUPER_ADMIN and CUSTOMER: a phone that is also a store, rider or driver on this
+database loses those roles, so promote a phone that is not used as a partner
+here. The owner then signs in with that phone and the code texted to it.
+
+To turn the console off, empty ADMIN_HOST and ADMIN_BASIC_AUTH_HASH and rerun
+pilot-up.sh (Caddy stops serving the name), then remove the idle container:
+
+    docker compose -f deploy/docker-compose.yml --profile admin rm --stop --force admin
+
 ## 4. Start and verify off-site backups
 
 From the retained root session after the deploy user can run Docker:

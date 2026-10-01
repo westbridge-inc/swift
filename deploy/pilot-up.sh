@@ -2,7 +2,8 @@
 # Single-host STAGING cutover. Invoke with an approved full origin/main SHA.
 # This script intentionally stops the old API/worker before migration. When
 # deploy/.env sets WEB_HOST it also builds and serves the website (apps/web)
-# for the same SHA; without WEB_HOST it does nothing more.
+# for the same SHA; without WEB_HOST it does nothing more. ADMIN_HOST does the
+# same for the admin console (apps/admin), behind an optional second gate.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -58,6 +59,52 @@ fi
 [ -n "$(env_value BACKUP_BUCKET)" ] || die "BACKUP_BUCKET is missing"
 [ -f "$HERE/routing-data/osrm/guyana-latest.osrm" ] ||
   die "OSRM extract is missing; run deploy/setup-routing.sh first"
+# [ADMIN-CONSOLE] The admin console is optional: a DNS name in ADMIN_HOST turns
+# it on, and every Compose call below then includes its profile. Same shape
+# rules as the other names, and it is none of them (case-insensitive): its
+# route comes first in the Caddyfile, so a shared name would hand that name to
+# the console. The website's extra names (WEB_ALIAS_HOSTS, space-separated)
+# count too. The console signs in with the API's cookies, which the API honours
+# only from an origin in CORS_ORIGIN, so that must name it.
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+ADMIN_HOST="$(env_value ADMIN_HOST)"
+ADMIN_BASIC_AUTH_HASH="$(env_value ADMIN_BASIC_AUTH_HASH)"
+if [ -n "$ADMIN_HOST" ]; then
+  [[ "$ADMIN_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
+    die "ADMIN_HOST must be a DNS hostname for HTTPS, or empty for no admin console"
+  admin_lc="$(lower "$ADMIN_HOST")"
+  [ "$admin_lc" != "$(lower "$API_HOST")" ] || die "ADMIN_HOST must differ from API_HOST"
+  [ -z "$API_ALIAS_HOST" ] || [ "$admin_lc" != "$(lower "$API_ALIAS_HOST")" ] ||
+    die "ADMIN_HOST must differ from API_ALIAS_HOST"
+  [ -z "$WEB_HOST" ] || [ "$admin_lc" != "$(lower "$WEB_HOST")" ] || die "ADMIN_HOST must differ from WEB_HOST"
+  read -r -a web_alias_names <<< "$(env_value WEB_ALIAS_HOSTS)"
+  for web_alias_name in "${web_alias_names[@]+"${web_alias_names[@]}"}"; do
+    [ "$admin_lc" != "$(lower "$web_alias_name")" ] || die "ADMIN_HOST must differ from WEB_ALIAS_HOSTS"
+  done
+  # Entries are compared whole: scheme, name and port, without spaces, quotes
+  # or a trailing slash (the API normalises those the same way).
+  cors_origins=",$(env_value CORS_ORIGIN | tr -d " \t\"'" | tr '[:upper:]' '[:lower:]' | sed 's#/,#,#g; s#/$##'),"
+  case "$cors_origins" in
+    *",https://$admin_lc,"*) ;;
+    *) die "CORS_ORIGIN must include https://$ADMIN_HOST: the console signs in with the API's cookies, which the API honours only from an allowed origin" ;;
+  esac
+  COMPOSE+=(--profile admin)
+fi
+# The optional second gate in front of the console: a bcrypt hash of cost 10 or
+# more, in single quotes (unquoted, Compose would read its `$` signs as
+# variables). A refusal names the setting, never its value.
+if [ -n "$ADMIN_BASIC_AUTH_HASH" ]; then
+  [ -n "$ADMIN_HOST" ] ||
+    die "ADMIN_BASIC_AUTH_HASH needs ADMIN_HOST: the gate stands in front of the admin console, which is off without it"
+  bcrypt_re='^[$]2[aby][$](1[0-9]|2[0-9]|3[01])[$][./A-Za-z0-9]{53}$'
+  gate_hash=""
+  case "$ADMIN_BASIC_AUTH_HASH" in
+    \'*\') gate_hash="${ADMIN_BASIC_AUTH_HASH:1:${#ADMIN_BASIC_AUTH_HASH}-2}" ;;
+  esac
+  [[ "$gate_hash" =~ $bcrypt_re ]] ||
+    die "ADMIN_BASIC_AUTH_HASH must be a bcrypt hash of cost 10 or more in single quotes (see PILOT-RUNBOOK.md 3c), or empty for no gate"
+  unset gate_hash
+fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 
 cd "$ROOT"
@@ -157,6 +204,10 @@ verify_private_ports
 if [ -n "$WEB_HOST" ]; then
   "${COMPOSE[@]}" build web
 fi
+# [ADMIN-CONSOLE] The same for the admin console: built before anything stops.
+if [ -n "$ADMIN_HOST" ]; then
+  "${COMPOSE[@]}" build admin
+fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
 "${ROUTING[@]}" up -d --wait osrm
 
@@ -208,5 +259,37 @@ if [ -n "$WEB_HOST" ]; then
   [ "$WEB_READY" = 1 ] ||
     die "the website did not become ready at https://$WEB_HOST (the API is serving $SHA); inspect: docker compose -f deploy/docker-compose.yml --profile web logs --tail=100 web caddy"
   echo "WEBSITE READY at https://$WEB_HOST (exact SHA $SHA)"
+fi
+
+# [ADMIN-CONSOLE] The console starts once the API it calls is ready; like the
+# website it is stateless and simply replaced. Ready means its own probe is
+# healthy AND Caddy answers its sign-in page over HTTPS on this host with
+# exactly the status the gate setting implies: 200 with no gate, 401 with one.
+# A console reachable without the gate it was configured with fails the deploy.
+if [ -n "$ADMIN_HOST" ]; then
+  "${COMPOSE[@]}" up -d --no-deps --force-recreate admin
+  ADMIN_GATE=off
+  ADMIN_EXPECT=200
+  if [ -n "$ADMIN_BASIC_AUTH_HASH" ]; then ADMIN_GATE=on; ADMIN_EXPECT=401; fi
+  ADMIN_READY=0
+  ADMIN_ANSWER=""
+  for _ in $(seq 1 90); do
+    ADMIN_ID="$("${COMPOSE[@]}" ps -q admin)"
+    if [ -n "$ADMIN_ID" ] && [ "$(docker inspect -f '{{.State.Health.Status}}' "$ADMIN_ID")" = healthy ]; then
+      ADMIN_ANSWER="$(curl -sS -o /dev/null -w '%{http_code}' --resolve "$ADMIN_HOST:443:127.0.0.1" \
+        --connect-timeout 5 --max-time 8 "https://$ADMIN_HOST/login" 2>/dev/null || true)"
+      if [ "$ADMIN_ANSWER" = "$ADMIN_EXPECT" ]; then
+        ADMIN_READY=1
+        break
+      fi
+    fi
+    sleep 2
+  done
+  if [ "$ADMIN_READY" != 1 ]; then
+    admin_why="the admin container never reported healthy"
+    [ -z "$ADMIN_ANSWER" ] || admin_why="https://$ADMIN_HOST/login answered $ADMIN_ANSWER, not $ADMIN_EXPECT"
+    die "the admin console is not ready at https://$ADMIN_HOST: $admin_why (extra sign-in gate $ADMIN_GATE; the API is serving $SHA); inspect: docker compose -f deploy/docker-compose.yml --profile admin logs --tail=100 admin caddy"
+  fi
+  echo "ADMIN CONSOLE READY at https://$ADMIN_HOST (exact SHA $SHA; extra sign-in gate $ADMIN_GATE)"
 fi
 echo "STAGING READY at exact SHA $SHA"

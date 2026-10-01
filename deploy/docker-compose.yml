@@ -8,7 +8,8 @@
 #
 # Services: postgres (PostGIS), redis, meilisearch, the API, and a dedicated
 # BullMQ worker (so N API replicas never process a job N times); optionally
-# the website (profile "web", turned on by WEB_HOST).
+# the website (profile "web", turned on by WEB_HOST) and the admin console
+# (profile "admin", turned on by ADMIN_HOST).
 #
 # SECRETS are never container environment VALUES: Docker persists those in the
 # container config on disk and `docker inspect` prints them. Every secret is a
@@ -230,6 +231,14 @@ services:
       # [Q11] The website's DNS name. Empty (the default) serves no website:
       # the Caddyfile adds it to the API's site only when it is set.
       WEB_HOST: ${WEB_HOST:-}
+      # [ADMIN-CONSOLE] The admin console's DNS name. Empty (the default)
+      # serves no console. The optional second gate in front of it is a
+      # bcrypt hash (the password never reaches this host); its user is
+      # DERIVED from the same setting, `admin` exactly when the hash is set,
+      # and the Caddyfile refuses to load one without the other.
+      ADMIN_HOST: ${ADMIN_HOST:-}
+      ADMIN_BASIC_AUTH_USER: ${ADMIN_BASIC_AUTH_HASH:+admin}
+      ADMIN_BASIC_AUTH_HASH: ${ADMIN_BASIC_AUTH_HASH:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - swift-caddy-data:/data
@@ -270,6 +279,36 @@ services:
     environment:
       # V8 collects well below the container's ceiling, so a leak restarts the
       # site instead of pressing on the database's memory.
+      NODE_OPTIONS: --max-old-space-size=384
+    mem_limit: 640m
+    # No host port: Caddy is the only public entrance.
+    networks: [private]
+
+  # [ADMIN-CONSOLE] The admin console (apps/admin), OPTIONAL, where partner
+  # documents are approved and rejected. The `admin` profile keeps it out of
+  # every plain `up`, and pilot-up.sh turns the profile on only when
+  # deploy/.env sets ADMIN_HOST, so a stack without ADMIN_HOST is exactly the
+  # stack above. Like the website it is stateless and only a CLIENT of the
+  # public API (the browser signs in to https://API_HOST with a staff phone
+  # and a one-time code; the API admits ADMIN and SUPER_ADMIN only): it reads
+  # no secret and not deploy/.env, mounts nothing, needs no migration and
+  # waits on no service. Caddy reaches it on the private network, behind the
+  # optional second gate; it publishes no port.
+  admin:
+    profiles: ["admin"]
+    build:
+      context: ..
+      dockerfile: apps/admin/Dockerfile
+      # NEXT_PUBLIC_* is inlined into the browser bundle at BUILD time, so the
+      # API the console calls is fixed per image: this stack's own public API.
+      # The build refuses an origin that is not https.
+      args:
+        NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}
+    image: swift-admin:${SWIFT_TAG:-local}
+    restart: unless-stopped
+    environment:
+      # V8 collects well below the container's ceiling, so a leak restarts the
+      # console instead of pressing on the database's memory.
       NODE_OPTIONS: --max-old-space-size=384
     mem_limit: 640m
     # No host port: Caddy is the only public entrance.
