@@ -998,14 +998,14 @@ export interface VendorItemInput {
 }
 
 export const vendorApi = {
-  profile: () => api.get('/vendor/profile'),
+  profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
   toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
   toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
-  order: (id: string) => api.get(`/vendor/orders/${id}`),
+  order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   // [W-25] a store's attestation carries the provider reference from its own wallet message
   confirmPayment: (id: string, reference: string) => api.post(`/vendor/orders/${id}/confirm-payment`, { reference }),
