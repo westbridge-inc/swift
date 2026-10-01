@@ -4,8 +4,9 @@ import { site, launch } from '@/site.config';
 /**
  * [Q36 item 7] The delivery policy, as Swift works today. Each rule is read
  * from the code:
- *  - every store sets its own delivery radius, and an address outside it is
- *    refused before the order is placed (order.service.ts, OUT_OF_RANGE);
+ *  - every store sets its own delivery radius; the home feed lists stores by
+ *    distance, and the radius is enforced when the delivery address is set
+ *    (customer.routes.ts) and again at checkout (order.service.ts, OUT_OF_RANGE);
  *  - the fee is a base fee plus a per-kilometre rate beyond the included
  *    distance, from the country's delivery-fee schedule (utils/markup.ts). The
  *    live figures can come from configuration, so this page quotes no number:
@@ -13,8 +14,8 @@ import { site, launch } from '@/site.config';
  *  - times are estimates (dispatch/live-eta.ts drives no contractual timer);
  *  - a no-show needs the rider's arrival plus a 5-minute wait, and a strike
  *    needs evidence (cash/cash-rules.service.ts, order/cancel-policy.ts).
- * "No deliveries outside Guyana, no exports" is a business commitment
- * awaiting the owner's approval: which countries Swift serves is data.
+ * "No deliveries outside Guyana, no exports" is a business commitment (which
+ * countries Swift serves is data, not code). Approved by the owner, 1 Oct 2026.
  */
 
 const UPDATED = '1 October 2026';
@@ -40,11 +41,11 @@ export default function DeliveryPage() {
           {site.tradeName} operates in {launch.markets.join(' and ')}, and the nearby areas each store delivers to.
         </li>
         <li>
-          Each store sets its own delivery radius. A store delivers only to addresses inside it: the app shows you the
-          stores that deliver to your address, and an order to an address outside a store&apos;s radius is refused
-          before it is placed.
+          Each store sets its own delivery radius. The app lists stores near you, and checks a store&apos;s delivery
+          radius when you choose your delivery address and again at checkout: an order to an address outside a
+          store&apos;s radius is refused before it is placed.
         </li>
-        {/* OWNER MUST APPROVE: business commitment. */}
+        {/* Approved by the owner, 1 Oct 2026: business commitment. */}
         <li>
           <b>No deliveries outside {site.country}, and no exports.</b> {site.tradeName} operates only in{' '}
           {site.country} and does not ship goods abroad.

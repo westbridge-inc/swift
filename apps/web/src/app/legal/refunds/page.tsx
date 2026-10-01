@@ -11,8 +11,7 @@ import { site, launch } from '@/site.config';
  *    (modules/order/cancel-policy.ts) and its charge path (order.service.ts);
  *  - the weekly partner fee is paid in advance, one week at a time, and
  *    stopping a plan ends future charges (modules/billing/billing.service.ts).
- * The sections marked below are business commitments awaiting the owner's
- * approval before this page is treated as final.
+ * Approved by the owner, 1 Oct 2026: the business commitments marked below.
  */
 
 const UPDATED = '1 October 2026';
@@ -77,8 +76,7 @@ export default function RefundsPage() {
         </li>
       </ul>
 
-      {/* DRAFT: owner approval pending (the MMG refund rail ruling is open).
-          No automatic refund exists; Swift can only help. */}
+      {/* Approved by the owner, 1 Oct 2026. No automatic refund exists; Swift can only help. */}
       <h2>If an MMG-paid order is cancelled or never arrives</h2>
       <p>
         Contact the business first and ask for your refund. If the business does not refund you, contact{' '}
@@ -89,7 +87,7 @@ export default function RefundsPage() {
         refund of order money is made by the business.
       </p>
 
-      {/* OWNER MUST APPROVE: this whole section is a business commitment. */}
+      {/* Approved by the owner, 1 Oct 2026: this whole section is a business commitment. */}
       <h2>The weekly partner fee</h2>
       <p>
         Businesses, riders and drivers pay {site.tradeName} a flat weekly fee for the software. Customers pay{' '}

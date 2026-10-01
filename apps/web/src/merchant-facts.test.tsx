@@ -112,6 +112,10 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Delivery policy' })).toBeTruthy();
     expect(text()).toContain(`No deliveries outside ${site.country}`);
     expect(screen.getByRole('heading', { name: /pickup/i })).toBeTruthy();
+    // [DS628] Code-true: the home feed lists stores by distance and does not filter by radius;
+    // the radius is enforced when the delivery address is set and again at checkout.
+    expect(text()).not.toContain('stores that deliver to your address');
+    expect(text()).toContain("The app lists stores near you, and checks a store's delivery radius when you choose your delivery address and again at checkout");
   });
 
   it('8 · the country in which the merchant is officially registered and located (Georgetown, Guyana)', async () => {
