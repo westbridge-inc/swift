@@ -4,6 +4,7 @@ import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
 import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
 import { bindBrowseTenant, requireRequestTenant } from './search-scope';
+import { customerPoint } from '../discovery/customer-point';
 import { visibleVendorInTenant } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
@@ -84,7 +85,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
   // Universal search — searches vendors AND items
   app.get('/search', { preHandler: [browseSearch] }, async (request) => {
-    const { q, type, cuisine, lat, lng, limit: parsedLimit } = searchQuerySchema.parse(request.query);
+    const { q, type, cuisine, lat, lng, limit: parsedLimit } = customerPoint(searchQuerySchema.parse(request.query));
     // [R048-003] ONE tenant per request — the caller's, as auth bound it. Carried into the
     // index filter (server-built) and into every DB fallback query below.
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);
