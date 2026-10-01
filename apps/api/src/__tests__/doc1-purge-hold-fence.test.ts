@@ -1032,3 +1032,48 @@ describe('[#1414 merge] a purge that projects takes the identity authority befor
     expect(await finishing).toBe('PURGED');
   });
 });
+
+// ---------------------------------------------------------------------------
+// [DS625] Independent review of #1407 at 518507d5. Finding 2: a whole-person
+// hold covers documents submitted after it (unstamped by design), so the
+// database must refuse a direct delete of them, and of their extracted fields,
+// the way the claim guard already refuses a claim — and must not let either
+// be moved off the person, or to another submission, to escape it.
+// ---------------------------------------------------------------------------
+
+describe('[DS625 F2] a whole-person hold refuses direct database deletes of a later document', () => {
+  it('a later document cannot be deleted or moved to another person until the hold is released', async () => {
+    const f = await fixture();
+    const placed = await placeDocLegalHold(holder, { ...holdInput(f), documentIds: undefined });
+    const later = await extraDocument(f, 'raw-delete-after-hold', { status: 'APPROVED' });
+    expect(later.doc.legalHoldId).toBeNull();
+    const other = (await fixture()).user;
+    await expect(worker.$executeRaw`DELETE FROM verification_documents WHERE id = ${later.doc.id}`).rejects.toThrow('subject-wide legal hold active');
+    await expect(worker.$executeRaw`UPDATE verification_documents SET "userId" = ${other.id} WHERE id = ${later.doc.id}`).rejects.toThrow('subject-wide legal hold active');
+    expect(await holder.verificationDocument.findUniqueOrThrow({ where: { id: later.doc.id } })).toMatchObject({ userId: f.user.id, legalHoldId: null });
+    // Release ends the coverage: the same direct delete of the unstamped, unclaimed row is then the database's ordinary business.
+    await releaseDocLegalHold(worker, { holdId: placed.hold.id, releasedBy: f.user.id, reason: 'Synthetic release' });
+    expect(await worker.$executeRaw`DELETE FROM verification_documents WHERE id = ${later.doc.id}`).toBe(1);
+  });
+
+  it('extracted fields of a later document cannot be deleted or moved to another submission', async () => {
+    const f = await fixture();
+    await placeDocLegalHold(holder, { ...holdInput(f), documentIds: undefined });
+    const later = await extraDocument(f, 'raw-extraction-after-hold', { status: 'APPROVED' });
+    const run = await worker.extractionRun.create({ data: {
+      submissionId: later.doc.id, tenantId: f.user.tenantId, profileCode: 'SYNTHETIC',
+      engineName: 'synthetic', engineVersion: '1', startedAt: new Date(), outcome: 'OK',
+      wrappedDek: new Uint8Array(40).fill(4),
+      fields: { create: {
+        submissionId: later.doc.id, tenantId: f.user.tenantId, fieldCode: 'synthetic_field',
+        valueCt: new Uint8Array(40).fill(5), source: 'HUMAN',
+      } },
+    } });
+    const elsewhere = (await fixture()).doc;
+    await expect(worker.$executeRaw`DELETE FROM extracted_field WHERE "submissionId" = ${later.doc.id}`).rejects.toThrow('subject-wide legal hold active');
+    await expect(worker.$executeRaw`DELETE FROM extraction_run WHERE id = ${run.id}::uuid`).rejects.toThrow('subject-wide legal hold active');
+    await expect(worker.$executeRaw`UPDATE extraction_run SET "submissionId" = ${elsewhere.id} WHERE id = ${run.id}::uuid`).rejects.toThrow('extraction identity immutable');
+    expect(await holder.extractionRun.count({ where: { id: run.id, submissionId: later.doc.id, wrappedDek: { not: null } } })).toBe(1);
+    expect(await holder.extractedField.count({ where: { submissionId: later.doc.id, valueCt: { not: null } } })).toBe(1);
+  });
+});

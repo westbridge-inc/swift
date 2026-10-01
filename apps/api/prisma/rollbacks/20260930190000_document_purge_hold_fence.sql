@@ -8,6 +8,9 @@
 -- below must see every row, and any other role is refused.
 -- The migration's own history row goes in the same transaction, so a later
 -- `prisma migrate deploy` re-applies the fence instead of reporting it applied.
+-- So does the row of 20261001120000_document_hold_guard_subject_wide: it only
+-- replaces two of the functions dropped here, so it is undone with them and the
+-- next deploy re-applies it after the fence.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 -- The ledgers FORCE row security, so even their owner can get a filtered view
@@ -64,7 +67,7 @@ ALTER TABLE encrypted_objects DROP COLUMN "sourceId", DROP COLUMN "retiredClaimI
 ALTER TABLE doc_legal_hold DROP COLUMN "subjectWide";
 DO $$ BEGIN
   IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
-    DELETE FROM "_prisma_migrations" WHERE migration_name = '20260930190000_document_purge_hold_fence';
+    DELETE FROM "_prisma_migrations" WHERE migration_name IN ('20260930190000_document_purge_hold_fence', '20261001120000_document_hold_guard_subject_wide');
   END IF;
 END $$;
 COMMIT;
