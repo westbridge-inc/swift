@@ -683,7 +683,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   const checkoutOn = (): Record<string, string> => ({
     MMG_CHECKOUT_ENABLED: '1',
     MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
-    MMG_CHECKOUT_MERCHANT_ID: '0000000001',
+    MMG_CHECKOUT_MERCHANT_ID: '0000001',
     MMG_CHECKOUT_CLIENT_ID: 'client-test',
     MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
     MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',

@@ -13,6 +13,8 @@ import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { DispatchService, EXPRESS_OFFER_TIMEOUT_SECONDS, OFFER_TIMEOUT_SECONDS } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
+import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // Full-platform live audit (2026-07-12, every persona driven over HTTP)
@@ -31,13 +33,15 @@ let app: FastifyInstance;
 const createdUserIds: string[] = [];
 const createdOrderIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_300_000_000 + Math.floor(Math.random() * 600_000_000);
+// [SAFE-B · retained history] A courier job with an issued drop-off proof is kept with the people it names,
+// so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('23');
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Platform',
       lastName: `Audit${seq}`,
       roles,
@@ -67,7 +71,7 @@ async function makeVendor() {
       name: `Audit Vendor ${seq}`,
       slug: `audit-vendor-${nanoid(10).toLowerCase()}`,
       vendorType: 'RESTAURANT',
-      phone: `+${phoneBase + 800 + seq}`,
+      phone: `${PHONE_PREFIX}${String(800 + seq).padStart(3, '0')}`,
       addressLine1: '1 Audit Ave',
       city: 'Georgetown',
       region: 'Demerara-Mahaica',
@@ -168,10 +172,22 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-  await app.close();
+  // [ALG-01] Riders tied at one spot make the fairness band record decisions
+  // about these orders; they outlive the orders unless they go with them.
+  // [SAFE-B · retained history] A courier job with an issued drop-off proof is kept with the people and store
+  // it names; the rest goes as before, in one transaction, and what stays is taken out of service.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { orderIds: createdOrderIds });
+      await tx.algoDecision.deleteMany({ where: { subjectId: { in: createdOrderIds } } });
+      await tx.order.deleteMany({ where: { id: { in: without(createdOrderIds, kept.orderIds) } } });
+      await tx.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await tx.user.deleteMany({ where: { id: { in: without(createdUserIds, kept.userIds) } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -240,13 +256,14 @@ describe('courier terminal effects', () => {
   it('proof-of-delivery pays the COURIER_FEE, frees the rider, notifies the sender', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider();
-    const proofIssued = `https://x/courier-proof/x/proof.jpg`;
     const job = await makeOrder(customer.userId, null, 'PICKED_UP', { orderType: 'COURIER', riderId: rider.riderId });
     await app.prisma.order.update({
       where: { id: job.id },
       // [M-28] The sender paid at pickup (the collect step): a proof may close the job.
-      data: { courierProofIssuedUrl: proofIssued, courierProofIssuedRiderId: rider.riderId, paymentStatus: 'CAPTURED' },
+      data: { paymentStatus: 'CAPTURED' },
     });
+    // [SAFE-B] The server's own issuer mints the drop-off proof for the assigned rider, as /proof-photo does.
+    const proofIssued = (await issueSyntheticHandoverPhoto(app.prisma, { orderId: job.id, actorId: rider.userId, role: 'RIDER' })).url;
     await app.prisma.rider.update({
       where: { id: rider.riderId },
       data: { isAvailable: false, currentOrderId: job.id },

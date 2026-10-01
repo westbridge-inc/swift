@@ -14,6 +14,7 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { OrderService } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // [E16] Courier pickup custody proof.
@@ -40,25 +41,34 @@ let seq = 0;
 // are fixed blocks +59200…/+592013…; the random +592 draws start 1–9, carry a
 // 13-digit timestamp, or are 8 nanoid characters). Keyed so cleanup also
 // clears a crashed run's leftovers.
-const PHONE_PREFIX = '+592036';
-const phoneBase = 5_920_360_000;
+// [SAFE-B · retained history] A job with an issued drop-off proof is kept with the people it names, so the
+// phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('13');
 
 async function purgeFixtures() {
   const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
   const userIds = users.map((u) => u.id);
   if (userIds.length === 0) return;
-  await app.prisma.order.deleteMany({ where: { OR: [{ customerId: { in: userIds } }, { rider: { userId: { in: userIds } } }] } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  const orderIds = (await app.prisma.order.findMany({ where: { OR: [{ customerId: { in: userIds } }, { rider: { userId: { in: userIds } } }] }, select: { id: true } })).map((o) => o.id);
+  // [SAFE-B · retained history] A job with an issued drop-off proof is kept with the people it names; the rest
+  // goes as before, in one transaction, and what stays is taken out of service.
+  await app.prisma.$transaction(async (tx) => {
+    const kept = await retainedCohort(tx, { orderIds });
+    const goneUserIds = without(userIds, kept.userIds);
+    await tx.order.deleteMany({ where: { id: { in: without(orderIds, kept.orderIds) } } });
+    await tx.rider.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await tx.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await tx.session.deleteMany({ where: { userId: { in: userIds } } });
+    await tx.user.deleteMany({ where: { id: { in: goneUserIds } } });
+    await retireKeptScaffolding(tx, kept);
+  }, { timeout: 60_000 });
 }
 
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Pkp',
       lastName: `U${seq}`,
       roles,

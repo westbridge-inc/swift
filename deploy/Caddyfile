@@ -10,9 +10,16 @@
 # is always set; every other host on this site is the website, and with
 # WEB_HOST unset there is no other host. The website sends its own security
 # headers (apps/web/next.config.ts); none are added or overridden here.
-{$API_HOST} {$WEB_HOST} {
+#
+# [STORE-1] API_ALIAS_HOST (optional, deploy/.env) is a SECOND DNS name for the
+# same API. The store build of the app is fixed to the production API name; until
+# a production stack exists, that name points at this stack. It gets its own
+# certificate like any site address, and it MUST be in the @api matcher: any
+# host missing from the matcher is served the website. Unset or empty, it
+# expands to nothing and this file is exactly what it was without it.
+{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {
     encode zstd gzip
-    @api host {$API_HOST}
+    @api host {$API_HOST} {$API_ALIAS_HOST}
     handle @api {
         @metrics path /metrics
         respond @metrics 403

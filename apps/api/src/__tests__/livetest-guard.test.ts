@@ -73,6 +73,9 @@ describe('[TASK-057] gate (p): no phone the suite uses can reach a real person',
       ...walk(join(ROOT, 'scripts/livetest')).filter((f) => /\.(ts|md)$/.test(f)),
       join(ROOT, 'deploy/journeys-run.sh'),
       join(ROOT, 'deploy/docker-compose.journeys.yml'),
+      // [PHONE-HELPER] the counterpart helper's host script and the owner's phone script
+      join(ROOT, 'deploy/phone-helper.sh'),
+      join(ROOT, 'deploy/PHONE-TEST-SCRIPT.md'),
     ];
     const offenders: string[] = [];
     for (const file of files) {

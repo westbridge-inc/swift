@@ -51,6 +51,9 @@ describe('card rail OFF at the billing boundary', () => {
       {} as NotificationService,
       { chargeToken } as unknown as PaymentProvider,
     );
+    // [#1393] The shared confirmation gate reads the payer, clock and holds;
+    // none of that is this case's subject. No payment is being confirmed here.
+    vi.spyOn(billing as unknown as { subscriptionHasConfirmationHold: () => Promise<boolean> }, 'subscriptionHasConfirmationHold').mockResolvedValue(false);
     // Exercise the real charge decision without opening services or manufacturing
     // the unrelated billing-cycle database graph.
     const attempt = billing as unknown as {
@@ -82,6 +85,8 @@ describe('card rail OFF at the billing boundary', () => {
         chargeToken: vi.fn(async () => ({ status: 'failed', providerRef: '', code: 'CARD_RAIL_DISABLED' })),
       } as unknown as PaymentProvider,
     );
+    // [#1393] As above: no payment is being confirmed for this subscription.
+    vi.spyOn(billing as unknown as { subscriptionHasConfirmationHold: () => Promise<boolean> }, 'subscriptionHasConfirmationHold').mockResolvedValue(false);
     const attempt = billing as unknown as { attemptCharge: (sub: object, amount: number) => Promise<unknown> };
     await expect(attempt.attemptCharge({
       id: 'synthetic', billingMethod: 'CARD', paymentToken: 'synthetic',

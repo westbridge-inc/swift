@@ -64,6 +64,9 @@ describe('[STA-1] review:provision and friends', () => {
     expect(row.staticOtpHash).not.toContain(c!.code);
     const user = await system(() => app.prisma.user.findUniqueOrThrow({ where: { phone: c!.identifier } }));
     expect([user.tenantId, user.isSynthetic, user.activeRole]).toEqual([SLUG, true, 'CUSTOMER']);
+    // The app signs a persisted session out when roles is empty or lacks the
+    // active role (authHydration "invalid_roles"): the reviewer must survive a restart.
+    expect(user.roles).toEqual(['CUSTOMER']);
   });
 
   it('rotate: every credential gets a new code; the old one no longer matches the stored hash', async () => {

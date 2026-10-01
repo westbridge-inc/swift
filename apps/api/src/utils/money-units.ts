@@ -40,6 +40,9 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'BillingEvent', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'BillingEvent', field: 'amountUsd', unit: 'USD_MAJOR' },
   { model: 'BillingEvent', field: 'fxRateUsed', unit: 'FX_RATE' },
+  // [#1393] The settled weekly fee a paid obligation transition consumed, in
+  // the unit of the SubscriptionPayment and BillingEvent it is bound to.
+  { model: 'BillingObligationTransition', field: 'amount', unit: 'MAJOR_WHOLE' },
   // [PT-1] A hosted Pay-now session's server-priced amount: the weekly fee it
   // pays, in the same unit as the BillingEvent / SubscriptionPayment it becomes.
   // It reaches a provider only through toProviderMinor, at the seam.

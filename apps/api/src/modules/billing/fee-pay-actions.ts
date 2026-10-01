@@ -3,6 +3,7 @@ import { log } from '../../utils/logger';
 import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 import { payInfo } from './agent-cash.service';
 import { weeklyFeeAmount } from './subscription-fee';
+import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 
 // ---------------------------------------------------------------------------
 // The ways a partner can pay the weekly fee IN THE APP, decided in one place
@@ -27,7 +28,7 @@ export type PayAction =
 export const FEE_CHECKOUT_PLATFORMS_KEY = 'billing.feeCheckout.platforms';
 const SWITCH_TTL_MS = 60_000;
 /** Paying rejoins a CHURNED account; PAUSED (billing stopped) and CANCELLED do not pay. */
-const PAYABLE: ReadonlySet<SubscriptionStatus> = new Set<SubscriptionStatus>(['TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CHURNED']);
+const PAYABLE: ReadonlySet<SubscriptionStatus> = new Set<SubscriptionStatus>([...OPERABLE_STATUSES, 'SUSPENDED', 'CHURNED']);
 
 type PayableSub = Pick<Subscription, 'status' | 'feeWaived' | 'currencyCode' | 'weeklyRate' | 'customRate'>;
 

@@ -68,12 +68,22 @@ export type MmgLookupDetail =
     outcome: 'found';
     transactionId: string;
     status: MmgTxStatus;
+    /** transactionStatus exactly as MMG sent it ("successful" in UAT, 1 Oct), or null. */
+    statusText: string | null;
     /** Exact minor units, or null when the amount was absent or unreadable. */
     amountMinor: number | null;
     currencyCode: string | null;
     /** creditParty values, or null when MMG sent none. */
     creditParties: string[] | null;
+    /** The values of the creditParty entries whose key is exactly "accountid":
+     *  the account the money went to (UAT, 1 Oct: Swift's merchant MSISDN).
+     *  Null when MMG sent no creditParty list. */
+    creditAccounts: string[] | null;
     createdAt: string | null;
+    /** transactionReference exactly as sent: MMG's ledger number for the
+     *  payment, a DIFFERENT number from the checkout reply's transactionId
+     *  (UAT, 1 Oct). Null when absent or not a string. */
+    ledgerReference: string | null;
     /** [F1] What MMG's answer carries in the CONFIRMED reference field(s)
      *  (MMG_LOOKUP_REFERENCE_FIELDS), exactly as sent. Empty while no field is
      *  confirmed, and then nothing binds this transaction to a checkout. */
@@ -86,15 +96,46 @@ export type MmgLookupDetail =
 
 /**
  * [MMG checkout F1] Which field of MMG's lookup answer echoes the merchant's
- * own transaction reference. UNCONFIRMED (CHECKOUT-CONTRACT.md U5): MMG's
- * published material does not say, and no field is read by a guessed name.
- * Until the first UAT run proves one and it is named here, no lookup binds to
- * a checkout, so every checkout credit is held for a person.
+ * own transaction reference. NONE: MMG's UAT round trip (1 Oct) showed the
+ * lookup carries neither our merchantTransactionId nor our description, so no
+ * field is read by a guessed name. A checkout is tied to its payment by MMG's
+ * own success answer for it instead (the owner's ruling of 1 Oct, in
+ * mmg-checkout.service.ts); a value here only ever adds a contradiction check.
  * Each entry is an exact key path ('a.b'). A value counts only when it is a
  * string, compared whole: never a substring, never a number (an 18-digit
  * reference does not survive a JSON number).
  */
 export const MMG_LOOKUP_REFERENCE_FIELDS: readonly string[] = [];
+
+/**
+ * [MMG checkout] One HTTP 200 lookup answer as the verifier reads it. Pure:
+ * the live adapter and the tests read MMG's answer the same way. Fields MMG
+ * did not send, or sent in a form that cannot be read exactly, are null.
+ */
+export function lookupDetailFrom(answer: Record<string, unknown>, transactionId: string): Extract<MmgLookupDetail, { outcome: 'found' }> {
+  const creditParty = answer['creditParty'];
+  const statusText = typeof answer['transactionStatus'] === 'string' ? answer['transactionStatus'] : null;
+  const ledgerReference = typeof answer['transactionReference'] === 'string' ? answer['transactionReference'] : null;
+  const party = (entry: unknown) => (entry && typeof entry === 'object' && !Array.isArray(entry) ? entry as Record<string, unknown> : null);
+  return {
+    outcome: 'found',
+    transactionId: ledgerReference ?? transactionId,
+    status: mapMmgStatus(statusText ?? undefined),
+    statusText,
+    amountMinor: exactMinor(answer['amount']),
+    currencyCode: typeof answer['currency'] === 'string' ? answer['currency'] : null,
+    creditParties: Array.isArray(creditParty)
+      ? creditParty.map((entry: unknown) => String(party(entry)?.['value'] ?? '')).filter(Boolean)
+      : null,
+    creditAccounts: Array.isArray(creditParty)
+      ? creditParty.filter((entry: unknown) => party(entry)?.['key'] === 'accountid').map((entry: unknown) => String(party(entry)?.['value'] ?? '')).filter(Boolean)
+      : null,
+    createdAt: typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null,
+    ledgerReference,
+    echoedReferences: echoedReferencesFrom(answer),
+    raw: answer,
+  };
+}
 
 /** The string values at exactly these key paths of a lookup answer. */
 export function echoedReferencesFrom(raw: unknown, fields: readonly string[] = MMG_LOOKUP_REFERENCE_FIELDS): string[] {
@@ -269,10 +310,15 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
       outcome: 'found',
       transactionId,
       status,
+      // The sandbox speaks Swift's own status words, never MMG's "successful",
+      // so a sandbox checkout is never confirmed automatically.
+      statusText: status,
       amountMinor,
       currencyCode,
       creditParties,
+      creditAccounts: creditParties,
       createdAt: planted?.createdAt ?? null,
+      ledgerReference: transactionId,
       echoedReferences: echoedReferencesFrom(raw),
       raw,
     };
@@ -505,8 +551,8 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   }
 
   /** [MMG checkout 2/6] GET /lookup for the checkout verifier. Never throws:
-   *  400/404/422 mean MMG does not know the id; anything else that is not an
-   *  answer is an error to retry, never a verdict. */
+   *  400/404/422 mean MMG does not know the id; only an HTTP 200 object is an
+   *  answer (owner, 1 Oct); anything else is an error to retry, never a verdict. */
   async transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail> {
     let res: Response;
     try {
@@ -519,24 +565,10 @@ export class LiveMmgProvider implements MmgMerchantProvider {
       return { outcome: 'error', reason: `MMG lookup unreachable: ${(err as Error).message}` };
     }
     if (res.status === 400 || res.status === 404 || res.status === 422) return { outcome: 'not_found' };
-    if (!res.ok) return { outcome: 'error', reason: `MMG lookup HTTP ${res.status}` };
+    if (res.status !== 200) return { outcome: 'error', reason: `MMG lookup HTTP ${res.status}` };
     const body: unknown = await res.json().catch(() => null);
     if (!body || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'error', reason: 'MMG lookup answered with no object' };
-    const answer = body as Record<string, unknown>;
-    const creditParty = answer['creditParty'];
-    return {
-      outcome: 'found',
-      transactionId: typeof answer['transactionReference'] === 'string' ? answer['transactionReference'] : transactionId,
-      status: mapMmgStatus(typeof answer['transactionStatus'] === 'string' ? answer['transactionStatus'] : undefined),
-      amountMinor: exactMinor(answer['amount']),
-      currencyCode: typeof answer['currency'] === 'string' ? answer['currency'] : null,
-      creditParties: Array.isArray(creditParty)
-        ? creditParty.map((party: unknown) => (party && typeof party === 'object' ? String((party as Record<string, unknown>)['value'] ?? '') : '')).filter(Boolean)
-        : null,
-      createdAt: typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null,
-      echoedReferences: echoedReferencesFrom(answer),
-      raw: answer,
-    };
+    return lookupDetailFrom(body as Record<string, unknown>, transactionId);
   }
 
   /** GET /txn-history. Throws on transport. */

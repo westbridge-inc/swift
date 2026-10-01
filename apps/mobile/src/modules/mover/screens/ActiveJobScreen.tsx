@@ -1,3 +1,5 @@
+import { uploadHandoverPhoto } from '../../../hooks/mover';
+import type { AuthSessionSnapshot } from '../../../lib/authSession';
 /** @jsxImportSource react */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Linking, Platform, Pressable, View } from 'react-native';
@@ -148,6 +150,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // [M-29] The unpaid sheet — the failed fare outcome (driver) or failed
   // handover (rider): refused, or nobody / left without paying.
   const [unpaidSheet, setUnpaidSheet] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [handoverPhoto, setHandoverPhoto] = useState<{ orderId: string; kind: string; url: string; owner: AuthSessionSnapshot } | null>(null);
+  const activePhotoBoundary = useRef('');
   // [M-28] The sender-pays courier job that ends at pickup: the fee was not
   // paid, so the parcel is never taken.
   const [senderRefusedSheet, setSenderRefusedSheet] = useState(false);
@@ -232,7 +237,8 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
+  activePhotoBoundary.current = `${job?.id}:${kind}`;
+  const busy = photoBusy || driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -424,9 +430,31 @@ export function ActiveJobScreen({ navigation }: any) {
   // [M-29] The failed outcome, on either rail: the server captures this GPS
   // as evidence, strikes the customer and opens the guarantee claim in one
   // commit — nothing here is optimistic, and the answer names the claim.
+  const addHandoverPhoto = async () => {
+    if (preview || !job?.id || !kind || photoBusy) return;
+    const owner = requireAuthSessionSnapshot();
+    const orderId = job.id;
+    const boundary = `${orderId}:${kind}`;
+    setPhotoBusy(true);
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      requireAuthSessionForPrincipal(owner);
+      if (!permission.granted) { toast.show('You can still record the outcome for review without a photo.'); return; }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      requireAuthSessionForPrincipal(owner);
+      if (shot.canceled || !shot.assets?.[0] || activePhotoBoundary.current !== boundary) return;
+      const url = await uploadHandoverPhoto(kind, orderId, shot.assets[0].uri, owner);
+      if (activePhotoBoundary.current === boundary) setHandoverPhoto({ orderId, kind, url, owner });
+    } catch (error) {
+      if (!(error instanceof AuthSessionBoundaryError)) toast.show('Photo could not be saved. Retry or record the outcome without it for review.');
+    } finally { setPhotoBusy(false); }
+  };
   const recordUnpaid = (outcome: FailedOutcome) => {
     setUnpaidSheet(false);
     if (preview || !job?.id) return;
+    const photo = handoverPhoto && handoverPhoto.orderId === job.id && handoverPhoto.kind === kind ? handoverPhoto : null;
+    if (photo) { try { requireAuthSessionForPrincipal(photo.owner); } catch { setHandoverPhoto(null); return; } }
+    const proof = photo ? { photoUrl: photo.url, authSession: photo.owner } : {};
     const recorded = isDriver ? 'Unpaid fare recorded' : 'Failed delivery recorded';
     const onSuccess = (res: any) => {
       const claim = res?.claim?.status;
@@ -438,11 +466,9 @@ export function ActiveJobScreen({ navigation }: any) {
       navigation?.goBack?.();
     };
     const onError = (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the outcome — try again or call support.");
-    if (isDriver) driverAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
-    // [M-28] A courier's failed outcome is recorded WITH the proof photo —
-    // the camera opens next, and the photo is the claim's evidence.
-    else if (isCourier) void captureCourierProof(outcome);
-    else riderAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
+    if (isDriver) driverAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }, { onSuccess, onError });
+    // Failed courier outcomes use the same optional issued-photo evidence path.
+    else riderAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }, { onSuccess, onError });
   };
 
   // [M-28] The sender's fee, recorded at pickup. 'paid' captures it (the door's
@@ -461,7 +487,7 @@ export function ActiveJobScreen({ navigation }: any) {
             active.refetch?.();
             return;
           }
-          toast.show(res?.status === 'CANCELLED' ? 'Job ended — the sender didn’t pay. Their account takes a strike.' : 'Recorded.');
+          toast.show(res?.status === 'CANCELLED' ? 'Job ended — the sender didn’t pay. The report is recorded for review.' : 'Recorded.');
           navigation?.goBack?.();
         },
         onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the sender's payment — try again or call support."),
@@ -1102,11 +1128,12 @@ export function ActiveJobScreen({ navigation }: any) {
         <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : isCourier ? 'The recipient didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {isDriver
-            ? 'Your location is recorded as evidence, the passenger’s account takes a strike, and the Swift guarantee reviews the fare. Pick what happened:'
+            ? 'Record what happened. Your evidence and fare claim will be reviewed; a missing photo does not stop you recording the outcome.'
             : isCourier
-              ? 'Next you’ll photograph the parcel at the door as evidence. Your location is recorded, the sender’s account takes a strike, and the Swift guarantee reviews the fee. Pick what happened:'
-              : 'Your location is recorded as evidence, the customer’s account takes a strike, and the Swift guarantee reviews the amount. Pick what happened:'}
+              ? 'Record what happened at the door. Add a photo if available; incomplete evidence goes to review.'
+              : 'Record what happened. Add a photo if available; missing or insufficient evidence goes to review.'}
         </T>
+        {<PillButton label={photoBusy ? 'Saving photo…' : handoverPhoto?.orderId === job?.id ? 'Replace photo' : 'Add photo'} disabled={busy} onPress={() => void addHandoverPhoto()} />}
         <PillButton
           label={isDriver || isCourier ? 'Refused to pay' : 'Refused to pay at the door'}
           variant="outline"
@@ -1130,7 +1157,7 @@ export function ActiveJobScreen({ navigation }: any) {
       <PopupCard visible={senderRefusedSheet} onClose={() => setSenderRefusedSheet(false)}>
         <PopupTitle variant="title" center>The sender didn’t pay?</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          Don’t take the parcel. The job ends here — your location is recorded and the sender’s account takes a strike.
+          Don’t take the parcel. The job ends here with the unpaid outcome recorded. Support can review any disagreement.
         </T>
         <PillButton
           label="Sender refused to pay"

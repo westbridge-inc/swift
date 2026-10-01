@@ -35,6 +35,20 @@ if [ -n "$WEB_HOST" ]; then
     die "WEB_HOST must differ from API_HOST"
   COMPOSE+=(--profile web)
 fi
+# [STORE-1] Optional second API name (the store build's fixed API name while no
+# production stack exists). Same shape rules as API_HOST, and it must be neither
+# the primary API name nor the website's: a website name in the API matcher
+# would serve the API in place of the site.
+API_ALIAS_HOST="$(env_value API_ALIAS_HOST)"
+if [ -n "$API_ALIAS_HOST" ]; then
+  [[ "$API_ALIAS_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
+    die "API_ALIAS_HOST must be a DNS hostname for HTTPS, or empty for no alias"
+  alias_lc="$(printf '%s' "$API_ALIAS_HOST" | tr '[:upper:]' '[:lower:]')"
+  [ "$alias_lc" != "$(printf '%s' "$API_HOST" | tr '[:upper:]' '[:lower:]')" ] ||
+    die "API_ALIAS_HOST must differ from API_HOST"
+  [ -z "$WEB_HOST" ] || [ "$alias_lc" != "$(printf '%s' "$WEB_HOST" | tr '[:upper:]' '[:lower:]')" ] ||
+    die "API_ALIAS_HOST must differ from WEB_HOST"
+fi
 [ "$(env_value MAPS_PROVIDER)" = osrm ] || die "pilot requires MAPS_PROVIDER=osrm"
 [ "$(env_value OSRM_URL)" = http://osrm:5000 ] || die "OSRM_URL must use the private routing service"
 # Secrets are not in this file (the encrypted store holds them; checked below

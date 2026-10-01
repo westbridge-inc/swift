@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { sweepTrialFeeEducation, firstPaymentFunnel } from '../modules/billing/trial-fee-education';
 import { NotificationService } from '../modules/notification/notification.service';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // The trial first-payment funnel [san spec 21.4]: day-10 and day-13 notices
 // of the first fee — each stage exactly once (BillingEvent unique-key gate) —
@@ -52,6 +53,7 @@ async function makeTrial(daysLeft: number) {
 beforeAll(async () => { await prisma.$connect(); });
 
 afterAll(async () => {
+  await cleanupBillingClocks(prisma, subIds);
   await prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });

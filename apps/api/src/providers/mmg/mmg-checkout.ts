@@ -16,9 +16,9 @@ import { isProduction } from '../../utils/runtime-mode';
 // ---------------------------------------------------------------------------
 // MMG hosted checkout — the partner pays the weekly fee on the MMG page.
 //
-// The source of truth is the MMG UAT package ONLY: the Checkout Flow demo
-// (Python, pyca/cryptography) for the wire format, and the Initiate Flow
-// Postman collection for endpoint and field NAMES. Nothing here is taken from
+// The official merchant page supplies current request/reply fields and codes.
+// The earlier Checkout Flow demo supplies serialization and OAEP parameters;
+// the Initiate Flow Postman collection supplies endpoint and field NAMES. Nothing here is taken from
 // a third-party integration, and no value from either file is in this repo.
 // providers/mmg/CHECKOUT-CONTRACT.md lists what is confirmed and what is not.
 //
@@ -27,10 +27,9 @@ import { isProduction } from '../../utils/runtime-mode';
 //            under MMG_CHECKOUT_PUBLIC_KEY, standard base64 with + → - and
 //            / → _ and the '=' padding KEPT, placed raw in the page URL:
 //            <page>?token=…&merchantId=…&X-Client-ID=…
-//   reply    base64url (padding optional) → the same OAEP under
-//            MMG_CHECKOUT_PRIVATE_KEY → UTF-8 → JSON. Its FIELD NAMES are
-//            UNCONFIRMED, so this module returns the generic object and
-//            describeShape() — never a parsed outcome.
+//   reply    canonical Base64 or Base64-URL (padding optional) → same OAEP
+//            under MMG_CHECKOUT_PRIVATE_KEY → UTF-8 → JSON. This module
+//            returns an object; the billing service validates official fields.
 //
 // [I2] A decrypted reply is a HINT, never proof of payment. The UAT key pair
 // is ONE pair shared with MMG, so anyone holding its public half can mint a
@@ -54,7 +53,7 @@ export const MMG_CHECKOUT_UAT_URL = 'https://mmgpg.mmgtest.net/mmg-pg/web/paymen
 export const MMG_CHECKOUT_SANDBOX_URL = 'https://mmg-checkout.sandbox.invalid/mmg-pg/web/payments';
 
 /** The obviously fake merchant the sandbox pays. */
-export const SANDBOX_MERCHANT_ID = '0000000000';
+export const SANDBOX_MERCHANT_ID = '0000000';
 
 /** The productDescription of every checkout: the fee is the only thing sold. */
 export const MMG_CHECKOUT_PRODUCT_DESCRIPTION = 'Swift weekly fee';
@@ -93,8 +92,8 @@ export interface MmgCheckoutRequest {
   merchantId: string;
   merchantTransactionId: string;
   productDescription: string;
-  /** Unix SECONDS, an integer — the demo sends int(time.time()). */
-  requestInitiationTime: number;
+  /** Decimal unix seconds string, as shown by the official merchant-page sample. */
+  requestInitiationTime: string;
   merchantName: string;
 }
 
@@ -163,15 +162,15 @@ export function checkoutPageUrl(env: Record<string, string | undefined> = proces
   return `${url.origin}${url.pathname}`;
 }
 
-/** Unix seconds, as the demo computes int(time.time()). */
-export function requestInitiationTime(now: Date): number {
-  return Math.floor(now.getTime() / 1000);
+/** The newer official sample represents whole unix seconds as a string. */
+export function requestInitiationTime(now: Date): string {
+  return String(Math.floor(now.getTime() / 1000));
 }
 
 // -- The request ----------------------------------------------------------------
 
 const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
-const MERCHANT_MSISDN = /^\d{7,15}$/;
+const MERCHANT_MSISDN = /^\d{7}$/;
 
 function shortAscii(value: string, what: string, max: number): string {
   if (!PRINTABLE_ASCII.test(value) || value.length > max || value.trim() !== value) {
@@ -183,14 +182,14 @@ function shortAscii(value: string, what: string, max: number): string {
 /** Validates every field and returns them in the demo order. */
 export function buildCheckoutRequest(input: MmgCheckoutRequest): MmgCheckoutRequest {
   if (!/^\d+$/.test(input.amount)) throw new MmgCheckoutError('INVALID_REQUEST', 'amount must be a string of digits.');
-  if (!MERCHANT_MSISDN.test(input.merchantId)) {
-    throw new MmgCheckoutError('INVALID_REQUEST', 'merchantId must be the merchant MSISDN, 7-15 digits.');
+  if (input.merchantId.length !== 7 || !MERCHANT_MSISDN.test(input.merchantId)) {
+    throw new MmgCheckoutError('INVALID_REQUEST', 'merchantId must be the merchant MSISDN, exactly 7 digits.');
   }
   if (!MERCHANT_TRANSACTION_ID_SHAPE.test(input.merchantTransactionId)) {
     throw new MmgCheckoutError('INVALID_REQUEST', 'merchantTransactionId must be 18 digits (newMerchantTransactionId).');
   }
-  if (!Number.isSafeInteger(input.requestInitiationTime) || input.requestInitiationTime <= 0) {
-    throw new MmgCheckoutError('INVALID_REQUEST', 'requestInitiationTime must be a positive integer of unix seconds.');
+  if (typeof input.requestInitiationTime !== 'string' || !/^[1-9][0-9]{0,9}$/.test(input.requestInitiationTime) || input.requestInitiationTime.trim() !== input.requestInitiationTime) {
+    throw new MmgCheckoutError('INVALID_REQUEST', 'requestInitiationTime must be a positive decimal string of unix seconds, at most 10 digits.');
   }
   return {
     secretKey: shortAscii(input.secretKey, 'The secret key', 256),
@@ -270,23 +269,26 @@ export function buildCheckoutUrl(page: string, token: string, merchantId: string
 
 // -- The reply ------------------------------------------------------------------
 
-/**
- * base64url with the padding optional: a token may arrive with its '='
- * padding or without it (the demo re-pads before decoding). The re-padding is
- * to a multiple of four — never four '=' on an already-aligned token — and a
- * token that IS padded must be padded correctly. Any character outside the
- * base64url alphabet is refused, never skipped.
- */
+/** Strict standard Base64 (official response instructions) or Base64-URL
+ *  (UAT demo), with optional correct padding and canonical unused bits.
+ *  A mixed alphabet, whitespace or malformed encoding is never repaired. */
 export function decodeCheckoutToken(token: string): Buffer {
-  const match = /^([A-Za-z0-9_-]+)(={0,2})$/.exec(token);
-  if (!match) throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token is not base64url.');
+  const match = /^([A-Za-z0-9+/_-]+)(={0,2})$/.exec(token);
+  if (!match || match[0].length !== token.length || (/[+/]/.test(token) && /[-_]/.test(token))) {
+    throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token is not canonical Base64 or Base64-URL.');
+  }
   const body = match[1] as string;
   const padding = (match[2] as string).length;
   const leftover = body.length % 4;
   if (leftover === 1) throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token has an impossible base64 length.');
   const needed = (4 - leftover) % 4;
   if (padding !== 0 && padding !== needed) throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token is padded wrongly.');
-  return Buffer.from(`${body.replace(/-/g, '+').replace(/_/g, '/')}${'='.repeat(needed)}`, 'base64');
+  const normalized = body.replace(/-/g, '+').replace(/_/g, '/');
+  const decoded = Buffer.from(`${normalized}${'='.repeat(needed)}`, 'base64');
+  if (decoded.toString('base64').replace(/=+$/, '') !== normalized) {
+    throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token has noncanonical base64 bits.');
+  }
+  return decoded;
 }
 
 /** Strict UTF-8 (the demo decodes with .decode()): an invalid byte is a
@@ -295,10 +297,8 @@ export function decodeCheckoutToken(token: string): Buffer {
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
- * Opens an MMG reply token into the generic object it carries. The field
- * names inside are UNCONFIRMED (CHECKOUT-CONTRACT.md U1–U3): read nothing
- * from it but describeShape() until MMG or the first sandbox run confirms
- * them — and even then it is a hint, never proof [I2].
+ * Opens an MMG reply into an object. The billing service validates the official
+ * response fields; decryption alone is never proof of payment [I2].
  */
 export function decryptCheckoutResultToken(token: string, resultPrivateKey: KeyObject): Record<string, unknown> {
   const k = rsaModulusBytes(resultPrivateKey);
@@ -513,7 +513,7 @@ function configValue(raw: string | undefined, name: string, rule: RegExp, what: 
 export function loadMmgCheckoutConfig(env: Record<string, string | undefined> = process.env): MmgCheckoutConfig {
   const production = isProduction(env);
   const checkoutPage = checkoutPageUrl(env);
-  const merchantId = configValue(env['MMG_CHECKOUT_MERCHANT_ID'], 'MMG_CHECKOUT_MERCHANT_ID', MERCHANT_MSISDN, 'the merchant MSISDN, 7-15 digits');
+  const merchantId = configValue(env['MMG_CHECKOUT_MERCHANT_ID'], 'MMG_CHECKOUT_MERCHANT_ID', MERCHANT_MSISDN, 'the merchant MSISDN, exactly 7 digits');
   const clientId = configValue(env['MMG_CHECKOUT_CLIENT_ID'], 'MMG_CHECKOUT_CLIENT_ID', /^[\x21-\x7e]{1,128}$/, '1-128 printable ASCII characters with no spaces');
   const merchantName = configValue(env['MMG_CHECKOUT_MERCHANT_NAME'], 'MMG_CHECKOUT_MERCHANT_NAME', /^[\x20-\x7e]{1,64}$/, 'the merchant name registered with MMG: 1-64 printable ASCII characters with no surrounding spaces');
   const secretKey = configValue(env['MMG_CHECKOUT_SECRET_KEY'], 'MMG_CHECKOUT_SECRET_KEY', /^[\x20-\x7e]{1,256}$/, '1-256 printable ASCII characters with no surrounding spaces');
@@ -527,7 +527,7 @@ export function loadMmgCheckoutConfig(env: Record<string, string | undefined> = 
     merchantId,
     merchantTransactionId: '9'.repeat(18),
     productDescription: MMG_CHECKOUT_PRODUCT_DESCRIPTION,
-    requestInitiationTime: 9_999_999_999,
+    requestInitiationTime: '9999999999',
     merchantName,
   }));
   const k = rsaModulusBytes(requestPublicKey);
@@ -572,7 +572,7 @@ export interface MmgCheckoutSession {
   /** Where the partner goes to pay: the MMG page with our encrypted token. */
   checkoutUrl: string;
   merchantTransactionId: string;
-  requestInitiationTime: number;
+  requestInitiationTime: string;
   /** The amount exactly as sent (formatCheckoutAmount). */
   amount: string;
 }
@@ -708,7 +708,7 @@ export class SandboxMmgCheckoutProvider implements MmgCheckoutProvider {
   }
 
   /** Plays the MMG return: a reply token carrying whatever object the caller
-   *  chooses (the real field names are UNCONFIRMED), as UTF-8 JSON. */
+   *  chooses (including malformed objects for negative tests), as UTF-8 JSON. */
   sandboxReplyToken(reply: Record<string, unknown>, options: { padded?: boolean } = {}): string {
     const token = toCheckoutToken(publicEncrypt(
       { key: this.keys().result.publicKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },

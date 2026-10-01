@@ -1,3 +1,5 @@
+import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
+import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
@@ -28,7 +30,7 @@ import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
-import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { requireStepUp } from '../auth/step-up';
 import { normalizeRegistrationMark } from '../verification/subjects';
 import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
@@ -258,7 +260,7 @@ const startOfMonth = startOfMonthGY;
 // ---------------------------------------------------------------------------
 
 export async function riderRoutes(app: FastifyInstance) {
-  const orderService = new OrderService(app.prisma, app.io);
+  const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const floatService = new FloatService(app.prisma);
   const verification = new VerificationService(
     app.prisma,
@@ -274,9 +276,24 @@ export async function riderRoutes(app: FastifyInstance) {
   const settlements = new DeliveryCashSettlementService(app.prisma, new NotificationService(app.prisma, app.io));
   const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
 
+  /** POST /orders/:id/handover-photo — the server issues the door photo, bound
+   *  to this order, its customer and the assigned rider. Only an issued photo
+   *  counts as evidence for a failed handover. */
+  app.post('/orders/:id/handover-photo', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    await getRider(app, request.user.userId); // authz before reading the upload
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a handover photo.');
+    const data = await issueHandoverPhoto(app.prisma, getStorageProvider(), {
+      orderId: id, actorId: request.user.userId, role: 'RIDER',
+      buffer: await file.toBuffer(), mimeType: file.mimetype,
+    });
+    return { success: true, data };
+  });
+
   /** POST /orders/:id/handover — the golden rule at the door.
-   *  'paid' completes the delivery; 'no_show'/'refused' fails it with GPS
-   *  evidence, strikes the customer, and opens the guarantee claim. */
+   *  'paid' completes the delivery; 'no_show'/'refused' fails it and files the
+   *  evidence; a strike and an automatic guarantee follow only a complete bundle. */
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId); // authz before validation
@@ -284,7 +301,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
     const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
-      const result = await cashRules.handover(id, request.user.userId, body);
+      const result = await cashRules.handover(id, request.user.userId, { ...body, sessionId: request.authSessionId ?? undefined });
       return {
         orderId: id,
         status: result.order.status,
@@ -410,6 +427,7 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
         float: {
           limit: Number(rider.floatLimit),
@@ -589,11 +607,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
     // grandfathered (legacy accounts pre-dating birth-on-verification); the
     // verdict maps onto this route's historical codes.
-    const sub = await app.prisma.subscription.findFirst({
-      where: { riderId: rider.id },
-      select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
-    });
-    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
@@ -614,9 +629,22 @@ export async function riderRoutes(app: FastifyInstance) {
     // offline, safety action, or switch invalidates this request instead of
     // allowing stale work to resurrect delivery supply.
     const { updated, retiredDriverId } = await app.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      // [SAFE-B · #1393] Only a mover with no weekly-fee subscription at all (the
+      // grandfathered path) needs the identity authority here. The shared mover
+      // fee belongs to the payer: a dual-role mover's one subscription may sit on
+      // the driver profile.
+      const currentSubscription = await tx.subscription.findFirst({
+        where: { OR: [{ riderId: rider.id }, { driver: { userId: request.user.userId } }] }, select: { id: true },
+      });
+      if (!currentSubscription) await requireIdentityAuthority(tx, request.user.userId);
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
+      await lockMoverSources(tx, feePayer);
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'GRANDFATHER' })).operable) {
+        throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your shared weekly fee does not currently permit going online.');
+      }
 
       // Authentication can be revoked after the Fastify pre-handler but while
       // verification checks are still running. Lock/revalidate this exact
@@ -2061,7 +2089,8 @@ export async function riderRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
-    const sub = await app.prisma.subscription.findFirst({ where: { riderId: rider.id } });
+    await requireStepUp(app, request);
+    const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const updated = body.method === 'NONE'
       ? await billing.stopBilling(sub.id, request.user.userId)
@@ -2129,16 +2158,15 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
     const rider = found!;
 
-    if (!rider.subscription) {
-      return { success: true, data: null };
-    }
-
-    const sub = rider.subscription;
+    const feePayer = await moverFeePayer(app.prisma, rider.userId);
+    const view = await readMoverFeeSubscription(app.prisma, feePayer);
+    if (!view) return { success: true, data: null };
+    const sub = view.subscription;
     const now = new Date();
     // THE canOperate rule (operate-gate.ts): the badge must show exactly what
     // the go-online switch allows — including the grace-lapse cutoff, which
     // this display copy used to miss.
-    const isActive = subscriptionOperability(sub, { missingRow: 'BLOCK' }, now).operable && sub.currentPeriodEnd > now;
+    const isActive = (await moverFeeOperability(app.prisma, feePayer, { missingRow: 'BLOCK' }, now)).operable && sub.currentPeriodEnd > now;
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
@@ -2146,6 +2174,7 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...sub,
+        moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
         // "My Swift Number" + Pay-screen block [san spec 2.4/6.1] — SAN,
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
