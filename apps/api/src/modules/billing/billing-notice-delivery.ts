@@ -45,6 +45,8 @@ function parseBillingNotice(note: string | null, subscriptionId: string): Billin
 }
 
 type NoticeRow = { id: string; subscriptionId: string; note: string | null; createdAt: Date; deliveredAt: Date | null };
+/** The claim expired or another worker took it over: hand nothing off. */
+class NoticeClaimLost extends Error {}
 
 /** The committed event is historical authority, not a fresh balance/access
  * decision. Render both channels as history even on first delivery: payment,
@@ -64,7 +66,8 @@ function historicalPayerNotice(notice: BillingNotice, event: NoticeRow): Billing
  *
  * [#1393] A payer notice (suspended nudge, churn) is a weekly-fee demand. Its
  * intent completes in the same transaction that records it as a stage of the
- * fee-demand outbox (`event:<id>`); from then on the outbox alone delivers it,
+ * fee-demand outbox (`event:<id>`), and only while this worker's claim is
+ * still unexpired and its own; from then on the outbox alone delivers it,
  * through the shared confirmation fence: nothing while a payment is being
  * confirmed, nothing after its obligation was paid, cancelled or closed, and
  * an SMS whose handoff outcome is unknown is never blindly resent. The intent
@@ -114,8 +117,15 @@ export async function deliverBillingNotice(
           UPDATE "billing_events"
           SET "deliveredAt" = clock_timestamp(), "noticeLeaseToken" = NULL, "noticeLeaseUntil" = NULL
           WHERE "id" = ${event.id} AND "noticeLeaseToken" = ${token} AND "deliveredAt" IS NULL
+            AND "noticeLeaseUntil" > clock_timestamp()
         `;
-        return handedOff === 1 ? demand.id : null;
+        // An expired or taken-over claim records nothing: a stage exists only
+        // for an intent this claim handed off.
+        if (handedOff !== 1) throw new NoticeClaimLost();
+        return demand.id;
+      }).catch((err: unknown) => {
+        if (err instanceof NoticeClaimLost) return null;
+        throw err;
       });
       if (!stage) return false;
       try {

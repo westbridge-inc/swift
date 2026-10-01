@@ -278,6 +278,8 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
       const databaseClock = sql.includes('clock_timestamp()');
       const event = [...state.events.values()].find(row => row['id'] === values[databaseClock ? 0 : 1]);
       if (!event || event['noticeLeaseToken'] !== values[databaseClock ? 1 : 2]) return 0;
+      // The hand-off UPDATE's own predicate: only an unexpired claim completes.
+      if (finish && sql.includes('"noticeLeaseUntil" > clock_timestamp()') && !(event['noticeLeaseUntil'] > noticeNow())) return 0;
       if (sql.includes('SET "noticeLeaseUntil"')) {
         if (event['deliveredAt'] || event['noticeLeaseUntil'] <= noticeNow()) return 0;
         event['noticeLeaseUntil'] = new Date(+noticeNow() + 120_000);
@@ -429,6 +431,10 @@ function selectSuspended(h: ReturnType<typeof harness>, select: () => Promise<an
  * (evidence: CLAUDE-legacy-notice-mapping.md). */
 const DEMAND_KINDS = ['billing_suspended_nudge', 'billing_churned'];
 function outbox<H extends ReturnType<typeof harness>>(h: H) {
+  // The shared clock and its first nudge are anchored when first read, at the
+  // database (wall) time: the fixture's world runs at the sweep's own instant.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(due);
   h.state.tables['deviceToken']!.push({ id: 'device-1', userId: h.state.user.id, token: 'ExponentPushToken[fixture-payer]', platform: 'ios', isActive: true });
   const sent: Array<{ channel: 'push' | 'sms'; kind?: unknown; to: string; body: string }> = [];
   const sendPush = vi.fn(async (tokens: string[], _title: string, body: string, data?: Record<string, unknown>) => {
@@ -716,24 +722,27 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
   });
 
   it.each([1, 40])('R3 suspended dunning skips a %s-day old subscription when an approval hold commits after selection', async days => {
-    const h = issuedHarness();
+    // [#1393] Payer notices go through the real fee-demand outbox (`outbox`).
+    const h = outbox(issuedHarness());
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
     selectSuspended(h, async () => {
       const stale = { ...h.state.sub };
       await observe(h, approval(h, { amountMinor: 1 }));
       return [stale];
     });
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
     expect(h.state.sub.status).toBe('SUSPENDED');
-    expect(h.state.notifications).not.toContain('billing_suspended_nudge');
-    expect(h.state.notifications).not.toContain('billing_churned');
-    expect(sms).not.toHaveBeenCalled();
+    expect(demandInbox(h)).toEqual([]);
+    expect(h.stages()).toEqual([]);
+    expect(h.sendSms).not.toHaveBeenCalled();
     expect([...h.state.events.keys()].filter(key => key.startsWith('nudge:') || key.startsWith('churned:'))).toEqual([]);
   });
 
   it.each([1, 40])('R4 a hold committed after the initial %s-day sweep read fences the nudge or churn write', async days => {
-    const h = issuedHarness();
+    // [#1393] Nothing is being confirmed when the sweep reads its candidate
+    // (the same fixture nudges or churns without the hold: R4 normal sweep).
+    // A payment then starts confirming, winning the payer lock first.
+    const h = outbox(harness());
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
     let selected = false;
     let holdCommitted = false;
@@ -746,7 +755,7 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
       expect(selected).toBe(true);
       if (holdCommitted) return;
       holdCommitted = true;
-      expect(await observe(h, approval(h, { amountMinor: 1 }))).toBe('held');
+      await startConfirming(h);
     };
     const originalLock = (h.billing as any).lockSubscriptionMoneyAuthority.bind(h.billing);
     vi.spyOn(h.billing as any, 'lockSubscriptionMoneyAuthority').mockImplementation(async (tx: any, sub: any) => {
@@ -768,295 +777,334 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
       if (args.data.idempotencyKey.startsWith('nudge:')) await commitHold();
       return originalEvent(args);
     });
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
 
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
     expect(holdCommitted).toBe(true);
     expect(sweepAuthorityLock).toBe(true);
     expect(h.state.sub.status).toBe('SUSPENDED');
-    expect(h.state.notifications).not.toContain('billing_suspended_nudge');
-    expect(h.state.notifications).not.toContain('billing_churned');
-    expect(sms).not.toHaveBeenCalled();
+    expect(h.state.tables['hold']).toEqual([expect.objectContaining({ paymentId: 'payment-confirming', status: 'ACTIVE' })]);
+    expect(demandInbox(h)).toEqual([]);
+    expect(h.stages()).toEqual([]);
+    expect(h.sendSms).not.toHaveBeenCalled();
     expect([...h.state.events.keys()].filter(key => key.startsWith('nudge:') || key.startsWith('churned:'))).toEqual([]);
   });
 
   it.each([1, 40])('R4 a failed %s-day sweep transaction rolls back its decision before any notice', async days => {
-    const h = issuedHarness();
+    // [#1393] Nothing is being confirmed, so the refused commit is the
+    // sweep's own decision; the same fixture then decides once it can commit.
+    const h = outbox(harness());
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
+    selectSuspended(h, async () => h.state.sub.status === 'SUSPENDED' ? [{ ...h.state.sub }] : []);
     h.barriers.beforeCommit = async () => { throw new Error('synthetic commit refusal'); };
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
 
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
     expect(h.state.sub.status).toBe('SUSPENDED');
     expect([...h.state.events.keys()].filter(key => key.startsWith('nudge:') || key.startsWith('churned:'))).toEqual([]);
-    expect(h.state.notifications).not.toContain('billing_suspended_nudge');
-    expect(h.state.notifications).not.toContain('billing_churned');
-    expect(sms).not.toHaveBeenCalled();
+    expect(demandInbox(h)).toEqual([]);
+    expect(h.stages()).toEqual([]);
+    expect(h.sendSms).not.toHaveBeenCalled();
+    h.barriers.beforeCommit = undefined;
+    expect(await h.billing.sweepSuspended(due)).toEqual(days === 40 ? { nudged: 0, churned: 1 } : { nudged: 1, churned: 0 });
+    expect(h.sendSms).toHaveBeenCalledOnce();
   });
 
   it.each([1, 40])('R4 a normal %s-day sweep commits one event before its one notice', async days => {
-    const h = issuedHarness();
+    // [#1393 outbox] The sweep commits its event (the intent) first; the payer
+    // notice is then handed to the fee-demand outbox, which delivers it once:
+    // one inbox row, one push, one SMS. A repeated sweep adds nothing.
+    const h = outbox(harness());
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
     selectSuspended(h, async () => [{ ...h.state.sub }]);
-    let committed = false;
-    h.barriers.afterCommit = async () => { committed = true; };
-    h.notifications.send.mockImplementation(async (input: any) => {
-      expect(committed).toBe(true);
-      h.state.notifications.push(input.data.kind);
-      return 'committed-inbox-notice';
-    });
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
     const kind = days === 40 ? 'billing_churned' : 'billing_suspended_nudge';
     const eventPrefix = days === 40 ? 'churned:' : 'nudge:';
+    const event = () => [...h.state.events.values()].find((row) => row['idempotencyKey']?.startsWith(eventPrefix));
+    const handedOffAtEffect: boolean[] = [];
+    h.sendSms.mockImplementation(async (to: string, body: string) => {
+      handedOffAtEffect.push(!!event()?.['deliveredAt'] && stageOf(h, event()?.['id'])?.['status'] === 'PENDING');
+      h.sent.push({ channel: 'sms', to, body });
+      return { ref: 'sms-ref' };
+    });
 
     expect(await h.billing.sweepSuspended(due)).toEqual(days === 40 ? { nudged: 0, churned: 1 } : { nudged: 1, churned: 0 });
-    expect(h.state.notifications).toEqual([kind]);
-    expect(sms).toHaveBeenCalledOnce();
+    expect(handedOffAtEffect).toEqual([true]);
+    expect(stageOf(h, event()!['id'])).toMatchObject({ status: 'DELIVERED' });
+    expect(demandInbox(h).map((row) => row['data'].kind)).toEqual([kind]);
+    expect(h.sent.map((effect) => effect.channel)).toEqual(['push', 'sms']);
+    expect(demandEffects(h)).toHaveLength(2);
     expect([...h.state.events.keys()].filter(key => key.startsWith(eventPrefix))).toHaveLength(1);
-    committed = false;
+
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
-    expect(h.state.notifications).toEqual([kind]);
-    expect(sms).toHaveBeenCalledOnce();
+    expect(await h.billing.drainPendingNotices(new Date(due.getTime() + 61_000))).toEqual({ attempted: 0, delivered: 0 });
+    expect(demandInbox(h)).toHaveLength(1);
+    expect(h.sent).toHaveLength(2);
     expect([...h.state.events.keys()].filter(key => key.startsWith(eventPrefix))).toHaveLength(1);
   });
 
+  // [#1393 outbox] The cases below re-express the retired per-event SMS lease
+  // cases (R4, R8, R9) against the fee-demand outbox that now delivers every
+  // payer notice. Each keeps its name where the property is unchanged; where
+  // the approved design changed the property (an SMS whose provider outcome is
+  // unknown is never blindly re-sent; time no longer decides who may send)
+  // the name says the new property. CLAUDE-legacy-notice-mapping.md maps each
+  // case old to new.
+  /** A suspended payer with no payment being confirmed (so nothing pauses its notices). */
+  function suspendedOutbox(days = 1) {
+    const h = outbox(harness());
+    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
+    selectSuspended(h, async () => h.state.sub.status === 'SUSPENDED' ? [{ ...h.state.sub }] : []);
+    return h;
+  }
+  const payerEvent = (h: Outbox, prefix = 'nudge:') => [...h.state.events.values()].find((row) => row['idempotencyKey']?.startsWith(prefix));
+  const smsEffects = (h: Outbox) => h.sent.filter((effect) => effect.channel === 'sms');
+  const pushEffects = (h: Outbox) => h.sent.filter((effect) => effect.channel === 'push');
+  /** The next matching call of one fixture method fails once; every other call runs unchanged. */
+  function failOnce(target: Record<string, any>, method: string, match: (args: any) => boolean = () => true, message = 'synthetic outage') {
+    const original = target[method];
+    let armed = true;
+    target[method] = vi.fn(async (...args: any[]) => {
+      if (armed && match(args[0])) { armed = false; throw new Error(message); }
+      return original(...args);
+    });
+  }
+  /** The owed week is paid: a weekly MMG request issued for it, then MMG approves it. */
+  async function payOwedWeek(h: Outbox, at: Date) {
+    h.state.payment = {
+      id: 'payment-1', subscriptionId: 'sub-1', amount: 2100, status: 'PENDING', paymentMethod: 'MOBILE_MONEY',
+      externalRef: 'mmgtx-prior', clientKey: h.reference, periodStart: due, periodEnd: new Date(due.getTime() + WEEK), createdAt: due,
+      expiresAt: new Date(at.getTime() + 86_400_000), lastPolledAt: null, pollBackoffSec: 30, failureCode: null, failureRaw: null,
+    };
+    h.state.events.set(`charge:${h.reference.slice(4)}`, { type: 'CHARGE_ATTEMPT', currencyCode: 'GYD', amount: 2100 });
+    return observe(h, approval(h), at);
+  }
+  const STALE_DEMAND = /still suspended|is unpaid|pay (?:in|your|to)|Approve the MMG/i;
+  /** Fee-demand effects only: a payment's own receipt or reinstatement notice is not a demand. */
+  const demandSent = (h: Outbox) => h.sent.filter((effect) => effect.channel === 'sms'
+    ? effect.body.includes('At the time') || STALE_DEMAND.test(effect.body) : DEMAND_KINDS.includes(String(effect.kind)));
+  /** The audited decision and money: status, schedule anchors, payment, wallet, ledger and events (not schedule projections). */
+  const economicOf = (h: Outbox) => {
+    const { status, autoRenew, failedAttempts, suspendedAt, currentPeriodStart, currentPeriodEnd, nextBillingDate } = h.state.sub as any;
+    return JSON.stringify([{ status, autoRenew, failedAttempts, suspendedAt, currentPeriodStart, currentPeriodEnd, nextBillingDate },
+      h.state.payment, h.state.wallet, ledger.keys, ledger.postings, [...h.state.events.keys()]]);
+  };
+
   it('R4 a later same-day suspension can churn with its own atomic event', async () => {
-    const h = issuedHarness();
-    const first = new Date(due.getTime() - 40 * DAY_FOR_R3);
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: first });
+    const h = suspendedOutbox(40);
+    const first = h.state.sub.suspendedAt as unknown as Date;
     selectSuspended(h, async () => [{ ...h.state.sub }]);
-    vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
 
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 1 });
     Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(first.getTime() + 60 * 60 * 1000) });
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 1 });
-    expect([...h.state.events.keys()].filter(key => key.startsWith('churned:'))).toHaveLength(2);
-    expect(h.state.notifications.filter(kind => kind === 'billing_churned')).toHaveLength(2);
+    const events = [...h.state.events.values()].filter((row) => row['idempotencyKey']?.startsWith('churned:'));
+    expect(events).toHaveLength(2);
+    // Each suspension episode has its own stage, delivered once each.
+    expect(events.map((event) => stageOf(h, event['id'])?.['status'])).toEqual(['DELIVERED', 'DELIVERED']);
+    expect(demandInbox(h).filter((row) => row['data'].kind === 'billing_churned')).toHaveLength(2);
+    expect(smsEffects(h)).toHaveLength(2);
   });
 
   it.each([1, 40])('R8 a failed push on day %s still attempts the independent SMS', async days => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    h.notifications.send.mockRejectedValue(new Error('synthetic push failure'));
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
+    const h = suspendedOutbox(days);
+    h.sendPush.mockRejectedValue(new Error('synthetic push failure'));
 
     await h.billing.sweepSuspended(due);
 
-    expect(sms).toHaveBeenCalledOnce();
+    expect(h.sendPush).toHaveBeenCalledOnce();
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    // The push outcome is unknown and kept for reconciliation; the SMS landed.
+    expect(h.handoff('push')).toMatchObject({ status: 'UNKNOWN' });
+    expect(h.handoff('sms')).toMatchObject({ status: 'DELIVERED' });
     expect([...h.state.events.keys()].filter(key => key.startsWith(days === 40 ? 'churned:' : 'nudge:'))).toHaveLength(1);
+    // A restarted worker never re-sends either channel.
+    await h.worker().drainPendingNotices(new Date(due.getTime() + 61_000));
+    expect(h.sendPush).toHaveBeenCalledOnce();
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(demandInbox(h)).toHaveLength(1);
   });
 
-  it('R8 an SMS outage after a committed inbox row retries SMS without a second inbox or lifecycle event', async () => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    const sms = vi.spyOn(h.billing as any, 'smsPayer')
-      .mockRejectedValueOnce(new Error('synthetic SMS outage')).mockResolvedValue(undefined);
+  it('R8 an SMS outage after a committed inbox row is never blindly re-sent, and repeats no inbox or lifecycle event', async () => {
+    const h = suspendedOutbox(1);
+    h.sendSms.mockRejectedValueOnce(new Error('synthetic SMS outage'));
 
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 1, churned: 0 });
-    const event = [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
-    expect(event['deliveredAt']).toBeNull();
-    expect(event['noticeSmsSentAt']).toBeNull();
-    expect(h.state.notifications).toEqual(['billing_suspended_nudge']);
-    expect(await h.billing.drainPendingNotices(new Date(due.getTime() + 60_000)))
-      .toEqual({ attempted: 1, delivered: 1 });
-    expect(sms).toHaveBeenCalledTimes(2);
-    expect(h.state.notifications).toEqual(['billing_suspended_nudge']);
+    const event = payerEvent(h)!;
+    expect(event['deliveredAt']).toBeTruthy(); // handed to the outbox
+    expect(demandInbox(h)).toHaveLength(1);
+    // The provider may have accepted it: the outcome is UNKNOWN, held for
+    // reconciliation, never sent again (no duplicate fee demand).
+    expect(h.handoff('sms')).toMatchObject({ status: 'UNKNOWN' });
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'PENDING' });
+    await h.worker().drainPendingNotices(new Date(due.getTime() + 60_000));
+    await h.worker().drainPendingNotices(new Date(due.getTime() + 120_000));
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.handoff('sms')).toMatchObject({ status: 'UNKNOWN' });
+    expect(demandInbox(h)).toHaveLength(1);
+    expect(pushEffects(h)).toHaveLength(1);
     expect([...h.state.events.keys()].filter(key => key.startsWith('nudge:'))).toHaveLength(1);
   });
 
   it.each([1, 40])('R8 day %s retries the committed inbox after restart without repeating a checkpointed SMS or lifecycle event', async days => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    selectSuspended(h, async () => h.state.sub.status === 'SUSPENDED' ? [{ ...h.state.sub }] : []);
-    h.notifications.send.mockRejectedValueOnce(new Error('synthetic push outage'));
-    const firstSms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
+    // The first delivery cannot write the inbox row: nothing is sent, the
+    // stage stays due. A restarted worker writes it and delivers each channel
+    // once; a further restart repeats nothing.
+    const h = suspendedOutbox(days);
+    failOnce(h.prisma.notification, 'upsert', () => true, 'synthetic inbox outage');
     const expected = days === 40 ? { nudged: 0, churned: 1 } : { nudged: 1, churned: 0 };
     expect(await h.billing.sweepSuspended(due)).toEqual(expected);
-    const key = [...h.state.events.keys()].find(value => value.startsWith(days === 40 ? 'churned:' : 'nudge:'))!;
-    const event = h.state.events.get(key)!;
-    expect(event['deliveredAt']).toBeNull();
-    expect(event['noticeSmsSentAt']).toEqual(due);
-    expect(firstSms).toHaveBeenCalledOnce();
+    const event = payerEvent(h, days === 40 ? 'churned:' : 'nudge:')!;
+    expect(event['deliveredAt']).toBeTruthy();
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'PENDING' });
+    expect(h.sent).toEqual([]);
     const eventCount = h.state.events.size;
 
-    const restarted = new BillingService(h.prisma as PrismaClient, h.notifications as any, {} as any);
-    const repeatSms = vi.spyOn(restarted as any, 'smsPayer').mockResolvedValue(undefined);
+    const restarted = h.worker();
     expect(await restarted.drainPendingNotices(new Date(due.getTime() + 60_000))).toEqual({ attempted: 1, delivered: 1 });
-    expect(event['deliveredAt']).toBeTruthy();
-    expect(repeatSms).not.toHaveBeenCalled();
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'DELIVERED' });
+    expect(demandInbox(h)).toHaveLength(1);
+    expect(h.sent.map((effect) => effect.channel)).toEqual(['push', 'sms']);
     expect(h.state.events.size).toBe(eventCount);
-    expect(h.state.notifications.filter(kind => kind === (days === 40 ? 'billing_churned' : 'billing_suspended_nudge'))).toHaveLength(1);
     expect(await restarted.drainPendingNotices(new Date(due.getTime() + 120_000))).toEqual({ attempted: 0, delivered: 0 });
     expect(await restarted.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
+    expect(h.sent).toHaveLength(2);
   });
 
   it('R8 both failed channels remain due through a restarted worker and expired claim lease', async () => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    h.notifications.send.mockResolvedValueOnce('');
-    vi.spyOn(h.billing as any, 'smsPayer').mockRejectedValueOnce(new Error('synthetic SMS outage'));
+    // The hand-off to the outbox fails (a payer lookup outage): nothing is
+    // recorded or sent and the intent stays due. A dead worker's unexpired
+    // claim blocks a restart until it expires.
+    const h = suspendedOutbox(1);
+    failOnce(h.prisma.user, 'findUnique', (args) => !!args?.select?.roles, 'synthetic payer lookup outage');
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 1, churned: 0 });
-    const event = [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
+    const event = payerEvent(h)!;
     expect(event['deliveredAt']).toBeNull();
-    expect(event['noticeSmsSentAt']).toBeNull();
+    expect(h.stages()).toEqual([]);
+    expect(h.sent).toEqual([]);
     const eventCount = h.state.events.size;
     event['noticeLeaseToken'] = 'dead-worker';
     event['noticeLeaseUntil'] = new Date(due.getTime() + 120_000);
 
-    const restarted = new BillingService(h.prisma as PrismaClient, h.notifications as any, {} as any);
-    const sms = vi.spyOn(restarted as any, 'smsPayer').mockResolvedValue(undefined);
+    const restarted = h.worker();
     expect(await restarted.drainPendingNotices(new Date(due.getTime() + 60_000))).toEqual({ attempted: 0, delivered: 0 });
     expect(await restarted.drainPendingNotices(new Date(due.getTime() + 121_000))).toEqual({ attempted: 1, delivered: 1 });
-    expect(sms).toHaveBeenCalledOnce();
-    expect(event['deliveredAt']).toBeTruthy();
+    expect(smsEffects(h)).toHaveLength(1);
+    expect(pushEffects(h)).toHaveLength(1);
+    expect(payerEvent(h)!['deliveredAt']).toBeTruthy();
     expect(h.state.events.size).toBe(eventCount);
   });
 
   it('R8 publisher death after commit leaves the billing event for a restarted worker', async () => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
+    const h = suspendedOutbox(1);
     h.barriers.afterCommit = async () => { throw new Error('synthetic publisher death'); };
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
-    const event = [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
-    expect(event['deliveredAt']).toBeNull();
-    expect(h.state.notifications).toEqual([]);
+    expect(payerEvent(h)!['deliveredAt']).toBeNull();
+    expect(h.stages()).toEqual([]);
+    expect(h.sent).toEqual([]);
     h.barriers.afterCommit = undefined;
-    const restarted = new BillingService(h.prisma as PrismaClient, h.notifications as any, {} as any);
-    vi.spyOn(restarted as any, 'smsPayer').mockResolvedValue(undefined);
+    const restarted = h.worker();
     expect(await restarted.drainPendingNotices(new Date(due.getTime() + 60_000))).toEqual({ attempted: 1, delivered: 1 });
-    expect(event['deliveredAt']).toBeTruthy();
+    expect(payerEvent(h)!['deliveredAt']).toBeTruthy();
+    expect(h.sent.map((effect) => effect.channel)).toEqual(['push', 'sms']);
     expect([...h.state.events.keys()].filter(key => key.startsWith('nudge:'))).toHaveLength(1);
   });
 
   it('R8 competing restarted workers atomically claim one pending event', async () => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
+    const h = suspendedOutbox(1);
+    serializeTransactions(h);
     h.barriers.afterCommit = async () => { throw new Error('synthetic publisher death'); };
     expect(await h.billing.sweepSuspended(due)).toEqual({ nudged: 0, churned: 0 });
     h.barriers.afterCommit = undefined;
 
-    const workerA = new BillingService(h.prisma as PrismaClient, h.notifications as any, {} as any);
-    const workerB = new BillingService(h.prisma as PrismaClient, h.notifications as any, {} as any);
-    const smsA = vi.spyOn(workerA as any, 'smsPayer').mockResolvedValue(undefined);
-    const smsB = vi.spyOn(workerB as any, 'smsPayer').mockResolvedValue(undefined);
     const results = await Promise.all([
-      workerA.drainPendingNotices(new Date(due.getTime() + 60_000)),
-      workerB.drainPendingNotices(new Date(due.getTime() + 60_000)),
+      h.worker().drainPendingNotices(new Date(due.getTime() + 60_000)),
+      h.worker().drainPendingNotices(new Date(due.getTime() + 60_000)),
     ]);
-    expect(results.reduce((sum, row) => sum + row.delivered, 0)).toBe(1);
-    expect(smsA.mock.calls.length + smsB.mock.calls.length).toBe(1);
-    expect(h.state.notifications).toEqual(['billing_suspended_nudge']);
+    // One worker claimed the intent and handed it off; the stage's channels
+    // went out once (a rival drain finds each reserved).
+    expect(results.reduce((sum, row) => sum + row.attempted, 0)).toBeGreaterThanOrEqual(1);
+    expect(h.stages()).toHaveLength(1);
+    expect(smsEffects(h)).toHaveLength(1);
+    expect(pushEffects(h)).toHaveLength(1);
+    expect(demandInbox(h)).toHaveLength(1);
     expect([...h.state.events.keys()].filter(key => key.startsWith('nudge:'))).toHaveLength(1);
   });
 
   it('R8 holds the active lease while another worker drains and permits only one send', async () => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
+    const h = suspendedOutbox(1);
+    serializeTransactions(h);
     h.barriers.afterCommit = async () => { throw new Error('synthetic publisher death'); };
     await h.billing.sweepSuspended(due);
     h.barriers.afterCommit = undefined;
 
+    // Worker A claims the intent, then stalls inside its hand-off (the payer
+    // re-check) while worker B drains.
     const entered = deferred();
     const release = deferred();
-    const originalSend = h.notifications.send.getMockImplementation()!;
-    h.notifications.send.mockImplementation(async (input: any) => {
-      entered.resolve();
-      await release.promise;
-      return originalSend(input);
+    const lookup = h.prisma.user.findUnique;
+    let stalled = false;
+    h.prisma.user.findUnique = vi.fn(async (args: any) => {
+      if (!stalled && args?.select?.roles) { stalled = true; entered.resolve(); await release.promise; }
+      return lookup(args);
     });
-    const workerA = new BillingService(h.prisma, h.notifications as any, {} as any);
-    const workerB = new BillingService(h.prisma, h.notifications as any, {} as any);
-    const sms = vi.spyOn(workerA as any, 'smsPayer').mockResolvedValue(undefined);
-    vi.spyOn(workerB as any, 'smsPayer').mockResolvedValue(undefined);
-    const first = workerA.drainPendingNotices(new Date(due.getTime() + 60_000));
+    const first = h.worker().drainPendingNotices(new Date(due.getTime() + 60_000));
     await entered.promise;
-    expect(await workerB.drainPendingNotices(new Date(due.getTime() + 60_000)))
-      .toEqual({ attempted: 0, delivered: 0 });
+    expect(await h.worker().drainPendingNotices(new Date(due.getTime() + 60_000))).toEqual({ attempted: 0, delivered: 0 });
     release.resolve();
     expect(await first).toEqual({ attempted: 1, delivered: 1 });
-    expect(sms).toHaveBeenCalledOnce();
-    expect(h.state.notifications).toEqual(['billing_suspended_nudge']);
+    expect(smsEffects(h)).toHaveLength(1);
+    expect(demandInbox(h)).toHaveLength(1);
   });
 
-  it('R8 preserves the obligation after an SMS acknowledgement before its checkpoint', async () => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    const originalExecute = h.prisma.$executeRaw.getMockImplementation()!;
-    let failCheckpoint = true;
-    h.prisma.$executeRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: any[]) => {
-      if (strings.join(' ').includes('SET "noticeSmsSentAt"') && failCheckpoint) {
-        failCheckpoint = false;
-        throw new Error('synthetic checkpoint crash');
-      }
-      return originalExecute(strings, ...values);
-    });
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
+  it('R8 preserves the obligation after an SMS acknowledgement before its checkpoint, and never re-sends it', async () => {
+    // The provider accepted the SMS but recording that outcome crashed: the
+    // hand-off stays UNKNOWN (sent, unrecorded), the stage keeps it as
+    // outstanding evidence, and no retry sends it a second time.
+    const h = suspendedOutbox(1);
+    failOnce(h.prisma.billingNoticeHandoff, 'update', (args) => args?.data?.status === 'DELIVERED' && h.handoff('sms')?.['id'] === args?.where?.id, 'synthetic checkpoint crash');
     await h.billing.sweepSuspended(due);
-    const event = [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
-    expect(event['deliveredAt']).toBeNull();
-    expect(event['noticeSmsSentAt']).toBeNull();
-    expect(sms).toHaveBeenCalledOnce();
-    const restarted = new BillingService(h.prisma, h.notifications as any, {} as any);
-    const retrySms = vi.spyOn(restarted as any, 'smsPayer').mockResolvedValue(undefined);
-    expect(await restarted.drainPendingNotices(new Date(due.getTime() + 60_000)))
-      .toEqual({ attempted: 1, delivered: 1 });
-    expect(retrySms).toHaveBeenCalledOnce();
-    expect(h.state.notifications).toEqual(['billing_suspended_nudge']);
+    const event = payerEvent(h)!;
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.handoff('sms')).toMatchObject({ status: 'UNKNOWN' });
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'PENDING' });
+    await h.worker().drainPendingNotices(new Date(due.getTime() + 60_000));
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.handoff('sms')).toMatchObject({ status: 'UNKNOWN' });
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'PENDING' });
+    expect(demandInbox(h)).toHaveLength(1);
     expect([...h.state.events.keys()].filter(key => key.startsWith('nudge:'))).toHaveLength(1);
   });
 
   it('R8 replays only the final acknowledgement after both channels checkpoint', async () => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    const originalExecute = h.prisma.$executeRaw.getMockImplementation()!;
-    let failAck = true;
-    h.prisma.$executeRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: any[]) => {
-      if (strings.join(' ').includes('SET "deliveredAt"') && failAck) {
-        failAck = false;
-        throw new Error('synthetic final acknowledgement crash');
-      }
-      return originalExecute(strings, ...values);
-    });
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
+    const h = suspendedOutbox(1);
+    failOnce(h.prisma.billingFeeNotice, 'updateMany', (args) => args?.data?.status === 'DELIVERED', 'synthetic final acknowledgement crash');
     await h.billing.sweepSuspended(due);
-    const event = [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
-    expect(event['noticeSmsSentAt']).toEqual(due);
-    expect(event['deliveredAt']).toBeNull();
-    const restarted = new BillingService(h.prisma, h.notifications as any, {} as any);
-    const retrySms = vi.spyOn(restarted as any, 'smsPayer').mockResolvedValue(undefined);
-    expect(await restarted.drainPendingNotices(new Date(due.getTime() + 60_000)))
-      .toEqual({ attempted: 1, delivered: 1 });
-    expect(event['deliveredAt']).toBeTruthy();
-    expect(sms).toHaveBeenCalledOnce();
-    expect(retrySms).not.toHaveBeenCalled();
-    expect(h.state.notifications).toEqual(['billing_suspended_nudge']);
+    const event = payerEvent(h)!;
+    expect(h.handoff('push')).toMatchObject({ status: 'DELIVERED' });
+    expect(h.handoff('sms')).toMatchObject({ status: 'DELIVERED' });
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'PENDING' });
+    expect(await h.worker().drainPendingNotices(new Date(due.getTime() + 60_000))).toEqual({ attempted: 1, delivered: 1 });
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'DELIVERED' });
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.sendPush).toHaveBeenCalledOnce();
+    expect(demandInbox(h)).toHaveLength(1);
   });
 
   it('R8 a bounded batch of poisoned oldest notices cannot starve the next eligible row', async () => {
-    const h = issuedHarness();
+    // 200 intents cannot be handed off (each names someone who is not the
+    // payer); the 201st is healthy. Each refused hand-off cools down, so the
+    // next bounded drain reaches the healthy one.
+    const h = suspendedOutbox(1);
     const firstDrain = new Date(due.getTime() + 30_000);
     const initialEventCount = h.state.events.size;
     for (let i = 0; i < 201; i += 1) {
       const row = await h.prisma.billingEvent.create({ data: {
         subscriptionId: 'sub-1', type: 'REMINDER', currencyCode: 'GYD',
         idempotencyKey: `nudge:sub-1:${i}`,
-        note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1',
-          title: i === 200 ? 'healthy' : 'poison', body: 'Open the app to pay',
+        note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: i === 200 ? 'user-1' : 'not-the-payer',
+          title: i === 200 ? 'healthy' : 'poison', body: 'Open the app to pay', sms: 'Unpaid',
           data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
       } });
       row.createdAt = new Date(due.getTime() + i);
     }
-    const healthyId = h.state.events.get('nudge:sub-1:200')!['id'];
-    h.notifications.send.mockImplementation(async (input: any) => input.dedupeKey === `billing-notice:${healthyId}` ? 'inbox-healthy' : '');
     expect(await h.billing.drainPendingNotices(firstDrain)).toEqual({ attempted: 200, delivered: 0 });
     expect(await h.billing.drainPendingNotices(new Date(firstDrain.getTime() + 1_000)))
       .toEqual({ attempted: 1, delivered: 1 });
@@ -1064,47 +1112,201 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     expect(h.state.events.get('nudge:sub-1:0')?.['noticeLeaseUntil']).toEqual(new Date(firstDrain.getTime() + 60_000));
     expect(h.state.events.get('nudge:sub-1:200')?.['deliveredAt']).toBeTruthy();
     expect(h.state.events.size).toBe(initialEventCount + 201);
+    expect(h.stages()).toHaveLength(1);
+    expect(smsEffects(h)).toHaveLength(1);
   });
 
   it.each([1, 40])('R9 payment before day %s notice retry preserves historical evidence without a stale payment demand', async days => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(due.getTime() - days * DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    h.notifications.send.mockRejectedValueOnce(new Error('synthetic inbox outage'));
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockRejectedValueOnce(new Error('synthetic SMS outage'));
+    const h = suspendedOutbox(days);
+    failOnce(h.prisma.notification, 'upsert', () => true, 'synthetic inbox outage');
     await h.billing.sweepSuspended(due);
     const event = [...h.state.events.values()].find(row => row['note']?.startsWith('{"noticeVersion":1,'))!;
     const originalNote = event['note'];
-    expect(await observe(h, approval(h), new Date(+due + 61_000))).toBe('advanced');
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'PENDING' });
+    expect(h.sent).toEqual([]);
+    expect(await payOwedWeek(h, new Date(+due + 61_000))).toBe('advanced');
     expect(h.state.sub.status).toBe('ACTIVE');
     expect(h.state.payment!.status).toBe('CAPTURED');
+    // Paying closed the obligation: its pending demand is obsolete, kept as history.
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'OBSOLETE' });
     const economic = JSON.stringify([h.state.sub, h.state.payment, h.state.wallet, ledger.keys, ledger.postings]);
-    sms.mockResolvedValue(undefined);
-    expect(await h.billing.drainPendingNotices(new Date(+due + 62_000))).toEqual({ attempted: 1, delivered: 1 });
-    const inbox = h.state.notificationPayloads.find(n => n.dedupeKey === `billing-notice:${event['id']}`);
-    expect(inbox.body).toContain('At the time');
-    expect(inbox.body).toContain(event['createdAt'].toISOString());
-    expect(inbox.title + inbox.body + sms.mock.calls.at(-1)![1]).not.toMatch(/still suspended|is unpaid|pay (?:in|your|to)|Approve the MMG/i);
+    await h.worker().drainPendingNotices(new Date(+due + 62_000));
+    expect(demandInbox(h)).toEqual([]);
+    expect(h.sent.filter((effect) => STALE_DEMAND.test(effect.body) || effect.body.includes('At the time'))).toEqual([]);
     expect(event['note']).toBe(originalNote);
     expect(JSON.stringify([h.state.sub, h.state.payment, h.state.wallet, ledger.keys, ledger.postings])).toBe(economic);
   });
 
   it.each(['inbox', 'sms'] as const)('R9 payment between partial %s delivery and retry does not issue a current-state payment demand', async missing => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    if (missing === 'inbox') h.notifications.send.mockRejectedValueOnce(new Error('synthetic inbox outage'));
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockResolvedValue(undefined);
-    if (missing === 'sms') sms.mockRejectedValueOnce(new Error('synthetic SMS outage'));
+    const h = suspendedOutbox(1);
+    if (missing === 'inbox') failOnce(h.prisma.notification, 'upsert', () => true, 'synthetic inbox outage');
+    else h.sendSms.mockRejectedValueOnce(new Error('synthetic SMS outage'));
     await h.billing.sweepSuspended(due);
     const event = [...h.state.events.values()].find(row => row['note']?.startsWith('{"noticeVersion":1,'))!;
-    expect(await observe(h, approval(h), new Date(+due + 61_000))).toBe('advanced');
-    expect(await h.billing.drainPendingNotices(new Date(+due + 62_000))).toEqual({ attempted: 1, delivered: 1 });
-    const inbox = h.state.notificationPayloads.filter(n => n.dedupeKey === `billing-notice:${event['id']}`);
-    expect(inbox).toHaveLength(1);
-    expect(inbox[0].body).toContain('At the time');
-    expect(sms.mock.calls.at(-1)![1]).toContain('At the time');
-    expect(sms).toHaveBeenCalledTimes(missing === 'sms' ? 2 : 1);
+    const before = demandSent(h).length;
+    expect(await payOwedWeek(h, new Date(+due + 61_000))).toBe('advanced');
+    await h.worker().drainPendingNotices(new Date(+due + 62_000));
+    // No fee demand goes out after the payment; whatever went out before it
+    // is the historical copy, never a current demand.
+    expect(demandSent(h)).toHaveLength(before);
+    expect(demandInbox(h)).toHaveLength(missing === 'inbox' ? 0 : 1);
+    for (const row of demandInbox(h)) expect(row['body']).toContain('At the time');
+    expect(demandSent(h).every((effect) => effect.body.includes('At the time') && !STALE_DEMAND.test(effect.body))).toBe(true);
+    expect(stageOf(h, event['id'])).toMatchObject({ status: 'OBSOLETE' });
+    expect(h.sendSms).toHaveBeenCalledTimes(missing === 'sms' ? 1 : 0);
+  });
+
+  it('R9 late batch acquisition cannot start expired or let a second worker duplicate the last SMS', async () => {
+    const h = suspendedOutbox(1);
+    let logical = +due;
+    h.state.noticeClock = () => new Date(logical);
+    const rows = [];
+    for (let i = 0; i < 17; i += 1) {
+      const row = await h.prisma.billingEvent.create({ data: {
+        subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: `nudge:sub-1:r9-${i}`,
+        note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
+          data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
+      } });
+      row.createdAt = new Date(+due + i);
+      rows.push(row);
+    }
+    const last = rows[16]!;
+    // Each claim is taken on the database clock at its own acquisition.
+    const claim = h.prisma.$queryRaw.getMockImplementation()!;
+    let lastClaim: { leaseUntil: number; at: number } | undefined;
+    h.prisma.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: any[]) => {
+      const result = await claim(strings, ...values);
+      if (strings.join(' ').includes('SET "noticeLeaseToken"') && values[1] === last.id && result.length === 1) {
+        const event = [...h.state.events.values()].find((row) => row['id'] === last.id)!;
+        lastClaim = { leaseUntil: +event['noticeLeaseUntil'], at: logical };
+      }
+      return result;
+    });
+    const smsB = vi.fn(async (to: string, body: string) => { h.sent.push({ channel: 'sms', to, body }); return { ref: 'sms-b' }; });
+    const workerB = h.notices({ sms: { sendSms: smsB } });
+    let sends = 0;
+    h.sendSms.mockImplementation(async (to: string, body: string) => {
+      sends += 1;
+      h.sent.push({ channel: 'sms', to, body });
+      logical += 8_000;
+      if (sends === 17) {
+        // A second worker reaching the last intent while its SMS is in flight.
+        expect(await deliverBillingNotice(h.prisma, workerB, last, new Date(logical))).toBe(false);
+        const stage = stageOf(h, last.id)!;
+        await workerB.deliverFeeDemand(stage['id']);
+      }
+      return { ref: 'sms-a' };
+    });
+
+    const result = await h.billing.drainPendingNotices(due);
+    expect(lastClaim!.leaseUntil).toBe(lastClaim!.at + 120_000);
+    expect(lastClaim!.at).toBe(+due + 16 * 8_000);
+    expect(result).toEqual({ attempted: 17, delivered: 17 });
+    expect(h.sendSms).toHaveBeenCalledTimes(17);
+    expect(smsB).not.toHaveBeenCalled();
+  });
+
+  it.each(['CANCELLED', 'PAUSED', 'HELD'] as const)('R9 queued history remains truthful after %s without changing the audited decision', async status => {
+    const h = suspendedOutbox(1);
+    failOnce(h.prisma.notification, 'upsert', () => true, 'synthetic inbox outage');
+    await h.billing.sweepSuspended(due);
+    const event = [...h.state.events.values()].find(row => row['note']?.startsWith('{"noticeVersion":1,'))!;
+    const note = event['note'];
+    if (status === 'HELD') {
+      // An MMG approval for this payer is held for a person.
+      h.state.payment = {
+        id: 'payment-1', subscriptionId: 'sub-1', amount: 2100, status: 'PENDING', paymentMethod: 'MOBILE_MONEY',
+        externalRef: 'mmgtx-prior', clientKey: h.reference, periodStart: due, periodEnd: new Date(due.getTime() + WEEK), createdAt: due,
+        expiresAt: new Date(+due + 86_400_000), lastPolledAt: null, pollBackoffSec: 30, failureCode: null, failureRaw: null,
+      };
+      h.state.events.set(`charge:${h.reference.slice(4)}`, { type: 'CHARGE_ATTEMPT', currencyCode: 'GYD', amount: 2100 });
+      expect(await observe(h, approval(h, { amountMinor: 1 }), new Date(+due + 1_000))).toBe('held');
+    } else Object.assign(h.state.sub, { status, autoRenew: false });
+    const economic = economicOf(h);
+    // (A held approval also queues its own admin page: the drain attempts it too.)
+    expect(await h.worker().drainPendingNotices(new Date(+due + 62_000))).toMatchObject({ delivered: 0 });
+    // Nothing is sent: a closed or cancelled plan's demand is obsolete; a held
+    // payment pauses it (it waits for the person's decision).
+    expect(h.sent).toEqual([]);
+    expect(demandInbox(h)).toEqual([]);
+    expect(stageOf(h, event['id'])).toMatchObject({ status: status === 'HELD' ? 'PENDING' : 'OBSOLETE' });
+    expect(event['note']).toBe(note);
+    expect(economicOf(h)).toBe(economic);
+  });
+
+  it.each([false, true])('R9 an expired inbox owner stops before SMS (replacement owner=%s)', async replacement => {
+    // Owner A claimed the intent, then stalled past its claim before handing
+    // it to the outbox. An expired claim hands off nothing; a replacement owner
+    // (or a later retry) delivers it once.
+    const h = suspendedOutbox(1);
+    serializeTransactions(h);
+    let logical = +due;
+    h.state.noticeClock = () => new Date(logical);
+    const row = await h.prisma.billingEvent.create({ data: {
+      subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: 'nudge:sub-1:slow',
+      note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
+        data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
+    } });
+    const owner = { current: 'A' };
+    h.sendSms.mockImplementation(async (to: string, body: string) => { h.sent.push({ channel: 'sms', to: `${owner.current}:${to}`, body }); return { ref: 'sms' }; });
+    const transaction = h.prisma.$transaction.getMockImplementation()!;
+    let stalled = false;
+    h.prisma.$transaction.mockImplementation(async (fn: any) => {
+      if (!stalled) {
+        stalled = true;
+        logical += 121_000;
+        if (replacement) {
+          owner.current = 'B';
+          expect(await deliverBillingNotice(h.prisma, h.notices(), row, new Date(logical))).toBe(true);
+          owner.current = 'A';
+        }
+      }
+      return transaction(fn);
+    });
+    expect(await deliverBillingNotice(h.prisma, h.notices(), row, due)).toBe(false);
+    expect(smsEffects(h).map((effect) => effect.to.split(':')[0])).toEqual(replacement ? ['B'] : []);
+    expect(!!payerEvent(h)!['deliveredAt']).toBe(replacement);
+    if (!replacement) {
+      expect(h.stages()).toEqual([]);
+      logical += 61_000;
+      owner.current = 'B';
+      expect(await deliverBillingNotice(h.prisma, h.notices(), row, new Date(logical))).toBe(true);
+      expect(smsEffects(h)).toHaveLength(1);
+    }
+    expect(demandInbox(h)).toHaveLength(1);
+    expect(h.stages()).toHaveLength(1);
+  });
+
+  it('R9 claims and hands off on database time despite an old caller time', async () => {
+    const h = suspendedOutbox(1);
+    let logical = +due;
+    h.state.noticeClock = () => new Date(logical);
+    const row = await h.prisma.billingEvent.create({ data: {
+      subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: 'nudge:sub-1:renew',
+      note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
+        data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
+    } });
+    const claimed: number[] = [];
+    const claim = h.prisma.$queryRaw.getMockImplementation()!;
+    h.prisma.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: any[]) => {
+      const result = await claim(strings, ...values);
+      if (strings.join(' ').includes('SET "noticeLeaseToken"') && result.length === 1) claimed.push(+payerEvent(h)!['noticeLeaseUntil']);
+      return result;
+    });
+    const smsB = vi.fn(async () => ({ ref: 'sms-b' }));
+    h.sendSms.mockImplementation(async (to: string, body: string) => {
+      h.sent.push({ channel: 'sms', to, body });
+      logical += 119_000;
+      // A rival during the in-flight SMS finds the intent already handed off.
+      expect(await deliverBillingNotice(h.prisma, h.notices({ sms: { sendSms: smsB } }), row, new Date(logical))).toBe(false);
+      return { ref: 'sms-a' };
+    });
+    expect(await deliverBillingNotice(h.prisma, h.notices(), row, new Date(+due - DAY_FOR_R3))).toBe(true);
+    // The claim ran on the database clock, not the caller's day-old time.
+    expect(claimed).toEqual([+due + 120_000]);
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(smsB).not.toHaveBeenCalled();
+    expect(payerEvent(h)!['deliveredAt']).toEqual(new Date(+due));
   });
 
   it.each(['subscription', 'user'] as const)('R9 transient %s tenant resolution retains the tenant-admin obligation until recovery', async lookup => {
@@ -1123,62 +1325,6 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     expect(h.state.notificationPayloads.map(n => n.userId)).toEqual(['platform-admin', 'tenant-admin']);
   });
 
-  it('R9 late batch acquisition cannot start expired or let a second worker duplicate the last SMS', async () => {
-    const h = issuedHarness();
-    let logical = +due;
-    h.state.noticeClock = () => new Date(logical);
-    vi.spyOn(Date, 'now').mockImplementation(() => logical);
-    const rows = [];
-    for (let i = 0; i < 17; i += 1) {
-      const row = await h.prisma.billingEvent.create({ data: {
-        subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: `nudge:sub-1:r9-${i}`,
-        note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
-          data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
-      } });
-      row.createdAt = new Date(+due + i);
-      rows.push(row);
-    }
-    const last = rows[16]!;
-    const originalSend = h.notifications.send.getMockImplementation()!;
-    let expiredAtAcquisition: boolean | undefined;
-    const smsB = vi.fn(async () => {});
-    h.notifications.send.mockImplementation(async input => {
-      if (input.dedupeKey === `billing-notice:${last.id}`) {
-        expiredAtAcquisition = +last.noticeLeaseUntil! <= logical;
-        await deliverBillingNotice(h.prisma, { send: originalSend } as any, last, new Date(logical), smsB);
-      }
-      return originalSend(input);
-    });
-    const smsA = vi.spyOn(h.billing as any, 'smsPayer').mockImplementation(async () => { logical += 8_000; });
-    const result = await h.billing.drainPendingNotices(due);
-    expect(expiredAtAcquisition).toBe(false);
-    expect(result).toEqual({ attempted: 17, delivered: 17 });
-    expect(smsA).toHaveBeenCalledTimes(17);
-    expect(smsB).not.toHaveBeenCalled();
-  });
-
-  it.each(['CANCELLED', 'PAUSED', 'HELD'] as const)('R9 queued history remains truthful after %s without changing the audited decision', async status => {
-    const h = issuedHarness();
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - DAY_FOR_R3) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    h.notifications.send.mockRejectedValueOnce(new Error('synthetic inbox outage'));
-    const sms = vi.spyOn(h.billing as any, 'smsPayer').mockRejectedValueOnce(new Error('synthetic SMS outage'));
-    await h.billing.sweepSuspended(due);
-    const event = [...h.state.events.values()].find(row => row['note']?.startsWith('{"noticeVersion":1,'))!;
-    const note = event['note'];
-    if (status === 'HELD') {
-      expect(await observe(h, approval(h, { amountMinor: 1 }), new Date(+due + 1_000))).toBe('held');
-    } else Object.assign(h.state.sub, { status, autoRenew: false });
-    const economic = JSON.stringify([h.state.sub, h.state.payment, h.state.wallet, ledger.keys, [...h.state.events.keys()]]);
-    sms.mockResolvedValue(undefined);
-    expect(await h.billing.drainPendingNotices(new Date(+due + 62_000))).toMatchObject({ delivered: 1 });
-    const inbox = h.state.notificationPayloads.find(n => n.dedupeKey === `billing-notice:${event['id']}`);
-    expect(inbox.body).toContain('At the time');
-    expect(inbox.body).toContain('Check the app for your current subscription status.');
-    expect(inbox.title + inbox.body + sms.mock.calls.at(-1)![1]).not.toMatch(/still suspended|is unpaid|pay (?:in|your|to)|Approve the MMG/i);
-    expect(event['note']).toBe(note);
-    expect(JSON.stringify([h.state.sub, h.state.payment, h.state.wallet, ledger.keys, [...h.state.events.keys()]])).toBe(economic);
-  });
 
   it.each(['platform', 'missing-user', 'missing-subscription'] as const)('R9 strict tenant resolution distinguishes %s from a resolved tenant subject', async subject => {
     const h = issuedHarness();
@@ -1199,58 +1345,6 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
     expect(h.state.notificationPayloads.map(n => n.userId)).toEqual(subject === 'platform' ? ['platform-admin'] : []);
   });
 
-  it.each([false, true])('R9 an expired inbox owner stops before SMS (replacement owner=%s)', async replacement => {
-    const h = issuedHarness();
-    let logical = +due;
-    h.state.noticeClock = () => new Date(logical);
-    const row = await h.prisma.billingEvent.create({ data: {
-      subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: 'nudge:sub-1:slow',
-      note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
-        data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
-    } });
-    const originalSend = h.notifications.send.getMockImplementation()!;
-    const smsB = vi.fn(async () => {});
-    h.notifications.send.mockImplementation(async input => {
-      logical += 121_000;
-      if (replacement) expect(await deliverBillingNotice(h.prisma, { send: originalSend } as any, row, new Date(logical), smsB)).toBe(true);
-      return originalSend(input);
-    });
-    const smsA = vi.fn(async () => {});
-    expect(await deliverBillingNotice(h.prisma, h.notifications as any, row, due, smsA)).toBe(false);
-    expect(smsA).not.toHaveBeenCalled();
-    expect(smsB).toHaveBeenCalledTimes(replacement ? 1 : 0);
-    expect(!!row.deliveredAt).toBe(replacement);
-    if (!replacement) {
-      logical += 61_000;
-      expect(await deliverBillingNotice(h.prisma, { send: originalSend } as any, row, new Date(logical), smsB)).toBe(true);
-      expect(smsB).toHaveBeenCalledOnce();
-    }
-    expect(h.state.notifications).toHaveLength(1);
-  });
-
-  it('R9 renews between slow channels using database time despite an old caller time', async () => {
-    const h = issuedHarness();
-    let logical = +due;
-    h.state.noticeClock = () => new Date(logical);
-    const row = await h.prisma.billingEvent.create({ data: {
-      subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: 'nudge:sub-1:renew',
-      note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
-        data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
-    } });
-    const originalSend = h.notifications.send.getMockImplementation()!;
-    h.notifications.send.mockImplementation(async input => { logical += 119_000; return originalSend(input); });
-    const smsB = vi.fn(async () => {});
-    const smsA = vi.fn(async () => {
-      expect(+row.noticeLeaseUntil!).toBe(logical + 120_000);
-      logical += 119_000;
-      expect(await deliverBillingNotice(h.prisma, { send: originalSend } as any, row, new Date(logical), smsB)).toBe(false);
-    });
-    expect(await deliverBillingNotice(h.prisma, h.notifications as any, row, new Date(+due - DAY_FOR_R3), smsA)).toBe(true);
-    expect(smsA).toHaveBeenCalledOnce();
-    expect(smsB).not.toHaveBeenCalled();
-    expect(row.noticeSmsSentAt).toEqual(new Date(logical));
-    expect(row.deliveredAt).toEqual(new Date(logical));
-  });
 });
 
 describe('R11 billing notice ownership through the real SMS recipient callback', () => {
@@ -2569,6 +2663,7 @@ beforeAll(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   ledger.keys.length = 0;
   ledger.postings.length = 0;
   vi.mocked(issueReceipt).mockClear();
