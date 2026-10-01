@@ -311,8 +311,25 @@ export async function hasConfirmationInTx(tx: Tx, subscriptionId: string, now: D
   const otherSource = except ? Object.entries(except).map(([field, id]) => ({
     OR: [{ [field]: null }, { [field]: { not: id } }],
   })) : [];
-  return !!await tx.paymentConfirmationHold.findFirst({ where: {
+  if (await tx.paymentConfirmationHold.findFirst({ where: {
     clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES }, AND: otherSource,
+  }, select: { id: true } })) return true;
+  // [R3] An MMG approval held for a person (MMG names a different or an
+  // unverified transaction for a request) is money MMG may hold for the payer,
+  // even when the request's own confirmation was already resolved (a captured
+  // week). No new instruction while it is reviewed: a second or third charge
+  // is never sent beside it. Reconciliation by a person clears the marker.
+  const authority = await tx.moverFeeAuthority.findUnique({ where: { canonicalSubscriptionId: subscriptionId }, include: { members: true } });
+  const sourceIds = authority?.members.map((m) => m.subscriptionId) ?? [subscriptionId];
+  const exceptPayment = except && 'paymentId' in except ? except.paymentId : undefined;
+  return !!await tx.subscriptionPayment.findFirst({ where: {
+    subscriptionId: { in: sourceIds }, paymentMethod: 'MOBILE_MONEY',
+    ...(exceptPayment ? { id: { not: exceptPayment } } : {}),
+    OR: [
+      { failureCode: { in: ['SETTLEMENT_MISMATCH', 'HISTORY_APPROVAL_UNVERIFIED'] } },
+      { failureRaw: { path: ['settlementHold'], equals: 'MMG_APPROVAL_MISMATCH' } },
+      { failureRaw: { path: ['settlementHold'], equals: 'MMG_HISTORY_APPROVAL_UNVERIFIED' } },
+    ],
   }, select: { id: true } });
 }
 

@@ -119,19 +119,29 @@ export async function handOffFeeDemand<T>(
   });
   if (!reserved) return undefined;
   let submitted: Promise<{ ok: true; value: T } | { ok: false; error: unknown }> | undefined;
-  await db.$transaction(async (tx) => {
-    if (!await permitted(tx, noticeId)) {
-      await tx.billingNoticeHandoff.update({ where: { id: reserved.id }, data: { status: 'NOT_SENT' } });
-      return;
+  try {
+    await db.$transaction(async (tx) => {
+      if (!await permitted(tx, noticeId)) {
+        await tx.billingNoticeHandoff.update({ where: { id: reserved.id }, data: { status: 'NOT_SENT' } });
+        return;
+      }
+      // Attach both handlers immediately; a quick rejection must not become an
+      // unhandled rejection while the database transaction is committing.
+      try {
+        submitted = effect().then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+      } catch (error) {
+        submitted = Promise.resolve({ ok: false as const, error });
+      }
+    });
+  } catch (error) {
+    // [#1393] The authorization failed before the provider call started: the
+    // reservation is provably unsent, so a later attempt may still make it.
+    // Once the call has started, UNKNOWN stays (never blindly resent).
+    if (!submitted) {
+      await db.billingNoticeHandoff.updateMany({ where: { id: reserved.id, status: 'UNKNOWN' }, data: { status: 'NOT_SENT' } }).catch(() => undefined);
     }
-    // Attach both handlers immediately; a quick rejection must not become an
-    // unhandled rejection while the database transaction is committing.
-    try {
-      submitted = effect().then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
-    } catch (error) {
-      submitted = Promise.resolve({ ok: false as const, error });
-    }
-  });
+    throw error;
+  }
   if (!submitted) return undefined;
   const result = await submitted;
   if (!result.ok) throw result.error; // UNKNOWN is durable; never blindly retry.

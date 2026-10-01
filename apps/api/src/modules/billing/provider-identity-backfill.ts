@@ -95,7 +95,11 @@ function agentCashSource(scope: Prisma.Sql): Prisma.Sql {
            ap."amount"::numeric AS "amount", ap."currencyCode"::text AS "currencyCode", ap."paidAt" AS "creditedAt", ap."tenantId"
     FROM "mmg_agent_payments" ap
     WHERE ap."subscriptionId" IS NOT NULL AND (ap."status" IN ('MATCHED', 'RESOLVED') OR EXISTS (
-      SELECT 1 FROM billing_events ev WHERE ev.type='PREPAID_TOPUP' AND right(ev."idempotencyKey",length(':agent:'||ap.channel||':'||ap."externalId"))=':agent:'||ap.channel||':'||ap."externalId"))
+      -- A committed credit is authority whatever its observation says: every
+      -- event key agent cash has written (the same three the historical check of a claim reads).
+      SELECT 1 FROM billing_events ev WHERE ev.type='PREPAID_TOPUP' AND (
+        ev."idempotencyKey"='agent-cash:pp:'||ap."providerPaymentId" OR ev."idempotencyKey"='agent-cash:'||ap.id
+        OR right(ev."idempotencyKey",length(':agent:'||ap.channel||':'||ap."externalId"))=':agent:'||ap.channel||':'||ap."externalId")))
       AND ${keyOf(raw)} <> ''
       ${scope}`;
 }

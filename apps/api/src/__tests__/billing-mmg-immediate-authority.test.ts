@@ -19,7 +19,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { LiveMmgProvider, SandboxMmgProvider, type LiveMmgConfig } from '../providers/mmg/mmg-provider';
 import { issueReceipt } from '../modules/billing/receipts';
 import { deliverBillingNotice } from '../modules/billing/billing-notice-delivery';
-import * as notificationChannels from '../providers/notifications/channels';
+import { NotificationService } from '../modules/notification/notification.service';
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
 const due = new Date('2026-09-20T12:00:00.000Z');
@@ -91,7 +91,8 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     // Independent synthetic database clock for lease/race schedules. Existing
     // fixed-time tests align it with their drain time; hostile cases override it.
     noticeClock: null as null | (() => Date),
-    tables: Object.fromEntries(['clock', 'transition', 'hold', 'feeNotice', 'handoff', 'authority', 'member', 'audit'].map((name) => [name, []])) as Record<string, Record<string, any>[]>,
+    tables: Object.fromEntries(['clock', 'transition', 'hold', 'feeNotice', 'handoff', 'authority', 'member', 'audit', 'notification', 'deviceToken']
+      .map((name) => [name, []])) as Record<string, Record<string, any>[]>,
   };
   const barriers = {
     beforeCommit: undefined as (() => Promise<void>) | undefined,
@@ -306,6 +307,10 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     billingObligationTransition: memory('transition'),
     billingFeeNotice: memory('feeNotice', () => ({ status: 'PENDING' })),
     billingNoticeHandoff: memory('handoff', () => ({ status: 'NOT_SENT', completedAt: null })),
+    // [#1393] The inbox and device rows the real NotificationService reads
+    // when it delivers a fee demand from the outbox (see `outbox` below).
+    notification: memory('notification', () => ({ isRead: false, readAt: null })),
+    deviceToken: memory('deviceToken', () => ({ isActive: true })),
     platformConfig: { findUnique: vi.fn(async ({ where }: any) => where.key === BILLING_CUTOVER_KEY ? { value: {
       version: BILLING_CUTOVER_VERSION, state: 'READY', completedAt: due.toISOString(), coverageDigest: 'synthetic-completed-backfill' } } : null) },
     billingEvent,
@@ -388,9 +393,11 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     tenantBillingCurrency: { findUnique: vi.fn(async () => null) },
   };
   const notifications = {
-    // Legacy notice-outbox cases below exercise their original real delivery
-    // path. The shared channel handoff is covered by its PostgreSQL suite.
+    // Money-path cases record their direct notices here. Payer billing
+    // notices are fee demands: cases about them deliver through the real
+    // NotificationService and the fee-demand outbox (`outbox` below).
     drainFeeDemands: vi.fn(async () => ({ attempted: 0, delivered: 0 })),
+    deliverFeeDemand: vi.fn(async () => ''),
     send: vi.fn(async (input: any) => {
       const key = input.dedupeKey ? `${input.userId}:${input.dedupeKey}` : null;
       if (key && state.notificationKeys.has(key)) return state.notificationKeys.get(key)!;
@@ -410,6 +417,88 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
 function selectSuspended(h: ReturnType<typeof harness>, select: () => Promise<any[]>) {
   const read = h.prisma.subscription.findMany;
   h.prisma.subscription.findMany = vi.fn(async (args: any) => args?.where?.status === 'SUSPENDED' ? select() : read(args));
+}
+
+/** [#1393] Payer billing notices (suspended nudge, churn) are weekly-fee
+ * demands. A committed notice intent is handed to the fee-demand outbox and
+ * the real NotificationService delivers it over these fixture tables: the
+ * inbox row, then socket, push and SMS handoffs (each reserved UNKNOWN before
+ * its provider call and re-checked under the payer's locks). Fake providers
+ * record every effect. Earlier this file drove the retired per-event SMS
+ * lease; each of those cases now proves the outbox property it maps to
+ * (evidence: CLAUDE-legacy-notice-mapping.md). */
+const DEMAND_KINDS = ['billing_suspended_nudge', 'billing_churned'];
+function outbox<H extends ReturnType<typeof harness>>(h: H) {
+  h.state.tables['deviceToken']!.push({ id: 'device-1', userId: h.state.user.id, token: 'ExponentPushToken[fixture-payer]', platform: 'ios', isActive: true });
+  const sent: Array<{ channel: 'push' | 'sms'; kind?: unknown; to: string; body: string }> = [];
+  const sendPush = vi.fn(async (tokens: string[], _title: string, body: string, data?: Record<string, unknown>) => {
+    sent.push({ channel: 'push', kind: data?.['kind'], to: tokens.join(','), body });
+    return { sent: tokens.length };
+  });
+  const sendSms = vi.fn(async (to: string, body: string) => { sent.push({ channel: 'sms', to, body }); return { ref: 'sms-ref' }; });
+  const channels = { push: { sendPush }, sms: { sendSms }, email: { sendEmail: vi.fn(async () => undefined) } };
+  const io = { to: () => ({ emit: () => true }) };
+  const notices = (override: Record<string, unknown> = {}) =>
+    new NotificationService(h.prisma as PrismaClient, io as never, { ...channels, ...override } as never);
+  const worker = () => new BillingService(h.prisma as PrismaClient, notices(), {} as any);
+  return Object.assign(h, {
+    billing: worker(), worker, notices, sent, sendPush, sendSms,
+    inbox: () => h.state.tables['notification']!,
+    stages: () => h.state.tables['feeNotice']!,
+    handoff: (channel: string) => h.state.tables['handoff']!.find((row) => row['channel'] === channel),
+  });
+}
+type Outbox = ReturnType<typeof outbox>;
+const demandInbox = (h: Outbox) => h.inbox().filter((row) => DEMAND_KINDS.includes(row['data']?.kind));
+const demandEffects = (h: Outbox) => h.sent.filter((effect) => effect.body.includes('At the time'));
+const stageOf = (h: Outbox, eventId: unknown) => h.stages().find((row) => row['stageKey'] === `event:${String(eventId)}`);
+
+/** PostgreSQL serializes these billing transactions on the payer's row locks.
+ * The in-memory tables model that with one transaction at a time: a rival
+ * started inside a transaction waits for it, exactly as it would on the lock. */
+function serializeTransactions(h: ReturnType<typeof harness>) {
+  const run = h.prisma.$transaction.getMockImplementation()!;
+  let tail: Promise<unknown> = Promise.resolve();
+  h.prisma.$transaction.mockImplementation((fn: any) => {
+    const result = tail.then(() => run(fn));
+    tail = result.catch(() => undefined);
+    return result;
+  });
+}
+
+/** A payment for this payer starts confirming in its own transaction: an MMG
+ * request still pending at MMG, which every fee-demand handoff then sees. */
+function startConfirming(h: ReturnType<typeof harness>) {
+  return h.prisma.$transaction(async () => {
+    h.state.payment = {
+      id: 'payment-confirming', subscriptionId: 'sub-1', amount: 2100, status: 'PENDING', paymentMethod: 'MOBILE_MONEY',
+      externalRef: 'mmgtx-confirming', clientKey: `sub:sub-1:${h.periodKey}:a1`, periodStart: due,
+      periodEnd: new Date(due.getTime() + WEEK), createdAt: due, expiresAt: new Date(Date.now() + 86_400_000),
+      lastPolledAt: null, pollBackoffSec: 30, failureCode: null, failureRaw: null,
+    };
+  });
+}
+
+/** A suspended payer's committed nudge, reached by the sweep (initial) or by
+ * the notice drain over an intent committed earlier (retry). */
+async function payerNoticeHarness(entry: 'initial' | 'retry', key: string) {
+  const h = outbox(harness());
+  Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - 86_400_000) });
+  selectSuspended(h, async () => [{ ...h.state.sub }]);
+  if (entry === 'retry') {
+    await h.prisma.billingEvent.create({ data: {
+      subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: `nudge:sub-1:${key}`,
+      note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
+        data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
+    } });
+  }
+  const notice = () => [...h.state.events.values()].find((row) => row['idempotencyKey']?.startsWith('nudge:'));
+  return Object.assign(h, {
+    notice,
+    stage: () => stageOf(h, notice()?.['id']),
+    start: () => entry === 'initial' ? h.billing.sweepSuspended(due) : h.billing.drainPendingNotices(due),
+    retry: () => h.worker().drainPendingNotices(new Date(+due + 61_000)),
+  });
 }
 
 describe('53FEC809 R3 approved mismatch quarantine', () => {
@@ -2163,7 +2252,7 @@ describe('EDFDCAB3 R2 dispatch, currency and oracle regressions', () => {
     const source = readFileSync(`${__dirname}/billing-intent-machine.test.ts`, 'utf8');
     const testStart = source.indexOf("'proves PostgreSQL lock ordering against an arrived poller");
     const bodyStart = source.indexOf('const due =', testStart);
-    const raceStart = source.indexOf('const prepaid = internals.applySuccessfulCharge(', bodyStart);
+    const raceStart = source.indexOf('const late = concurrent.pollPendingMmgCharges(', bodyStart);
     expect(testStart >= 0 && bodyStart > testStart && raceStart > bodyStart).toBe(true);
     const prefix = source.slice(bodyStart, raceStart);
     // Execute the real fixture setup, stopping before its PostgreSQL race.
@@ -2173,13 +2262,13 @@ describe('EDFDCAB3 R2 dispatch, currency and oracle regressions', () => {
     h.prisma.subscriptionPayment.findFirstOrThrow = async () => h.state.payment;
     h.prisma.prepaidBalance.create = async ({ data }: any) => { h.state.wallet = data.balance; };
     vi.spyOn(SandboxMmgProvider.prototype, 'initiatePayment').mockResolvedValue({ status: 'pending', transactionId: 'synthetic-fixture' });
-    const code = ts.transpile(`async function setup(removePrepaidLock) { ${prefix}\nreturn { lateAuthorityLocked, prepaidPid, latePid }; }`, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
+    const code = ts.transpile(`async function setup(removePrepaidLocks) { ${prefix}\nreturn { lateHolding, prepaidDebitedWhileLateHeld, latePid }; }`, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None });
     const setup = new Function('BillingService', 'NotificationService', 'app', 'billing', 'getPaymentProvider', 'makeVendorMmgSub', 'subWithRelations', 'sandboxSetTxStatus', 'deferred', 'expect', 'vi', 'HOUR', `${code}; return setup;`)(
       BillingService, class { send = vi.fn(); }, { prisma: h.prisma, io: {} }, h.billing,
       () => ({}), async () => ({ sub: h.state.sub }), async () => ({ ...h.state.sub }), () => {},
       () => ({ promise: Promise.resolve(), resolve: () => {} }), expect, vi, 3_600_000,
     );
-    expect(await setup(removePrepaidLock)).toEqual({ lateAuthorityLocked: false, prepaidPid: 0, latePid: 0 });
+    expect(await setup(removePrepaidLock)).toEqual({ lateHolding: false, prepaidDebitedWhileLateHeld: false, latePid: 0 });
     expect(h.state.payment?.status).toBe('PENDING');
   });
 });
@@ -2262,7 +2351,12 @@ describe('independent six-finding repair regressions', () => {
     (h.billing as any).payments = { chargeToken: vi.fn(async () => ({ status: 'unknown', reason: 'synthetic-timeout', providerRef: '' })) };
     expect(await h.billing.billSubscription({ ...h.state.sub } as any, due)).toBe('pending');
     expect(h.state.payment).toMatchObject({ status: 'UNKNOWN', paymentMethod: 'CARD', failureCode: 'TIMEOUT_UNKNOWN', failureRaw: { reason: 'synthetic-timeout' } });
-    expect(h.state.sub.nextRetryAt).toEqual(new Date(due.getTime() + WEEK / 7));
+    // [#1393 owner decision] An ambiguous card answer is a payment being
+    // confirmed: its own hold pauses the shared clock (no retry stamp) until
+    // the reconciler or a person confirms it.
+    expect(h.state.tables['hold']).toEqual([expect.objectContaining({ paymentId: 'payment-1', status: 'ACTIVE' })]);
+    expect(h.state.sub.billingConfirmationPausedAt).not.toBeNull();
+    expect(h.state.sub.nextRetryAt).toBeNull();
     expect(h.state.notifications).toEqual([]);
   });
 
@@ -2319,6 +2413,7 @@ describe('independent six-finding repair regressions', () => {
     const observed = vi.fn(async () => {});
     vi.spyOn(h.billing as any, 'lockSubscriptionMoneyAuthority').mockResolvedValueOnce({
       payerStatus: 'ACTIVE', payerPhone: '', status: h.state.sub.status, autoRenew: h.state.sub.autoRenew,
+      collectionAllowed: true, bankInsteadOfAdvance: false, suppressNotice: false,
     });
     (h.billing as any).observer = { afterSuccessfulChargePrepaidDebit: observed };
     expect(await (h.billing as any).applySuccessfulCharge({ ...h.state.sub }, 2100, 'prepaid', due, h.periodKey, undefined, undefined, 2100)).toBe(true);
@@ -2480,6 +2575,31 @@ afterEach(() => {
 });
 
 describe('immediate MMG outcomes obey fresh locked authority without services', () => {
+  /** [#1393] A prior request still pending at MMG is a payment being confirmed:
+   *  it holds the shared clock, so a billing run stops before any lookup or
+   *  instruction (proved once below) and the poller resolves it with the same
+   *  lookup, the same bound approval rules and the same authority locks. Its
+   *  counts map onto the charge path's old verdicts. */
+  async function resolvePrior(h: ReturnType<typeof harness>, at = due): Promise<'succeeded' | 'failed' | 'pending'> {
+    // An issued request always has its attempt record, which pins the
+    // currency MMG's answer is bound to (kept when a case set its own pin).
+    const attemptKey = `charge:sub-1:${h.periodKey}:a0`;
+    if (!h.state.events.has(attemptKey)) h.state.events.set(attemptKey, { id: 'original-attempt', subscriptionId: 'sub-1', type: 'CHARGE_ATTEMPT', amount: 2100, currencyCode: 'GYD', createdAt: due });
+    const polled = await h.billing.pollPendingMmgCharges(at);
+    return polled.settled + polled.banked > 0 ? 'succeeded' : polled.failed > 0 ? 'failed' : 'pending';
+  }
+
+  it('[#1393] a billing run over a prior request still pending at MMG stops before any lookup and sends nothing', async () => {
+    const h = harness('prior_lookup');
+    const lookup = vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup');
+    const initiate = vi.spyOn(SandboxMmgProvider.prototype, 'initiatePayment');
+    expect(await h.billing.billSubscription({ ...h.state.sub } as any, due)).toBe('pending');
+    expect(lookup).not.toHaveBeenCalled();
+    expect(initiate).not.toHaveBeenCalled();
+    expect(h.state.tables['hold']).toEqual([expect.objectContaining({ paymentId: 'payment-1', status: 'ACTIVE' })]);
+    expect(h.state.payment).toMatchObject({ status: 'PENDING', failureCode: null });
+  });
+
   type GenericSuccessInternals = {
     applySuccessfulCharge(
       snapshot: ReturnType<typeof harness>['state']['sub'],
@@ -2671,7 +2791,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
         if (outcome === 'captured') h.state.payment!.status = 'CAPTURED';
         if (outcome === 'reopened') h.state.payment!.status = 'PENDING';
         if (outcome === 'success') h.state.events.set(`success:sub-1:${h.periodKey}`, { type: 'CHARGE_SUCCESS' });
-        if (outcome === 'failed') h.state.events.set(`failed:sub-1:${h.periodKey}:a0`, { type: 'CHARGE_FAILED' });
+        if (outcome === 'failed') h.state.events.set(`failed:sub-1:${h.periodKey}:a0`, { type: 'CHARGE_FAILED', subscriptionId: 'sub-1' });
         if (outcome === 'preserved') h.state.payment!.failureRaw = { subscriptionOutcome: 'PRESERVED_NO_DUNNING' };
         return snapshot;
       });
@@ -2732,7 +2852,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
           await release.promise;
           return { transactionId: 'mmgtx-prior', status: 'approved', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
         });
-        const pending = h.billing.billSubscription({ ...h.state.sub } as any, due);
+        const pending = resolvePrior(h);
         await arrived.promise;
         if (disposition === 'cancelled') applyAuthority(h.state, 'CANCELLED');
         if (disposition === 'covered') h.state.events.set(`success:sub-1:${h.periodKey}`, { id: 'covered' });
@@ -2763,14 +2883,16 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
     vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockImplementation(async () => {
       arrived.resolve();
       await release.promise;
+      // The settlement's own commit is the next one: arm its check now (once).
+      h.barriers.beforeCommit = async () => {
+        h.barriers.beforeCommit = undefined;
+        expect(h.state.sub.status).toBe('ACTIVE');
+        expect(h.state.vendor).toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
+        expect(h.accessWrites).toEqual([true, true]);
+      };
       return { transactionId: 'mmgtx-prior', status: 'approved', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
     });
-    h.barriers.beforeCommit = async () => {
-      expect(h.state.sub.status).toBe('ACTIVE');
-      expect(h.state.vendor).toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
-      expect(h.accessWrites).toEqual([true, true]);
-    };
-    const pending = h.billing.billSubscription({ ...h.state.sub } as any, due);
+    const pending = resolvePrior(h);
     await arrived.promise;
     h.state.sub.status = 'SUSPENDED';
     Object.assign(h.state.vendor, { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' });
@@ -2794,10 +2916,11 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
       const release = deferred();
       vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockImplementation(async () => {
         if (deletionFirst) { atBoundary.resolve(); await release.promise; }
+        // After the lookup, the next commit is the settlement's own (armed once).
+        else h.barriers.afterCommit = async () => { h.barriers.afterCommit = undefined; atBoundary.resolve(); await release.promise; };
         return { transactionId: 'mmgtx-prior', status: 'approved', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
       });
-      if (!deletionFirst) h.barriers.afterCommit = async () => { atBoundary.resolve(); await release.promise; };
-      const pending = h.billing.billSubscription({ ...h.state.sub } as any, due);
+      const pending = resolvePrior(h);
       await atBoundary.promise;
       applyAuthority(h.state, 'DEACTIVATED');
       applyAuthority(h.state, 'CANCELLED');
@@ -2882,16 +3005,17 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
       const h = harness('prior_lookup', true);
       h.state.sub.status = 'SUSPENDED';
       Object.assign(h.state.vendor, { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' });
-      vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockResolvedValue({
-        transactionId: 'mmgtx-prior', status: 'approved', amountMinor: 210000,
-        currencyCode: 'GYD', reference: h.reference,
+      vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockImplementation(async () => {
+        // After the lookup, the next commit is the settlement's own (armed once).
+        h.barriers.afterCommit = async () => {
+          h.barriers.afterCommit = undefined;
+          applyAuthority(h.state, authority);
+          if (authority === 'BANNED_TOMBSTONE') applyAuthority(h.state, 'CANCELLED');
+        };
+        return { transactionId: 'mmgtx-prior', status: 'approved', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
       });
-      h.barriers.afterCommit = async () => {
-        applyAuthority(h.state, authority);
-        if (authority === 'BANNED_TOMBSTONE') applyAuthority(h.state, 'CANCELLED');
-      };
 
-      expect(await h.billing.billSubscription({ ...h.state.sub } as any, due)).toBe('succeeded');
+      expect(await resolvePrior(h)).toBe('succeeded');
 
       expect(h.state.sub.status).toBe(authority === 'BANNED_TOMBSTONE' ? 'CANCELLED' : authority);
       expect(h.state.notifications).not.toContain('billing_reinstated');
@@ -2920,7 +3044,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
           });
         }
 
-        const initial = await h.billing.billSubscription({ ...h.state.sub } as any, due);
+        const initial = entry === 'initiate' ? await h.billing.billSubscription({ ...h.state.sub } as any, due) : await resolvePrior(h);
         if (entry === 'initiate') {
           expect(initial).toBe('pending');
           expect(await h.billing.pollPendingMmgCharges(new Date(due.getTime() + 60_000))).toMatchObject({ banked: 1 });
@@ -2955,7 +3079,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
         });
       }
 
-      const initial = await h.billing.billSubscription({ ...h.state.sub } as any, due);
+      const initial = entry === 'initiate' ? await h.billing.billSubscription({ ...h.state.sub } as any, due) : await resolvePrior(h);
       if (entry === 'initiate') {
         expect(initial).toBe('pending');
         expect(await h.billing.pollPendingMmgCharges(new Date(due.getTime() + 60_000))).toMatchObject({ settled: 1 });
@@ -2998,7 +3122,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
         } as any;
       });
 
-      expect(await h.billing.billSubscription({ ...h.state.sub } as any, due)).toBe('pending');
+      expect(await resolvePrior(h)).toBe('pending');
 
       expect(h.state.payment).toMatchObject({ status: 'PENDING', failureCode: 'SETTLEMENT_MISMATCH' });
       expect(h.state.wallet).toBe(0);
@@ -3049,7 +3173,7 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
       await release.promise;
       return { transactionId: 'mmgtx-prior', status: 'pending', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
     });
-    const run = h.billing.billSubscription({ ...h.state.sub } as any, due);
+    const run = resolvePrior(h);
     await arrived.promise;
     applyAuthority(h.state, 'CANCELLED');
     release.resolve();
@@ -3091,9 +3215,11 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
     vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockImplementation(async () => {
       arrived.resolve();
       await release.promise;
-      return { transactionId: 'mmgtx-prior', status: 'declined', amountMinor: 210000, currencyCode: 'GYD' };
+      return { transactionId: 'mmgtx-prior', status: 'declined', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
     });
 
+    // [#1393] The request's issued attempt pins its currency (what MMG's answer is bound to).
+    h.state.events.set(`charge:sub-1:${h.periodKey}:a0`, { id: 'original-attempt', subscriptionId: 'sub-1', type: 'CHARGE_ATTEMPT', amount: 2100, currencyCode: 'GYD', createdAt: due });
     const pending = h.billing.pollPendingMmgCharges(new Date());
     await arrived.promise;
     Object.assign(h.state.sub, {
@@ -3131,19 +3257,30 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
     vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockImplementation(async () => {
       arrived.resolve();
       await release.promise;
-      return { transactionId: 'mmgtx-prior', status: 'declined', amountMinor: 210000, currencyCode: 'GYD' };
+      return { transactionId: 'mmgtx-prior', status: 'declined', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
     });
 
-    const pending = h.billing.pollPendingMmgCharges(new Date());
+    // [#1393] The request's issued attempt pins its currency (what MMG's answer is bound to).
+    h.state.events.set(`charge:sub-1:${h.periodKey}:a0`, { id: 'original-attempt', subscriptionId: 'sub-1', type: 'CHARGE_ATTEMPT', amount: 2100, currencyCode: 'GYD', createdAt: due });
+    const resolvedAt = new Date();
+    const pending = h.billing.pollPendingMmgCharges(resolvedAt);
     await arrived.promise;
     h.state.sub.failedAttempts = 2;
     release.resolve();
 
     expect(await pending).toMatchObject({ failed: 1 });
     expect(h.state.payment?.status).toBe('FAILED');
-    expect(h.state.sub).toMatchObject({ status: 'SUSPENDED', failedAttempts: 3 });
+    // [#1393] The decline resolves the request's confirmation, and a resolution
+    // never suspends in its own instant: the ladder is exhausted at the fresh
+    // locked level (a2, never the pre-lookup a0). The request was being
+    // confirmed since it was sent, so the two days of grace start now: the
+    // first run after them suspends.
+    expect(h.state.sub).toMatchObject({ status: 'PAST_DUE', failedAttempts: 3 });
     expect(h.state.events.get(`failed:${h.state.sub.id}:${h.periodKey}:a2`)).toMatchObject({ type: 'CHARGE_FAILED' });
     expect(h.state.events.has(`failed:${h.state.sub.id}:${h.periodKey}:a0`)).toBe(false);
+    expect(await h.billing.billSubscription({ ...h.state.sub } as any, new Date(resolvedAt.getTime() + 47 * 3_600_000))).toBe('pending');
+    expect(await h.billing.billSubscription({ ...h.state.sub } as any, new Date(resolvedAt.getTime() + 48 * 3_600_000 + 60_000))).toBe('suspended');
+    expect(h.state.sub).toMatchObject({ status: 'SUSPENDED', failedAttempts: 3 });
     expect(h.state.notifications).toContain('billing_suspended');
   });
 
@@ -3156,9 +3293,11 @@ describe('immediate MMG outcomes obey fresh locked authority without services', 
       vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockImplementation(async () => {
         arrived.resolve();
         await release.promise;
-        return { transactionId: 'mmgtx-prior', status: 'declined', amountMinor: 210000, currencyCode: 'GYD' };
+        return { transactionId: 'mmgtx-prior', status: 'declined', amountMinor: 210000, currencyCode: 'GYD', reference: h.reference };
       });
 
+      // [#1393] The request's issued attempt pins its currency (what MMG's answer is bound to).
+      h.state.events.set(`charge:sub-1:${h.periodKey}:a0`, { id: 'original-attempt', subscriptionId: 'sub-1', type: 'CHARGE_ATTEMPT', amount: 2100, currencyCode: 'GYD', createdAt: due });
       const pending = h.billing.pollPendingMmgCharges(new Date());
       await arrived.promise;
       if (authority === 'CHURNED') {

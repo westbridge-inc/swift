@@ -10,7 +10,6 @@ import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, Subscript
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
-import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
@@ -22,7 +21,7 @@ import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
-import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice, type BillingNoticeLeaseGuard } from './billing-notice-delivery';
+import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { amountDueNow } from './amount-due';
@@ -3939,49 +3938,10 @@ export class BillingService {
     });
   }
 
-  /** Best-effort SMS to the payer — dunning escalation channel (§11: the
-   *  scarce resource is attention; push may be muted or the app deleted).
-   *  Never throws into a billing decision. */
-  private async smsPayer(sub: SubWithRelations, body: string, renewNoticeLease?: BillingNoticeLeaseGuard) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: this.payerUserId(sub) },
-      select: { phone: true },
-    });
-    if (!user?.phone) throw new Error('payer phone unavailable');
-    // The subscription and phone lookups may outlive a committed notice's
-    // lease. Renew only the unexpired current token, after all preparation and
-    // immediately before invoking the provider; a stale worker leaves it due.
-    if (renewNoticeLease) {
-      // A successful UPDATE can reach this worker after its renewed lease has
-      // expired. Start before the query so a delayed response or paused worker
-      // consumes the full budget. This matches the notice's 120-second DB lease
-      // without comparing host wall time with database time.
-      const renewalStarted = performance.now();
-      if (!await renewNoticeLease() || performance.now() - renewalStarted >= 120_000) {
-        throw new Error('billing notice lease lost before SMS');
-      }
-    }
-    await getChannels().sms.sendSms(user.phone, body);
-  }
-
-  private async sendNoticeSms(subscriptionId: string, userId: string, body: string, renewLease: BillingNoticeLeaseGuard): Promise<void> {
-    const sub = await this.prisma.subscription.findUnique({
-      where: { id: subscriptionId },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { id: true, owner: { select: { userId: true } } } },
-      },
-    });
-    if (!sub || this.payerUserId(sub) !== userId) throw new Error('billing notice payer changed');
-    await this.smsPayer(sub, body, renewLease);
-  }
-
   /** Retry committed notice intents independently of the current subscription
    * state. In particular, CHURNED no longer hides an undelivered final notice. */
   async drainPendingNotices(now = new Date()): Promise<{ attempted: number; delivered: number }> {
-    const historical = await drainPendingBillingNotices(this.prisma, this.notifications, now, (subscriptionId, userId, body, renewLease) =>
-      this.sendNoticeSms(subscriptionId, userId, body, renewLease));
+    const historical = await drainPendingBillingNotices(this.prisma, this.notifications, now);
     const current = await this.notifications.drainFeeDemands();
     return { attempted: historical.attempted + current.attempted, delivered: historical.delivered + current.delivered };
   }
@@ -4096,8 +4056,7 @@ export class BillingService {
         if (decision.kind === 'churned') out.churned += 1;
         else out.nudged += 1;
         try {
-          await deliverBillingNoticeByKey(this.prisma, this.notifications, decision.noticeKey, now,
-            (subscriptionId, userId, body, renewLease) => this.sendNoticeSms(subscriptionId, userId, body, renewLease));
+          await deliverBillingNoticeByKey(this.prisma, this.notifications, decision.noticeKey, now);
         } catch (err) {
           log().warn({ err, subscriptionId: candidate.id }, 'billing notice remains due after committed sweep');
         }

@@ -1395,6 +1395,91 @@ describe('[F2] one MMG transaction, one credit, across every channel and every e
   });
 });
 
+
+// [SX386 F2 · #1395 canonical identity] A committed historical agent-cash
+// credit is authority whatever its observation says: the delivery that saved
+// it may have died with the observation still RECEIVED, or a repair may have
+// given it up as UNMATCHED, with no identity, an unlinked OPEN identity, or a
+// linked OPEN one, under any of the three event keys agent cash has written.
+// After the backfill, a fresh admin command (or a checkout) naming that same
+// transaction never posts again: no wallet credit, receipt, counter or ledger.
+describe('[SX386 F2] a committed agent credit with a stale observation is never credited twice', () => {
+  type Mode = { observation: 'RECEIVED' | 'UNMATCHED'; identity: 'none' | 'open' | 'linked'; key: 'suffix' | 'agent' | 'pp' };
+  const modes: Array<[string, Mode]> = [
+    ['RECEIVED, no identity, the pre-atomic key', { observation: 'RECEIVED', identity: 'none', key: 'suffix' }],
+    ['UNMATCHED, an unlinked OPEN identity, the pre-atomic key', { observation: 'UNMATCHED', identity: 'open', key: 'suffix' }],
+    ['RECEIVED, no identity, the original agent key', { observation: 'RECEIVED', identity: 'none', key: 'agent' }],
+    ['UNMATCHED, a linked OPEN identity, the original agent key', { observation: 'UNMATCHED', identity: 'linked', key: 'agent' }],
+    ['RECEIVED, a linked OPEN identity, the identity key', { observation: 'RECEIVED', identity: 'linked', key: 'pp' }],
+  ];
+  const adminFor = async () => {
+    const admin = await app.prisma.user.create({ data: { phone: `+${phoneBase + 40000 + (seq += 1)}`, firstName: 'F2', lastName: 'Admin', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true } });
+    userIds.push(admin.id);
+    return admin;
+  };
+  const moneyOf = async (subscriptionId: string) => {
+    const events = await app.prisma.billingEvent.findMany({ where: { subscriptionId, type: 'PREPAID_TOPUP' }, select: { idempotencyKey: true } });
+    return {
+      wallet: await walletOf(subscriptionId),
+      credits: events.length,
+      receipts: await app.prisma.feeReceipt.count({ where: { subscriptionId } }),
+      counter: (await app.prisma.receiptCounter.findMany({ where: { tenantId: 'swift-default' } })).reduce((n, c) => n + c.seq, 0),
+      ledger: await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: { in: events.map((e) => `ledger:${e.idempotencyKey}`) } } }),
+    };
+  };
+  async function committedLegacyCredit(s: { subId: string }, txn: string, mode: Mode) {
+    const identity = mode.identity === 'none' ? null : await app.prisma.providerPayment.create({ data: {
+      provider: 'MMG', providerTxnId: txn.toUpperCase(), status: 'OPEN', amount: 2100, currencyCode: 'GYD' } });
+    const observation = await app.prisma.mmgAgentPayment.create({ data: {
+      channel: 'MMG_AGENT_WEBHOOK', externalId: txn, mmgTxnId: txn, sanRaw: 'legacy-f2', amount: 2100, currencyCode: 'GYD',
+      paidAt: new Date(), status: mode.observation, subscriptionId: s.subId, raw: {},
+      ...(mode.identity === 'linked' ? { providerPaymentId: identity!.id } : {}),
+    } });
+    const eventKey = mode.key === 'pp' ? `agent-cash:pp:${identity!.id}`
+      : mode.key === 'agent' ? `agent-cash:${observation.id}` : `topup:${s.subId}:agent:MMG_AGENT_WEBHOOK:${txn}`;
+    // The credit committed: wallet, receipt, counter, ledger and event, all at once.
+    await app.prisma.$transaction((db) => billing.recordTopUpInTransaction(db, {
+      subscriptionId: s.subId, amount: 2100, recordedBy: 'agent-cash:MMG_AGENT_WEBHOOK', reference: txn, eventKey }));
+    return { observation, identity };
+  }
+
+  it.each(modes)('%s: the backfill then a fresh admin command posts nothing', async (_name, mode) => {
+    const s = await makeSub();
+    const txn = tx(`F2STALE${mode.observation.slice(0, 1)}${mode.identity.toUpperCase()}${mode.key.toUpperCase()}`);
+    const { observation } = await committedLegacyCredit(s, txn, mode);
+    const before = await moneyOf(s.subId);
+    expect(before).toMatchObject({ wallet: 2100, credits: 1, receipts: 1, ledger: 1 });
+
+    await runProviderIdentityBackfill(app.prisma, { subscriptionIds: [s.subId] });
+    const identity = await identityOf(txn);
+    expect(identity).toMatchObject({ status: 'CREDITED', creditedPaymentId: observation.id });
+
+    const admin = await adminFor();
+    await expect(billing.recordTopUpCommand({ adminId: admin.id, idempotencyKey: key(), requestHash: 'h', subscriptionId: s.subId, amount: 2100, reference: txn }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    expect(await moneyOf(s.subId)).toEqual(before);
+  });
+
+  it.each(modes)('%s: without any backfill, racing admin commands and a checkout naming it post nothing', async (_name, mode) => {
+    const s = await makeSub();
+    const txn = tx(`F2RACE${mode.observation.slice(0, 1)}${mode.identity.toUpperCase()}${mode.key.toUpperCase()}`);
+    await committedLegacyCredit(s, txn, mode);
+    const before = await moneyOf(s.subId);
+    const row = await intentOf((await start(s)).checkout.ref);
+    approved(txn, 2100, echoOf(row));
+    await confirmingWith(row.id, txn);
+    const admin = await adminFor();
+    const results = await Promise.allSettled([
+      billing.recordTopUpCommand({ adminId: admin.id, idempotencyKey: key(), requestHash: 'h1', subscriptionId: s.subId, amount: 2100, reference: txn }),
+      billing.recordTopUpCommand({ adminId: admin.id, idempotencyKey: key(), requestHash: 'h2', subscriptionId: s.subId, amount: 2100, reference: txn }),
+      service.pollIntents(new Date()),
+    ]);
+    expect(results.slice(0, 2).every((r) => r.status === 'rejected')).toBe(true);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'ALREADY_CREDITED' });
+    expect(await moneyOf(s.subId)).toEqual(before);
+  });
+});
+
 describe('[F2] a historical conflict never stops the backfill from completing, and never licenses a second credit', () => {
   it('records completion with the conflict counted, pages operators once, never re-runs, and the conflicted transaction still never credits again', async () => {
     const operator = await operatorFor();
