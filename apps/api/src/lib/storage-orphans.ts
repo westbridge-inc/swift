@@ -4,6 +4,7 @@ import {
   resolveUnreferencedAvatarObject,
 } from '../modules/verification/object-authority';
 import { purgeUnattachedObject, purgeDocumentWithClaim, probeCommittedPurge, finishDocumentPurge, type PurgeStorage } from '../modules/verification/purge-fence';
+import { activeFaceEvidenceHolds, recordFaceEvidenceHeld } from '../modules/verification/face-evidence';
 
 /**
  * [F-026-02] The durable census of storage objects the platform still owes a
@@ -210,6 +211,17 @@ export async function retryStorageOrphan(
           || row.userId !== seed.userId || row.tenantId !== seed.tenantId) return false;
         const owner = await tx.user.findUnique({ where: { id: row.userId! }, select: { tenantId: true } });
         if (!owner || owner.tenantId !== row.tenantId) return false;
+        // [DS625] The signup selfie is face evidence: while any legal hold names the
+        // person it is kept, recorded against the hold, and this obligation stays open
+        // for the sweep to retry after release.
+        const holdIds = await activeFaceEvidenceHolds(tx, row.userId!, owner.tenantId);
+        if (holdIds.length) {
+          await recordFaceEvidenceHeld(tx, {
+            tenantId: owner.tenantId, userId: row.userId!, holdIds, evidence: 'AVATAR_OBJECT', item: `avatar-orphan:${row.id}`,
+            actorId: 'storage-orphan-retry', details: { orphanId: row.id, reason: row.reason },
+          });
+          return false;
+        }
         await resolveUnreferencedAvatarObject(tx, { fileKey: row.key, userId: row.userId! });
         if (!await deleteStorageObjectAndConfirmAbsent(storage, row.key)) return false;
         const closed = await tx.storageOrphan.updateMany({

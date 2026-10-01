@@ -17,6 +17,7 @@ import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion
 import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { isOwnedAvatarKey } from '../verification/object-authority';
+import { eraseFaceRecordsUnlessHeld } from '../verification/face-evidence';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -322,6 +323,11 @@ export class AccountService {
     // 1. Crypto-shred every verification document: delete the object, null the
     //    wrapped DEK (unrecoverable even from a ciphertext backup), mark purged.
     const storage = getStorageProvider();
+    // [DS625] Face evidence first: the biometric face template and the liveness
+    // checks are kept, and recorded against the hold, while any legal hold names
+    // the person; otherwise they go now. (The selfie object follows in 1a, under
+    // the same rule.)
+    const face = await eraseFaceRecordsUnlessHeld(prisma, userId);
     // [DOC-1 §9.4 · DOC-INV-14] A document under a legal hold is NOT purged by
     // erasure: it stays, due for purge the moment the hold is released (its
     // retention clock is set to now), and the deferral is written to the audit
@@ -332,10 +338,17 @@ export class AccountService {
       where: { userId, purgedAt: null, ...(subjectWideHold ? {} : { legalHoldId: { not: null } }) },
       data: { retentionExpiresAt: new Date() },
     });
-    if (deferred.count > 0) {
+    const avatarObligation = (preflight as { avatarOrphanId?: string | null }).avatarOrphanId;
+    const heldFaceEvidence = face.held && (face.faceTemplates || face.livenessChecks || avatarObligation)
+      ? { avatarObject: avatarObligation ? 1 : 0, livenessChecks: face.livenessChecks, faceTemplates: face.faceTemplates, holdIds: face.holdIds }
+      : null;
+    if (deferred.count > 0 || heldFaceEvidence) {
       await prisma.auditLog.create({ data: {
         userId, action: 'ERASURE_DEFERRED_LEGAL_HOLD', entity: 'User', entityId: userId,
-        changes: { heldDocuments: deferred.count, reason: 'DOC-1 §9.4: a legal hold blocks purge until released' },
+        changes: {
+          heldDocuments: deferred.count, reason: 'DOC-1 §9.4: a legal hold blocks purge until released',
+          ...(heldFaceEvidence && { heldFaceEvidence }),
+        },
       } });
     }
     const docs = await prisma.verificationDocument.findMany({
@@ -418,9 +431,10 @@ export class AccountService {
     //     IntegritySettings.tombstoneRetentionEnabled (default OFF). When ON,
     //     the salted hashes + membership remain (legitimate-interest fraud
     //     prevention, the documented sole exception); the raw-embedding face
-    //     template is deleted in EVERY case — it is not a hash.
+    //     template is deleted in EVERY case — it is not a hash — unless a legal
+    //     hold names the person [DS625]: it went, or was kept, with the liveness
+    //     checks before step 1.
     const integrity = await prisma.integritySettings.findUnique({ where: { id: 'platform' } });
-    await prisma.faceTemplate.deleteMany({ where: { accountId: userId } });
     if (!integrity?.tombstoneRetentionEnabled) {
       await prisma.$transaction(async (tx) => {
         await lockIdentityAuthority(tx);
@@ -441,9 +455,9 @@ export class AccountService {
     //     shares, third-party emergency contacts, exact-location queue/watch
     //     rows, and the cart. None has a continuing purpose once the person
     //     leaves; case-bound safety evidence lives elsewhere under its own
-    //     hold rules.
+    //     hold rules. The biometric liveness rows went, or were kept under a legal
+    //     hold, with the face template before step 1 [DS625].
     await prisma.accountRecovery.deleteMany({ where: { userId } });
-    await prisma.livenessCheck.deleteMany({ where: { userId } });
     await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
     await prisma.emergencyContact.deleteMany({ where: { userId } });
     await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });

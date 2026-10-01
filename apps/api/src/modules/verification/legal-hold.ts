@@ -17,6 +17,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { docLegalHoldGauge } from '../../plugins/observability';
 import { lockPurgeUser, purgeEvent, assertPurgeTenant } from './purge-fence';
+import { eraseFaceRecordsOnRelease } from './face-evidence';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -163,6 +164,8 @@ export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId:
     const unstamped = await tx.verificationDocument.updateMany({ where: { legalHoldId: hold.id }, data: { legalHoldId: null } });
     await purgeEvent(tx, { tenantId: hold.tenantId, userId: hold.subjectUserId, holdId: hold.id, kind: 'HOLD_RELEASED', actorId: input.releasedBy,
       details: { reason: input.reason, documents: unstamped.count } });
+    // [DS625] An erased person's face records were kept only for their holds.
+    await eraseFaceRecordsOnRelease(tx, hold, input.releasedBy);
     return { hold: await tx.docLegalHold.findUniqueOrThrow({ where: { id: hold.id } }), documents: unstamped.count };
   });
 }
