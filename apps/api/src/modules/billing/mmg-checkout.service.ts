@@ -468,17 +468,18 @@ export class MmgCheckoutService {
         return 'UNKNOWN';
       }
       mmgCheckoutEventsCounter.labels('reply').inc();
-      if (intent.status === 'CONFIRMED') return 'CONFIRMED';
-      if (intent.status === 'HELD') return 'CONFIRMING';
       const configFailure = CONFIG_FAILURES[parsed.resultCode];
       if (configFailure) {
         // 3, 4, 5: MMG refused OUR request (secret key, merchant id, token). A
         // configuration or security fault, never a payment state: written down
-        // above, operators paged once per checkout and code, and the checkout
-        // itself is never touched. Nothing is looked up, held or credited.
+        // above, operators paged once per checkout and code whatever the
+        // checkout's state, and the checkout itself is never touched. Nothing
+        // is looked up, held or credited.
         await this.alertRefusedRequest(intent, parsed.resultCode, configFailure, input.source);
         return 'UNKNOWN';
       }
+      if (intent.status === 'CONFIRMED') return 'CONFIRMED';
+      if (intent.status === 'HELD') return 'CONFIRMING';
 
       // Return, notify and poll can overlap. Merge against the locked current
       // row, preserving both candidates and the first reply's timestamp. MMG's

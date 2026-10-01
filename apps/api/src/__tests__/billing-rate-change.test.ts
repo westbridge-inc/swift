@@ -488,6 +488,8 @@ describe('owner taxi 8,000: future fees change, issued money does not', () => {
     await billing.lapseStoppedSubscriptions();
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: taxi.subId } })).status).toBe('PAUSED');
     await billing.recalculateMoverTiers();
+    // [SAFE-B] The billing-method routes need a stepped-up session.
+    await grantStepUp(app, taxi.httpToken);
     const resume = await app.inject({ method: 'PUT', url: '/api/v1/driver/subscription/billing-method', payload: { method: 'CASH' }, headers: { 'content-type': 'application/json', authorization: `Bearer ${taxi.httpToken}` } });
     expect(resume.statusCode, resume.body).toBe(200);
     const payments = await enginePayments(taxi.subId);

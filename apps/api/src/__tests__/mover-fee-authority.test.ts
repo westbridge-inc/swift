@@ -22,6 +22,7 @@ import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { platformStats } from '../modules/admin/platform-stats';
 import { runFxChangeNotices } from '../modules/billing/fx-notices';
+import { grantStepUp } from './helpers/step-up';
 
 const DAY = 86_400_000;
 const run = nanoid(7);
@@ -153,6 +154,8 @@ describe('one mover fee across actual role surfaces', () => {
       const go = await call(f.token, 'POST', `${role}/go-online`, { latitude: 6.8, longitude: -58.15 });
       expect(go.statusCode, go.body).toBe(200);
     }
+    // [SAFE-B] The billing-method routes need a stepped-up session.
+    await grantStepUp(app, f.token);
     const stopped = await call(f.token, 'PUT', 'driver/subscription/billing-method', { method: 'NONE' });
     expect(stopped.statusCode, stopped.body).toBe(200);
     const riderScreen = await call(f.token, 'GET', 'rider/subscription');
@@ -164,6 +167,8 @@ describe('one mover fee across actual role surfaces', () => {
 
   it('a held pair exposes both sources and prevents all new weekly debits and settings resume', async () => {
     const f = await legacy('funded');
+    // [SAFE-B] A stepped-up session: the refusal below is the hold's, not the step-up's.
+    await grantStepUp(app, f.token);
     for (const role of ['rider', 'driver']) {
       const screen = await call(f.token, 'GET', `${role}/subscription`);
       expect(screen.statusCode, screen.body).toBe(200);
@@ -279,6 +284,7 @@ describe('bounded finance decision with original money retained', () => {
       expect(stats.activeSubscriptions).toHaveLength(1);
       expect(stats.activeSubscriptions[0]).toMatchObject({ id: f.driver.id, type: 'TAXI_DRIVER' });
     });
+    await grantStepUp(app, f.token);
     expect((await call(f.token, 'PUT', 'driver/subscription/billing-method', { method: 'NONE' })).statusCode).toBe(200);
     expect((await call(f.token, 'PUT', 'rider/subscription/billing-method', { method: 'CASH' })).statusCode).toBe(200);
     expect((await sys(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: f.rider.id } }))).autoRenew).toBe(true);

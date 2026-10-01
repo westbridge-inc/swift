@@ -163,7 +163,13 @@ export class SubscriptionService {
     const run = async (tx: Prisma.TransactionClient) => {
       await bindTenantTransaction(tx);
       await lockIdentityAuthority(tx);
-      const sub = 'vendorId' in entity ? await this.vendorRow(entity, tx) : await this.moverRow(entity, tx);
+      // [#1393] One weekly fee per mover payer: the payer and every one of its
+      // sources are locked (and ownership re-read) before the activation is read.
+      const payer = 'vendorId' in entity ? null : await this.lockMoverPayer(entity, tx);
+      const activation = await this.activation(entity, tx);
+      const sub = payer && !('vendorId' in entity)
+        ? await this.moverRow(entity, payer, activation, tx)
+        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, 'swift-default');
       return apply(tx, sub);
     };
     return '$transaction' in db ? db.$transaction(run) : run(db);
@@ -186,17 +192,9 @@ export class SubscriptionService {
     }
   }
 
-  private async vendorRow(entity: { vendorId: string }, tx: Prisma.TransactionClient): Promise<Subscription> {
-    const activation = await this.activation(entity, tx);
-    return activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, 'swift-default');
-  }
-
-  /** [#1393 · mover fee authority] One weekly fee per mover payer: a second
-   * role adopts the payer's canonical subscription (a taxi activation re-tiers
-   * its future rate, with a record), and a new subscription is born under the
-   * payer and source locks, then joins the payer's fee authority. Runs inside
-   * withActivation, after the identity lock. */
-  private async moverRow(entity: { riderId: string } | { driverId: string }, tx: Prisma.TransactionClient): Promise<Subscription> {
+  /** [#1393 · mover fee authority] The payer and all of its mover sources,
+   * locked in the common order, with the profile's owner re-read under the lock. */
+  private async lockMoverPayer(entity: { riderId: string } | { driverId: string }, tx: Prisma.TransactionClient) {
     const profile = 'riderId' in entity
       ? await tx.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { user: { select: { id: true, tenantId: true } } } })
       : await tx.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { user: { select: { id: true, tenantId: true } } } });
@@ -206,7 +204,16 @@ export class SubscriptionService {
       ? await tx.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { userId: true } })
       : await tx.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { userId: true } });
     if (fresh.userId !== payer.userId) throw new AppError(409, 'MOVER_FEE_OWNERSHIP_INVALID', 'Mover ownership changed during activation.');
-    const activation = await this.activation(entity, tx);
+    return payer;
+  }
+
+  /** [#1393 · mover fee authority] A second role adopts the payer's canonical
+   * subscription (a taxi activation re-tiers its future rate, with a record);
+   * a new subscription is born on the trial law and joins the payer's fee authority. */
+  private async moverRow(
+    entity: { riderId: string } | { driverId: string }, payer: { userId: string; tenantId: string },
+    activation: ActivationPricing, tx: Prisma.TransactionClient,
+  ): Promise<Subscription> {
     if (activation.existing) {
       const authority = await activateMoverFeeType(tx, payer, 'driverId' in entity ? 'TAXI_DRIVER' : activation.existing.type);
       let sub = activation.existing;

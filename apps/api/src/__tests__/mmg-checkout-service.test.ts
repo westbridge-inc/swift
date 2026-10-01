@@ -609,6 +609,35 @@ describe('concurrent checkout replies and URL emission', () => {
     }
   });
 
+  it('a fresh start whose own unsealing overlaps a reply hands out no URL: the answer is the checkout as it now stands', async () => {
+    // [DS386 #1] The first answer for a newly created checkout goes through the
+    // same central responder as every replay: the checkout is written down
+    // before its page is unsealed, so a reply can land during that unseal.
+    const s = await makeSub();
+    const keys = getKeyProvider()!;
+    const unwrap = keys.unwrapDek.bind(keys);
+    const entered = deferred();
+    const release = deferred();
+    const spy = vi.spyOn(keys, 'unwrapDek').mockImplementationOnce(async (wrapped) => {
+      entered.resolve();
+      await release.promise;
+      return unwrap(wrapped);
+    });
+    const waiting = start(s);
+    try {
+      await entered.promise;
+      const row = await app.prisma.mmgCheckoutIntent.findFirstOrThrow({ where: { subscriptionId: s.subId } });
+      expect(row.status).toBe('OPEN');
+      expect(await reply(row, tx('UNSEALFRESH'))).toBe('CONFIRMING');
+      release.resolve();
+      expect(await waiting).toMatchObject({ created: true, checkout: { ref: row.id, status: 'CONFIRMING', checkoutUrl: null } });
+    } finally {
+      release.resolve();
+      await waiting.catch(() => undefined);
+      spy.mockRestore();
+    }
+  });
+
   it('expires an OPEN checkout whose deadline passes during unsealing', async () => {
     const s = await makeSub();
     const clientKey = key();
@@ -914,6 +943,31 @@ describe('the official MMG response contract', () => {
     expect(await codeReply(row, '0', txn)).toBe('CONFIRMED');
     expect(await topups(s.subId)).toHaveLength(1);
   });
+
+  it.each((['CONFIRMED', 'HELD'] as const).flatMap((status) => (['3', '4', '5'] as const).map((code) => ({ status, code }))))(
+    'ResultCode $code for a $status checkout is still a configuration alert: paged once, nothing changed, nothing looked up', async ({ status, code }) => {
+      const s = await makeSub();
+      const operator = await operatorFor();
+      const row = await intentOf((await start(s)).checkout.ref);
+      if (status === 'CONFIRMED') {
+        const paid = tx(`CONFIGPAID${code}`);
+        approved(paid, 2100, echoOf(row));
+        expect(await codeReply(row, '0', paid)).toBe('CONFIRMED');
+      } else {
+        await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { status: 'HELD', reason: 'REFERENCE_NOT_ECHOED', nextCheckAt: null } });
+      }
+      const before = await intentOf(row.id);
+      const credits = (await topups(s.subId)).length;
+      lookedUp.length = 0;
+      const txn = tx(`CONFIGLATE${status}${code}`);
+      for (let n = 0; n < 2; n += 1) expect(await codeReply(row, code, txn)).toBe('UNKNOWN');
+      expect(await intentOf(row.id)).toEqual(before);
+      expect(lookedUp).toEqual([]);
+      expect(await topups(s.subId)).toHaveLength(credits);
+      expect(await identityOf(txn)).toBeNull();
+      const alerts = await app.prisma.notification.findMany({ where: { userId: operator.id, data: { path: ['checkoutId'], equals: row.id } } });
+      expect(alerts.filter((alert) => (alert.data as { alert?: string }).alert === 'mmg-checkout-reply-code')).toHaveLength(1);
+    });
 });
 
 // ---------------------------------------------------------------------------

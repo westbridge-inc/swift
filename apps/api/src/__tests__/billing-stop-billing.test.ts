@@ -18,6 +18,7 @@ import { subscriptionOperability } from '../modules/subscription/operate-gate';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { readDunningClock } from '../modules/billing/dunning-clock';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
@@ -31,9 +32,11 @@ import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
 
 const DAY = 24 * 60 * 60 * 1000;
 const WEEK = 7 * DAY;
-// This file's own fixture block (+5920326nnn). Grep the repo: no other file
-// uses 5920326 (gold-2 money uses 5920324, stale-ready uses 5920325).
-const PHONE_PREFIX = '+5920326';
+// [SAFE-B · retained history] Choosing the MMG rail records an advisory payer
+// declaration: immutable evidence naming its subscription and account, kept
+// after the suite. The fixtures therefore live in a phone namespace no other
+// suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('25');
 
 let app: FastifyInstance;
 let billing: BillingService;
@@ -217,19 +220,31 @@ async function purgeBlock() {
     where: { OR: [{ rider: { userId: { in: ids } } }, { driver: { userId: { in: ids } } }] },
     select: { id: true },
   });
-  const sids = subs.map((sub) => sub.id);
-  await cleanupBillingClocks(app.prisma, sids);
-  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: sids } } });
-  await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: sids } } });
-  await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: sids } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-  await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: [...sids, ...ids] } }, { userId: { in: ids } }] }, 'test-cleanup:e12-stop-billing');
-  await app.prisma.subscription.deleteMany({ where: { id: { in: sids } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.driver.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+  const allSids = subs.map((sub) => sub.id);
+  // [SAFE-B · retained history] A subscription an MMG payer declaration names
+  // is kept with its money records and mover; the rest goes as before, in one
+  // transaction, and what stays is taken out of service.
+  const { sids, gone } = await app.prisma.$transaction(async (tx) => {
+    const kept = await retainedCohort(tx, { subscriptionIds: allSids });
+    const sids = without(allSids, kept.subscriptionIds);
+    const gone = without(ids, kept.userIds);
+    await cleanupBillingClocks(tx, allSids);
+    await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: sids } } });
+    await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: sids } } });
+    await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: sids } } });
+    // A mover payer's fee authority and its member rows go with the payer, before its subscriptions.
+    await tx.user.deleteMany({ where: { id: { in: gone } } });
+    await tx.subscription.deleteMany({ where: { id: { in: sids } } });
+    await tx.notification.deleteMany({ where: { userId: { in: ids } } });
+    await tx.rider.deleteMany({ where: { userId: { in: gone } } });
+    await tx.driver.deleteMany({ where: { userId: { in: gone } } });
+    await tx.session.deleteMany({ where: { userId: { in: ids } } });
+    await tx.user.deleteMany({ where: { id: { in: gone } } });
+    await retireKeptScaffolding(tx, kept);
+    return { sids, gone };
+  }, { timeout: 60_000 });
+  // Audit rows are append-only: what goes, goes through the sanctioned purge.
+  await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: [...sids, ...gone] } }, { userId: { in: gone } }] }, 'test-cleanup:e12-stop-billing');
 }
 
 afterAll(async () => {

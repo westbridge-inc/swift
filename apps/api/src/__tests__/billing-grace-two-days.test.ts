@@ -7,12 +7,13 @@ import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { getPaymentProvider, type PaymentProvider } from '../providers/payment/payment-provider';
 import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
 import { inoperableSubscriptionWhere, subscriptionOperability } from '../modules/subscription/operate-gate';
 import { moverFeeOperability } from '../modules/subscription/mover-fee-authority';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // [#1393 · coordinator item 10] The owner's grace is two full days of active
@@ -34,8 +35,11 @@ const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 const WEEK = 7 * DAY;
-// This file's own fixture block (+5920341nnn); no other file uses it.
-const PHONE_PREFIX = '+5920341';
+// [SAFE-B · retained history] Choosing the MMG rail records an advisory payer
+// declaration: immutable evidence naming its subscription and account, kept
+// after the suite. The fixtures therefore live in a phone namespace no other
+// suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('19');
 
 let app: FastifyInstance;
 let billing: BillingService;
@@ -53,8 +57,8 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   return user;
 }
 
-/** A store with an empty wallet: every charge from it fails. */
-async function makeStore(due: Date) {
+/** A store with an empty wallet (every charge from it fails), or paying by card. */
+async function makeStore(due: Date, rail: 'CASH' | 'CARD' = 'CASH') {
   const user = await makeUser(['VENDOR_OWNER'] as UserRole[], 'VENDOR_OWNER');
   const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await app.prisma.vendor.create({
@@ -67,7 +71,8 @@ async function makeStore(due: Date) {
   vendorIds.push(vendor.id);
   const sub = await app.prisma.subscription.create({
     data: {
-      vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 15000, billingMethod: 'CASH',
+      vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 15000, billingMethod: rail,
+      ...(rail === 'CARD' ? { paymentToken: 'tok_grace' } : {}),
       currentPeriodStart: new Date(due.getTime() - WEEK), currentPeriodEnd: due, nextBillingDate: due,
       prepaidBalance: { create: { balance: 0, currencyCode: 'GYD' } },
     },
@@ -121,18 +126,32 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await cleanupBillingClocks(app.prisma, subIds);
-  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-  await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-  await app.close();
+  // [SAFE-B · retained history] A subscription an MMG payer declaration names is
+  // kept with its money records, store and owner; the rest goes as before, in
+  // one transaction. What stays is cancelled without renewal and its store
+  // closed, so no later billing cycle reaches it.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { subscriptionIds: subIds });
+      const goneSubs = without(subIds, kept.subscriptionIds);
+      const goneVendors = without(vendorIds, kept.vendorIds);
+      await cleanupBillingClocks(tx, subIds);
+      await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.notification.deleteMany({ where: { userId: { in: userIds } } });
+      // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
+      await tx.user.deleteMany({ where: { id: { in: without(userIds, kept.userIds) } } });
+      await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.subscription.deleteMany({ where: { id: { in: goneSubs } } });
+      await tx.item.deleteMany({ where: { vendorId: { in: goneVendors } } });
+      await tx.vendor.deleteMany({ where: { id: { in: goneVendors } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
+
 
 describe('[#1393 · item 10] two full days of grace on every gate, paused while a payment is confirmed', () => {
   it('a store is never blocked before 48 hours of active overdue time; a confirmation pause does not count; it is blocked at exactly 48 hours, with no billing run in between', async () => {
@@ -193,6 +212,38 @@ describe('[#1393 · item 10] two full days of grace on every gate, paused while 
     const suspended = await row(s.subId);
     expect(suspended.status).toBe('SUSPENDED');
     expect(suspended.suspendedAt!.getTime()).toBe(at(48 * HOUR + MIN).getTime());
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } })).status).toBe('SUSPENDED');
+  });
+
+  it('a store paying by card: declines inside two days never suspend; the gate refuses at exactly 48 hours, and the next run suspends', async () => {
+    // Owner decision 4: the two days of grace hold on cards too, through the
+    // same shared dunning clock (each attempt is a processor-proven decline).
+    const t0 = new Date(Date.now() - 50 * DAY);
+    const at = (ms: number) => new Date(t0.getTime() + ms);
+    const s = await makeStore(t0, 'CARD');
+    const declines: string[] = [];
+    const decliningCard: PaymentProvider = {
+      tokenizeCard: async () => ({ token: 'tok_grace' }),
+      chargeToken: async (input) => { declines.push(input.idempotencyKey); return { status: 'failed', providerRef: `ch_${nanoid(6)}`, reason: 'Card declined' }; },
+      refund: async () => ({ status: 'succeeded', providerRef: `re_${nanoid(6)}` }),
+      lookupCharge: async () => ({ status: 'failed', reason: 'Card declined' }),
+    };
+    const card = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), decliningCard);
+
+    expect(await card.billSubscription(await withRelations(s.subId) as never, t0)).toBe('failed');
+    expect(await card.billSubscription(await withRelations(s.subId) as never, at(24 * HOUR))).toBe('failed');
+    // A third decline forced early (a rail change or a top-up can re-bill at once).
+    expect(await card.billSubscription(await withRelations(s.subId) as never, at(30 * HOUR))).toBe('failed');
+    expect(declines).toHaveLength(3);
+    expect(await row(s.subId)).toMatchObject({ status: 'PAST_DUE', failedAttempts: 3, suspendedAt: null });
+    expect((await row(s.subId)).billingEnforcementDueAt!.getTime()).toBe(at(48 * HOUR).getTime());
+    expect(await storeGate(s.subId, at(24 * HOUR + MIN))).toEqual({ operable: true });
+    expect(await storeGate(s.subId, at(48 * HOUR - MIN))).toEqual({ operable: true });
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } })).status).toBe('ACTIVE');
+
+    expect(await storeGate(s.subId, at(48 * HOUR))).toEqual({ operable: false, why: 'GRACE_LAPSED', status: 'PAST_DUE' });
+    expect(await card.billSubscription(await withRelations(s.subId) as never, at(48 * HOUR + MIN))).toBe('suspended');
+    expect((await row(s.subId)).status).toBe('SUSPENDED');
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } })).status).toBe('SUSPENDED');
   });
 
