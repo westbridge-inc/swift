@@ -1,6 +1,9 @@
 import type { NextConfig } from 'next';
 import { PHASE_DEVELOPMENT_SERVER } from 'next/constants';
 import { SITE_DOMAIN } from './src/site.domain';
+
+/** The public site's own names: never noindexed, whichever build answers them. */
+const PUBLIC_SITE_HOSTS = [SITE_DOMAIN, `www.${SITE_DOMAIN}`];
 import {
   type BrowserApiMode,
   buildBrowserContentSecurityPolicy,
@@ -171,16 +174,26 @@ export default function createNextConfig(phase: string): NextConfig {
               key: 'Permissions-Policy',
               value: 'geolocation=(self), microphone=(), camera=(self)',
             },
-            // [Q11] The staging site is a full copy of the public one on another
-            // host, backed by test data: no search engine may index it in the
-            // public site's place. A staging-channel build only; the public
-            // build never sends this.
-            ...(releaseChannel === 'staging' ? [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] : []),
           ],
         },
+        // [Q11] The staging site is a full copy of the public one on another
+        // host, backed by test data: no search engine may index it in the
+        // public site's place. A staging-channel build only; the public build
+        // never sends this. [DS628] And only on the staging host(s): the deploy
+        // stack can serve the public names from this same image
+        // (WEB_ALIAS_HOSTS), and swiftgy.com and www must stay indexable. Every
+        // other name keeps the noindex, so an unexpected host fails safe.
+        ...(releaseChannel === 'staging'
+          ? [{
+              source: '/(.*)',
+              missing: PUBLIC_SITE_HOSTS.map((host) => ({ type: 'host' as const, value: host.replace(/\./g, '\\.') })),
+              headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }],
+            }]
+          : []),
         // Every depth: MMG may put its reply in the path (/pay/mmg/success/token=…).
-        // These rules override the site-wide Referrer-Policy above, and Next
-        // sends a config header in place of the route handler's own.
+        // These rules come after the site-wide ones, so they win for these paths
+        // (Referrer-Policy included), and Next sends a config header in place of
+        // the route handler's own.
         { source: '/pay/mmg/:path*', headers: [
           { key: 'X-Robots-Tag', value: 'noindex' },
           { key: 'Cache-Control', value: 'no-store' },

@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1
 # ---------------------------------------------------------------------------
-# Swift web (apps/web, Next.js) — the self-hosted image. The staging stack
-# serves it (deploy/docker-compose.yml, profile "web"); the public site on
-# swiftgy.com is still deployed by Vercel, which never reads this file.
+# Swift web (apps/web, Next.js) — the self-hosted image. The deploy stack
+# serves it (deploy/docker-compose.yml, profile "web") at its staging name
+# (WEB_HOST) and, optionally, at the public names swiftgy.com and www
+# (WEB_ALIAS_HOSTS). Only the staging name is marked noindex (next.config.ts).
+# .github/workflows/deploy-web.yml can still deploy the site to Vercel, which
+# never reads this file.
 # Multi-stage like apps/api/Dockerfile: install the workspace, build Next's
 # standalone server, then a slim non-root runtime that carries only that
 # server. Built from the MONOREPO ROOT so pnpm can resolve the workspace:
@@ -41,6 +44,10 @@ ARG SWIFT_WEB_CHANNEL
 # Unset or empty keeps src/site.config.ts refusing to build while a company
 # detail is still a {{TOKEN}}; only an explicit 1 lets such a build through.
 ARG NEXT_PUBLIC_ALLOW_SITE_TOKENS
+# [Item 7] The pre-launch switch for the public site: `live` opens ordering on
+# the apex and www; unset or empty shows the "Launching soon" front door there.
+# Other hosts this image answers (staging) keep the full marketplace either way.
+ARG NEXT_PUBLIC_WEB_ORDERING
 # next.config.ts: the standalone server, and the type check and lint stay
 # with CI (the reason is written there).
 ENV SWIFT_WEB_IMAGE_BUILD=1

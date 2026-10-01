@@ -604,7 +604,8 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
         # is unset; the API host is always set, so the split keys on it.
         code = [line.split("#", 1)[0].strip() for line in self.TEXT.splitlines()]
         # [STORE-1] The optional API alias sits with the API host, before the website.
-        self.assertEqual([line for line in code if "$WEB_HOST" in line], ["{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {"])
+        # [Item 8] The optional website aliases follow the website's own name.
+        self.assertEqual([line for line in code if "$WEB_HOST" in line], ["{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {"])
         body = "\n".join(self.blocks(API_HOST=API_HOST, WEB_HOST=WEB_HOST)[0][1])
         self.assertRegex(
             body,
@@ -773,13 +774,17 @@ class Q11PilotUpWebsite(unittest.TestCase):
         self.store = " ".join(sorted(set(re.findall(r"_FILE: /run/secrets/([A-Z][A-Z0-9_]*)", compose))
                                      | {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}))
 
-    def run_pilot(self, web_host=None, alias=None, **extra):
+    def run_pilot(self, web_host=None, alias=None, web_aliases=None, web_ordering=None, **extra):
         settings = (f"PILOT_ENV=staging\nAPI_HOST={API_HOST}\nMAPS_PROVIDER=osrm\nOSRM_URL=http://osrm:5000\n"
                     "BACKUP_BUCKET=test-backups\nNODE_ENV=development\nCORS_ORIGIN=https://staging.example.com\n")
         if web_host is not None:
             settings += f"WEB_HOST={web_host}\n"
         if alias is not None:
             settings += f"API_ALIAS_HOST={alias}\n"
+        if web_aliases is not None:
+            settings += f"WEB_ALIAS_HOSTS={web_aliases}\n"
+        if web_ordering is not None:
+            settings += f"WEB_ORDERING={web_ordering}\n"
         (self.here / ".env").write_text(settings)
         env = os.environ.copy()
         env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
@@ -867,6 +872,67 @@ class Q11PilotUpWebsite(unittest.TestCase):
                 self.assertIn(f"API_ALIAS_HOST {message}", result.stderr)
                 self.assertEqual(calls, [])
 
+    # [Item 8] WEB_ALIAS_HOSTS: the public names for the website on this stack.
+    def test_valid_website_aliases_deploy_like_the_website_name(self):
+        for aliases in (PUBLIC_ALIASES, "example.com"):
+            with self.subTest(aliases=aliases):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, alias=ALIAS_HOST, web_aliases=aliases)
+                self.assertEqual(result.returncode, 0, result.stderr[-800:])
+                self.assertIn(f"STAGING READY at exact SHA {self.SHA}", result.stdout)
+
+    def test_malformed_website_aliases_are_refused_before_anything_changes(self):
+        for bad in ("https://example.com", "example.com/", "example.com:443", "localhost", "example", "-example.com",
+                    "example.com,www.example.com", "example.com www.example.com/"):
+            with self.subTest(aliases=bad):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, web_aliases=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("WEB_ALIAS_HOSTS must be DNS hostnames", result.stderr)
+                self.assertEqual(calls, [], "nothing may run before the settings are accepted")
+
+    def test_website_aliases_must_differ_from_the_api_names_and_the_website_name(self):
+        cases = (
+            (API_HOST, None, "must differ from API_HOST"),
+            (f"example.com {API_HOST.upper()}", None, "must differ from API_HOST"),
+            (ALIAS_HOST, ALIAS_HOST, "must differ from API_ALIAS_HOST"),
+            (ALIAS_HOST.upper(), ALIAS_HOST, "must differ from API_ALIAS_HOST"),
+            (WEB_HOST, None, "must differ from WEB_HOST"),
+            (f"www.example.com {WEB_HOST.upper()}", None, "must differ from WEB_HOST"),
+            ("example.com EXAMPLE.com", None, "must not repeat a name"),
+        )
+        for aliases, api_alias, message in cases:
+            with self.subTest(aliases=aliases, api_alias=api_alias):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, alias=api_alias, web_aliases=aliases)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"WEB_ALIAS_HOSTS {message}", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_website_aliases_need_the_website(self):
+        for web_host in (None, ""):
+            with self.subTest(web_host=web_host):
+                self.log.write_text("")
+                result, calls = self.run_pilot(web_host, web_aliases="example.com")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("WEB_ALIAS_HOSTS needs WEB_HOST", result.stderr)
+                self.assertEqual(calls, [])
+
+    # [Item 7] The pre-launch switch is baked into the website build.
+    def test_the_pre_launch_switch_is_live_or_nothing(self):
+        for value in ("", "live"):
+            with self.subTest(web_ordering=value):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, web_ordering=value)
+                self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        for value in ("Live", "LIVE", "true", "1", "yes", "soon"):
+            with self.subTest(web_ordering=value):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, web_ordering=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("WEB_ORDERING must be live or empty", result.stderr)
+                self.assertEqual(calls, [])
+
     def test_a_site_that_does_not_build_leaves_the_running_stack_untouched(self):
         result, calls = self.run_pilot(WEB_HOST, FAIL_ON="build web")
         self.assertNotEqual(result.returncode, 0)
@@ -942,6 +1008,22 @@ class Q11WebsiteDocs(unittest.TestCase):
                        '--resolve "$WEB_HOST:443:127.0.0.1"', "X-Robots-Tag"):
             self.assertIn(needle, section)
 
+    def test_the_runbook_says_how_to_serve_the_public_names_and_what_the_front_door_is(self):
+        # [Item 8 · DS628] Serving swiftgy.com and www from this stack, whether they are indexed,
+        # the pre-launch switch, and the plain fact that the front door is presentation-only.
+        runbook = (DEPLOY / "PILOT-RUNBOOK.md").read_text()
+        start = runbook.index("Serving the public site from this stack")
+        end = runbook.find("\n## ", start)
+        section = runbook[start:end if end != -1 else len(runbook)]
+        for needle in ("WEB_ALIAS_HOSTS=swiftgy.com www.swiftgy.com", "WEB_ORDERING=live", "presentation-only",
+                       "open to the apps", "CORS_ORIGIN", "does not open ordering", "x-robots-tag",
+                       "301", ".well-known"):
+            self.assertIn(needle, section)
+        # Section 3b no longer claims the image marks every name noindex.
+        start_3b = runbook.index("Serving the website on staging")
+        section_3b = runbook[start_3b:runbook.find("\n## ", start_3b)]
+        self.assertIn("only on the staging name", section_3b)
+
 
 
 
@@ -976,6 +1058,62 @@ class StoreApiAliasHost(unittest.TestCase):
     def test_caddy_gets_the_alias_with_an_empty_default(self):
         caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
         self.assertIn("API_ALIAS_HOST: ${API_ALIAS_HOST:-}", caddy)
+
+
+# ===========================================================================
+# [Item 8] WEB_ALIAS_HOSTS: optional extra DNS names for the WEBSITE — the
+# public swiftgy.com and www.swiftgy.com while no production stack exists,
+# mirroring API_ALIAS_HOST. Each name gets its own certificate and reaches the
+# website, never the API. www is redirected to the apex by the website itself
+# (apps/web/next.config.ts), which keeps the app-link files on www unredirected;
+# a proxy-level redirect would move those too. Unset, nothing changes.
+# ===========================================================================
+
+PUBLIC_ALIASES = "example.com www.example.com"
+
+
+class PublicSiteWebAliasHosts(unittest.TestCase):
+    def blocks(self, env: dict):
+        return top_level_blocks(caddy_render((DEPLOY / "Caddyfile").read_text(), env))
+
+    def test_unset_website_aliases_leave_the_api_and_website_exactly_as_before(self):
+        for env in ({"API_HOST": API_HOST, "WEB_HOST": WEB_HOST}, {"API_HOST": API_HOST, "WEB_HOST": WEB_HOST, "WEB_ALIAS_HOSTS": ""}):
+            with self.subTest(env=env):
+                [[addresses, body]] = self.blocks(env)
+                self.assertEqual(addresses, [API_HOST, WEB_HOST])
+                self.assertIn(f"@api host {API_HOST}", body)
+
+    def test_each_alias_is_served_with_its_own_certificate_and_reaches_the_website_never_the_api(self):
+        env = {"API_HOST": API_HOST, "API_ALIAS_HOST": ALIAS_HOST, "WEB_HOST": WEB_HOST, "WEB_ALIAS_HOSTS": PUBLIC_ALIASES}
+        [[addresses, body]] = self.blocks(env)
+        self.assertEqual(addresses, [API_HOST, ALIAS_HOST, WEB_HOST, "example.com", "www.example.com"])
+        # Requests are split on the API matcher; every other host is the website.
+        matchers = [line for line in body if line.startswith("@api host")]
+        self.assertEqual(matchers, [f"@api host {API_HOST} {ALIAS_HOST}"])
+        self.assertEqual(body[-3:], ["handle {", "reverse_proxy web:3000", "}"])
+
+    def test_www_reaches_the_website_which_redirects_it_to_the_apex(self):
+        # No proxy-level redirect: it would also move the app-link files the
+        # phone apps fetch from www (they refuse to follow a redirect).
+        self.assertNotRegex((DEPLOY / "Caddyfile").read_text(), r"(?m)^\s*redir\b")
+        next_config = (DEPLOY.parent / "apps" / "web" / "next.config.ts").read_text()
+        self.assertIn(r"source: '/:path((?!\\.well-known/).*)'", next_config)
+        self.assertIn("has: [{ type: 'host', value: `www.${SITE_DOMAIN}` }]", next_config)
+        self.assertIn("destination: `https://${SITE_DOMAIN}/:path*`", next_config)
+
+    def test_caddy_gets_the_website_aliases_with_an_empty_default(self):
+        caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
+        self.assertIn("WEB_ALIAS_HOSTS: ${WEB_ALIAS_HOSTS:-}", caddy)
+
+    def test_the_website_build_takes_the_pre_launch_switch_closed_by_default(self):
+        web = service_block(DEPLOY / "docker-compose.yml", "web")
+        self.assertIn("NEXT_PUBLIC_WEB_ORDERING: ${WEB_ORDERING:-}", web)
+        self.assertIn("ARG NEXT_PUBLIC_WEB_ORDERING", dockerfile_stages(WEB_DOCKERFILE)["build"])
+
+    def test_the_example_settings_document_both_and_leave_them_empty(self):
+        example = (DEPLOY / ".env.deploy.example").read_text()
+        self.assertRegex(example, r"(?m)^WEB_ALIAS_HOSTS=$")
+        self.assertRegex(example, r"(?m)^WEB_ORDERING=$")
 
 
 if __name__ == "__main__":
