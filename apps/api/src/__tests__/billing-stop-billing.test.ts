@@ -11,7 +11,7 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { BillingService } from '../modules/billing/billing.service';
+import { BillingService, CARD_PAY_NOW_KEY_PREFIX } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { subscriptionOperability } from '../modules/subscription/operate-gate';
@@ -19,7 +19,7 @@ import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
-import { readDunningClock } from '../modules/billing/dunning-clock';
+import { currentDunningClock, readDunningClock, resolveConfirmationInTx } from '../modules/billing/dunning-clock';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
 
@@ -651,6 +651,37 @@ describe('E12 — the stopped subscription and the billing engine', () => {
     const request = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
     sandboxSetTxStatus(request.externalRef!, 'pending');
     expect((await putMethod('/api/v1/rider/subscription/billing-method', httpToken, 'NONE')).statusCode).toBe(200);
+
+    await billing.lapseStoppedSubscriptions(new Date());
+    const row = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    expect({ status: row.status, autoRenew: row.autoRenew }).toEqual({ status: 'ACTIVE', autoRenew: false });
+    expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: subId, externalRef: `trial:${subId}` } })).toBe(0);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, idempotencyKey: { startsWith: 'pause:' } } })).toBe(0);
+  });
+
+  it('[#1393 · E12] a card payment instruction for the trial-end week, proven unpaid, still makes the week owed: no charge record is needed to say it was not free', async () => {
+    const trialEnd = new Date(Date.now() - 3 * DAY);
+    const { subId } = await makeRiderSub({ due: trialEnd, autoRenew: false });
+    await app.prisma.subscription.update({ where: { id: subId }, data: {
+      status: 'TRIAL', isTrialActive: true, trialEndDate: trialEnd, currentPeriodStart: new Date(trialEnd.getTime() - 14 * DAY),
+    } });
+    await new SubscriptionService(app.prisma).convertExpiredTrials();
+    // A card PAY_NOW the provider authorized for the trial-end week, written as
+    // the card rail writes it, then proven unpaid: an instruction was issued,
+    // yet no charge record exists beside it and the clock runs again.
+    const instruction = await app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: subId, amount: 12000, status: 'UNKNOWN', paymentMethod: 'CARD', purpose: 'CARD_PAY_NOW',
+      clientKey: `${CARD_PAY_NOW_KEY_PREFIX}e12-${nanoid(10)}`, failureRaw: { providerEffect: 'AUTHORIZED', providerRail: 'CARD' },
+      periodStart: trialEnd, periodEnd: new Date(trialEnd.getTime() + WEEK),
+    } });
+    const now = new Date();
+    await app.prisma.$transaction(async (tx) => {
+      await currentDunningClock(tx, subId, now);
+      await resolveConfirmationInTx(tx, subId, { paymentId: instruction.id }, 'PROVEN_UNPAID',
+        { actor: 'e12-finance-proof', reference: `unpaid:${instruction.id}` }, now);
+    });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: { in: ['CHARGE_ATTEMPT', 'CHARGE_SUCCESS', 'CHARGE_FAILED'] } } })).toBe(0);
+    expect((await readDunningClock(app.prisma, subId)).pausedAt).toBeNull();
 
     await billing.lapseStoppedSubscriptions(new Date());
     const row = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
