@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { NextRequest } from 'next/server';
+import { NextRequest, type NextResponse } from 'next/server';
 import { getRewrittenUrl, unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -40,8 +40,8 @@ async function deployedWith(webOrdering: string) {
   const config = await configWith(webOrdering);
   return {
     config,
-    ordering: await load<{ webOrderingOpen: (host: string | null | undefined, state?: string) => boolean }>('lib/web-ordering.ts'),
-    middleware: await load<{ middleware: (r: NextRequest) => Response; config: { matcher: string[] } }>('middleware.ts'),
+    ordering: await load<{ webOrderingOpen: (_host: string | null | undefined, _state?: string) => boolean }>('lib/web-ordering.ts'),
+    middleware: await load<{ middleware: (_r: NextRequest) => NextResponse; config: { matcher: string[] } }>('middleware.ts'),
   };
 }
 

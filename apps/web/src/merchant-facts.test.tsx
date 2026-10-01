@@ -45,7 +45,7 @@ async function renderRoute(url: keyof typeof LAYOUT_OF) {
   const layoutFile = join(APP, LAYOUT_OF[url]!);
   expect(existsSync(layoutFile), `${url} has no layout at ${LAYOUT_OF[url]}`).toBe(true);
   const { default: Page } = (await import(/* @vite-ignore */ file!)) as { default: () => unknown };
-  const { default: Layout } = (await import(/* @vite-ignore */ layoutFile)) as { default: (p: { children: React.ReactNode }) => React.ReactNode };
+  const { default: Layout } = (await import(/* @vite-ignore */ layoutFile)) as { default: (_p: { children: React.ReactNode }) => React.ReactNode };
   const content = (await Page()) as React.ReactNode;
   return render(<Layout>{content}</Layout>);
 }

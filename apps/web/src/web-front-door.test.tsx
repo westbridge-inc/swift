@@ -33,7 +33,7 @@ async function configWith(webOrdering: string) {
 
 /** The address bar the page is opened at. */
 function openAt(url: string) {
-  (window as unknown as { happyDOM: { setURL(u: string): void } }).happyDOM.setURL(url);
+  (window as unknown as { happyDOM: { setURL(_u: string): void } }).happyDOM.setURL(url);
 }
 
 afterEach(() => {
