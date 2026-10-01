@@ -8,6 +8,7 @@ import { color, elevation, radius, space } from '@swift/ui';
 import { useDiscoveryCategories, useMarketItems, useAddToCart, type MarketItem } from '../../../hooks/customer';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useLocationStore } from '../../../stores/locationStore';
+import { useAuthStore } from '../../../stores/authStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto } from '../../../lib/images';
 import { haptic } from '../../../lib/haptics';
@@ -206,6 +207,7 @@ export function MarketScreen() {
   // (lib/pullToRefresh). The first-load skeleton below stays on isLoading.
   const pull = usePullToRefresh(feed.refetch);
   const addToCart = useAddToCart();
+  const { isAuthenticated, promptLogin } = useAuthStore();
 
   // RETAIL only: this tab is goods. A food category chip here would filter the
   // feed to nothing and read as "we have no tools".
@@ -223,6 +225,7 @@ export function MarketScreen() {
 
   const mutateCart = addToCart.mutate;
   const onAdd = useCallback((item: MarketItem) => {
+    if (!isAuthenticated) { promptLogin(); return; }
     haptic.select();
     mutateCart(
       { vendorId: item.vendorId, itemId: item.id, quantity: 1 },
@@ -234,7 +237,7 @@ export function MarketScreen() {
           toast.error(e?.response?.data?.error?.message ?? 'Couldn’t add that — try again.'),
       },
     );
-  }, [mutateCart]);
+  }, [isAuthenticated, promptLogin, mutateCart]);
   const onOpen = useCallback((item: MarketItem) => {
     navigation.navigate('MenuItem', { itemId: item.id, vendorId: item.vendorId });
   }, [navigation]);

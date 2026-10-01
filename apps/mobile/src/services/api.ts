@@ -426,7 +426,7 @@ export const customerApi = {
   // [E01-B] Remove the applied promo from the cart: the quote re-prices
   // without it and checkout stops sending it. (The web cart cannot remove a
   // promotion yet; the phone can.)
-  removeCartPromo: () => api.delete('/customer/cart/promo'),
+  removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message, cancellationFee } } inside the axios
@@ -446,22 +446,22 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
-  }, idempotencyKey: string) =>
+  }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
-    // only when the order is placed or the cart changes. The server refuses
+    // only when the order is placed or an unsent cart intent changes. The server refuses
     // a concurrent twin and replays a finished one — so a double tap, a
     // timed-out response and a reopened app all resolve to ONE order.
-    api.post('/customer/checkout', data, {
+    api.post('/customer/checkout', data, capturedAuthConfig(session, {
       headers: { 'Idempotency-Key': idempotencyKey },
-    }),
+    })),
   /** [MOB-020] What became of a checkout attempt whose answer never arrived:
    *  placed (the receipt), in flight (the key is claimed), or nothing. Asked
    *  BEFORE a different order is placed over an unresolved one. */
-  checkoutReceipt: (idempotencyKey: string) =>
-    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`),
+  checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
-  reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
+  reorder: (id: string, session?: AuthSessionSnapshot) => api.post(`/customer/orders/${id}/reorder`, {}, capturedAuthConfig(session)),
   ratingTags: () => api.get('/customer/rating-tags'),
   itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>
     api.post(`/customer/orders/${id}/item-feedback`, body),
@@ -486,15 +486,16 @@ export const customerApi = {
     quantity?: number;
     selectedOptions?: Record<string, unknown>;
     specialInstructions?: string;
-  }) => api.post('/customer/cart/items', data),
+  }, session?: AuthSessionSnapshot) => api.post('/customer/cart/items', data, capturedAuthConfig(session)),
   updateCartItem: (
     id: string,
     data: { quantity: number; selectedOptions?: Record<string, unknown>; specialInstructions?: string },
-  ) => api.put(`/customer/cart/items/${id}`, data),
-  removeCartItem: (id: string) => api.delete(`/customer/cart/items/${id}`),
-  clearCart: () => api.delete('/customer/cart'),
-  setCartAddress: (addressId: string) => api.put('/customer/cart/address', { addressId }),
-  setCartTip: (amount: number) => api.put('/customer/cart/tip', { amount }),
+    session?: AuthSessionSnapshot,
+  ) => api.put(`/customer/cart/items/${id}`, data, capturedAuthConfig(session)),
+  removeCartItem: (id: string, session?: AuthSessionSnapshot) => api.delete(`/customer/cart/items/${id}`, capturedAuthConfig(session)),
+  clearCart: (session?: AuthSessionSnapshot) => api.delete('/customer/cart', capturedAuthConfig(session)),
+  setCartAddress: (addressId: string, session?: AuthSessionSnapshot) => api.put('/customer/cart/address', { addressId }, capturedAuthConfig(session)),
+  setCartTip: (amount: number, session?: AuthSessionSnapshot) => api.put('/customer/cart/tip', { amount }, capturedAuthConfig(session)),
 };
 
 // Taxi / rides (mounted at /api/v1/rides)

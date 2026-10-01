@@ -40,9 +40,9 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
-import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
+import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
-import { shapeCheckoutAnswer } from './checkout-answer';
+import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
@@ -99,6 +99,29 @@ interface CheckoutInput {
    *  interleaving proof can attempt a concurrent child mutation and observe it
    *  block against the held lock. Never set in routes. */
   afterCartLock?: () => Promise<void>;
+  /** [CHECKOUT-IDEM · AX354 S1] The commit point, made explicit: called once,
+   *  the moment the order transaction has COMMITTED (never after a rollback),
+   *  with the receipt row it wrote and the committed answer. From then on the
+   *  order exists, and a caller holding the command's claim must keep it. */
+  onCommitted?: (commit: CheckoutCommit) => void;
+}
+
+/** What a committed checkout reports at its commit point. */
+export interface CheckoutCommit {
+  /** The receipt row written inside the order transaction; null for a checkout without an idempotency key. */
+  receiptId: string | null;
+  /** The committed answer: the value the receipt holds. */
+  answer: CheckoutAnswer;
+}
+
+/** An order as the checkout transaction creates it (the post-commit notices read these fields). */
+type CheckoutCreatedOrder = Prisma.OrderGetPayload<{ include: { items: true; vendor: { select: { id: true; name: true; ownerId: true } } } }>;
+
+/** What the checkout transaction's body hands to COMMIT. */
+interface CheckoutStaged {
+  orders: CheckoutCreatedOrder[];
+  answer: CheckoutAnswer;
+  receiptId: string | null;
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -1130,6 +1153,10 @@ export class OrderService {
     // [M-11] The two effects every order owes after it commits carry their
     // delays; computed before the transaction so the rows inside it are whole.
     const queueTiming = await checkoutQueueTiming(this.prisma);
+    // [CHECKOUT-IDEM · AX366 F1] Set as the body's last act, when it hands its
+    // work to COMMIT: how a rejected transaction is told apart (see
+    // settleCheckoutCommit).
+    let staged = null as CheckoutStaged | null;
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const checkoutCommit = await this.prisma.$transaction(async (tx) => {
       if (promoCodeId) await lockIdentityAuthority(tx);
@@ -1560,16 +1587,31 @@ export class OrderService {
         timing: queueTiming,
         now,
       });
-      if (input.idempotency) {
-        await persistCheckoutReceiptInTransaction(tx, {
+      const receiptId = input.idempotency
+        ? await persistCheckoutReceiptInTransaction(tx, {
           userId: input.userId, tenantId: user.tenantId, idempotencyKey: input.idempotency.key, requestHash: input.idempotency.requestHash,
           orderIds: created.map((o) => o.id), result: answer,
-        });
-      }
+        })
+        : null;
       await input.afterDurableTail?.();
-      return { orders: created, answer };
-    });
-    const { orders, answer } = checkoutCommit;
+      staged = { orders: created, answer, receiptId };
+      return staged;
+    }).catch((err: unknown) => this.settleCheckoutCommit(staged, err));
+    const { orders, answer, receiptId } = checkoutCommit;
+
+    // ── [CHECKOUT-IDEM · AX354 S1] THE COMMIT POINT ──────────────────────────
+    // The transaction resolved (or its lost acknowledgement was settled by the
+    // durable receipt): the orders, their outbox tail and the receipt are
+    // durable. Nothing below may throw to the caller: the order exists, the
+    // answer is the committed receipt, and every step from here is best-effort,
+    // logged when it fails. (A post-commit throw used to reach the route, which
+    // released the command's claim and answered 500 for a placed order, so the
+    // receipt probe could answer "none" and invite the same order twice.)
+    try {
+      input.onCommitted?.({ receiptId, answer });
+    } catch (err) {
+      log().error({ err, receiptId }, '[CHECKOUT-IDEM] a commit listener threw; ignored, the order is committed');
+    }
 
     // Post-transaction: emit and notify per vendor (best-effort). The socket
     // event goes to that vendor's room only — a global emit would fan out to
@@ -1580,33 +1622,44 @@ export class OrderService {
     // the store learning of an order it cannot see; the release publishes them,
     // and an in-window cancel (which restocks) never does.
     for (const order of orders) {
-      const held = isHeld(order);
-      if (!held) {
-        this.io
-          .to(`vendor:${order.vendorId}`)
-          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
-      }
-      const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
-      if (vendorOwner) {
+      // [CHECKOUT-IDEM] One store's failed notice is logged, never thrown, and
+      // never skips the next store's. The store is still alerted: by the alert
+      // ladder, an outbox row committed with the order [M-11], or, for a held
+      // order, by its release [Q12].
+      try {
+        const held = isHeld(order);
         if (!held) {
-          await this.notifications.newOrderForVendor(
-            vendorOwner.userId,
-            order.orderNumber,
-            order.items.length,
-            Number(order.totalAmount),
-            order.id,
-            // [Q10] The same cut-off the auto-cancel row above was armed with.
-            vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
-          );
+          this.io
+            .to(`vendor:${order.vendorId}`)
+            .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
         }
-        if (order.vendorId) {
+        const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
+        if (vendorOwner) {
           if (!held) {
-            for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
-              await this.notifications.lowStock(vendorOwner.userId, ev);
-            }
+            await this.notifications.newOrderForVendor(
+              vendorOwner.userId,
+              order.orderNumber,
+              order.items.length,
+              Number(order.totalAmount),
+              order.id,
+              // [Q10] The same cut-off the auto-cancel row above was armed with.
+              vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
+            );
           }
-          stockEventsByVendor.delete(order.vendorId);
+          if (order.vendorId) {
+            if (!held) {
+              for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
+                await this.notifications.lowStock(vendorOwner.userId, ev);
+              }
+            }
+            stockEventsByVendor.delete(order.vendorId);
+          }
         }
+      } catch (err) {
+        log().error(
+          { err, orderId: order.id, vendorId: order.vendorId, receiptId },
+          '[CHECKOUT-IDEM] post-commit store notice failed; the order stands, and its alert ladder (or its release) still alerts the store',
+        );
       }
     }
 
@@ -1615,6 +1668,35 @@ export class OrderService {
     }
 
     return answer;
+  }
+
+  /**
+   * [CHECKOUT-IDEM · AX366 F1] Settle a rejected checkout transaction.
+   * - The body never finished (nothing staged): COMMIT was never sent, so the
+   *   transaction rolled back. A CONFIRMED rollback, rethrown as it is.
+   * - The body finished: the rejection came from the commit itself (a commit
+   *   error, or an acknowledgement lost after the database committed). The
+   *   outcome is UNKNOWN, and only the durable rows can settle it. This
+   *   transaction's receipt (or, without a key, its first order) present: the
+   *   order committed, so carry on as committed. Absent or unreadable:
+   *   CheckoutOutcomeUnknownError, and the caller keeps its claim.
+   */
+  private async settleCheckoutCommit(staged: CheckoutStaged | null, err: unknown): Promise<CheckoutStaged> {
+    if (!staged) throw err;
+    let landed = false;
+    try {
+      landed = staged.receiptId
+        ? (await this.prisma.checkoutReceipt.count({ where: { id: staged.receiptId } })) === 1
+        : (await this.prisma.order.count({ where: { id: staged.orders[0]!.id } })) === 1;
+    } catch (readErr) {
+      log().error({ err: readErr, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] the durable receipt could not be read to settle an unknown commit');
+    }
+    if (landed) {
+      log().warn({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit acknowledgement lost; the durable receipt proves the order committed');
+      return staged;
+    }
+    log().error({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit outcome unknown and no durable receipt yet; the claim is kept');
+    throw new CheckoutOutcomeUnknownError(staged.receiptId);
   }
 
   /**
