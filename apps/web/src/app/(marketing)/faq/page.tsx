@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
+import { BrowserOrderingNote } from '@/components/browser-ordering-note';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
 
 export const metadata: Metadata = {
@@ -73,7 +74,8 @@ const FAQ: QA[] = [
     q: 'Is there an iPhone or Android app?',
     a: (
       <>
-        Store ordering and order tracking work in your phone&apos;s browser. Taxi rides require the Swift mobile app
+        <BrowserOrderingNote open="Store ordering and order tracking work in your phone's browser." /> Taxi rides
+        require the Swift mobile app
         during the pilot, including the safety PIN and SOS. Store download links will appear here when available.
       </>
     ),

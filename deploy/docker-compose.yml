@@ -231,6 +231,9 @@ services:
       # [Q11] The website's DNS name. Empty (the default) serves no website:
       # the Caddyfile adds it to the API's site only when it is set.
       WEB_HOST: ${WEB_HOST:-}
+      # [Item 8] Extra names for the website (space-separated), e.g. the public
+      # apex and www. Empty (the default) adds none.
+      WEB_ALIAS_HOSTS: ${WEB_ALIAS_HOSTS:-}
       # [ADMIN-CONSOLE] The admin console's DNS name. Empty (the default)
       # serves no console. The optional second gate in front of it is a
       # bcrypt hash (the password never reaches this host); its user is
@@ -274,6 +277,11 @@ services:
         # company detail is still a {{TOKEN}}; WEB_ALLOW_SITE_TOKENS=1 in
         # deploy/.env lets the staging site build with them (PILOT-RUNBOOK.md).
         NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}
+        # [Item 7] The pre-launch switch for the PUBLIC site (swiftgy.com and
+        # www): WEB_ORDERING=live in deploy/.env opens ordering there; empty
+        # (the default) shows the "Launching soon" front door. Every other host
+        # this image answers, staging included, keeps the full marketplace.
+        NEXT_PUBLIC_WEB_ORDERING: ${WEB_ORDERING:-}
     image: swift-web:${SWIFT_TAG:-local}
     restart: unless-stopped
     environment:

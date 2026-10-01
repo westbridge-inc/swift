@@ -18,6 +18,14 @@
 # host missing from the matcher is served the website. Unset or empty, it
 # expands to nothing and this file is exactly what it was without it.
 #
+# [Item 8] WEB_ALIAS_HOSTS (optional, deploy/.env) is a space-separated list of
+# extra DNS names for the WEBSITE — the public swiftgy.com and www.swiftgy.com
+# while no production stack exists. Each gets its own certificate and, being
+# absent from the @api matcher, reaches the website. www is redirected to the
+# apex by the website itself (apps/web/next.config.ts), which keeps the app-link
+# files on www unredirected; no redirect belongs here. Unset or empty, it
+# expands to nothing and this file is exactly what it was without it.
+#
 # [ADMIN-CONSOLE] ADMIN_HOST (optional, deploy/.env) is the admin console's DNS
 # name (apps/admin, the `admin` service). It joins this site for the reason
 # WEB_HOST does, gets its own certificate, and its route comes FIRST, keyed on
@@ -36,7 +44,7 @@
 # user: both empty is no gate, and one without the other cannot be parsed, so
 # a half-configured gate stops Caddy instead of serving the console ungated.
 # The gate's credential ends here: it is stripped before the console.
-{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$ADMIN_HOST} {
+{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {$ADMIN_HOST} {
     encode zstd gzip
     @admin host {$ADMIN_HOST} admin.invalid
     handle @admin {

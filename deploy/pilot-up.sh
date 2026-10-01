@@ -50,6 +50,36 @@ if [ -n "$API_ALIAS_HOST" ]; then
   [ -z "$WEB_HOST" ] || [ "$alias_lc" != "$(printf '%s' "$WEB_HOST" | tr '[:upper:]' '[:lower:]')" ] ||
     die "API_ALIAS_HOST must differ from WEB_HOST"
 fi
+# [Item 8] Optional extra names for the WEBSITE (the public apex and www while no
+# production stack exists), space-separated. Same shape rules as the other
+# names; none may be the API's, the API alias's or the website's own name, nor
+# repeat: a website name in the API matcher would serve the API in place of the
+# site. They name the website, so they need it. Split without globbing.
+WEB_ALIAS_HOSTS="$(env_value WEB_ALIAS_HOSTS)"
+if [ -n "$WEB_ALIAS_HOSTS" ]; then
+  [ -n "$WEB_HOST" ] || die "WEB_ALIAS_HOSTS needs WEB_HOST: the aliases name the website, which is off without it"
+  lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+  read -r -a web_aliases <<< "$WEB_ALIAS_HOSTS"
+  seen=" "
+  for web_alias in "${web_aliases[@]}"; do
+    [[ "$web_alias" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
+      die "WEB_ALIAS_HOSTS must be DNS hostnames for HTTPS separated by spaces, or empty for none"
+    web_alias_lc="$(lower "$web_alias")"
+    [ "$web_alias_lc" != "$(lower "$API_HOST")" ] || die "WEB_ALIAS_HOSTS must differ from API_HOST"
+    [ -z "$API_ALIAS_HOST" ] || [ "$web_alias_lc" != "$(lower "$API_ALIAS_HOST")" ] ||
+      die "WEB_ALIAS_HOSTS must differ from API_ALIAS_HOST"
+    [ "$web_alias_lc" != "$(lower "$WEB_HOST")" ] || die "WEB_ALIAS_HOSTS must differ from WEB_HOST"
+    case "$seen" in *" $web_alias_lc "*) die "WEB_ALIAS_HOSTS must not repeat a name" ;; esac
+    seen="$seen$web_alias_lc "
+  done
+fi
+# [Item 7] The website's pre-launch switch is baked into its build: `live`, or
+# nothing (the public site shows the "Launching soon" front door). A near miss
+# such as `Live` would quietly keep the public site closed, so it is refused.
+case "$(env_value WEB_ORDERING)" in
+  "" | live) ;;
+  *) die "WEB_ORDERING must be live or empty" ;;
+esac
 [ "$(env_value MAPS_PROVIDER)" = osrm ] || die "pilot requires MAPS_PROVIDER=osrm"
 [ "$(env_value OSRM_URL)" = http://osrm:5000 ] || die "OSRM_URL must use the private routing service"
 # Secrets are not in this file (the encrypted store holds them; checked below
