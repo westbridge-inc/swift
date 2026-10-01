@@ -78,7 +78,7 @@ describe('[Q11] the staging website build', () => {
     expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag')))
       .toEqual(expect.arrayContaining([
         { source: '/s/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] },
-        { source: '/pay/mmg/:outcome', headers: [
+        { source: '/pay/mmg/:path*', headers: [
           { key: 'X-Robots-Tag', value: 'noindex' },
           { key: 'Cache-Control', value: 'no-store' },
           { key: 'Referrer-Policy', value: 'no-referrer' },

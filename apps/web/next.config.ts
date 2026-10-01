@@ -190,7 +190,11 @@ export default function createNextConfig(phase: string): NextConfig {
               headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }],
             }]
           : []),
-        { source: '/pay/mmg/:outcome', headers: [
+        // Every depth: MMG may put its reply in the path (/pay/mmg/success/token=…).
+        // These rules come after the site-wide ones, so they win for these paths
+        // (Referrer-Policy included), and Next sends a config header in place of
+        // the route handler's own.
+        { source: '/pay/mmg/:path*', headers: [
           { key: 'X-Robots-Tag', value: 'noindex' },
           { key: 'Cache-Control', value: 'no-store' },
           { key: 'Referrer-Policy', value: 'no-referrer' },
