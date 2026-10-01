@@ -5,6 +5,7 @@ import {
   BadgePercent, ShieldCheck, Banknote, Search, ClipboardCheck, MapPinned,
 } from 'lucide-react';
 import { Section } from '@/components/site';
+import { OrderOnTheWeb } from '@/components/order-on-the-web';
 import { launch, showAppStoreBadges, SITE_ORIGIN } from '@/site.config';
 
 /**
@@ -70,8 +71,6 @@ const PROMISES = [
 ];
 
 export default function WelcomePage() {
-  const canOrderOnWeb = launch.webOrdering === 'live';
-
   return (
     <>
       <Section>
@@ -89,22 +88,9 @@ export default function WelcomePage() {
           <div className="mt-8 flex flex-wrap gap-3">
             {/* Honest CTAs [AC-10]: the primary action only promises what the
                 launch config says works. No dead paths, no coming-soon buttons
-                dressed as live ones. */}
-            {canOrderOnWeb ? (
-              <Link
-                href="/"
-                className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
-              >
-                Order on the web
-              </Link>
-            ) : (
-              <Link
-                href="/signup"
-                className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
-              >
-                Join the waitlist
-              </Link>
-            )}
+                dressed as live ones. [Item 7] Which is decided per site: the
+                pre-launch switch closes ordering on the public site only. */}
+            <OrderOnTheWeb className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]" />
             <Link
               href="/vendors"
               className="rounded-full border border-[var(--swift-border-strong)] px-6 py-3 font-semibold transition-colors hover:bg-[var(--swift-subtle)]"

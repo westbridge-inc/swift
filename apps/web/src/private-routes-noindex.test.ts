@@ -32,6 +32,7 @@ const PUBLIC_PAGES = [
   '(marketing)/drivers/page.tsx',
   '(marketing)/faq/page.tsx',
   '(marketing)/how-it-works/page.tsx',
+  '(marketing)/launching-soon/page.tsx', // [Item 7] the public site's front door before launch, canonical at /
   '(marketing)/pricing/page.tsx',
   '(marketing)/stores/page.tsx',
   '(marketing)/stores/[slug]/page.tsx', // legacy storefront redirect
