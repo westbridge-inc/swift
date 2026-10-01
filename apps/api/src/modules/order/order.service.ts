@@ -55,6 +55,7 @@ import {
 } from '../rides/passenger-custody';
 import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { subscriptionOperability } from '../subscription/operate-gate';
+import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 
@@ -761,8 +762,14 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, tenant: { select: { kind: true } } },
     });
+
+    // [STA-1 DL-5] The store-review fiction places no order: its stores and
+    // menus are fictional and it has no money rail. Refused here, before any
+    // write, outbox row (the vendor alert ladder ends in an SMS), MMG hand-off
+    // or dispatch — the reviewer reads the reason under the Place-order button.
+    if (user.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError();
 
     // Strike consequences: repeated failed cash handovers
     // restrict ordering to verified accounts, then ban outright
