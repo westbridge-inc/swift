@@ -141,31 +141,49 @@ export interface VerificationReviewObserver {
 const REMINDER_WINDOW_DAYS = 30;
 
 /** Rejection reason codes (onboarding spec §9.3) — templated openings so
- *  applicants get consistent, actionable messages across reviewers. */
+ *  applicants get consistent, actionable messages across reviewers. These are
+ *  the codes a reviewer may choose for a NEW decision; the reject route accepts
+ *  nothing else. */
 export const REJECTION_REASON_CODES = [
   'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
-  'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'INSURANCE_NOT_HIRE', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
   'WRONG_PLATE_CLASS',
 ] as const;
 export type RejectionReasonCode = (typeof REJECTION_REASON_CODES)[number];
+/**
+ * Retired reason codes: never offered and never applied to a new decision, but
+ * KEPT, because decisions recorded before they were retired carry them
+ * (review_decision.reasonCode and the "[CODE]" opening of a reviewNote) and
+ * that history must stay readable.
+ *  - NOT_YELLOW — retired by the owner's ruling of 2026-10-01: a yellow car is
+ *    not a requirement for a taxi (this overrides DOC-1 §3.7). The H plate stays
+ *    required; a vehicle without one is rejected as WRONG_PLATE_CLASS.
+ */
+export const RETIRED_REJECTION_REASON_CODES = ['NOT_YELLOW'] as const;
+export type RetiredRejectionReasonCode = (typeof RETIRED_REJECTION_REASON_CODES)[number];
+/** Every reason code a recorded decision can carry: the live codes and the retired ones. */
+export type RecordedRejectionReasonCode = RejectionReasonCode | RetiredRejectionReasonCode;
 /** [DOC-1 §13] 24 hours from REVIEW_QUEUED to decision. */
 export const REVIEW_SLA_HOURS = Number(process.env['REVIEW_SLA_HOURS'] ?? 24);
 /**
  * [DOC-1 §8.5] What the actor is told is a CATEGORY — never the reviewer's
  * internal note and never the internal reason. The rows are the spec's table:
  * QUALITY (unreadable / missing page), EXPIRED, REQUIREMENT (the document does
- * not meet the requirement for the account type — wrong type, class, colour,
- * insurance scope), ACCOUNT_MISMATCH (details do not match the account), and
+ * not meet the requirement for the account type — wrong type, class, insurance
+ * scope; the vehicle's colour is no longer one, owner ruling 2026-10-01),
+ * ACCOUNT_MISMATCH (details do not match the account), and
  * UNVERIFIABLE for the fraud class — alteration, duplicate across accounts, not
  * issued to the submitter (a face mismatch is exactly that) — which must read
  * IDENTICALLY: never tell a fraudster which signal caught them.
  */
-export const ACTOR_FACING_CATEGORY: Record<RejectionReasonCode, string> = {
+export const ACTOR_FACING_CATEGORY: Record<RecordedRejectionReasonCode, string> = {
   UNREADABLE: 'QUALITY', INCOMPLETE: 'QUALITY',
   EXPIRED: 'EXPIRED',
-  WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', NOT_YELLOW: 'REQUIREMENT', WRONG_PLATE_CLASS: 'REQUIREMENT',
+  WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', WRONG_PLATE_CLASS: 'REQUIREMENT',
   NAME_MISMATCH: 'ACCOUNT_MISMATCH',
   SUSPECTED_TAMPERING: 'UNVERIFIABLE', DUPLICATE: 'UNVERIFIABLE', FACE_MISMATCH: 'UNVERIFIABLE',
+  // Retired (see RETIRED_REJECTION_REASON_CODES): kept so a decision recorded under it keeps its category.
+  NOT_YELLOW: 'REQUIREMENT',
 };
 
 /** [DOC-1 §24.1 · §8.5] One generic message for the whole fraud class — and the human-review route (DOC-INV-33). */
@@ -183,7 +201,6 @@ const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   FACE_MISMATCH: FRAUD_GENERIC_TEXT,
   NAME_MISMATCH: 'The name on this document does not match your account.',
   INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
-  NOT_YELLOW: 'The vehicle must be Corporate Yellow with the H plate visible.',
   WRONG_PLATE_CLASS: 'A taxi must carry an H registration mark — this vehicle is not registered as a hire car.',
   // [DOC-1 §24.1 · §8.5] The fraud class reads IDENTICALLY and never names the
   // signal: Swift does not tell a person its system believes their document is

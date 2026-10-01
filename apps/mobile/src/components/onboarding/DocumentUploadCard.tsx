@@ -27,7 +27,8 @@ const DOC_LABELS: Record<string, string> = {
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',
   fitness_cert: 'Fitness Certificate',
-  vehicle_exterior_photo: 'Car Exterior Photo (H plate + yellow visible)',
+  // Owner ruling 2026-10-01: a taxi may be any colour; the H plate must show.
+  vehicle_exterior_photo: 'Car exterior photo (H plate visible)',
   owner_national_id: 'Owner National ID',
   business_registration: 'Business Registration',
   tin_certificate: 'TIN Certificate',
