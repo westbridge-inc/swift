@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -15,6 +16,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // §13 MMG billing rail: the weekly fee as a merchant-initiated request the
@@ -28,13 +30,16 @@ let billing: BillingService;
 const userIds: string[] = [];
 const subIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_400_000_000 + Math.floor(Math.random() * 500_000_000);
+// [SAFE-B · retained history] Choosing the MMG rail records an advisory payer declaration: immutable evidence
+// naming its subscription and account, kept after the suite. The movers therefore live in a phone namespace no
+// other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('17');
 
 async function makeMoverWithMmgSub(opts: { due: Date; msisdn?: string }) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Rail', lastName: `U${seq}`,
       roles: ['MOVER', 'CUSTOMER'] as UserRole[], activeRole: 'MOVER', isPhoneVerified: true, selfieCapturedAt: new Date(),
     },
@@ -94,17 +99,30 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // The synthetic subscriptions own clock evidence (RESTRICT in production): remove it first.
-  await cleanupBillingClocks(app.prisma, subIds);
-  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  await app.close();
+  // [SAFE-B · retained history] A subscription an MMG payer declaration names is kept with its money records and
+  // mover; the rest goes as before, in one transaction. What stays is cancelled without renewal and the mover
+  // taken offline, so no later billing cycle or dispatch reaches it.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { subscriptionIds: subIds });
+      const goneSubs = without(subIds, kept.subscriptionIds);
+      const goneUsers = without(userIds, kept.userIds);
+      // [#1393] The synthetic subscriptions own clock evidence (RESTRICT in production): remove it first.
+      await cleanupBillingClocks(tx, subIds);
+      await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      // A mover payer's fee authority and its member rows go with the payer, before its subscriptions.
+      await tx.user.deleteMany({ where: { id: { in: goneUsers } } });
+      await tx.subscription.deleteMany({ where: { id: { in: goneSubs } } });
+      await tx.notification.deleteMany({ where: { userId: { in: userIds } } });
+      await tx.rider.deleteMany({ where: { userId: { in: goneUsers } } });
+      await tx.session.deleteMany({ where: { userId: { in: userIds } } });
+      await tx.user.deleteMany({ where: { id: { in: goneUsers } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
 
 describe('poll settle correctness [SWIFT-AUD-D2-04]', () => {
@@ -393,6 +411,7 @@ describe('rail selection', () => {
   it('PUT /rider/subscription/billing-method flips to MMG (msisdn required) and back', async () => {
     const { subId, httpToken } = await makeMoverWithMmgSub({ due: new Date(Date.now() + 3 * DAY) });
 
+    await grantStepUp(app, httpToken);
     const noMsisdn = await app.inject({
       method: 'PUT', url: '/api/v1/rider/subscription/billing-method',
       payload: { method: 'MOBILE_MONEY' },

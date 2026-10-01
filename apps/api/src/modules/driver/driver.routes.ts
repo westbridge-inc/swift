@@ -1,3 +1,4 @@
+import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
@@ -1297,14 +1298,28 @@ export async function driverRoutes(app: FastifyInstance) {
   // 6. The fare outcome at the destination — the golden rule for rides [M-29].
   //    'paid' completes the ride with the fare captured and the driver's fare
   //    earned, in one commit; 'refused' / 'no_show' (the passenger left without
-  //    paying) fail it with GPS evidence, strike the passenger and open the
-  //    driver's guarantee claim. The same rail as the rider's handover at the
-  //    door — never a second one.
+  //    paying) fail it, file the evidence and open the driver's guarantee claim
+  //    for review. Until the destination-wait policy is decided a taxi filing is
+  //    never complete, so it neither strikes the passenger nor pays automatically.
+  //    The same rail as the rider's handover at the door — never a second one.
   const fareOutcomeSchema = z.object({
     outcome: z.enum(['paid', 'no_show', 'refused']),
     gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
     photoUrl: z.string().max(2048).optional(),
   });
+  app.post('/rides/:id/handover-photo', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const driver = await getDriver(request.user.userId);
+    await getDriverRide(driver.id, id); // ownership before reading the upload
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a handover photo.');
+    const data = await issueHandoverPhoto(app.prisma, getStorageProvider(), {
+      orderId: id, actorId: request.user.userId, role: 'DRIVER',
+      buffer: await file.toBuffer(), mimeType: file.mimetype,
+    });
+    return { success: true, data };
+  });
+
   app.post('/rides/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
@@ -1313,7 +1328,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // Idempotent on Idempotency-Key: a network-retried outcome returns the
     // original result instead of failing the (now-terminal) transition.
     const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
-      const result = await cashRules.handover(id, request.user.userId, body);
+      const result = await cashRules.handover(id, request.user.userId, { ...body, sessionId: request.authSessionId ?? undefined });
       return {
         orderId: id,
         status: result.order.status,
@@ -1722,6 +1737,7 @@ export async function driverRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    await requireStepUp(app, request);
     const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());

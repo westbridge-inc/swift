@@ -1,11 +1,13 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
+
+type Db = PrismaClient | Prisma.TransactionClient;
 
 /** Synthetic fixtures own these exact subscriptions. Production retention FKs
  * remain RESTRICT; tests explicitly remove their dependent clock evidence.
  * A mover payer's clock is keyed to their canonical subscription, so the
  * evidence of a member subscription can live on a clock keyed to another of
  * the payer's rows: every clock these subscriptions feed is removed whole. */
-export async function cleanupBillingClocks(db: PrismaClient, subscriptionIds: readonly string[]) {
+export async function cleanupBillingClocks(db: Db, subscriptionIds: readonly string[]) {
   if (!subscriptionIds.length) return;
   const subscriptionId = { in: [...subscriptionIds] };
   const clocks = await db.billingDunningClock.findMany({ where: { OR: [
@@ -22,7 +24,7 @@ export async function cleanupBillingClocks(db: PrismaClient, subscriptionIds: re
   await db.billingDunningClock.deleteMany({ where: { id: clockId } });
 }
 
-export async function cleanupPayerBillingClocks(db: PrismaClient, userIds: readonly string[]) {
+export async function cleanupPayerBillingClocks(db: Db, userIds: readonly string[]) {
   if (!userIds.length) return;
   const users = { in: [...userIds] };
   const subs = await db.subscription.findMany({ where: { OR: [

@@ -302,6 +302,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /integrity/appeals/:id/resolve': c('C3', 'integrity.appeal.decide'),
   'POST /integrity/exceptions': c('C3', 'integrity.exception.write'),
   'POST /integrity/backfill': c('C5', 'integrity.backfill'),
+  // [SAFE-B] Ambiguous historical identity links: stage bounded review cases, and
+  // record the reviewed KEEP_REVIEW disposition. Neither grants, splits or clears.
+  'POST /integrity/reviews/scan': c('C3', 'integrity.review.scan'),
+  'POST /integrity/reviews/:id/retain': c('C3', 'integrity.review.decide'),
 
   // ── Billing, cash and settlement ────────────────────────────────────────
   'GET /billing/fx-rates': c('C0', 'billing.read'),
@@ -696,6 +700,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'POST /integrity/exceptions': 'creates the grant; there is no before state to digest',
   'POST /verification/legal-holds': 'creates the hold; there is no before state to digest',
   'POST /integrity/appeals/:id/resolve': 'the appeal is founder-scoped and read through the integrity graph, not a tenant row',
+  'POST /integrity/reviews/scan': 'stages bounded review cases across many clusters; each case is its own immutable snapshot',
+  'POST /integrity/reviews/:id/retain': 'the case is founder-scoped and immutable except its disposition; the snapshot digest the decision names is the record',
   'PUT /rides/drivers/:id/vehicle-identity': 'writes vehicle identity across driver and ride rows; no single subject',
   'DELETE /dlq/:queue/:id': 'a queue job, not a database row',
 };

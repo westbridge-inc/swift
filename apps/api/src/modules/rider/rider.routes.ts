@@ -1,3 +1,5 @@
+import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
+import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
@@ -273,9 +275,24 @@ export async function riderRoutes(app: FastifyInstance) {
   const settlements = new DeliveryCashSettlementService(app.prisma, new NotificationService(app.prisma, app.io));
   const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
 
+  /** POST /orders/:id/handover-photo — the server issues the door photo, bound
+   *  to this order, its customer and the assigned rider. Only an issued photo
+   *  counts as evidence for a failed handover. */
+  app.post('/orders/:id/handover-photo', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    await getRider(app, request.user.userId); // authz before reading the upload
+    const file = await request.file();
+    if (!file) throw new AppError(400, 'NO_FILE', 'Attach a handover photo.');
+    const data = await issueHandoverPhoto(app.prisma, getStorageProvider(), {
+      orderId: id, actorId: request.user.userId, role: 'RIDER',
+      buffer: await file.toBuffer(), mimeType: file.mimetype,
+    });
+    return { success: true, data };
+  });
+
   /** POST /orders/:id/handover — the golden rule at the door.
-   *  'paid' completes the delivery; 'no_show'/'refused' fails it with GPS
-   *  evidence, strikes the customer, and opens the guarantee claim. */
+   *  'paid' completes the delivery; 'no_show'/'refused' fails it and files the
+   *  evidence; a strike and an automatic guarantee follow only a complete bundle. */
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId); // authz before validation
@@ -283,7 +300,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
     const { data, replayed } = await withIdempotency(app, request, 'handover', id, async () => {
-      const result = await cashRules.handover(id, request.user.userId, body);
+      const result = await cashRules.handover(id, request.user.userId, { ...body, sessionId: request.authSessionId ?? undefined });
       return {
         orderId: id,
         status: result.order.status,
@@ -611,6 +628,15 @@ export async function riderRoutes(app: FastifyInstance) {
     // offline, safety action, or switch invalidates this request instead of
     // allowing stale work to resurrect delivery supply.
     const { updated, retiredDriverId } = await app.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      // [SAFE-B · #1393] Only a mover with no weekly-fee subscription at all (the
+      // grandfathered path) needs the identity authority here. The shared mover
+      // fee belongs to the payer: a dual-role mover's one subscription may sit on
+      // the driver profile.
+      const currentSubscription = await tx.subscription.findFirst({
+        where: { OR: [{ riderId: rider.id }, { driver: { userId: request.user.userId } }] }, select: { id: true },
+      });
+      if (!currentSubscription) await requireIdentityAuthority(tx, request.user.userId);
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
@@ -2062,6 +2088,7 @@ export async function riderRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    await requireStepUp(app, request);
     const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const updated = body.method === 'NONE'

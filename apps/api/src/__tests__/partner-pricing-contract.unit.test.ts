@@ -159,6 +159,9 @@ function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY',
     },
     subscription: { ...authority.subscription, create, findFirstOrThrow: vi.fn() },
     enforcementAction: { create: vi.fn(() => Promise.resolve({})) },
+    // [SAFE-B] The trial law reads the identity authority (no cluster here);
+    // `...authority` answers the identity advisory lock with no rows.
+    identityClusterMember: { findUnique: vi.fn(async () => null) },
     $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => {
       const tx = Object.fromEntries(Object.entries(prisma).filter(([name]) => name !== '$transaction'));
       return callback(tx);
@@ -1041,17 +1044,23 @@ describe('activation — a market that cannot price a partner refuses to activat
       expect(block.indexOf(then), then).toBeGreaterThan(-1);
       expect(block.indexOf(first), `${first} must precede ${then}`).toBeLessThan(block.indexOf(then));
     };
-    // Admin approval: priced before the CAS that makes the store ACTIVE and searchable.
-    before(handler('/vendors/:id/approve'), 'priceForActivation({ vendorId: id })', "status: 'ACTIVE'");
-    // Document verification: priced before documentsVerified is written for a rider or a driver.
-    before(handler('/riders/:id/verify-documents'), 'priceForActivation({ riderId: id })', 'documentsVerified: isVerified');
-    before(handler('/drivers/:id/verify-documents'), 'priceForActivation({ driverId: id })', 'documentsVerified: isVerified');
+    // Atomic wrapper resolves pricing and trial authority before invoking the
+    // activation callback; the callback cannot escape its transaction.
+    before(handler('/vendors/:id/approve'), 'withActivation({ vendorId: id }', "status: 'ACTIVE'");
+    for (const role of ['rider', 'driver']) {
+      const block = handler(`/${role}s/:id/verify-documents`);
+      expect(block).toContain(`withActivation({ ${role}Id: id }, (tx) => project(tx))`);
+      expect(block).toContain(`tx.${role}.update(`);
+      expect(block).not.toContain(`app.prisma.${role}.update(`);
+    }
+    const subscription = SOURCE('modules', 'subscription', 'subscription.service.ts');
+    before(subscription.slice(subscription.indexOf('async withActivation')), 'await this.activation(entity, tx)', 'return apply(tx, sub)');
 
     const verification = SOURCE('modules', 'verification', 'verification.service.ts');
     // The one projection that owns vendor activation prices a store before it flips it verified/ACTIVE.
     const projectionAt = verification.indexOf('private async projectVendorActivation(');
     expect(projectionAt).toBeGreaterThan(-1);
-    before(verification.slice(projectionAt, projectionAt + 4000), 'priceForActivation({ vendorId: vendor.id }, db)', 'data: { isVerified: true');
+    before(verification.slice(projectionAt, projectionAt + 4000), 'startTrialForVendor(vendor.id, db)', 'data: { isVerified: true');
     // The review decision prices inside its transaction, before the approval projects anything.
     const decisionAt = verification.indexOf('private async transitionPendingDocument(');
     expect(decisionAt).toBeGreaterThan(-1);

@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -313,6 +314,7 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: paused.subId } })).status).toBe('PAUSED');
 
     // Resume: charged at once, at the rate in force, from the money already held.
+    await grantStepUp(app, paused.httpToken);
     const resume = await app.inject({
       method: 'PUT',
       url: '/api/v1/rider/subscription/billing-method',

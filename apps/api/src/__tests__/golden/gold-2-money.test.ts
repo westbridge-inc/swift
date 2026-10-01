@@ -1,3 +1,4 @@
+import { grantStepUp } from '../helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
@@ -23,6 +24,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider, sandboxResetMmg, sandboxSetTxStatus } from '../../providers/mmg/mmg-provider';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { cleanupBillingClocks, cleanupPayerBillingClocks } from '../helpers/billing-clock-cleanup';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // GOLD-2 · VEND-04 + MONEY-03 — the partner's weekly fee: the rate card, the
@@ -57,9 +59,14 @@ import { cleanupBillingClocks, cleanupPayerBillingClocks } from '../helpers/bill
 //   · [G2-F1] the weekly fee is billed in GYD (fixed by G2-F1)
 // ---------------------------------------------------------------------------
 
-// This file's own fixture block (+5920324nnn, 11 characters); user, store and
-// payer phones and the crash-recovery purge all share this ONE constant.
-const PHONE_PREFIX = '+5920324';
+// This file's own fixture block: user and store phones and the crash-recovery
+// purge share PHONE_PREFIX; the declared MMG payer numbers use PAYER_PREFIX.
+// [SAFE-B · retained history] An MMG payer declaration is immutable evidence naming its subscription and
+// account, so a partner who chose MMG is kept after the suite. Its people and stores therefore live in a
+// phone namespace no other suite uses or purges, unique to the run; the payer numbers they declare are
+// plain MSISDNs and stay fixed.
+const PHONE_PREFIX = retainedPhonePrefix('06');
+const PAYER_PREFIX = '+5920324';
 const FIXTURE = 'gold2-money-fixture';
 const DAY = 24 * 60 * 60 * 1000;
 const WEEK = 7 * DAY;
@@ -193,6 +200,7 @@ function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: str
 
 /** The owner picks the MMG merchant rail on the real route. */
 async function chooseMmg(p: Partner, msisdn: string) {
+  await grantStepUp(app, p.owner.token);
   const res = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'MOBILE_MONEY', mmgPayerMsisdn: msisdn }, { 'x-vendor-id': p.vendorId });
   expect(res.statusCode, res.body).toBe(200);
   expect(res.json().data).toEqual({ billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: msisdn });
@@ -234,16 +242,24 @@ async function purgeFixtures() {
     const ids = [...new Set([...byPhone, ...vendors.map((v) => v.owner.userId)])];
     const vendorIds = vendors.map((v) => v.id);
     if (ids.length === 0 && vendorIds.length === 0) return;
-    const subIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
-    await cleanupBillingClocks(app.prisma, subIds);
+    const allSubIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
+    // [#1393] Every fixture's shared dunning clock evidence goes first (a kept
+    // partner keeps its money records, never a pending fee demand or hold).
+    await cleanupBillingClocks(app.prisma, allSubIds);
     await cleanupPayerBillingClocks(app.prisma, ids);
     const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
+    // [SAFE-B · retained history] A partner whose owner declared an MMG payer keeps that declaration, and with it the
+    // subscription, store, owner and money records it names. Everything else goes exactly as before.
+    const kept = await retainedCohort(app.prisma, { subscriptionIds: allSubIds });
+    const subIds = without(allSubIds, kept.subscriptionIds);
+    const keptVendorIds = new Set(kept.vendorIds);
     const imports = await app.prisma.settlementImport.findMany({ where: { source: { startsWith: 'gold2-money-' } }, select: { id: true } });
-    await app.prisma.mmgAgentPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { externalId: { startsWith: 'G2AC-' } }] } });
-    await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { startsWith: 'G2AC-' } }] } });
-    await app.prisma.settlementImport.deleteMany({ where: { id: { in: imports.map((i) => i.id) } } });
-    await app.prisma.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: ids } }, { approvedBy: { in: ids } }] } });
-    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...vendorIds, ...subIds, ...imports.map((i) => i.id)] } }] }, 'GOLD-2 golden journey fixture cleanup (gold-2-money)');
+    await app.prisma.mmgAgentPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { externalId: { startsWith: 'G2AC-' }, subscriptionId: null }] } });
+    await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { startsWith: 'G2AC-' }, subscriptionId: null }] } });
+    const importIds = imports.map((i) => i.id);
+    await app.prisma.settlementImport.deleteMany({ where: { id: { in: importIds } } });
+    await app.prisma.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: without(ids, kept.userIds) } }, { approvedBy: { in: without(ids, kept.userIds) } }] } });
+    await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: without(ids, kept.userIds) } }, { entityId: { in: [...without(ids, kept.userIds), ...without(vendorIds, keptVendorIds), ...subIds, ...importIds] } }] }, 'GOLD-2 golden journey fixture cleanup (gold-2-money)');
     if (subIds.length > 0) {
       // The final dunning warning pages every platform admin (the seeded one
       // too). The page has no dedupe key, so its tracking row is matched to its
@@ -291,13 +307,15 @@ async function purgeFixtures() {
     await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: without(vendorIds, keptVendorIds) } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: without(ids, kept.userIds) } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-    await purgeRedis([...ids, ...sessionIds, ...vendorIds, ...subIds]);
+    await app.prisma.customer.deleteMany({ where: { userId: { in: without(ids, kept.userIds) } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: without(ids, kept.userIds) } } });
+    // What stays is taken out of service: its stores close and its subscriptions are cancelled without renewal.
+    await retireKeptScaffolding(app.prisma, kept);
+    await purgeRedis([...ids, ...sessionIds, ...vendorIds, ...allSubIds]);
   });
 }
 
@@ -579,9 +597,9 @@ describe('GOLD-2 · MONEY-03 — the agent channel credits once', () => {
 describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
   it('the owner picks MMG; the weekly bill is a request on their phone; nothing advances until MMG says approved, which settles the week exactly once with its ledger', async () => {
     const p = await makePartner('Zed');
-    const refused = await call('PUT', '/api/v1/vendor/subscription/billing-method', outsider.token, { method: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}801` });
+    const refused = await call('PUT', '/api/v1/vendor/subscription/billing-method', outsider.token, { method: 'MOBILE_MONEY', mmgPayerMsisdn: `${PAYER_PREFIX}801` });
     expect(refused.statusCode).toBe(403);
-    await chooseMmg(p, `${PHONE_PREFIX}801`);
+    await chooseMmg(p, `${PAYER_PREFIX}801`);
     const { period, request } = await mmgRequestPending(p);
     const periodKey = period.toISOString().slice(0, 10);
     expect(request.expiresAt!.getTime()).toBeGreaterThan(Date.now() + DAY - 60_000);
@@ -628,7 +646,7 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 
   it('a declined request duns: the payment fails, the week does not advance, and the ladder moves', async () => {
     const p = await makePartner('Ada');
-    await chooseMmg(p, `${PHONE_PREFIX}802`);
+    await chooseMmg(p, `${PAYER_PREFIX}802`);
     const { period, request } = await mmgRequestPending(p);
     sandboxSetTxStatus(request.externalRef!, 'declined');
     await pollBackoffPasses(request.id);
@@ -643,7 +661,7 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 
   it('cash paid while a request is pending is never a double charge: the approval pays this week and the cash pays the next', async () => {
     const p = await makePartner('Bea');
-    await chooseMmg(p, `${PHONE_PREFIX}803`);
+    await chooseMmg(p, `${PAYER_PREFIX}803`);
     // The first week fell due a week ago; its request goes out now and waits.
     const { period, request } = await mmgRequestPending(p, WEEK + 60 * 60_000);
 
@@ -676,7 +694,7 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 
   it('an approval that arrives after the owner closed the account banks the money once and never reopens billing (E13, fixed by #1280)', async () => {
     const p = await makePartner('Cyd');
-    await chooseMmg(p, `${PHONE_PREFIX}804`);
+    await chooseMmg(p, `${PAYER_PREFIX}804`);
     const { request } = await mmgRequestPending(p);
 
     const closed = await call('DELETE', '/api/v1/customer/account', p.owner.token);
@@ -717,11 +735,12 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
 describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing', () => {
   it('stop sets autoRenew=false keeping the rail, writes exactly one stop event + audit row, and a double-stop adds none', async () => {
     const p = await makePartner('E12a');
-    await chooseMmg(p, `${PHONE_PREFIX}807`);
+    await chooseMmg(p, `${PAYER_PREFIX}807`);
 
+    await grantStepUp(app, p.owner.token);
     const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
     expect(stop.statusCode, stop.body).toBe(200);
-    expect(stop.json().data).toEqual({ billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}807` });
+    expect(stop.json().data).toEqual({ billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PAYER_PREFIX}807` });
 
     const row = await subRow(p.subId);
     expect({
@@ -729,13 +748,14 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
       nextRetryAt: row.nextRetryAt,
       billingMethod: row.billingMethod,
       mmgPayerMsisdn: row.mmgPayerMsisdn,
-    }).toEqual({ autoRenew: false, nextRetryAt: null, billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PHONE_PREFIX}807` });
+    }).toEqual({ autoRenew: false, nextRetryAt: null, billingMethod: 'MOBILE_MONEY', mmgPayerMsisdn: `${PAYER_PREFIX}807` });
 
     // The GET exposes autoRenew for the app's stop/resume state.
     const get = await call('GET', '/api/v1/vendor/subscription', p.owner.token, undefined, { 'x-vendor-id': p.vendorId });
     expect(get.statusCode).toBe(200);
     expect(get.json().data.autoRenew).toBe(false);
 
+    await grantStepUp(app, p.owner.token);
     const again = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
     expect(again.statusCode, again.body).toBe(200);
 
@@ -769,6 +789,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
 
     // Another store's owner resolves THEIR OWN store — this subscription is
     // unreachable by the route's shape (no subscription id in the URL).
+    await grantStepUp(app, q.owner.token);
     const theirs = await call('PUT', '/api/v1/vendor/subscription/billing-method', q.owner.token, { method: 'NONE' }, { 'x-vendor-id': q.vendorId });
     expect(theirs.statusCode, theirs.body).toBe(200);
     expect((await subRow(p.subId)).autoRenew).toBe(true);
@@ -784,11 +805,13 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
       data: { subscriptionId: p.subId, balance: RATE_CARD_SMALL_VENDOR, currencyCode },
     }));
 
+    await grantStepUp(app, p.owner.token);
     const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
     expect(stop.statusCode, stop.body).toBe(200);
     await billing.runBillingCycle();
     expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(0);
 
+    await grantStepUp(app, p.owner.token);
     const resume = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'CASH' }, { 'x-vendor-id': p.vendorId });
     expect(resume.statusCode, resume.body).toBe(200);
     expect((await subRow(p.subId)).autoRenew).toBe(true);
@@ -802,6 +825,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
   it('a stopped store pauses at its period end, and the owner resumes it self-serve — charged at the resume, like a renewal', async () => {
     const p = await makePartner('E12e');
     await trialEnds(p); // [DS198 D1] ACTIVE (the sweep only pauses ACTIVE rows); the trial's period is over too
+    await grantStepUp(app, p.owner.token);
     const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
     expect(stop.statusCode, stop.body).toBe(200);
 
@@ -818,6 +842,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
       data: { subscriptionId: p.subId, balance: RATE_CARD_SMALL_VENDOR, currencyCode: lapsed.currencyCode },
     }));
     const resumedAt = Date.now();
+    await grantStepUp(app, p.owner.token);
     const resume = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'CASH' }, { 'x-vendor-id': p.vendorId });
     expect(resume.statusCode, resume.body).toBe(200);
     // [DS207 F2] Charged AT the resume, through the instant path a top-up
@@ -857,7 +882,7 @@ describe('GOLD-2 · VEND-04 / MONEY-03 — [G2-F1] the weekly fee is billed in G
 
   beforeAll(async () => {
     p = await makePartner('Gia');
-    await chooseMmg(p, `${PHONE_PREFIX}805`);
+    await chooseMmg(p, `${PAYER_PREFIX}805`);
     externalRef = (await mmgRequestPending(p)).request.externalRef!;
   });
 
@@ -873,7 +898,7 @@ describe('GOLD-2 · VEND-04 / MONEY-03 — [G2-F1] the weekly fee is billed in G
     // migration then corrected this subscription's rows to "GYD", and the
     // payer approves afterwards with the provider still echoing "GY".
     const legacy = await makePartner('Gus');
-    await chooseMmg(legacy, `${PHONE_PREFIX}806`);
+    await chooseMmg(legacy, `${PAYER_PREFIX}806`);
     await sys(() => app.prisma.subscription.update({ where: { id: legacy.subId }, data: { currencyCode: 'GY' } }));
     const { period, request } = await mmgRequestPending(legacy);
     const pinned = await sys(() => app.prisma.billingEvent.findMany({ where: { subscriptionId: legacy.subId, type: 'CHARGE_ATTEMPT' }, select: { currencyCode: true } }));

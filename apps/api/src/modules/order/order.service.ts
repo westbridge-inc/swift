@@ -1,3 +1,6 @@
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { admittedCourierPhoto } from '../cash/handover-evidence';
+import { lockIdentityAuthority } from '../integrity/identity-review';
 import { Prisma } from '@prisma/client';
 import type {
   PrismaClient,
@@ -37,9 +40,9 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
-import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
+import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
-import { shapeCheckoutAnswer } from './checkout-answer';
+import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
 import { promiseAtCheckout } from '../eta/promise';
@@ -55,6 +58,7 @@ import {
 } from '../rides/passenger-custody';
 import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { subscriptionOperability } from '../subscription/operate-gate';
+import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 
@@ -96,6 +100,29 @@ interface CheckoutInput {
    *  interleaving proof can attempt a concurrent child mutation and observe it
    *  block against the held lock. Never set in routes. */
   afterCartLock?: () => Promise<void>;
+  /** [CHECKOUT-IDEM · AX354 S1] The commit point, made explicit: called once,
+   *  the moment the order transaction has COMMITTED (never after a rollback),
+   *  with the receipt row it wrote and the committed answer. From then on the
+   *  order exists, and a caller holding the command's claim must keep it. */
+  onCommitted?: (commit: CheckoutCommit) => void;
+}
+
+/** What a committed checkout reports at its commit point. */
+export interface CheckoutCommit {
+  /** The receipt row written inside the order transaction; null for a checkout without an idempotency key. */
+  receiptId: string | null;
+  /** The committed answer: the value the receipt holds. */
+  answer: CheckoutAnswer;
+}
+
+/** An order as the checkout transaction creates it (the post-commit notices read these fields). */
+type CheckoutCreatedOrder = Prisma.OrderGetPayload<{ include: { items: true; vendor: { select: { id: true; name: true; ownerId: true } } } }>;
+
+/** What the checkout transaction's body hands to COMMIT. */
+interface CheckoutStaged {
+  orders: CheckoutCreatedOrder[];
+  answer: CheckoutAnswer;
+  receiptId: string | null;
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -461,6 +488,7 @@ type EarningNotice = {
 };
 
 export interface CanonicalOrderTransitionInput {
+  serializeIdentity?: boolean;
   orderId: string;
   target: OrderStatus;
   allowedFrom: readonly OrderStatus[];
@@ -738,8 +766,14 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, tenant: { select: { kind: true } } },
     });
+
+    // [STA-1 DL-5] The store-review fiction places no order: its stores and
+    // menus are fictional and it has no money rail. Refused here, before any
+    // write, outbox row (the vendor alert ladder ends in an SMS), MMG hand-off
+    // or dispatch — the reviewer reads the reason under the Place-order button.
+    if (user.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError();
 
     // Strike consequences: repeated failed cash handovers
     // restrict ordering to verified accounts, then ban outright
@@ -1126,8 +1160,13 @@ export class OrderService {
     // [M-11] The two effects every order owes after it commits carry their
     // delays; computed before the transaction so the rows inside it are whole.
     const queueTiming = await checkoutQueueTiming(this.prisma);
+    // [CHECKOUT-IDEM · AX366 F1] Set as the body's last act, when it hands its
+    // work to COMMIT: how a rejected transaction is told apart (see
+    // settleCheckoutCommit).
+    let staged = null as CheckoutStaged | null;
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const checkoutCommit = await this.prisma.$transaction(async (tx) => {
+      if (promoCodeId) await lockIdentityAuthority(tx);
       // Global creation lock order starts with User. Account deletion takes the
       // same row lock before counting live orders, closing the authenticate →
       // delete → insert race for every order produced by this checkout.
@@ -1252,7 +1291,7 @@ export class OrderService {
         // any account in the identity cluster counts (promo-farming across
         // fresh accounts dies here). Unclustered → [userId] exactly.
         const { clusterMemberIds } = await import('../integrity/identity.service');
-        const promoMemberIds = await clusterMemberIds(this.prisma, input.userId);
+        const promoMemberIds = await clusterMemberIds(tx as PrismaClient, input.userId);
         const userUses = await tx.order.count({
           where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
         });
@@ -1555,16 +1594,31 @@ export class OrderService {
         timing: queueTiming,
         now,
       });
-      if (input.idempotency) {
-        await persistCheckoutReceiptInTransaction(tx, {
+      const receiptId = input.idempotency
+        ? await persistCheckoutReceiptInTransaction(tx, {
           userId: input.userId, tenantId: user.tenantId, idempotencyKey: input.idempotency.key, requestHash: input.idempotency.requestHash,
           orderIds: created.map((o) => o.id), result: answer,
-        });
-      }
+        })
+        : null;
       await input.afterDurableTail?.();
-      return { orders: created, answer };
-    });
-    const { orders, answer } = checkoutCommit;
+      staged = { orders: created, answer, receiptId };
+      return staged;
+    }).catch((err: unknown) => this.settleCheckoutCommit(staged, err));
+    const { orders, answer, receiptId } = checkoutCommit;
+
+    // ── [CHECKOUT-IDEM · AX354 S1] THE COMMIT POINT ──────────────────────────
+    // The transaction resolved (or its lost acknowledgement was settled by the
+    // durable receipt): the orders, their outbox tail and the receipt are
+    // durable. Nothing below may throw to the caller: the order exists, the
+    // answer is the committed receipt, and every step from here is best-effort,
+    // logged when it fails. (A post-commit throw used to reach the route, which
+    // released the command's claim and answered 500 for a placed order, so the
+    // receipt probe could answer "none" and invite the same order twice.)
+    try {
+      input.onCommitted?.({ receiptId, answer });
+    } catch (err) {
+      log().error({ err, receiptId }, '[CHECKOUT-IDEM] a commit listener threw; ignored, the order is committed');
+    }
 
     // Post-transaction: emit and notify per vendor (best-effort). The socket
     // event goes to that vendor's room only — a global emit would fan out to
@@ -1575,33 +1629,44 @@ export class OrderService {
     // the store learning of an order it cannot see; the release publishes them,
     // and an in-window cancel (which restocks) never does.
     for (const order of orders) {
-      const held = isHeld(order);
-      if (!held) {
-        this.io
-          .to(`vendor:${order.vendorId}`)
-          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
-      }
-      const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
-      if (vendorOwner) {
+      // [CHECKOUT-IDEM] One store's failed notice is logged, never thrown, and
+      // never skips the next store's. The store is still alerted: by the alert
+      // ladder, an outbox row committed with the order [M-11], or, for a held
+      // order, by its release [Q12].
+      try {
+        const held = isHeld(order);
         if (!held) {
-          await this.notifications.newOrderForVendor(
-            vendorOwner.userId,
-            order.orderNumber,
-            order.items.length,
-            Number(order.totalAmount),
-            order.id,
-            // [Q10] The same cut-off the auto-cancel row above was armed with.
-            vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
-          );
+          this.io
+            .to(`vendor:${order.vendorId}`)
+            .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
         }
-        if (order.vendorId) {
+        const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
+        if (vendorOwner) {
           if (!held) {
-            for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
-              await this.notifications.lowStock(vendorOwner.userId, ev);
-            }
+            await this.notifications.newOrderForVendor(
+              vendorOwner.userId,
+              order.orderNumber,
+              order.items.length,
+              Number(order.totalAmount),
+              order.id,
+              // [Q10] The same cut-off the auto-cancel row above was armed with.
+              vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
+            );
           }
-          stockEventsByVendor.delete(order.vendorId);
+          if (order.vendorId) {
+            if (!held) {
+              for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
+                await this.notifications.lowStock(vendorOwner.userId, ev);
+              }
+            }
+            stockEventsByVendor.delete(order.vendorId);
+          }
         }
+      } catch (err) {
+        log().error(
+          { err, orderId: order.id, vendorId: order.vendorId, receiptId },
+          '[CHECKOUT-IDEM] post-commit store notice failed; the order stands, and its alert ladder (or its release) still alerts the store',
+        );
       }
     }
 
@@ -1610,6 +1675,35 @@ export class OrderService {
     }
 
     return answer;
+  }
+
+  /**
+   * [CHECKOUT-IDEM · AX366 F1] Settle a rejected checkout transaction.
+   * - The body never finished (nothing staged): COMMIT was never sent, so the
+   *   transaction rolled back. A CONFIRMED rollback, rethrown as it is.
+   * - The body finished: the rejection came from the commit itself (a commit
+   *   error, or an acknowledgement lost after the database committed). The
+   *   outcome is UNKNOWN, and only the durable rows can settle it. This
+   *   transaction's receipt (or, without a key, its first order) present: the
+   *   order committed, so carry on as committed. Absent or unreadable:
+   *   CheckoutOutcomeUnknownError, and the caller keeps its claim.
+   */
+  private async settleCheckoutCommit(staged: CheckoutStaged | null, err: unknown): Promise<CheckoutStaged> {
+    if (!staged) throw err;
+    let landed = false;
+    try {
+      landed = staged.receiptId
+        ? (await this.prisma.checkoutReceipt.count({ where: { id: staged.receiptId } })) === 1
+        : (await this.prisma.order.count({ where: { id: staged.orders[0]!.id } })) === 1;
+    } catch (readErr) {
+      log().error({ err: readErr, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] the durable receipt could not be read to settle an unknown commit');
+    }
+    if (landed) {
+      log().warn({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit acknowledgement lost; the durable receipt proves the order committed');
+      return staged;
+    }
+    log().error({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit outcome unknown and no durable receipt yet; the claim is kept');
+    throw new CheckoutOutcomeUnknownError(staged.receiptId);
   }
 
   /**
@@ -1789,6 +1883,7 @@ export class OrderService {
     tx: Prisma.TransactionClient,
     input: CanonicalOrderTransitionInput,
   ): Promise<CanonicalOrderTransitionResult> {
+    await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const source = await tx.order.findUnique({ where: { id: input.orderId } });
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
@@ -2030,7 +2125,7 @@ export class OrderService {
     // proof: a door photo issued to a rider who has since been replaced does
     // not deliver the parcel for the new one.
     if (input.target === 'DELIVERED' && order.orderType === 'COURIER') {
-      if (!courierDeliveryProofBound(order)) {
+      if (!courierDeliveryProofBound(order) || !(await admittedCourierPhoto(tx, source, order.courierProofPhotoUrl))) {
         throw new AppError(
           409,
           'DELIVERY_PROOF_REQUIRED',
@@ -2060,7 +2155,10 @@ export class OrderService {
     let committed: CanonicalOrderTransitionResult | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        committed = await this.prisma.$transaction((tx) => this.stageCanonicalOrderTransition(tx, input));
+        committed = await this.prisma.$transaction(async (tx) => {
+          if (input.serializeIdentity) await lockIdentityAuthority(tx);
+          return this.stageCanonicalOrderTransition(tx, input);
+        });
         break;
       } catch (error) {
         const retryable = typeof error === 'object'
@@ -2323,6 +2421,7 @@ export class OrderService {
     changedBy: string,
     note?: string,
     opts?: {
+      serializeIdentity?: boolean;
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
       expectedRiderId?: string | null;
@@ -2345,6 +2444,7 @@ export class OrderService {
       allowedFrom,
       changedBy,
       note,
+      serializeIdentity: opts?.serializeIdentity,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),

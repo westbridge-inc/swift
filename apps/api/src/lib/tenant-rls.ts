@@ -26,6 +26,7 @@
  */
 
 export const TENANT_TABLES = [
+  'handover_photo_proofs', 'cash_handover_evidence', 'mmg_payer_evidence', 'identity_review_cases',
   'EmergencyContact', 'EvidenceBundle', 'IncidentCase', 'LivenessCheck',
   'SafetyAccessLog', 'SosAlert', 'TripSafetySession', 'actor_rating_stats',
   // [S-01] The SOS escalation outbox belongs to the alert's tenant.

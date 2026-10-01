@@ -4,7 +4,7 @@ import type { PrismaClient } from '@prisma/client';
 import type Redis from 'ioredis';
 import { AppError } from '../../utils/errors';
 import { algoValue, ALGO_DEFAULTS } from '../algo/algo-config';
-import { clusterRootId } from './identity.service';
+import { identityAuthority } from './identity-review';
 import { velocityCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
 
@@ -144,7 +144,9 @@ export async function checkVelocity(
 /** The verdict for THIS request, thrown as the platform's error when refused. Callable inline (a money field on a wider route) or as a preHandler. */
 export async function assertVelocity(app: FastifyInstance, request: FastifyRequest, action: string): Promise<void> {
   const userId = (request as FastifyRequest & { user?: { userId?: string } }).user?.userId ?? null;
-  const clusterId = userId ? await clusterRootId(app.prisma, userId).catch(() => null) : null;
+  const authority = userId ? await identityAuthority(app.prisma, userId) : null;
+  // Retain account/device/IP velocity; do not charge an ambiguous shared counter.
+  const clusterId = authority?.status === 'RESOLVED' ? authority.clusterId : null;
   const deviceHeader = request.headers['x-device-id'];
   const verdict = await checkVelocity(
     { redis: app.redis, prisma: app.prisma },

@@ -3249,9 +3249,7 @@ export class BillingService {
         note: `Billing rail set to ${method}${method === 'MOBILE_MONEY' ? ' (MMG merchant-initiated)' : ' (prepaid)'}`,
       },
     });
-    // Identity-integrity capture (§2.1 MMG_PAYER — HARD: the money doesn't
-    // lie). Fire-and-forget; A4 payer-laundering unions + any §3.4
-    // retroactive trial reconciliation happen inside the capture.
+    // Preserve the declaration as advisory provenance, never an identity edge.
     if (method === 'MOBILE_MONEY' && mmgPayerMsisdn) {
       const human = await this.prisma.subscription.findUnique({
         where: { id: subscriptionId },
@@ -3265,7 +3263,7 @@ export class BillingService {
       if (userId) {
         const { captureMmgPayer } = await import('../integrity/capture-hooks');
         const role = human?.rider ? 'RIDER' : human?.driver ? 'DRIVER' : 'VENDOR';
-        captureMmgPayer(this.prisma, { userId, role, payerMsisdn: mmgPayerMsisdn.trim() });
+        await captureMmgPayer(this.prisma, { userId, role, subscriptionId, payerMsisdn: mmgPayerMsisdn.trim() }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
       }
     }
     // [DS207 F2] A resumed PAUSED plan is charged NOW, through the same

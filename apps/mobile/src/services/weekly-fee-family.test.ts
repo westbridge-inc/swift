@@ -43,7 +43,7 @@ vi.mock('../stores/authStore', () => ({
 vi.mock('../stores/moverPreview', () => ({ useMoverPreview: (pick: (_s: unknown) => unknown) => pick({ preview: false }) }));
 vi.mock('../stores/storeSwitcher', async () => {
   const { createStore } = await import('zustand/vanilla');
-  const state = createStore(() => ({ selectedStoreId: 'store-B', feeContextPending: false, feeContextError: null as unknown, setSelectedStore: (id: string) => state.setState({ selectedStoreId: id }), setFeeContextPending: (pending: boolean) => state.setState({ feeContextPending: pending }) }));
+  const state = createStore(() => ({ selectedStoreId: 'store-B', storeGeneration: 0, feeContextPending: false, feeContextError: null as unknown, setSelectedStore: (id: string) => state.setState({ selectedStoreId: id, storeGeneration: state.getState().storeGeneration + 1 }), setFeeContextPending: (pending: boolean) => state.setState({ feeContextPending: pending }) }));
   return { useStoreSwitcher: Object.assign((pick: (_s: unknown) => unknown) => pick(state.getState()), state) };
 });
 vi.mock('../kit', () => Object.fromEntries(['Card', 'ErrorState', 'Header', 'LoadingBlock', 'PillButton', 'Screen', 'T'].map((name) => [name, name])));
@@ -76,7 +76,7 @@ function elements(node: unknown): Element[] {
   return [el, ...elements(el.props.children)];
 }
 const original = api.defaults.adapter;
-beforeEach(() => { fx.effects = []; fx.moverKind.mockClear(); useStoreSwitcher.setState({ selectedStoreId: 'store-B', feeContextPending: false, feeContextError: null }); });
+beforeEach(() => { fx.effects = []; fx.moverKind.mockClear(); useStoreSwitcher.setState({ selectedStoreId: 'store-B', storeGeneration: 0, feeContextPending: false, feeContextError: null }); });
 afterEach(() => { api.defaults.adapter = original; });
 describe('notification family with the active mover stack [AX316 R3]', () => {
   it('opens the store family inside Earner mode and never reads the vendor ref through mover endpoints', async () => {
