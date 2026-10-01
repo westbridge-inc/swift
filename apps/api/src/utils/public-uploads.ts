@@ -2,6 +2,7 @@ import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
+import { REVIEW_PACK_IMAGE_DIR, reviewPackPicture } from '../modules/review/content-pack';
 
 // Only explicitly public upload trees are ever served statically. KYC /
 // verification documents live under other /uploads folders and stay private —
@@ -29,6 +30,15 @@ export function registerPublicUploads(app: FastifyInstance, uploadBase: string) 
       const rel = request.params['*'];
       if (!rel || rel.includes('..') || path.isAbsolute(rel)) {
         return reply.code(400).send({ error: 'bad path' });
+      }
+      // [STA-1 Part 6] The review content pack's item pictures are DRAWN from
+      // the pack itself (modules/review/pack-image.ts), never read from disk:
+      // the same bytes in every process and on every deploy. Only a picture
+      // the pack declares exists; any other name under this prefix is a 404.
+      if (folder === 'items' && rel.startsWith(REVIEW_PACK_IMAGE_DIR)) {
+        const png = reviewPackPicture(rel.slice(REVIEW_PACK_IMAGE_DIR.length));
+        if (!png) return reply.code(404).send();
+        return reply.header('Content-Type', 'image/png').header('Cache-Control', 'public, max-age=86400').send(png);
       }
       const abs = path.join(uploadBase, folder, rel);
       try {
