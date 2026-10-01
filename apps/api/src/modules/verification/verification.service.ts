@@ -1416,7 +1416,17 @@ export class VerificationService {
   ): Promise<void> {
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
-      include: { vendors: { select: { id: true, vendorType: true, isVerified: true, status: true } } },
+      include: {
+        vendors: {
+          // [STA-1 Part 6] A REVIEW tenant's stores are the store-review
+          // fiction (review/content-pack.ts): they hold no documents by
+          // design, so document authority neither lights nor darkens them —
+          // without this the daily belt took the reviewer's stores down. Every
+          // other tenant's store is projected exactly as before.
+          where: { tenant: { kind: { not: 'REVIEW' } } },
+          select: { id: true, vendorType: true, isVerified: true, status: true },
+        },
+      },
     });
     if (!owner) return;
     // [DOC-1 §3.6 · P3-2] A VALID registration record promotes every UNREGISTERED store the

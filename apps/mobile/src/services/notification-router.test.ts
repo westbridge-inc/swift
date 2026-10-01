@@ -13,6 +13,9 @@ vi.mock('../navigation/navigationRef', () => ({
   safeNavigate: () => false,
 }));
 
+vi.mock('../stores/authStore', () => ({ getAuthSessionSnapshot: () => null }));
+vi.mock('../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null, storeGeneration: 0 }) } }));
+
 import { destinationFor } from './notification-router';
 
 // The tap-router's single source of truth [first-open 2.4]: every payload

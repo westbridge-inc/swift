@@ -34,7 +34,6 @@ import {
   orderActions,
   type VendorOrderActionKind,
 } from '../shared';
-import { disconnectSocket } from '../../../services/socket';
 import { docLabel } from '../../../components/onboarding/DocumentUploadCard';
 import { useVerificationStatus } from '../../../hooks/verification';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
@@ -822,7 +821,6 @@ export function VendorOps({ store, navigation }: any) {
   // as the order screen: the API refuses a rejection without a reason, so a
   // bare tap used to fail with nothing on screen.
   const [rejecting, setRejecting] = useState<{ id: string; fulfillment?: string | null } | null>(null);
-  const [switchingStore, setSwitchingStore] = useState(false);
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
   const setSelfDelivery = useSetSelfDelivery();
@@ -865,22 +863,7 @@ export function VendorOps({ store, navigation }: any) {
   // isRefetching dropped the whole board behind a spinner on every poll; it
   // now shows only while the owner's own pull is in flight (lib/pullToRefresh).
   const pull = usePullToRefresh(() => qc.invalidateQueries({ queryKey: ['vendor'] }));
-  const switchStore = async (id: string) => {
-    if (id === store.id || switchingStore) return;
-    setSwitchingStore(true);
-    disconnectSocket();
-    setSelectedStore(id);
-    try {
-      // Store-aware query keys live outside this lane. Reset the shared cache
-      // so the next store never inherits the previous store's role or facts.
-      await Promise.all([
-        qc.resetQueries({ queryKey: ['vendor'] }),
-        qc.resetQueries({ queryKey: ['verification'] }),
-      ]);
-    } finally {
-      setSwitchingStore(false);
-    }
-  };
+  const switchStore = (id: string) => setSelectedStore(id);
   const fetched: any[] = ordersQ.data ?? [];
   const boardLoading = ordersQ.isLoading && !ordersQ.data;
   const boardUnavailable = ordersQ.isError && !ordersQ.data;
@@ -922,15 +905,6 @@ export function VendorOps({ store, navigation }: any) {
       </T>
     </View>
   );
-
-  if (switchingStore) {
-    return (
-      <Screen>
-        <TabHeader title="Switching store…" eyebrow="LOADING BUSINESS" statusTone="muted" />
-        <LoadingBlock />
-      </Screen>
-    );
-  }
 
   return (
     <Screen>
