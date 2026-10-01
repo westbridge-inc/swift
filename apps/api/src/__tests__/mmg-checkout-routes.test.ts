@@ -67,6 +67,8 @@ type Found = Extract<MmgLookupDetail, { outcome: 'found' }>;
 function found(txn: string, status: Found['status'], amountGyd: number, patch: Partial<Found> = {}) {
   lookups.set(txn, {
     outcome: 'found', transactionId: txn, status, amountMinor: amountGyd * 100, currencyCode: 'GYD',
+    // The fields #1393 added to MmgLookupDetail, named as "not sent" (null), exactly as they read before it.
+    statusText: null, creditAccounts: null, ledgerReference: null,
     creditParties: [SANDBOX_MERCHANT_ID], createdAt: null, echoedReferences: [], raw: { transactionReference: txn }, ...patch,
   });
 }
