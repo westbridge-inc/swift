@@ -3370,6 +3370,8 @@ model MmgCheckoutIntent {
   @@index([tenantId])
   @@index([subscriptionId, createdAt])
   @@index([status, nextCheckAt])
+  // [MMG support lookup] Support finds a checkout by a transaction a reply named (candidates @> {id}).
+  @@index([candidates], type: Gin)
   @@map("mmg_checkout_intents")
 }
 

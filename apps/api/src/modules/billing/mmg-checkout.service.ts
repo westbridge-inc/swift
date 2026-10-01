@@ -26,6 +26,7 @@ import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-p
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
+import { partnerReceiptIds } from './mmg-checkout-receipt';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout (MMG-CHECKOUT-API.md is the contract).
@@ -66,9 +67,9 @@ const LATE_CHECK_MS = 6 * 3_600_000;
 const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_000] as const;
 /** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's
  *  creationDate, and for when MMG's success answer reached us. */
-const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
+export const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
 /** An MMG transaction id or ledger number as MMG writes it. */
-const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
 const MAX_REPLY_PARAMS = 16;
 const MAX_REPLY_PARAM_CHARS = 4096;
@@ -108,6 +109,10 @@ export interface CheckoutView {
   expiresAt: string;
   confirmedAt: string | null;
   subscriptionStatus: SubscriptionStatus;
+  /** [MMG support lookup] Ours, the merchantTransactionId MMG was sent. Always. */
+  swiftReference: string;
+  /** [MMG support lookup] MMG's transaction, only once CONFIRMED (partnerReceiptIds). */
+  mmgTransactionId: string | null;
 }
 
 export interface StartedCheckout {
@@ -1165,6 +1170,7 @@ export class MmgCheckoutService {
       expiresAt: intent.expiresAt.toISOString(),
       confirmedAt: intent.confirmedAt ? intent.confirmedAt.toISOString() : null,
       subscriptionStatus,
+      ...partnerReceiptIds(intent),
     };
   }
 }

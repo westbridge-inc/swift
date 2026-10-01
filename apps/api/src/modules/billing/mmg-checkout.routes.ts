@@ -17,6 +17,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { BillingService } from './billing.service';
 import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type ReturnState } from './mmg-checkout.service';
 import { clientPlatform, feePayActions, type PayAction } from './fee-pay-actions';
+import { partnerReceiptIds } from './mmg-checkout-receipt';
 import {
   MAX_REPLY_VALUES,
   MAX_REPLY_VALUE_CHARS,
@@ -119,6 +120,8 @@ function checkoutView(row: MmgCheckoutIntent, subscriptionStatus: SubscriptionSt
     expiresAt: row.expiresAt.toISOString(),
     confirmedAt: row.confirmedAt ? row.confirmedAt.toISOString() : null,
     subscriptionStatus,
+    // [MMG support lookup] The partner's receipt: our reference always, MMG's once CONFIRMED.
+    ...partnerReceiptIds(row),
   };
 }
 
