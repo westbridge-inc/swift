@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { Receipt } from 'lucide-react';
 import type {
@@ -56,6 +56,7 @@ const WINDOW_WORDS: Record<NonNullable<MmgCheckoutTimelineEntry['windowCheck']>,
   UNREADABLE: "MMG's date could not be read",
 };
 const SOURCE_WORDS: Record<MmgCheckoutTimelineEntry['source'], string> = { RETURN: 'Reply (return page)', NOTIFY: 'Reply (MMG server)', LOOKUP: 'MMG lookup' };
+const PLATFORM_WORDS: Record<string, string> = { ios: 'iPhone app', android: 'Android app', web: 'Website', unknown: 'Unknown' };
 
 const gyd = (amount: number) => `GY$${amount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 /** Guyana time, always: support and partners speak in it. */
@@ -69,8 +70,11 @@ function StatusPill({ status }: { status: MmgCheckoutSupportStatus }) {
   return <span className={`px-2.5 py-1 rounded-full text-xs whitespace-nowrap ${STATUS_TONE[status]}`}>{STATUS_WORDS[status]}</span>;
 }
 
-function Id({ value, empty }: { value: string | null; empty: string }) {
-  return value ? <span className="font-mono text-xs break-all">{value}</span> : <span className="text-[var(--muted)] text-xs">{empty}</span>;
+/** An id on one line in the table (it is read and copied whole); allowed to wrap in the narrower detail. */
+function Id({ value, empty, wrap = false }: { value: string | null; empty: string; wrap?: boolean }) {
+  return value
+    ? <span className={`font-mono text-xs ${wrap ? 'break-all' : 'whitespace-nowrap'}`}>{value}</span>
+    : <span className="text-[var(--muted)] text-xs whitespace-nowrap">{empty}</span>;
 }
 
 type Applied = { q: string; status: MmgCheckoutSupportStatus | ''; run: number };
@@ -127,85 +131,87 @@ export default function MmgPaymentsPage() {
         <button type="submit" className="px-5 py-2.5 rounded-lg bg-[var(--accent)] text-white text-sm font-semibold">Search</button>
       </form>
 
-      <div className="grid grid-cols-1 2xl:grid-cols-5 gap-6">
-        <section aria-label="Payments" className="2xl:col-span-3 bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-          {list.isPending ? (
-            <p role="status" className="p-12 text-center text-[var(--muted)] text-sm">Searching…</p>
-          ) : list.isError && !list.data ? (
-            <div role="alert" className="p-6 text-sm text-red-400">Could not load MMG payments: {messageOf(list.error)}</div>
-          ) : rows.length === 0 ? (
-            <div className="p-12 flex flex-col items-center text-center">
-              <Receipt size={40} className="text-[var(--muted)] mb-3" />
-              <p className="text-sm text-[var(--muted)]">{applied.q ? 'No MMG payment matches that exactly.' : 'No MMG payments yet.'}</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-left text-[var(--muted)] text-xs">
-                  <tr>
-                    {['Created', 'Swift reference', 'MMG transaction ID', 'MMG reference', 'Amount', 'Status', 'Partner', applied.q ? 'Matched by' : null, '']
-                      .filter((h): h is string => h !== null)
-                      .map((h) => <th key={h || 'open'} scope="col" className="px-4 py-3 font-medium">{h}</th>)}
+      <section aria-label="Payments" className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden mb-6">
+        {list.isPending ? (
+          <p role="status" className="p-12 text-center text-[var(--muted)] text-sm">Searching…</p>
+        ) : list.isError && !list.data ? (
+          <div role="alert" className="p-6 text-sm text-red-400">Could not load MMG payments: {messageOf(list.error)}</div>
+        ) : rows.length === 0 ? (
+          <div className="p-12 flex flex-col items-center text-center">
+            <Receipt size={40} className="text-[var(--muted)] mb-3" />
+            <p className="text-sm text-[var(--muted)]">{applied.q ? 'No MMG payment matches that exactly.' : 'No MMG payments yet.'}</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-[var(--muted)] text-xs">
+                <tr>
+                  {['Created', 'Swift reference', 'MMG transaction ID', 'MMG reference', 'Amount', 'Status', 'Partner', applied.q ? 'Matched by' : null, '']
+                    .filter((h): h is string => h !== null)
+                    .map((h) => <th key={h || 'open'} scope="col" className="px-4 py-3 font-medium">{h}</th>)}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--border)]">
+                {rows.map((row) => (
+                  <tr key={row.id} className={openId === row.id ? 'bg-white/5' : undefined}>
+                    <td className="px-4 py-3 whitespace-nowrap">{when(row.createdAt)}</td>
+                    <td className="px-4 py-3"><Id value={row.swiftReference} empty="—" /></td>
+                    <td className="px-4 py-3"><Id value={row.mmgTransactionId} empty="Not confirmed" /></td>
+                    <td className="px-4 py-3"><Id value={row.mmgTransactionReference} empty="Not known" /></td>
+                    <td className="px-4 py-3 whitespace-nowrap">{gyd(row.amount)}</td>
+                    <td className="px-4 py-3"><StatusPill status={row.status} /></td>
+                    <td className="px-4 py-3">
+                      <p className="whitespace-nowrap">{row.partner.displayName ?? '—'}</p>
+                      <p className="text-xs text-[var(--muted)] whitespace-nowrap">{KIND_WORDS[row.partner.kind]}{row.partner.maskedPhone ? ` · ${row.partner.maskedPhone}` : ''}</p>
+                    </td>
+                    {applied.q ? <td className="px-4 py-3 text-xs">{row.matchedBy.map((m) => MATCH_WORDS[m]).join(', ')}</td> : null}
+                    <td className="px-4 py-3">
+                      <button
+                        type="button"
+                        onClick={() => setOpenId(row.id)}
+                        aria-label={`Open payment ${row.swiftReference}`}
+                        className="text-xs underline text-[var(--accent)]"
+                      >
+                        Open
+                      </button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-[var(--border)]">
-                  {rows.map((row) => (
-                    <tr key={row.id} className={openId === row.id ? 'bg-white/5' : undefined}>
-                      <td className="px-4 py-3 whitespace-nowrap">{when(row.createdAt)}</td>
-                      <td className="px-4 py-3"><Id value={row.swiftReference} empty="—" /></td>
-                      <td className="px-4 py-3"><Id value={row.mmgTransactionId} empty="Not confirmed" /></td>
-                      <td className="px-4 py-3"><Id value={row.mmgTransactionReference} empty="Not known" /></td>
-                      <td className="px-4 py-3 whitespace-nowrap">{gyd(row.amount)}</td>
-                      <td className="px-4 py-3"><StatusPill status={row.status} /></td>
-                      <td className="px-4 py-3">
-                        <p>{row.partner.displayName ?? '—'}</p>
-                        <p className="text-xs text-[var(--muted)]">{KIND_WORDS[row.partner.kind]}{row.partner.maskedPhone ? ` · ${row.partner.maskedPhone}` : ''}</p>
-                      </td>
-                      {applied.q ? <td className="px-4 py-3 text-xs">{row.matchedBy.map((m) => MATCH_WORDS[m]).join(', ')}</td> : null}
-                      <td className="px-4 py-3">
-                        <button
-                          type="button"
-                          onClick={() => setOpenId(row.id)}
-                          aria-label={`Open payment ${row.swiftReference}`}
-                          className="text-xs underline text-[var(--accent)]"
-                        >
-                          Open
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {list.hasNextPage ? (
-                <div className="p-4 border-t border-[var(--border)]">
-                  <button type="button" disabled={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()} className="text-sm underline disabled:opacity-50">
-                    {list.isFetchingNextPage ? 'Loading…' : 'Load more'}
-                  </button>
-                </div>
-              ) : null}
-              {list.isFetchNextPageError ? <p role="alert" className="px-4 pb-4 text-sm text-red-400">Could not load more: {messageOf(list.error)}</p> : null}
-            </div>
-          )}
-        </section>
+                ))}
+              </tbody>
+            </table>
+            {list.hasNextPage ? (
+              <div className="p-4 border-t border-[var(--border)]">
+                <button type="button" disabled={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()} className="text-sm underline disabled:opacity-50">
+                  {list.isFetchingNextPage ? 'Loading…' : 'Load more'}
+                </button>
+              </div>
+            ) : null}
+            {list.isFetchNextPageError ? <p role="alert" className="px-4 pb-4 text-sm text-red-400">Could not load more: {messageOf(list.error)}</p> : null}
+          </div>
+        )}
+      </section>
 
-        <aside className="2xl:col-span-2">{openId ? <Detail id={openId} /> : null}</aside>
-      </div>
+      {openId ? <Detail id={openId} /> : null}
     </div>
   );
 }
 
 function Detail({ id }: { id: string }) {
+  const panel = useRef<HTMLElement | null>(null);
   const detail = useQuery({
     queryKey: ['mmg-checkout', id],
     queryFn: () => fetchMmgCheckout(id),
     refetchOnWindowFocus: false,
     staleTime: Infinity,
   });
+  useEffect(() => {
+    if (detail.data) panel.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+  }, [detail.data]);
   if (detail.isPending) return <p role="status" className="text-sm text-[var(--muted)]">Opening the payment…</p>;
   if (detail.isError) return <div role="alert" className="text-sm text-red-400">Could not open this payment: {messageOf(detail.error)}</div>;
   const d: MmgCheckoutSupportDetail = detail.data.data;
   return (
-    <section aria-label="Payment detail" className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 space-y-6">
+    <section ref={panel} aria-label="Payment detail" className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 space-y-6 scroll-mt-6">
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs text-[var(--muted)]">Swift reference</p>
@@ -213,20 +219,24 @@ function Detail({ id }: { id: string }) {
         </div>
         <StatusPill status={d.status} />
       </div>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-        <Field label="MMG transaction ID"><Id value={d.mmgTransactionId} empty="Not confirmed" /></Field>
-        <Field label="MMG reference"><Id value={d.mmgTransactionReference} empty="Not known" /></Field>
-        <Field label="Amount">{gyd(d.amount)} {d.currencyCode}</Field>
-        <Field label="Started on">{d.platform}</Field>
-        <Field label="Partner">{d.partner.displayName ?? '—'} · {KIND_WORDS[d.partner.kind]}{d.partner.maskedPhone ? ` · ${d.partner.maskedPhone}` : ''}</Field>
-        <Field label="Subscription"><span className="font-mono text-xs break-all">{d.partner.subscriptionId}</span></Field>
-        <Field label="Created">{when(d.createdAt)}</Field>
-        <Field label="MMG replied">{when(d.replyAt)}</Field>
-        <Field label="Confirmed">{when(d.confirmedAt)}</Field>
-        {d.reason ? <Field label="Reason (operators only)"><span className="font-mono text-xs">{d.reason}</span></Field> : null}
-      </dl>
-      {d.creditedPeriod ? <Credited period={d.creditedPeriod} /> : null}
-      <Timeline entries={d.timeline} truncated={d.timelineTruncated} />
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+        <div className="space-y-6">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+            <Field label="MMG transaction ID"><Id value={d.mmgTransactionId} empty="Not confirmed" wrap /></Field>
+            <Field label="MMG reference"><Id value={d.mmgTransactionReference} empty="Not known" wrap /></Field>
+            <Field label="Amount">{gyd(d.amount)} {d.currencyCode}</Field>
+            <Field label="Started on">{PLATFORM_WORDS[d.platform] ?? d.platform}</Field>
+            <Field label="Partner">{d.partner.displayName ?? '—'} · {KIND_WORDS[d.partner.kind]}{d.partner.maskedPhone ? ` · ${d.partner.maskedPhone}` : ''}</Field>
+            <Field label="Subscription"><span className="font-mono text-xs break-all">{d.partner.subscriptionId}</span></Field>
+            <Field label="Created">{when(d.createdAt)}</Field>
+            <Field label="MMG replied">{when(d.replyAt)}</Field>
+            <Field label="Confirmed">{when(d.confirmedAt)}</Field>
+            {d.reason ? <Field label="Reason (operators only)"><span className="font-mono text-xs">{d.reason}</span></Field> : null}
+          </dl>
+          {d.creditedPeriod ? <Credited period={d.creditedPeriod} /> : null}
+        </div>
+        <Timeline entries={d.timeline} truncated={d.timelineTruncated} />
+      </div>
     </section>
   );
 }
@@ -266,7 +276,7 @@ function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[];
           {entries.map((e, i) => (
             <li key={`${e.at}-${i}`} className="border-l-2 border-[var(--border)] pl-3 text-sm">
               <p className="font-medium">{SOURCE_WORDS[e.source]} <span className="text-[var(--muted)] font-normal">· {when(e.at)}</span></p>
-              <p className="text-xs text-[var(--muted)] mt-0.5 space-x-2">
+              <p className="text-xs text-[var(--muted)] mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
                 {e.resultCode !== null ? <span>Result code {e.resultCode} ({RESULT_WORDS[e.resultCode] ?? 'undocumented'})</span> : null}
                 {e.transactionStatus ? <span>MMG status: {e.transactionStatus}</span> : null}
                 {e.amount ? <span>Amount: {e.amount} {e.currency ?? ''}</span> : null}
