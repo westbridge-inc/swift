@@ -2,7 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import type Redis from 'ioredis';
 import { AppError, NotFoundError, ForbiddenError } from '../../utils/errors';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
-import { checkOtpDailyBudget } from '../../utils/sms-budget';
+import { checkSafetySmsBudget, smsDestinationAllowed, type SmsBudgetReason } from '../../utils/sms-budget';
 import { normalizePhone } from '../../utils/phone';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
@@ -20,6 +20,11 @@ import { log } from '../../utils/logger';
 // daily-budgeted. Crucially the rate-limit keys on the TARGET PHONE, not the
 // contact row — otherwise delete+re-add would mint a fresh key each time and let
 // an authenticated user SMS-bomb any number.
+//
+// [AUD-L4-008] The daily budget is the safety-text budget (utils/sms-budget),
+// never the login one, so no flood of login codes can stop a contact being
+// confirmed. And a contact's number must be one we can text: a launch-market
+// number, refused before it is saved.
 
 const MAX_CONTACTS = Math.min(10, Math.max(1, Number(process.env['MAX_EMERGENCY_CONTACTS']) || 5));
 
@@ -33,6 +38,23 @@ const MAX_CONTACTS = Math.min(10, Math.max(1, Number(process.env['MAX_EMERGENCY_
 // owner's own later is caught by the same comparison.
 export const EMERGENCY_CONTACT_IS_YOU = 'EMERGENCY_CONTACT_IS_YOU';
 export const EMERGENCY_CONTACT_IS_YOU_MESSAGE = 'An emergency contact must be someone else. Enter their number, not yours.';
+
+/** [AUD-L4-008] Why a confirmation code was refused, in words the owner can act on. */
+function contactCodeRefused(reason: SmsBudgetReason | undefined): AppError {
+  switch (reason) {
+    case 'destination_country':
+      return new AppError(400, 'COUNTRY_NOT_ACTIVE', 'An emergency contact needs a Guyana (+592) number for now.');
+    case 'recipient_daily':
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', 'You have sent this number too many codes today. Try again tomorrow.');
+    case 'sender_daily':
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', 'You have sent too many confirmation codes today. Try again tomorrow.');
+    case 'safety_daily':
+      log().error('[sms-budget] daily safety-text ceiling reached — refusing safety texts until reset');
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', "We can't send confirmation codes right now. Please try again later.");
+    default:
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', 'This number has received too many messages today. Try again tomorrow.');
+  }
+}
 
 /** A phone as its digits: the platform normaliser (utils/phone), then the
  *  leading + dropped, so an account number stored without it is still the
@@ -90,8 +112,11 @@ export class EmergencyContactService {
    *  refreshes its details WITHOUT dropping a prior verification (the number is
    *  unchanged). A code is sent only when the contact is not yet verified, and
    *  best-effort — a rate-limit must not fail the save (use resend() to force).
-   *  [Q9] The account's own number is refused first: no row, no code. */
+   *  [Q9] The account's own number is refused first: no row, no code.
+   *  [AUD-L4-008] So is a number outside the launch market: it could never
+   *  be texted a code, so it is never saved. */
   async add(input: AddContactInput): Promise<{ contact: Awaited<ReturnType<PrismaClient['emergencyContact']['upsert']>>; codeSent: boolean }> {
+    if (!smsDestinationAllowed(input.phoneE164)) throw contactCodeRefused('destination_country');
     await this.refuseOwnNumber(input.userId, input.phoneE164);
     const priority = Math.min(3, Math.max(1, Math.trunc(input.priority ?? 1)));
     const existing = await this.prisma.emergencyContact.findUnique({
@@ -122,12 +147,15 @@ export class EmergencyContactService {
   }
 
   /** Send/refresh the confirmation code to the contact's phone. Rate-limited
-   *  1/min per target phone and counted against the shared daily SMS budget. */
+   *  1/min per target phone and counted against the safety-text daily budget
+   *  (never the login one). Only to a launch-market number [AUD-L4-008]. */
   async sendCode(contactId: string, phoneE164: string, ownerUserId: string): Promise<void> {
+    // [AUD-L4-008] Checked before anything is counted, for rows saved before this rule too.
+    if (!smsDestinationAllowed(phoneE164)) throw contactCodeRefused('destination_country');
     const allowed = await checkOtpRateLimit(this.redis, this.smsKey(phoneE164));
     if (!allowed) throw new AppError(429, 'RATE_LIMITED', 'Please wait a moment before requesting another confirmation code.');
-    const budget = await checkOtpDailyBudget(this.redis, phoneE164);
-    if (!budget.allowed) throw new AppError(429, 'SMS_BUDGET_EXCEEDED', 'This number has received too many messages today. Try again tomorrow.');
+    const budget = await checkSafetySmsBudget(this.redis, phoneE164, { senderId: ownerUserId });
+    if (!budget.allowed) throw contactCodeRefused(budget.reason);
 
     const owner = await this.prisma.user.findUnique({ where: { id: ownerUserId }, select: { firstName: true } });
     const ownerName = owner?.firstName?.trim() || 'A Swift user';
@@ -139,6 +167,8 @@ export class EmergencyContactService {
         `${ownerName} added you as their Swift emergency contact — you'll be alerted if they trigger an SOS. Confirm with code ${code}. Didn't expect this? Ignore this message.`,
       );
     } catch (err) {
+      // A code that never left gives back the budget it counted.
+      await budget.refund?.().catch(() => {});
       log().error({ err, contactId }, 'emergency-contact: confirmation SMS failed');
       throw new AppError(502, 'SMS_SEND_FAILED', "We couldn't send the confirmation code right now. Please try again in a moment.");
     }

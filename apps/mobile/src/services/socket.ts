@@ -12,14 +12,15 @@ import { canTeardownRuntime } from '../lib/runtimeOwnership';
 // EXPO_PUBLIC_API_URL override — so a staging/preview EAS build repoints both at
 // once. The previous `__DEV__ ? localhost : api.swiftgy.com` hardcode had no env
 // escape hatch, so a non-prod build could never reach a non-prod socket.
-const SOCKET_URL = API_URL;
+// Read API_URL when connecting: store handoffs now load this module during
+// API/auth initialization, before the API export is necessarily initialized.
 
 let socket: Socket | null = null;
 let socketOwner: AuthPrincipalBoundary | null = null;
 
 export function getSocket(): Socket {
   if (!socket) {
-    socket = io(SOCKET_URL, {
+    socket = io(API_URL, {
       autoConnect: false,
       transports: ['websocket'],
       // Callback form: every (re)connection attempt reads the CURRENT access
@@ -67,6 +68,28 @@ export function disconnectSocket(expectedOwner?: AuthPrincipalBoundary): boolean
   // only `.connected` leaves an old account's Manager alive between attempts.
   ownedSocket?.disconnect();
   return true;
+}
+
+/** A same-account store handoff must leave the old store's server room WITHOUT
+ *  discarding the shared socket other mounted layers hold: a mover's dispatch
+ *  offers, a customer's live tracking. Rooms belong to one connection and the
+ *  server has no vendor-room leave, so reconnect THIS instance. socket.io keeps
+ *  listeners on the instance across disconnect()/connect(), and every layer's
+ *  'connect' handler re-joins what it still needs. Emits buffered for the
+ *  retired connection are dropped, never replayed into the new one. */
+export function reconnectSocketForStoreHandoff(): void {
+  const current = socket;
+  if (!current || !socketOwner) return;
+  if (!samePrincipalBoundary(socketOwner, getAuthSessionSnapshot())) {
+    // Never reconnect another account's socket under this session.
+    disconnectSocket();
+    return;
+  }
+  current.sendBuffer = [];
+  current.receiveBuffer = [];
+  if (!current.active) return;
+  current.disconnect();
+  current.connect();
 }
 
 // Joins the order's socket room (server verifies the order belongs to this

@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
+import { useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState, useEffect, type ReactNode } from 'react';
-import { useMutation } from '@tanstack/react-query';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
@@ -680,7 +680,7 @@ export function VendorInsightsScreen() {
   const q = useVendorAnalytics();
   const readOnly = !!useVendorPreview((state) => state.previewType);
   // Signed short-lived link (the JWT can't ride an in-app browser).
-  const statement = useMutation({
+  const statement = useVendorMutation({
     mutationFn: async () => {
       const owner = requireAuthSessionSnapshot();
       const r = await vendorApi.salesStatement(owner);
