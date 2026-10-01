@@ -7,6 +7,8 @@ import {
   useAuthStore,
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
+import { useMoverPreview } from '../stores/moverPreview';
+import { installPreviewWriteGuard } from '../lib/previewWriteGuard';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
 import {
@@ -149,6 +151,13 @@ api.interceptors.request.use((config) => {
   }
   return config;
 }, undefined, { synchronous: true });
+
+// [Earner preview] While a rider's or driver's preview is on screen, no write
+// leaves the phone — not even one a screen forgot to make a no-op. "On screen"
+// is the preview flag AND the mover app being the one open, so a flag that ever
+// outlived its stack can never block the customer app's checkout. Token
+// refresh, logout and push registration use raw axios and are untouched.
+installPreviewWriteGuard(api, () => useMoverPreview.getState().preview && useAuthStore.getState().intent === 'mover');
 
 // Response interceptor for token refresh. The coordinator single-flights an
 // exact session, but lets a newly logged-in account start its own flight. Every
