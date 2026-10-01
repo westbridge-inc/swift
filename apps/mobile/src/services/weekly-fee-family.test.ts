@@ -40,7 +40,7 @@ vi.mock('../stores/authStore', () => ({
   getAuthSessionSnapshot: () => fx.owner,
   useAuthStore: Object.assign((pick: (_s: unknown) => unknown) => pick({ user: { id: fx.owner.userId }, sessionGeneration: 1, intent: 'mover' }), { getState: () => ({ intent: 'mover' }) }),
 }));
-vi.mock('../stores/moverPreview', () => ({ useMoverPreview: (pick: (_s: unknown) => unknown) => pick({ preview: false }) }));
+vi.mock('../stores/moverPreview', () => ({ useMoverPreview: Object.assign((pick: (_s: unknown) => unknown) => pick({ preview: false }), { getState: () => ({ preview: false }) }) }));
 vi.mock('../stores/storeSwitcher', async () => {
   const { createStore } = await import('zustand/vanilla');
   const state = createStore(() => ({ selectedStoreId: 'store-B', storeGeneration: 0, feeContextPending: false, feeContextError: null as unknown, setSelectedStore: (id: string) => state.setState({ selectedStoreId: id, storeGeneration: state.getState().storeGeneration + 1 }), setFeeContextPending: (pending: boolean) => state.setState({ feeContextPending: pending }) }));

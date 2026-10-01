@@ -16,6 +16,9 @@ vi.mock('./api', () => ({ api: { get: mock.get, post: mock.post } }));
 vi.mock('../navigation/navigationRef', () => ({ safeNavigate: mock.navigate }));
 vi.mock('../kit/toast', () => ({ toast: { show: mock.toast } }));
 vi.mock('../lib/analytics', () => ({ track: vi.fn() }));
+// No earner preview is open in these tests; ending one on a link is proven
+// through the real router in navigation/RootNavigator.moverPreview.navigation.test.ts.
+vi.mock('../stores/moverPreviewExit', () => ({ leaveMoverPreview: () => false }));
 
 let uninstall: (() => void) | undefined;
 const flush = async () => { await vi.runAllTimersAsync(); };

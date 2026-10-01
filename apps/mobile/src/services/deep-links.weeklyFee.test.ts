@@ -5,6 +5,8 @@ vi.mock('./api', () => ({ api: { post: vi.fn(), get: vi.fn() } }));
 vi.mock('../navigation/navigationRef', () => ({ safeNavigate: mocks.navigate }));
 vi.mock('../kit/toast', () => ({ toast: { show: vi.fn() } }));
 vi.mock('../lib/analytics', () => ({ track: mocks.track }));
+// No earner preview is open here; a payment return that ends one is proven in navigation/RootNavigator.moverPreview.navigation.test.ts.
+vi.mock('../stores/moverPreviewExit', () => ({ leaveMoverPreview: () => false }));
 import { installDeepLinkHandler, isWeeklyFeeReturn, resetDeepLinksForTests } from './deep-links';
 afterEach(() => { resetDeepLinksForTests(); mocks.initialUrl = null; vi.clearAllMocks(); });
 it('MMG return opens only WeeklyFee, never carries a token/state or emits analytics', () => {

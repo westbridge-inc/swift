@@ -1,7 +1,7 @@
-import { useCallback } from 'react';
 import { DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../services/api';
-import { useAuthStore } from '../../stores/authStore';
+import type { EmergencyDial } from '../../lib/emergencyPolicy';
 import { useMoverPreview, type MoverPreviewKind } from '../../stores/moverPreview';
+import { leaveMoverPreview } from '../../stores/moverPreviewExit';
 
 /**
  * The earner preview's doors and words [owner, 1 Oct 2026]: a delivery rider
@@ -31,16 +31,19 @@ export function previewFaceForVehicle(vehicle: VehicleKind): MoverPreviewKind {
   return DRIVER_VEHICLE_KINDS.includes(vehicle) ? 'DRIVER' : 'RIDER';
 }
 
-/** Leave the preview the way it was entered. From the documents the mover app
+/** [DS624 S3] The emergency popup inside the preview. Its button dials no one
+ *  and Swift records nothing there (the active job is a sample), so instead of
+ *  promising a call and a saved alert it says so, and names who to call. */
+export function previewSosCopy(dial: EmergencyDial): string {
+  const who = dial.kind === 'manual' ? 'your local emergency services' : dial.number;
+  return `This is a preview: this button calls no one and Swift records nothing. In a real emergency, call ${who} yourself, now.`;
+}
+
+/** Leave the preview the way it was entered (stores/moverPreviewExit — the
+ *  same exit a link or a notification takes). From the documents the mover app
  *  stays open, so the stack (reset by its preview key) lands on the documents;
  *  from the welcome screen the intent is cleared, back to the welcome. */
 export function useLeaveMoverPreview() {
   const fromDocuments = useMoverPreview((s) => s.origin) === 'documents';
-  const setIntent = useAuthStore((s) => s.setIntent);
-  const leave = useCallback(() => {
-    const { origin, exitPreview } = useMoverPreview.getState();
-    exitPreview();
-    if (origin !== 'documents') setIntent(null);
-  }, [setIntent]);
-  return { fromDocuments, leave };
+  return { fromDocuments, leave: leaveMoverPreview };
 }
