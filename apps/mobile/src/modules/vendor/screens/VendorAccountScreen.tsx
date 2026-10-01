@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
+import { guardVendorOperation, useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState, useEffect } from 'react';
-import { useQueryClient, useMutation } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { Pressable, ScrollView, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
@@ -87,15 +88,16 @@ export function VendorAccountScreen() {
   // what the server holds; the owner can cancel it from any device.
   const stepUp = useStepUp();
   const [mmgError, setMmgError] = useState<string | null>(null);
-  const saveMmgLink = useMutation({
-    mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl })),
+  const updateMmgLink = guardVendorOperation((mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl }));
+  const saveMmgLink = useVendorMutation({
+    mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => updateMmgLink(mmgPayUrl)),
     onMutate: () => setMmgError(null),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
     onError: (e: unknown) => {
       if (!isStepUpDismissed(e)) setMmgError(serverMessage(e, 'That link could not be saved. Check it and try again.'));
     },
   });
-  const cancelPendingMmgLink = useMutation({
+  const cancelPendingMmgLink = useVendorMutation({
     mutationFn: () => vendorApi.cancelPendingMmgLink(),
     onSuccess: () => {
       toast.success('Change cancelled', 'Your current link stays. Other devices were signed out.');
@@ -108,7 +110,7 @@ export function VendorAccountScreen() {
   // two opinions about a valid number is how a shopkeeper gets told their own
   // shop number is wrong for a reason that is not true.
   const [callNumberError, setCallNumberError] = useState<string | null>(null);
-  const saveCallNumber = useMutation({
+  const saveCallNumber = useVendorMutation({
     mutationFn: (publicPhone: string | null) => vendorApi.updateProfile({ publicPhone }),
     onMutate: () => setCallNumberError(null),
     onSuccess: () => {
@@ -310,7 +312,7 @@ function StoreLocationCard({ store }: { store: any }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const movePin = useMutation({
+  const movePin = useVendorMutation({
     mutationFn: (pin: StorePin) => vendorApi.updateProfile({ latitude: pin.latitude, longitude: pin.longitude }),
     onMutate: () => setError(null),
     onSuccess: () => {

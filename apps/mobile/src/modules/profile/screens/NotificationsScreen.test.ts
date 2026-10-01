@@ -6,8 +6,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // notification list never called it, so tapping a row did nothing. This suite
 // drives the REAL NotificationsScreen (the component is called as a function,
 // with no React renderer, as in PersonalDataScreen.test.ts) and the REAL
-// destinationFor. Only the native modules, the data hook, safeNavigate and the
-// navigator the screen sits in are stubbed. That navigator carries the route
+// destinationFor. Only the native modules, the data hook, safeNavigate, the
+// navigator the screen sits in and the tap-router's live session/store readers
+// (which the inbox never calls) are stubbed. That navigator carries the route
 // names CustomerStack.tsx really registers, read from the file below.
 //
 // The contract: a row tap equals a push tap (one table, never a second
@@ -30,6 +31,12 @@ vi.mock('../../../navigation/navigationRef', () => ({
   navigationRef: { isReady: () => true },
   safeNavigate: mocks.safeNavigate,
 }));
+// The tap-router reads the session and the selected store when it routes a
+// live tap; the inbox uses only its pure destinationFor table. Stubbed as
+// notification-router.test.ts stubs them: the real auth store loads native
+// storage and crypto that this suite deliberately does not.
+vi.mock('../../../stores/authStore', () => ({ getAuthSessionSnapshot: () => null }));
+vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: null, storeGeneration: 0 }) } }));
 vi.mock('../../../hooks/customer', () => ({
   useNotifications: () => mocks.notifications,
 }));
