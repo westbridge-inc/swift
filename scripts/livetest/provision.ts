@@ -16,6 +16,7 @@ import { login, GET, POST, PUT, req, upload, codeOf, type Session, type Res } fr
 import { ensureSelfies, uniquePng, type Roster } from './roster.js';
 import { FICTIONAL_GY, TargetRefused } from './guard.js';
 import { isJourneyMintedStore } from './store-retire.js';
+import { completeCourierFixture } from './courier-cleanup.js';
 import type { World, WorldItem } from './journeys/context.js';
 import { activeLegsOf, customerOrder, riderToDoorFrom, doorOf, startAndSettle, IN_CUSTODY, TERMINAL } from './journeys/common.js';
 
@@ -242,13 +243,16 @@ async function heal(roster: Roster, admin: Session, log: (s: string) => void): P
         seen.add(o.id);
         const what = `${m.id} ${o.orderType ?? 'order'} ${o.id} (${o.status})`;
         if (!IN_CUSTODY.includes(o.status)) { settle(what, await operatorCancel(o.id), 'cancelled'); continue; }
-        // [DS230 F3] The door handover closes CASH only; an MMG leg would be
+        if (o.orderType === 'COURIER') {
+          settle(what, await completeCourierFixture(m.session, o, doorOf(o, m)), 'finished');
+          continue;
+        }
+        // [DS230 F3] The delivery door handover closes CASH only; an MMG leg would be
         // walked to the door for nothing. Name it, and leave it untouched.
         if (o.paymentMethod !== 'CASH') { stuck.push(`${what}: ${o.paymentMethod} in custody — not a cash handover`); continue; }
-        const courier = o.orderType === 'COURIER'; // settles from any custody state; no door PIN
-        const walked = courier ? null : await riderToDoorFrom(m.session, o.id, o.status);
+        const walked = await riderToDoorFrom(m.session, o.id, o.status);
         if (walked && !walked.ok) { settle(`${what} walking to the door`, walked, 'finished'); continue; }
-        const pin = courier ? null : await doorPin(o.id);
+        const pin = await doorPin(o.id);
         settle(what, await POST(`/rider/orders/${o.id}/handover`, { outcome: 'paid', gps: doorOf(o, m), ...(pin ? { ridePin: pin } : {}) }, m.session.token), 'finished');
       }
       await PUT('/rider/profile', { riderType: 'BOTH' }, m.session.token);

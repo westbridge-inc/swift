@@ -19,6 +19,7 @@ import { adminRoutes } from '../../modules/admin/admin.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { createQueues, type SwiftQueues } from '../../jobs/queue';
 import { recoveryFor } from '../../jobs/recovery-policy';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · PLAT-02 — a worker crashes mid-flow and the platform recovers.
@@ -87,7 +88,9 @@ if (fileSlots !== 1) {
 }
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONE_PREFIX = '+5920334';
+// [SAFE-B · retained history] A courier drop-off proof is immutable evidence: its job and everyone it names
+// are kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('08');
 const FIXTURE = 'gold3-plat02-fixture';
 const API_ROOT = process.cwd();
 const UPLOAD_DIR = mkdtempSync(path.join(os.tmpdir(), 'swift-gold3-plat02-'));
@@ -359,29 +362,36 @@ async function purgeFixtures() {
       where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }, { vendorId: { in: vendorIds } }] },
       select: { id: true },
     })).map((o) => o.id);
-    await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
-    await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
+    // [SAFE-B · retained history] An issued drop-off proof keeps its job and the people and store it names.
+    // Everything else goes as before; what stays is taken out of service at the end.
+    const kept = await retainedCohort(app.prisma, { orderIds });
+    const goneOrderIds = without(orderIds, kept.orderIds);
+    const goneUserIds = without(ids, kept.userIds);
+    await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+    await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: goneUserIds } } });
     await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
     await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
     await app.prisma.batchEvaluation.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
-    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
+    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: goneOrderIds } }, { riderId: { in: without(riderIds, kept.riderIds) } }] } });
     if (orderIds.length > 0) {
       await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
     }
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: goneOrderIds } } });
     await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
-    await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-    await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } });
+    await app.prisma.address.deleteMany({ where: { userId: { in: goneUserIds } } });
+    const goneVendorIds = without(vendorIds, kept.vendorIds);
+    await app.prisma.item.deleteMany({ where: { vendorId: { in: goneVendorIds } } });
+    await app.prisma.category.deleteMany({ where: { vendorId: { in: goneVendorIds } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: goneVendorIds } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds }, userId: { in: goneUserIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
+    await app.prisma.rider.deleteMany({ where: { id: { in: without(riderIds, kept.riderIds) } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: goneUserIds } } });
+    await retireKeptScaffolding(app.prisma, kept);
   });
 }
 

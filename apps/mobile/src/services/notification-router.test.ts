@@ -248,7 +248,7 @@ const CENSUS: Case[] = [
   { k: 'mmg_payment_confirmed', d: { ...O, audience: 'customer', claimRevision: 1 }, to: DELIVERY('o1'), why: 'customer — the STORE reported the MMG payment arrived: a claim, never a capture; the order screen is where they can say they did not pay [S1-6]' },
   { k: 'mmg_claim_disputed', d: { ...O, audience: 'customer', claimRevision: 2 }, to: DELIVERY('o1'), why: 'customer — their word and the store\'s disagree and the order is held; the claim card is on their order screen. The store\'s copy is tagged audience:business and lands on its order desk by the audience rule [S1-6]' },
   { k: 'mmg_claim_resolved', d: { ...O, audience: 'customer', claimRevision: 3 }, to: DELIVERY('o1'), why: 'customer — an operator decided the payment disagreement; same audience split as mmg_claim_disputed [S1-6]' },
-  { k: 'strike', d: O, to: DELIVERY('o1'), why: 'customer — failed delivery recorded' },
+  { k: 'handover_review', d: O, to: DELIVERY('o1'), why: 'customer — failed delivery recorded' },
   { k: 'delivery_options', d: O, to: DELIVERY('o1'), why: 'customer — supply is thin, pick another option' },
   { k: 'delivery_cash_settlement', d: { ...O, settlementId: 's1', status: 'OPEN' }, to: DELIVERY('o1'), why: 'cash settlement on that order' },
   { k: 'dispatch_retrying', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — still looking for a mover' },

@@ -13,7 +13,8 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
 import { grantStepUp } from './helpers/step-up';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { syntheticLocationOwner } from './helpers/online-mover';
+import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
@@ -34,10 +35,9 @@ const DAY = 24 * 60 * 60 * 1000;
 // parallel.
 const GPS = { lat: 7.6, lng: -58.2 };
 const DOOR = { lat: 7.6007, lng: -58.2007 };
-// Phone prefix verified unused: the suites use 00122, 00133, 00144, 00166,
-// 00177, 00188, 00077, 00087/88, 00201/02, 00797/98/99, 0029900… and none
-// claims 00155.
-const PHONE_PREFIX = '+59200155';
+// [SAFE-B · retained history] A no-show's filing is immutable evidence: its order and everyone it names are
+// kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('10');
 const RESERVE_NOTE = 'goods-door-pin fixture reserve';
 
 let app: FastifyInstance;
@@ -56,30 +56,36 @@ async function purgeFixtures() {
   if (ids.length === 0) return;
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
   const riderIds = riders.map((r) => r.id);
-  await app.prisma.rlpReserveEntry.deleteMany({ where: { note: RESERVE_NOTE } });
-  await app.prisma.reimbursementClaim.deleteMany({
-    where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
-  });
   const orderIds = (
     await app.prisma.order.findMany({
       where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
       select: { id: true },
     })
   ).map((o) => o.id);
-  await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
-  await app.prisma.deliveryCashSettlement.deleteMany({ where: { orderId: { in: orderIds } } });
-  await app.prisma.strike.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-  await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+  // [SAFE-B · retained history] A filed no-show keeps its order, claim and strike, and the people it names;
+  // reserve entries are money records and are never deleted. Everything else goes as before, in one
+  // transaction, and what stays is taken out of service.
+  await app.prisma.$transaction(async (tx) => {
+    const kept = await retainedCohort(tx, { orderIds });
+    const goneOrderIds = without(orderIds, kept.orderIds);
+    const goneUserIds = without(ids, kept.userIds);
+    await tx.reimbursementClaim.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+    await tx.earning.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+    await tx.deliveryCashSettlement.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+    await tx.strike.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await tx.order.deleteMany({ where: { id: { in: goneOrderIds } } });
+    await tx.cart.deleteMany({ where: { customerId: { in: ids } } });
+    await tx.notification.deleteMany({ where: { userId: { in: ids } } });
+    await tx.user.deleteMany({ where: { id: { in: goneUserIds } } });
+    await retireKeptScaffolding(tx, kept);
+  }, { timeout: 60_000 });
 }
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `${PHONE_PREFIX}${String(seq).padStart(2, '0')}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'DoorPin',
       lastName: `User${seq}`,
       roles,
@@ -91,7 +97,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id,
       token,
@@ -101,7 +107,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
 async function makeRider() {
@@ -113,7 +119,8 @@ async function makeRider() {
       vehicleType: 'MOTORCYCLE',
       documentsVerified: true,
       isOnline: true,
-      locationSessionId: syntheticLocationOwner('doorpin'),
+      // [SAFE-B] The rider's own session owns its location stream, as the location route records it.
+      locationSessionId: u.sessionId,
       currentLat: GPS.lat,
       currentLng: GPS.lng,
       lastLocationUpdate: new Date(),
@@ -623,10 +630,14 @@ describe('MKT-F057 — the documented no-show path stays open without a PIN', ()
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider();
     const order = await makeAtDoorOrder(customer.userId, rider.riderId, '246810');
+    // [SAFE-B] A strike needs the evidence the server holds: the door photo it issued, filed with the
+    // fix the rider's own session persisted at the door. The PIN plays no part in a no-show.
+    const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: rider.userId, role: 'RIDER' });
 
     const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
       outcome: 'no_show',
       gps: DOOR,
+      photoUrl: photo.url,
     }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('FAILED');

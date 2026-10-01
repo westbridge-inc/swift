@@ -1,3 +1,4 @@
+import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
 import { useMutation, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
@@ -395,13 +396,16 @@ export function useVendorSubscription(enabled = true) {
 
 /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee, then
  *  re-read the subscription so the screen's autoRenew state is server truth. */
-export function useSetVendorBillingMethod() {
+export function useSetVendorBillingMethod(guard: MutationGuard) {
   const qc = useQueryClient();
   // [DS198 D4] Preview-safe like every other vendor write: in the sample
   // preview, "Stop weekly billing" must never fire a real PUT.
   return usePreviewSafeMutation({
-    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
-      unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn)),
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) => {
+      return runBillingMutation(guard,
+        (session, storeId) => unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn, session, storeId)),
+        () => useStoreSwitcher.getState().selectedStoreId);
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'subscription'] }),
   });
 }

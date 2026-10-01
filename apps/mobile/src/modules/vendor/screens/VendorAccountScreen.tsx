@@ -77,7 +77,8 @@ export function VendorAccountScreen() {
   const isOwner = myRole === 'OWNER';
   const isManager = myRole === 'OWNER' || myRole === 'MANAGER';
   const sub = useVendorSubscription(isOwner);
-  const setBilling = useSetVendorBillingMethod();
+  const stepUp = useStepUp();
+  const setBilling = useSetVendorBillingMethod(stepUp.withStepUp);
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
   const qc = useQueryClient();
@@ -85,7 +86,6 @@ export function VendorAccountScreen() {
   // session to confirm it holds the phone (the code sheet), then STAGES the
   // change behind a cool-off with the old link live. The card shows exactly
   // what the server holds; the owner can cancel it from any device.
-  const stepUp = useStepUp();
   const [mmgError, setMmgError] = useState<string | null>(null);
   const saveMmgLink = useMutation({
     mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl })),
@@ -632,10 +632,10 @@ function PromosSection() {
  * Swift account by phone as MANAGER or STAFF, flip roles, remove access.
  */
 function StaffSection() {
+  const stepUp = useStepUp();
   const staffQ = useVendorStaff();
   // [ALG-34] A grant hands the store's board to a phone: the server asks this
   // session to confirm it holds the owner's phone first.
-  const stepUp = useStepUp();
   const addStaff = useAddStaff(stepUp.withStepUp);
   const removeStaff = useRemoveStaff();
   const updateRole = useUpdateStaffRole(stepUp.withStepUp);

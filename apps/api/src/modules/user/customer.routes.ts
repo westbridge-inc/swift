@@ -1,3 +1,4 @@
+import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
@@ -747,9 +748,18 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
     }
 
-    await app.prisma.customer.update({
-      where: { id: customer.id },
-      data: { referredBy: referrer.id },
+    await app.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      const resolved = await requireIdentityAuthority(tx, userId);
+      await requireIdentityAuthority(tx, referrer.userId);
+      if (resolved.memberIds.includes(referrer.userId)) throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
+      if (await tx.customer.findFirst({ where: { userId: { in: resolved.memberIds }, referredBy: { not: null } }, select: { id: true } })) {
+        throw new AppError(409, 'ALREADY_REFERRED', 'You’ve already used a referral code');
+      }
+      const updated = await tx.customer.updateMany({
+        where: { id: customer.id, referredBy: null }, data: { referredBy: referrer.id },
+      });
+      if (updated.count !== 1) throw new AppError(409, 'ALREADY_REFERRED', 'A referral is already recorded.');
     });
 
     return { success: true, data: { referrerName: referrer.user?.firstName ?? null } };
@@ -3211,6 +3221,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/promo/validate', { preHandler: [velocityGuard(app, 'promo.validate')] }, async (request: AuthRequest) => {
     const { userId } = request.user;
     const { code } = promoValidateSchema.parse(request.body);
+    const authority = await requireIdentityAuthority(app.prisma, userId);
 
     const promo = await app.prisma.promoCode.findUnique({
       where: { code: code.toUpperCase().trim() },
@@ -3229,7 +3240,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Check user-specific usage
     const userUsage = await app.prisma.order.count({
-      where: { customerId: userId, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+      where: { customerId: { in: authority.memberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
     });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'ALREADY_USED', 'You have already used this promo code the maximum number of times');
