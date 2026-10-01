@@ -177,12 +177,18 @@ type CheckoutStatus = {
 |---|---|---|
 | `OPEN` | created; the partner has not finished on the MMG page, or MMG has not told Swift yet | "Finish paying on the MMG page." After returning: "Waiting for MMG…" |
 | `CONFIRMING` | MMG sent the partner back; Swift is checking with MMG | "Confirming your payment with MMG. Don't pay again." |
-| `CONFIRMED` | MMG's records confirm the payment and tie it to this checkout, and the fee is credited | "Paid: GY$X received on <date>." |
+| `CONFIRMED` | MMG answered success for this checkout and its records confirm the payment (the six conditions below), and the fee is credited | "Paid: GY$X received on <date>." |
 | `NOT_PAID` | MMG answered for this checkout that it was not paid (result 1, 2 or 6; 7 when MMG declines the transaction it named), or MMG's own record for this checkout shows the payment did not complete. Never a return path or a missing record alone | "MMG didn't complete this payment. You can try again." |
 | `EXPIRED` | the checkout ran out of time, or MMG never confirmed it within a day; no failure is declared | "This checkout expired. If you paid, it will be credited once MMG confirms it." |
-| `HELD` | MMG's records do not match this checkout (amount, currency or merchant), do not tie the payment to this checkout, or the same MMG payment was claimed twice; a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
+| `HELD` | MMG's records show a payment that cannot be confirmed automatically: a condition below fails (status word, amount, currency, merchant, time, a number already credited), MMG never answered success for it, or MMG's answers for this checkout disagree; a person reviews it, and reminders and suspension stay paused meanwhile | "We're checking this payment by hand. Don't pay again. Support will contact you." |
 
-Attribution is bound to MMG's lookup echo; unbound confirmations are held. Until MMG's lookup field for the merchant's reference is confirmed in UAT, a paid checkout is `HELD` for a person rather than credited automatically.
+**Automatic confirmation (owner, 1 Oct).** A payment is credited automatically only when ALL of these hold; anything else is `HELD` for a person, with no reminders and no suspension, and operators are alerted once:
+1. MMG's reply decrypts with ResultCode `0`, naming this checkout's `merchantTransactionId` and an MMG `transactionId`, and reaches Swift (through the return door or the notify door, whichever is first) while the checkout is open: by its deadline, with two minutes' tolerance. A not-paid answer (`1`, `2`, `6`, `7`) for the same checkout, or success naming two transactions, means MMG's answers disagree.
+2. MMG's lookup of that `transactionId` answers HTTP 200 with `transactionStatus` exactly `successful`.
+3. Every `creditParty` entry keyed `accountid` is Swift's configured merchant number.
+4. `amount` is exactly the checkout's whole-GYD amount and `currency` is `GYD`.
+5. `creationDate` lies inside the checkout's window (created to expiry, two minutes' tolerance). MMG writes it in Guyana time even where it ends in `Z` (UAT, 1 Oct), and Swift reads it so.
+6. Neither the `transactionId` nor the lookup's `transactionReference` (MMG's ledger number, a different number) was ever credited by any channel. The credit claims both, under the one-credit-per-MMG-payment constraint.
 
 Never say "paid" before `CONFIRMED`. Never promise an instant restore: access comes back when the payment is credited, and `subscriptionStatus` shows it.
 
@@ -190,7 +196,7 @@ Never say "paid" before `CONFIRMED`. Never promise an instant restore: access co
 
 After payment, MMG sends the partner's browser to the return address registered for Swift's merchant account: `<MMG_CHECKOUT_RETURN_ORIGIN>/pay/mmg/<outcome>`, for example `…/pay/mmg/success` and `…/pay/mmg/error`.
 
-The official merchant page says MMG posts an encrypted TOKEN to the configured Response URL. The exact transport parameter spelling remains unconfirmed. The page forwards bounded fields and interprets nothing. MMG must also register the Error URL; the optional Notify URL requires separate authentication and transport confirmation. Checkout series PR 3 owns the API route wiring and route-level checks below; these are pending integration requirements, not completed PR 2 behavior.
+The official merchant page says MMG posts an encrypted TOKEN to the configured Response URL. In UAT (1 Oct) MMG appended it to the Response URL's PATH (`…/payment/token=<encrypted>`), not the query, so the page forwards that path value too. The page forwards bounded fields and interprets nothing. MMG must also register the Error URL; the optional Notify URL requires separate authentication and transport confirmation. Checkout series PR 3 owns the API route wiring and route-level checks below; these are pending integration requirements, not completed PR 2 behavior.
 
 1. **Accept both GET and POST.** Take every query parameter (GET) or form field (POST) exactly as received:
    - a key that appears more than once is forwarded as an array of its values, in order;
@@ -232,14 +238,14 @@ Both public routes are rate-limited and size-capped. Neither credits anything by
 
 The service accepts only root `merchantTransactionId`, `transactionId` and string `ResultCode` (`0`–`7`). The merchant reference must exactly equal a persisted checkout reference. Messages, HTML and nested or guessed fields never identify a transaction or decide a state.
 
-- `0` (success) triggers an authoritative lookup. Only a bound paid record credits; an unbound one is held for a person; an absent record keeps confirming and can expire.
-- `1` (agent not registered), `2` (failed) and `6` (cancelled) are "not paid": the checkout becomes `NOT_PAID`, the confirmation pause is released, and the partner may pay again. A transaction the answer names is still looked at later: a bound paid record credits once, and a paid record that cannot be tied to the checkout is held for a person and pauses reminders and suspension again for the same week.
-- `7` (timed out) is not paid unless the lookup says paid: naming no transaction it is `NOT_PAID` at once; naming one, MMG's lookup decides (declined is `NOT_PAID`, paid confirms or holds, pending or unknown keeps confirming and the pause held).
-- After any `0` answer for a checkout, a later `1`, `2`, `6` or `7` releases nothing: MMG's lookup decides.
+- `0` (success) triggers an authoritative lookup. A paid record credits automatically only under the six conditions above; otherwise it is held for a person; an absent record keeps confirming and can expire.
+- `1` (agent not registered), `2` (failed) and `6` (cancelled) are "not paid": the checkout becomes `NOT_PAID`, the confirmation pause is released, and the partner may pay again. A transaction the answer names is still looked at later: a paid record is held for a person (MMG never answered success for it, or its answers disagree) and pauses reminders and suspension again for the same week.
+- `7` (timed out) is not paid unless the lookup says paid: naming no transaction it is `NOT_PAID` at once; naming one, MMG's lookup decides (declined is `NOT_PAID`; paid is held for a person to confirm, since only a `0` answer confirms automatically; pending or unknown keeps confirming and the pause held).
+- After any `0` answer for a checkout, a later `1`, `2`, `6` or `7` releases nothing; MMG's answers then disagree, so a paid record is held for a person.
 - `3` (invalid secret), `4` (merchant mismatch), and `5` (token decryption failed) are a configuration or security alert for operators, paged once per checkout and code. The checkout is never touched, nothing is looked up or credited, and the answer is `UNKNOWN`.
 - An unknown code or malformed response leaves the checkout unchanged. `ResultMessage` and `htmlResponse` are never rendered.
 
-The response's merchant reference does not establish the lookup reference field. `MMG_LOOKUP_REFERENCE_FIELDS` remains empty pending lookup UAT, so live automatic crediting remains held. The F2 canonical identity integration still depends on PR #1395.
+UAT (1 Oct) showed that MMG's lookup carries neither Swift's `merchantTransactionId` nor its description, so `MMG_LOOKUP_REFERENCE_FIELDS` stays empty: a payment is tied to its checkout by MMG's own success answer for it (condition 1), never by a lookup field. Every channel claims MMG payments through #1395's one identity path.
 
 ## 7. Notices (push, SMS, inbox)
 

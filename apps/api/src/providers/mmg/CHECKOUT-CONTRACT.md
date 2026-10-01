@@ -49,25 +49,25 @@ Only these root fields have documented meaning:
 
 | ResultCode | MMG meaning | Swift action |
 |---|---|---|
-| `0` | Transaction Successful | Check MMG's server record before crediting. |
+| `0` | Transaction Successful | Check MMG's server record; credit automatically only under the six conditions (MMG-CHECKOUT-API.md, owner 1 Oct), otherwise hold for a person. |
 | `1` | Agent Not Registered | Not paid: NOT_PAID, the confirmation pause is released, the partner may retry. A named transaction is still checked later. |
 | `2` | Payment Failed | Same not-paid rule. |
 | `3` | Invalid Secret Key | Configuration or security alert to operators, once per checkout; the checkout is not touched; no lookup, no credit. |
 | `4` | Merchant ID Mismatch | Same configuration alert rule. |
 | `5` | Token Decryption Failed | Same configuration alert rule. |
 | `6` | Transaction Cancelled | Same not-paid rule. |
-| `7` | Request Timed Out | Not paid unless the server record says paid: no transaction is NOT_PAID; a named transaction is decided by MMG's lookup (declined is NOT_PAID; pending or unknown keeps the pause). |
+| `7` | Request Timed Out | Not paid unless the server record says paid: no transaction is NOT_PAID; a named transaction is decided by MMG's lookup (declined is NOT_PAID; paid is held for a person; pending or unknown keeps the pause). |
 
-Unknown/malformed result fields do not change a checkout. A success requires transactionId. After a success answer for a checkout, a later not-paid answer releases nothing: the server record decides. A previously confirmed credit is never reversed by a later response.
+Unknown/malformed result fields do not change a checkout. A success requires transactionId. After a success answer for a checkout, a later not-paid answer releases nothing, and the disagreement holds a paid record for a person. A previously confirmed credit is never reversed by a later response.
 
-`merchantTransactionId` in this browser response is not the lookup reference field. `MMG_LOOKUP_REFERENCE_FIELDS` stays empty until lookup UAT identifies that field. Credit still requires a matching server-side transaction, amount, currency, payee and checkout reference.
+`merchantTransactionId` in this browser response is not a lookup field: UAT (1 Oct) showed MMG's lookup carries neither it nor the product description, so `MMG_LOOKUP_REFERENCE_FIELDS` stays empty. The lookup answers HTTP 200 with `transactionStatus`, a whole-dollar `amount` string, `currency`, `creationDate` (Guyana time, even where it ends in `Z`), `transactionReference` (MMG's ledger number, a different number from the reply's `transactionId`), `creditParty`/`debitParty` as `[{key: "accountid", value}]`, and `metadata` whose `description` is empty. Credit requires MMG's success answer for the checkout plus that record: `successful`, exact amount in GYD, our merchant's `accountid`, created inside the checkout's window, and neither number credited before.
 
 ## UNCONFIRMED — requires MMG or a sandbox run
 
 - **U1/U2 resolved:** reply field names and codes are documented above.
 - **U3 partially resolved:** MMG posts an encrypted TOKEN to the configured Response URL; merchants also register an Error URL and optionally a Notify URL. Exact transport parameter spelling, Notify authentication and server-to-server behavior remain unconfirmed. Checkout series PR 3 must wire the API return/notify routes and verify those boundaries; PR 2 currently provides the service only.
 - **U4** Whether the amount digits are MAJOR units (D1). The MMG page displays the amount on the first sandbox run.
-- **U5** Whether the merchant-initiated lookup (C11) finds checkout transactions, and which id to use.
+- **U5 resolved (UAT, 1 Oct):** the merchant-initiated lookup finds a checkout payment by the reply's `transactionId` and answers with MMG's own ledger number in `transactionReference`.
 - **U6** Whether MMG refuses a repeated `merchantTransactionId`.
 - **U7** The live page host.
 - **U8** How long a checkout session lives.
@@ -75,7 +75,7 @@ Unknown/malformed result fields do not change a checkout. A success requires tra
 
 ## Security posture
 
-- **A decrypted reply proves nothing about who sent it.** The UAT key pair is shared with MMG, so anyone holding its public half can mint a reply that decrypts cleanly. Nothing credits a partner until the merchant-initiated lookup confirms the transaction, including its amount, currency and merchant (plan invariant I2, PR 2).
+- **A decrypted reply proves nothing about who sent it.** The UAT key pair is shared with MMG, so anyone holding its public half can mint a reply that decrypts cleanly. Nothing credits a partner until the merchant-initiated lookup confirms the transaction, including its status, amount, currency, merchant and time, and the one-credit constraint accepts both of MMG's numbers for it (plan invariant I2, PR 2).
 - **The keys stay two settings even though UAT uses one pair:**
   - `MMG_CHECKOUT_PUBLIC_KEY` is the MMG-issued public half, provisioned from the secret store through `MMG_CHECKOUT_PUBLIC_KEY_FILE`. The boot guard refuses a private key there rather than quietly deriving the public half from it.
   - `MMG_CHECKOUT_PRIVATE_KEY` is a secret file.

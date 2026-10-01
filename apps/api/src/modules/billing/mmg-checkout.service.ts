@@ -24,6 +24,7 @@ import { payInfo } from './agent-cash.service';
 import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
+import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 
 // ---------------------------------------------------------------------------
@@ -35,10 +36,14 @@ import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './
 // transactionId and ResultCode fields. No nested value or guessed key binds
 // a reply to a checkout or supplies a transaction id.
 // The reply is only a pointer. MMG's own merchant lookup is the only evidence
-// [I2], and a candidate credits only when that lookup reports it approved, for
-// exactly the amount asked, in GYD, paid to our merchant, AND names this
-// checkout's own reference in its confirmed reference field [F1]. Attribution is
-// bound to MMG's lookup echo; an unbound confirmation is held for a person.
+// [I2]. A payment confirms automatically (the owner's ruling of 1 Oct) only
+// when ALL hold: (1) MMG answered ResultCode 0 for THIS checkout, naming the
+// transaction, while the checkout was open; (2) MMG's lookup of that
+// transaction says "successful"; (3) the money went to our merchant's
+// "accountid"; (4) exactly the amount asked, in GYD; (5) MMG created it inside
+// the checkout's window; (6) neither the transaction nor MMG's ledger number
+// for it was ever credited. Anything else is held for a person, with
+// reminders and suspension paused [F1].
 //
 // The credit is the provider_payments compare-and-set every channel claims
 // [I3 · F2]; one open checkout per subscription is a partial unique index
@@ -59,8 +64,11 @@ const CONFIRM_WINDOW_MS = 24 * 3_600_000;
 const LATE_WINDOW_MS = 7 * 24 * 3_600_000;
 const LATE_CHECK_MS = 6 * 3_600_000;
 const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_000] as const;
-/** A transaction stamped (with a time zone) more than a day before its checkout cannot be its payment. */
-const OLDER_THAN_CHECKOUT_MS = 24 * 3_600_000;
+/** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's
+ *  creationDate, and for when MMG's success answer reached us. */
+const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
+/** An MMG transaction id or ledger number as MMG writes it. */
+const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
 const MAX_REPLY_PARAMS = 16;
 const MAX_REPLY_PARAM_CHARS = 4096;
@@ -156,7 +164,7 @@ export function checkoutReplyFrom(reply: unknown): MmgCheckoutReply | null {
   // Failed attempts may have no transaction. A success must name one.
   const absent = txn === undefined || txn === null || txn === '';
   if (absent && code === '0') return null;
-  if (!absent && (typeof txn !== 'string' || txn.trim() !== txn || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(txn))) return null;
+  if (!absent && (typeof txn !== 'string' || txn.trim() !== txn || !MMG_TXN_ID.test(txn))) return null;
   return { merchantTransactionId: ref, transactionId: absent ? null : txn as string, resultCode: code as MmgResultCode };
 }
 
@@ -209,13 +217,72 @@ export function bindingOf(merchantTransactionId: string, echoedReferences: reado
   return distinct[0] === merchantTransactionId ? 'BOUND' : 'MISMATCH';
 }
 
+/**
+ * [owner, 1 Oct] MMG's creationDate as an instant. MMG writes Guyana
+ * wall-clock time and labels it "Z" (UAT: a checkout opened at 15:38:19 Guyana
+ * time, 19:38:19Z, was paid with creationDate "2026-10-01T15:39:36.526Z"), so
+ * a stamp with "Z" or no zone is read as Guyana time; an explicit numeric
+ * offset is honoured as stated. Anything else cannot be read: null.
+ */
+const MMG_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})?$/;
+export function mmgCreationInstant(stamp: string | null): number | null {
+  if (typeof stamp !== 'string') return null;
+  const match = MMG_STAMP.exec(stamp);
+  if (!match) return null;
+  const [y, mo, d, h, mi, sec] = match.slice(1, 7).map(Number) as [number, number, number, number, number, number];
+  const ms = Number((match[7] ?? '').padEnd(3, '0').slice(0, 3));
+  const face = new Date(Date.UTC(y, mo - 1, d, h, mi, sec, ms));
+  if (face.getUTCFullYear() !== y || face.getUTCMonth() !== mo - 1 || face.getUTCDate() !== d
+    || face.getUTCHours() !== h || face.getUTCMinutes() !== mi || face.getUTCSeconds() !== sec) return null;
+  const zone = match[8];
+  if (zone && zone !== 'Z') {
+    const sign = zone.startsWith('-') ? -1 : 1;
+    const offsetMs = sign * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * 60_000;
+    return face.getTime() - offsetMs;
+  }
+  return instantOfGuyanaWallClock(face).getTime();
+}
+
+/** MMG's success answer for one checkout, or why there is none. */
+export type SuccessAnswer = { txnId: string } | { txnId: null; reason: string };
+const NO_SUCCESS: SuccessAnswer = { txnId: null, reason: 'NO_SUCCESS_ANSWER' };
+
+/**
+ * [owner, 1 Oct · condition 1] MMG's own success answer for THIS checkout:
+ * ResultCode "0" naming this checkout's merchantTransactionId and one MMG
+ * transactionId, received through either door while the checkout was open
+ * (by its deadline, two minutes' tolerance). A not-paid answer (1, 2, 6, 7)
+ * for the same checkout, or success naming two transactions, is a
+ * disagreement a person resolves. 3, 4 and 5 are configuration alerts, not
+ * payment answers. `answers` are the checkout's RETURN and NOTIFY records.
+ */
+export function successAnswerOf(
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'expiresAt' | 'status'>,
+  answers: ReadonlyArray<{ detail: string | null; body: unknown; createdAt: Date }>,
+): SuccessAnswer {
+  const named = (body: unknown) => (body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null);
+  const success = answers.filter((answer) => answer.detail === SUCCESS_ANSWER
+    && named(answer.body)?.['merchantTransactionId'] === intent.merchantTransactionId
+    && typeof named(answer.body)?.['transactionId'] === 'string');
+  if (success.length === 0) return NO_SUCCESS;
+  if (answers.some((answer) => NEGATIVE_ANSWERS.includes(answer.detail ?? ''))) return { txnId: null, reason: 'MMG_ANSWERS_DISAGREE' };
+  const txns = [...new Set(success.map((answer) => named(answer.body)!['transactionId'] as string))];
+  if (txns.length !== 1) return { txnId: null, reason: 'MMG_ANSWERS_DISAGREE' };
+  if (!success.some((answer) => answer.createdAt.getTime() <= intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS)) {
+    return { txnId: null, reason: 'SUCCESS_ANSWER_AFTER_CLOSE' };
+  }
+  if (intent.status !== 'CONFIRMING' && intent.status !== 'EXPIRED') return { txnId: null, reason: 'CHECKOUT_NOT_OPEN' };
+  return { txnId: txns[0]! };
+}
+
 type Hold = { verdict: 'HOLD'; txnId: string; reason: string; decisive: boolean };
 type Declined = { verdict: 'DECLINED'; txnId: string; reason: string; bound: boolean };
 type Verdict =
-  | { verdict: 'CONFIRM'; txnId: string }
-  /** `decisive`: a person must look now. A money mismatch MMG does not tie to
-   *  this checkout may be another transaction the reply named, so it waits out
-   *  the confirmation window before holding. */
+  /** `ledgerReference`: MMG's ledger number for the payment, credited with it [owner condition 6]. */
+  | { verdict: 'CONFIRM'; txnId: string; ledgerReference: string }
+  /** `decisive`: a person must look now. A mismatch on a record that MMG's
+   *  answer does not tie to this checkout may be another transaction the
+   *  replies named, so it waits out the confirmation window before holding. */
   | Hold
   /** `bound`: MMG's answer ties the failure to THIS checkout; the only
    *  failure a partner is ever told about [F5]. */
@@ -224,13 +291,15 @@ type Verdict =
 
 /** What one lookup answer means for one checkout. `otherCheckoutRefs` are OUR
  *  other checkouts' references that the answer names (whole values): a
- *  contradiction a person must resolve [F1]. */
+ *  contradiction a person must resolve [F1]. `success` is MMG's own success
+ *  answer for this checkout (successAnswerOf). */
 export function judge(
-  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'amount' | 'currencyCode' | 'createdAt'>,
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'amount' | 'currencyCode' | 'createdAt' | 'expiresAt'>,
   txnId: string,
   detail: MmgLookupDetail,
   merchantIds: string[],
   otherCheckoutRefs: readonly string[] = [],
+  success: SuccessAnswer = NO_SUCCESS,
 ): Verdict {
   if (detail.outcome === 'not_found') return { verdict: 'NOT_FOUND', txnId };
   if (detail.outcome === 'error') return { verdict: 'ERROR', txnId };
@@ -243,16 +312,29 @@ export function judge(
     if (otherCheckoutRefs.length > 0) return hold('REFERENCE_OF_ANOTHER_CHECKOUT', true);
     if (binding === 'MISMATCH') return hold('REFERENCE_MISMATCH', true);
     if (binding === 'AMBIGUOUS') return hold('REFERENCE_AMBIGUOUS', true);
-    const zoned = detail.createdAt && /(Z|[+-]\d{2}:?\d{2})$/.test(detail.createdAt) ? Date.parse(detail.createdAt) : NaN;
-    if (Number.isFinite(zoned) && zoned < intent.createdAt.getTime() - OLDER_THAN_CHECKOUT_MS) return hold('OLDER_THAN_CHECKOUT', bound);
-    if (detail.amountMinor === null || detail.amountMinor !== minorOf(intent)) return hold('AMOUNT_MISMATCH', bound);
-    if (detail.currencyCode !== intent.currencyCode) return hold('CURRENCY_MISMATCH', bound);
-    if (!detail.creditParties || detail.creditParties.length === 0) return hold('MERCHANT_UNCONFIRMED', bound);
-    if (!detail.creditParties.some((party) => merchantIds.some((merchant) => sameMsisdn(merchant, party)))) return hold('MERCHANT_MISMATCH', bound);
-    // [F1] Everything matches, but only MMG's own echo of THIS checkout's
-    // reference attributes the payment to it. Unbound, a person attributes it.
-    if (!bound) return hold('REFERENCE_NOT_ECHOED', true);
-    return { verdict: 'CONFIRM', txnId };
+    // (1) MMG's success answer for this checkout named this transaction.
+    const answered = success.txnId === txnId;
+    const tied = answered || bound;
+    // (2) MMG's own word, exactly.
+    if (detail.statusText !== 'successful') return hold('STATUS_NOT_SUCCESSFUL', tied);
+    // (4) Exactly the amount asked, in GYD.
+    if (detail.amountMinor === null || detail.amountMinor !== minorOf(intent)) return hold('AMOUNT_MISMATCH', tied);
+    if (detail.currencyCode !== 'GYD' || intent.currencyCode !== 'GYD') return hold('CURRENCY_MISMATCH', tied);
+    // (3) Paid to our merchant: every "accountid" credit party is ours.
+    if (!detail.creditAccounts || detail.creditAccounts.length === 0) return hold('MERCHANT_UNCONFIRMED', tied);
+    if (!detail.creditAccounts.every((account) => merchantIds.some((merchant) => sameMsisdn(merchant, account)))) return hold('MERCHANT_MISMATCH', tied);
+    // (5) Created inside this checkout's window.
+    const created = mmgCreationInstant(detail.createdAt);
+    if (created === null) return hold('CREATION_DATE_UNREADABLE', tied);
+    if (created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) {
+      return hold('OUTSIDE_CHECKOUT_WINDOW', tied);
+    }
+    // (6) MMG's ledger number is credited with the transaction, once (confirm).
+    if (!detail.ledgerReference || !MMG_TXN_ID.test(detail.ledgerReference)) return hold('LEDGER_REFERENCE_MISSING', tied);
+    // Everything matches, but only MMG's success answer for THIS checkout
+    // attributes the payment to it. Without it, a person attributes it.
+    if (!answered) return hold(success.txnId === null ? success.reason : 'NOT_THE_ANSWERED_TRANSACTION', true);
+    return { verdict: 'CONFIRM', txnId, ledgerReference: detail.ledgerReference };
   }
   if (detail.status === 'declined' || detail.status === 'expired' || detail.status === 'reversed') {
     return { verdict: 'DECLINED', txnId, reason: `MMG_${detail.status.toUpperCase()}`, bound };
@@ -714,6 +796,11 @@ export class MmgCheckoutService {
     }
     const merchantIds = this.merchantIds(provider);
     const lookup = this.lookup();
+    // [owner, 1 Oct · condition 1] MMG's own answers for this checkout, through either door.
+    const success = successAnswerOf(intent, await this.prisma.mmgCheckoutObservation.findMany({
+      where: { intentId: intent.id, source: { in: ['RETURN', 'NOTIFY'] }, detail: { in: [...NEGATIVE_ANSWERS, SUCCESS_ANSWER] } },
+      select: { detail: true, body: true, createdAt: true },
+    }));
     const verdicts: Verdict[] = [];
     for (const txnId of intent.candidates.slice(0, MAX_CANDIDATES)) {
       const detail = await lookup.transactionLookupDetail(txnId);
@@ -728,15 +815,15 @@ export class MmgCheckoutService {
         failure: detail.outcome === 'not_found' ? 'LOOKUP_NOT_FOUND' : detail.outcome === 'error' ? 'LOOKUP_FAILED' : null,
       });
       const others = detail.outcome === 'found' ? await this.otherCheckoutRefsIn(detail.raw, intent) : [];
-      verdicts.push(judge(intent, txnId, detail, merchantIds, others));
+      verdicts.push(judge(intent, txnId, detail, merchantIds, others, success));
     }
 
-    const confirmed = verdicts.find((v) => v.verdict === 'CONFIRM');
+    const confirmed = verdicts.find((v): v is Extract<Verdict, { verdict: 'CONFIRM' }> => v.verdict === 'CONFIRM');
     if (confirmed) {
       // [F2] Checkout crediting stays off until every earlier credit carries
       // its provider identity; the confirmation waits, nothing is lost.
       if (!(await providerIdentityBackfillDone(this.prisma))) return this.reschedule(intent, now, 'IDENTITY_BACKFILL_PENDING');
-      return this.confirm(intent, confirmed.txnId, now);
+      return this.confirm(intent, confirmed.txnId, confirmed.ledgerReference, now);
     }
     const decisive = verdicts.find((v): v is Hold => v.verdict === 'HOLD' && v.decisive);
     // Late checks (EXPIRED / NOT_PAID) look for a confirmation, and put any
@@ -792,9 +879,13 @@ export class MmgCheckoutService {
     return intent.status as CheckoutStatus;
   }
 
-  /** [I2 · I3 · F2] The credit: one transaction, one provider identity, once. */
-  private async confirm(intent: MmgCheckoutIntent, txnId: string, now: Date): Promise<CheckoutStatus> {
+  /** [I2 · I3 · F2] The credit: one transaction, one provider identity, once.
+   *  [owner, 1 Oct · condition 6] MMG's ledger number for the same payment is
+   *  claimed with it, under the same one-credit constraint: a payment another
+   *  channel credited by either number is never credited again. */
+  private async confirm(intent: MmgCheckoutIntent, txnId: string, ledgerReference: string, now: Date): Promise<CheckoutStatus> {
     const key = txnId; // Preserve provider spelling; SQL owns identity equivalence.
+    const numbers = [...new Set([key, ledgerReference])];
     const amount = Number(intent.amount);
     let outcome: 'credited' | 'already' | 'held';
     try {
@@ -810,8 +901,8 @@ export class MmgCheckoutService {
         // identity (the push rail's payments, admin top-ups): never relied on,
         // never skipped.
         const [pushed, toppedUp] = await Promise.all([
-          tx.subscriptionPayment.findFirst({ where: { externalRef: { equals: txnId, mode: 'insensitive' } }, select: { id: true } }),
-          tx.topUpCommand.findFirst({ where: { providerRef: { equals: txnId, mode: 'insensitive' } }, select: { id: true } }),
+          tx.subscriptionPayment.findFirst({ where: { OR: numbers.map((n) => ({ externalRef: { equals: n, mode: 'insensitive' as const } })) }, select: { id: true } }),
+          tx.topUpCommand.findFirst({ where: { OR: numbers.map((n) => ({ providerRef: { equals: n, mode: 'insensitive' as const } })) }, select: { id: true } }),
         ]);
         if (pushed || toppedUp) {
           throw new ProviderIdentityError('PROVIDER_TXN_ALREADY_CREDITED', 'Another channel already recorded this transaction.');
@@ -826,6 +917,12 @@ export class MmgCheckoutService {
           tenantId: current.tenantId,
           creditedBy: `mco:${current.id}`,
         });
+        for (const number of numbers.filter((n) => n !== key)) {
+          await claimProviderPaymentInTx(tx, {
+            provider: 'MMG', providerTxnId: number, amount, currencyCode: current.currencyCode,
+            subscriptionId: current.subscriptionId, tenantId: current.tenantId, creditedBy: `mco:${current.id}`,
+          });
+        }
         if (!identity.already) {
           await this.billing.recordTopUpInTransaction(tx, {
             subscriptionId: current.subscriptionId,
