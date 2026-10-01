@@ -1,9 +1,13 @@
 -- Empty-fence rollback only. Once authority/retirement exists, retain this schema
 -- and stop destructive execution; use a forward correction. Never discard claims.
--- Run only after excluding ALL destructive workers, then acknowledge in this
--- session: SET app.document_purge_workers_stopped = 'true';
+-- Lockstep: this drops columns the fence-era application writes (upload
+-- reservations, purge claims, holds). Revert the application to the release
+-- before the fence FIRST, and exclude ALL destructive workers, then acknowledge
+-- in this session: SET app.document_purge_workers_stopped = 'true';
 -- Run as a role that bypasses row security (superuser or BYPASSRLS): the checks
 -- below must see every row, and any other role is refused.
+-- The migration's own history row goes in the same transaction, so a later
+-- `prisma migrate deploy` re-applies the fence instead of reporting it applied.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 -- The ledgers FORCE row security, so even their owner can get a filtered view
@@ -22,8 +26,9 @@ DO $$ BEGIN
     OR EXISTS (SELECT 1 FROM document_purge_event)
     OR EXISTS (SELECT 1 FROM encrypted_objects WHERE "retiredClaimId" IS NOT NULL OR "uploadState" = 'PENDING')
     OR EXISTS (SELECT 1 FROM verification_documents WHERE "activePurgeClaimId" IS NOT NULL OR "imageCompletionClaimId" IS NOT NULL OR "fieldsPurgedAt" IS NOT NULL)
-    OR EXISTS (SELECT 1 FROM deletion_receipt WHERE "purgeClaimId" IS NOT NULL) THEN
-    RAISE EXCEPTION 'rollback refused: durable authority, events, reservations or completion provenance exist';
+    OR EXISTS (SELECT 1 FROM deletion_receipt WHERE "purgeClaimId" IS NOT NULL)
+    OR EXISTS (SELECT 1 FROM doc_legal_hold WHERE "subjectWide") THEN
+    RAISE EXCEPTION 'rollback refused: durable authority, events, reservations, completion provenance or whole-person holds exist';
   END IF;
 END $$;
 DROP TRIGGER document_purge_orphan_guard ON storage_orphans;
@@ -56,4 +61,10 @@ ALTER TABLE verification_documents DROP COLUMN "activePurgeClaimId", DROP COLUMN
   DROP COLUMN "fieldsPurgedAt", DROP COLUMN "imageSourceKind";
 ALTER TABLE encrypted_objects DROP COLUMN "sourceId", DROP COLUMN "retiredClaimId",
   DROP COLUMN "storageNamespace", DROP COLUMN "uploadState";
+ALTER TABLE doc_legal_hold DROP COLUMN "subjectWide";
+DO $$ BEGIN
+  IF to_regclass('public._prisma_migrations') IS NOT NULL THEN
+    DELETE FROM "_prisma_migrations" WHERE migration_name = '20260930190000_document_purge_hold_fence';
+  END IF;
+END $$;
 COMMIT;

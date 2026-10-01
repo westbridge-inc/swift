@@ -6961,6 +6961,8 @@ model DocLegalHold {
   /// The safety case the hold was raised from, when there is one.
   incidentCaseId String?
   incidentCase   IncidentCase?          @relation(fields: [incidentCaseId], references: [id], onDelete: Restrict)
+  /// Placed without a document list: covers every document of the person, including later ones.
+  subjectWide    Boolean                @default(false)
   documents      VerificationDocument[]
   fraudCases     FraudCase[]
   purgeEvents    DocumentPurgeEvent[]

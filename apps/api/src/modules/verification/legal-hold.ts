@@ -35,6 +35,15 @@ export interface PlaceDocLegalHoldInput {
   incidentCaseId?: string;
   /** Explicit acknowledgement that only remaining record/fields can be preserved. */
   preserveRemainingData?: boolean;
+  /**
+   * What a committed purge of the person does to this hold. REFUSE (the default,
+   * and the only mode the admin API reaches): the whole hold is refused with a
+   * typed conflict. EXCLUDE_AND_RECORD (fraud confirmation only, inside its own
+   * transaction): every document that can still be preserved is held, each
+   * committed purge is excluded and recorded against its claim, and the caller's
+   * transaction commits. Committed destruction is never revoked either way.
+   */
+  committedPurge?: 'REFUSE' | 'EXCLUDE_AND_RECORD';
 }
 
 export function reviewByWindow(now = new Date()): { min: Date; max: Date } {
@@ -54,12 +63,19 @@ export class PurgeHoldConflict extends AppError {
   }
 }
 
-export async function recordHoldConflict(tx: Pick<Prisma.TransactionClient, 'documentPurgeEvent'>, error: PurgeHoldConflict) {
-  for (const conflict of error.conflicts) await purgeEvent(tx, {
-    tenantId: error.tenantId, userId: error.input.subjectUserId, claimId: conflict.claimId,
-    kind: error.code === 'DOCUMENT_PURGE_COMMITTED' ? 'HOLD_CONFLICT_PURGE_COMMITTED' : 'HOLD_CONFLICT_IMAGE_PURGED',
-    actorId: error.input.placedBy, details: { documentId: conflict.documentId, scope: conflict.scope },
+type HoldConflict = { claimId: string; documentId: string | null; scope: string };
+
+async function appendHoldConflicts(tx: Pick<Prisma.TransactionClient, 'documentPurgeEvent'>, tenantId: string,
+  input: PlaceDocLegalHoldInput, conflicts: HoldConflict[], kind: 'HOLD_CONFLICT_PURGE_COMMITTED' | 'HOLD_CONFLICT_IMAGE_PURGED') {
+  for (const conflict of conflicts) await purgeEvent(tx, {
+    tenantId, userId: input.subjectUserId, claimId: conflict.claimId, kind,
+    actorId: input.placedBy, details: { documentId: conflict.documentId, scope: conflict.scope },
   });
+}
+
+export async function recordHoldConflict(tx: Pick<Prisma.TransactionClient, 'documentPurgeEvent'>, error: PurgeHoldConflict) {
+  await appendHoldConflicts(tx, error.tenantId, error.input, error.conflicts,
+    error.code === 'DOCUMENT_PURGE_COMMITTED' ? 'HOLD_CONFLICT_PURGE_COMMITTED' : 'HOLD_CONFLICT_IMAGE_PURGED');
 }
 
 export async function placeDocLegalHold(prisma: PrismaClient, input: PlaceDocLegalHoldInput, now = new Date()) {
@@ -91,12 +107,17 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
   const committed = await tx.documentPurgeClaim.findMany({ where: {
     userId: user.id, tenantId: user.tenantId, state: 'COMMITTED',
     ...(ids ? { documentId: { in: ids } } : {}),
-  } });
-  if (committed.length) throw new PurgeHoldConflict(user.tenantId, input,
-    committed.map((c) => ({ claimId: c.id, documentId: c.documentId, scope: c.mode })));
+  }, orderBy: { id: 'asc' } });
+  const conflicts = committed.map((c) => ({ claimId: c.id, documentId: c.documentId, scope: c.mode }));
+  const excludeCommitted = input.committedPurge === 'EXCLUDE_AND_RECORD';
+  if (conflicts.length && !excludeCommitted) throw new PurgeHoldConflict(user.tenantId, input, conflicts);
+  // Fraud confirmation: what is already committed to destruction stays committed
+  // and is recorded against its claim, in this transaction; the rest is held.
+  if (conflicts.length) await appendHoldConflicts(tx, user.tenantId, input, conflicts, 'HOLD_CONFLICT_PURGE_COMMITTED');
+  const underCommittedPurge = new Set(committed.flatMap((c) => (c.documentId ? [c.documentId] : [])));
   const destroyed = docs.filter((d) => d.fieldsPurgedAt !== null);
   if (ids && destroyed.length) throw new AppError(409, 'NOTHING_TO_HOLD', 'A requested document has already been fully erased', { documentIds: destroyed.map((d) => d.id) });
-  const remaining = docs.filter((d) => !d.fieldsPurgedAt && !d.legalHoldId);
+  const remaining = docs.filter((d) => !d.fieldsPurgedAt && !d.legalHoldId && !underCommittedPurge.has(d.id));
   const missingImages = remaining.filter((d) => d.imagePurgedAt !== null || d.purgedAt !== null);
   if (missingImages.length && !input.preserveRemainingData) {
     const conflicts = missingImages.filter((d) => d.imageCompletionClaimId).map((d) => ({ claimId: d.imageCompletionClaimId!, documentId: d.id, scope: 'IMAGE' }));
@@ -110,18 +131,21 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
   }) : [];
   const absentImages = remaining.filter((d) => !d.fileUrl || d.imagePurgedAt !== null || d.purgedAt !== null);
   const scope = absentImages.length ? 'REMAINING_DATA' : 'DOCUMENT_AND_IMAGE';
+  // No document list means the person: later documents are covered too (the claim guards read this).
+  const subjectWide = !ids;
   const hold = await tx.docLegalHold.create({ data: {
     tenantId: user.tenantId, subjectUserId: user.id, reason: input.reason, ownerId: input.ownerId, reviewBy: input.reviewBy,
-    placedBy: input.placedBy, placedAt: now, incidentCaseId: input.incidentCaseId ?? null,
+    placedBy: input.placedBy, placedAt: now, incidentCaseId: input.incidentCaseId ?? null, subjectWide,
   } });
   const stamped = await tx.verificationDocument.updateMany({
     where: { id: { in: remaining.map((d) => d.id) }, userId: user.id, legalHoldId: null }, data: { legalHoldId: hold.id },
   });
   if (stamped.count !== remaining.length) throw new AppError(409, 'HOLD_SCOPE_CHANGED', 'The preservation scope changed');
   const missingImageDocumentIds = absentImages.map((d) => d.id);
+  const excludedClaimIds = conflicts.map((c) => c.claimId);
   await purgeEvent(tx, { tenantId: user.tenantId, userId: user.id, holdId: hold.id, kind: 'HOLD_PLACED', actorId: input.placedBy,
-    details: { scope, documentIds: remaining.map((d) => d.id), missingImageDocumentIds, priorReceiptIds: receipts.map((r) => r.id) } });
-  return { hold, documents: stamped.count, scope, missingImageDocumentIds, priorReceiptIds: receipts.map((r) => r.id) };
+    details: { scope, subjectWide, documentIds: remaining.map((d) => d.id), missingImageDocumentIds, priorReceiptIds: receipts.map((r) => r.id), excludedClaimIds } });
+  return { hold, documents: stamped.count, scope, subjectWide, missingImageDocumentIds, priorReceiptIds: receipts.map((r) => r.id), excludedClaimIds };
 }
 
 export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId: string; releasedBy: string; reason: string }, now = new Date()) {

@@ -325,8 +325,10 @@ export class AccountService {
     // erasure: it stays, due for purge the moment the hold is released (its
     // retention clock is set to now), and the deferral is written to the audit
     // trail — erasure deferred by a legal obligation is recorded, never silent.
+    // A whole-person hold covers every document of the person, stamped or not.
+    const subjectWideHold = await prisma.docLegalHold.count({ where: { subjectUserId: userId, releasedAt: null, subjectWide: true } }) > 0;
     const deferred = await prisma.verificationDocument.updateMany({
-      where: { userId, purgedAt: null, legalHoldId: { not: null } },
+      where: { userId, purgedAt: null, ...(subjectWideHold ? {} : { legalHoldId: { not: null } }) },
       data: { retentionExpiresAt: new Date() },
     });
     if (deferred.count > 0) {

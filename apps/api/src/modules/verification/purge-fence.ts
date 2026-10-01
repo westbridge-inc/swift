@@ -69,10 +69,27 @@ async function namespaceOf(storage: PurgeStorage) {
   return namespace;
 }
 
-async function lockAndResolveSource(tx: Tx, input: { fileKey: string; userId: string; documentId?: string }, namespace: string) {
+async function lockAndResolveSource(
+  tx: Tx, input: { fileKey: string; userId: string; documentId?: string }, namespace: string,
+  actor: { tenantId: string; actorId: string },
+) {
   await tx.$queryRaw`SELECT "sourceId" FROM encrypted_objects WHERE "fileKey" = ${input.fileKey} ORDER BY "sourceId" FOR UPDATE`;
   await assertCompleteSourceCensus(tx);
-  const object = await resolveVerificationObject(tx, input);
+  let object = await resolveVerificationObject(tx, input);
+  if (object.storageNamespace === null) {
+    // An upload from before the fence recorded no namespace. It is bound once,
+    // here, under the user and source locks, to the store this worker reaches;
+    // the SQL guard allows only this NULL -> value step and never a rebind. The
+    // binding is recorded, and it rolls back with the claim if the claim fails.
+    const adopted = await tx.encryptedObject.updateMany({
+      where: { sourceId: object.sourceId, storageNamespace: null, retiredClaimId: null, uploadState: 'READY' },
+      data: { storageNamespace: namespace },
+    });
+    if (adopted.count !== 1) throw verificationObjectUnavailable();
+    await purgeEvent(tx, { tenantId: actor.tenantId, userId: input.userId, kind: 'SOURCE_NAMESPACE_ADOPTED', actorId: actor.actorId,
+      details: { sourceId: object.sourceId } });
+    object = await tx.encryptedObject.findUniqueOrThrow({ where: { sourceId: object.sourceId } });
+  }
   if (object.retiredClaimId || object.uploadState !== 'READY' || object.storageNamespace !== namespace) throw verificationObjectUnavailable();
   return object;
 }
@@ -88,6 +105,8 @@ export async function claimDocumentPurge(db: PrismaClient, storage: PurgeStorage
     const user = await lockPurgeUser(tx, input.userId, input.tenantId);
     const doc = await lockDocumentSource(tx, input.documentId, user.id);
     if (!doc || doc.legalHoldId) return null; // hold-first authority guard
+    // A whole-person hold covers documents submitted after it, stamped or not.
+    if (await tx.docLegalHold.count({ where: { subjectUserId: user.id, tenantId: user.tenantId, releasedAt: null, subjectWide: true } })) return null;
     const mode = input.mode === 'FULL_RETENTION' && user.phone === `deleted:${user.id}` ? 'FULL_ERASURE' : input.mode;
     if (doc.activePurgeClaimId) {
       const active = await tx.documentPurgeClaim.findUniqueOrThrow({ where: { id: doc.activePurgeClaimId } });
@@ -108,15 +127,21 @@ export async function claimDocumentPurge(db: PrismaClient, storage: PurgeStorage
         : doc.status === 'APPROVED' && (vendors > 0 || rider?.documentsVerified || driver?.documentsVerified) ? 'ACTIVE_LICENCE' : null;
       if (ground) throw new AppError(409, ground, 'Document erasure is refused by its current retention obligation');
     }
-    const object = doc.fileUrl ? await lockAndResolveSource(tx, { fileKey: doc.fileUrl, userId: user.id, documentId: doc.id }, namespace) : null;
+    const object = doc.fileUrl
+      ? await lockAndResolveSource(tx, { fileKey: doc.fileUrl, userId: user.id, documentId: doc.id }, namespace, { tenantId: user.tenantId, actorId: input.initiatedBy })
+      : null;
     const prior = !object && doc.imageCompletionClaimId
       ? await tx.documentPurgeClaim.findUnique({ where: { id: doc.imageCompletionClaimId } }) : null;
-    if (!object && (!prior || prior.state !== 'COMPLETE' || prior.documentId !== doc.id) && doc.imageSourceKind !== 'BORN_EMPTY') throw verificationObjectUnavailable();
+    // A row from before the fence with a blank pointer: nothing proves what became
+    // of its image, so its claim may retire the record and fields only, and
+    // certifies no image destruction.
+    const unprovenEmpty = !object && !prior && !doc.fileUrl && doc.imageSourceKind === 'UNPROVEN' && mode !== 'IMAGE_ONLY';
+    if (!object && !unprovenEmpty && (!prior || prior.state !== 'COMPLETE' || prior.documentId !== doc.id) && doc.imageSourceKind !== 'BORN_EMPTY') throw verificationObjectUnavailable();
     const runs = mode === 'FULL_ERASURE' ? await tx.extractionRun.findMany({ where: { submissionId: doc.id }, orderBy: { id: 'asc' }, select: { id: true } }) : [];
     const fields = mode === 'FULL_ERASURE' ? await tx.extractedField.findMany({ where: { submissionId: doc.id }, orderBy: { id: 'asc' }, select: { id: true } }) : [];
     const claim = await tx.documentPurgeClaim.create({ data: {
       tenantId: user.tenantId, userId: user.id, documentId: doc.id, subjectId: doc.subjectId, docType: doc.docType, role: doc.role,
-      mode, sourceKind: object ? 'OBJECT' : prior ? 'PRIOR_IMAGE' : 'BORN_EMPTY',
+      mode, sourceKind: object ? 'OBJECT' : prior ? 'PRIOR_IMAGE' : unprovenEmpty ? 'UNPROVEN_EMPTY' : 'BORN_EMPTY',
       sourceId: object?.sourceId, fileKey: object?.fileKey, storageNamespace: object?.storageNamespace,
       sourceFingerprint: object ? fingerprint(object) : null, sha256: object?.sha256, sizeBytes: object?.sizeBytes,
       previousImageClaimId: prior?.id, runIds: runs.map((r) => r.id), fieldIds: fields.map((f) => f.id), initiatedBy: input.initiatedBy,
@@ -203,9 +228,11 @@ export async function finishDocumentPurge(db: PrismaClient, claimId: string, ten
         || await tx.extractedField.count({ where: { submissionId: doc.id, valueCt: { not: null } } })) throw verificationObjectUnavailable();
     }
     const now = new Date();
+    // An unproven pre-fence blank pointer certifies no image lineage and keeps its historical marker.
+    const unproven = claim.sourceKind === 'UNPROVEN_EMPTY';
     await tx.verificationDocument.update({ where: { id: doc.id }, data: {
-      fileUrl: '', imagePurgedAt: doc.imagePurgedAt ?? (claim.sourceKind === 'BORN_EMPTY' ? null : now),
-      imageCompletionClaimId: doc.imageCompletionClaimId ?? claim.id,
+      fileUrl: '', imagePurgedAt: doc.imagePurgedAt ?? (claim.sourceKind === 'BORN_EMPTY' || unproven ? null : now),
+      imageCompletionClaimId: doc.imageCompletionClaimId ?? (unproven ? null : claim.id),
       ...(claim.mode !== 'IMAGE_ONLY' && { purgedAt: doc.purgedAt ?? now }),
       ...(claim.mode === 'FULL_ERASURE' && { fieldsPurgedAt: now }),
     } });
@@ -237,7 +264,7 @@ export async function purgeUnattachedObject(db: PrismaClient, storage: PurgeStor
     const existing = await tx.documentPurgeClaim.findFirst({ where: { orphanId, userId: user.id, tenantId: user.tenantId } });
     if (existing) return existing;
     if (await tx.docLegalHold.count({ where: { subjectUserId: user.id, tenantId: user.tenantId, releasedAt: null } })) return null;
-    const object = await lockAndResolveSource(tx, { fileKey: seed.key, userId: user.id }, namespace);
+    const object = await lockAndResolveSource(tx, { fileKey: seed.key, userId: user.id }, namespace, { tenantId: user.tenantId, actorId: 'orphan-reaper' });
     await tx.$queryRaw`SELECT id FROM storage_orphans WHERE id = ${orphanId} FOR UPDATE`;
     const row = await tx.storageOrphan.findUnique({ where: { id: orphanId } });
     if (!row || row.purgedAt || row.key !== seed.key || row.userId !== user.id || row.tenantId !== user.tenantId) return null;

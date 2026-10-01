@@ -12,7 +12,7 @@ import { claimDocumentPurge, probeCommittedPurge, finishDocumentPurge, purgeUnat
 import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
 import { runWithTenant } from '../plugins/tenant-context';
 import { retryStorageOrphan } from '../lib/storage-orphans';
-import { eraseDocumentsFor } from '../modules/verification/dsar';
+import { eraseDocumentsFor, exportDocumentsFor } from '../modules/verification/dsar';
 import { resolveVerificationObject } from '../modules/verification/object-authority';
 import { backfillSubjects } from '../modules/verification/subjects';
 import { getStorageProvider } from '../providers/storage/storage-provider';
@@ -763,4 +763,231 @@ it('claim, storage probe, field erasure and receipt complete under a real NOBYPA
     expect(await role.deletionReceipt.count({ where: { purgeClaimId: claim!.id } })).toBe(1);
     expect(synthetic.objects.has(f.fileKey)).toBe(false);
   } finally { await role.$disconnect(); }
+});
+
+// ---------------------------------------------------------------------------
+// [DS617] Independent review of #1407: four findings, each proved red first.
+// ---------------------------------------------------------------------------
+
+async function extraSource(f: { user: { id: string } }, name: string, storageNamespace: string | null = 'synthetic:hold-fence') {
+  const fileKey = `/uploads/verification/${f.user.id}/${name}.enc`;
+  const bytes = Buffer.from(`Synthetic ${name} bytes, no personal data`);
+  synthetic.objects.set(fileKey, bytes);
+  const envelope = await worker.encryptedObject.create({ data: {
+    fileKey, storageNamespace, createdBy: f.user.id, iv: new Uint8Array(12).fill(1), authTag: new Uint8Array(16).fill(2),
+    wrappedDek: new Uint8Array(40).fill(3), sha256: createHash('sha256').update(bytes).digest('hex'),
+    mimeType: 'image/jpeg', sizeBytes: bytes.length,
+  } });
+  return { fileKey, envelope, bytes };
+}
+async function extraDocument(
+  f: { user: { id: string } }, name: string,
+  opts: { status?: 'PENDING' | 'APPROVED'; retentionExpiresAt?: Date | null; storageNamespace?: string | null } = {},
+) {
+  const source = await extraSource(f, name, opts.storageNamespace === undefined ? 'synthetic:hold-fence' : opts.storageNamespace);
+  const doc = await worker.verificationDocument.create({ data: {
+    userId: f.user.id, role: 'CUSTOMER', docType: 'identity_l2', fileUrl: source.fileKey,
+    status: opts.status ?? 'PENDING', retentionExpiresAt: opts.retentionExpiresAt ?? null,
+  } });
+  return { ...source, doc };
+}
+/** A row as it existed before the fence: every other trigger (state machine, record, lineage) runs; only the
+ *  fence's own insert guard, which did not exist yet, is skipped — inside this one transaction. */
+async function preFenceDocument(f: { user: { id: string } }, data: { fileUrl: string; imagePurgedAt?: Date | null; imageSourceKind?: string }) {
+  return worker.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('ALTER TABLE verification_documents DISABLE TRIGGER zz_document_hold_purge_guard');
+    const doc = await tx.verificationDocument.create({ data: {
+      userId: f.user.id, role: 'CUSTOMER', docType: 'identity_l2', status: 'APPROVED',
+      retentionExpiresAt: new Date(Date.now() - DAY), ...data,
+    } });
+    await tx.$executeRawUnsafe('ALTER TABLE verification_documents ENABLE TRIGGER zz_document_hold_purge_guard');
+    return doc;
+  });
+}
+async function confirmFraud(docId: string) {
+  const reviewer = async (n: string) => (await worker.user.create({ data: {
+    id: `holdfence-reviewer-${n}-${randomUUID()}`, phone: `synthetic:reviewer-${randomUUID()}`, firstName: 'Synthetic', lastName: `Reviewer ${n}`,
+    roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE',
+  } })).id;
+  const [first, second] = [await reviewer('a'), await reviewer('b')];
+  const svc = service(worker);
+  // DOC-1 §24.2: the first fraud-class verdict escalates; a different reviewer confirms.
+  expect((await svc.rejectDocument(docId, first, 'Synthetic suspicion', 'DUPLICATE')).status).toBe('PENDING');
+  return { second, confirm: () => svc.rejectDocument(docId, second, 'Synthetic confirmation', 'DUPLICATE') };
+}
+async function committedFraud(docId: string) {
+  const doc = await holder.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+  expect(doc.status).toBe('REJECTED');
+  const fraud = await holder.fraudCase.findFirstOrThrow({ where: { submissionId: docId } });
+  expect(fraud.legalHoldId).not.toBeNull();
+  expect(doc.legalHoldId).toBe(fraud.legalHoldId);
+  expect((await holder.enforcementAction.findUniqueOrThrow({ where: { id: fraud.enforcementId! } })).level).toBe('BLOCK_PENDING_FOUNDER');
+  return fraud;
+}
+const rawClaim = (f: { user: { id: string; tenantId: string } }, doc: { id: string; docType: string; role: string }, data: Partial<Prisma.DocumentPurgeClaimUncheckedCreateInput>) =>
+  worker.documentPurgeClaim.create({ data: {
+    tenantId: f.user.tenantId, userId: f.user.id, documentId: doc.id, docType: doc.docType, role: doc.role,
+    mode: 'FULL_RETENTION', sourceKind: 'OBJECT', initiatedBy: 'synthetic-sql-bypass', ...data,
+  } });
+
+describe('[DS617 S1] a confirmed fraud always commits; its hold preserves what remains and records what cannot be preserved', () => {
+  it('another document already under committed destruction: the conflict is recorded, the rest is held, purge-first still completes', async () => {
+    const f = await claimFixture('FULL_RETENTION');
+    const pending = await extraDocument(f, 'fraud-target');
+    const { confirm } = await confirmFraud(pending.doc.id);
+    await expect(confirm()).resolves.toMatchObject({ id: pending.doc.id, status: 'REJECTED' });
+    await committedFraud(pending.doc.id);
+    // Committed destruction is never revoked or falsely "held".
+    expect((await holder.verificationDocument.findUniqueOrThrow({ where: { id: f.doc.id } })).legalHoldId).toBeNull();
+    expect(await holder.documentPurgeEvent.count({ where: { claimId: f.claim.id, kind: 'HOLD_CONFLICT_PURGE_COMMITTED' } })).toBe(1);
+    expect(await finish(f, await probeCommittedPurge(worker, getStorageProvider(), f.claim.id, f.user.tenantId))).toBe('PURGED');
+  });
+
+  it('a document whose image was already purged is held for its remaining record, and the hold says so', async () => {
+    const f = await claimFixture('IMAGE_ONLY');
+    expect(await finish(f, await probeCommittedPurge(worker, getStorageProvider(), f.claim.id, f.user.tenantId))).toBe('PURGED');
+    const pending = await extraDocument(f, 'fraud-target');
+    const { confirm } = await confirmFraud(pending.doc.id);
+    await expect(confirm()).resolves.toMatchObject({ status: 'REJECTED' });
+    const fraud = await committedFraud(pending.doc.id);
+    expect((await holder.verificationDocument.findUniqueOrThrow({ where: { id: f.doc.id } })).legalHoldId).toBe(fraud.legalHoldId);
+    const placed = await holder.documentPurgeEvent.findFirstOrThrow({ where: { holdId: fraud.legalHoldId!, kind: 'HOLD_PLACED' } });
+    expect(placed.details).toMatchObject({ scope: 'REMAINING_DATA', missingImageDocumentIds: [f.doc.id] });
+  });
+
+  it('an unattached upload under committed destruction does not stop the documents being held', async () => {
+    const f = await orphanFixture();
+    synthetic.beforeRead = async (key) => { if (key === f.fileKey) throw new Error('synthetic provider outage'); };
+    expect(await purgeUnattachedObject(worker, getStorageProvider(), f.orphan.id)).toBe(false);
+    synthetic.beforeRead = undefined;
+    const orphanClaim = await holder.documentPurgeClaim.findFirstOrThrow({ where: { orphanId: f.orphan.id } });
+    expect(orphanClaim.state).toBe('COMMITTED');
+    const pending = await extraDocument(f, 'fraud-target');
+    const { confirm } = await confirmFraud(pending.doc.id);
+    await expect(confirm()).resolves.toMatchObject({ status: 'REJECTED' });
+    const fraud = await committedFraud(pending.doc.id);
+    expect((await holder.verificationDocument.findUniqueOrThrow({ where: { id: f.doc.id } })).legalHoldId).toBe(fraud.legalHoldId);
+    expect(await holder.documentPurgeEvent.count({ where: { claimId: orphanClaim.id, kind: 'HOLD_CONFLICT_PURGE_COMMITTED' } })).toBe(1);
+  });
+});
+
+describe('[DS617 S2] a whole-person hold also covers documents submitted after it', () => {
+  it('retention, the reaper, DSAR erasure and raw SQL all refuse a later document; release ends the coverage', async () => {
+    const f = await fixture();
+    const placed = await placeDocLegalHold(holder, { ...holdInput(f), documentIds: undefined });
+    expect(placed.documents).toBe(1);
+    const later = await extraDocument(f, 'submitted-after-hold', { status: 'APPROVED', retentionExpiresAt: new Date(Date.now() - DAY) });
+    expect(later.doc.legalHoldId).toBeNull();
+    const claimLater = () => claimDocumentPurge(worker, getStorageProvider(), {
+      documentId: later.doc.id, userId: f.user.id, tenantId: f.user.tenantId, mode: 'FULL_RETENTION', initiatedBy: 'synthetic-test',
+    });
+    expect(await claimLater()).toBeNull();
+    await service(documentMaintenanceScope(worker, [f.user.id])).purgeExpiredDocuments();
+    expect(synthetic.deleted).not.toContain(later.fileKey);
+    expect(await holder.documentPurgeClaim.count({ where: { documentId: later.doc.id } })).toBe(0);
+    await expect(rawClaim(f, later.doc, {
+      sourceId: later.envelope.sourceId, fileKey: later.fileKey, storageNamespace: later.envelope.storageNamespace,
+      sourceFingerprint: 'synthetic-unusable-fingerprint', sha256: later.envelope.sha256, sizeBytes: later.envelope.sizeBytes,
+    })).rejects.toThrow('subject-wide legal hold active');
+    expect(await eraseDocumentsFor(worker, service(worker), f.user.id, [later.doc.id]))
+      .toEqual([expect.objectContaining({ documentId: later.doc.id, outcome: 'REFUSED', ground: 'LEGAL_HOLD' })]);
+    await releaseDocLegalHold(worker, { holdId: placed.hold.id, releasedBy: f.user.id, reason: 'Synthetic release' });
+    expect(await claimLater()).not.toBeNull();
+  });
+
+  it('a subject access export reports a later document as under the whole-person hold', async () => {
+    const id = `holdfence-${randomUUID()}`;
+    const user = await worker.user.create({ data: { id, phone: `synthetic:${id}`, firstName: 'Synthetic', lastName: 'HoldFence', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE' } });
+    const first = await extraDocument({ user }, 'held-at-placement', { status: 'APPROVED' });
+    await placeDocLegalHold(holder, { subjectUserId: id, reason: 'Synthetic preservation', ownerId: id, placedBy: id, reviewBy: new Date(Date.now() + 7 * DAY) });
+    const later = await extraDocument({ user }, 'after-hold-export', { status: 'APPROVED' });
+    const exported = await exportDocumentsFor(worker, id);
+    expect(exported.documents.map((d) => [d.id, d.underLegalHold])).toEqual([[first.doc.id, true], [later.doc.id, true]]);
+  });
+
+  it('a hold that names its documents covers only those, as specified (DOC-1 §9.4)', async () => {
+    const f = await fixture();
+    await placeDocLegalHold(holder, holdInput(f));
+    const later = await extraDocument(f, 'beside-named-hold', { status: 'APPROVED', retentionExpiresAt: new Date(Date.now() - DAY) });
+    expect(await claimDocumentPurge(worker, getStorageProvider(), {
+      documentId: later.doc.id, userId: f.user.id, tenantId: f.user.tenantId, mode: 'FULL_RETENTION', initiatedBy: 'synthetic-test',
+    })).not.toBeNull();
+  });
+
+  it('account erasure defers every document of a person under a whole-person hold and says so', async () => {
+    const f = await fixture();
+    await placeDocLegalHold(holder, { ...holdInput(f), documentIds: undefined });
+    const later = await extraDocument(f, 'submitted-before-erasure', { status: 'APPROVED' });
+    const account = new AccountService({ prisma: worker, io: { in: () => ({ disconnectSockets: () => undefined }) },
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } } as unknown as FastifyInstance);
+    expect(await account.deleteAccount(f.user.id)).toMatchObject({ deleted: false });
+    expect(synthetic.deleted).not.toContain(later.fileKey);
+    expect(await holder.documentPurgeClaim.count({ where: { documentId: later.doc.id } })).toBe(0);
+    const deferred = await holder.auditLog.findFirstOrThrow({ where: { action: 'ERASURE_DEFERRED_LEGAL_HOLD', entityId: f.user.id } });
+    expect((deferred.changes as { heldDocuments?: number }).heldDocuments).toBe(2);
+  });
+});
+
+describe('[DS617 S2] pre-fence documents stay purgeable without weakening the fence', () => {
+  it('a pre-fence envelope with no recorded namespace is bound once, inside the claim, to the store the worker reaches', async () => {
+    const f = await fixture();
+    const legacy = await extraDocument(f, 'pre-fence-object', { status: 'APPROVED', retentionExpiresAt: new Date(Date.now() - DAY), storageNamespace: null });
+    expect(await service(worker).purgeDocumentNow({ ...legacy.doc, user: f.user }, 'reaper', { requireRetentionElapsed: true, shredFields: false })).toBe('PURGED');
+    expect(await holder.encryptedObject.findUniqueOrThrow({ where: { fileKey: legacy.fileKey } })).toMatchObject({ storageNamespace: 'synthetic:hold-fence', wrappedDek: null });
+    const claim = await holder.documentPurgeClaim.findFirstOrThrow({ where: { documentId: legacy.doc.id } });
+    expect(claim).toMatchObject({ sourceKind: 'OBJECT', storageNamespace: 'synthetic:hold-fence', state: 'COMPLETE' });
+    expect(await holder.deletionReceipt.findUniqueOrThrow({ where: { purgeClaimId: claim.id } })).toMatchObject({ verificationProbeResult: 'CONFIRMED_ABSENT' });
+    expect(await holder.documentPurgeEvent.count({ where: { userId: f.user.id, kind: 'SOURCE_NAMESPACE_ADOPTED' } })).toBe(1);
+    // A recorded namespace is never rebound: a different one refuses before any external effect.
+    const elsewhere = await extraDocument(f, 'recorded-elsewhere', { status: 'APPROVED', retentionExpiresAt: new Date(Date.now() - DAY), storageNamespace: 'synthetic:elsewhere' });
+    await expect(claimDocumentPurge(worker, getStorageProvider(), {
+      documentId: elsewhere.doc.id, userId: f.user.id, tenantId: f.user.tenantId, mode: 'FULL_RETENTION', initiatedBy: 'synthetic-test',
+    })).rejects.toMatchObject({ code: 'VERIFICATION_OBJECT_UNAVAILABLE' });
+    expect((await holder.encryptedObject.findUniqueOrThrow({ where: { fileKey: elsewhere.fileKey } })).storageNamespace).toBe('synthetic:elsewhere');
+    expect(synthetic.deleted).not.toContain(elsewhere.fileKey);
+  });
+
+  it('a pre-fence blank pointer retires its record without certifying any image destruction', async () => {
+    const f = await fixture();
+    const earlier = new Date(Date.now() - 30 * DAY);
+    const doc = await preFenceDocument(f, { fileUrl: '', imagePurgedAt: earlier });
+    expect(doc.imageSourceKind).toBe('UNPROVEN');
+    expect(await service(worker).purgeDocumentNow({ ...doc, user: f.user }, 'reaper', { requireRetentionElapsed: true, shredFields: false })).toBe('PURGED');
+    const after = await holder.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } });
+    expect(after.purgedAt).not.toBeNull();
+    expect(after.imageCompletionClaimId).toBeNull();
+    expect(after.imagePurgedAt).toEqual(earlier);
+    const claim = await holder.documentPurgeClaim.findFirstOrThrow({ where: { documentId: doc.id } });
+    expect(claim).toMatchObject({ sourceKind: 'UNPROVEN_EMPTY', mode: 'FULL_RETENTION', state: 'COMPLETE' });
+    expect(await holder.deletionReceipt.findUniqueOrThrow({ where: { purgeClaimId: claim.id } })).toMatchObject({ verificationProbeResult: 'NOT_APPLICABLE' });
+  });
+
+  it('only a pre-fence blank pointer qualifies: a fenced document, an image-only scope and raw SQL are refused', async () => {
+    const f = await fixture();
+    const fenced = await preFenceDocument(f, { fileUrl: '', imageSourceKind: 'OBJECT' });
+    await expect(claimDocumentPurge(worker, getStorageProvider(), {
+      documentId: fenced.id, userId: f.user.id, tenantId: f.user.tenantId, mode: 'FULL_RETENTION', initiatedBy: 'synthetic-test',
+    })).rejects.toMatchObject({ code: 'VERIFICATION_OBJECT_UNAVAILABLE' });
+    await expect(rawClaim(f, fenced, { sourceKind: 'UNPROVEN_EMPTY' })).rejects.toThrow('legacy empty source mismatch');
+    const legacy = await preFenceDocument(f, { fileUrl: '' });
+    await expect(rawClaim(f, legacy, { sourceKind: 'UNPROVEN_EMPTY', mode: 'IMAGE_ONLY' })).rejects.toThrow('legacy empty source mismatch');
+    expect(await holder.documentPurgeClaim.count({ where: { documentId: { in: [fenced.id, legacy.id] } } })).toBe(0);
+  });
+
+  it('the reaper completes its sweep and its heartbeat with pre-fence rows due', async () => {
+    const f = await fixture();
+    const legacyObject = await extraDocument(f, 'pre-fence-due', { status: 'APPROVED', retentionExpiresAt: new Date(Date.now() - DAY), storageNamespace: null });
+    const legacyBlank = await preFenceDocument(f, { fileUrl: '' });
+    const before = Date.now();
+    await service(documentMaintenanceScope(worker, [f.user.id])).purgeExpiredDocuments();
+    for (const id of [f.doc.id, legacyObject.doc.id, legacyBlank.id]) {
+      expect((await holder.verificationDocument.findUniqueOrThrow({ where: { id } })).purgedAt).not.toBeNull();
+    }
+    // The blank pre-fence pointer gains no invented image-purge time and no image lineage.
+    const blank = await holder.verificationDocument.findUniqueOrThrow({ where: { id: legacyBlank.id } });
+    expect(blank.imagePurgedAt).toBeNull();
+    expect(blank.imageCompletionClaimId).toBeNull();
+    const heartbeat = await holder.platformConfig.findUniqueOrThrow({ where: { key: 'last_reaper_run_at' } });
+    expect(new Date(String(heartbeat.value).replace(/^"|"$/g, '')).getTime()).toBeGreaterThanOrEqual(before - 1000);
+  });
 });

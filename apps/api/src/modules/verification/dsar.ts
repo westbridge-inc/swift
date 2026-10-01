@@ -39,6 +39,11 @@ export function refusalGround(doc: { held: boolean; amlRecord: boolean; approved
   return null;
 }
 
+/** A whole-person hold covers every document of the person, including any submitted after it. */
+async function subjectWideHoldActive(prisma: PrismaClient, userId: string, tenantId: string): Promise<boolean> {
+  return (await prisma.docLegalHold.count({ where: { subjectUserId: userId, tenantId, releasedAt: null, subjectWide: true } })) > 0;
+}
+
 export async function exportDocumentsFor(prisma: PrismaClient, userId: string) {
   const docs = await prisma.verificationDocument.findMany({
     where: { userId },
@@ -51,6 +56,8 @@ export async function exportDocumentsFor(prisma: PrismaClient, userId: string) {
   const ids = docs.map((d) => d.id);
   const cases = await prisma.reviewCase.findMany({ where: { submissionId: { in: ids } }, include: { decisions: { orderBy: { decidedAt: 'asc' } } } });
   const receipts = await prisma.deletionReceipt.findMany({ where: { subjectId: userId }, orderBy: { deletedAt: 'asc' } });
+  const owner = await prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+  const subjectWideHold = owner ? await subjectWideHoldActive(prisma, userId, owner.tenantId) : false;
   const kp = getKeyProvider();
   let fieldCount = 0;
   const documents = [];
@@ -67,7 +74,7 @@ export async function exportDocumentsFor(prisma: PrismaClient, userId: string) {
     documents.push({
       id: d.id, docType: d.docType, role: d.role, status: d.status,
       submittedAt: d.createdAt, reviewedAt: d.reviewedAt, expiresAt: d.expiresAt, purgedAt: d.purgedAt,
-      underLegalHold: d.legalHoldId !== null,
+      underLegalHold: d.legalHoldId !== null || subjectWideHold,
       fields,
       verdicts: d.validationResults.map((v) => ({ validatorCode: v.validatorCode, status: v.status, evaluatedAt: v.evaluatedAt })),
       // Categories only — never the reviewer's note, never the precise reason (§8.5).
@@ -105,6 +112,7 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
     orderBy: { createdAt: 'asc' },
   });
   const live = await relationshipIsLive(prisma, userId);
+  const subjectWideHold = await subjectWideHoldActive(prisma, userId, user.tenantId);
   const receiptOf = async (id: string) => {
     const r = await prisma.deletionReceipt.findFirst({ where: { submissionId: id }, orderBy: { deletedAt: 'desc' } });
     return r ? { deletedAt: r.deletedAt, probe: r.verificationProbeResult, stores: r.storeLocations } : undefined;
@@ -114,7 +122,7 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
     if (d.fieldsPurgedAt) { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'ALREADY_DESTROYED', receipt: await receiptOf(d.id) }); continue; }
     const type = await prisma.docType.findUnique({ where: { code: registryCode(user.countryCode, d.docType) }, select: { amlRecordClass: true } });
     const ground = refusalGround({
-      held: d.legalHoldId !== null,
+      held: d.legalHoldId !== null || subjectWideHold,
       amlRecord: Boolean(type && type.amlRecordClass !== 'NOT_APPLICABLE'),
       approved: d.status === 'APPROVED',
       relationshipLive: live,
@@ -129,7 +137,8 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
     else if (result === 'PROBE_FAILED') outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'DESTRUCTION_PENDING', receipt: await receiptOf(d.id) });
     else {
       const current = await prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } });
-      outcomes.push(current.legalHoldId ? { documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }
+      const heldNow = current.legalHoldId !== null || await subjectWideHoldActive(prisma, userId, user.tenantId);
+      outcomes.push(heldNow ? { documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }
         : { documentId: d.id, docType: d.docType, outcome: 'DESTRUCTION_PENDING' });
     }
   }

@@ -904,9 +904,16 @@ export class VerificationService {
     args: { docId: string; subjectUserId: string; tenantId: string; caseId: string; reviewerId: string; reasonCode: RejectionReasonCode; now: Date },
   ): Promise<void> {
     const { docId, subjectUserId, tenantId, caseId, reviewerId, reasonCode, now } = args;
+    // [DS617] The confirmation never rolls back over a purge of this person's
+    // documents. Whatever is already committed to destruction stays committed
+    // (it cannot be revoked) and is recorded against its claim in THIS
+    // transaction; every document that can still be preserved is held — an image
+    // already purged under policy is held for its remaining record, and the hold
+    // says so — and, as a whole-person hold, it covers later documents too.
     const hold = await placeDocLegalHoldIn(tx, {
       subjectUserId, reason: `Fraud confirmed on second review (${reasonCode}) — evidence preserved for a founder decision`,
       ownerId: reviewerId, placedBy: reviewerId, reviewBy: new Date(now.getTime() + FRAUD_HOLD_REVIEW_DAYS * 86_400_000),
+      preserveRemainingData: true, committedPurge: 'EXCLUDE_AND_RECORD',
     }, now).catch((err: unknown) => {
       // NOTHING_TO_HOLD cannot happen here — the document being rejected is unpurged — but a hold is never the thing that loses the rejection.
       if (err instanceof AppError && err.code === 'NOTHING_TO_HOLD') return null;

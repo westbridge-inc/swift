@@ -16,7 +16,7 @@ CREATE TABLE document_purge_claim (
   "orphanId" text REFERENCES storage_orphans(id) ON DELETE RESTRICT,
   "subjectId" uuid, "docType" text, role text,
   mode text NOT NULL CHECK (mode IN ('IMAGE_ONLY','FULL_RETENTION','FULL_ERASURE','UNATTACHED_OBJECT')),
-  "sourceKind" text NOT NULL CHECK ("sourceKind" IN ('OBJECT','PRIOR_IMAGE','BORN_EMPTY')),
+  "sourceKind" text NOT NULL CHECK ("sourceKind" IN ('OBJECT','PRIOR_IMAGE','BORN_EMPTY','UNPROVEN_EMPTY')),
   "sourceId" uuid REFERENCES encrypted_objects("sourceId") ON DELETE RESTRICT,
   "fileKey" text, "storageNamespace" text, "sourceFingerprint" text, sha256 text, "sizeBytes" integer,
   "previousImageClaimId" uuid REFERENCES document_purge_claim(id) ON DELETE RESTRICT,
@@ -52,6 +52,9 @@ CREATE INDEX "document_purge_event_tenantId_createdAt_idx" ON document_purge_eve
 CREATE INDEX "document_purge_event_claimId_idx" ON document_purge_event("claimId");
 ALTER TABLE deletion_receipt ADD COLUMN "purgeClaimId" uuid REFERENCES document_purge_claim(id) ON DELETE RESTRICT, ADD COLUMN scope text;
 CREATE UNIQUE INDEX "deletion_receipt_purgeClaimId_key" ON deletion_receipt("purgeClaimId");
+-- A hold placed without a document list covers the person: documents submitted
+-- later are covered too. Holds placed before this fence keep their stamps only.
+ALTER TABLE doc_legal_hold ADD COLUMN "subjectWide" boolean NOT NULL DEFAULT false;
 
 -- These ledgers carry no default tenant: lineage must be explicit.
 ALTER TABLE document_purge_claim ENABLE ROW LEVEL SECURITY;
@@ -79,8 +82,13 @@ BEGIN
     SELECT * INTO d FROM verification_documents WHERE id = NEW."documentId" FOR UPDATE;
     IF NOT FOUND OR d."userId" <> u.id OR d."legalHoldId" IS NOT NULL OR d."activePurgeClaimId" IS NOT NULL
       OR d."subjectId" IS DISTINCT FROM NEW."subjectId" OR d."docType" IS DISTINCT FROM NEW."docType" OR d.role::text IS DISTINCT FROM NEW.role THEN RAISE EXCEPTION 'document purge binding unavailable'; END IF;
+    IF EXISTS (SELECT 1 FROM doc_legal_hold WHERE "subjectUserId" = u.id AND "releasedAt" IS NULL AND "subjectWide") THEN RAISE EXCEPTION 'subject-wide legal hold active'; END IF;
     IF NEW."sourceKind" = 'OBJECT' AND d."fileUrl" <> NEW."fileKey" THEN RAISE EXCEPTION 'purge pointer mismatch'; END IF;
     IF NEW."sourceKind" = 'BORN_EMPTY' AND (d."imageSourceKind" <> 'BORN_EMPTY' OR d."fileUrl" <> '') THEN RAISE EXCEPTION 'unproven empty source'; END IF;
+    -- A row written before this fence with a blank pointer: no image lineage can
+    -- be proved or certified, so only its record and fields may be retired.
+    IF NEW."sourceKind" = 'UNPROVEN_EMPTY' AND (d."imageSourceKind" <> 'UNPROVEN' OR d."fileUrl" <> '' OR d."imageCompletionClaimId" IS NOT NULL
+      OR NEW.mode NOT IN ('FULL_RETENTION','FULL_ERASURE')) THEN RAISE EXCEPTION 'legacy empty source mismatch'; END IF;
     IF NEW."sourceKind" = 'PRIOR_IMAGE' THEN
       SELECT * INTO prior FROM document_purge_claim WHERE id = NEW."previousImageClaimId";
       IF NOT FOUND OR prior.state <> 'COMPLETE' OR prior."documentId" <> d.id OR d."imageCompletionClaimId" <> prior.id OR d."fileUrl" <> '' THEN RAISE EXCEPTION 'image lineage mismatch'; END IF;
@@ -175,7 +183,10 @@ BEGIN
   IF NEW."imageSourceKind" IS DISTINCT FROM OLD."imageSourceKind" THEN RAISE EXCEPTION 'source origin immutable'; END IF;
   IF OLD."legalHoldId" IS NOT NULL AND NEW."legalHoldId" IS DISTINCT FROM OLD."legalHoldId" AND NOT EXISTS (SELECT 1 FROM doc_legal_hold WHERE id = OLD."legalHoldId" AND "releasedAt" IS NOT NULL) THEN RAISE EXCEPTION 'active hold cannot be unstamped'; END IF;
   IF NEW."legalHoldId" IS NOT NULL AND NEW."legalHoldId" IS DISTINCT FROM OLD."legalHoldId" THEN
-    IF EXISTS (SELECT 1 FROM document_purge_claim WHERE "userId" = owner_id AND state = 'COMMITTED' AND ("documentId" = OLD.id OR mode = 'UNATTACHED_OBJECT')) THEN RAISE EXCEPTION 'DOCUMENT_PURGE_COMMITTED'; END IF;
+    -- Per document: never stamp a document whose own destruction is committed.
+    -- (An unattached upload is never a document; whether a whole-person hold may
+    -- be reported while one is being destroyed is the hold writer's decision.)
+    IF EXISTS (SELECT 1 FROM document_purge_claim WHERE "userId" = owner_id AND state = 'COMMITTED' AND "documentId" = OLD.id) THEN RAISE EXCEPTION 'DOCUMENT_PURGE_COMMITTED'; END IF;
     IF NOT EXISTS (SELECT 1 FROM doc_legal_hold h JOIN users u ON u.id = h."subjectUserId" AND u."tenantId" = h."tenantId" WHERE h.id = NEW."legalHoldId" AND h."subjectUserId" = owner_id AND h."releasedAt" IS NULL) THEN RAISE EXCEPTION 'hold lineage mismatch'; END IF;
   END IF;
   IF OLD."legalHoldId" IS NOT NULL OR EXISTS (SELECT 1 FROM document_purge_claim WHERE "documentId" = OLD.id) THEN
