@@ -251,8 +251,9 @@ describe('[MMG checkout F2 · F7] agent cash claims the one identity inside its 
   it('[F7] an identity on record for another tenant is a conflict: suspensed, never credited', async () => {
     const { sub, san } = await makeVendorSub();
     const id = txn();
+    // Filed exactly as a claim files an identity: under its canonical key.
     await prisma.providerPayment.create({
-      data: { tenantId: 'another-tenant-f7', provider: PROVIDER, providerTxnId: keyOf(id), status: 'OPEN', amount: 2100, currencyCode: 'GYD' },
+      data: { tenantId: 'another-tenant-f7', provider: PROVIDER, providerTxnId: await canonical(keyOf(id)), status: 'OPEN', amount: 2100, currencyCode: 'GYD' },
     });
     expect(await svc.ingest(webhook(id, san))).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
     expect(await money(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, balance: 0 });

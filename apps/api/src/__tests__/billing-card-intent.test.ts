@@ -337,12 +337,21 @@ describe('[M-01 · operations] the kill switch and the unreachable processor', (
     fake.lookupMode = 'normal';
     expect((await billing.reconcileUnknownCardCharges()).settled).toBeGreaterThanOrEqual(1);
     expect(await facts(first, periodKey)).toMatchObject({ successes: 1, failures: 0, ledger: 1, nextBillingDate: due.getTime() + 7 * DAY });
-    // Reachable: retrieved and settled inside the charge path — nothing sent.
+    // Reachable: [#1393] the live intent is a payment being confirmed, so it
+    // holds the shared clock and the charge path stops before any instruction
+    // (the belt behind it stays as defence in depth). Nothing is sent; the
+    // reconciler retrieves the intent by its key and settles it once.
     const second = await makeCardSub(due); await plant(second);
-    expect(await bill(second)).toBe('succeeded');
+    const lookupsBefore = fake.lookups;
+    expect(await bill(second)).toBe('pending');
     expect(fake.keysSeen).toHaveLength(0);
-    expect(fake.lookups).toBeGreaterThanOrEqual(2);
+    const planted = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: second, paymentMethod: 'CARD' } });
+    expect(await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: planted.id } })).toMatchObject({ status: 'ACTIVE' });
+    expect((await billing.reconcileUnknownCardCharges()).settled).toBeGreaterThanOrEqual(1);
+    expect(fake.keysSeen).toHaveLength(0);
+    expect(fake.lookups).toBeGreaterThan(lookupsBefore);
     expect(await facts(second, periodKey)).toMatchObject({ successes: 1, failures: 0, ledger: 1, nextBillingDate: due.getTime() + 7 * DAY });
+    expect(await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: planted.id } })).toMatchObject({ status: 'PAID' });
   });
 
   it('CARD_RAIL_KILL=1 stops new instructions — and never the reconciler', async () => {

@@ -12,7 +12,7 @@ import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isPassengerVehicle
 import { partnerRateFor, type SubscriptionTiers } from '../modules/country/country-config.service';
 import { PartnerService } from '../modules/partner/partner.service';
 import { lockMoverFeeAuthority, resolveMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
-import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { cleanupBillingClocks, cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // The mover weekly fee follows the ROLE first, then the VEHICLE — never the
@@ -247,6 +247,10 @@ describe('mover fee band — what a mover is actually charged', () => {
     const owned = await app.prisma.subscription.findMany({ where: { OR: [{ driverId: driver.id }, { riderId: rider.id }] } });
     const due = new Date(Date.now() - 60_000);
     for (const sub of owned) {
+      // [#1393] Aging input: the trial is over and the week is due. The shared
+      // clock is born at the trial's due date, so compressing time re-anchors
+      // this test-owned clock (no money, hold or notice exists before the first fee).
+      await cleanupBillingClocks(app.prisma, [sub.id]);
       await app.prisma.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', isTrialActive: false, currentPeriodStart: new Date(due.getTime() - 7 * 86_400_000), currentPeriodEnd: due, nextBillingDate: due } });
       await app.prisma.prepaidBalance.upsert({ where: { subscriptionId: sub.id }, create: { subscriptionId: sub.id, balance: 20000, currencyCode: 'GYD' }, update: { balance: 20000 } });
       const ready = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id }, include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } } });

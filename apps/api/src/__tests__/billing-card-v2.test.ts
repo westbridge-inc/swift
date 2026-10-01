@@ -282,7 +282,13 @@ describe('[C4] requires_action (off-session 3-D Secure) is not a decline', () =>
     expect(after.failures).toBe(0);
     expect(after.payments).toEqual([expect.objectContaining({ status: 'FAILED', failureCode: 'REQUIRES_ACTION' })]);
     expect(after.payments[0]!.failureRaw).toMatchObject({ subscriptionOutcome: 'PRESERVED_NO_DUNNING', providerOutcome: 'REQUIRES_ACTION' });
-    expect(after.sub.nextRetryAt!.getTime()).toBeGreaterThanOrEqual(before + 23 * 60 * 60 * 1000);
+    // [#1393 owner decision] A card waiting for its 3-D Secure step is being
+    // confirmed: the instruction holds the shared clock, so no retry, reminder
+    // or suspension runs until it is confirmed either way.
+    expect(after.sub.billingConfirmationPausedAt!.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    expect(after.sub.nextRetryAt).toBeNull();
+    expect(await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: after.payments[0]!.id } }))
+      .toMatchObject({ status: 'ACTIVE' });
     expect((await kindsFor(p.userId)).filter((k) => k === 'billing_card_action_required')).toHaveLength(1);
     // The notice says only what is true (the fee-notice law): no card door the app lacks yet, no instant restore.
     const notice = await app.prisma.notification.findFirstOrThrow({ where: { userId: p.userId, title: 'Card payment not completed' } });

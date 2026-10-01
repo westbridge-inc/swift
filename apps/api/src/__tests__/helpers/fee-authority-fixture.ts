@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import { Prisma } from '@prisma/client';
+import { billingMemoryTable } from './billing-memory-tables';
 
 // The pricing fakes model the new ownership/member tables too. The actual
 // resolver still executes; its dual-role and database-lock laws are covered by
@@ -9,10 +10,19 @@ export function authorityTables(rows: () => Array<Record<string, any>>, people: 
   const members: Array<Record<string, any>> = [];
   const source = (row: Record<string, any>): Record<string, any> => ({
     riderId: null, driverId: null, vendorId: null, rider: null, driver: null, vendor: null,
-    status: 'ACTIVE', customRate: null, feeWaived: false, createdAt: new Date(0), ...row,
+    status: 'ACTIVE', customRate: null, feeWaived: false, createdAt: new Date(0),
+    // Dates a new shared clock reads (its due and retry anchors); fixtures may override.
+    nextBillingDate: new Date(0), nextRetryAt: null, suspendedAt: null, updatedAt: new Date(0), ...row,
     weeklyRate: new Prisma.Decimal(row['weeklyRate'] ?? 1),
   });
   const all = () => rows().map(source);
+  // [#1393] An authority decision syncs the payer's shared dunning clock in the
+  // same transaction. These pricing fakes hold that clock in memory; with no
+  // completed cutover marker, effects stay unready (no projection is applied).
+  const clocks: Array<Record<string, any>> = [];
+  const holds: Array<Record<string, any>> = [];
+  const clockDefaults = () => ({ epoch: 1, version: 0, elapsedMs: 0n, pausedAt: null, resumedAt: null, authorityHoldReason: null,
+    authorityRevision: null, retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null });
   const owner = (row: Record<string, any>) => row['rider']?.user?.id ?? row['driver']?.user?.id ?? row['vendor']?.owner?.user?.id;
   const find = async ({ where }: { where: { id: string } }) => all().find((r) => r['id'] === where.id) ?? null;
   return {
@@ -20,6 +30,8 @@ export function authorityTables(rows: () => Array<Record<string, any>>, people: 
       findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => people().find((u) => u['id'] === where.id)!) },
     subscription: {
       findUnique: vi.fn(find), findUniqueOrThrow: vi.fn(find),
+      // The clock's projection columns only; the pricing fakes keep their own rates.
+      update: vi.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => ({ ...(await find({ where })), ...data })),
       findMany: vi.fn(async ({ where }: { where: { id?: { in: string[] }; OR?: Array<{ rider?: { userId: string }; driver?: { userId: string } }> } }) =>
         all().filter((r) => where.id ? where.id.in.includes(r['id']) : owner(r) === (where.OR?.[0]?.rider?.userId ?? where.OR?.[1]?.driver?.userId))),
     },
@@ -38,6 +50,9 @@ export function authorityTables(rows: () => Array<Record<string, any>>, people: 
       return { count: data.length };
     }) },
     auditLog: { create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({ id: `decision-${authorities.size}-${members.length}`, ...data })) },
+    billingDunningClock: billingMemoryTable(() => clocks, 'clock', clockDefaults),
+    paymentConfirmationHold: billingMemoryTable(() => holds, 'hold'),
+    platformConfig: { findUnique: vi.fn(async () => null) },
     $executeRaw: vi.fn(async () => 0),
     $queryRaw: vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
       const sql = parts.join('?');

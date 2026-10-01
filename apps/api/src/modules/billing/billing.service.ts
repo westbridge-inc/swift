@@ -1,5 +1,5 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
-import { voluntaryResumeProofInTx } from './obligation-evidence';
+import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
 import { resumeVoluntaryObligationInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
@@ -91,7 +91,6 @@ type InstrumentLookup =
   | { status: 'not_found' }
   | { status: 'unknown'; reason: string }
   | { status: 'held' };
-const RETRY_HOURS = 24;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Local request review threshold. It cannot expire an authorized provider
@@ -458,7 +457,14 @@ export class BillingService {
           const clock = await currentDunningClock(tx, sub.id, now);
           // A resumed but uncollected obligation is still owed. A stopped
           // flag and an old period end cannot erase that liability.
-          const proof = await voluntaryResumeProofInTx(tx, fresh, clock);
+          let proof = await voluntaryResumeProofInTx(tx, fresh, clock);
+          // [E12] A trial that ended while billing was stopped owed nothing:
+          // its free period is recorded as zero-fee coverage, then it lapses
+          // like any covered period (and resumes charged at the resume).
+          if (!proof && await stoppedTrialOwesNothingInTx(tx, fresh, clock)) {
+            await recordTrialCoverageInTx(tx, fresh);
+            proof = await voluntaryResumeProofInTx(tx, fresh, clock);
+          }
           if (!proof) return false;
           // Guarded: a resume that armed autoRenew in between wins.
           const flipped = await tx.subscription.updateMany({
@@ -2730,14 +2736,13 @@ export class BillingService {
         where: { id: sub.id },
         select: { autoRenew: true },
       });
-      if (await this.subscriptionHasConfirmationHold(tx, sub.id, undefined, input.now)
+      // The approval prompt belongs to THIS instruction: its own confirmation
+      // hold never silences it, while another payment still being confirmed
+      // does. The retry schedule is the shared clock's projection (paused
+      // while this instruction is confirmed), never a stamp written here.
+      if (await this.subscriptionHasConfirmationHold(tx, sub.id, input.paymentId, input.now)
         || authority.bankInsteadOfAdvance || authority.suppressNotice || !live?.autoRenew
         || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(authority.status)) return false;
-
-      await tx.subscription.update({
-        where: { id: sub.id },
-        data: { nextRetryAt: new Date(input.now.getTime() + RETRY_HOURS * 60 * 60 * 1000) },
-      });
       return true;
     });
   }

@@ -349,18 +349,19 @@ export class NotificationService {
 
   async send(payload: NotificationPayload): Promise<string> {
     if (isFeeDemand(payload)) {
-      // Best effort like every send (below): a recorded fee demand stays
-      // PENDING for the drain worker, and one that could not be recorded for
-      // this recipient is logged, never thrown into the caller. An admin
-      // fan-out must still reach the next admin.
+      // A fee demand that cannot be recorded for THIS recipient is logged and
+      // counted, never thrown into the caller: an admin fan-out must still
+      // reach the next admin. A recorded demand's delivery outcome (an
+      // UNKNOWN handoff included) still reaches the caller unchanged.
+      let notice: Awaited<ReturnType<typeof enqueueFeeDemand>>;
       try {
-        const notice = await enqueueFeeDemand(this.prisma, payload);
-        return await this.deliverFeeDemand(notice.id);
+        notice = await enqueueFeeDemand(this.prisma, payload);
       } catch (err) {
-        log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not delivered now');
+        log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
         notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
         return '';
       }
+      return this.deliverFeeDemand(notice.id);
     }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 

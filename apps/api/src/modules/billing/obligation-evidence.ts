@@ -20,6 +20,36 @@ export async function settledFeePeriodInTx(tx: Tx, sub: Subscription, start: Dat
   return matches.length === 1 ? matches[0]! : null;
 }
 
+/** [E12] A trial that ended while weekly billing was stopped owed nothing: no
+ * fee ever fell due and no instruction was ever issued for any of the payer's
+ * sources, and the obligation never moved past the trial end. Only such a row
+ * may record its free trial as zero-fee coverage (below). */
+export async function stoppedTrialOwesNothingInTx(tx: Tx, sub: Subscription, clock: BillingDunningClock): Promise<boolean> {
+  if (sub.status !== 'ACTIVE' || sub.autoRenew || sub.isTrialActive || sub.failedAttempts !== 0 || !sub.trialEndDate
+    || clock.subscriptionId !== sub.id || clock.epoch !== 1 || clock.pausedAt || clock.authorityHoldReason) return false;
+  const end = sub.trialEndDate.getTime();
+  if (sub.currentPeriodEnd.getTime() !== end || sub.nextBillingDate.getTime() !== end || clock.dueAt.getTime() !== end
+    || sub.currentPeriodStart.getTime() >= end) return false;
+  const authority = clock.moverPayerUserId ? await tx.moverFeeAuthority.findUnique({
+    where: { userId: clock.moverPayerUserId }, include: { members: true } }) : null;
+  const ids = authority?.members.map((m) => m.subscriptionId) ?? [sub.id];
+  if (await tx.subscriptionPayment.count({ where: { subscriptionId: { in: ids } } })) return false;
+  return !await tx.billingEvent.count({ where: { subscriptionId: { in: ids },
+    type: { in: ['CHARGE_ATTEMPT', 'CHARGE_SUCCESS', 'CHARGE_FAILED'] } } });
+}
+
+/** The free trial as zero-fee coverage: the same durable records every
+ * zero-fee period carries (a captured zero payment and its success record).
+ * Nothing is credited, no money moves and no ledger line is written. */
+export async function recordTrialCoverageInTx(tx: Tx, sub: Subscription) {
+  const ref = `trial:${sub.id}`;
+  await tx.subscriptionPayment.create({ data: { subscriptionId: sub.id, amount: 0, status: 'CAPTURED', paymentMethod: 'CASH',
+    externalRef: ref, periodStart: sub.currentPeriodStart, periodEnd: sub.currentPeriodEnd, paidAt: sub.currentPeriodStart } });
+  await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: 0, currencyCode: sub.currencyCode,
+    idempotencyKey: `success:${sub.id}:${sub.currentPeriodStart.toISOString().slice(0, 10)}`, paymentRef: ref,
+    note: 'Free trial: no weekly fee was due (billing was stopped before the first fee)' } });
+}
+
 /** A settled period may authorize one voluntary restart. The immutable
  * transition's unique payment identity also covers restarting exactly at period
  * end, where changing the due date alone would not consume the proof. */

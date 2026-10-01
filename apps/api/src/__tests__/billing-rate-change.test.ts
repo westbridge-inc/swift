@@ -85,6 +85,8 @@ async function makeRiderSub(opts: {
   feeWaived?: boolean;
   prepaid?: number;
   msisdn?: string;
+  /** [#1393] The current period was paid: its captured payment and success record exist. */
+  paid?: boolean;
 }) {
   const { userId, token } = await makeUser(['MOVER', 'CUSTOMER'] as UserRole[], 'MOVER');
   const rider = await app.prisma.rider.create({
@@ -116,12 +118,31 @@ async function makeRiderSub(opts: {
         : {}),
     },
   });
+  if (opts.paid) await settlePeriod(sub.id, sub.currentPeriodStart, sub.currentPeriodEnd, Number(sub.weeklyRate));
   return { userId, subId: sub.id, httpToken: token };
 }
+
+/** [#1393] A paid week as the billing engine records one: its captured payment
+ *  and matching success record. A stopped plan pauses at its period end only on
+ *  this exact settled coverage; a date alone never erases a fee. */
+async function settlePeriod(subId: string, start: Date, end: Date, amount: number) {
+  const paymentRef = `ax332-paid:${subId}:${start.toISOString()}`;
+  await app.prisma.subscriptionPayment.create({ data: { subscriptionId: subId, amount, paymentMethod: 'CASH', status: 'CAPTURED',
+    periodStart: start, periodEnd: end, paidAt: start, externalRef: paymentRef } });
+  await app.prisma.billingEvent.create({ data: { subscriptionId: subId, type: 'CHARGE_SUCCESS', amount, currencyCode: 'GYD',
+    paymentRef, idempotencyKey: `success:${subId}:${start.toISOString().slice(0, 10)}` } });
+}
+
+/** Payments the billing engine made, leaving out a fixture's settled week. */
+const enginePayments = (subId: string) => app.prisma.subscriptionPayment.findMany({
+  where: { subscriptionId: subId, NOT: { externalRef: { startsWith: 'ax332-paid:' } } }, orderBy: { createdAt: 'asc' },
+});
 
 /** A taxi subscription issued on the previous 9,000 rate. */
 async function makeTaxiSub(opts: {
   due: Date; status?: SubscriptionStatus; weeklyRate?: number; customRate?: number; feeWaived?: boolean; prepaid?: number; msisdn?: string;
+  /** [#1393] Billing stopped with the current period paid: the lapse sweep pauses it at the period end. */
+  stoppedPaid?: boolean;
 }) {
   const { userId, token } = await makeUser(['MOVER', 'DRIVER', 'CUSTOMER'], 'DRIVER');
   const driver = await app.prisma.driver.create({ data: {
@@ -133,9 +154,10 @@ async function makeTaxiSub(opts: {
     ...(opts.customRate !== undefined ? { customRate: opts.customRate } : {}),
     ...(opts.feeWaived ? { feeWaived: true, feeWaivedBy: 'test-admin', feeWaivedReason: 'test waiver' } : {}),
     billingMethod: opts.msisdn ? 'MOBILE_MONEY' : 'CASH', mmgPayerMsisdn: opts.msisdn ?? null,
-    autoRenew: opts.status !== 'PAUSED', currentPeriodStart: new Date(opts.due.getTime() - WEEK), currentPeriodEnd: opts.due, nextBillingDate: opts.due,
+    autoRenew: opts.status !== 'PAUSED' && !opts.stoppedPaid, currentPeriodStart: new Date(opts.due.getTime() - WEEK), currentPeriodEnd: opts.due, nextBillingDate: opts.due,
     ...(opts.prepaid !== undefined ? { prepaidBalance: { create: { balance: opts.prepaid, currencyCode: 'GYD' } } } : {}),
   } });
+  if (opts.stoppedPaid) await settlePeriod(sub.id, sub.currentPeriodStart, sub.currentPeriodEnd, Number(sub.weeklyRate));
   return { userId, subId: sub.id, httpToken: token };
 }
 
@@ -277,7 +299,7 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
   it('a rider paused on 8,000 moves to 6,000, and resuming charges 6,000 from prepaid funds', async () => {
     const now = new Date();
     // Stopped weekly billing on the old card; the paid period then ran out.
-    const paused = await makeRiderSub({ due: new Date(now.getTime() - 2 * DAY), autoRenew: false, prepaid: 8000 });
+    const paused = await makeRiderSub({ due: new Date(now.getTime() - 2 * DAY), autoRenew: false, prepaid: 8000, paid: true });
     await billing.lapseStoppedSubscriptions(now);
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: paused.subId } })).status).toBe('PAUSED');
 
@@ -299,7 +321,7 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
     });
     expect(resume.statusCode, resume.body).toBe(200);
 
-    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: paused.subId } });
+    const payments = await enginePayments(paused.subId);
     expect(payments).toHaveLength(1);
     expect({ amount: Number(payments[0]!.amount), status: payments[0]!.status }).toEqual({ amount: 6000, status: 'CAPTURED' });
     const wallet = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: paused.subId } });
@@ -400,22 +422,17 @@ describe('AX332 F2: due now is the charge already issued', () => {
     expect(await rate(rider.subId)).toBe(6000);
 
     await billing.sweepSuspended(now);
-    // The committed notice (the audit record of what the partner was told is
-    // owed) says the same as the fee screen: what approving the request
-    // settles, never the new weekly rate in its place.
-    const event = await app.prisma.billingEvent.findFirstOrThrow({
+    // [#1393 owner decision] While the 8,000 request is being confirmed no
+    // "you owe" nudge is committed or delivered at all, so no notice can quote
+    // a figure the fee screen does not. The fee screen states what approving
+    // the request settles: the issued 8,000, never the new weekly rate.
+    expect(await app.prisma.billingEvent.count({
       where: { subscriptionId: rider.subId, type: 'REMINDER', idempotencyKey: { startsWith: `nudge:${rider.subId}:` } },
-    });
-    const committed = JSON.parse(event.note!) as { body: string };
-    expect(committed.body).toContain('You owe $8,000 GYD.');
-    expect(committed.body).not.toContain('6,000');
-    expect((await feeScreen(rider.httpToken)).amountDueGyd).toBe(8000);
-    // What is delivered is rendered as history and names no amount at all, so
-    // no push can quote a figure the fee screen does not.
-    const pushed = await app.prisma.notification.findFirstOrThrow({
+    })).toBe(0);
+    expect(await app.prisma.notification.count({
       where: { userId: rider.userId, data: { path: ['kind'], equals: 'billing_suspended_nudge' } },
-    });
-    expect(pushed.body).not.toMatch(/\d,\d{3}/);
+    })).toBe(0);
+    expect((await feeScreen(rider.httpToken)).amountDueGyd).toBe(8000);
   });
 
   it('only a live charge for the week now owed is due now: not a dead one, not a request for a week already paid', async () => {
@@ -464,11 +481,14 @@ describe('owner taxi 8,000: future fees change, issued money does not', () => {
   });
 
   it('resumes a paused taxi at 8,000 from prepaid funds', async () => {
-    const taxi = await makeTaxiSub({ due: new Date(Date.now() - DAY), status: 'PAUSED', prepaid: 9000 });
+    // [#1393] Paused the real way: billing stopped, the paid week ran out, the lapse sweep paused it.
+    const taxi = await makeTaxiSub({ due: new Date(Date.now() - DAY), stoppedPaid: true, prepaid: 9000 });
+    await billing.lapseStoppedSubscriptions();
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: taxi.subId } })).status).toBe('PAUSED');
     await billing.recalculateMoverTiers();
     const resume = await app.inject({ method: 'PUT', url: '/api/v1/driver/subscription/billing-method', payload: { method: 'CASH' }, headers: { 'content-type': 'application/json', authorization: `Bearer ${taxi.httpToken}` } });
     expect(resume.statusCode, resume.body).toBe(200);
-    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: taxi.subId } });
+    const payments = await enginePayments(taxi.subId);
     expect(payments).toHaveLength(1);
     expect({ amount: Number(payments[0]!.amount), status: payments[0]!.status }).toEqual({ amount: 8000, status: 'CAPTURED' });
     expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: taxi.subId } })).balance)).toBe(1000);

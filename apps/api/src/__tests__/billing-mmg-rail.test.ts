@@ -180,21 +180,15 @@ describe('MMG charge lifecycle', () => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091162' });
 
-    // Local age does not settle provider authority in either direction.
-    await app.prisma.subscriptionPayment.create({
-      data: {
-        subscriptionId: subId,
-        amount: 12000,
-        status: 'PENDING',
-        paymentMethod: 'MOBILE_MONEY',
-        externalRef: `mmgtx_${outcome}_${nanoid(8)}`,
-        periodStart: due,
-        periodEnd: new Date(due.getTime() + 7 * DAY),
-        createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
-      },
-    });
+    // [#1393] Issued by the real intent machine, so MMG's answer is bound to
+    // THIS request (our reference, amount and pinned currency). Local age
+    // (polled 25 hours later, past our TTL) does not settle provider
+    // authority in either direction.
+    expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
+    const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
+    sandboxSetTxStatus(issued.externalRef!, outcome);
 
-    const polled = await billing.pollPendingMmgCharges();
+    const polled = await billing.pollPendingMmgCharges(new Date(Date.now() + 25 * 60 * 60 * 1000));
     if (outcome === 'expired') expect(polled.failed).toBeGreaterThanOrEqual(1);
     else expect(polled.stillPending).toBeGreaterThanOrEqual(1);
 
@@ -301,15 +295,24 @@ describe('MMG double-charge guard [SWIFT-004]', () => {
     const outcome = await billing.billSubscription((await subWithRelations(subId)) as any);
     expect(outcome).toBe('pending');
 
-    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    let payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
     // The guard must NOT have initiated a second MMG request: exactly one MMG
     // reference is in play for the week. (Pre-fix, a blind re-initiate added a
     // second approvable request → the double-charge.)
     const refs = new Set(payments.map((p) => p.externalRef));
     expect(refs.size).toBe(1);
     expect([...refs][0]).toBe(originalRef);
-    // The original is re-attached (PENDING) so the poller can still settle it.
-    expect(payments.find((p) => p.externalRef === originalRef)!.status).toBe('PENDING');
+    // [#1393] A FAILED row with no proof from MMG is a payment still being
+    // confirmed: it holds the shared clock, so the charge path stops before
+    // any lookup or instruction. The repair pass re-attaches the original
+    // (PENDING) so the poller can still settle it, never inventing a failure.
+    const original = payments.find((p) => p.externalRef === originalRef)!;
+    expect(await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: original.id } })).toMatchObject({ status: 'ACTIVE' });
+    await billing.reconcileTerminalWithoutOutcome();
+    payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    expect(payments).toHaveLength(1);
+    expect(payments[0]!.status).toBe('PENDING');
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } })).toBe(0);
   });
 
   it('heals a late approval — settles off the original request instead of charging again', async () => {
@@ -330,8 +333,13 @@ describe('MMG double-charge guard [SWIFT-004]', () => {
       data: { status: 'PAST_DUE', failedAttempts: 1, nextRetryAt: new Date(Date.now() - 1000) },
     });
 
-    const outcome = await billing.billSubscription((await subWithRelations(subId)) as any);
-    expect(outcome).toBe('succeeded');
+    // [#1393] The FAILED row without MMG's proof is still being confirmed: the
+    // charge path stops (no second request), the repair pass re-attaches the
+    // original and the poller settles the approval off it.
+    expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
+    await billing.reconcileTerminalWithoutOutcome();
+    const polled = await billing.pollPendingMmgCharges();
+    expect(polled.settled).toBeGreaterThanOrEqual(1);
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
     expect(after.status).toBe('ACTIVE');
@@ -366,6 +374,10 @@ describe('MMG double-charge guard [SWIFT-004]', () => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
     }
+    // [#1393] The repair pass re-attaches it and the poller sees MMG's approval,
+    // which nothing ties to our request: held for a person, never settled.
+    await billing.reconcileTerminalWithoutOutcome();
+    await billing.pollPendingMmgCharges();
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
     expect(after.status).toBe('PAST_DUE');
