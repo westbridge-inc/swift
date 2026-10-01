@@ -9,33 +9,29 @@ export { SiteNav } from './site-nav';
 /**
  * [Q36] How money moves, in one honest line. Orders are paid to the business —
  * cash, or the store's own MMG — and the API refuses any other order payment.
- * Visa and Mastercard are for Swift's own charge, the weekly partner fee, and
- * read "coming soon" until launch.cardPayments says the card rail is live.
+ * Visa and Mastercard are for Swift's own charges (the weekly partner fee, and
+ * advertising a business chooses to buy). They are listed only once
+ * launch.cardPayments says the card rail is live: a method that does not work
+ * yet is never shown or teased (the partner checkout census enforces it).
  */
 export function PaymentMethods() {
   const cardsLive = launch.cardPayments === 'live';
-  const methods = [
-    { name: 'Cash', soon: false },
-    { name: 'MMG', soon: false },
-    { name: 'Visa', soon: !cardsLive },
-    { name: 'Mastercard', soon: !cardsLive },
-  ];
+  const methods = ['Cash', 'MMG', ...(cardsLive ? ['Visa', 'Mastercard'] : [])];
   return (
     <section aria-label="Payment methods" className="mx-auto max-w-6xl px-5 py-5 text-xs text-[var(--swift-muted)]">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-5">
         <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--swift-ink)]">Payment methods</h2>
         <ul className="flex flex-wrap gap-2">
-          {methods.map((m) => (
-            <li key={m.name} className="inline-flex items-center gap-1.5 rounded-full border border-[var(--swift-border)] bg-white px-3 py-1 text-sm font-semibold text-[var(--swift-ink)]">
-              {m.name}
-              {m.soon ? <span className="text-[11px] font-medium text-[var(--swift-muted)]">coming soon</span> : null}
+          {methods.map((name) => (
+            <li key={name} className="inline-flex items-center rounded-full border border-[var(--swift-border)] bg-white px-3 py-1 text-sm font-semibold text-[var(--swift-ink)]">
+              {name}
             </li>
           ))}
         </ul>
       </div>
       <p className="mt-3 max-w-3xl leading-relaxed">
-        Orders are paid to the business itself, in cash or by MMG. Visa and Mastercard are for Swift&apos;s weekly partner
-        fee{cardsLive ? '.' : ' and are coming soon.'}
+        Orders are paid to the business itself, in cash or by MMG.
+        {cardsLive ? " Visa and Mastercard are for Swift's own charges, the weekly partner fee and advertising." : null}
       </p>
     </section>
   );

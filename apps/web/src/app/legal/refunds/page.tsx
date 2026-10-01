@@ -92,16 +92,15 @@ export default function RefundsPage() {
       {/* OWNER MUST APPROVE: this whole section is a business commitment. */}
       <h2>The weekly partner fee</h2>
       <p>
-        {site.tradeName}&apos;s only charge is the flat weekly fee that businesses, riders and drivers pay for the
-        software. Customers pay {site.tradeName} nothing.
+        Businesses, riders and drivers pay {site.tradeName} a flat weekly fee for the software. Customers pay{' '}
+        {site.tradeName} nothing. Advertising that a business chooses to buy is covered by the separate advertising
+        terms.
       </p>
       <ul>
         <li>
           <b>Paid in advance.</b> Each payment covers the week that starts on its due date. Today the fee is paid by
           MMG.{' '}
-          {cardsLive
-            ? 'It can also be paid by Visa or Mastercard, through our bank’s card payment page.'
-            : 'Paying by Visa or Mastercard, through our bank’s card payment page, is coming soon.'}
+          {cardsLive ? 'It can also be paid by Visa or Mastercard, through our bank’s card payment page.' : null}
         </li>
         <li>
           <b>Charged twice, or by mistake?</b> {site.tradeName} refunds the extra or mistaken charge in full, to the

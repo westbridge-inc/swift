@@ -122,7 +122,8 @@ export const launch = {
   },
 
   /** [Q36] Visa and Mastercard, through the bank's card gateway, for Swift's
-   *  OWN charge — the weekly partner fee. Orders are never paid by card: the
+   *  OWN charges — the weekly partner fee, and advertising a business chooses
+   *  to buy. Orders are never paid by card: the
    *  API accepts only cash or the store's own MMG for an order. Flip to 'live'
    *  only when a partner can pay the weekly fee by card end to end; until then
    *  every card mark on the site says "coming soon". */

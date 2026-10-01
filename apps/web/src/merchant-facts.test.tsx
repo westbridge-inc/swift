@@ -2,7 +2,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { site } from '@/site.config';
+import { launch, site } from '@/site.config';
 
 // ---------------------------------------------------------------------------
 // [Q36] The card bank's minimum website information. The bank is sent a
@@ -71,6 +71,9 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     const words = services.textContent ?? '';
     for (const who of ['Customers', 'Businesses', 'Delivery riders', 'Taxi drivers']) expect(words, who).toContain(who);
     expect(words).toMatch(/weekly fee/i);
+    // The published Terms name Swift's other charge: advertising a business can choose to buy.
+    expect(words).toMatch(/advertising/i);
+    expect(words).not.toMatch(/only charge/i);
     expect(within(services).getByRole('link', { name: /pricing/i }).getAttribute('href')).toBe('/pricing');
   });
 
@@ -116,14 +119,15 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     expect(screen.getByRole('region', { name: 'Company facts' }).textContent).toContain(`Registered and located in${site.registeredCity}, ${site.country}`);
   });
 
-  // The official artwork is gated behind the brands' own terms, which only the
-  // company can accept; until it is supplied the footer names both cards in
-  // plain text (never an imitation of a mark).
-  it('9 · Visa and Mastercard are named under Payment methods, beside cash and MMG', async () => {
+  // The card marks join the list only once cards are accepted (the partner
+  // checkout census forbids teasing a method early), and the official artwork
+  // waits on the brands' own terms, which only the company can accept: until
+  // both, the bank's ninth item is shown as the methods that work today.
+  it('9 · Payment methods: cash and MMG today, Visa and Mastercard exactly when cards are live', async () => {
     await renderRoute('/about');
     const methods = within(footer()).getByRole('region', { name: 'Payment methods' });
     const listed = within(methods).getAllByRole('listitem').map((item) => item.textContent ?? '');
-    for (const method of ['Cash', 'MMG', 'Visa', 'Mastercard']) expect(listed.some((item) => item.startsWith(method)), method).toBe(true);
+    expect(listed).toEqual(['Cash', 'MMG', ...(launch.cardPayments === 'live' ? ['Visa', 'Mastercard'] : [])]);
   });
 });
 

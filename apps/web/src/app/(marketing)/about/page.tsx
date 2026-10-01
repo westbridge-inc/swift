@@ -65,7 +65,8 @@ export default function AboutPage() {
               Most delivery platforms take a percentage of every sale. Swift does not, and it is not
               a promotion that expires. Businesses and movers pay one flat weekly subscription and
               keep <b className="font-semibold text-[var(--swift-ink)]">100%</b> of every sale, fare
-              and tip. The subscription is the entire business model — there is no commission line,
+              and tip. Apart from advertising a business can choose to buy, the subscription is the entire
+              business model — there is no commission line,
               no service fee taken from a driver, and no markup added to a customer&apos;s bill.
             </p>
             <p>
@@ -104,10 +105,10 @@ export default function AboutPage() {
             </ul>
             <h3 className="mt-7 text-lg font-bold text-[var(--swift-ink)]">What {site.tradeName} charges</h3>
             <p className="mt-2 text-[var(--swift-muted)]">
-              {site.tradeName}&apos;s only charge is a flat weekly fee that businesses, riders and drivers pay in
-              advance for the software, after a free trial. There is no commission on any sale, fare or tip, and
-              nothing is added to a customer&apos;s bill. The current weekly fee for each kind of partner is on
-              the{' '}
+              Businesses, riders and drivers pay {site.tradeName} a flat weekly fee for the software, in advance,
+              after a free trial. A business can also choose to buy advertising on {site.tradeName}, under separate
+              advertising terms. There is no commission on any sale, fare or tip, and nothing is added to a
+              customer&apos;s bill. The current weekly fee for each kind of partner is on the{' '}
               <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/pricing">
                 pricing page
               </Link>
