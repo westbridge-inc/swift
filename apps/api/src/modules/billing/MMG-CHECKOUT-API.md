@@ -185,7 +185,7 @@ type CheckoutStatus = {
 **Automatic confirmation (owner, 1 Oct).** A payment is credited automatically only when ALL of these hold; anything else is `HELD` for a person, with no reminders and no suspension, and operators are alerted once:
 1. MMG's reply decrypts with ResultCode `0`, naming this checkout's `merchantTransactionId` and an MMG `transactionId`, and reaches Swift (through the return door or the notify door, whichever is first) while the checkout is open: by its deadline, with two minutes' tolerance. A not-paid answer (`1`, `2`, `6`, `7`) for the same checkout, or success naming two transactions, means MMG's answers disagree.
 2. MMG's lookup of that `transactionId` answers HTTP 200 with `transactionStatus` exactly `successful`.
-3. Every `creditParty` entry keyed `accountid` is Swift's configured merchant number.
+3. Every `creditParty` entry keyed `accountid`, including one with an empty or missing value, is the checkout's configured merchant number (`MMG_CHECKOUT_MERCHANT_ID`). A payment to any other number, another Swift number included, is held.
 4. `amount` is exactly the checkout's whole-GYD amount and `currency` is `GYD`.
 5. `creationDate` lies inside the checkout's window (created to expiry, two minutes' tolerance), read in the zone the server setting `MMG_CHECKOUT_CREATION_ZONE` names (section 8), and is no more than two minutes after Swift first received an MMG reply naming the transaction. With the setting unset, MMG's payment time cannot be checked, so every MMG payment is `HELD`.
 6. Neither the `transactionId` nor the lookup's `transactionReference` (MMG's ledger number, a different number) was ever credited by any channel. The credit claims both, under the one-credit-per-MMG-payment constraint.

@@ -1998,6 +1998,29 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await heldAlerts(operator.id, row.id)).toHaveLength(1);
   });
 
+  it('[DS632] condition (3) is the checkout’s own merchant only: a payment to the push rail’s number (MMG_MERCHANT_ID) is HELD, never credited', async () => {
+    const before = process.env['MMG_MERCHANT_ID'];
+    process.env['MMG_MERCHANT_ID'] = '5926999911';
+    try {
+      const s = await makeSub();
+      const row = await intentOf((await start(s)).checkout.ref);
+      const txn = tx('PUSHRAILNUMBER');
+      approved(txn, 2100, {}, { creditParty: [{ key: 'accountid', value: '5926999911' }] });
+      expect(await codeReply(row, '0', txn)).toBe('CONFIRMING');
+      expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'MERCHANT_MISMATCH' });
+      expect(await topups(s.subId)).toHaveLength(0);
+      expect(await identityOf(txn)).toBeNull();
+      // The same payment to the checkout's own merchant confirms.
+      const t = await makeSub();
+      const own = await intentOf((await start(t)).checkout.ref);
+      approved(tx('CHECKOUTNUMBER'), 2100);
+      expect(await codeReply(own, '0', tx('CHECKOUTNUMBER'))).toBe('CONFIRMED');
+    } finally {
+      if (before === undefined) delete process.env['MMG_MERCHANT_ID'];
+      else process.env['MMG_MERCHANT_ID'] = before;
+    }
+  });
+
   it('MMG’s success answer that reaches us after the checkout closed is HELD, even with an exact payment made in time', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);

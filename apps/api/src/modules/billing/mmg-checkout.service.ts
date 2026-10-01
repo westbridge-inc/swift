@@ -357,7 +357,7 @@ export function judge(
     // (4) Exactly the amount asked, in GYD.
     if (detail.amountMinor === null || detail.amountMinor !== minorOf(intent)) return hold('AMOUNT_MISMATCH', tied);
     if (detail.currencyCode !== 'GYD' || intent.currencyCode !== 'GYD') return hold('CURRENCY_MISMATCH', tied);
-    // (3) Paid to our merchant: every "accountid" credit party is ours.
+    // (3) Paid to this checkout's merchant: every "accountid" credit party is it.
     if (!detail.creditAccounts || detail.creditAccounts.length === 0) return hold('MERCHANT_UNCONFIRMED', tied);
     if (!detail.creditAccounts.every((account) => merchantIds.some((merchant) => sameMsisdn(merchant, account)))) return hold('MERCHANT_MISMATCH', tied);
     // (5) Created inside this checkout's window, the stamp read in the
@@ -1150,8 +1150,11 @@ export class MmgCheckoutService {
     }
   }
 
+  /** [DS632] Condition (3): the checkout's own merchant number, the one its
+   *  page paid. Never the push rail's (MMG_MERCHANT_ID): a payment to another
+   *  Swift account is held for a person, not attributed to this checkout. */
   private merchantIds(provider: MmgCheckoutProvider | null): string[] {
-    return [provider?.merchantId, process.env['MMG_MERCHANT_ID']].filter((id): id is string => typeof id === 'string' && id.length > 0);
+    return provider?.merchantId ? [provider.merchantId] : [];
   }
 
   private async observe(row: {
