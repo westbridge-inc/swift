@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient, type DocumentPurgeClaim, type EncryptedObject } from '@prisma/client';
 import { getTenantContext } from '../../plugins/tenant-context';
 import { AppError } from '../../utils/errors';
+import { lockIdentityAuthority } from '../integrity/identity-review';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import { registryCode } from './doc-registry';
 import { writeDeletionReceipt, type PurgeEvidence } from './purge-receipt';
@@ -212,6 +213,10 @@ export async function finishDocumentPurge(db: PrismaClient, claimId: string, ten
   return db.$transaction<PurgeOutcome>(async (tx) => {
     const seed = await tx.documentPurgeClaim.findFirst({ where: { id: claimId, tenantId } });
     if (!seed?.documentId) throw verificationObjectUnavailable();
+    // Every claim but an image-only one projects, and a projection can reach subscription
+    // activation, which takes the identity authority: take it first, before the person's
+    // row, in the order every projection uses (identity-review lockIdentityAuthority).
+    if (seed.mode !== 'IMAGE_ONLY') await lockIdentityAuthority(tx);
     await lockPurgeUser(tx, seed.userId, tenantId);
     const doc = await lockDocumentSource(tx, seed.documentId, seed.userId);
     const claim = await tx.documentPurgeClaim.findUniqueOrThrow({ where: { id: claimId } });

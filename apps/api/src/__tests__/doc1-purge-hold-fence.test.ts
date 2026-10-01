@@ -991,3 +991,44 @@ describe('[DS617 S2] pre-fence documents stay purgeable without weakening the fe
     expect(new Date(String(heartbeat.value).replace(/^"|"$/g, '')).getTime()).toBeGreaterThanOrEqual(before - 1000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [#1414 merge] Main takes the identity authority before any account row lock
+// (subscription.service withActivation). A purge that projects can reach that
+// activation, so it takes the authority first, too.
+// ---------------------------------------------------------------------------
+
+async function identityLockWaiterWhile(pending: () => boolean): Promise<'WAITING' | 'FINISHED' | 'TIMEOUT'> {
+  for (let attempt = 0; attempt < 200 && pending(); attempt++) {
+    const [row] = await worker.$queryRaw<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM pg_locks l JOIN pg_database d ON d.oid = l.database
+      WHERE d.datname = current_database() AND l.locktype = 'advisory' AND NOT l.granted`;
+    if (row!.n > 0) return 'WAITING';
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return pending() ? 'TIMEOUT' : 'FINISHED';
+}
+
+describe('[#1414 merge] a purge that projects takes the identity authority before the person', () => {
+  it('a full-retention finish waits for the identity authority without holding the person row', async () => {
+    const f = await claimFixture('FULL_RETENTION');
+    const evidence = await probeCommittedPurge(worker, getStorageProvider(), f.claim.id, f.user.tenantId);
+    const held = barrier();
+    const proceed = barrier();
+    const authority = holder.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended('identity-authority-v1', 0))::text AS locked`;
+      held.release();
+      await proceed.promise;
+      // The waiting finish has not taken the person's row: an identity writer can still lock it.
+      return tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM users WHERE id = ${f.user.id} FOR UPDATE NOWAIT`;
+    }, { timeout: 30_000 });
+    await held.promise;
+    let settled = false;
+    const finishing = finish(f, evidence).finally(() => { settled = true; });
+    const first = await identityLockWaiterWhile(() => !settled);
+    proceed.release();
+    expect(await authority).toHaveLength(1);
+    expect(first).toBe('WAITING');
+    expect(await finishing).toBe('PURGED');
+  });
+});
