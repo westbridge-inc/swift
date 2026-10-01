@@ -1654,6 +1654,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const report = await runBillingInvariants(ctx.prisma);
         const broken =
           report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+          report.unjudgedSubscriptions.length +
           report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
@@ -1663,7 +1664,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );

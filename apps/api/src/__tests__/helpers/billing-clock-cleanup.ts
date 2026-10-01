@@ -1,15 +1,25 @@
 import type { PrismaClient } from '@prisma/client';
 
 /** Synthetic fixtures own these exact subscriptions. Production retention FKs
- * remain RESTRICT; tests explicitly remove their dependent clock evidence. */
+ * remain RESTRICT; tests explicitly remove their dependent clock evidence.
+ * A mover payer's clock is keyed to their canonical subscription, so the
+ * evidence of a member subscription can live on a clock keyed to another of
+ * the payer's rows: every clock these subscriptions feed is removed whole. */
 export async function cleanupBillingClocks(db: PrismaClient, subscriptionIds: readonly string[]) {
   if (!subscriptionIds.length) return;
   const subscriptionId = { in: [...subscriptionIds] };
-  await db.billingNoticeHandoff.deleteMany({ where: { notice: { subscriptionId } } });
-  await db.billingFeeNotice.deleteMany({ where: { subscriptionId } });
-  await db.paymentConfirmationHold.deleteMany({ where: { subscriptionId } });
-  await db.billingObligationTransition.deleteMany({ where: { clock: { subscriptionId } } });
-  await db.billingDunningClock.deleteMany({ where: { subscriptionId } });
+  const clocks = await db.billingDunningClock.findMany({ where: { OR: [
+    { subscriptionId },
+    { holds: { some: { subscriptionId } } },
+    { notices: { some: { subscriptionId } } },
+    { obligationTransitions: { some: { OR: [{ subscriptionId }, { fromSubscriptionId: subscriptionId }] } } },
+  ] }, select: { id: true } });
+  const clockId = { in: clocks.map((c) => c.id) };
+  await db.billingNoticeHandoff.deleteMany({ where: { notice: { OR: [{ subscriptionId }, { clockId }] } } });
+  await db.billingFeeNotice.deleteMany({ where: { OR: [{ subscriptionId }, { clockId }] } });
+  await db.paymentConfirmationHold.deleteMany({ where: { OR: [{ subscriptionId }, { clockId }] } });
+  await db.billingObligationTransition.deleteMany({ where: { OR: [{ subscriptionId }, { fromSubscriptionId: subscriptionId }, { clockId }] } });
+  await db.billingDunningClock.deleteMany({ where: { id: clockId } });
 }
 
 export async function cleanupPayerBillingClocks(db: PrismaClient, userIds: readonly string[]) {

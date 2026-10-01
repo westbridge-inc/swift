@@ -7,6 +7,9 @@ const FEE_DEMAND_KINDS = new Set([
   'billing_failed', 'billing_final_warning', 'billing_suspended',
   'billing_suspended_nudge', 'billing_churned', 'billing_reminder', 'trial_fee_education', 'billing_dunning_ops_task',
 ]);
+/** An ops task goes to the payer's own tenant operators: notifyAdmins pages
+ * ADMIN and SUPER_ADMIN alike, so either role is a valid recipient. */
+const isOperator = (roles: readonly string[]) => roles.includes('ADMIN') || roles.includes('SUPER_ADMIN');
 export function isFeeDemand(payload: NotificationPayload): boolean {
   return FEE_DEMAND_KINDS.has(String(payload.data?.['kind']));
 }
@@ -27,7 +30,7 @@ export async function enqueueFeeDemandInTx(tx: Prisma.TransactionClient, payload
     const kind = String(payload.data?.['kind']);
     const recipient = await tx.user.findUnique({ where: { id: userId }, select: { tenantId: true, roles: true } });
     if (!recipient || recipient.tenantId !== tenantId || (kind === 'billing_dunning_ops_task'
-      ? !recipient.roles.includes('ADMIN') : payerUserId !== userId)) throw new Error('Fee demand recipient changed');
+      ? !isOperator(recipient.roles) : payerUserId !== userId)) throw new Error('Fee demand recipient changed');
     const clock = await currentDunningClock(tx, subscriptionId);
     if (clock.subscriptionId !== subscriptionId) throw new Error('Fee demand names a historical source');
     const stageKey = payload.feeStageKey ?? payload.dedupeKey ?? `${kind}:a${sub.failedAttempts}`;
@@ -54,7 +57,7 @@ async function permitted(tx: Prisma.TransactionClient, noticeId: string) {
   const kind = payload.data?.['kind'];
   const admin = kind === 'billing_dunning_ops_task'
     ? await tx.user.findUnique({ where: { id: notice.userId }, select: { tenantId: true, roles: true, status: true } }) : null;
-  const recipientValid = admin ? admin.tenantId === notice.tenantId && admin.roles.includes('ADMIN') && admin.status === 'ACTIVE' : userId === notice.userId;
+  const recipientValid = admin ? admin.tenantId === notice.tenantId && isOperator(admin.roles) && admin.status === 'ACTIVE' : userId === notice.userId;
   if (clock.epoch !== notice.epoch || !recipientValid || userStatus !== 'ACTIVE' || !sub.autoRenew
     || ['CANCELLED', 'PAUSED'].includes(sub.status)) {
     if (notice.status === 'PENDING') await tx.billingFeeNotice.update({ where: { id: noticeId }, data: { status: 'OBSOLETE' } });

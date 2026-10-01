@@ -12,6 +12,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { SandboxMmgProvider } from '../providers/mmg/mmg-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [M-04 · S0] MMG terminal status and dunning outcome are ONE transition.
@@ -127,11 +128,14 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   vi.restoreAllMocks();
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+  // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();

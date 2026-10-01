@@ -22,6 +22,7 @@ import { NotificationService } from '../../modules/notification/notification.ser
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider, sandboxResetMmg, sandboxSetTxStatus } from '../../providers/mmg/mmg-provider';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
+import { cleanupBillingClocks, cleanupPayerBillingClocks } from '../helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // GOLD-2 · VEND-04 + MONEY-03 — the partner's weekly fee: the rate card, the
@@ -130,16 +131,21 @@ const wallet = async (subscriptionId: string) => Number((await sys(() => app.pri
 const mmgPayments = (subscriptionId: string) => sys(() => app.prisma.subscriptionPayment.findMany({ where: { subscriptionId, paymentMethod: 'MOBILE_MONEY' }, orderBy: { createdAt: 'asc' } }));
 const noticesTo = async (userId: string) => (await sys(() => app.prisma.notification.findMany({ where: { userId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { title: true } }))).map((n) => n.title);
 
-/** The 14-day trial ends (its aging input), and the convert-trials job runs. */
+/** The 14-day trial ends (its aging input), and the convert-trials job runs.
+ *  [#1393] A trial ends when its period does: the trial end, the period end and
+ *  the first due date are one instant (activation writes them together), so the
+ *  aging input moves all three, and the obligation keeps that due instant. */
 async function trialEnds(p: Partner) {
-  await sys(() => app.prisma.subscription.update({ where: { id: p.subId }, data: { trialEndDate: new Date(Date.now() - 60_000) } }));
-  const convertedFrom = Date.now();
+  const ended = new Date(Date.now() - 60_000);
+  await sys(() => app.prisma.subscription.update({ where: { id: p.subId }, data: {
+    trialEndDate: ended, currentPeriodStart: new Date(ended.getTime() - 14 * 86_400_000), currentPeriodEnd: ended, nextBillingDate: ended,
+  } }));
   await subscriptions.convertExpiredTrials();
   const row = await subRow(p.subId);
   expect({ status: row.status, isTrialActive: row.isTrialActive }).toEqual({ status: 'ACTIVE', isTrialActive: false });
-  // Converted and immediately due, so the next billing cycle charges it.
-  expect(row.nextBillingDate.getTime()).toBeGreaterThanOrEqual(convertedFrom - 1000);
-  expect(row.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+  // Converted and due from the trial end itself, so the next billing cycle charges it.
+  expect(row.nextBillingDate.getTime()).toBe(ended.getTime());
+  expect(row.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now());
   return row.nextBillingDate;
 }
 /** The day's retry clock passes (its aging input). */
@@ -223,6 +229,8 @@ async function purgeFixtures() {
     const vendorIds = vendors.map((v) => v.id);
     if (ids.length === 0 && vendorIds.length === 0) return;
     const subIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
+    await cleanupBillingClocks(app.prisma, subIds);
+    await cleanupPayerBillingClocks(app.prisma, ids);
     const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
     const imports = await app.prisma.settlementImport.findMany({ where: { source: { startsWith: 'gold2-money-' } }, select: { id: true } });
     await app.prisma.mmgAgentPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { externalId: { startsWith: 'G2AC-' } }] } });

@@ -13,6 +13,11 @@ export interface InvariantReport {
   wrongfulSuspensions: string[]; // auto-healed subscription ids
   earlyBillingSuspensions: string[]; // historical timing evidence; never clears unrelated restrictions
   enforcementLeaks: string[]; // ACTIVE but unpaid past grace+6h — alert only
+  /** Subscriptions whose payer or shared clock could not be read, so neither
+   *  detector could judge them (ownership needs review) — alert only. One such
+   *  row never stops the run: every later check, the S0 ledger ones included,
+   *  still runs. */
+  unjudgedSubscriptions: string[];
   receiptGaps: { tenantId: string; year: number; expected: number; actual: number }[];
   /** Σdebits ≠ Σcredits across the whole double-entry ledger — S0, the books are broken [tollgate 16.2]. */
   ledgerTrialImbalance: { debits: number; credits: number } | null;
@@ -22,7 +27,7 @@ export interface InvariantReport {
 
 export async function runBillingInvariants(prisma: PrismaClient, now = new Date()): Promise<InvariantReport> {
   const report: InvariantReport = {
-    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], earlyBillingSuspensions: [], enforcementLeaks: [], receiptGaps: [],
+    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [], receiptGaps: [],
     ledgerTrialImbalance: null, ledgerWalletMismatches: [],
   };
 
@@ -51,23 +56,32 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
     where: { status: 'SUSPENDED', currentPeriodEnd: { gt: now } },
     select: { id: true },
   });
+  const unjudged = (subscriptionId: string, err: unknown) => {
+    if (!report.unjudgedSubscriptions.includes(subscriptionId)) report.unjudgedSubscriptions.push(subscriptionId);
+    log().error({ err, subscriptionId }, '[billing invariants] subscription payer or clock unreadable; reported, the run continues');
+  };
   for (const candidate of wrongful) {
-    const healed = await prisma.$transaction(async (tx) => {
-      const authority = await lockBillingAuthority(tx, candidate.id);
-      const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id }, include: { vendor: true } });
-      const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}` } });
-      if (sub.status !== 'SUSPENDED' || !sub.autoRenew || authority.userStatus !== 'ACTIVE'
-        || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded
-        || (sub.vendor && sub.vendor.suspensionSource !== 'BILLING')) return false;
-      await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 } });
-      if (sub.vendor) await tx.vendor.updateMany({ where: { id: sub.vendor.id, status: 'SUSPENDED', suspensionSource: 'BILLING' },
-        data: { status: 'ACTIVE', suspensionSource: null } });
-      await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REINSTATED',
-        idempotencyKey: `wrongful-heal:${sub.id}:${now.toISOString().slice(0, 10)}`,
-        note: 'Recorded billing suspension conflicted with paid coverage; current billing authority restored',
-      } });
-      return true;
-    });
+    let healed = false;
+    try {
+      healed = await prisma.$transaction(async (tx) => {
+        const authority = await lockBillingAuthority(tx, candidate.id);
+        const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id }, include: { vendor: true } });
+        const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}` } });
+        if (sub.status !== 'SUSPENDED' || !sub.autoRenew || authority.userStatus !== 'ACTIVE'
+          || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded
+          || (sub.vendor && sub.vendor.suspensionSource !== 'BILLING')) return false;
+        await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 } });
+        if (sub.vendor) await tx.vendor.updateMany({ where: { id: sub.vendor.id, status: 'SUSPENDED', suspensionSource: 'BILLING' },
+          data: { status: 'ACTIVE', suspensionSource: null } });
+        await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REINSTATED',
+          idempotencyKey: `wrongful-heal:${sub.id}:${now.toISOString().slice(0, 10)}`,
+          note: 'wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority restored',
+        } });
+        return true;
+      });
+    } catch (err) {
+      unjudged(candidate.id, err);
+    }
     if (healed) report.wrongfulSuspensions.push(candidate.id);
   }
 
@@ -78,7 +92,13 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
     select: { id: true, status: true, suspendedAt: true },
   });
   for (const sub of candidates) {
-    const clock = await prisma.$transaction((tx) => currentDunningClock(tx, sub.id, now));
+    let clock: Awaited<ReturnType<typeof currentDunningClock>>;
+    try {
+      clock = await prisma.$transaction((tx) => currentDunningClock(tx, sub.id, now));
+    } catch (err) {
+      unjudged(sub.id, err);
+      continue;
+    }
     if (sub.status === 'ACTIVE' && !clock.pausedAt && activeOverdueMs(clock, now) > FULL_FEE_GRACE_MS + 6 * 3_600_000) {
       report.enforcementLeaks.push(sub.id);
     }

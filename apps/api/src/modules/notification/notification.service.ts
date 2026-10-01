@@ -349,8 +349,18 @@ export class NotificationService {
 
   async send(payload: NotificationPayload): Promise<string> {
     if (isFeeDemand(payload)) {
-      const notice = await enqueueFeeDemand(this.prisma, payload);
-      return this.deliverFeeDemand(notice.id);
+      // Best effort like every send (below): a recorded fee demand stays
+      // PENDING for the drain worker, and one that could not be recorded for
+      // this recipient is logged, never thrown into the caller. An admin
+      // fan-out must still reach the next admin.
+      try {
+        const notice = await enqueueFeeDemand(this.prisma, payload);
+        return await this.deliverFeeDemand(notice.id);
+      } catch (err) {
+        log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not delivered now');
+        notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
+        return '';
+      }
     }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 

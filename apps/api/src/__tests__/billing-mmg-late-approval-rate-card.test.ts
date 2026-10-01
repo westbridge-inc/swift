@@ -14,6 +14,7 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 import { windDownPartner } from '../modules/user/partner-wind-down';
 import { guyanaTiers } from '../modules/ops/platform-config';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [G-MMG-1 · R13 on current main] A late MMG approval under the Guyana rate card.
@@ -144,6 +145,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   // Fee receipts and ledger lines are append-only financial records and stay,
   // as in the other billing suites; everything keyed to the fixtures goes.
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });

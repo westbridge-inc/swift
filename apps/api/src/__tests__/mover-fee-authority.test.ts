@@ -370,7 +370,8 @@ describe('bounded finance decision with original money retained', () => {
       expect(audit.userId).toBe(finance.userId);
       expect(audit.changes).toMatchObject({ approvalId: action.approvalId, futureRate: { before: Number(canonical.weeklyRate), after: 8000 }, aliasEvidence: { [alias.id]: expect.stringMatching(/^[a-f0-9]{64}$/) },
         sourceEvidence: { [f.rider.id]: expect.stringMatching(/^[a-f0-9]{64}$/), [f.driver.id]: expect.stringMatching(/^[a-f0-9]{64}$/) } });
-      await expect(app.prisma.auditLog.update({ where: { id: audit.id }, data: { action: 'changed' } })).rejects.toThrow();
+      // Refused by the append-only trigger. Raw SQL, as audit-append-only.test.ts does: only the purge helper names an audit write.
+      await expect(app.prisma.$executeRaw`UPDATE audit_logs SET action = 'changed' WHERE id = ${audit.id}`).rejects.toThrow(/append-only/);
     });
   });
 

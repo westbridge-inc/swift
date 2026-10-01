@@ -16,6 +16,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { subscriptionOperability } from '../modules/subscription/operate-gate';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // E12 (ledger S1) — the partner's self-serve stop/resume of the weekly fee.
@@ -192,6 +193,7 @@ async function purgeBlock() {
     select: { id: true },
   });
   const sids = subs.map((sub) => sub.id);
+  await cleanupBillingClocks(app.prisma, sids);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: sids } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: sids } } });
   await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: sids } } });

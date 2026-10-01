@@ -63,8 +63,10 @@ export async function projectDunningClock(tx: Tx, clock: BillingDunningClock, no
       gracePeriodEnd: sub.status === 'PAST_DUE' ? deadline : sub.gracePeriodEnd,
       // An ordinary ACTIVE paid period needs no retry marker. Original aliases
       // retain independently imposed manual restrictions but never collect.
+      // A closed, cancelled or paused row is never retried: its marker stays clear.
       nextRetryAt: !ready || sub.id !== clock.subscriptionId || !sub.autoRenew || clock.retryAtMs === null
         || (['TRIAL', 'ACTIVE'].includes(sub.status) && !sub.failedAttempts)
+        || !['ACTIVE', 'PAST_DUE', 'SUSPENDED'].includes(sub.status)
         ? null : activeDeadline(clock, clock.retryAtMs, now),
     };
     const same = (a: Date | null, b: Date | null) => a?.getTime() === b?.getTime();

@@ -51,7 +51,10 @@ import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPaye
 const MAX_FAILED_ATTEMPTS = 3;
 
 /** [M-04] What a recorded failure decided — computed and applied inside one transaction. */
-type FailureOutcome = { attempts: number; willSuspend: boolean; nextRetryAt: Date; finalWarning: boolean };
+/** `suspendsAt`: the shared clock's grace deadline, the instant access stops unless the fee is paid. */
+type FailureOutcome = { attempts: number; willSuspend: boolean; nextRetryAt: Date; suspendsAt: Date; finalWarning: boolean };
+/** The suspension moment as a notice states it (minute precision, UTC). */
+const suspensionMoment = (at: Date) => at.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 type ChargeAttemptResult = (
   /** `spendPrepaid` = debit this much from the prepaid balance INSIDE the
    *  advance transaction, so the money and the week it buys commit together. */
@@ -3613,17 +3616,21 @@ export class BillingService {
     else {
       const final = attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled;
       const payLine = await this.feePayLine(sub, null);
+      // [§11] The final warning names the moment: the shared 48-hour grace
+      // deadline, when every gate stops this partner unless the fee is paid. A
+      // payment that starts confirming before then only moves it later.
+      const when = suspensionMoment(gracePeriodEnd);
       await enqueueFeeDemandInTx(tx, {
         userId: this.payerUserId(sub), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub),
         title: final ? 'Final warning — payment needed' : 'Subscription payment failed',
-        body: final ? `${reason}. Your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}`
+        body: final ? `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. ${payLine}`
           : `${reason}. We will retry after the remaining retry interval. ${payLine}`,
-        data: { kind: final ? 'billing_final_warning' : 'billing_failed', subscriptionId: sub.id },
+        data: { kind: final ? 'billing_final_warning' : 'billing_failed', subscriptionId: sub.id, ...(final ? { suspendsAt: gracePeriodEnd.toISOString() } : {}) },
         feeStageKey: `${final ? 'final-warning' : 'failed'}:a${attempts}`,
-        ...(final ? { feeSms: `Swift: your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}` } : {}),
+        ...(final ? { feeSms: `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${payLine}` } : {}),
       });
     }
-    return { attempts, willSuspend, nextRetryAt, finalWarning: attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled };
+    return { attempts, willSuspend, nextRetryAt, suspendsAt: gracePeriodEnd, finalWarning: attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled };
   }
 
   /** [M-04] Post-commit notices for a failure outcome — best effort, never
@@ -3634,25 +3641,27 @@ export class BillingService {
       await this.suspendAccessNotices(sub);
       return;
     }
-    const { attempts, nextRetryAt, finalWarning } = outcome;
+    const { attempts, suspendsAt, finalWarning } = outcome;
     const payLine = await this.feePayLine(sub, null);
     if (finalWarning) {
-      const when = nextRetryAt.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+      // The committed notice of this stage (recordFailureInTx) is what is
+      // delivered: the same stage key finds it, so this repeats its words.
+      const when = suspensionMoment(suspendsAt);
       await this.notifications.send({
         userId: this.payerUserId(sub),
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Final warning — payment needed',
-        body: `${reason}. Your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}`,
+        body: `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. ${payLine}`,
         audience: this.payerAudience(sub),
-        data: { kind: 'billing_final_warning', subscriptionId: sub.id },
+        data: { kind: 'billing_final_warning', subscriptionId: sub.id, suspendsAt: suspendsAt.toISOString() },
         feeStageKey: `final-warning:a${attempts}`,
-        feeSms: `Swift: your weekly fee remains unpaid. Access may be suspended after your remaining grace expires. ${payLine}`,
+        feeSms: `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${payLine}`,
       }).catch(() => {});
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: await tenantOfUser(this.prisma, sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId ?? null),
         title: 'Dunning — final warning issued',
-        body: `Subscription ${sub.id} reached warning attempt ${attempts}/${MAX_FAILED_ATTEMPTS}. Check its current payment and grace status before contacting the payer.`,
-        data: { kind: 'billing_dunning_ops_task', subscriptionId: sub.id, suspendsAt: nextRetryAt.toISOString() },
+        body: `Subscription ${sub.id} suspends at ${when} (attempt ${attempts}/${MAX_FAILED_ATTEMPTS}) unless paid; a payment that starts confirming first moves it later. Check its current payment status before contacting the payer.`,
+        data: { kind: 'billing_dunning_ops_task', subscriptionId: sub.id, suspendsAt: suspendsAt.toISOString() },
       }).catch(() => {});
       return;
     }

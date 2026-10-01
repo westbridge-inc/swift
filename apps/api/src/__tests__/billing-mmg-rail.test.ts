@@ -13,6 +13,8 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
 
 // ---------------------------------------------------------------------------
 // §13 MMG billing rail: the weekly fee as a merchant-initiated request the
@@ -92,6 +94,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // The synthetic subscriptions own clock evidence (RESTRICT in production): remove it first.
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -219,6 +223,57 @@ describe('MMG charge lifecycle', () => {
     await billing.pollPendingMmgCharges();
     const payment = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
     expect(payment.status).toBe('PENDING'); // the payer still has time
+  });
+});
+
+// [July P0 · coordinator item 9] The original double charge: the poller
+// expired a request still pending at MMG on our own 24-hour clock, marked it
+// FAILED and dunned it without cancelling it at MMG, so the next cycle's fresh
+// attempt key fired a SECOND request for the same week. Local time is never
+// provider proof: the request stays live, nothing is dunned or suspended while
+// it is being confirmed (owner decision 2), and no second request is sent.
+describe('[July P0] a request still live at MMG past our 24-hour clock is never charged twice', () => {
+  it('stays pending with no failure, no dunning and no second request; the fee stays paused past 48 hours; a late approval settles it once', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const hours = (n: number) => new Date(due.getTime() + n * 60 * 60 * 1000);
+    const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6091167' });
+    expect(await billing.billSubscription(await subWithRelations(subId) as never, hours(0))).toBe('pending');
+    const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId, paymentMethod: 'MOBILE_MONEY' } });
+    expect(issued).toMatchObject({ status: 'PENDING', externalRef: expect.any(String) });
+    sandboxSetTxStatus(issued.externalRef!, 'pending'); // the payer never answers on their phone
+    const one = { requests: 1, attempts: 1, failures: 0 };
+    const facts = async () => ({
+      requests: await app.prisma.subscriptionPayment.count({ where: { subscriptionId: subId, paymentMethod: 'MOBILE_MONEY' } }),
+      attempts: await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_ATTEMPT' } }),
+      failures: await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } }),
+    });
+
+    // Our 24-hour clock runs out while MMG still says pending.
+    for (const at of [hours(25), hours(26)]) {
+      await billing.pollPendingMmgCharges(at);
+      expect(await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: issued.id } })).toMatchObject({ status: 'PENDING', failureCode: null });
+    }
+    // Every later cycle, past 48 wall hours and well beyond, sends nothing new
+    // and neither dunns nor suspends while the request is being confirmed.
+    for (const at of [hours(25), hours(49), hours(100)]) {
+      expect(await billing.billSubscription(await subWithRelations(subId) as never, at)).toBe('pending');
+      expect(await facts()).toEqual(one);
+      const sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+      expect(sub).toMatchObject({ status: 'ACTIVE', failedAttempts: 0, billingConfirmationPausedAt: expect.any(Date), billingEnforcementDueAt: null });
+    }
+    const hold = await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: issued.id } });
+    expect(hold.status).toBe('ACTIVE');
+    expect((await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { id: hold.clockId } })).pausedAt).not.toBeNull();
+    expect(await app.prisma.billingFeeNotice.count({ where: { subscriptionId: subId } })).toBe(0);
+
+    // MMG finally says approved: the ONE request settles, once.
+    sandboxSetTxStatus(issued.externalRef!, 'approved');
+    await billing.pollPendingMmgCharges(hours(101));
+    await billing.pollPendingMmgCharges(hours(102));
+    expect(await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: issued.id } })).toMatchObject({ status: 'CAPTURED' });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' } })).toBe(1);
+    expect(await facts()).toEqual(one);
+    expect((await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: issued.id } })).status).toBe('PAID');
   });
 });
 

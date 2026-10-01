@@ -12,6 +12,7 @@ import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isPassengerVehicle
 import { partnerRateFor, type SubscriptionTiers } from '../modules/country/country-config.service';
 import { PartnerService } from '../modules/partner/partner.service';
 import { lockMoverFeeAuthority, resolveMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // The mover weekly fee follows the ROLE first, then the VEHICLE — never the
@@ -155,6 +156,7 @@ describe('mover fee band — what a mover is actually charged', () => {
   });
 
   afterAll(async () => {
+    await cleanupPayerBillingClocks(app.prisma, createdUserIds);
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
     await app.close();
   });

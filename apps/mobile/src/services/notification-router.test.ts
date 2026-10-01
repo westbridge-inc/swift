@@ -546,6 +546,7 @@ const NOT_PUSH_KINDS = new Set([
   'stall',                                        // scheduler-health union
   'advanced', 'banked', 'held', 'lost',           // MMG settlement outcome union (billing.service.ts)
   'churned', 'dunned', 'nudged', 'preserved', 'skipped', // dunning/repair outcome unions (billing.service.ts)
+  'blocked', 'reserved', 'unproven',              // pay-session start and terminal-repair unions (card-rail, mmg-checkout, billing.service.ts)
 ]);
 
 function filesUnder(dir: string, ext: '.ts' | '.tsx'): string[] {

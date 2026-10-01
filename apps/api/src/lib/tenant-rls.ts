@@ -109,6 +109,8 @@ export const TENANT_TABLES = [
   // walled like the provider payment that credits it.
   'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
   'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
+  // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
+  'billing_obligation_transitions',
   'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',

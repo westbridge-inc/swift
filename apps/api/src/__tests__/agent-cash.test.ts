@@ -6,6 +6,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { ensureSan } from '../modules/billing/san.service';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // Agent-cash ingestion [san spec PARTS 4/13] against the real engine:
 // scenario B (suspended → cash → reactivated through recordTopUp's instant
@@ -76,6 +77,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(prisma, subIds);
   await prisma.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds } } });
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });

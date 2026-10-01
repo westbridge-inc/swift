@@ -19,6 +19,7 @@ import {
 } from '../providers/card/card-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { cardRailWorkerSource } from '../modules/billing/card-rail-worker';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [PT-1] The weekly fee on an enrolled card (CARD_RAIL_V2=1). The charge uses
@@ -202,6 +203,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   delete process.env['CARD_RAIL_V2'];
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();

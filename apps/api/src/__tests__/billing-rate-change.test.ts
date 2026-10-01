@@ -15,6 +15,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // AX332 (PR #1389): a rate change meets the subscriptions already running.
@@ -251,6 +252,7 @@ async function purgeBlock() {
     select: { id: true },
   });
   const sids = subs.map((sub) => sub.id);
+  await cleanupBillingClocks(app.prisma, sids);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: sids } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: sids } } });
   await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: sids } } });

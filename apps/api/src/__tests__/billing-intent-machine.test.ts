@@ -10,6 +10,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { sandboxSetTxStatus, sandboxAddHistory, sandboxResetMmg } from '../providers/mmg/mmg-provider';
 import { windDownPartner } from '../modules/user/partner-wind-down';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // TOLLGATE A2 — the intent machine. UNKNOWN is a first-class state [LAW M-5]:
@@ -101,6 +102,7 @@ beforeAll(async () => {
 afterEach(() => sandboxResetMmg());
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, createdSubIds);
   if (createdSubIds.length) {
     await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: createdSubIds } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: createdSubIds } } });
