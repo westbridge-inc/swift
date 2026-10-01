@@ -603,7 +603,8 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
         # Matching on WEB_HOST would become an argument-less host matcher when it
         # is unset; the API host is always set, so the split keys on it.
         code = [line.split("#", 1)[0].strip() for line in self.TEXT.splitlines()]
-        self.assertEqual([line for line in code if "$WEB_HOST" in line], ["{$API_HOST} {$WEB_HOST} {"])
+        # [STORE-1] The optional API alias sits with the API host, before the website.
+        self.assertEqual([line for line in code if "$WEB_HOST" in line], ["{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {"])
         body = "\n".join(self.blocks(API_HOST=API_HOST, WEB_HOST=WEB_HOST)[0][1])
         self.assertRegex(
             body,
@@ -918,3 +919,36 @@ class Q11WebsiteDocs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===========================================================================
+# [STORE-1] API_ALIAS_HOST: an optional SECOND DNS name for the same API. The
+# store build of the app is fixed to the production name (api.swiftgy.com);
+# until a production stack exists, that name points at this one. The alias must
+# reach the API, never the website, and an unset alias changes nothing.
+# ===========================================================================
+
+ALIAS_HOST = "api.example.com"
+
+
+class StoreApiAliasHost(unittest.TestCase):
+    def blocks(self, env: dict):
+        return top_level_blocks(caddy_render((DEPLOY / "Caddyfile").read_text(), env))
+
+    def test_an_unset_alias_leaves_the_api_and_website_exactly_as_before(self):
+        for env in ({"API_HOST": API_HOST}, {"API_HOST": API_HOST, "API_ALIAS_HOST": ""}):
+            [[addresses, body]] = self.blocks(env)
+            self.assertEqual(addresses, [API_HOST])
+            self.assertIn(f"@api host {API_HOST}", body)
+
+    def test_the_alias_is_served_with_its_own_certificate_and_routed_to_the_api(self):
+        [[addresses, body]] = self.blocks({"API_HOST": API_HOST, "API_ALIAS_HOST": ALIAS_HOST, "WEB_HOST": WEB_HOST})
+        self.assertEqual(addresses, [API_HOST, ALIAS_HOST, WEB_HOST])
+        # Requests are split on the matcher: a host missing from it would be
+        # served the WEBSITE. The alias must be an API host.
+        self.assertIn(f"@api host {API_HOST} {ALIAS_HOST}", body)
+        self.assertNotIn(f"@api host {API_HOST} {ALIAS_HOST} {WEB_HOST}", body)
+
+    def test_caddy_gets_the_alias_with_an_empty_default(self):
+        caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
+        self.assertIn("API_ALIAS_HOST: ${API_ALIAS_HOST:-}", caddy)
