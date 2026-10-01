@@ -1,3 +1,6 @@
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { admittedCourierPhoto } from '../cash/handover-evidence';
+import { lockIdentityAuthority } from '../integrity/identity-review';
 import { Prisma } from '@prisma/client';
 import type {
   PrismaClient,
@@ -55,6 +58,7 @@ import {
 } from '../rides/passenger-custody';
 import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { subscriptionOperability } from '../subscription/operate-gate';
+import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 
@@ -484,6 +488,7 @@ type EarningNotice = {
 };
 
 export interface CanonicalOrderTransitionInput {
+  serializeIdentity?: boolean;
   orderId: string;
   target: OrderStatus;
   allowedFrom: readonly OrderStatus[];
@@ -761,8 +766,14 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, tenant: { select: { kind: true } } },
     });
+
+    // [STA-1 DL-5] The store-review fiction places no order: its stores and
+    // menus are fictional and it has no money rail. Refused here, before any
+    // write, outbox row (the vendor alert ladder ends in an SMS), MMG hand-off
+    // or dispatch — the reviewer reads the reason under the Place-order button.
+    if (user.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError();
 
     // Strike consequences: repeated failed cash handovers
     // restrict ordering to verified accounts, then ban outright
@@ -1155,6 +1166,7 @@ export class OrderService {
     let staged = null as CheckoutStaged | null;
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const checkoutCommit = await this.prisma.$transaction(async (tx) => {
+      if (promoCodeId) await lockIdentityAuthority(tx);
       // Global creation lock order starts with User. Account deletion takes the
       // same row lock before counting live orders, closing the authenticate →
       // delete → insert race for every order produced by this checkout.
@@ -1279,7 +1291,7 @@ export class OrderService {
         // any account in the identity cluster counts (promo-farming across
         // fresh accounts dies here). Unclustered → [userId] exactly.
         const { clusterMemberIds } = await import('../integrity/identity.service');
-        const promoMemberIds = await clusterMemberIds(this.prisma, input.userId);
+        const promoMemberIds = await clusterMemberIds(tx as PrismaClient, input.userId);
         const userUses = await tx.order.count({
           where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
         });
@@ -1871,6 +1883,7 @@ export class OrderService {
     tx: Prisma.TransactionClient,
     input: CanonicalOrderTransitionInput,
   ): Promise<CanonicalOrderTransitionResult> {
+    await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const source = await tx.order.findUnique({ where: { id: input.orderId } });
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
@@ -2112,7 +2125,7 @@ export class OrderService {
     // proof: a door photo issued to a rider who has since been replaced does
     // not deliver the parcel for the new one.
     if (input.target === 'DELIVERED' && order.orderType === 'COURIER') {
-      if (!courierDeliveryProofBound(order)) {
+      if (!courierDeliveryProofBound(order) || !(await admittedCourierPhoto(tx, source, order.courierProofPhotoUrl))) {
         throw new AppError(
           409,
           'DELIVERY_PROOF_REQUIRED',
@@ -2142,7 +2155,10 @@ export class OrderService {
     let committed: CanonicalOrderTransitionResult | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        committed = await this.prisma.$transaction((tx) => this.stageCanonicalOrderTransition(tx, input));
+        committed = await this.prisma.$transaction(async (tx) => {
+          if (input.serializeIdentity) await lockIdentityAuthority(tx);
+          return this.stageCanonicalOrderTransition(tx, input);
+        });
         break;
       } catch (error) {
         const retryable = typeof error === 'object'
@@ -2405,6 +2421,7 @@ export class OrderService {
     changedBy: string,
     note?: string,
     opts?: {
+      serializeIdentity?: boolean;
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
       expectedRiderId?: string | null;
@@ -2427,6 +2444,7 @@ export class OrderService {
       allowedFrom,
       changedBy,
       note,
+      serializeIdentity: opts?.serializeIdentity,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),

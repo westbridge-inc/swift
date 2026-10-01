@@ -255,13 +255,17 @@ export const VEND_04: Journey<Ctx> = {
     rec.check('the store has a subscription with its weekly rate and cash account number', !!sub?.status && Number(sub?.weeklyFeeGyd ?? sub?.weeklyRate) > 0 && !!sub?.san,
       `status=${sub?.status} weekly=${sub?.weeklyFeeGyd ?? sub?.weeklyRate} san=${sub?.sanFormatted ?? sub?.san} due=${sub?.amountDueGyd}`);
     const cash = await PUT('/vendor/subscription/billing-method', { method: 'CASH' }, R1.session.token);
-    rec.expect('the owner pays by agent cash (idempotent choice)', cash, 200);
-    rec.deny('MMG billing without the payer number', await PUT('/vendor/subscription/billing-method', { method: 'MOBILE_MONEY' }, R1.session.token), [400], ['MSISDN_REQUIRED']);
+    if (cash.status === 403 && codeOf(cash) === 'STEP_UP_REQUIRED') {
+      rec.deny('billing-method changes require this session to complete step-up', cash, [403], ['STEP_UP_REQUIRED']);
+      rec.skipCase('stop billing', 'Positive billing-method and payer-number cases require a legitimately verified session; this journey does not initiate SMS or bypass step-up.');
+    } else {
+      rec.expect('the owner pays by agent cash (idempotent choice)', cash, 200);
+      rec.deny('MMG billing without the payer number', await PUT('/vendor/subscription/billing-method', { method: 'MOBILE_MONEY' }, R1.session.token), [400], ['MSISDN_REQUIRED']);
+      const stop = await PUT('/vendor/subscription/billing-method', { method: 'NONE' }, R1.session.token);
+      rec.expect('a verified partner can stop weekly billing self-serve (E12)', stop, 200);
+      if (stop.ok) rec.expect('restore agent cash after the stop-billing check', await PUT('/vendor/subscription/billing-method', { method: 'CASH' }, R1.session.token), 200);
+    }
     rec.deny('a customer cannot read a store’s subscription', await GET('/vendor/subscription', ctx.roster.customers.C2!.session.token), [403, 404]);
-    const stop = await PUT('/vendor/subscription/billing-method', { method: 'NONE' }, R1.session.token);
-    rec.check('a partner can stop weekly billing self-serve (E12)', stop.ok,
-      stop.ok ? `→ ${brief(stop)}` : `no stop option: billing-method refuses a stop (→ ${brief(stop)}) and no other route exists; the only way out is account deletion — E12 open`);
-    if (stop.ok) await PUT('/vendor/subscription/billing-method', { method: 'CASH' }, R1.session.token);
     const inquiry = await req('POST', '/billing/mmg/inquiry', { body: { accountNumber: String(sub?.san ?? '0') } });
     rec.check('the agent-cash channel refuses an unsigned inquiry (dark or signature-gated)', inquiry.status === 503 || inquiry.status === 401, `→ ${inquiry.status} ${inquiry.text.slice(0, 120)}`);
     rec.skipAll('the weekly bill runs from the hourly billing job only after the 14-day trial ends, and suspension follows three failed charges 24 h apart; a run cannot advance the clock (no HTTP trigger). Agent-cash receipts need the webhook secret, which the runner must not hold');

@@ -52,8 +52,8 @@ describe('the hook retries exactly once, only after a verify', () => {
     expect((retry.match(/fn\(\.\.\.args\)/g) ?? []).length).toBe(1);
     const dismiss = src.slice(src.indexOf('dismiss: () => {'));
     expect(dismiss).toContain('reject(new StepUpDismissed());');
-    expect(src).toContain('onVerified={() => pendingRef.current?.retry()}');
-    expect(src).toContain('onClose={() => pendingRef.current?.dismiss()}');
+    expect(src).toContain('onVerified={() => pending?.retry()}');
+    expect(src).toContain('onClose={() => pending?.dismiss()}');
   });
 });
 
@@ -65,14 +65,14 @@ describe('the code sheet', () => {
     expect(src).toContain('if (v.length === CODE_LEN) submit(v);');
     expect(src).toContain("serverMessage(send.error,");
     expect(src).toContain("serverMessage(verify.error,");
-    expect(src).toContain('authApi.stepUp()');
-    expect(src).toContain('authApi.verifyStepUp(c)');
+    expect(src).toContain('authApi.stepUp(pinned())');
+    expect(src).toContain('authApi.verifyStepUp(c, pinned())');
   });
 
   it('says the one thing that defeats a social-engineered code, and hands control back only on a verified session', () => {
     expect(src).toContain('Swift will never ask you for this code.');
-    const onSuccess = src.slice(src.indexOf('mutationFn: (c: string) => authApi.verifyStepUp(c)'));
-    expect(onSuccess.slice(0, 200)).toContain('onVerified();');
+    const onSuccess = src.slice(src.indexOf('mutationFn: (c: string) => authApi.verifyStepUp(c, pinned())'));
+    expect(onSuccess.slice(0, 400)).toContain('onVerified();');
     expect(src).toContain('accessibilityRole="alert"');
   });
 });

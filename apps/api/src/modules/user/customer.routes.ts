@@ -1,3 +1,4 @@
+import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
@@ -7,6 +8,7 @@ import { z } from 'zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
+import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
@@ -747,9 +749,18 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
     }
 
-    await app.prisma.customer.update({
-      where: { id: customer.id },
-      data: { referredBy: referrer.id },
+    await app.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      const resolved = await requireIdentityAuthority(tx, userId);
+      await requireIdentityAuthority(tx, referrer.userId);
+      if (resolved.memberIds.includes(referrer.userId)) throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
+      if (await tx.customer.findFirst({ where: { userId: { in: resolved.memberIds }, referredBy: { not: null } }, select: { id: true } })) {
+        throw new AppError(409, 'ALREADY_REFERRED', 'You’ve already used a referral code');
+      }
+      const updated = await tx.customer.updateMany({
+        where: { id: customer.id, referredBy: null }, data: { referredBy: referrer.id },
+      });
+      if (updated.count !== 1) throw new AppError(409, 'ALREADY_REFERRED', 'A referral is already recorded.');
     });
 
     return { success: true, data: { referrerName: referrer.user?.firstName ?? null } };
@@ -1019,7 +1030,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // Browsing is open to guests; personalization (favourites, active order,
     // order-again) only applies when signed in.
     const userId = request.user?.userId;
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const { lat, lng } = customerPoint(latLngQuerySchema.parse(request.query));
 
     const cacheKey = homeCacheKey(userId, lat, lng);
 
@@ -1217,10 +1228,13 @@ export async function customerRoutes(app: FastifyInstance) {
     const openVendors = enriched.filter(isOrderable);
     const closedVendors = enriched.filter((v) => !isOrderable(v));
 
-    // Featured: top-rated open vendors
-    const featured = openVendors
-      .filter((v) => (v.averageRating as number) >= 4.0 && (v.totalOrders as number) >= 10)
-      .slice(0, 8);
+    // Featured: top-rated open vendors. [REVIEW-READY] When no open store has
+    // earned the bar yet (every store at launch, and the App Review demo),
+    // the open stores themselves fill the rail, so Home never says "Nothing's
+    // open right now" while stores are open. Once one store qualifies, only
+    // qualifying stores show; ratings and order counts are never invented.
+    const qualifying = openVendors.filter((v) => (v.averageRating as number) >= 4.0 && (v.totalOrders as number) >= 10);
+    const featured = (qualifying.length > 0 ? qualifying : openVendors).slice(0, 8);
 
     // Nearby: within 5 km, open
     const nearby = lat != null && lng != null
@@ -1254,7 +1268,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/vendors', async (request: AuthRequest) => {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { type, cuisine, search, lat, lng, open, sort, minRating, category } = vendorsBrowseQuerySchema.parse(request.query);
+    const { type, cuisine, search, lat, lng, open, sort, minRating, category } = customerPoint(vendorsBrowseQuerySchema.parse(request.query));
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
@@ -1417,7 +1431,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get('/vendors/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const { lat, lng } = customerPoint(latLngQuerySchema.parse(request.query));
 
     // [F-028-07] findFirst with a RELATIONAL tenant predicate, not
     // findUnique(id): a guest who knew an id could retrieve a store whose
@@ -1596,7 +1610,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get('/favorites', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const { lat, lng } = customerPoint(latLngQuerySchema.parse(request.query));
 
     const customer = await app.prisma.customer.findUnique({
       where: { userId },
@@ -1761,7 +1775,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/cart', async (request: AuthRequest) => {
     // [E01] The quote is priced for the choices checkout will be sent — the
     // speed, each store's DELIVERY/PICKUP and the tip — not for defaults.
-    const { lat, lng, express, fulfillmentSelections, tipAmount } = cartQuerySchema.parse(request.query);
+    const { lat, lng, express, fulfillmentSelections, tipAmount } = customerPoint(cartQuerySchema.parse(request.query));
 
     const cart = await buildCartResponse(app, request.user.userId, lat, lng, { express, fulfillmentSelections, tipAmount });
     return { success: true, data: cart };
@@ -3287,6 +3301,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/promo/validate', { preHandler: [velocityGuard(app, 'promo.validate')] }, async (request: AuthRequest) => {
     const { userId } = request.user;
     const { code } = promoValidateSchema.parse(request.body);
+    const authority = await requireIdentityAuthority(app.prisma, userId);
 
     const promo = await app.prisma.promoCode.findUnique({
       where: { code: code.toUpperCase().trim() },
@@ -3305,7 +3320,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Check user-specific usage
     const userUsage = await app.prisma.order.count({
-      where: { customerId: userId, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+      where: { customerId: { in: authority.memberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
     });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'ALREADY_USED', 'You have already used this promo code the maximum number of times');

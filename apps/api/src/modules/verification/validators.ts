@@ -9,7 +9,7 @@
 import type { ValidationStatus } from '@prisma/client';
 
 export interface DeclaredField { fieldCode: string; isRequired: boolean; isBlindIndexed: boolean }
-/** [DOC-1 §3 · P3-3] What the submitter IS, for the taxi rules: a Driver profile = taxi work (H plate, Corporate Yellow); a Rider = delivery (exempt, §3.8). */
+/** [DOC-1 §3 · P3-3] What the submitter IS, for the taxi rules: a Driver profile = taxi work (H plate); a Rider = delivery (exempt, §3.8). */
 export interface ValidatorContext {
   taxi: boolean;
   /** The registration mark on the submitter's mover profile, normalised — the cross-match anchor. */
@@ -54,13 +54,11 @@ export const VALIDATOR_IMPLEMENTATIONS: Readonly<Record<string, ValidatorImpl>> 
     if (!mark) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
     return normMark(mark).startsWith('H') ? { status: 'PASS' } : { status: 'FAIL' };
   },
-  // [DOC-1 §3.7] Hire cars are Corporate Yellow; read colour judged, unread → a human.
-  'validators#V_VEHICLE_COLOUR': ({ present, context }) => {
-    if (!context?.taxi || context.bucket !== 'VEHICLE') return NOT_APPLICABLE;
-    const colour = present.get('colour');
-    if (!colour) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
-    return /yellow/i.test(colour) ? { status: 'PASS' } : { status: 'FAIL' };
-  },
+  // [Owner ruling 2026-10-01] There is no colour rule: a taxi may be any colour. This overrides
+  // DOC-1 §3.7 ("hire cars are Corporate Yellow"); the H plate (V_PLATE_CLASS above) stays required.
+  // V_VEHICLE_COLOUR stays declared in the registry as a retired, non-blocking row with no
+  // implementation, so the results it wrote before the ruling still name a known rule.
+  // Never add a colour judgement back here.
   // [DOC-1 §3.7] The mark on the document must be the mark on the vehicle — any mismatch is a hard review.
   'validators#V_PLATE_CROSS_MATCH': ({ present, context }) => {
     if (context?.bucket !== 'VEHICLE') return NOT_APPLICABLE;

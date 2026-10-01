@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { bindBrowseTenant, requireRequestTenant } from '../search/search-scope';
+import { customerPoint } from './customer-point';
 
 // ---------------------------------------------------------------------------
 // Customer-facing discovery endpoints (#17 Part 8) — the rail's data source.
@@ -44,11 +45,11 @@ export async function discoveryRoutes(app: FastifyInstance) {
    *  category read with a 500 the moment the flag was ON, and the Home rail
    *  went dark in production. */
   app.get('/categories', { preHandler: [bindBrowseTenant(app)] }, async (request) => {
-    const query = z.object({
+    const query = customerPoint(z.object({
       vertical: z.enum(['FOOD', 'GROCERY', 'RETAIL', 'ALL']).default('ALL'),
       lat: z.coerce.number().min(-90).max(90).optional(),
       lng: z.coerce.number().min(-180).max(180).optional(),
-    }).parse(request.query ?? {});
+    }).parse(request.query ?? {}));
 
     if (!(await flagEnabled())) return { success: true, data: { enabled: false, categories: [] } };
     const tenantId = request.publicTenantId ?? requireRequestTenant(request);

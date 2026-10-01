@@ -43,14 +43,14 @@ export function MoverAccountScreen({ navigation }: any) {
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
   const subQ = useMoverSubscription(kind);
-  const setBilling = useSetMoverBillingMethod(kind);
+  const stepUp = useStepUp();
+  const setBilling = useSetMoverBillingMethod(kind, stepUp.withStepUp);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
   const qc = useQueryClient();
   // [ALG-34] The MMG pay link is where the money goes: the server asks this
   // session to confirm it holds the phone (the code sheet), then STAGES the
   // change behind a cool-off with the old link live.
-  const stepUp = useStepUp();
   const [mmgError, setMmgError] = React.useState<string | null>(null);
   const saveMmgLink = useMutation({
     mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => driverApi.updateProfile({ mmgPayUrl })),

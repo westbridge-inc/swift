@@ -580,8 +580,8 @@ export class AgentCashService {
       });
     }
 
-    // S-7: the payer's MSISDN feeds the identity graph — one phone cash-paying
-    // fees for three "unrelated" trial vendors is a STRONG cluster edge.
+    // Signed/manual/CSV credit metadata does not authenticate the wallet owner.
+    // Preserve it as advisory provenance; money settlement keeps its own checks.
     if (p.payerMsisdn) {
       const sub = await this.prisma.subscription.findUnique({
         where: { id: committed.subscriptionId },
@@ -592,7 +592,7 @@ export class AgentCashService {
         },
       });
       const userId = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
-      if (userId) captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : 'MOVER', payerMsisdn: p.payerMsisdn });
+      if (userId) await captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : sub?.driver ? 'DRIVER' : 'RIDER', payerMsisdn: p.payerMsisdn, observed: true, observationId: paymentId, subscriptionId: committed.subscriptionId }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
     }
     return { status: 'accepted', paymentId: committed.paymentId, subscriptionId: committed.subscriptionId };
   }

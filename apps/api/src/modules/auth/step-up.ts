@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Redis } from 'ioredis';
 import { AppError } from '../../utils/errors';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
-import { checkOtpDailyBudget } from '../../utils/sms-budget';
+import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
 import { getChannels } from '../../providers/notifications/channels';
 import { log } from '../../utils/logger';
 
@@ -60,6 +60,11 @@ async function assertNotLocked(redis: Redis, userId: string): Promise<void> {
 export async function sendStepUpOtp(app: FastifyInstance, userId: string): Promise<{ sentTo: string; validForSeconds: number }> {
   const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true } });
   if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This account is no longer active');
+  // [AUD-L4-008] A code is texted only to a launch-market number, checked
+  // before anything is counted.
+  if (!smsDestinationAllowed(user.phone)) {
+    throw new AppError(400, 'COUNTRY_NOT_ACTIVE', "We can't text a code to the phone number on this account. Contact Swift support.");
+  }
 
   await assertNotLocked(app.redis, userId);
   if (!(await checkOtpRateLimit(app.redis, stepUpCodeKey(userId)))) {

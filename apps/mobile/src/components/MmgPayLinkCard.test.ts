@@ -57,8 +57,9 @@ describe('both screens wire the same seam', () => {
   });
 
   it('the client hits the exact server routes', () => {
-    expect(api).toContain("stepUp: () => api.post('/auth/step-up')");
-    expect(api).toContain("verifyStepUp: (code: string) => api.post('/auth/step-up/verify', { code })");
+    // [SAFE-B] The step-up calls carry the captured session, so a retry verifies the SAME session it began on.
+    expect(api).toContain("stepUp: (session?: AuthSessionSnapshot) => api.post('/auth/step-up', undefined, capturedAuthConfig(session))");
+    expect(api).toContain("verifyStepUp: (code: string, session?: AuthSessionSnapshot) => api.post('/auth/step-up/verify', { code }, capturedAuthConfig(session))");
     expect(api).toContain("api.delete('/vendor/profile/mmg-pay-url/pending')");
     expect(api).toContain("api.delete('/driver/profile/mmg-pay-url/pending')");
   });
