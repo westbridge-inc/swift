@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1
 # ---------------------------------------------------------------------------
-# Swift web (apps/web, Next.js) — the self-hosted image. The staging stack
-# serves it (deploy/docker-compose.yml, profile "web"); the public site on
-# swiftgy.com is still deployed by Vercel, which never reads this file.
+# Swift web (apps/web, Next.js) — the self-hosted image. The deploy stack
+# serves it (deploy/docker-compose.yml, profile "web") at its staging name
+# (WEB_HOST) and, optionally, at the public names swiftgy.com and www
+# (WEB_ALIAS_HOSTS). Only the staging name is marked noindex (next.config.ts).
+# .github/workflows/deploy-web.yml can still deploy the site to Vercel, which
+# never reads this file.
 # Multi-stage like apps/api/Dockerfile: install the workspace, build Next's
 # standalone server, then a slim non-root runtime that carries only that
 # server. Built from the MONOREPO ROOT so pnpm can resolve the workspace:
