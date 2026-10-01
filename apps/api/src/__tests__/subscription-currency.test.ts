@@ -12,6 +12,7 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { getMmgProvider, sandboxResetMmg } from '../providers/mmg/mmg-provider';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // G2-F1 — a partner subscription is born in the country's ISO-4217 currency
@@ -136,8 +137,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
+  // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
+  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
   await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } });
