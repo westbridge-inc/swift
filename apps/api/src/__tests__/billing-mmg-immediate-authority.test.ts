@@ -20,6 +20,7 @@ import { LiveMmgProvider, SandboxMmgProvider, type LiveMmgConfig } from '../prov
 import { issueReceipt } from '../modules/billing/receipts';
 import { deliverBillingNotice } from '../modules/billing/billing-notice-delivery';
 import { NotificationService } from '../modules/notification/notification.service';
+import { resolveConfirmationInTx } from '../modules/billing/dunning-clock';
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
 const due = new Date('2026-09-20T12:00:00.000Z');
@@ -458,6 +459,7 @@ type Outbox = ReturnType<typeof outbox>;
 const demandInbox = (h: Outbox) => h.inbox().filter((row) => DEMAND_KINDS.includes(row['data']?.kind));
 const demandEffects = (h: Outbox) => h.sent.filter((effect) => effect.body.includes('At the time'));
 const stageOf = (h: Outbox, eventId: unknown) => h.stages().find((row) => row['stageKey'] === `event:${String(eventId)}`);
+const smsSent = (h: Outbox) => h.sent.filter((effect) => effect.channel === 'sms');
 
 /** PostgreSQL serializes these billing transactions on the payer's row locks.
  * The in-memory tables model that with one transaction at a time: a rival
@@ -1348,44 +1350,57 @@ describe('53FEC809 R3 approved mismatch quarantine', () => {
 });
 
 describe('R11 billing notice ownership through the real SMS recipient callback', () => {
+  // [#1393 outbox] The per-event SMS recipient callback is retired. A payer
+  // notice is handed to the fee-demand outbox under its claim; the outbox
+  // re-checks the payer, the pause and the obligation under the payer's
+  // locks, reserves each channel before its provider call and never re-sends
+  // a reserved one. These cases keep R11's recipient schedules on that path:
+  // 'subscription' is the payer authority read that opens the hand-off, and
+  // 'phone' is the SMS recipient read just before the SMS reservation. (A
+  // stall is placed outside any open transaction: the memory tables cannot
+  // interleave a rival inside one, which PostgreSQL would serialize on the
+  // payer lock.) CLAUDE-legacy-notice-mapping.md maps each case old to new.
   type Entry = 'initial' | 'retry';
   type Lookup = 'subscription' | 'phone';
 
   async function noticeHarness(entry: Entry) {
-    const h = harness();
+    const h = await payerNoticeHarness(entry, 'r11');
     let logical = +due;
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - 86_400_000) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    h.prisma.user.findUnique.mockResolvedValue({ phone: h.state.user.phone });
-    const notice = () => [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
-    const installClock = () => { h.state.noticeClock = () => new Date(logical); };
-    if (entry === 'initial') {
-      // The fixture transaction snapshots plain data before the clock hook.
-      h.barriers.afterCommit = async () => { installClock(); };
-    } else {
-      await h.prisma.billingEvent.create({ data: {
-        subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: 'nudge:sub-1:r11',
-        note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
-          data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
-      } });
-      installClock();
-    }
-    const sms = vi.fn(async (_phone: string, _body: string) => {});
-    vi.spyOn(notificationChannels, 'getChannels').mockReturnValue({ sms: { sendSms: sms } } as unknown as ReturnType<typeof notificationChannels.getChannels>);
-    const start = () => entry === 'initial' ? h.billing.sweepSuspended(due) : h.billing.drainPendingNotices(due);
-    const retry = () => new BillingService(h.prisma, h.notifications as any, {} as any).drainPendingNotices(new Date(logical));
-    return { ...h, notice, sms, start, retry, clock: () => logical, advance: (ms: number) => { logical += ms; } };
-  }
-
-  function interceptRecipientLookup(h: Awaited<ReturnType<typeof noticeHarness>>, lookup: Lookup, hook: () => Promise<void>) {
-    const target = lookup === 'subscription' ? h.prisma.subscription : h.prisma.user;
-    const original = target.findUnique.getMockImplementation()!;
-    let calls = 0;
-    target.findUnique.mockImplementation(async (input: any) => {
-      const recipientLookup = lookup === 'subscription' ? !!input.include && !!h.notice() : input.select?.phone === true;
-      if (recipientLookup) { calls += 1; await hook(); }
-      return original(input);
+    h.state.noticeClock = () => new Date(logical);
+    const owner = { current: 'A' };
+    const senders: string[] = [];
+    h.sendSms.mockImplementation(async (to: string, body: string) => {
+      senders.push(owner.current);
+      h.sent.push({ channel: 'sms', to, body });
+      return { ref: `sms-${owner.current}` };
     });
+    const claimed = () => !!h.notice()?.['noticeLeaseToken'] && !h.notice()?.['deliveredAt'];
+    return Object.assign(h, {
+      owner, senders, claimed,
+      clock: () => logical,
+      advance: (ms: number) => { logical += ms; },
+      retry: () => h.worker().drainPendingNotices(new Date(logical)),
+    });
+  }
+  type NoticeHarness = Awaited<ReturnType<typeof noticeHarness>>;
+
+  /** Run `hook` once at the recipient lookup: before the hand-off transaction
+   * opens (subscription) or at the SMS recipient read (phone). */
+  function atRecipientLookup(h: NoticeHarness, lookup: Lookup, hook: () => Promise<void>) {
+    let calls = 0;
+    if (lookup === 'subscription') {
+      const transaction = h.prisma.$transaction.getMockImplementation()!;
+      h.prisma.$transaction.mockImplementation(async (fn: any) => {
+        if (h.claimed()) { calls += 1; if (calls === 1) await hook(); }
+        return transaction(fn);
+      });
+    } else {
+      const read = h.prisma.user.findUnique;
+      h.prisma.user.findUnique = vi.fn(async (args: any) => {
+        if (args?.select?.phone === true && h.notice()?.['deliveredAt']) { calls += 1; if (calls === 1) await hook(); }
+        return read(args);
+      });
+    }
     return () => calls;
   }
 
@@ -1393,36 +1408,40 @@ describe('R11 billing notice ownership through the real SMS recipient callback',
     (['subscription', 'phone'] as const).flatMap(lookup => [false, true].map(replacement => ({ entry, lookup, replacement }))));
   it.each(staleSchedules)('R11 $entry: 121-second $lookup lookup suppresses stale SMS (replacement=$replacement)', async ({ entry, lookup, replacement }) => {
     const h = await noticeHarness(entry);
-    let stalled = false;
-    let owner = 'A';
-    const senders: string[] = [];
-    h.sms.mockImplementation(async () => { senders.push(owner); });
-    const lookupCalls = interceptRecipientLookup(h, lookup, async () => {
-      if (stalled) return;
-      stalled = true;
+    const lookupCalls = atRecipientLookup(h, lookup, async () => {
       h.advance(121_000);
       if (replacement) {
-        owner = 'B';
-        expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-        owner = 'A';
+        h.owner.current = 'B';
+        expect(await h.retry()).toMatchObject({ delivered: 1 });
+        h.owner.current = 'A';
       }
     });
 
     await h.start();
 
     expect(lookupCalls()).toBeGreaterThan(0);
-    expect(senders).toEqual(replacement ? ['B'] : []);
-    expect(!!h.notice()['deliveredAt']).toBe(replacement);
-    if (!replacement) {
-      expect(h.notice()['noticeSmsSentAt']).toBeNull();
-      h.advance(61_000);
-      owner = 'B';
-      expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-      expect(senders).toEqual(['B']);
+    if (lookup === 'subscription') {
+      // A's claim expired during the stall: A hands off nothing. The
+      // replacement (or a retry after the cool-down) delivers it once.
+      expect(h.senders).toEqual(replacement ? ['B'] : []);
+      expect(!!h.notice()!['deliveredAt']).toBe(replacement);
+      if (!replacement) {
+        expect(h.stages()).toEqual([]);
+        h.advance(61_000);
+        h.owner.current = 'B';
+        expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
+        expect(h.senders).toEqual(['B']);
+      }
+    } else {
+      // Past the hand-off, the SMS belongs to whoever reserves it first under
+      // the payer's lock: the replacement when one ran, else A after its
+      // locked re-check. Never both.
+      expect(h.senders).toEqual(replacement ? ['B'] : ['A']);
     }
-    expect(h.state.notifications).toHaveLength(1);
+    expect(smsSent(h)).toHaveLength(1);
+    expect(demandInbox(h)).toHaveLength(1);
     expect(h.state.events.size).toBe(1);
-    expect(h.sms.mock.calls[0]![1]).toContain('At the time');
+    expect(smsSent(h)[0]!.body).toContain('At the time');
     expect(h.state.sub.status).toBe('SUSPENDED');
     expect(h.state.wallet).toBe(0);
     expect(ledger.keys).toEqual([]);
@@ -1430,37 +1449,62 @@ describe('R11 billing notice ownership through the real SMS recipient callback',
 
   const callbackSchedules = (['initial', 'retry'] as const).flatMap(entry =>
     (['subscription', 'phone'] as const).map(lookup => ({ entry, lookup })));
-  it.each(callbackSchedules)('R11 $entry: renews after a slow unexpired $lookup lookup at the actual provider boundary', async ({ entry, lookup }) => {
+  it.each(callbackSchedules)('R11 $entry: after a slow unexpired $lookup lookup the SMS is authorized at the actual provider boundary', async ({ entry, lookup }) => {
     const h = await noticeHarness(entry);
-    let leaseAtSend: number | null = null;
-    let completedAtSend: Date | null = null;
-    interceptRecipientLookup(h, lookup, async () => { h.advance(119_000); });
-    h.sms.mockImplementation(async () => {
-      leaseAtSend = +h.notice()['noticeLeaseUntil'];
-      completedAtSend = h.notice()['deliveredAt'];
+    const trace: string[] = [];
+    atRecipientLookup(h, lookup, async () => { h.advance(119_000); trace.push('lookup-done'); });
+    const notice = h.prisma.billingFeeNotice.findUnique;
+    h.prisma.billingFeeNotice.findUnique = vi.fn(async (args: any) => { trace.push('authorize'); return notice(args); });
+    let atSend: { reservation: unknown; stage: unknown; authorizedAfterLookup: boolean } | undefined;
+    h.sendSms.mockImplementation(async (to: string, body: string) => {
+      atSend = {
+        reservation: h.handoff('sms')?.['status'], stage: h.stage()?.['status'],
+        authorizedAfterLookup: trace.lastIndexOf('authorize') > trace.indexOf('lookup-done') && trace.includes('lookup-done'),
+      };
+      h.sent.push({ channel: 'sms', to, body });
+      return { ref: 'sms-a' };
     });
+
     await h.start();
-    expect(h.sms).toHaveBeenCalledOnce();
-    expect(leaseAtSend).toBe(h.clock() + 120_000);
-    expect(completedAtSend).toBeNull();
-    expect(h.notice()['noticeSmsSentAt']).toEqual(new Date(h.clock()));
-    expect(h.notice()['deliveredAt']).toEqual(new Date(h.clock()));
+
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    // The provider call was reserved first and authorized by a locked
+    // re-check that ran after the slow lookup, on the then-current state.
+    expect(atSend).toEqual({ reservation: 'UNKNOWN', stage: 'PENDING', authorizedAfterLookup: true });
+    expect(h.handoff('sms')).toMatchObject({ status: 'DELIVERED' });
+    expect(h.stage()).toMatchObject({ status: 'DELIVERED' });
+    expect(h.notice()!['deliveredAt']).toBeTruthy();
   });
 
   it.each(callbackSchedules)('R11 $entry: transient $lookup lookup failure retains the notice until recovery', async ({ entry, lookup }) => {
     const h = await noticeHarness(entry);
-    let fail = true;
-    interceptRecipientLookup(h, lookup, async () => {
-      if (fail) { fail = false; throw new Error('synthetic recipient lookup outage'); }
+    // The lookup is down until recovery (every matching read fails meanwhile).
+    let outage = true;
+    const [target, method, matches] = lookup === 'subscription'
+      ? [h.prisma.subscription, 'findUniqueOrThrow', (args: any) => !!args?.include?.rider && h.claimed()] as const
+      : [h.prisma.user, 'findUnique', (args: any) => args?.select?.phone === true && !!h.notice()?.['deliveredAt']] as const;
+    const read = (target as any)[method];
+    (target as any)[method] = vi.fn(async (args: any) => {
+      if (outage && matches(args)) throw new Error('synthetic recipient lookup outage');
+      return read(args);
     });
     await h.start();
-    expect(h.sms).not.toHaveBeenCalled();
-    expect(h.notice()['deliveredAt']).toBeNull();
-    expect(h.notice()['noticeSmsSentAt']).toBeNull();
+    expect(h.sendSms).not.toHaveBeenCalled();
+    if (lookup === 'subscription') {
+      // The hand-off rolled back: nothing recorded, the intent stays due.
+      expect(h.notice()!['deliveredAt']).toBeNull();
+      expect(h.stages()).toEqual([]);
+    } else {
+      // Handed off; the SMS was never reserved, so the stage stays due.
+      expect(h.stage()).toMatchObject({ status: 'PENDING' });
+      expect(h.handoff('sms')).toBeUndefined();
+    }
+    outage = false;
     h.advance(61_000);
     expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-    expect(h.sms).toHaveBeenCalledOnce();
-    expect(h.state.notifications).toHaveLength(1);
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(demandInbox(h)).toHaveLength(1);
+    expect(h.stage()).toMatchObject({ status: 'DELIVERED' });
   });
 
   it.each(['initial', 'retry'] as const)('R11 %s: payer mismatch cannot send or checkpoint the notice', async entry => {
@@ -1469,113 +1513,102 @@ describe('R11 billing notice ownership through the real SMS recipient callback',
     let mismatch = true;
     h.prisma.subscription.findUnique.mockImplementation(async (input: any) => {
       const sub = await original(input);
-      return input.include && h.notice() && mismatch ? { ...sub, rider: { userId: 'other-payer' } } : sub;
+      return input?.select?.rider && h.claimed() && mismatch
+        ? { ...sub, rider: { user: { id: 'other-payer', tenantId: 'swift-default' } } } : sub;
     });
+    const phoneReads = vi.fn();
+    const read = h.prisma.user.findUnique;
+    h.prisma.user.findUnique = vi.fn(async (args: any) => { if (args?.select?.phone === true) phoneReads(); return read(args); });
+
     await h.start();
-    expect(h.sms).not.toHaveBeenCalled();
-    expect(h.prisma.user.findUnique).not.toHaveBeenCalled();
-    expect(h.notice()['deliveredAt']).toBeNull();
-    expect(h.notice()['noticeSmsSentAt']).toBeNull();
+    expect(h.sendSms).not.toHaveBeenCalled();
+    expect(phoneReads).not.toHaveBeenCalled();
+    expect(h.notice()!['deliveredAt']).toBeNull();
+    expect(h.stages()).toEqual([]);
+    expect(demandInbox(h)).toEqual([]);
     mismatch = false;
     h.advance(61_000);
     expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-    expect(h.sms).toHaveBeenCalledOnce();
-    expect(h.sms.mock.calls[0]![0]).toBe(h.state.user.phone);
-    expect(h.state.notifications).toHaveLength(1);
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.sendSms.mock.calls[0]![0]).toBe(h.state.user.phone);
+    expect(demandInbox(h)).toHaveLength(1);
   });
 });
 
 describe('R13 final notice renewal result freshness at the real SMS boundary', () => {
+  // [#1393 outbox] The final lease renewal before the SMS is retired. The
+  // outbox reserves the SMS first (UNKNOWN, committed), then in a second
+  // transaction holding the payer's locks re-checks the payer, the pause and
+  // the obligation and starts the provider call. R13's schedules now act on
+  // that final authorization: delayed, refused, failed, a failed channel, and
+  // a provider call accepted with its outcome lost or still in flight. The
+  // reservation, not elapsed time, decides who may send; an UNKNOWN outcome is
+  // never re-sent. CLAUDE-legacy-notice-mapping.md maps each case old to new.
   type Entry = 'initial' | 'retry';
 
   async function freshnessHarness(entry: Entry) {
-    const h = harness();
+    const h = await payerNoticeHarness(entry, 'r13');
     let logical = +due;
-    let monotonic = 10_000;
-    Object.assign(h.state.sub, { status: 'SUSPENDED', suspendedAt: new Date(+due - 86_400_000) });
-    selectSuspended(h, async () => [{ ...h.state.sub }]);
-    h.prisma.user.findUnique.mockResolvedValue({ phone: h.state.user.phone });
-    vi.spyOn(performance, 'now').mockImplementation(() => monotonic);
-    // A wall-clock jump must not license a stale result or reject a fresh one.
-    vi.spyOn(Date, 'now').mockImplementation(() => +due - monotonic);
-    const notice = () => [...h.state.events.values()].find(row => row['idempotencyKey']?.startsWith('nudge:'))!;
-    const installClock = () => { h.state.noticeClock = () => new Date(logical); };
-    if (entry === 'initial') h.barriers.afterCommit = async () => { installClock(); };
-    else {
-      await h.prisma.billingEvent.create({ data: {
-        subscriptionId: 'sub-1', type: 'REMINDER', idempotencyKey: 'nudge:sub-1:r13',
-        note: JSON.stringify({ noticeVersion: 1, target: 'payer', userId: 'user-1', title: 'Reminder', body: 'Unpaid', sms: 'Unpaid',
-          data: { kind: 'billing_suspended_nudge', subscriptionId: 'sub-1' } }),
-      } });
-      installClock();
-    }
-    const sms = vi.fn(async (_phone: string, _body: string) => {});
-    vi.spyOn(notificationChannels, 'getChannels').mockReturnValue({ sms: { sendSms: sms } } as unknown as ReturnType<typeof notificationChannels.getChannels>);
-    const execute = h.prisma.$executeRaw.getMockImplementation()!;
-    const smsStamps: number[] = [];
-    let renewals = 0;
-    let finalRenewal: undefined | ((execute: () => Promise<number>) => Promise<number>);
-    h.prisma.$executeRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: any[]) => {
-      const sql = strings.join(' ');
-      if (sql.includes('SET "noticeLeaseUntil"') && ++renewals === 3 && finalRenewal) {
-        return finalRenewal(() => execute(strings, ...values));
-      }
-      const count = await execute(strings, ...values);
-      if (sql.includes('SET "noticeSmsSentAt"')) smsStamps.push(count);
-      return count;
+    h.state.noticeClock = () => new Date(logical);
+    const owner = { current: 'A' };
+    const senders: string[] = [];
+    h.sendSms.mockImplementation(async (to: string, body: string) => {
+      senders.push(owner.current);
+      h.sent.push({ channel: 'sms', to, body });
+      return { ref: `sms-${owner.current}` };
     });
-    return {
-      ...h, notice, sms, smsStamps,
-      start: () => entry === 'initial' ? h.billing.sweepSuspended(due) : h.billing.drainPendingNotices(due),
-      retry: () => new BillingService(h.prisma, h.notifications as any, {} as any).drainPendingNotices(new Date(logical)),
+    // The SMS's final authorization is the second hand-off transaction: its
+    // locked re-check reads the notice once the SMS is already reserved.
+    // Every such read reaches the hook, which decides when to act.
+    let finalAuthorization: undefined | ((proceed: () => Promise<unknown>) => Promise<unknown>);
+    let fired = 0;
+    const read = h.prisma.billingFeeNotice.findUnique;
+    h.prisma.billingFeeNotice.findUnique = vi.fn(async (args: any) => {
+      if (finalAuthorization && h.handoff('sms')?.['status'] === 'UNKNOWN') {
+        fired += 1;
+        return finalAuthorization(() => read(args));
+      }
+      return read(args);
+    });
+    return Object.assign(h, {
+      owner, senders,
+      fired: () => fired,
       clock: () => logical,
-      advance: (ms: number) => { logical += ms; monotonic += ms; },
-      onFinalRenewal: (hook: NonNullable<typeof finalRenewal>) => { finalRenewal = hook; },
-    };
+      advance: (ms: number) => { logical += ms; },
+      retry: () => h.worker().drainPendingNotices(new Date(logical)),
+      onFinalAuthorization: (hook: NonNullable<typeof finalAuthorization>) => { finalAuthorization = hook; },
+    });
   }
 
   const delays = (['initial', 'retry'] as const).flatMap(entry =>
     [119, 120, 121].flatMap(seconds => [false, true].map(replacement => ({ entry, seconds, replacement }))));
-  it.each(delays)('R13 $entry: final renewal response delayed $seconds seconds (replacement=$replacement)', async ({ entry, seconds, replacement }) => {
+  it.each(delays)('R13 $entry: final authorization delayed $seconds seconds sends once, from the reservation holder (replacement=$replacement)', async ({ entry, seconds, replacement }) => {
     const h = await freshnessHarness(entry);
-    let owner = 'A';
-    let renewed: number | undefined;
     let rival: { attempted: number; delivered: number } | undefined;
-    let replacementState: string | undefined;
-    const senders: string[] = [];
-    h.sms.mockImplementation(async () => { senders.push(owner); });
-    h.onFinalRenewal(async execute => {
-      // Execute the UPDATE first; only its successful response is delayed.
-      renewed = await execute();
+    let acted = false;
+    h.onFinalAuthorization(async (proceed) => {
+      if (acted) return proceed();
+      acted = true;
       h.advance(seconds * 1000);
       if (replacement) {
-        owner = 'B';
+        h.owner.current = 'B';
         rival = await h.retry();
-        replacementState = JSON.stringify(h.notice());
-        owner = 'A';
+        h.owner.current = 'A';
       }
-      return renewed;
+      return proceed();
     });
 
     await h.start();
 
-    expect(renewed).toBe(1);
-    const expired = seconds >= 120;
-    expect(senders).toEqual(expired ? replacement ? ['B'] : [] : ['A']);
-    if (replacement) expect(rival).toEqual(expired ? { attempted: 1, delivered: 1 } : { attempted: 0, delivered: 0 });
-    if (expired && replacement) expect(JSON.stringify(h.notice())).toBe(replacementState);
-    if (expired && !replacement) {
-      expect(h.notice()['noticeSmsSentAt']).toBeNull();
-      expect(h.notice()['deliveredAt']).toBeNull();
-      h.advance(61_000);
-      owner = 'C';
-      expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-      expect(senders).toEqual(['C']);
-    }
-    expect(h.smsStamps).toEqual([1]);
-    expect(h.notice()['deliveredAt']).toBeTruthy();
-    expect(h.sms.mock.calls[0]![1]).toContain('At the time');
-    expect(h.state.notifications).toHaveLength(1);
+    expect(h.fired()).toBeGreaterThan(0);
+    // Whatever the delay, A holds the SMS reservation: a rival finds it
+    // reserved and sends nothing; A's locked re-check still permits it.
+    expect(h.senders).toEqual(['A']);
+    if (replacement) expect(rival).toMatchObject({ attempted: 1 });
+    expect(h.handoff('sms')).toMatchObject({ status: 'DELIVERED' });
+    expect(h.stage()).toMatchObject({ status: 'DELIVERED' });
+    expect(smsSent(h)[0]!.body).toContain('At the time');
+    expect(demandInbox(h)).toHaveLength(1);
     expect(h.state.events.size).toBe(1);
     expect(h.state.sub.status).toBe('SUSPENDED');
     expect(h.state.wallet).toBe(0);
@@ -1584,42 +1617,59 @@ describe('R13 final notice renewal result freshness at the real SMS boundary', (
 
   const failedRenewals = (['initial', 'retry'] as const).flatMap(entry =>
     (['zero', 'throw'] as const).map(failure => ({ entry, failure })));
-  it.each(failedRenewals)('R13 $entry: failed final renewal ($failure) sends nothing and recovers', async ({ entry, failure }) => {
+  it.each(failedRenewals)('R13 $entry: failed final authorization ($failure) sends nothing and recovers', async ({ entry, failure }) => {
     const h = await freshnessHarness(entry);
-    let intercepted = false;
-    h.onFinalRenewal(async () => {
-      intercepted = true;
-      if (failure === 'throw') throw new Error('synthetic final-renewal outage');
-      return 0;
+    // 'zero': a payment starts confirming just before the final re-check (the
+    // re-check refuses); 'throw': the re-check itself fails until recovery.
+    let outage = true;
+    let confirming = false;
+    h.onFinalAuthorization(async (proceed) => {
+      if (failure === 'throw' && outage) throw new Error('synthetic final-authorization outage');
+      if (failure === 'zero' && !confirming) { confirming = true; await startConfirming(h); }
+      return proceed();
     });
     await h.start();
-    expect(intercepted).toBe(true);
-    expect(h.sms).not.toHaveBeenCalled();
-    expect(h.notice()['noticeSmsSentAt']).toBeNull();
-    expect(h.notice()['deliveredAt']).toBeNull();
+    expect(h.fired()).toBeGreaterThan(0);
+    expect(h.sendSms).not.toHaveBeenCalled();
+    // Refused before the provider call: provably unsent, so it may go later.
+    expect(h.handoff('sms')).toMatchObject({ status: 'NOT_SENT' });
+    expect(h.stage()).toMatchObject({ status: 'PENDING' });
+    if (failure === 'zero') {
+      // MMG answers the request not paid: the pause lifts.
+      await h.prisma.$transaction((tx: any) => resolveConfirmationInTx(tx, 'sub-1', { paymentId: 'payment-confirming' }, 'PROVEN_UNPAID',
+        { actor: 'synthetic-provider', reference: 'declined' }, new Date(h.clock())));
+      h.state.payment = null;
+    }
+    outage = false;
     h.advance(61_000);
     expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-    expect(h.sms).toHaveBeenCalledOnce();
-    expect(h.smsStamps).toEqual([1]);
-    expect(h.state.notifications).toHaveLength(1);
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.handoff('sms')).toMatchObject({ status: 'DELIVERED' });
+    expect(demandInbox(h)).toHaveLength(1);
   });
 
   const failedChannels = (['initial', 'retry'] as const).flatMap(entry =>
     (['inbox', 'sms'] as const).map(failure => ({ entry, failure })));
   it.each(failedChannels)('R13 $entry: independent $failure recovery preserves the other channel checkpoint', async ({ entry, failure }) => {
+    // 'inbox': the inbox's push fails after the inbox row commits; 'sms': the
+    // SMS provider fails. Either outcome is UNKNOWN and kept; the other
+    // channels' checkpoints stand, and a retry re-sends nothing.
     const h = await freshnessHarness(entry);
-    if (failure === 'inbox') h.notifications.send.mockRejectedValueOnce(new Error('synthetic inbox outage'));
-    else h.sms.mockRejectedValueOnce(new Error('synthetic SMS outage'));
+    if (failure === 'inbox') h.sendPush.mockRejectedValueOnce(new Error('synthetic push outage'));
+    else h.sendSms.mockRejectedValueOnce(new Error('synthetic SMS outage'));
     await h.start();
-    expect(h.sms).toHaveBeenCalledOnce();
-    expect(h.notice()['deliveredAt']).toBeNull();
-    expect(!!h.notice()['noticeSmsSentAt']).toBe(failure === 'inbox');
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.sendPush).toHaveBeenCalledOnce();
+    expect(h.handoff(failure === 'inbox' ? 'push' : 'sms')).toMatchObject({ status: 'UNKNOWN' });
+    expect(h.handoff(failure === 'inbox' ? 'sms' : 'push')).toMatchObject({ status: 'DELIVERED' });
+    expect(h.stage()).toMatchObject({ status: 'PENDING' });
     h.advance(61_000);
-    expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-    expect(h.sms).toHaveBeenCalledTimes(failure === 'inbox' ? 1 : 2);
-    expect(h.sms.mock.calls.every(([, body]) => body.includes('At the time'))).toBe(true);
-    expect(h.smsStamps).toEqual([1]);
-    expect(h.state.notifications).toHaveLength(1);
+    await h.retry();
+    expect(h.sendSms).toHaveBeenCalledOnce();
+    expect(h.sendPush).toHaveBeenCalledOnce();
+    expect(smsSent(h).every((effect) => effect.body.includes('At the time'))).toBe(true);
+    expect(h.handoff(failure === 'inbox' ? 'sms' : 'push')).toMatchObject({ status: 'DELIVERED' });
+    expect(demandInbox(h)).toHaveLength(1);
     expect(h.state.events.size).toBe(1);
   });
 
@@ -1627,37 +1677,44 @@ describe('R13 final notice renewal result freshness at the real SMS boundary', (
     (['lost-ack', 'in-flight-expiry'] as const).map(ambiguity => ({ entry, ambiguity })));
   it.each(ambiguities)('R13 $entry: accepted provider $ambiguity remains explicit and stale checkpoints cannot overwrite the winner', async ({ entry, ambiguity }) => {
     const h = await freshnessHarness(entry);
-    let owner = 'A';
-    let once = false;
     let rival: { attempted: number; delivered: number } | undefined;
     let replacementState: string | undefined;
-    const effects: Array<{ owner: string; leaseValidAtSend: boolean }> = [];
-    h.sms.mockImplementation(async () => {
-      effects.push({ owner, leaseValidAtSend: +h.notice()['noticeLeaseUntil'] > h.clock() });
-      if (once) return;
+    const effects: Array<{ owner: string; reservedAtSend: boolean }> = [];
+    let once = false;
+    h.sendSms.mockImplementation(async (to: string, body: string) => {
+      effects.push({ owner: h.owner.current, reservedAtSend: h.handoff('sms')?.['status'] === 'UNKNOWN' });
+      h.sent.push({ channel: 'sms', to, body });
+      if (once) return { ref: 'sms-again' };
       once = true;
+      // MMG's SMS provider accepted the message but its answer was lost.
       if (ambiguity === 'lost-ack') throw new Error('synthetic acceptance with lost provider acknowledgement');
+      // The provider call is still in flight when a rival worker drains.
       h.advance(121_000);
-      owner = 'B';
+      h.owner.current = 'B';
       rival = await h.retry();
-      replacementState = JSON.stringify(h.notice());
-      owner = 'A';
+      replacementState = JSON.stringify(h.handoff('sms'));
+      h.owner.current = 'A';
+      return { ref: 'sms-a' };
     });
     await h.start();
     if (ambiguity === 'lost-ack') {
-      expect(h.notice()['noticeSmsSentAt']).toBeNull();
-      expect(h.notice()['deliveredAt']).toBeNull();
+      // Kept explicit for reconciliation, never re-sent by a later worker.
+      expect(h.handoff('sms')).toMatchObject({ status: 'UNKNOWN' });
+      expect(h.stage()).toMatchObject({ status: 'PENDING' });
       h.advance(61_000);
-      owner = 'B';
-      expect(await h.retry()).toEqual({ attempted: 1, delivered: 1 });
-      expect(h.smsStamps).toEqual([1]);
+      h.owner.current = 'B';
+      await h.retry();
+      expect(h.handoff('sms')).toMatchObject({ status: 'UNKNOWN' });
     } else {
-      expect(rival).toEqual({ attempted: 1, delivered: 1 });
-      expect(h.smsStamps).toEqual([1, 0]);
-      expect(JSON.stringify(h.notice())).toBe(replacementState);
+      // The rival found the SMS reserved and wrote nothing over it; the
+      // sender's own completion is the only record.
+      expect(rival).toMatchObject({ attempted: 1 });
+      expect(JSON.parse(replacementState!)).toMatchObject({ status: 'UNKNOWN' });
+      expect(h.handoff('sms')).toMatchObject({ status: 'DELIVERED' });
+      expect(h.stage()).toMatchObject({ status: 'DELIVERED' });
     }
-    expect(effects).toEqual([{ owner: 'A', leaseValidAtSend: true }, { owner: 'B', leaseValidAtSend: true }]);
-    expect(h.state.notifications).toHaveLength(1);
+    expect(effects).toEqual([{ owner: 'A', reservedAtSend: true }]);
+    expect(demandInbox(h)).toHaveLength(1);
     expect(h.state.events.size).toBe(1);
     expect(h.state.sub.status).toBe('SUSPENDED');
     expect(h.state.wallet).toBe(0);
