@@ -107,7 +107,7 @@ if [ -n "$ADMIN_HOST" ]; then
   [ -z "$API_ALIAS_HOST" ] || [ "$admin_lc" != "$(lower "$API_ALIAS_HOST")" ] ||
     die "ADMIN_HOST must differ from API_ALIAS_HOST"
   [ -z "$WEB_HOST" ] || [ "$admin_lc" != "$(lower "$WEB_HOST")" ] || die "ADMIN_HOST must differ from WEB_HOST"
-  read -r -a web_alias_names <<< "$(env_value WEB_ALIAS_HOSTS)"
+  read -r -a web_alias_names <<< "$WEB_ALIAS_HOSTS"
   for web_alias_name in "${web_alias_names[@]+"${web_alias_names[@]}"}"; do
     [ "$admin_lc" != "$(lower "$web_alias_name")" ] || die "ADMIN_HOST must differ from WEB_ALIAS_HOSTS"
   done
@@ -132,7 +132,7 @@ if [ -n "$ADMIN_BASIC_AUTH_HASH" ]; then
     \'*\') gate_hash="${ADMIN_BASIC_AUTH_HASH:1:${#ADMIN_BASIC_AUTH_HASH}-2}" ;;
   esac
   [[ "$gate_hash" =~ $bcrypt_re ]] ||
-    die "ADMIN_BASIC_AUTH_HASH must be a bcrypt hash of cost 10 or more in single quotes (see PILOT-RUNBOOK.md 3c), or empty for no gate"
+    die "ADMIN_BASIC_AUTH_HASH must be a bcrypt hash of cost 10 or more in single quotes (see PILOT-RUNBOOK.md 3d), or empty for no gate"
   unset gate_hash
 fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
