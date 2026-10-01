@@ -1,3 +1,4 @@
+import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
   openAvatarErasureObligationIds,
   queueStorageOrphan,
@@ -421,8 +422,11 @@ export class AccountService {
     const integrity = await prisma.integritySettings.findUnique({ where: { id: 'platform' } });
     await prisma.faceTemplate.deleteMany({ where: { accountId: userId } });
     if (!integrity?.tombstoneRetentionEnabled) {
-      await prisma.identityKey.deleteMany({ where: { accountId: userId } });
-      await prisma.identityClusterMember.deleteMany({ where: { accountId: userId } });
+      await prisma.$transaction(async (tx) => {
+        await lockIdentityAuthority(tx);
+        await tx.identityKey.deleteMany({ where: { accountId: userId } });
+        await tx.identityClusterMember.deleteMany({ where: { accountId: userId } });
+      });
     }
 
     // 2. Revoke access everywhere: refresh sessions + push tokens.

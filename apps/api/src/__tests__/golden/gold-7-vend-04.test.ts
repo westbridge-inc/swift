@@ -1,3 +1,4 @@
+import { grantStepUp } from '../helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
@@ -420,6 +421,7 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
 
     // Stopping is idempotent and preserves the paid week. Only the production
     // process-billing composition can lapse it; a direct cycle call cannot.
+    await grantStepUp(app, p.owner.token);
     for (let i = 0; i < 2; i += 1) {
       const stopped = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, headers);
       expect(stopped.statusCode, stopped.body).toBe(200);

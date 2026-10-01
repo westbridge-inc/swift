@@ -3581,6 +3581,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    await requireStepUp(app, request);
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId } });
     if (!sub) throw new NotFoundError('Subscription');
     const billingSvc = new BillingService(app.prisma, notifications, getPaymentProvider());

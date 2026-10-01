@@ -11,6 +11,11 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
+import { CashRulesService } from '../modules/cash/cash-rules.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { OrderService } from '../modules/order/order.service';
+import { issueSyntheticHandoverPhoto, syntheticMoverSession } from './helpers/handover-proof';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] ARC BATCH B — the settlement digest, the top-up command, the three
@@ -30,7 +35,12 @@ const orderIds: string[] = [];
 const riderIds: string[] = [];
 const adIds = { advertiser: [] as string[], placement: [] as string[], campaign: [] as string[] };
 let token = '';
+let cash: CashRulesService;
 const REASON = 'Week 36 close, finance ticket GY-7100';
+// [SAFE-B · retained history] A payable claim is a real filing, kept with the people it names after the suite,
+// so people live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('24');
+let personSeq = 0;
 
 const call = (m: string, u: string, p?: unknown, extra: Record<string, string> = {}) => injectWithApproval(app, {
   method: m as never, url: u,
@@ -44,7 +54,7 @@ const changedOf = (row: { changes: unknown }) => (changesOf(row)['changed'] ?? {
 
 async function person(role: 'CUSTOMER' | 'RIDER' | 'VENDOR_OWNER', tag: string) {
   const u = await app.prisma.user.create({ data: {
-    phone: `+5926${String(600000 + Math.floor(Math.random() * 399999))}`, firstName: 'B', lastName: `${tag}${RUN}${nanoid(3)}`,
+    phone: `${PHONE_PREFIX}${String(++personSeq).padStart(3, '0')}`, firstName: 'B', lastName: `${tag}${RUN}${nanoid(3)}`,
     roles: [role], activeRole: role, status: 'ACTIVE', isPhoneVerified: true } });
   userIds.push(u.id); return u;
 }
@@ -91,6 +101,35 @@ async function claim(status: 'PENDING_REVIEW' | 'APPROVED', vendorId: string) {
   return app.prisma.reimbursementClaim.create({ data: {
     orderId: order.id, riderId: rider.id, customerId: customer.id, amount: 2000, reason: 'no_show', gpsLat: 6.8, gpsLng: -58.15, photoUrl: 'storage://t/door.jpg', status, flags: [] } });
 }
+/** [SAFE-B] A payout needs the evidence the server holds, never a planted claim: the rider's own session holds
+ *  a fresh fix at the door, the server issued the door photo, and the refusal is filed. The typed GPS is far
+ *  from the door, so the complete claim waits for a person (gps_far), who approves it. */
+async function approvedPayableClaim(vendorId: string) {
+  const customer = await person('CUSTOMER', 'Cust');
+  const riderUser = await person('RIDER', 'Rider');
+  const sessionId = await syntheticMoverSession(app.prisma, riderUser.id, 'arcb');
+  const door = { lat: 6.8, lng: -58.15 };
+  const rider = await app.prisma.rider.create({ data: { userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', currentLat: door.lat, currentLng: door.lng, lastLocationUpdate: new Date(), locationSessionId: sessionId } });
+  riderIds.push(rider.id);
+  const order = await app.prisma.order.create({ data: {
+    orderNumber: `ARCB-${RUN}-${nanoid(6)}`, orderType: 'FOOD_DELIVERY', customerId: customer.id, vendorId, riderId: rider.id,
+    status: 'ARRIVED', deliveryAddress: 'x', deliveryLat: door.lat, deliveryLng: door.lng,
+    subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 300, totalAmount: 2300, paymentMethod: 'CASH' } });
+  orderIds.push(order.id);
+  await app.prisma.orderStatusLog.createMany({ data: [
+    { orderId: order.id, status: 'PICKED_UP', changedBy: rider.id, note: 'fixture pickup', createdAt: new Date(Date.now() - 40 * 60_000) },
+    { orderId: order.id, status: 'ARRIVED', changedBy: rider.id, note: 'fixture arrival', createdAt: new Date(Date.now() - 10 * 60_000) },
+  ] });
+  const item = await app.prisma.item.findFirst({ where: { vendorId }, select: { id: true } })
+    ?? await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } })).id, name: 'Plate', basePrice: 2000 } as never, select: { id: true } });
+  await app.prisma.orderItem.create({ data: { orderId: order.id, itemId: item.id, name: 'Plate', quantity: 1, basePrice: 2000, markedUpPrice: 2000, markupAmount: 0, totalBase: 2000, totalMarkup: 0, totalCustomer: 2000, selectedOptions: {} } as never });
+  await app.prisma.rlpReserveEntry.create({ data: { countryCode: 'GY', kind: 'ADJUSTMENT', amount: 2000, note: RESERVE_NOTE } });
+  const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: riderUser.id, role: 'RIDER' });
+  const { claim: filed } = await cash.handover(order.id, riderUser.id, { outcome: 'refused', gps: { lat: door.lat + 0.1, lng: door.lng }, photoUrl: photo.url, sessionId });
+  expect(filed, 'a complete filing waiting for a person').toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true });
+  expect(filed!.flags).toContain('gps_far');
+  return cash.approveClaim(filed!.id, 'arcb-reviewer', 'reviewed with the complete bundle');
+}
 async function unpaidInvoice() {
   const a = await app.prisma.advertiser.create({ data: { companyName: `ArcB ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000001', createdByUserId: `u-${nanoid(6)}`, status: 'APPROVED' } });
   adIds.advertiser.push(a.id);
@@ -116,6 +155,7 @@ beforeAll(async () => {
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });
   userIds.push(admin.id);
+  cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), new OrderService(app.prisma, app.io));
   token = app.jwt.sign({ userId: admin.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
   await app.prisma.session.create({ data: {
     userId: admin.id, token, refreshToken: nanoid(48), authMethod: 'OTP',
@@ -123,8 +163,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // [P31-1] reserve draws of this suite's payouts first, then its funding entries
-  await app.prisma.rlpReserveEntry.deleteMany({ where: { OR: [{ claim: { orderId: { in: orderIds } } }, { note: RESERVE_NOTE }] } });
+  // [SAFE-B · retained history] Reserve entries are money records and a filing is immutable evidence: the
+  // filed orders, their claims and the people and store they name are kept, and nothing about them is
+  // deleted or swallowed. The rest is cleaned as before; what stays is taken out of service.
+  const kept = await runWithoutTenant(() => retainedCohort(app.prisma, { orderIds }), 'arcb');
   await dropAuditRefusal(app, REFUSAL);
   await cleanupSecondApprovers(app);
   await runWithoutTenant(async () => {
@@ -135,23 +177,23 @@ afterAll(async () => {
     await app.prisma.adCampaign.deleteMany({ where: { id: { in: adIds.campaign } } }).catch(() => {});
     await app.prisma.adPlacement.deleteMany({ where: { id: { in: adIds.placement } } }).catch(() => {});
     await app.prisma.advertiser.deleteMany({ where: { id: { in: adIds.advertiser } } }).catch(() => {});
-    await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: orderIds } } }).catch(() => {});
-    await app.prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } }).catch(() => {});
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }).catch(() => {});
-    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } }).catch(() => {});
+    await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: without(orderIds, kept.orderIds) } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: without(orderIds, kept.orderIds) } } });
+    await app.prisma.rider.deleteMany({ where: { id: { in: without(riderIds, kept.riderIds) } } });
     await app.prisma.topUpCommand.deleteMany({ where: { adminId: { in: userIds } } }).catch(() => {});
     await app.prisma.billingEvent.deleteMany({ where: { subscription: { vendorId: { in: vendorIds } } } }).catch(() => {});
     await app.prisma.prepaidBalance.deleteMany({ where: { subscription: { vendorId: { in: vendorIds } } } }).catch(() => {});
     await app.prisma.subscription.deleteMany({ where: { vendorId: { in: vendorIds } } }).catch(() => {});
     await app.prisma.settlement.deleteMany({ where: { vendorId: { in: vendorIds } } }).catch(() => {});
-    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } }).catch(() => {});
-    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } }).catch(() => {});
+    await app.prisma.vendor.deleteMany({ where: { id: { in: without(vendorIds, kept.vendorIds) } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds }, userId: { in: without(userIds, kept.userIds) } } });
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'arcb').catch(() => 0);
     await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'arcb').catch(() => 0);
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
+    await app.prisma.customer.deleteMany({ where: { userId: { in: without(userIds, kept.userIds) } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: without(userIds, kept.userIds) } } });
+    await retireKeptScaffolding(app.prisma, kept);
   }, 'arcb');
   await app.close();
 });
@@ -230,7 +272,7 @@ describe('[ADM-002] claim decisions', () => {
     expect(changedOf(rb[0]!)['status']?.to).toBe('REJECTED');
   });
   it('paid: the payout evidence is the diff — reference and attested amount', async () => {
-    const v = await freshVendor(); const c = await claim('APPROVED', v.id);
+    const v = await freshVendor(); const c = await approvedPayableClaim(v.id);
     const res = await call('PUT', `/api/v1/admin/cash-rules/claims/${c.id}/paid`, { reference: `MMG${RUN}P1`, amount: 2000 });
     expect(res.statusCode, res.body).toBe(200);
     const rows = await rowsFor(c.id);
@@ -242,7 +284,7 @@ describe('[ADM-002] claim decisions', () => {
     expect(rows.some((r) => r.action === 'CLAIM_PAID' || r.action === 'MARK_CLAIM_PAID')).toBe(false);
   });
   it('paid: a refused audit leaves the claim APPROVED with no reference', async () => {
-    const v = await freshVendor(); const c = await claim('APPROVED', v.id);
+    const v = await freshVendor(); const c = await approvedPayableClaim(v.id);
     await refuseAuditWhere(app, REFUSAL, { entityId: c.id });
     try {
       const res = await call('PUT', `/api/v1/admin/cash-rules/claims/${c.id}/paid`, { reference: `MMG${RUN}P2`, amount: 2000 });

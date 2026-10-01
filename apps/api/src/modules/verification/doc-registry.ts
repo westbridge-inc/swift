@@ -118,7 +118,7 @@ export interface ValidatorRow {
  * [DOC-1 §7.2–7.5] The 24 validators as the spec lists them — data. Blocking per the
  * spec's tables (WARN and routing rows are non-blocking). Only rows with an implRef
  * judge anything today; the rest wait for their implementation and no ACTIVE type may
- * depend on them (DOC-INV-2).
+ * depend on them (DOC-INV-2). One row is retired by ruling, not waiting: V_VEHICLE_COLOUR.
  */
 export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   // §7.2 field-level
@@ -132,7 +132,10 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   { code: 'V_TIN_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', docTypeLegacy: 'tin_certificate' },
   { code: 'V_PLATE_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
   { code: 'V_PLATE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'WRONG_PLATE_CLASS' , implRef: 'validators#V_PLATE_CLASS' },
-  { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: true, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' , implRef: 'validators#V_VEHICLE_COLOUR' },
+  // RETIRED by the owner's ruling of 2026-10-01: a taxi may be any colour (overrides §3.7 "hire cars are
+  // Corporate Yellow"; the H plate stays — V_PLATE_CLASS). Declared, never blocking, never implemented:
+  // the row stays only so validation results written before the ruling still name a known rule.
+  { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: false, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' },
   { code: 'V_LICENCE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'LICENCE_CLASS_MISMATCH', docTypeLegacy: 'drivers_licence' , implRef: 'validators#V_LICENCE_CLASS' },
   { code: 'V_INSURANCE_SCOPE', scope: 'FIELD', isBlocking: true, detailCode: 'INSURANCE_SCOPE_INSUFFICIENT', docTypeLegacy: 'vehicle_insurance', implRef: 'validators#V_INSURANCE_SCOPE' },
   { code: 'V_FIELD_CONFIDENCE', scope: 'FIELD', isBlocking: false, detailCode: 'UNREADABLE_CAPTURE' },
@@ -441,7 +444,7 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
     { fieldCode: 'make', dataType: 'text' },
     { fieldCode: 'model', dataType: 'text' },
     { fieldCode: 'year', dataType: 'number' },
-    { fieldCode: 'colour', dataType: 'text', validatorRef: 'V_VEHICLE_COLOUR' },
+    { fieldCode: 'colour', dataType: 'text' }, // recorded, never judged (owner ruling 2026-10-01: any colour)
     { fieldCode: 'owner_name', dataType: 'text', isPii: true },
   ],
   road_service_licence: [

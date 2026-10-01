@@ -55,6 +55,11 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   AdCreative: ['AdCampaign'],
   AdBooking: ['AdCampaign'],
   RunStop: ['DeliveryRun'],
+  // [SAFE-B] A claim staged from a filing holds a RESTRICT foreign key to it (claim_handover_evidence_fk), and the
+  // filing carries tenantId. A legacy claim (handoverEvidenceId null) still reaches its tenant only through the
+  // FK-less rider/order references it always had: that EXPAND follow-up stands, it just cannot be listed in
+  // PENDING_EXPAND once the model has a tenant-bearing parent.
+  ReimbursementClaim: ['CashHandoverEvidence'],
 };
 
 /** These foreign keys preserve global reservations, not tenant ownership.
@@ -134,7 +139,6 @@ export const PLATFORM_WIDE: Record<string, string> = {
  *  Each is an EXPAND candidate under the child-table contract; none may be added
  *  here without a named follow-up. */
 export const PENDING_EXPAND: Record<string, string> = {
-  ReimbursementClaim: 'FK-less rider/order references',
   ReturnRequest: 'FK-less order reference',
   CollectionContact: 'FK-less subscription/vendor reference',
   ContentReport: 'FK-less reporter/subject references',

@@ -19,12 +19,14 @@ import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
-import { VerificationService, REJECTION_REASON_CODES, ACTOR_FACING_CATEGORY, REVIEW_SLA_HOURS } from '../modules/verification/verification.service';
+import { VerificationService, REJECTION_REASON_CODES, RETIRED_REJECTION_REASON_CODES, ACTOR_FACING_CATEGORY, REVIEW_SLA_HOURS } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 
-/** DOC-1 §8.5 actor-facing table, pinned FROM the spec as literals (the test must not import the thing it grades). */
-const SPEC_8_5_CATEGORY: Record<(typeof REJECTION_REASON_CODES)[number], string> = {
+/** DOC-1 §8.5 actor-facing table, pinned FROM the spec as literals (the test must not import the thing it grades).
+ *  NOT_YELLOW is retired (owner ruling 2026-10-01): never offered or applied again, but its row stays so the
+ *  decisions recorded under it keep their category. */
+const SPEC_8_5_CATEGORY: Record<(typeof REJECTION_REASON_CODES)[number] | (typeof RETIRED_REJECTION_REASON_CODES)[number], string> = {
   UNREADABLE: 'QUALITY', INCOMPLETE: 'QUALITY',
   EXPIRED: 'EXPIRED',
   WRONG_DOCUMENT: 'REQUIREMENT', INSURANCE_NOT_HIRE: 'REQUIREMENT', NOT_YELLOW: 'REQUIREMENT', WRONG_PLATE_CLASS: 'REQUIREMENT',
@@ -128,7 +130,7 @@ describe('[DOC-1 P4-5] review cases and decisions', () => {
   });
 
   it('the reason → category table is the one in §8.5 — pinned as literals, so a lie in the map cannot satisfy itself', () => {
-    expect(Object.keys(ACTOR_FACING_CATEGORY).sort()).toEqual([...REJECTION_REASON_CODES].sort());
+    expect(Object.keys(ACTOR_FACING_CATEGORY).sort()).toEqual([...REJECTION_REASON_CODES, ...RETIRED_REJECTION_REASON_CODES].sort());
     expect(ACTOR_FACING_CATEGORY).toEqual(SPEC_8_5_CATEGORY);
     // §8.5: the fraud class reads IDENTICALLY — never tell a fraudster which signal caught them.
     const fraudClass = (['SUSPECTED_TAMPERING', 'DUPLICATE', 'FACE_MISMATCH'] as const).map((c) => ACTOR_FACING_CATEGORY[c]);

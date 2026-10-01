@@ -1,3 +1,4 @@
+import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
 import type { FastifyInstance } from 'fastify';
@@ -1359,16 +1360,11 @@ export async function adminRoutes(app: FastifyInstance) {
     // price this store refuses the approval here, with the config error, and
     // the store stays pending — never ACTIVE and searchable with no
     // subscription, which a failure after the CAS below used to leave behind.
-    await subscriptions.priceForActivation({ vendorId: id });
-
-    // CAS [EV-ACT-11]: exactly one approval transitions the store, so a
-    // double-tap cannot double-fire the trial/notification side effects.
-    const won = await app.prisma.vendor.updateMany({
-      where: { id, status: { not: 'ACTIVE' } },
-      data: { status: 'ACTIVE', isVerified: true },
+    const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true } });
+      if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
+      return tx.vendor.findUniqueOrThrow({ where: { id } });
     });
-    if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
-    const updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
@@ -1376,7 +1372,6 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
 
     // A subscription is born as a 14-day trial the moment the vendor goes live.
-    await subscriptions.startTrialForVendor(id);
 
     await notifications.send({
       userId: vendor.owner.userId,
@@ -1538,9 +1533,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // [PR1270-S2-03] Price BEFORE documentsVerified is written: a rider whose
     // market cannot price them is refused here, still unverified, rather than
     // verified with no subscription.
-    if (isVerified) await subscriptions.priceForActivation({ riderId: id });
-
-    const updated = await mutationOrNotFound('Rider', id, () => app.prisma.rider.update({
+    const project = (tx: Prisma.TransactionClient) => mutationOrNotFound('Rider', id, () => tx.rider.update({
       where: { id, user: { tenantId } },
       data: {
         documentsVerified: isVerified,
@@ -1553,6 +1546,10 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     }));
 
+    const updated = isVerified
+      ? await subscriptions.withActivation({ riderId: id }, (tx) => project(tx))
+      : await project(app.prisma);
+
     await audit(
       request.user.userId,
       isVerified ? 'VERIFY_RIDER_DOCUMENTS' : 'REJECT_RIDER_DOCUMENTS',
@@ -1563,7 +1560,6 @@ export async function adminRoutes(app: FastifyInstance) {
     );
 
     // Verification is the founder-chosen trigger: start the 14-day trial.
-    if (isVerified) await subscriptions.startTrialForRider(id);
 
     await notifications.send({
       userId: rider.userId,
@@ -1673,9 +1669,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // [PR1270-S2-03] Price BEFORE documentsVerified is written: a driver whose
     // market cannot price them is refused here, still unverified, rather than
     // verified with no subscription.
-    if (isVerified) await subscriptions.priceForActivation({ driverId: id });
-
-    const updated = await mutationOrNotFound('Driver', id, () => app.prisma.driver.update({
+    const project = (tx: Prisma.TransactionClient) => mutationOrNotFound('Driver', id, () => tx.driver.update({
       where: { id, user: { tenantId } },
       data: {
         documentsVerified: isVerified,
@@ -1687,6 +1681,10 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     }));
 
+    const updated = isVerified
+      ? await subscriptions.withActivation({ driverId: id }, (tx) => project(tx))
+      : await project(app.prisma);
+
     await audit(
       request.user.userId,
       isVerified ? 'VERIFY_DRIVER_DOCUMENTS' : 'REJECT_DRIVER_DOCUMENTS',
@@ -1697,7 +1695,6 @@ export async function adminRoutes(app: FastifyInstance) {
     );
 
     // Verification is the founder-chosen trigger: start the 14-day trial.
-    if (isVerified) await subscriptions.startTrialForDriver(id);
 
     await notifications.send({
       userId: driver.userId,
@@ -3769,7 +3766,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get<{ Params: { userId: string } }>('/integrity/identity/:userId', { preHandler: [platformControlGuard] }, async (request) => {
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(app.prisma);
-    const clusterId = await identity.resolveCluster(request.params.userId);
+    const authority = await identityAuthority(app.prisma, request.params.userId);
+    const clusterId = authority.clusterId;
     if (!clusterId) {
       return { success: true, data: { clusterId: null, members: [], trialGrants: [], enforcement: [], exceptions: [], softAdvisories: await identity.softAdvisories(request.params.userId) } };
     }
@@ -3788,6 +3786,7 @@ export async function adminRoutes(app: FastifyInstance) {
     return {
       success: true,
       data: {
+        authorityStatus: authority.status,
         clusterId,
         members: members.map((m) => ({
           accountId: m.accountId,
@@ -4784,6 +4783,23 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { id: resolved.id, appeal: resolved.appeal } };
   });
 
+  /** [SAFE-B] Ambiguous historical identity links: stage bounded, snapshot-bound
+   *  review cases, then record a reviewed KEEP_REVIEW disposition. Neither route
+   *  grants, splits, restores or clears anything. */
+  app.post('/integrity/reviews/scan', { preHandler: [platformControlGuard] }, async (request) => {
+    const body = z.object({ afterId: z.string().optional(), limit: z.number().int().min(1).max(25).default(25) }).parse(request.body ?? {});
+    const data = await stageIdentityReviewCases(app.prisma, body.afterId, body.limit);
+    return { success: true, data };
+  });
+  app.post('/integrity/reviews/:id/retain', { preHandler: [platformControlGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ expectedDigest: z.string().regex(/^[a-f0-9]{64}$/), note: z.string().trim().min(8).max(500),
+      members: z.array(z.object({ accountId: z.string(), disposition: z.literal('KEEP_REVIEW') })).min(1).max(500),
+    }).parse(request.body);
+    const data = await retainIdentityReview(app.prisma, { caseId: id, adminId: request.user.userId, ...body });
+    return { success: true, data };
+  });
+
   /** §3.5 — the founder issues a deliberate, logged exception (multi-location
    *  vendor trial-per-location, household, override). The trial law honors
    *  live exceptions; appeals overturn through this same mechanism. */
@@ -4794,14 +4810,15 @@ export async function adminRoutes(app: FastifyInstance) {
       note: z.string().trim().min(3).max(500),
       expiresAt: z.string().datetime().optional(),
     }).parse(request.body ?? {});
-    const cluster = await app.prisma.identityCluster.findUnique({ where: { id: body.clusterId }, select: { id: true } });
-    if (!cluster) throw new NotFoundError('IdentityCluster', body.clusterId);
-    const grant = await app.prisma.exceptionGrant.create({
-      data: {
-        clusterId: body.clusterId, scope: body.scope, note: body.note,
-        grantedBy: request.user.userId,
+    const grant = await app.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      const cluster = await tx.identityCluster.findUnique({ where: { id: body.clusterId }, select: { id: true, mergedIntoId: true, authorityReviewRequired: true } });
+      if (!cluster) throw new NotFoundError('IdentityCluster', body.clusterId);
+      if (cluster.mergedIntoId || cluster.authorityReviewRequired) throw new IdentityReviewRequiredError();
+      return tx.exceptionGrant.create({ data: {
+        clusterId: body.clusterId, scope: body.scope, note: body.note, grantedBy: request.user.userId,
         expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
-      },
+      } });
     });
     return { success: true, data: grant };
   });

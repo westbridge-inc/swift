@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -152,13 +153,15 @@ async function subWithRelations(subId: string) {
   });
 }
 
-const putMethod = (url: string, token: string, method: 'CASH' | 'MOBILE_MONEY' | 'NONE', msisdn?: string) =>
-  app.inject({
+const putMethod = async (url: string, token: string, method: 'CASH' | 'MOBILE_MONEY' | 'NONE', msisdn?: string) => {
+  await grantStepUp(app, token);
+  return app.inject({
     method: 'PUT',
     url,
     payload: { method, ...(msisdn ? { mmgPayerMsisdn: msisdn } : {}) },
     headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
   });
+};
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
