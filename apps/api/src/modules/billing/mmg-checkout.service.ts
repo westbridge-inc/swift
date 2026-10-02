@@ -610,18 +610,22 @@ export class MmgCheckoutService {
         await this.alertRefusedRequest(intent, parsed.resultCode, configFailure, input.source);
         return 'UNKNOWN';
       }
-      if (intent.status === 'CONFIRMED') return 'CONFIRMED';
+      if (intent.status === 'CONFIRMED') {
+        await this.alertUnapplied(intent, parsed, input.source);
+        return 'CONFIRMED';
+      }
       if (intent.status === 'HELD') return 'CONFIRMING';
 
       // Return, notify and poll can overlap. Merge against the locked current
       // row, preserving both candidates and the first reply's timestamp. MMG's
       // own not-paid answer for THIS checkout releases the confirmation pause
       // in the same transaction, unless a success answer was ever given for it.
-      const released = await this.prisma.$transaction(async (tx) => {
+      const merged = await this.prisma.$transaction(async (tx) => {
         await lockBillingAuthority(tx, intent.subscriptionId);
         await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
-        if (current.status === 'CONFIRMED' || current.status === 'HELD') return false;
+        if (current.status === 'CONFIRMED') return 'CONFIRMED' as const;
+        if (current.status === 'HELD') return 'UNCHANGED' as const;
         const named = parsed.transactionId ? [parsed.transactionId] : [];
         const candidates = [...new Set([...current.candidates, ...named])].slice(0, MAX_CANDIDATES);
         const replyAt = !current.replyAt || now < current.replyAt ? now : current.replyAt;
@@ -639,18 +643,23 @@ export class MmgCheckoutService {
           if (moved.count !== 1) throw new Error(`Locked checkout ${current.id} changed under its reply`);
           await resolveConfirmationInTx(tx, current.subscriptionId, { checkoutId: current.id }, 'PROVEN_UNPAID',
             { actor: 'mmg-checkout-reply', reference: `${current.merchantTransactionId}:MMG_RESULT_${parsed.resultCode}` }, now);
-          return true;
+          return 'RELEASED' as const;
         }
         await tx.mmgCheckoutIntent.updateMany({
           where: { id: current.id, status: current.status },
           data: { candidates, replyAt, outcomeHint, nextCheckAt: now, ...(current.status === 'OPEN' ? { status: 'CONFIRMING' } : {}) },
         });
-        return false;
+        return 'UNCHANGED' as const;
       });
-      if (released) {
+      if (merged === 'RELEASED') {
         mmgCheckoutEventsCounter.labels('not_paid').inc();
         await this.tellPartner(intent, 'NOT_PAID');
         return 'NOT_PAID';
+      }
+      if (merged === 'CONFIRMED') {
+        // Confirmed while this reply waited for the lock.
+        await this.alertUnapplied(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), parsed, input.source);
+        return 'CONFIRMED';
       }
       return returnStateFor(await this.verify(intent.id, now));
     });
@@ -775,6 +784,32 @@ export class MmgCheckoutService {
       data: { kind: 'billing_invariants', alert: 'mmg-checkout-reply-code', resultCode: code, reason, checkoutId: intent.id, source },
       dedupeKey: `mmg-checkout-reply-code:${intent.id}:${code}`,
     }).catch((err) => log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about a refused request'));
+  }
+
+  /** [DS632] MMG answered success for a checkout that is already CONFIRMED,
+   *  naming a transaction it did not credit (neither of MMG's two numbers for
+   *  the payment it credited): money MMG may hold for the partner that was
+   *  never applied. The reply is already written down [I9]. It is never
+   *  looked up for credit and never credited; operators are paged once per
+   *  checkout, whichever door and however often. */
+  private async alertUnapplied(intent: MmgCheckoutIntent, reply: MmgCheckoutReply, source: 'RETURN' | 'NOTIFY'): Promise<void> {
+    if (reply.resultCode !== '0' || !reply.transactionId) return;
+    // Provider identities are stored trimmed and upper-cased; a reply's id has no spaces (MMG_TXN_ID).
+    const named = reply.transactionId.toUpperCase();
+    if (intent.mmgTransactionId?.toUpperCase() === named) return;
+    const applied = await this.prisma.providerPayment.findFirst({
+      where: { provider: 'MMG', providerTxnId: named, creditedPaymentId: `mco:${intent.id}` }, select: { id: true },
+    });
+    if (applied) return;
+    mmgCheckoutEventsCounter.labels('reply_unapplied').inc();
+    log().error({ checkoutId: intent.id, source }, '[MMG checkout] MMG answered success for a confirmed checkout naming another transaction: money received and not applied');
+    await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: intent.tenantId,
+      title: 'MMG checkout: money received and not applied',
+      body: `MMG answered success for checkout ${intent.id}, which is already paid, naming MMG transaction ${reply.transactionId}, which was not credited. Nothing was credited for it. Reconcile it against the MMG statement.`,
+      data: { kind: 'billing_invariants', alert: 'mmg-checkout-unapplied', checkoutId: intent.id, transactionId: reply.transactionId, source },
+      dedupeKey: `mmg-checkout-unapplied:${intent.id}`,
+    }).catch((err) => log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about money not applied'));
   }
 
   /** [F3] The answer a key already has, if it has one: the checkout it was

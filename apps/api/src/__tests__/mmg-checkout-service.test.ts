@@ -2084,6 +2084,42 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await topups(s.subId)).toHaveLength(1);
   });
 
+  it('[DS632] after a checkout is CONFIRMED, MMG’s success answer naming ANOTHER transaction is written down and operators are told once that money was received and not applied; nothing is credited', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const paid = tx('APPLIEDTX');
+    approved(paid, 2100);
+    expect(await codeReply(row, '0', paid, 'RETURN')).toBe('CONFIRMED');
+    // MMG repeating the credited payment, by either of its numbers, is not new money.
+    expect(await codeReply(row, '0', paid, 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', ledgerOf(paid), 'NOTIFY')).toBe('CONFIRMED');
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(0);
+
+    const other = tx('UNAPPLIEDTX');
+    approved(other, 2100);
+    lookedUp.length = 0;
+    expect(await codeReply(row, '0', other, 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', other, 'RETURN')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', tx('UNAPPLIEDTX2'), 'NOTIFY')).toBe('CONFIRMED');
+    // Written down, never looked up for credit, never credited.
+    const named = (await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id, source: { in: ['RETURN', 'NOTIFY'] } } }))
+      .filter((o) => (o.body as Record<string, unknown> | null)?.['transactionId'] === other);
+    expect(named).toHaveLength(2);
+    expect(lookedUp).toEqual([]);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: paid });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(other)).toBeNull();
+    // Operators are told once for this checkout, whichever door and however often.
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.title).toMatch(/money received and not applied/i);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: other });
+    // The partner hears nothing new.
+    expect(await toldOf(s.userId, 'CONFIRMED')).toHaveLength(1);
+    expect(await toldOf(s.userId, 'HELD')).toHaveLength(0);
+  });
+
   it('the return door and the notify door at once, both carrying MMG’s answer, credit once', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);
