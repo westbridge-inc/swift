@@ -241,7 +241,7 @@ Both public routes are rate-limited per source address and size-capped: `/return
 
 **MMG's result code.** MMG sends the outcome, success or failure, to the same Response URL, so the `…/pay/mmg/success` path is not a success. The API reads the reply's documented `ResultCode`:
 - `3`, `4`, `5` (invalid secret key, merchant id mismatch, token decryption failed): MMG could not accept Swift's request. The reply is written down, operators are paged once per checkout and code, the checkout is left exactly as it was whatever its state, and the page answers `UNKNOWN`. Nothing is ever credited on these.
-- every other reply goes to the service, which decides as described under "Official response interpretation" below: `0` confirms only under the six conditions (section 5) and is otherwise held for a person; `1`, `2` and `6` are `NOT_PAID` at once; `7` is `NOT_PAID` at once when it names no transaction, and waits for MMG's lookup when it names one.
+- every other reply goes to the service, which decides as described under "Official response interpretation" below: `0` confirms only under the six conditions (section 5): a paid record that fails one is held for a person, and a record MMG does not have yet keeps the checkout confirming; `1`, `2` and `6` are `NOT_PAID` at once; `7` is `NOT_PAID` at once when it names no transaction, and waits for MMG's lookup when it names one.
 
 ### Official response interpretation (service boundary)
 
