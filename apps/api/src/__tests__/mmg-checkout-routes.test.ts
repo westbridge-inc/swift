@@ -415,6 +415,28 @@ describe('live: payActions per the contract (section 3)', () => {
     resetFeeCheckoutSwitchCache();
   });
 
+  it('[owner, 1 Oct · option 2] the iOS app pays in-app too: with no switch row every platform is live, and the switch stays the server-side kill switch', async () => {
+    const p = await makeStore();
+    const switchTo = async (value: Record<string, unknown> | null) => {
+      if (value === null) await app.prisma.platformConfig.deleteMany({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } });
+      else await app.prisma.platformConfig.upsert({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY }, create: { key: FEE_CHECKOUT_PLATFORMS_KEY, value: value as never }, update: { value: value as never } });
+      resetFeeCheckoutSwitchCache();
+    };
+    const mmgOn = async (platform: string) => (await subscriptionOf(p, { 'x-client-platform': platform })).json().data.payActions[0];
+    // No row at all (the default): iOS, Android, the web and an unnamed platform all pay in the app.
+    await switchTo(null);
+    for (const platform of ['ios', 'android', 'web', '']) expect(await mmgOn(platform), platform || 'unknown').toMatchObject({ id: 'MMG_CHECKOUT', state: 'live' });
+    // A row that does not name iOS leaves iOS on.
+    await switchTo({ android: true, web: true });
+    expect(await mmgOn('ios')).toMatchObject({ state: 'live' });
+    // The kill switch: iOS off with no app build; Android still pays.
+    await switchTo({ ios: false });
+    expect(await mmgOn('ios')).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    expect((await start(p, { 'x-client-platform': 'ios' })).json().error.code).toBe('PAY_ACTION_OFF');
+    expect(await mmgOn('android')).toMatchObject({ state: 'live' });
+    await switchTo(null);
+  });
+
   it('[#1393] never live while a weekly-fee payment is being confirmed, nor before the billing clock covers the subscription', async () => {
     const LIVE = { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' };
     const MMG_OFF = { id: 'MMG_CHECKOUT', state: 'off' };
@@ -895,6 +917,8 @@ describe('[store review] a demo partner never opens a real MMG page', () => {
       const sub = await isolated(() => subscriptionOf(p));
       expect(sub.statusCode, `${label}: ${sub.body}`).toBe(200);
       expect(sub.json().data.payActions, label).toEqual(OFF);
+      // Whatever the platform: the refusal is the tenant's, not the platform switch's.
+      expect((await isolated(() => subscriptionOf(p, { 'x-client-platform': 'android' }))).json().data.payActions, `${label} on android`).toEqual(OFF);
       const res = await isolated(() => start(p));
       expect(res.statusCode, `${label}: ${res.body}`).toBe(409);
       expect(res.json().error.code, label).toBe('PAY_ACTION_OFF');
