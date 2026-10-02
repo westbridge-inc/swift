@@ -9,6 +9,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
+import { readOfferItinerary, type TaxiStopPreview } from '../rides/taxi-stops-read';
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
 import { algoConfig } from '../algo/algo-config';
@@ -1362,6 +1363,8 @@ export class DispatchService {
           id: true, status: true, riderId: true, driverId: true, orderType: true, holdExpiresAt: true,
           fulfillment: true, fulfillmentMode: true, fulfillmentModeVersion: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
+          // [TAXI multi-stop] Whether the ride has stops: the offer card shows them.
+          taxiStopCount: true,
           subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true, foodAgeHeldAt: true, foodAgeWaivedAt: true,
           // [S1-6] The disagreement latch the locked assignment writes also read.
           mmgClaimMismatchAt: true,
@@ -1546,6 +1549,11 @@ export class DispatchService {
         // §7: a mover judges a big grocery order BEFORE accepting.
         const totalUnits = order.items.reduce((s, i) => s + i.quantity, 0);
 
+        // [TAXI multi-stop] A driver judges a ride with stops by where it goes:
+        // how many stops and where, in order. Read before the final proofs
+        // below, like every other enrichment; a ride without stops reads nothing.
+        const itinerary = order.orderType === 'TAXI' ? await readOfferItinerary(this.prisma, order) : null;
+
         // [F-014-10] FINAL conditional publish proof: the awaited trust/load
         // reads above leave a window where a go-offline release or a role
         // switch retires this exact attempt. Publishing anyway would render a
@@ -1646,6 +1654,8 @@ export class DispatchService {
             // already paid the store) and null whenever the numbers do not
             // reconcile — see `cashMathForOffer`.
             cashMath: cashMathForOffer(order),
+            // [TAXI multi-stop] stopCount and stops, only for a ride with stops.
+            ...itinerary,
           });
         } catch (err) {
           // [F-014-10] A socket-layer throw must not strand the installed
@@ -1824,6 +1834,10 @@ export class DispatchService {
     /** [ALG-06 ①] The incentive the live card carried, or null — a rebuilt
      *  card that dropped Swift's bonus would show less money than the live one. */
     rescueIncentiveGyd: number | null;
+    /** [TAXI multi-stop] The live card's stops, for a ride that has them: a
+     *  card rebuilt after an app restart shows the same itinerary. */
+    stopCount?: number;
+    stops?: TaxiStopPreview[];
   } | null> {
     const reverse = await this.redis.get(moverOfferKey(moverId));
     if (!reverse) return null;
@@ -1849,6 +1863,7 @@ export class DispatchService {
         pickupAddress: true, deliveryAddress: true, pickupLat: true, pickupLng: true,
         totalAmount: true, subtotalBase: true, serviceFee: true, taxAmount: true, discount: true,
         id: true, status: true, riderId: true, driverId: true, fulfillment: true, fulfillmentMode: true, fulfillmentModeVersion: true, orderType: true, foodAgeHeldAt: true, holdExpiresAt: true,
+        taxiStopCount: true,
         vendor: { select: { name: true } },
         items: { select: { quantity: true } },
       },
@@ -1893,6 +1908,9 @@ export class DispatchService {
       orderId,
       order.orderType === 'TAXI' ? undefined : riderDeliveryAuthorityVersionFromAttempt(attemptId),
     );
+    // [TAXI multi-stop] The same stops the live card carried (read from the
+    // ride, so a restart loses nothing), before the final proof below.
+    const itinerary = order.orderType === 'TAXI' ? await readOfferItinerary(this.prisma, order) : null;
     // Trust, location, routing and incentive reads can all outlive this offer.
     // The final authority/pair/TTL proof is after ALL enrichment, with no await
     // between the final deadline check and returning the card.
@@ -1919,6 +1937,7 @@ export class DispatchService {
       rescueIncentiveGyd: rescueIncentive,
       // The SAME function the live emit calls — one definition of the triple.
       cashMath: cashMathForOffer(order),
+      ...itinerary,
     };
   }
 
