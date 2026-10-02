@@ -11,7 +11,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { runWithTenant } from '../plugins/tenant-context';
+import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -1720,6 +1720,23 @@ describe('[F7] payment evidence is filed under the checkout’s own tenant', () 
     expect(await intentOf(row2.id)).toMatchObject({ status: 'HELD', reason: 'TENANT_CONFLICT_ON_RECORD' });
     expect(await identityOf(tx('FOREIGNTX1'))).toMatchObject({ status: 'OPEN', tenantId: 'swift-default' });
     expect(await topups(t2.subId)).toHaveLength(0);
+  });
+});
+
+describe('[DS633] an Idempotency-Key is filed under its checkout’s tenant', () => {
+  it('a key bound to an open checkout carries that checkout’s tenant, even when bound with no tenant in context', async () => {
+    const tenantId = `ten-key-${RUN.toLowerCase()}`;
+    await app.prisma.tenant.create({ data: { id: tenantId, name: 'Checkout key tenant', slug: `key-tenant-${RUN.toLowerCase()}` } });
+    tenantIds.push(tenantId);
+    const t = await makeSub({ tenantId });
+    const first = await runWithTenant(tenantId, () => start(t));
+    expect((await intentOf(first.checkout.ref)).tenantId).toBe(tenantId);
+    // A second tap with a new key, answered with the open checkout, as system work would be.
+    const next = key();
+    const again = await runAsSystem('ds633-checkout-key-tenant', () => start(t, next));
+    expect(again).toMatchObject({ created: false, checkout: { ref: first.checkout.ref } });
+    const bound = await app.prisma.mmgCheckoutKey.findUniqueOrThrow({ where: { createdByUserId_clientKey: { createdByUserId: t.userId, clientKey: next } } });
+    expect(bound).toMatchObject({ intentId: first.checkout.ref, tenantId });
   });
 });
 

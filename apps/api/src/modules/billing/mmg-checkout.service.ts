@@ -844,7 +844,9 @@ export class MmgCheckoutService {
     now: Date,
   ): Promise<{ intentId: string; answer: () => Promise<{ created: false; checkout: StartedCheckout }> }> {
     try {
-      await this.prisma.mmgCheckoutKey.create({ data: { createdByUserId: who.userId, clientKey: who.clientKey, intentId: intent.id } });
+      // [DS633] Filed under the checkout's own tenant, named: never whatever
+      // tenant (or none) the caller's context happens to carry.
+      await this.prisma.mmgCheckoutKey.create({ data: { tenantId: intent.tenantId, createdByUserId: who.userId, clientKey: who.clientKey, intentId: intent.id } });
       // Answered as it stands NOW: a reply may have moved it on since it was read,
       // and a page is only ever handed out while the checkout is still OPEN.
       return {
