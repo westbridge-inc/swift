@@ -7,6 +7,7 @@ import { T, TonePill, PillButton, useLogoutConfirm } from '../../kit';
 import { money } from '../../lib/money';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '../../lib/appointmentTime';
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
+import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
 
 export const GUTTER = space['2xl'];
 
@@ -564,10 +565,13 @@ export function HeaderAction({ label, tone = 'brand', onPress }: { label: string
 const VENDOR_LOGOUT_BODY = 'New-order alerts stop on this device until you log back in. Your store, menu and orders stay with your account.';
 
 /** Tab-root header: the board may replace the product eyebrow with a live store
- *  state; the other tabs retain the quiet Swift Business identity. */
+ *  state; the other tabs retain the quiet Swift Business identity. A business
+ *  sign-up passes `onBack`: "‹ Swift" then sits top-left, above the title. */
 export function TabHeader({
   title,
   onSwitch,
+  onBack,
+  backBusy = false,
   eyebrow = 'SWIFT BUSINESS',
   avatar,
   statusTone = 'brand',
@@ -575,6 +579,9 @@ export function TabHeader({
 }: {
   title: string;
   onSwitch?: () => void;
+  /** Back to ordering in Swift (components/onboarding/backToSwift). */
+  onBack?: () => void;
+  backBusy?: boolean;
   eyebrow?: string;
   avatar?: string;
   statusTone?: 'brand' | 'success' | 'warning' | 'muted';
@@ -590,7 +597,7 @@ export function TabHeader({
         : statusTone === 'muted'
           ? color.text.secondary
           : color.brand[500];
-  return (
+  const header = (
     <View
       style={{
         flexDirection: 'row',
@@ -634,6 +641,15 @@ export function TabHeader({
       </View>
       {logoutDialog}
     </View>
+  );
+  if (!onBack) return header;
+  return (
+    <>
+      <View style={{ paddingHorizontal: GUTTER, paddingTop: space.xs }}>
+        <BackToSwiftButton onPress={onBack} busy={backBusy} />
+      </View>
+      {header}
+    </>
   );
 }
 
