@@ -183,6 +183,8 @@ describe('verification mutations', () => {
     await openReview(user);
     await reviewEvidence(user);
     await user.type(screen.getByPlaceholderText('Rejection reason'), '  Document is unreadable  ');
+    // [ADMIN-CONSOLE] every rejection names the server's reason code
+    await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
     const rejectButton = screen.getByRole('button', { name: 'Reject' });
 
     await user.click(rejectButton);
@@ -202,7 +204,7 @@ describe('verification mutations', () => {
     );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/verification/document-target/reject`);
     expect(init?.method).toBe('PUT');
-    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Document is unreadable' });
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Document is unreadable', reasonCode: 'UNREADABLE' });
   });
 
   it.each([
@@ -234,6 +236,7 @@ describe('verification mutations', () => {
     await reviewEvidence(user);
     if (buttonName === 'Reject') {
       await user.type(screen.getByPlaceholderText('Rejection reason'), 'Document is unreadable');
+      await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
     }
     await user.click(screen.getByRole('button', { name: buttonName }));
 
@@ -282,6 +285,7 @@ describe('verification mutations', () => {
     await openReview(user);
     await reviewEvidence(user);
     await user.type(screen.getByPlaceholderText('Rejection reason'), 'Document is unreadable');
+    await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
     await user.click(screen.getByRole('button', { name: 'Reject' }));
 
     expect(confirm).toHaveBeenCalledWith(
@@ -310,8 +314,11 @@ describe('verification mutations', () => {
     await openReview(user);
     await reviewEvidence(user);
     await user.type(screen.getByPlaceholderText('Rejection reason'), 'Document is unreadable');
+    // reject is live before the approval starts, so its lock below is the pending decision's
+    await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
     const approveButton = screen.getByRole('button', { name: 'Approve' });
     const rejectButton = screen.getByRole('button', { name: 'Reject' });
+    expect(rejectButton.hasAttribute('disabled')).toBe(false);
 
     await user.click(approveButton);
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
@@ -537,5 +544,185 @@ describe('[DS110-15] the document must actually load before Approve unlocks', ()
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
     // the button never switched to "view again" — nothing was marked previewed
     expect(screen.queryByRole('button', { name: 'View document again' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [ADMIN-CONSOLE] Hosted, this page is where the owner decides real partner
+// documents, so it speaks the reject route's whole contract
+// (apps/api admin.routes.ts rejectDocSchema): the reviewer's words AND one of
+// the server's reason codes. The code is what the applicant is told (a
+// category and a consistent opening line) and what the decision record keeps;
+// without one the server records the decision as UNSPECIFIED. Two of the
+// server's own refusals tell the reviewer to reject AS a code
+// (WRONG_PLATE_CLASS, INSURANCE_NOT_HIRE), and the fraud class only reaches a
+// second reviewer when it is sent as a code. The codes are read from the API
+// source, so the page cannot drift from what the route accepts.
+// ---------------------------------------------------------------------------
+
+function apiSource(path: string): string {
+  return readFileSync(join(process.cwd(), '../api/src', path), 'utf8');
+}
+
+function serverCodes(name: 'REJECTION_REASON_CODES' | 'RETIRED_REJECTION_REASON_CODES'): string[] {
+  const block = new RegExp(`export const ${name} = \\[([\\s\\S]*?)\\] as const;`).exec(
+    apiSource('modules/verification/verification.service.ts'),
+  );
+  if (!block) throw new Error(`${name} not found in the API verification service`);
+  return [...block[1]!.matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]!);
+}
+
+function serverSecondReviewCodes(): string[] {
+  const block = /FRAUD_CLASS_CODES[^=]*= new Set<RejectionReasonCode>\(\[([^\]]*)\]\)/.exec(
+    apiSource('modules/verification/verification.service.ts'),
+  );
+  if (!block) throw new Error('FRAUD_CLASS_CODES not found in the API verification service');
+  return [...block[1]!.matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]!).sort();
+}
+
+function serverRejectBodyKeys(): string[] {
+  const block = /const rejectDocSchema = z\.object\(\{([\s\S]*?)\n\}\);/.exec(apiSource('modules/admin/admin.routes.ts'));
+  if (!block) throw new Error('rejectDocSchema not found in the admin routes');
+  return [...block[1]!.matchAll(/^\s*([a-zA-Z]+):/gm)].map((m) => m[1]!).sort();
+}
+
+const PLATE_REASON = 'The registration on the photo is a private P plate, not an H plate';
+
+describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes', () => {
+  it('offers exactly the server’s live codes, in its order: the H-plate reason, never the retired colour one', async () => {
+    mockApi(verificationHandler(() => { throw new Error('no mutation expected'); }));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+
+    const offered = within(screen.getByLabelText('Reason code'))
+      .getAllByRole('option')
+      .map((option) => (option as HTMLOptionElement).value)
+      .filter(Boolean);
+    expect(offered).toEqual(serverCodes('REJECTION_REASON_CODES'));
+    expect(offered).toContain('WRONG_PLATE_CLASS');
+    // [#1415] the owner's ruling retired the colour reason; the route refuses it
+    expect(serverCodes('RETIRED_REJECTION_REASON_CODES')).toContain('NOT_YELLOW');
+    for (const retired of serverCodes('RETIRED_REJECTION_REASON_CODES')) expect(offered).not.toContain(retired);
+  });
+
+  it('says a code goes to a second reviewer for exactly the server’s fraud class', async () => {
+    mockApi(verificationHandler(() => { throw new Error('no mutation expected'); }));
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+
+    const warned: string[] = [];
+    for (const code of serverCodes('REJECTION_REASON_CODES')) {
+      await user.selectOptions(screen.getByLabelText('Reason code'), code);
+      if (screen.queryByText(/a different reviewer must confirm/i)) warned.push(code);
+    }
+    expect(warned.sort()).toEqual(serverSecondReviewCodes());
+  });
+
+  it('reject stays shut until a code is chosen, then sends the code with the reviewer’s words, the route’s whole body', async () => {
+    const confirm = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('confirm', confirm);
+    const fetchMock = mockApi(
+      verificationHandler((request) => {
+        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/reject') {
+          return { body: { success: true, data: { ...baseDocument, status: 'REJECTED' } } };
+        }
+        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+      }),
+    );
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await reviewEvidence(user);
+    await user.type(screen.getByPlaceholderText('Rejection reason'), PLATE_REASON);
+    const rejectButton = screen.getByRole('button', { name: 'Reject' }) as HTMLButtonElement;
+    expect(rejectButton.disabled).toBe(true);
+
+    await user.selectOptions(screen.getByLabelText('Reason code'), 'WRONG_PLATE_CLASS');
+    expect(rejectButton.disabled).toBe(false);
+    await user.click(rejectButton);
+
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    const [, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
+    const sent = JSON.parse(String(init?.body));
+    expect(sent).toEqual({ reason: PLATE_REASON, reasonCode: 'WRONG_PLATE_CLASS' });
+    expect(Object.keys(sent).sort()).toEqual(serverRejectBodyKeys());
+    // [ADM-006] the stated reason rides the header the server reads first
+    expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe(PLATE_REASON);
+    expect(screen.queryByText(/second review/i)).toBeNull();
+  });
+
+  it('a second-reviewer code says so before sending, and the page never calls the document rejected', async () => {
+    const confirm = vi.fn().mockReturnValue(true);
+    vi.stubGlobal('confirm', confirm);
+    mockApi(
+      verificationHandler((request) => {
+        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/reject') {
+          // [DOC-1 §24.2] the first reviewer's suspicion escalates: the document stays PENDING
+          return { body: { success: true, data: { ...baseDocument, status: 'PENDING' } } };
+        }
+        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+      }),
+    );
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await reviewEvidence(user);
+    await user.type(screen.getByPlaceholderText('Rejection reason'), 'The edges of the photo look edited around the name');
+    await user.selectOptions(screen.getByLabelText('Reason code'), 'SUSPECTED_TAMPERING');
+    expect(screen.getByText(/a different reviewer must confirm/i)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+
+    expect(String(confirm.mock.calls[0]?.[0])).toMatch(/second reviewer/i);
+    const notice = await screen.findByRole('status');
+    expect(notice.textContent).toMatch(/sent for a second review/i);
+    expect(notice.textContent).toMatch(/not rejected/i);
+  });
+
+  it('the server’s second-reviewer rule is shown in the server’s own words', async () => {
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    const refusal = 'You raised this suspicion — a different reviewer must confirm it (DOC-1 §24.2)';
+    mockApi(
+      verificationHandler((request) => {
+        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/reject') {
+          return { status: 403, body: { success: false, error: { code: 'SECOND_REVIEWER_REQUIRED', message: refusal } } };
+        }
+        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+      }),
+    );
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await reviewEvidence(user);
+    await user.type(screen.getByPlaceholderText('Rejection reason'), 'The photo was clearly edited around the name');
+    await user.selectOptions(screen.getByLabelText('Reason code'), 'SUSPECTED_TAMPERING');
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain(refusal);
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('an approval the server refuses for its plate is shown, and the reviewer rejects with that code', async () => {
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
+    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REAL_REASON));
+    const plateRefusal = 'A taxi must carry an H registration mark; this vehicle is registered as P 1234. Reject the document as WRONG_PLATE_CLASS.';
+    const fetchMock = mockApi(
+      verificationHandler((request) => {
+        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/approve') {
+          return { status: 400, body: { success: false, error: { code: 'WRONG_PLATE_CLASS', message: plateRefusal } } };
+        }
+        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/reject') {
+          return { body: { success: true, data: { ...baseDocument, status: 'REJECTED' } } };
+        }
+        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+      }),
+    );
+    const { user } = renderWithQuery(<VerificationPage />);
+    await openReview(user);
+    await reviewEvidence(user);
+    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    expect((await screen.findByRole('alert')).textContent).toContain(plateRefusal);
+
+    await user.type(screen.getByPlaceholderText('Rejection reason'), PLATE_REASON);
+    await user.selectOptions(screen.getByLabelText('Reason code'), 'WRONG_PLATE_CLASS');
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(2));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[1]![1]?.body)).reasonCode).toBe('WRONG_PLATE_CLASS');
   });
 });

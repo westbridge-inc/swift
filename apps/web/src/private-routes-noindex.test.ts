@@ -32,13 +32,16 @@ const PUBLIC_PAGES = [
   '(marketing)/drivers/page.tsx',
   '(marketing)/faq/page.tsx',
   '(marketing)/how-it-works/page.tsx',
+  '(marketing)/launching-soon/page.tsx', // [Item 7] the public site's front door before launch, canonical at /
   '(marketing)/pricing/page.tsx',
   '(marketing)/stores/page.tsx',
   '(marketing)/stores/[slug]/page.tsx', // legacy storefront redirect
   '(marketing)/vendors/page.tsx',
   '(marketing)/welcome/page.tsx',
   'legal/child-safety/page.tsx',
+  'legal/delivery/page.tsx', // [Q36] the card bank's delivery policy
   'legal/privacy/page.tsx',
+  'legal/refunds/page.tsx', // [Q36] the card bank's refund and cancellation policy
   'legal/terms/page.tsx',
   'signup/page.tsx', // public business acquisition door [AX295 F1]
   'store/[slug]/page.tsx',
@@ -83,7 +86,7 @@ const TOKEN_DISALLOWED_PAGES = [
 ];
 
 // Token-bearing HTML route handlers carry response headers instead of metadata.
-const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[outcome]/route.ts'];
+const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[...path]/route.ts'];
 
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
@@ -242,12 +245,12 @@ describe('[DS288] every route has a reviewed search classification', () => {
 
   it.each(TOKEN_DISALLOWED_HANDLERS)('%s stays disallowed AND sends noindex for GET and POST', async (handler) => {
     expect(crawlable(urlOf(handler))).toBe(false);
-    const { GET, POST } = await import('./app/pay/mmg/[outcome]/route');
+    const { GET, POST } = await import('./app/pay/mmg/[...path]/route');
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }));
     try {
       for (const method of ['GET', 'POST'] as const) {
         const request = new Request('https://example.test/pay/mmg/success', { method });
-        const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ outcome: 'success' }) });
+        const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ path: ['success'] }) });
         expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
         expect(await response.text()).toContain('<meta name="robots" content="noindex">');
       }
