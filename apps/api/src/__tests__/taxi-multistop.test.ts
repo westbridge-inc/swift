@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] POST /rides/estimate with stops, through the real
@@ -19,6 +20,12 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 // configured routing engine cannot route it. The same ride without stops is
 // today's estimate (pinned byte for byte in taxi-estimate-single-leg-pin).
 // Phone prefix +5923418 (grepped: unused elsewhere).
+//
+// [PRICING-GY-OCT] Guyana's default is now the owner's October fare (pinned in
+// fares-georgetown-defaults.test.ts, its included kilometres once per trip
+// with stops too). This file puts the card these bytes were derived from —
+// which names no included kilometres — on the Guyana row and restores the
+// seeded card after: every byte below must stand unchanged under it.
 // ---------------------------------------------------------------------------
 
 const DAY = 86_400_000;
@@ -64,6 +71,7 @@ async function buildApp(): Promise<FastifyInstance> {
 let app: FastifyInstance;
 let token: string;
 let seq = 0;
+let restoreTaxiCard: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -111,11 +119,13 @@ beforeAll(async () => {
   delete process.env['MAPS_PROVIDER'];
   delete process.env['OSRM_URL'];
   app = await buildApp();
+  restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
+  await restoreTaxiCard();
   await purgeFixtures(app);
   await app.close();
 });
