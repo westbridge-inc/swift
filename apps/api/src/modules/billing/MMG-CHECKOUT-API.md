@@ -133,7 +133,7 @@ poll GET …/mmg-checkout/{ref}            → section 5
 | 409 | `PAY_ACTION_OFF` | the MMG checkout is not live for this subscription or platform | refetch the subscription, hide the button |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | the key was used for a different request | new tap, new key |
 | 409 | `CHECKOUT_CONFIRMING` | an earlier checkout is being confirmed; `error.details.ref` names it | show that checkout (section 5); do not start another |
-| 409 | `PAYMENT_CONFIRMING` | another weekly-fee payment (any checkout or card payment) is being confirmed; `error.details.ref` names the checkout when it is this one | "We're confirming a payment. Don't pay again."; refetch the subscription |
+| 409 | `PAYMENT_CONFIRMING` | another weekly-fee payment (any checkout or card payment) is being confirmed; `error.details.ref` is optional: it names a checkout only when the server knows which one, so never rely on it | "We're confirming a payment. Don't pay again."; refetch the subscription |
 | 409 | `PAYMENT_QUOTE_CHANGED` | the fee, the wallet or the owed week changed while the page was being prepared | refetch the subscription, then let the partner tap again |
 | 429 | `RATE_LIMITED` | too many attempts | wait and retry |
 | 503 | `MMG_CHECKOUT_UNAVAILABLE` | the checkout could not be built or stored safely right now | "Try again in a minute." |

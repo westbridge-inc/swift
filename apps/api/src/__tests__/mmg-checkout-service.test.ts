@@ -350,7 +350,10 @@ describe('starting a checkout — server-priced, written down first, one open at
     const old = (await start(s)).checkout;
     await app.prisma.mmgCheckoutIntent.update({ where: { id: old.ref }, data: { expiresAt: new Date(Date.now() - 1000) } });
     // An expired page may still be paid on MMG's side: never a second page yet.
-    await expect(start(s)).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_CONFIRMING' });
+    // [DS633] This refusal names no checkout: details.ref is optional.
+    const refused = await start(s).catch((err: unknown) => err);
+    expect(refused).toMatchObject({ statusCode: 409, code: 'PAYMENT_CONFIRMING' });
+    expect((refused as { details?: { ref?: string } }).details?.ref).toBeUndefined();
     expect((await intentOf(old.ref)).status).toBe('EXPIRED');
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
     // A person confirms it was not paid (finance review): the partner may pay again.

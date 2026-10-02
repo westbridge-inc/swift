@@ -360,6 +360,15 @@ describe('the reference MMG’s lookup echoes [F1] (UAT, 1 Oct: no lookup field 
   });
 });
 
+describe('[DS633] the contract says what a PAYMENT_CONFIRMING refusal carries', () => {
+  it('documents error.details.ref as optional: a client never relies on it', () => {
+    const contract = readFileSync(join(__dirname, '..', 'modules/billing/MMG-CHECKOUT-API.md'), 'utf8');
+    const row = contract.split('\n').find((line) => line.startsWith('| 409 | `PAYMENT_CONFIRMING`'));
+    expect(row, 'the PAYMENT_CONFIRMING row of section 4').toBeDefined();
+    expect(row).toMatch(/`error\.details\.ref` is optional/);
+  });
+});
+
 describe('the backfill completion record [F2]', () => {
   it('lives under a key the admin config route can never write, so it cannot be set by hand', () => {
     // The route's own key rule, read from its source: widening it to allow ':'
