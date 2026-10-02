@@ -14,6 +14,7 @@ import {
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, guyanaDay, mmgPayLine } from '../modules/billing/fee-notice-copy';
 import type { MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { MMG_LOOKUP_REFERENCE_FIELDS, echoedReferencesFrom, lookupDetailFrom, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { setAppLogger } from '../utils/logger';
 import { PROVIDER_IDENTITY_BACKFILL_KEY } from '../modules/billing/provider-identity-backfill';
 
 // ---------------------------------------------------------------------------
@@ -433,10 +434,37 @@ describe('payActions — MMG_CHECKOUT is live only when it truly is, and off is 
     expect(await mmgCheckoutLive(config, sub(), 'unknown', liveProvider)).toBe(false);
   });
 
-  it('only an explicit false switches a platform off', async () => {
-    for (const value of [{ ios: 'no' }, { ios: 0 }, { ios: null }, [], 'off']) {
+  it('[DS633] only a real boolean counts: any other value switches that platform off, with a warning; a row that is not an object switches every platform off', async () => {
+    const warn = vi.fn();
+    setAppLogger({ info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never);
+    try {
+      for (const value of [{ ios: 'false' }, { ios: 'no' }, { ios: 'true' }, { ios: 0 }, { ios: 1 }, { ios: null }, { ios: {} }]) {
+        resetFeeCheckoutSwitchCache();
+        warn.mockClear();
+        const config = configWith(value);
+        expect(await mmgCheckoutLive(config, sub(), 'ios', liveProvider), JSON.stringify(value)).toBe(false);
+        expect(await mmgCheckoutLive(config, sub(), 'android', liveProvider), JSON.stringify(value)).toBe(true);
+        expect(await mmgCheckoutLive(config, sub(), 'unknown', liveProvider), JSON.stringify(value)).toBe(false);
+        expect(warn, JSON.stringify(value)).toHaveBeenCalled();
+      }
+      for (const value of [[], 'off', false, 0, null]) {
+        resetFeeCheckoutSwitchCache();
+        warn.mockClear();
+        for (const platform of ['ios', 'android', 'web', 'unknown'] as const) {
+          expect(await mmgCheckoutLive(configWith(value), sub(), platform, liveProvider), `${JSON.stringify(value)} ${platform}`).toBe(false);
+        }
+        expect(warn, JSON.stringify(value)).toHaveBeenCalled();
+      }
+      // Real booleans, and a platform missing from the row (owner ruling "3 b": on), warn about nothing.
       resetFeeCheckoutSwitchCache();
-      expect(await mmgCheckoutLive(configWith(value), sub(), 'ios', liveProvider), JSON.stringify(value)).toBe(true);
+      warn.mockClear();
+      const config = configWith({ ios: false, android: true });
+      expect(await mmgCheckoutLive(config, sub(), 'ios', liveProvider)).toBe(false);
+      expect(await mmgCheckoutLive(config, sub(), 'android', liveProvider)).toBe(true);
+      expect(await mmgCheckoutLive(config, sub(), 'web', liveProvider)).toBe(true);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      setAppLogger(console);
     }
   });
 

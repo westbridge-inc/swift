@@ -265,7 +265,7 @@ The server writes the fee notices. They never offer an agent, cash, a Swift Numb
   - `UTC`: `Z` is UTC, and a stamp with no zone cannot be read (held).
 
   An explicit numeric offset (for example `-04:00`) is read as stated with either value. Production leaves it **unset** until MMG confirms how it writes `creationDate`, or a real payment proves it. Unset, no MMG payment is confirmed automatically: each one is `HELD` (reason `CREATION_ZONE_UNVERIFIED`) and operators are alerted once per checkout. Any other value stops the server from starting. If MMG's time for a payment is later than the first MMG reply Swift received about it (beyond two minutes), the payment is `HELD` (reason `CREATION_AFTER_REPLY`) and operators are told that MMG's stamps may not match the configured zone.
-- **The per-platform switch:** the platform-config key `billing.feeCheckout.platforms`, value `{ "ios": true, "android": true, "web": true }`. A missing row, or a missing platform in it, counts as on (owner ruling "3 b": the iPhone button is on). Setting a platform to `false` hides the MMG checkout there within a minute, with no deploy.
+- **The per-platform switch:** the platform-config key `billing.feeCheckout.platforms`, value `{ "ios": true, "android": true, "web": true }`. A missing row, or a missing platform in it, counts as on (owner ruling "3 b": the iPhone button is on). Setting a platform to `false` hides the MMG checkout there within a minute, with no deploy. Only the JSON booleans `true` and `false` count: any other value for a platform (the string `"false"` included) switches that platform off, and a value that is not an object switches every platform off, each with a warning in the server log.
 
 ## 9. Answers to the UI lane (2026-09-29)
 
