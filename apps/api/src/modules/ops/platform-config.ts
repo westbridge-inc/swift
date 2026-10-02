@@ -25,8 +25,11 @@ import { isProduction } from '../../utils/runtime-mode';
  * migration ledger (20260612/20260706/20260826), where reviewed schema belongs.
  */
 
-/** Bump when any value below changes; recorded with every apply. */
-export const PLATFORM_CONFIG_VERSION = '2026-09-29.1';
+/** Bump when any value below changes; recorded with every apply.
+ *  2026-10-01.2 [ZONE-FARES]: the CJIA and Ogle airport zones with their own
+ *  taxi per-km rate, and no fixed zone-to-zone fares at all (the Georgetown
+ *  Central ↔ South 2,000 pair is gone). */
+export const PLATFORM_CONFIG_VERSION = '2026-10-01.2';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -129,6 +132,12 @@ export function seedFxRate(env: Record<string, string | undefined> = process.env
   }
   return 209; // DOC-INV-43 fallback: the April-2026 observation, dev/test only (the census test allowlists this line)
 }
+
+/** [ZONE-FARES] The airport taxi rate, whole GYD a kilometre (owner, 1 Oct
+ *  2026): what a trip that starts or ends at CJIA or Ogle pays for each
+ *  kilometre beyond the included ones, in place of Guyana's own per-km.
+ *  Georgetown → CJIA, 41 km: 800 + 295 × 38 = 12,010 → 12,000. */
+export const AIRPORT_TAXI_PER_KM = 295;
 
 /** The desired platform spine, as data. */
 export function desiredPlatformConfig(): DesiredConfig {
@@ -284,6 +293,35 @@ export function desiredPlatformConfig(): DesiredConfig {
           boundary: { type: 'Polygon', coordinates: [[[-58.18, 6.73], [-58.13, 6.73], [-58.13, 6.78], [-58.18, 6.78], [-58.18, 6.73]]] },
         },
       },
+      // [ZONE-FARES] The owner, 1 Oct 2026: an airport prices PER KILOMETRE,
+      // never as a fixed zone-to-zone fare — a fixed fare is unfair to people
+      // who live near the airport. A trip that starts or ends in an airport
+      // zone pays its per-km rate beyond the included kilometres (the base and
+      // the included kilometres stay Guyana's). Neither polygon touches a
+      // Georgetown zone or the other: Georgetown's boxes span lat 6.73–6.83,
+      // lng -58.18 to -58.13.
+      {
+        // Cheddi Jagan International Airport (Timehri): terminal, apron and
+        // the approach roads; 25 km south of Georgetown South's edge.
+        id: 'cjia-airport',
+        create: {
+          name: 'CJIA Airport',
+          description: 'Cheddi Jagan International Airport, Timehri: terminal, apron and approach roads. Taxi trips to or from here pay the airport rate per kilometre.',
+          boundary: { type: 'Polygon', coordinates: [[[-58.268, 6.488], [-58.238, 6.488], [-58.238, 6.512], [-58.268, 6.512], [-58.268, 6.488]]] },
+          taxiPerKm: AIRPORT_TAXI_PER_KM,
+        },
+      },
+      {
+        // Eugene F. Correia International Airport, Ogle: terminal and apron;
+        // east of Georgetown Central's east edge (-58.13) by 1.6 km.
+        id: 'ogle-airport',
+        create: {
+          name: 'Ogle Airport',
+          description: 'Eugene F. Correia International Airport, Ogle: terminal and apron. Taxi trips to or from here pay the airport rate per kilometre.',
+          boundary: { type: 'Polygon', coordinates: [[[-58.114, 6.799], [-58.096, 6.799], [-58.096, 6.814], [-58.114, 6.814], [-58.114, 6.799]]] },
+          taxiPerKm: AIRPORT_TAXI_PER_KM,
+        },
+      },
     ],
     // [B5] Rider stacking capacity, founder-gated: 2 (2026-08-29), raised to 3
     // by the owner on 2026-09-24 ("the riders can take plenty orders", then
@@ -293,10 +331,13 @@ export function desiredPlatformConfig(): DesiredConfig {
     algoConfig: [
       { tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 3, founderGated: true, updatedBy: 'seed:founder-directive-2026-09-24' },
     ],
-    zoneFares: [
-      { fromZoneId: 'georgetown-central', toZoneId: 'georgetown-south', fare: 2000 },
-      { fromZoneId: 'georgetown-south', toZoneId: 'georgetown-central', fare: 2000 },
-    ],
+    // [ZONE-FARES] No fixed zone-to-zone fare is seeded. The Georgetown
+    // Central ↔ South 2,000 pair contradicted the owner's formula and is gone;
+    // airports price per kilometre (above), never as a pair. A fixed fare is an
+    // admin decision now: /api/v1/admin/zone-fares (deploy/PILOT-RUNBOOK.md
+    // "Taxi zone pricing"). An install seeded before keeps its rows until an
+    // admin deletes them — this plan creates, it never deletes.
+    zoneFares: [],
   };
 }
 
