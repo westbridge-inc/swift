@@ -31,6 +31,9 @@ import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../.
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { telUrl } from '../../../lib/emergencyPolicy';
 import { canDriverHandbackRide } from '../../../lib/driverRide';
+import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
+import { useWaitingClock } from '../../../hooks/useWaitingClock';
+import { DriverItinerary, DriverWaiting, TaxiStopActions } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
 const RIDE_PIN_LENGTH = 6;
@@ -107,6 +110,18 @@ function railFor(status: string | undefined, isDriver: boolean): { steps: Timeli
   return { steps, currentIndex };
 }
 
+/** [TAXI multi-stop] A map region that frames every point of a route. */
+function regionAround(points: { latitude: number; longitude: number }[]) {
+  const lats = points.map((p) => p.latitude);
+  const lngs = points.map((p) => p.longitude);
+  return {
+    latitude: (Math.min(...lats) + Math.max(...lats)) / 2,
+    longitude: (Math.min(...lngs) + Math.max(...lngs)) / 2,
+    latitudeDelta: Math.max(0.02, (Math.max(...lats) - Math.min(...lats)) * 2.2),
+    longitudeDelta: Math.max(0.02, (Math.max(...lngs) - Math.min(...lngs)) * 2.2),
+  };
+}
+
 export function ActiveJobScreen({ navigation }: any) {
   const insets = useSafeAreaInsets();
   const { kind } = useMoverKind();
@@ -171,6 +186,9 @@ export function ActiveJobScreen({ navigation }: any) {
   const canDriverHandback = isDriver && canDriverHandbackRide(liveJob);
   const retainDriverHandbackHost = driverHandbackFlow?.phase === 'submitting' || driverHandbackFlow?.phase === 'dismissing';
   const job: any = liveJob ?? (retainDriverHandbackHost ? driverHandbackFlow?.job : null) ?? null;
+  // [TAXI waiting charge §8.3] The live wait on a taxi trip, from the driver's
+  // arrival on — the same figures the passenger sees. Null without the field.
+  const waitingClock = useWaitingClock(isDriver ? liveJob : null);
 
   // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
   // changes — a stacked-leg switch, a leg dropped from the run (the
@@ -225,8 +243,15 @@ export function ActiveJobScreen({ navigation }: any) {
 
   const pickup = job?.pickupLat != null ? { latitude: Number(job.pickupLat), longitude: Number(job.pickupLng) } : null;
   const drop = job?.deliveryLat != null ? { latitude: Number(job.deliveryLat), longitude: Number(job.deliveryLng) } : null;
+  // [TAXI multi-stop] A driver's taxi trip with stops: the stops in order, and
+  // the points the map draws between pickup and drop-off (none without stops).
+  const itinerary = isDriver ? rideStops(job) : [];
+  const itineraryPoints = itinerary.flatMap((s) => (s.lat != null && s.lng != null ? [{ sequence: s.sequence, latitude: s.lat, longitude: s.lng }] : []));
+  const routePoints = pickup && drop ? [pickup, ...itineraryPoints.map(({ latitude, longitude }) => ({ latitude, longitude })), drop] : [];
   const region =
-    pickup && drop
+    itineraryPoints.length > 0 && pickup && drop
+      ? regionAround(routePoints)
+      : pickup && drop
       ? {
           latitude: (pickup.latitude + drop.latitude) / 2,
           longitude: (pickup.longitude + drop.longitude) / 2,
@@ -376,8 +401,16 @@ export function ActiveJobScreen({ navigation }: any) {
   const custName = cust ? [cust.firstName, cust.lastName].filter(Boolean).join(' ') : null;
   const inProgress = String(job?.status ?? '').toUpperCase() === 'RIDE_IN_PROGRESS';
   const riderToDrop = !isDriver && pickedUp;
-  const navTarget = inProgress || riderToDrop ? drop : pickup;
-  const targetLabel = inProgress || riderToDrop ? 'drop-off' : 'pickup';
+  // [TAXI multi-stop] While a stop is still open the trip heads for it, one leg
+  // at a time; the stop step replaces "Fare collected", which the server
+  // refuses until every stop is done (409 STOPS_REMAINING).
+  const stopGate = isDriver && inProgress && hasOpenStop(job);
+  const nextItineraryStop = stopGate ? itinerary.find((s) => s.sequence === nextStopSequence(job)) ?? null : null;
+  const nextStopPoint = nextItineraryStop && nextItineraryStop.lat != null && nextItineraryStop.lng != null
+    ? { latitude: nextItineraryStop.lat, longitude: nextItineraryStop.lng }
+    : null;
+  const navTarget = nextStopPoint ?? (inProgress || riderToDrop ? drop : pickup);
+  const targetLabel = nextStopPoint ? `stop ${nextItineraryStop!.sequence}` : inProgress || riderToDrop ? 'drop-off' : 'pickup';
   const openNav = () => {
     if (!navTarget) return;
     const q = `${navTarget.latitude},${navTarget.longitude}`;
@@ -403,6 +436,9 @@ export function ActiveJobScreen({ navigation }: any) {
       {
         onError: (e: any) => {
           if (step.pin) haptic.failure();
+          // [TAXI multi-stop] The part-3 guard: a stop is still open. Re-read
+          // the trip so its stop step is what the driver sees next.
+          if (e?.response?.data?.error?.code === 'STOPS_REMAINING') active.refetch?.();
           // [E19] The arrival gate refuses a status claim, never the driver:
           // say why, and when the server offers it, name the passenger escape.
           if (step.action === 'arrived') {
@@ -601,12 +637,16 @@ export function ActiveJobScreen({ navigation }: any) {
         >
           {pickup ? <Marker coordinate={pickup} title="Pickup" /> : null}
           {drop ? <Marker coordinate={drop} title="Drop-off" pinColor={color.brand[500]} /> : null}
+          {itineraryPoints.map(({ sequence, latitude, longitude }) => (
+            <Marker key={`stop-${sequence}`} coordinate={{ latitude, longitude }} title={`Stop ${sequence}`} pinColor={color.info} />
+          ))}
           {pickup && drop ? (
             <>
               {/* Bold route line: white halo under the accent stroke. Geodesic
-                  connector — a heading, not turn-by-turn. */}
-              <Polyline coordinates={[pickup, drop]} geodesic strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
-              <Polyline coordinates={[pickup, drop]} geodesic strokeColor={color.brand[500]} strokeWidth={5} />
+                  connector — a heading, not turn-by-turn. [TAXI multi-stop]
+                  It runs through the stops in order. */}
+              <Polyline coordinates={routePoints} geodesic strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
+              <Polyline coordinates={routePoints} geodesic strokeColor={color.brand[500]} strokeWidth={5} />
             </>
           ) : null}
         </MapView>
@@ -712,9 +752,23 @@ export function ActiveJobScreen({ navigation }: any) {
               ) : null}
               <StatusRail onDark {...railFor(job.status, isDriver)} style={{ marginTop: space.md }} />
               <View style={{ marginTop: space.md }}>
-                <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />
+                {itinerary.length > 0 ? (
+                  // [TAXI multi-stop] Pickup, each stop, drop-off — the current one
+                  // highlighted, every stop with its own Navigate.
+                  <DriverItinerary job={job} />
+                ) : (
+                  <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />
+                )}
               </View>
             </DCard>
+
+            {/* [TAXI waiting charge] The live wait, once the driver has arrived. */}
+            {waitingClock ? (
+              <DriverWaiting
+                view={waitingClock}
+                tripFare={inProgress && !stopGate && !waitingClock.running && job?.taxiFareTotal != null ? Number(job.taxiFareTotal) : null}
+              />
+            ) : null}
 
             {/* Passenger / customer */}
             {cust ? (
@@ -795,7 +849,9 @@ export function ActiveJobScreen({ navigation }: any) {
                       flight. Failure keeps its own language: CodeInput already
                       shakes ±6dp ×3 on error. */}
                   {step.action === 'start' ? <LockIn label="Code accepted — locked in." style={{ marginBottom: space.md }} /> : null}
-                  {bigButton(step.label, runDriverStep, {
+                  {stopGate ? (
+                    <TaxiStopActions job={job} disabled={busy} onGetHelp={() => navigation.navigate('GetHelp' as never)} />
+                  ) : bigButton(step.label, runDriverStep, {
                     loading: busy,
                     disabled: busy || (!!step.pin && pin.length < RIDE_PIN_LENGTH),
                     lockedIn: step.action === 'start',
