@@ -10,9 +10,11 @@ import type { MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 // so the handler reads the code and never assumes success from the path.
 //
 // A reply is a pointer, never evidence: no code here credits anything. Codes
-// 0, 1, 2, 6 and 7 hand the reply to the service, whose MMG lookup decides;
-// codes 3, 4 and 5 mean MMG could not accept OUR request (secret key, merchant
-// id, token) — a configuration or security problem for operators, on which
+// 0, 1, 2, 6 and 7 hand the reply to the service, which decides (#1393: only
+// a 0 confirms, under the owner's six conditions; 1, 2 and 6 are MMG's own
+// "not paid"; 7 waits for MMG's lookup when it names a transaction); codes 3,
+// 4 and 5 mean MMG could not accept OUR request (secret key, merchant id,
+// token) — a configuration or security problem for operators, on which
 // nothing moves at all (mmg-checkout.routes.ts).
 // ---------------------------------------------------------------------------
 
@@ -29,10 +31,12 @@ export const MMG_RESULT_CODES: Readonly<Record<string, string>> = {
 };
 
 /**
- * PAID: the lookup may confirm it. NOT_PAID / TIMED_OUT: the lookup decides;
- * only MMG's own record for this checkout ever says "not paid" [F5]. ALERT:
- * MMG refused our request; operators must look, and nothing is credited.
- * UNKNOWN: no code, or one MMG has not documented: the lookup decides.
+ * What MMG's documented code means. The routes act only on ALERT (MMG refused
+ * our request; operators must look, and nothing is credited); every other
+ * class goes to the service, which decides (#1393): PAID may confirm after the
+ * lookup, NOT_PAID is MMG's own "not paid", TIMED_OUT is "not paid" unless the
+ * lookup says paid, UNKNOWN (no code, or one MMG has not documented) decides
+ * nothing.
  */
 export type ReplyCodeClass = 'PAID' | 'NOT_PAID' | 'TIMED_OUT' | 'ALERT' | 'UNKNOWN';
 

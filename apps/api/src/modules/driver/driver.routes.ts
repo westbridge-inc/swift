@@ -1707,12 +1707,14 @@ export async function driverRoutes(app: FastifyInstance) {
   // ─── Subscription ──────────────────────────────────────────────────────
 
   // The MMG weekly-fee checkout [mmg checkout 3/6]: the driver starts and
-  // follows a checkout for their own subscription.
+  // follows a checkout for their own weekly fee: the payer's ONE canonical
+  // subscription [#1393 mover fee authority], the same one GET /subscription
+  // shows, which may sit on the mover's rider profile.
   const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
     subscriptionFor: async (request) => {
-      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, include: { subscription: true } });
+      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
       if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-      return found!.subscription;
+      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
     },
   });
 

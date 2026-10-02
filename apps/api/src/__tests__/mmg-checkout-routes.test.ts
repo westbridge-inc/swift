@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { nanoid } from 'nanoid';
 import type { SubscriptionStatus, UserRole } from '@prisma/client';
@@ -10,6 +10,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
+import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { rateLimitKey } from '../utils/rate-limit-key';
@@ -20,6 +21,8 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
+import { readDunningClock } from '../modules/billing/dunning-clock';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import {
   MMG_CHECKOUT_NOTIFY_BODY_LIMIT,
   MMG_CHECKOUT_NOTIFY_RATE,
@@ -29,13 +32,14 @@ import {
   MMG_CHECKOUT_START_RATE,
   RETURN_STATES,
   mmgCheckoutPublicRoutes,
+  mmgCheckoutRuntimeOf,
   type MmgCheckoutRuntime,
 } from '../modules/billing/mmg-checkout.routes';
 import { FEE_CHECKOUT_PLATFORMS_KEY, resetFeeCheckoutSwitchCache } from '../modules/billing/fee-pay-actions';
 import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
-import type { MmgLookupClient, MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { lookupDetailFrom, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout ROUTES against the database (MMG-CHECKOUT-API.md
@@ -47,6 +51,11 @@ import type { MmgLookupClient, MmgLookupDetail } from '../providers/mmg/mmg-prov
 //
 // Every route stays behind MMG_CHECKOUT_ENABLED (default off). A reply is a
 // pointer, never evidence: nothing here credits without MMG's own lookup.
+// [owner, 1 Oct · #1393] A payment confirms automatically only on MMG's own
+// success answer for the checkout plus its lookup's six conditions; the lookup
+// is scripted as MMG's UAT answer, read through the live adapter. Every
+// subscription is mapped onto #1393's shared billing confirmation clock, as the
+// billing cutover maps every subscription in production.
 // Phones: +592647… (checked unused in the monorepo).
 // ---------------------------------------------------------------------------
 
@@ -62,22 +71,42 @@ let superAdminId: string;
 const startedAt = new Date();
 
 const lookups = new Map<string, MmgLookupDetail>();
-const lookup: MmgLookupClient = { transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' } };
+/** Every transaction MMG's lookup was asked about, in order. */
+const lookedUp: string[] = [];
+const lookup: MmgLookupClient = { transactionLookupDetail: async (id) => {
+  lookedUp.push(id);
+  return lookups.get(id) ?? { outcome: 'not_found' };
+} };
 type Found = Extract<MmgLookupDetail, { outcome: 'found' }>;
-function found(txn: string, status: Found['status'], amountGyd: number, patch: Partial<Found> = {}) {
-  lookups.set(txn, {
-    outcome: 'found', transactionId: txn, status, amountMinor: amountGyd * 100, currencyCode: 'GYD',
-    creditParties: [SANDBOX_MERCHANT_ID], createdAt: null, echoedReferences: [], raw: { transactionReference: txn }, ...patch,
-  });
+/** MMG stamps creationDate as Guyana wall-clock time written with a "Z" (UAT, 1 Oct). */
+const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
+/** MMG's own ledger number for a payment: a different number from the reply's transactionId (UAT, 1 Oct). */
+const ledgerOf = (txn: string) => `L${txn}`;
+/** [owner, 1 Oct] MMG's lookup answer in the exact UAT shape (evidence/mmg-uat/ROUNDTRIP-PROOF-20261001.md),
+ *  as #1393's suites build it: transactionStatus, a whole-dollar amount string, currency, creationDate (now:
+ *  inside a fresh checkout's window), MMG's ledger number, the parties as [{ key: "accountid", value }] and
+ *  metadata whose description is empty. */
+const uatAnswer = (txn: string, amountGyd: number, answer: Record<string, unknown> = {}): Record<string, unknown> => ({
+  transactionStatus: 'successful', amount: String(amountGyd), currency: 'GYD', creationDate: gyStamp(new Date()),
+  subType: 'subscriber_mpay', transactionReference: ledgerOf(txn),
+  creditParty: [{ key: 'accountid', value: SANDBOX_MERCHANT_ID }], debitParty: [{ key: 'accountid', value: '6000002' }],
+  metadata: [{ key: 'amount', value: String(amountGyd) }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }],
+  descriptionText: null, ...answer,
+});
+/** MMG's lookup of `txn`, read exactly as the live adapter reads it. `answer` patches MMG's own fields; `patch` the reading. */
+function found(txn: string, amountGyd: number, answer: Record<string, unknown> = {}, patch: Partial<Found> = {}) {
+  lookups.set(txn, { ...lookupDetailFrom(uatAnswer(txn, amountGyd, answer), txn), ...patch });
 }
-const approved = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, 'approved', amountGyd, patch);
-const declined = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, 'declined', amountGyd, patch);
-/** [F1] MMG's answer echoing THIS checkout's reference in its confirmed reference field. */
+const approved = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, amountGyd, {}, patch);
+const declined = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, amountGyd, { transactionStatus: 'failed' }, patch);
+/** [F1] MMG's answer echoing THIS checkout's reference. MMG's lookup carries no such field (UAT, 1 Oct): an echo
+ *  only adds a contradiction check, it never confirms. */
 const echoOf = (row: { merchantTransactionId: string }): Partial<Found> => ({ echoedReferences: [row.merchantTransactionId] });
 
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const subIds: string[] = [];
+const tenantIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_647_000_000 + Math.floor(Math.random() * 900_000);
 const RUN = nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, 'Q');
@@ -89,11 +118,18 @@ const enable = (on: boolean) => {
 };
 
 type Actor = { userId: string; token: string };
-async function makeUser(roles: UserRole[], activeRole: UserRole): Promise<Actor> {
+/** Fixtures are written in an explicit tenant scope: `tenantId`'s, or none (the schema's production tenant).
+ *  Never the caller's ambient context, which a previous in-process request may have bound to its own tenant
+ *  (Fastify's inject runs the auth hook in the caller's context, and the scoped client stamps creates). */
+const inTenant = <T>(tenantId: string | undefined, fn: () => Promise<T>) => (tenantId ? runWithTenant(tenantId, fn) : runWithoutTenant(fn, 'mmgpr3-test-fixture'));
+async function makeUser(roles: UserRole[], activeRole: UserRole, tenantId?: string): Promise<Actor> {
   seq += 1;
-  const user = await app.prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Pay', lastName: `R${seq}`, roles, activeRole, isPhoneVerified: true, selfieCapturedAt: new Date() },
-  });
+  const user = await inTenant(tenantId, () => app.prisma.user.create({
+    data: {
+      phone: `+${phoneBase + seq}`, firstName: 'Pay', lastName: `R${seq}`, roles, activeRole, isPhoneVerified: true, selfieCapturedAt: new Date(),
+      ...(tenantId ? { tenantId } : {}),
+    },
+  }));
   userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
   await app.prisma.session.create({
@@ -101,52 +137,86 @@ async function makeUser(roles: UserRole[], activeRole: UserRole): Promise<Actor>
   });
   return { userId: user.id, token };
 }
-type SubOpts = { status?: SubscriptionStatus; balance?: number; due?: Date };
+/** `tenantId`: the partner's tenant (default: the production tenant). `mapped: false`: a subscription the
+ *  shared billing confirmation clock has not mapped yet. */
+type SubOpts = { status?: SubscriptionStatus; balance?: number; due?: Date; tenantId?: string; mapped?: boolean };
 function period(opts: SubOpts) {
   const due = opts.due ?? new Date(Date.now() + 3 * DAY);
   return { currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due, nextBillingDate: due };
 }
+/** [#1393] The billing cutover maps every subscription onto the shared confirmation clock, and the read-only
+ *  pay decision fails closed without one (reading never maps it). Fixtures are mapped the same way, through
+ *  #1393's own read path, unless a test asks for an unmapped subscription. */
+async function mappedUnless<T extends { subId: string }>(partner: T, opts: SubOpts): Promise<T> {
+  if (opts.mapped !== false) await inTenant(opts.tenantId, () => readDunningClock(app.prisma, partner.subId));
+  return partner;
+}
 async function makeStore(opts: SubOpts & { owner?: Actor } = {}) {
-  const owner = opts.owner ?? (await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER'));
-  const ownerRow = await app.prisma.vendorOwner.upsert({ where: { userId: owner.userId }, create: { userId: owner.userId }, update: {} });
-  const vendor = await app.prisma.vendor.create({
-    data: {
-      ownerId: ownerRow.id, name: `Pay Store ${seq}`, slug: `pay-store-${nanoid(6).toLowerCase()}`,
-      vendorType: 'RESTAURANT', phone: `+${phoneBase + 5000 + seq}`,
-      addressLine1: '1 Pay Street', city: 'Georgetown', region: 'Demerara-Mahaica',
-      latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
-    },
+  const owner = opts.owner ?? (await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER', opts.tenantId));
+  const { vendorId, subId } = await inTenant(opts.tenantId, async () => {
+    const ownerRow = await app.prisma.vendorOwner.upsert({ where: { userId: owner.userId }, create: { userId: owner.userId }, update: {} });
+    const vendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: ownerRow.id, name: `Pay Store ${seq}`, slug: `pay-store-${nanoid(6).toLowerCase()}`,
+        vendorType: 'RESTAURANT', phone: `+${phoneBase + 5000 + seq}`,
+        addressLine1: '1 Pay Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+        latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
+        ...(opts.tenantId ? { tenantId: opts.tenantId } : {}),
+      },
+    });
+    vendorIds.push(vendor.id);
+    const sub = await app.prisma.subscription.create({
+      data: { vendorId: vendor.id, type: 'RESTAURANT', status: opts.status ?? 'ACTIVE', weeklyRate: 2100, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
+    });
+    subIds.push(sub.id);
+    return { vendorId: vendor.id, subId: sub.id };
   });
-  vendorIds.push(vendor.id);
-  const sub = await app.prisma.subscription.create({
-    data: { vendorId: vendor.id, type: 'RESTAURANT', status: opts.status ?? 'ACTIVE', weeklyRate: 2100, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
-  });
-  subIds.push(sub.id);
-  return { ...owner, vendorId: vendor.id, subId: sub.id, family: 'vendor' as const };
+  return mappedUnless({ ...owner, vendorId, subId, family: 'vendor' as const }, opts);
 }
 async function makeRider(opts: SubOpts = {}) {
-  const actor = await makeUser(['MOVER'], 'MOVER');
-  const rider = await app.prisma.rider.create({ data: { userId: actor.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
-  const sub = await app.prisma.subscription.create({
-    data: { riderId: rider.id, type: 'DELIVERY_RIDER', status: opts.status ?? 'ACTIVE', weeklyRate: 6000, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
+  const actor = await makeUser(['MOVER'], 'MOVER', opts.tenantId);
+  const subId = await inTenant(opts.tenantId, async () => {
+    const rider = await app.prisma.rider.create({ data: { userId: actor.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
+    const sub = await app.prisma.subscription.create({
+      data: { riderId: rider.id, type: 'DELIVERY_RIDER', status: opts.status ?? 'ACTIVE', weeklyRate: 6000, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
+    });
+    subIds.push(sub.id);
+    return sub.id;
   });
-  subIds.push(sub.id);
-  return { ...actor, subId: sub.id, family: 'rider' as const };
+  return mappedUnless({ ...actor, subId, family: 'rider' as const }, opts);
 }
-async function makeDriver(opts: SubOpts = {}) {
-  const actor = await makeUser(['MOVER'], 'MOVER');
-  const driver = await app.prisma.driver.create({
+async function driverProfile(userId: string) {
+  return app.prisma.driver.create({
     data: {
-      userId: actor.userId, vehicleType: 'CAR', documentsVerified: true, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
+      userId, vehicleType: 'CAR', documentsVerified: true, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
       vehicleColor: 'Silver', licensePlate: `HB-${RUN}-${seq}`, driverLicenseUrl: 'test/lic', vehicleInsuranceUrl: 'test/ins',
     },
   });
-  const sub = await app.prisma.subscription.create({
-    data: { driverId: driver.id, type: 'TAXI_DRIVER', status: opts.status ?? 'ACTIVE', weeklyRate: 8000, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
-  });
-  subIds.push(sub.id);
-  return { ...actor, subId: sub.id, family: 'driver' as const };
 }
+async function makeDriver(opts: SubOpts = {}) {
+  const actor = await makeUser(['MOVER'], 'MOVER', opts.tenantId);
+  const subId = await inTenant(opts.tenantId, async () => {
+    const driver = await driverProfile(actor.userId);
+    const sub = await app.prisma.subscription.create({
+      data: { driverId: driver.id, type: 'TAXI_DRIVER', status: opts.status ?? 'ACTIVE', weeklyRate: 8000, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
+    });
+    subIds.push(sub.id);
+    return sub.id;
+  });
+  return mappedUnless({ ...actor, subId, family: 'driver' as const }, opts);
+}
+/** A tenant of another kind. REVIEW is the store-review demo: its requests pass the review gate only while a
+ *  review session is live, as review:provision creates one. */
+async function makeTenant(kind: 'REVIEW' | 'CRAWLER') {
+  const id = `mmgpr3-${kind.toLowerCase()}-${nanoid(6).toLowerCase()}`;
+  await app.prisma.tenant.create({ data: { id, slug: id, name: `MMG checkout ${kind.toLowerCase()} fiction`, kind, isActive: true } });
+  tenantIds.push(id);
+  if (kind === 'REVIEW') await runWithTenant(id, () => app.prisma.reviewSession.create({ data: { tenantId: id, expiresAt: new Date(Date.now() + DAY) } }));
+  return id;
+}
+/** A request (or read) in its own tenant context. Fastify's inject runs the auth hook in the caller's context,
+ *  so without this a request's tenant would carry over to whatever the test creates next. */
+const isolated = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'mmgpr3-test-isolation');
 type Partner = { token: string; userId: string; subId: string; family: 'vendor' | 'rider' | 'driver'; vendorId?: string };
 
 const headersOf = (p: Partner, extra: Record<string, string> = {}) => ({
@@ -239,25 +309,36 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
-  const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
-  await app.prisma.mmgCheckoutObservation.deleteMany({ where: { OR: [{ intentId: { in: intents.map((i) => i.id) } }, { intentId: null, createdAt: { gte: startedAt } }] } });
-  await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { endsWith: RUN } }] } });
-  await app.prisma.platformConfig.deleteMany({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } });
-  await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-  await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-  await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  // Unscoped, as system work: the fixtures span the production, review and crawler tenants.
+  await isolated(async () => {
+    // [#1393] The shared confirmation clock's evidence (holds, notices, transitions, clocks) names the checkouts: it goes first.
+    await cleanupBillingClocks(app.prisma, subIds);
+    const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
+    await app.prisma.mmgCheckoutObservation.deleteMany({ where: { OR: [{ intentId: { in: intents.map((i) => i.id) } }, { intentId: null, createdAt: { gte: startedAt } }] } });
+    await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { endsWith: RUN } }] } });
+    await app.prisma.platformConfig.deleteMany({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } });
+    await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    // [#1393] A mover's fee authority lives exactly as long as its payer and names the canonical subscription:
+    // the mover payers go first (profiles, sessions, notices and the authority cascade), then the subscriptions.
+    const payers = await app.prisma.moverFeeAuthority.findMany({ where: { userId: { in: userIds } }, select: { userId: true } });
+    await app.prisma.user.deleteMany({ where: { id: { in: payers.map((a) => a.userId) } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+    await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await app.prisma.reviewSession.deleteMany({ where: { tenantId: { in: tenantIds } } });
+    await app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
+  });
   await app.close();
   if (kekBefore === undefined) delete process.env['MASTER_KEK'];
   else process.env['MASTER_KEK'] = kekBefore;
@@ -333,6 +414,47 @@ describe('live: payActions per the contract (section 3)', () => {
     await app.prisma.platformConfig.delete({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } });
     resetFeeCheckoutSwitchCache();
   });
+
+  it('[#1393] never live while a weekly-fee payment is being confirmed, nor before the billing clock covers the subscription', async () => {
+    const LIVE = { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' };
+    const MMG_OFF = { id: 'MMG_CHECKOUT', state: 'off' };
+    const mmgOf = async (p: Partner) => (await subscriptionOf(p)).json().data.payActions[0];
+
+    // No clock covers it yet: the read-only decision fails closed, and reading never maps one.
+    const p = await makeStore({ mapped: false });
+    expect(await mmgOf(p)).toEqual(MMG_OFF);
+    expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: p.subId } })).toBe(0);
+    await isolated(() => readDunningClock(app.prisma, p.subId));
+    expect(await mmgOf(p)).toEqual(LIVE);
+
+    // Its own checkout is open (the partner may be paying on MMG's page right now): no second Pay
+    // button. The open checkout is resumed from latestMmgCheckout.
+    const open = await started(p);
+    expect(await mmgOf(p)).toEqual(MMG_OFF);
+    expect((await subscriptionOf(p)).json().data.latestMmgCheckout).toMatchObject({ ref: open.ref, status: 'OPEN' });
+    // MMG's own "cancelled" answer for it releases the pause: live again.
+    expect((await ret('error', { token: officialReply(open.row, '6') })).json().data.state).toBe('NOT_PAID');
+    expect(await mmgOf(p)).toEqual(LIVE);
+
+    // Confirming: MMG sent the partner back naming a transaction its lookup does not know yet.
+    const confirming = await started(p);
+    expect((await ret('success', { token: officialReply(confirming.row, '7', tx('SLOW7')) })).json().data.state).toBe('CONFIRMING');
+    expect(await mmgOf(p)).toEqual(MMG_OFF);
+
+    // Another weekly-fee payment, on another rail, is unclear: off, and a new page is refused.
+    const q = await makeStore();
+    expect(await mmgOf(q)).toEqual(LIVE);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: q.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: q.subId, amount: 2100, paymentMethod: 'CARD',
+      status: 'UNKNOWN', periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), failureRaw: { providerEffect: 'AUTHORIZED' } } });
+    expect(await mmgOf(q)).toEqual(MMG_OFF);
+    // Reading changed nothing: no hold was taken by the payload.
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: q.subId } })).toBe(0);
+    const refused = await start(q);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('PAYMENT_CONFIRMING');
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: q.subId } })).toBe(0);
+  });
 });
 
 describe('live: starting and following a checkout (sections 4-5)', () => {
@@ -390,6 +512,37 @@ describe('live: starting and following a checkout (sections 4-5)', () => {
       expect(Number(row.amount)).toBe(p.family === 'rider' ? 6000 : 8000);
       expect((await follow(p, ref)).json().data).toMatchObject({ ref, status: 'OPEN' });
       expect((await subscriptionOf(p)).json().data.latestMmgCheckout.ref).toBe(ref);
+    }
+  });
+
+  it.each(['driver', 'rider'] as const)('[#1393 mover fee authority] a dual-role mover whose one fee sits on the %s profile pays it from the other family: the subscription GET /subscription shows', async (holder) => {
+    // A mover with a rider profile and a driver profile; one weekly fee, on the `holder` profile.
+    const actor = await makeUser(['MOVER'], 'MOVER');
+    const { sub, fee } = await isolated(async () => {
+      const rider = await app.prisma.rider.create({ data: { userId: actor.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
+      const driver = await driverProfile(actor.userId);
+      const fee = holder === 'driver' ? { driverId: driver.id, type: 'TAXI_DRIVER' as const, weeklyRate: 8000 } : { riderId: rider.id, type: 'DELIVERY_RIDER' as const, weeklyRate: 6000 };
+      const sub = await app.prisma.subscription.create({ data: { ...fee, status: 'ACTIVE', ...period({}), prepaidBalance: { create: { balance: 0 } } } });
+      subIds.push(sub.id);
+      await readDunningClock(app.prisma, sub.id);
+      return { sub, fee };
+    });
+    const asRider = { ...actor, subId: sub.id, family: 'rider' as const };
+    const asDriver = { ...actor, subId: sub.id, family: 'driver' as const };
+    for (const p of [asRider, asDriver]) {
+      expect((await subscriptionOf(p)).json().data, p.family).toMatchObject({ id: sub.id, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: fee.weeklyRate }, { id: 'CARD', state: 'off' }] });
+    }
+    // The OTHER family's Pay button pays exactly that fee.
+    const payer = holder === 'driver' ? asRider : asDriver;
+    const res = await start(payer);
+    expect(res.statusCode, res.body).toBe(201);
+    const row = await intentOf(res.json().data.ref);
+    expect(row.subscriptionId).toBe(sub.id);
+    expect(Number(row.amount)).toBe(fee.weeklyRate);
+    // Either family follows it, and both payloads carry it.
+    for (const p of [asRider, asDriver]) {
+      expect((await follow(p, row.id)).json().data, p.family).toMatchObject({ ref: row.id, status: 'OPEN' });
+      expect((await subscriptionOf(p)).json().data.latestMmgCheckout, p.family).toMatchObject({ ref: row.id, status: 'OPEN' });
     }
   });
 
@@ -459,44 +612,55 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     expect(await walletOf(p.subId)).toBe(600);
   });
 
-  it('failed (2), cancelled (6) and timed-out (7) replies never credit; MMG says "not paid" only through its own record', async () => {
+  it('[owner, 1 Oct] failed (2), cancelled (6) and timed-out (7) replies never credit; MMG\'s own not-paid answer for the checkout says "not paid" at once', async () => {
     const p = await makeStore({ balance: 600 });
-    // 2 · MMG names a transaction its lookup declines but does not tie to this checkout: confirming, never "not paid" [F5].
+    // 2 · MMG's own failed answer for THIS checkout, naming a transaction: NOT_PAID at once, the
+    // confirmation pause released, the partner told once. The transaction is still looked at later [I8].
     const failed = await started(p);
     declined(tx('FAIL2'), 1500);
     let res = await ret('success', { token: officialReply(failed.row, '2', tx('FAIL2')) });
-    expect(res.json().data.state).toBe('CONFIRMING');
-    expect((await follow(p, failed.ref)).json().data.status).toBe('CONFIRMING');
+    expect(res.json().data.state).toBe('NOT_PAID');
+    expect((await follow(p, failed.ref)).json().data.status).toBe('NOT_PAID');
     expect((await intentOf(failed.ref)).candidates).toEqual([tx('FAIL2')]);
+    expect((await toldOf(p.userId, 'NOT_PAID')).length).toBe(1);
     expect(await creditsOf(p.subId)).toBe(0);
-    // A second checkout is refused while that one confirms: the partner cannot pay twice.
-    const blocked = await start(p);
-    expect(blocked.statusCode).toBe(409);
-    expect(blocked.json().error).toMatchObject({ code: 'CHECKOUT_CONFIRMING', details: { ref: failed.ref } });
-    await app.prisma.mmgCheckoutIntent.update({ where: { id: failed.ref }, data: { status: 'EXPIRED', nextCheckAt: null } });
 
-    // 2 again, and this time MMG's lookup ties the decline to THIS checkout: NOT_PAID, and the partner may try again.
+    // The partner may try again at once (no manual expiry). MMG's ResultCode is a string ("2"): a JSON
+    // number is not MMG's documented reply, so it decides nothing; the documented one says not paid.
     const bound = await started(p);
     declined(tx('FAIL2B'), 1500, echoOf(bound.row));
     res = await ret('success', { token: officialReply(bound.row, 2, tx('FAIL2B')) });
+    expect(res.json().data.state).toBe('UNKNOWN');
+    expect((await intentOf(bound.ref)).status).toBe('OPEN');
+    res = await ret('success', { token: officialReply(bound.row, '2', tx('FAIL2B')) });
     expect(res.json().data.state).toBe('NOT_PAID');
     expect((await follow(p, bound.ref)).json().data.status).toBe('NOT_PAID');
-    expect((await toldOf(p.userId, 'NOT_PAID')).length).toBe(1);
+    expect((await toldOf(p.userId, 'NOT_PAID')).length).toBe(2);
 
-    // 6 · cancelled on MMG's page: no transaction to look up; confirming, nothing credited.
+    // 6 · cancelled on MMG's page: no transaction to look up; NOT_PAID at once, nothing credited.
     const cancelled = await started(p);
     res = await ret('success', { token: officialReply(cancelled.row, '6') });
-    expect(res.json().data.state).toBe('CONFIRMING');
+    expect(res.json().data.state).toBe('NOT_PAID');
     expect((await intentOf(cancelled.ref)).candidates).toEqual([]);
-    await app.prisma.mmgCheckoutIntent.update({ where: { id: cancelled.ref }, data: { status: 'EXPIRED', nextCheckAt: null } });
 
-    // 7 · timed out: not paid unless the lookup says paid — it does not.
+    // 7 · timed out naming no transaction: nothing can have been paid; NOT_PAID at once.
+    const timedOutEmpty = await started(p);
+    res = await ret('error', { token: officialReply(timedOutEmpty.row, '7') });
+    expect(res.json().data.state).toBe('NOT_PAID');
+    expect((await toldOf(p.userId, 'NOT_PAID')).length).toBe(4);
+
+    // 7 · timed out naming a transaction: not paid unless the lookup says paid — MMG does not know it
+    // yet, so the checkout keeps confirming: never "not paid" on a timeout alone.
     const timedOut = await started(p);
     res = await ret('success', { token: officialReply(timedOut.row, '7', tx('TIME7')) });
     expect(res.json().data.state).toBe('CONFIRMING');
     expect((await intentOf(timedOut.ref)).status).toBe('CONFIRMING');
     // …and the error path is the same reply family: never "not paid" on its own.
     expect((await ret('error', { token: officialReply(timedOut.row, '7', tx('TIME7')) })).json().data.state).toBe('CONFIRMING');
+    // A second checkout is refused while that one confirms: the partner cannot pay twice.
+    const blocked = await start(p);
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json().error).toMatchObject({ code: 'CHECKOUT_CONFIRMING', details: { ref: timedOut.ref } });
 
     expect(await creditsOf(p.subId)).toBe(0);
     expect(await walletOf(p.subId)).toBe(600);
@@ -525,8 +689,9 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
       expect(JSON.stringify(seen[0]!.body)).not.toContain('must-not-be-stored');
       expect(seen[0]!.shape).toMatchObject({ merchantTransactionId: 'string', ResultCode: typeof code === 'number' ? 'integer' : 'string' });
       expect(await identitiesOf(txn)).toBe(0);
-      // Let the next code start a fresh checkout.
-      await app.prisma.mmgCheckoutIntent.update({ where: { id: ref }, data: { status: 'EXPIRED' } });
+      // Let the next code start a fresh checkout. An expired checkout MMG never answered keeps the
+      // payment pause [#1393], so MMG's own "cancelled" answer for this one releases it instead.
+      expect((await ret('error', { token: officialReply(row, '6') })).json().data.state).toBe('NOT_PAID');
     }
     const alerts = (await alertsOf('mmg-checkout-reply-code')).slice(before);
     expect(alerts.map((a) => (a.data as Record<string, unknown>)['resultCode'])).toEqual(['3', '4', '5']);
@@ -552,13 +717,16 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     expect(view).toMatchObject({ status: 'CONFIRMED', amountGyd: 1500 });
     expect(view.confirmedAt).toEqual(expect.any(String));
     expect(await identitiesOf(txn)).toBe(1);
+    expect(await identitiesOf(ledgerOf(txn))).toBe(1); // [owner, 1 Oct · 6] MMG's ledger number is claimed with it
     expect(await creditsOf(p.subId)).toBe(1);
     expect(await walletOf(p.subId)).toBe(600 + 1500 - 2100); // credited, then re-billed at once [I5]
     expect((await follow(p, ref)).json().data.subscriptionStatus).toBe('ACTIVE');
     expect((await toldOf(p.userId, 'CONFIRMED')).length).toBe(1);
 
     // The same reply again through the web page, then the notify route as a form and as JSON: still one credit.
-    expect((await ret('success', { token: ['stale-duplicate', token] })).json().data.state).toBe('CONFIRMED');
+    // [DS635] The token must arrive once, as one string: the same reply named twice is refused as UNKNOWN.
+    expect((await ret('success', { token })).json().data.state).toBe('CONFIRMED');
+    expect((await ret('success', { token: ['stale-duplicate', token] })).json().data.state).toBe('UNKNOWN');
     expect((await notify(`token=${encodeURIComponent(token)}&extra=1`, 'application/x-www-form-urlencoded')).json()).toEqual({ success: true });
     expect((await notify({ payload: token })).json()).toEqual({ success: true });
     expect(await identitiesOf(txn)).toBe(1);
@@ -576,30 +744,110 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     const { ref, row } = await started(p);
     const txn = tx('NOTIFY0');
     approved(txn, 1500, echoOf(row));
-    const res = await notify({ Token: officialReply(row, 0, txn), noise: 'ignored' });
+    // A JSON-number code is not MMG's documented reply: it decides nothing.
+    expect((await notify({ Token: officialReply(row, 0, txn), noise: 'ignored' })).json()).toEqual({ success: true });
+    expect((await follow(p, ref)).json().data.status).toBe('OPEN');
+    // MMG's reply as its page documents it and UAT returned it: ResultCode "0", a string.
+    const res = await notify({ Token: officialReply(row, '0', txn), noise: 'ignored' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ success: true });
     expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
     expect(await identitiesOf(txn)).toBe(1);
   });
 
-  it('the HELD path: MMG confirms a payment it does not tie to this checkout → held for a person, shown honestly, nothing credited', async () => {
+  it('the HELD path: MMG shows a payment its success answer never named for this checkout → held for a person, shown honestly, nothing credited, no second page', async () => {
     const p = await makeStore({ balance: 600 });
     const { ref, row } = await started(p);
     const txn = tx('HELD1');
-    approved(txn, 1500); // approved, right amount, our merchant — but MMG's record does not echo our reference (MMG_LOOKUP_REFERENCE_FIELDS=[])
-    const res = await ret('success', { token: officialReply(row, '0', txn) });
+    approved(txn, 1500); // MMG's lookup: paid in full, to our merchant, inside the checkout's window …
+    // … but MMG answered "timed out" (7) for this checkout, not success (0): only MMG's success answer ties
+    // a payment to a checkout automatically [owner, 1 Oct]. A person decides.
+    const res = await ret('success', { token: officialReply(row, '7', txn) });
     expect(res.json()).toEqual({ success: true, data: { state: 'CONFIRMING' } });
     expect((await follow(p, ref)).json().data.status).toBe('HELD');
     const payload = (await subscriptionOf(p)).json().data;
     expect(payload.latestMmgCheckout).toMatchObject({ ref, status: 'HELD' });
+    expect(payload.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
     expect(await creditsOf(p.subId)).toBe(0);
     expect(await identitiesOf(txn)).toBe(0);
     expect(await walletOf(p.subId)).toBe(600);
     expect((await toldOf(p.userId, 'HELD')).length).toBe(1);
     expect((await alertsOf('mmg-checkout-held')).some((a) => (a.data as Record<string, unknown>)['checkoutId'] === ref)).toBe(true);
-    // Held is final for the partner: a new checkout may be started (a person resolves the held one).
-    expect((await start(p)).statusCode).toBe(201);
+    // A held payment keeps the payment pause until a person resolves it [#1393]: no second MMG page.
+    const again = await start(p);
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('PAYMENT_CONFIRMING');
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } })).toBe(1);
+  });
+
+  it('[#1393] refused-request codes page operators once per checkout and code, whatever the checkout\'s state; the checkout never changes', async () => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const before = (await alertsOf('mmg-checkout-reply-code')).length;
+    // The same code-3 reply twice (a repeat or a replay): written down twice, paged once.
+    const three = officialReply(row, '3', tx('DUP3'));
+    for (const n of [1, 2]) expect((await ret('error', { token: three })).json().data.state, `reply ${n}`).toBe('UNKNOWN');
+    expect((await observationsOf(ref)).map((o) => o.failure)).toEqual(['RESULT_CODE_3', 'RESULT_CODE_3']);
+    expect((await alertsOf('mmg-checkout-reply-code')).length).toBe(before + 1);
+    // Another code for the same checkout is another page.
+    expect((await ret('error', { token: officialReply(row, '4') })).json().data.state).toBe('UNKNOWN');
+    expect((await alertsOf('mmg-checkout-reply-code')).length).toBe(before + 2);
+    expect((await intentOf(ref)).status).toBe('OPEN');
+    // Paid, through MMG's success answer; a refused-request code afterwards still pages, once, and moves nothing.
+    const txn = tx('DUPPAID0');
+    approved(txn, 1500);
+    expect((await ret('success', { token: officialReply(row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    for (const n of [1, 2]) expect((await notify({ token: officialReply(row, '5', txn) })).json(), `notify ${n}`).toEqual({ success: true });
+    expect((await alertsOf('mmg-checkout-reply-code')).length).toBe(before + 3);
+    expect((await intentOf(ref)).status).toBe('CONFIRMED');
+    expect(await creditsOf(p.subId)).toBe(1);
+  });
+
+  it('[#1393] MMG said "not paid", then its lookup shows the payment made: the checkout turns HELD, and every partner view shows it', async () => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const txn = tx('LATE2');
+    // MMG's own failed answer naming a transaction: NOT_PAID at once, the pause released.
+    expect((await ret('error', { token: officialReply(row, '2', txn) })).json().data.state).toBe('NOT_PAID');
+    expect((await subscriptionOf(p)).json().data.payActions[0]).toMatchObject({ state: 'live' });
+    // Hours later, MMG's lookup shows that transaction paid in full: a person must decide.
+    approved(txn, 1500);
+    await mmgCheckoutRuntimeOf(app).service.pollIntents(new Date(Date.now() + 7 * 3_600_000));
+    expect((await follow(p, ref)).json().data.status).toBe('HELD');
+    const payload = (await subscriptionOf(p)).json().data;
+    expect(payload.latestMmgCheckout).toMatchObject({ ref, status: 'HELD' });
+    expect(payload.recentCheckouts[0]).toMatchObject({ ref, status: 'HELD' });
+    expect(payload.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' }); // the pause is taken again
+    expect((await toldOf(p.userId, 'HELD')).length).toBe(1);
+    expect(await creditsOf(p.subId)).toBe(0);
+    expect(await identitiesOf(txn)).toBe(0);
+  });
+
+  it('[DS635] a reply token named more than once is ambiguous: UNKNOWN, nothing opened, looked up or written', async () => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const txn = tx('TWICE0');
+    approved(txn, 1500);
+    const token = officialReply(row, '0', txn);
+    const observed = await app.prisma.mmgCheckoutObservation.count();
+    const asked = lookedUp.length;
+    // A repeated query or form field arrives as an array; two spellings of the field are two tokens.
+    for (const params of [{ token: [token, token] }, { token: ['stale-duplicate', token] }, { token: [token] }, { token, Token: token }]) {
+      const res = await ret('success', params);
+      expect(res.statusCode).toBe(200);
+      expect(res.json(), JSON.stringify(params).slice(0, 40)).toEqual({ success: true, data: { state: 'UNKNOWN' } });
+    }
+    // MMG's notify door holds to the same rule: a repeated form field, or a JSON array.
+    const encoded = encodeURIComponent(token);
+    expect((await notify(`token=${encoded}&token=${encoded}`, 'application/x-www-form-urlencoded')).json()).toEqual({ success: true });
+    expect((await notify({ token: [token] })).json()).toEqual({ success: true });
+    expect(await app.prisma.mmgCheckoutObservation.count()).toBe(observed);
+    expect(lookedUp.length).toBe(asked);
+    expect(await intentOf(ref)).toMatchObject({ status: 'OPEN', candidates: [], replyAt: null });
+    expect(await identitiesOf(txn)).toBe(0);
+    // One string is the accepted form.
+    expect((await ret('success', { token })).json().data.state).toBe('CONFIRMED');
+    expect(await creditsOf(p.subId)).toBe(1);
   });
 
   it('the return answer carries only a state; malformed bodies are refused', async () => {
@@ -619,6 +867,73 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
       const res = await app.inject({ method: 'POST', url: RETURN_URL, headers: { 'content-type': 'application/json' }, payload: bad });
       expect(res.statusCode, JSON.stringify(bad).slice(0, 80)).toBe(400);
       expect(res.json().success).toBe(false);
+    }
+  });
+});
+
+describe('[store review] a demo partner never opens a real MMG page', () => {
+  beforeEach(() => enable(true));
+
+  it('REVIEW-tenant partners in every family: MMG_CHECKOUT off, and starting one is 409 PAY_ACTION_OFF with nothing written', async () => {
+    // The same fixture in the production tenant is live: only the tenant differs.
+    expect((await isolated(async () => subscriptionOf(await makeStore()))).json().data.payActions[0]).toMatchObject({ state: 'live' });
+    const review = await makeTenant('REVIEW');
+    const crawler = await makeTenant('CRAWLER');
+    // Created inside their own tenant, as the store-review provisioning creates them.
+    const demo = [
+      { kind: 'REVIEW', p: await makeStore({ tenantId: review }) },
+      { kind: 'REVIEW', p: await makeRider({ tenantId: review }) },
+      { kind: 'REVIEW', p: await makeDriver({ tenantId: review }) },
+      { kind: 'CRAWLER', p: await makeStore({ tenantId: crawler }) },
+    ];
+    for (const { kind, p } of demo) {
+      const label = `${p.family} in ${kind}`;
+      // The partner really is in that tenant, and the billing clock covers the subscription.
+      const tenant = await isolated(() => app.prisma.user.findUniqueOrThrow({ where: { id: p.userId }, select: { tenant: { select: { kind: true } } } }));
+      expect(tenant.tenant.kind, label).toBe(kind);
+      expect(await isolated(() => app.prisma.billingDunningClock.count({ where: { subscriptionId: p.subId } })), label).toBe(1);
+      const sub = await isolated(() => subscriptionOf(p));
+      expect(sub.statusCode, `${label}: ${sub.body}`).toBe(200);
+      expect(sub.json().data.payActions, label).toEqual(OFF);
+      const res = await isolated(() => start(p));
+      expect(res.statusCode, `${label}: ${res.body}`).toBe(409);
+      expect(res.json().error.code, label).toBe('PAY_ACTION_OFF');
+      expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } })), label).toBe(0);
+      expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId } })), label).toBe(0);
+    }
+  });
+});
+
+describe('[MMG-RETURN-PATH] the reply MMG puts in the address path', () => {
+  beforeEach(() => enable(true));
+
+  it('the web page forwards it as params.token with only the outcome word; it reaches observeReply and confirms automatically', async () => {
+    const digits = () => String(20_000_000_000_000 + Math.floor(Math.random() * 9_000_000_000_000));
+    // `response`: the web page's word for /pay/mmg/token=<reply>, with no outcome in the path.
+    for (const outcome of ['success', 'response']) {
+      const p = await makeStore({ balance: 600 });
+      const { ref, row } = await started(p);
+      // MMG's reply exactly as UAT decrypted it (evidence/mmg-uat/ROUNDTRIP-PROOF-20261001.md): string fields,
+      // a 14-digit transaction id, ResultCode "0", MMG's message and HTML; one RSA-4096 block as padded base64url.
+      const txn = digits();
+      const ledger = digits();
+      const token = sandbox.sandboxReplyToken({
+        merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0',
+        ResultMessage: 'Transaction Successful', htmlResponse: '<html><body><h1>Transaction Successful</h1></body></html>',
+      });
+      expect(token).toMatch(/^[A-Za-z0-9_-]+={0,2}$/); // what the web page accepts from the path
+      expect(token).toHaveLength(684);
+      found(txn, 1500, { transactionReference: ledger });
+      const res = await app.inject({ method: 'POST', url: RETURN_URL, headers: { 'content-type': 'application/json' }, payload: { outcome, params: { token } } });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({ success: true, data: { state: 'CONFIRMED' } });
+      // It reached observeReply: written down as MMG's success answer for this checkout, then MMG's lookup decided.
+      expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['RETURN', 'MMG_RESULT_0'], ['LOOKUP', txn]]);
+      expect(await intentOf(ref)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+      expect(await creditsOf(p.subId)).toBe(1);
+      expect(await identitiesOf(txn)).toBe(1);
+      expect(await identitiesOf(ledger)).toBe(1);
+      expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
     }
   });
 });
@@ -694,7 +1009,12 @@ describe('limits: rate and body caps on every door', () => {
 
 describe('the web return page contract', () => {
   it('the merged web route forwards to exactly this route, with this body, and renders exactly the states this route answers', () => {
-    const src = readFileSync(resolve(process.cwd(), '../web/src/app/pay/mmg/[outcome]/route.ts'), 'utf8');
+    // The one route handler under /pay/mmg, whatever its dynamic segment is named: [outcome], then
+    // [...path] since MMG-RETURN-PATH (#1421) moved it to read MMG's reply from the address path.
+    const dir = resolve(process.cwd(), '../web/src/app/pay/mmg');
+    const handlers = readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory() && existsSync(resolve(dir, entry.name, 'route.ts')));
+    expect(handlers.map((entry) => entry.name)).toHaveLength(1);
+    const src = readFileSync(resolve(dir, handlers[0]!.name, 'route.ts'), 'utf8');
     expect(src).toContain(`}/api/v1/billing/mmg-checkout/return\``);
     expect(src).toContain('JSON.stringify({ outcome, params })');
     expect(src).toContain('body?.data?.state');

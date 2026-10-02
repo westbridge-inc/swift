@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { MmgCheckoutIntent, Prisma, Subscription, SubscriptionStatus } from '@prisma/client';
+import type { MmgCheckoutIntent, Prisma, PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
@@ -16,7 +16,9 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { BillingService } from './billing.service';
 import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type ReturnState } from './mmg-checkout.service';
-import { clientPlatform, feePayActions, type PayAction } from './fee-pay-actions';
+import { clientPlatform, feePayActions, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { readFeePaymentDecision } from './fee-payment-authority';
+import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import {
   MAX_REPLY_VALUES,
   MAX_REPLY_VALUE_CHARS,
@@ -49,6 +51,12 @@ import {
 // subscription is the only one who may start or read a checkout (anyone else
 // is 404 or 403 from the family's own gate), and a reply from MMG is a
 // pointer that only prompts the server's own lookup — never a credit.
+//
+// The Pay button (`MMG_CHECKOUT` live) also needs what feePayActions does not
+// express: #1393's shared confirmation authority allowing a NEW payment (none
+// of this fee's payments is being confirmed, and the billing clock covers the
+// subscription), and a payer in a production tenant: the store-review demo
+// never opens a real MMG page.
 // ---------------------------------------------------------------------------
 
 /** Per-partner: twenty taps a minute is a stuck finger, not a partner. */
@@ -122,6 +130,39 @@ function checkoutView(row: MmgCheckoutIntent, subscriptionStatus: SubscriptionSt
   };
 }
 
+/**
+ * [store review] Whether the payer (#1393's: the rider's or driver's user, or
+ * the store owner's) is in a PRODUCTION tenant. The store-review demo (REVIEW)
+ * and crawler (CRAWLER) tenants are fiction with no money rail: their partners
+ * never open a real MMG page.
+ */
+async function payerIsProduction(prisma: PrismaClient, subscriptionId: string): Promise<boolean> {
+  const payer = await subscriptionPayer(prisma, subscriptionId);
+  const tenant = await prisma.tenant.findUnique({ where: { id: payer.tenantId }, select: { kind: true } });
+  return tenant?.kind === 'PRODUCTION';
+}
+
+/**
+ * payActions for one subscription: feePayActions (configuration, platform,
+ * amount) and, before MMG_CHECKOUT may be live, a payer in a production tenant
+ * and #1393's read-only decision for a NEW payment. That decision is `off`
+ * while any of this fee's payments is being confirmed (an MMG checkout open,
+ * confirming, held or expired without an answer; a card payment pending or
+ * unclear) and while no billing clock covers the subscription. Reading never
+ * maps a clock, takes a hold or changes a payment.
+ */
+async function payActionsFor(
+  prisma: PrismaClient,
+  sub: Subscription,
+  platform: ClientPlatform,
+  checkout: () => MmgCheckoutProvider,
+): Promise<PayAction[]> {
+  const actions = await feePayActions(prisma, sub, platform, checkout);
+  if (!actions.some((action) => action.id === 'MMG_CHECKOUT' && action.state === 'live')) return actions;
+  const payable = (await payerIsProduction(prisma, sub.id)) && (await readFeePaymentDecision(prisma, sub.id)).allowed;
+  return payable ? actions : actions.map((action): PayAction => (action.id === 'MMG_CHECKOUT' ? { id: 'MMG_CHECKOUT', state: 'off' } : action));
+}
+
 export interface PartnerCheckoutRoutes {
   /** The three fields GET /subscription gains, for this family's own subscription. */
   feePayload: (sub: Subscription, headers: Record<string, unknown>, now?: Date) => Promise<FeeCheckoutPayload>;
@@ -144,7 +185,7 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
   const feePayload = async (sub: Subscription, headers: Record<string, unknown>, now: Date = new Date()): Promise<FeeCheckoutPayload> => {
     if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [] };
     const [payActions, rows] = await Promise.all([
-      feePayActions(app.prisma, sub, clientPlatform(headers), rt().checkout),
+      payActionsFor(app.prisma, sub, clientPlatform(headers), rt().checkout),
       app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: sub.id }, orderBy: { createdAt: 'desc' }, take: RECENT_CHECKOUTS }),
     ]);
     const recentCheckouts = rows.map((row) => checkoutView(row, sub.status));
@@ -158,6 +199,10 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
     const sub = await options.subscriptionFor(request);
     if (!sub) throw new AppError(404, 'SUBSCRIPTION_NOT_FOUND', 'There is no subscription to pay.');
     if (!mmgCheckoutEnabled()) throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    // [store review] A demo partner never reaches MMG: refused before any key, price or page.
+    if (!(await payerIsProduction(app.prisma, sub.id))) {
+      throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
+    }
     const { created, checkout } = await rt().service.createCheckout({
       subscriptionId: sub.id,
       userId: request.user.userId,
@@ -206,6 +251,17 @@ function formFields(text: string): Record<string, string | string[]> {
   return out;
 }
 
+/**
+ * [DS635] MMG sends ONE reply token, as one string. A token named more than
+ * once (a repeated query or form field arrives as an array; `token` and
+ * `Token` are two) is ambiguous: it is refused before anything is opened,
+ * looked up or written down.
+ */
+function ambiguousToken(params: Record<string, unknown>): boolean {
+  const tokens = Object.entries(params).filter(([key]) => key.toLowerCase() === 'token');
+  return tokens.length > 1 || tokens.some(([, value]) => Array.isArray(value));
+}
+
 /** Whatever MMG's notify carries: a JSON object's own values, or a parsed form. Anything else is nothing. */
 function notifyParams(body: unknown, query: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = Object.create(null);
@@ -234,6 +290,10 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited } } }, async (request) => {
     const body = returnBody.parse(request.body ?? {});
     if (!mmgCheckoutEnabled()) return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
+    if (ambiguousToken(body.params)) {
+      log().warn({ source: 'RETURN' }, '[MMG checkout] a reply token arrived more than once; refused as UNKNOWN');
+      return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
+    }
     const state = await observeReply(app, rt(), { source: 'RETURN', outcome: body.outcome, params: body.params });
     return { success: true, data: { state } };
   });
@@ -241,7 +301,12 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   /** MMG's own servers, if MMG calls one: JSON or a form, always 200, never a word about any account. */
   app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited } } }, async (request) => {
     if (mmgCheckoutEnabled()) {
-      await observeReply(app, rt(), { source: 'NOTIFY', outcome: 'notify', params: notifyParams(request.body, request.query) }).catch((err) => {
+      const params = notifyParams(request.body, request.query);
+      if (ambiguousToken(params)) {
+        log().warn({ source: 'NOTIFY' }, '[MMG checkout] a reply token arrived more than once; ignored');
+        return { success: true };
+      }
+      await observeReply(app, rt(), { source: 'NOTIFY', outcome: 'notify', params }).catch((err) => {
         log().error({ err }, '[MMG checkout] a notify could not be processed; the poll will look again');
       });
     }
@@ -255,9 +320,11 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
  *   - 3, 4, 5: MMG refused OUR request (secret key, merchant id, token). An
  *     alert for operators; the reply is written down and nothing else moves —
  *     not the checkout, not a lookup, never a credit.
- *   - everything else, and a reply with no code: the service, whose MMG
- *     lookup alone decides (0 confirms or holds; 1, 2, 6 and 7 are "not paid"
- *     only when MMG's own record for this checkout says so [F5]).
+ *   - everything else, and a reply with no code: the service decides
+ *     (#1393; MMG-CHECKOUT-API.md, "Official response interpretation"): 0
+ *     confirms only under the owner's six conditions, else is held for a
+ *     person; 1, 2 and 6 are MMG's own "not paid" for the checkout; 7 is "not
+ *     paid" unless MMG's lookup says paid. Nothing credits from a reply alone.
  */
 async function observeReply(
   app: FastifyInstance,
@@ -314,6 +381,9 @@ async function alertOnRefusedRequest(
       body: `MMG answered result code ${input.code} (${meaning})${intent ? ` for checkout ${intent.id}` : ' for a reference that is not ours'}. `
         + 'This is a configuration or security problem with the checkout request, not a payment. Nothing was credited; the checkout was not changed.',
       data: { kind: 'billing_invariants', alert: 'mmg-checkout-reply-code', resultCode: input.code, checkoutId: intent?.id ?? null, source: input.source },
+      // [#1393] Once per checkout and code, under the service's own key: a repeated or replayed reply
+      // is written down again but pages nobody twice, whatever the checkout's state.
+      ...(intent ? { dedupeKey: `mmg-checkout-reply-code:${intent.id}:${input.code}` } : {}),
     }).catch((err) => {
       log().error({ err, resultCode: input.code }, '[MMG checkout] the operators could not be paged about a refused request');
     });

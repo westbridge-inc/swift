@@ -70,9 +70,12 @@ type PayAction =
 It is `live` only when **all** of these hold:
 - the server's MMG checkout is configured and valid (`MMG_CHECKOUT_ENABLED=1` with complete credentials, which the boot guard already checks);
 - the platform switch allows the caller's platform (section 2);
-- the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED` (paying rejoins), and its fee is not waived.
+- the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED` (paying rejoins), and its fee is not waived;
+- none of this fee's payments is being confirmed: no MMG checkout that is open, confirming, held or expired without an answer, and no card payment that is pending, awaiting 3-D Secure or unclear (the same pause that refuses a new page with `409 PAYMENT_CONFIRMING`, section 4). While a checkout is open or confirming, `latestMmgCheckout` carries it: resume or follow it from there;
+- the billing confirmation clock covers the subscription (the billing cutover maps every subscription; one it has not mapped yet stays `off` until it has, and reading the payload never maps one);
+- the partner is in a production tenant: a store-review demo account never opens a real MMG page.
 
-It is `off` for `PAUSED` (weekly billing stopped: resume first), `CANCELLED` and waived fees.
+It is `off` for `PAUSED` (weekly billing stopped: resume first), `CANCELLED`, waived fees and store-review demo accounts, and while a payment is being confirmed.
 
 ### `amountGyd`
 
@@ -130,7 +133,7 @@ poll GET …/mmg-checkout/{ref}            → section 5
 | 401 | (existing auth codes) | not signed in, or the token expired | the usual refresh or sign-in |
 | 403 | (existing role codes) | not this store's owner | hide Pay |
 | 404 | `SUBSCRIPTION_NOT_FOUND` | no subscription | refetch |
-| 409 | `PAY_ACTION_OFF` | the MMG checkout is not live for this subscription or platform | refetch the subscription, hide the button |
+| 409 | `PAY_ACTION_OFF` | the MMG checkout is not live for this subscription or platform (or the account is a store-review demo) | refetch the subscription, hide the button |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | the key was used for a different request | new tap, new key |
 | 409 | `CHECKOUT_CONFIRMING` | an earlier checkout is being confirmed; `error.details.ref` names it | show that checkout (section 5); do not start another |
 | 409 | `PAYMENT_CONFIRMING` | another weekly-fee payment (any checkout or card payment) is being confirmed; `error.details.ref` names the checkout when it is this one | "We're confirming a payment. Don't pay again."; refetch the subscription |
@@ -232,11 +235,13 @@ The official merchant page says MMG posts an encrypted TOKEN to the configured R
 
 The planned `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers. Its authentication and server-to-server behavior must be confirmed with MMG before enabling it (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
 
-Both public routes are rate-limited per source address and size-capped: `/return` takes 120 calls a minute and a body of up to 96 KB (the 16 values of 4096 characters the page forwards, as JSON); `/notify` takes 60 a minute and 16 KB. Over the limit is `429`, over the cap is `413`, and a `/return` body that is not `{ outcome, params }` within those bounds is `400`. Neither credits anything by itself: they only prompt the server to check with MMG. With `MMG_CHECKOUT_ENABLED` off, both answer neutrally (`UNKNOWN`, `200`) and write nothing down.
+Both public routes are rate-limited per source address and size-capped: `/return` takes 120 calls a minute and a body of up to 96 KB (the 16 values of 4096 characters the page forwards, as JSON); `/notify` takes 60 a minute and 16 KB. Over the limit is `429`, over the cap is `413`, and a `/return` body that is not `{ outcome, params }` within those bounds is `400`. Neither credits anything by itself: they only prompt the server to check with MMG. With `MMG_CHECKOUT_ENABLED` off, a body within those bounds is answered neutrally (`UNKNOWN`, `200`) and nothing is written down; a malformed `/return` body is still `400`.
+
+**One token.** MMG sends one reply token, as one string. A token named more than once (a repeated query or form field arrives as an array, and `token` and `Token` are two) is ambiguous: `/return` answers `UNKNOWN` and `/notify` ignores it, before anything is opened, looked up or written down.
 
 **MMG's result code.** MMG sends the outcome, success or failure, to the same Response URL, so the `…/pay/mmg/success` path is not a success. The API reads the reply's documented `ResultCode`:
-- `0` (successful), `1`, `2`, `6` (not registered, failed, cancelled) and `7` (timed out): the reply is written down and MMG's own lookup decides. A checkout is `CONFIRMED` only when the lookup confirms it, and `NOT_PAID` only when MMG's own record for that checkout says the payment did not complete (section 5).
-- `3`, `4`, `5` (invalid secret key, merchant id mismatch, token decryption failed): MMG could not accept Swift's request. The reply is written down, operators are alerted, the checkout is left exactly as it was, and the page answers `UNKNOWN`. Nothing is ever credited on these.
+- `3`, `4`, `5` (invalid secret key, merchant id mismatch, token decryption failed): MMG could not accept Swift's request. The reply is written down, operators are paged once per checkout and code, the checkout is left exactly as it was whatever its state, and the page answers `UNKNOWN`. Nothing is ever credited on these.
+- every other reply goes to the service, which decides as described under "Official response interpretation" below: `0` confirms only under the six conditions (section 5) and is otherwise held for a person; `1`, `2` and `6` are `NOT_PAID` at once; `7` is `NOT_PAID` at once when it names no transaction, and waits for MMG's lookup when it names one.
 
 ### Official response interpretation (service boundary)
 
