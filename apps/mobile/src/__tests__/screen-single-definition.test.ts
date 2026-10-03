@@ -48,16 +48,7 @@ const source = new Map(files.map((f) => [f, readFileSync(f, 'utf8')]));
  * is audited from BOTH sides below — an entry that is no longer orphaned fails,
  * so it cannot outlive its reason.
  */
-const ALLOWED_ORPHANS: Array<{ file: string; reason: string }> = [
-  {
-    file: 'modules/onboarding/OnboardingScreen.tsx',
-    // Residue R6. Its three first-run carousel slides are still stock
-    // photographs — it is also the single exemption in stock-photo-gate.ts,
-    // awaiting founder brand art. Ship it or delete it is a founder decision,
-    // so it is recorded here rather than quietly removed.
-    reason: 'R6 — FOUNDER DECISION PENDING: ship the first-run carousel or delete it (needs brand art)',
-  },
-];
+const ALLOWED_ORPHANS: Array<{ file: string; reason: string }> = [];
 
 describe('a screen is defined in exactly one place', () => {
   it('no screen component name is declared in two files', () => {
