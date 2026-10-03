@@ -25,7 +25,7 @@ import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
+import { visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
@@ -315,7 +315,8 @@ async function buildCartResponse(
   choices: CartQuoteChoices = {},
 ) {
   const cart = await app.prisma.cart.findUnique({
-    where: { customerId: userId },
+    // Historical cart relations need the same caller wall as direct reads.
+    where: { customerId: userId, vendor: vendorTenantForCaller() },
     include: {
       vendor: {
         select: {
@@ -326,6 +327,7 @@ async function buildCartResponse(
         },
       },
       items: {
+        where: { item: { vendor: vendorTenantForCaller() } },
         include: {
           item: {
             select: {
@@ -1344,7 +1346,9 @@ export async function customerRoutes(app: FastifyInstance) {
       );
       total = idRows.length;
       const pageIds = idRows.slice(skip, skip + limit).map((r) => r.id);
-      const rows = await app.prisma.vendor.findMany({ where: { id: { in: pageIds } } });
+      // Recheck all caller filters after ranking; visibility can change
+      // between the ID projection and this page read.
+      const rows = await app.prisma.vendor.findMany({ where: { AND: [where, { id: { in: pageIds } }] } });
       const byId = new Map(rows.map((r) => [r.id, r]));
       vendors = pageIds.map((id) => byId.get(id)).filter((v): v is NonNullable<typeof v> => v != null);
     } else {
@@ -1441,7 +1445,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // renders its closed state); tenant deactivation is the operator-level
     // kill switch and nothing of a dead tenant may serve.
     const vendor = await app.prisma.vendor.findFirst({
-      where: { id, tenant: { isActive: true } },
+      where: { id, ...vendorTenantForCaller() },
       include: {
         categories: {
           orderBy: { sortOrder: 'asc' },
@@ -1575,8 +1579,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
 
-    const vendor = await app.prisma.vendor.findUnique({
-      where: { id },
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id, ...vendorTenantForCaller() },
       select: { id: true, averageRating: true, totalRatings: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -1616,7 +1620,7 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { userId },
       include: {
         favoriteVendors: {
-          where: { status: 'ACTIVE' },
+          where: { status: 'ACTIVE', ...vendorTenantForCaller() },
           orderBy: { name: 'asc' },
         },
       },
@@ -1643,7 +1647,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { vendorId } = request.params as { vendorId: string };
     const { userId } = request.user;
 
-    const vendor = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { id: true, name: true } });
+    const vendor = await app.prisma.vendor.findFirst({ where: { id: vendorId, ...vendorTenantForCaller() }, select: { id: true, name: true } });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
 
     await resolveCustomer(app, userId);
@@ -1684,7 +1688,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { date } = itemSlotsQuerySchema.parse(request.query);
 
     const item = await app.prisma.item.findUnique({
-      where: { id },
+      where: { id, vendor: vendorTenantForCaller() },
       select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
     });
     if (!item) throw new NotFoundError('Listing', id);
@@ -1789,7 +1793,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Validate item
     const item = await app.prisma.item.findFirst({
-      where: { id: body.itemId, vendorId: body.vendorId, isAvailable: true },
+      where: { id: body.itemId, vendorId: body.vendorId, isAvailable: true, vendor: vendorTenantForCaller() },
       include: { optionGroups: { include: { options: true } } },
     });
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
