@@ -10,6 +10,7 @@ import { marketTabVisible } from '@/lib/app-rules';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { MarketSkeleton, MarketGridSkeleton, CategorySkeleton } from '@/components/customer-skeletons';
+import { FavouriteButton } from '@/components/account/favourites';
 import { EmptyNote } from '@/components/order-ui';
 
 /**
@@ -81,7 +82,7 @@ function MarketInner() {
         <>
           <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
             {items.map((item) => (
-              <li key={item.id}>
+              <li key={item.id} className="relative">
                 <Link
                   href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
                   className={`block overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] ${PRESS}`}
@@ -96,6 +97,7 @@ function MarketInner() {
                     <span className="block truncate text-xs text-[var(--swift-muted)]">{item.vendorName}</span>
                   </span>
                 </Link>
+                <div className="absolute right-2 top-2"><FavouriteButton vendorId={item.vendorId} name={item.vendorName} /></div>
               </li>
             ))}
           </ul>

@@ -7,11 +7,15 @@ import { Heart } from 'lucide-react';
 import { useCustomerSession } from '@/components/customer-session';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { signInPath } from '@/lib/customer-routes';
-import { accountApi } from './account-api';
+import { accountApi, type Favourite } from './account-api';
 import { AccountFrame, useAccountQuery } from './account-frame';
+
+const className = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full border border-black/10 bg-white px-3 text-[var(--swift-red)] disabled:opacity-50';
 
 export function FavouriteButton({ vendorId, name }: { vendorId: string; name: string }) {
   const session = useCustomerSession();
+  if (session.status === 'guest') return <Link href={signInPath(`/order/vendor/${encodeURIComponent(vendorId)}`)} className={className} aria-label={`Sign in to save ${name}`}><Heart size={20} aria-hidden /></Link>;
+  if (session.status === 'checking') return <button type="button" disabled className={className} aria-label={`Save ${name} to favourites`}><Heart size={20} aria-hidden /></button>;
   return <FavouriteControl key={`${session.scope}:${session.epoch}`} vendorId={vendorId} name={name} />;
 }
 
@@ -19,17 +23,38 @@ function FavouriteControl({ vendorId, name }: { vendorId: string; name: string }
   const session = useCustomerSession();
   const favourites = useAccountQuery('favourites', accountApi.favourites);
   const queryClient = useQueryClient();
-  const mutationKey = ['account', session.scope, session.epoch, 'favourite', vendorId];
+  const allMutations = ['account', session.scope, session.epoch, 'favourite'];
+  const mutationKey = [...allMutations, vendorId];
+  const queryKey = ['account', session.scope, session.epoch, 'favourites'];
   const busy = useIsMutating({ mutationKey }) > 0;
   const [error, setError] = useState<string | null>(null);
   const saved = favourites.data?.some((vendor) => vendor.id === vendorId) ?? false;
   const mutation = useMutation({
     mutationKey,
-    mutationFn: async (wasSaved: boolean) => { await accountApi.favourite(vendorId, wasSaved); await favourites.refetch(); },
-    onError: (e: Error) => setError(e.message),
+    mutationFn: (wasSaved: boolean) => accountApi.favourite(vendorId, wasSaved),
+    onMutate: async (wasSaved: boolean) => {
+      await queryClient.cancelQueries({ queryKey, exact: true });
+      const previous = queryClient.getQueryData<Favourite[]>(queryKey)?.find((v) => v.id === vendorId);
+      queryClient.setQueryData<Favourite[]>(queryKey, (list = []) => wasSaved
+        ? list.filter((v) => v.id !== vendorId) : [...list.filter((v) => v.id !== vendorId), { id: vendorId, name }]);
+      return { previous };
+    },
+    onError: (e: Error, _wasSaved, context) => {
+      // Roll back this store only: another heart can be saving concurrently.
+      queryClient.setQueryData<Favourite[]>(queryKey, (list = []) => {
+        const rest = list.filter((v) => v.id !== vendorId);
+        return context?.previous ? [...rest, context.previous] : rest;
+      });
+      setError(e.message);
+    },
+    onSettled: () => {
+      // Refetch only after the last write, so an earlier response cannot erase
+      // a different store's pending optimistic change.
+      if (queryClient.isMutating({ mutationKey: allMutations }) === 1) {
+        return queryClient.invalidateQueries({ queryKey, exact: true });
+      }
+    },
   });
-  const className = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full border border-black/10 bg-white px-3 text-[var(--swift-red)] disabled:opacity-50';
-  if (session.status === 'guest') return <Link href={signInPath(`/order/vendor/${encodeURIComponent(vendorId)}`)} className={className} aria-label={`Sign in to save ${name}`}><Heart size={20} aria-hidden /></Link>;
   function toggle() {
     if (queryClient.isMutating({ mutationKey }) || !favourites.data || favourites.isError) return;
     setError(null); mutation.mutate(saved);
@@ -39,7 +64,7 @@ function FavouriteControl({ vendorId, name }: { vendorId: string; name: string }
       disabled={busy || session.status !== 'signed-in' || !favourites.data || favourites.isError} onClick={() => void toggle()}>
       <Heart size={20} fill={saved ? 'currentColor' : 'none'} aria-hidden />
     </button>
-    {favourites.isError && <button type="button" className="block text-xs underline" onClick={() => void favourites.refetch()}>Retry favourites</button>}
+    {favourites.isError && <button type="button" className="block min-h-11 text-xs underline" onClick={() => void favourites.refetch()}>Retry favourites</button>}
     {error && <p role="alert" className="text-sm">{error}</p>}
   </div>;
 }

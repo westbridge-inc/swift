@@ -29,5 +29,5 @@ export function AccountFrame({ title, children }: { title: string; children: Rea
 export function useAccountQuery<T>(name: string, read: () => Promise<T>) {
   const session = useCustomerSession();
   return useQuery({ queryKey: ['account', session.scope, session.epoch, name], queryFn: read,
-    enabled: session.status === 'signed-in', retry: false, staleTime: 0, gcTime: 0 });
+    enabled: session.status === 'signed-in', retry: false, staleTime: name === 'favourites' ? 30_000 : 0, gcTime: name === 'favourites' ? 5 * 60_000 : 0 });
 }
