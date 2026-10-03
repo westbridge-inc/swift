@@ -14,6 +14,7 @@ import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useRideSos } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { useMoverPreview } from '../../../stores/moverPreview';
+import { previewSosCopy } from '../preview';
 import { toast } from '../../../kit/toast';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
@@ -1094,10 +1095,14 @@ export function ActiveJobScreen({ navigation }: any) {
             Get emergency help?
           </PopupTitle>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-            {emergencyDialCopy(previewEmergencyDial(sosCountry))} Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.
+            {/* [DS624 S3] The preview's button calls no one and records
+                nothing, so the preview says so — and names who to call. */}
+            {preview
+              ? previewSosCopy(previewEmergencyDial(sosCountry))
+              : `${emergencyDialCopy(previewEmergencyDial(sosCountry))} Swift also saves the alert and your live location on this trip’s record. Use only in a real emergency.`}
           </T>
           <PillButton
-            label="Yes — get help now"
+            label={preview ? 'OK' : 'Yes — get help now'}
             style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
             disabled={sos.isPending}
             onPress={() => {
