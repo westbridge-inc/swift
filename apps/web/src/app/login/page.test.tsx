@@ -11,10 +11,11 @@ const mocked = vi.hoisted(() => ({
   verifyCustomerLogin: vi.fn(),
 }));
 vi.mock('next/navigation', () => ({
+  usePathname: () => '/login',
   useRouter: () => ({ replace: mocked.replace, push: vi.fn() }),
   useSearchParams: () => new URLSearchParams(mocked.query),
 }));
-vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin }));
+vi.mock('@/lib/auth', async (actual) => ({ ...await actual<typeof import('@/lib/auth')>(), sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin }));
 vi.mock('@/lib/customer', () => ({ verifyCustomerLogin: mocked.verifyCustomerLogin }));
 vi.mock('@/components/swift-logo', () => ({ SwiftLogo: () => <span>Swift</span> }));
 
@@ -56,7 +57,7 @@ describe('[Q7b] signing in from the customer app', () => {
     ['the cart', '/cart'],
   ])('from %s is a customer sign-in that returns there', async (_name, next) => {
     expect(await signIn(`next=${encodeURIComponent(next)}`)).toBe(next);
-    expect(mocked.verifyCustomerLogin).toHaveBeenCalledWith('+5926001001', '246810');
+    expect(mocked.verifyCustomerLogin).toHaveBeenCalledWith('+5926001001', '246810', expect.any(Function));
     expect(mocked.verifyPartnerLogin).not.toHaveBeenCalled();
   });
 

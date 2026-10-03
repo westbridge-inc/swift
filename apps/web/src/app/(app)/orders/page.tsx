@@ -20,7 +20,7 @@ export default function OrdersPage() {
   // in as someone else leaves the app shell — and this cache — behind. The
   // person and epoch also isolate a session restored without leaving the shell.
   const { scope, epoch } = useCustomerSession();
-  const orders = useQuery<any[]>({ queryKey: ['customer', 'orders', scope, epoch], queryFn: getOrders });
+  const orders = useQuery<any[]>({ queryKey: ['customer', 'orders', scope, epoch], queryFn: getOrders, staleTime: 0, refetchInterval: 15_000 });
 
   return (
     <div className="space-y-4">
@@ -39,8 +39,8 @@ export default function OrdersPage() {
               <p className="text-sm text-[var(--swift-muted)]">{o.orderNumber} · {o.items?.length ?? o.itemCount ?? 0} item(s)</p>
             </div>
             <div className="text-right">
-              <span className="rounded-full bg-[var(--swift-red-50)] px-2.5 py-1 text-xs font-bold text-[var(--swift-red)]">{LABEL[o.status] ?? o.status}</span>
-              <p className="mt-1 font-bold">{money(o.totalAmount ?? o.total)}</p>
+              <span className="rounded-full bg-[var(--swift-red-50)] px-2.5 py-1 text-xs font-bold text-[var(--swift-red)]">{orders.isPaused ? 'Waiting for connection…' : orders.isFetching ? 'Checking status…' : orders.isError ? 'Status unavailable' : LABEL[o.status] ?? o.status}</span>
+              <p className="mt-1 font-bold">{orders.isFetching || orders.isPaused || orders.isError ? '—' : money(o.totalAmount ?? o.total)}</p>
             </div>
           </Link>
         ))}

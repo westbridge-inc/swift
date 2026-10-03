@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mock = vi.hoisted(() => ({ probe: vi.fn(), restore: vi.fn(), router: { replace: vi.fn() } }));
 vi.mock('next/navigation', () => ({ useRouter: () => mock.router }));
-vi.mock('@/lib/auth', () => ({ sessionProbe: mock.probe, restoreSession: mock.restore }));
+vi.mock('@/lib/auth', () => ({ sessionProbe: mock.probe, restoreSession: mock.restore, currentSessionProof: async (proof: Promise<unknown>) => proof }));
 import { WeeklyFeeDestination } from './weekly-fee-destination';
 beforeEach(() => { vi.resetAllMocks(); mock.restore.mockResolvedValue({ ok: false }); });
 describe('neutral weekly-fee destination', () => {
@@ -19,12 +19,12 @@ describe('neutral weekly-fee destination', () => {
     expect(mock.router.replace).not.toHaveBeenCalled();
   });
   it('signs in then returns to the same neutral choice, without return parameters', async () => {
-    mock.probe.mockResolvedValue({ ok: false });
+    mock.probe.mockResolvedValue({ ok: false, signedOut: true });
     render(<WeeklyFeeDestination />);
     await waitFor(() => expect(mock.router.replace).toHaveBeenCalledWith('/login?next=%2Fweekly-fee'));
   });
   it('restores an expired access session before choosing the mover portal', async () => {
-    mock.probe.mockResolvedValue({ ok: false }); mock.restore.mockResolvedValue({ ok: true, user: { roles: ['RIDER'] } });
+    mock.probe.mockResolvedValue({ ok: false, signedOut: true }); mock.restore.mockResolvedValue({ ok: true, user: { roles: ['RIDER'] } });
     render(<WeeklyFeeDestination />);
     await waitFor(() => expect(mock.router.replace).toHaveBeenCalledWith('/portal/weekly-fee'));
   });

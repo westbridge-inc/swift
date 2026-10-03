@@ -21,7 +21,8 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiRequestError, sessionProbe } from '@/lib/auth';
+import { SessionBoundary } from '@/components/providers';
+import { ApiRequestError, currentSessionProof, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, queueStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
   addToCart,
@@ -171,7 +172,13 @@ function optionGuidance(group: OptionGroup): string {
   return `Choose up to ${group.maxSelect}`;
 }
 
-export function StorefrontExperience({ store, returnPath, fromQr = false }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean }) {
+type StorefrontProps = { store: StorefrontDetail; returnPath: string; fromQr?: boolean };
+
+export function StorefrontExperience(props: StorefrontProps) {
+  return <SessionBoundary><StorefrontSession {...props} /></SessionBoundary>;
+}
+
+function StorefrontSession({ store, returnPath, fromQr = false }: StorefrontProps) {
   const router = useRouter();
   const [dismissedDiningStore, setDismissedDiningStore] = useState<string | null>(null);
   const diningNoticeDismissed = dismissedDiningStore === store.id;
@@ -266,7 +273,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false }: { st
     // only once the server has attested — so a signed-out visitor never fires
     // the two authenticated loads, exactly as the token check used to prevent.
     setSignedIn(false);
-    void sessionProbe().then((session) => {
+    void currentSessionProof(sessionProbe()).then((session) => {
       if (!alive || !session.ok) return;
       setSignedIn(true);
       setLoadingCart(true);

@@ -11,7 +11,7 @@ import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 
 const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), query: '' }));
-vi.mock('next/navigation', () => ({ useRouter: () => nav, useSearchParams: () => new URLSearchParams(nav.query), notFound: () => { throw new Error('not found'); } }));
+vi.mock('next/navigation', () => ({ usePathname: () => window.location.pathname, useRouter: () => nav, useSearchParams: () => new URLSearchParams(nav.query), notFound: () => { throw new Error('not found'); } }));
 
 const store: StorefrontDetail = {
   id: 'qr-store', slug: 'garden-kitchen', name: 'Garden Kitchen', description: null,

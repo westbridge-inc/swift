@@ -1,4 +1,5 @@
 import { ApiRequestError, apiFetch } from '@/lib/auth';
+import { readSessionProfile, writeSessionProfile } from '@/lib/session-profile-cache';
 
 // Curated errors from the customer routes and their shared error handler.
 const customerErrorCodes = new Set([
@@ -19,7 +20,8 @@ export interface Ticket { id: string; subject: string; status: string; adminNote
 export interface TicketInput { category: SupportCategory; subject: string; message: string; orderId?: string }
 
 // The phone's customerApi contracts, using the web's cookie/session guard.
-// Private reads are never cached by the browser; expiry leaves the shell's door visible.
+// Private HTTP reads use no-store; profile memory reuse is scoped below.
+// Expiry leaves the shell's sign-in door visible.
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   try {
     const response = await apiFetch(`/api/v1/customer${path}`, {
@@ -34,8 +36,8 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
 }
 
 export const accountApi = {
-  profile: () => request<Profile>('/profile'),
-  updateProfile: (body: { firstName: string; lastName: string; email?: string }) => request<Profile>('/profile', 'PUT', body),
+  profile: () => readSessionProfile(() => request<Profile>('/profile')),
+  updateProfile: (body: { firstName: string; lastName: string; email?: string }) => writeSessionProfile(() => request<Profile>('/profile', 'PUT', body)),
   consent: () => request<Consent>('/consent'),
   marketing: (granted: boolean) => request('/consent/marketing', 'POST', { granted }),
   addresses: () => request<Address[]>('/addresses'),

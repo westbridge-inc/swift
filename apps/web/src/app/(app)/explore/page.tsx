@@ -1,10 +1,6 @@
-'use client';
-
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { UtensilsCrossed, ShoppingCart, Store, Car, Package, Wrench, BadgePercent, Wallet, ShieldCheck } from 'lucide-react';
-import { getVendors, type Vendor } from '@/lib/customer';
-import { VendorCard, VendorGridSkeleton } from '@/components/order-ui';
+import { ExploreStores } from '@/components/explore-stores';
 
 const VERTICALS = [
   { href: '/order/browse?type=RESTAURANT', label: 'Food', desc: 'Restaurants & takeaway', Icon: UtensilsCrossed },
@@ -21,9 +17,6 @@ const VALUES = [
 ];
 
 export default function ExplorePage() {
-  const [featured, setFeatured] = useState<Vendor[] | null>(null);
-  useEffect(() => { getVendors().then((v) => setFeatured(v.slice(0, 8))).catch(() => setFeatured([])); }, []);
-
   return (
     <div className="space-y-10">
       <section className="rounded-3xl bg-[var(--swift-red)] p-8 text-white md:p-12">
@@ -59,7 +52,7 @@ export default function ExplorePage() {
 
       <section>
         <div className="flex items-center justify-between"><h2 className="text-xl font-extrabold">Popular near you</h2><Link href="/order/browse" className="text-sm font-semibold text-[var(--swift-red)]">See all</Link></div>
-        <div className="mt-4">{featured === null ? <VendorGridSkeleton /> : <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">{featured.map((v) => <VendorCard key={v.id} v={v} />)}</div>}</div>
+        <ExploreStores />
       </section>
     </div>
   );

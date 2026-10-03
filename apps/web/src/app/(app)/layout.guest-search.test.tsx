@@ -17,6 +17,8 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ replace: state.replace, push: state.push, back: state.back }),
 }));
 vi.mock('@/lib/auth', () => ({
+  currentSessionEpoch: () => 0,
+  verifySessionNow: state.sessionProbe,
   sessionProbe: state.sessionProbe,
   restoreSession: state.restoreSession,
   getSessionPrincipal: () => state.principal,

@@ -2,13 +2,16 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { adoptSession } from '@/lib/auth';
 
 const fx = vi.hoisted(() => ({
   send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(),
   replace: vi.fn(), coords: vi.fn(), search: vi.fn(), details: vi.fn(), api: vi.fn(),
 }));
-vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
-vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, apiFetch: fx.api }));
+vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }), usePathname: () => '/signup' }));
+vi.mock('@/lib/auth', async (actual) => ({ ...await actual<typeof import('@/lib/auth')>(),
+  sendOtp: fx.send, apiFetch: fx.api, verifySessionNow: async () => ({ ok: true }),
+}));
 vi.mock('@/lib/customer', () => ({
   verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become,
   placesAutocomplete: fx.search, placeDetails: fx.details,
@@ -25,7 +28,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   fx.send.mockResolvedValue(undefined);
   fx.verify.mockResolvedValue({ signedIn: false, isNewUser: true });
-  fx.register.mockResolvedValue({});
+  fx.register.mockImplementation(async () => { adoptSession('test-vendor'); return { user: { id: 'test-vendor' } }; });
   fx.become.mockResolvedValue({});
   fx.coords.mockResolvedValue(DEVICE);
   fx.search.mockResolvedValue([DOOR]);
@@ -62,6 +65,21 @@ async function chooseDoor(user: Awaited<ReturnType<typeof business>>) {
 }
 
 describe('Q8 website store pin', () => {
+  it('AX356 F4 drops the confirmed store pin and address on a session change', async () => {
+    const user = await business();
+    await picker(user);
+    await chooseDoor(user);
+    await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
+    expect(disabled('Create business')).toBe(false);
+    const oldSubmit = screen.getByRole('button', { name: 'Create business' });
+    act(() => adoptSession('different-vendor'));
+    expect(screen.queryByDisplayValue('12 Regent Street')).toBeNull();
+    expect(screen.queryByText(/Store location confirmed:/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create business' })).toBeNull();
+    fireEvent.click(oldSubmit);
+    expect(fx.become).not.toHaveBeenCalled();
+  });
+
   it('cannot create a business until the owner explicitly confirms a pin', async () => {
     const user = await business();
     expect(disabled('Create business')).toBe(true);
