@@ -107,6 +107,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       body.docType,
       body.fileUrl,
       body.privacyNoticeVersion,
+      request.user.role,
     );
     reply.code(201);
     return { success: true, data: doc };

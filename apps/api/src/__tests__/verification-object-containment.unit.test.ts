@@ -87,7 +87,7 @@ function rawSecurityCensus(people: Map<string, any>, orphans: Map<string, any>, 
 function harness() {
   const people = new Map([A, B].map((id) => [id, {
     id, tenantId: id === A ? 'tenant-a' : 'tenant-b', countryCode: 'GY', trustLevel: 'L1',
-    status: 'ACTIVE', avatar: avatar(id), selfieCapturedAt: new Date(),
+    status: 'ACTIVE', activeRole: 'MOVER', updatedAt: new Date(), avatar: avatar(id), selfieCapturedAt: new Date(),
   }]));
   const objects = new Map([A, B].map((id) => [key(id), {
     fileKey: key(id), createdBy: id, wrappedDek: new Uint8Array(60).fill(1),

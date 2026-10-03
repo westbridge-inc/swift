@@ -1518,7 +1518,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // documents match — this button confirms that review, it cannot replace
     // it). An empty request body used to mean "approve on no evidence".
     if (isVerified) {
-      const live = await verification.getLiveOperationStatus(rider.userId, { vehicleType: rider.vehicleType });
+      const live = await verification.getLiveOperationStatus(rider.userId, { vehicleType: rider.vehicleType, kind: 'RIDER' });
       if (!live.allowed) {
         throw new AppError(
           409,
@@ -1724,7 +1724,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = reasonSchema.parse(request.body ?? {});
     const driver = await app.prisma.driver.findFirst({ where: { id, user: { tenantId } } });
     if (!driver) throw new NotFoundError('Driver', id);
-    const result = await verification.approveVehicleAssignment(driver.userId);
+    const result = await verification.approveVehicleAssignment(driver.userId, driver);
     await audit(
       request.user.userId,
       'APPROVE_DRIVER_VEHICLE_ASSIGNMENT',

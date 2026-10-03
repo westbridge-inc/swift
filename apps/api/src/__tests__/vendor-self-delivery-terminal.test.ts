@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -168,6 +169,8 @@ beforeAll(async () => {
       floatLimit: 1_000_000,
     },
   });
+  // Likewise the current-document gate every new-custody boundary re-checks.
+  await currentMoverDocuments(app.prisma, ru.id, 'MOTORCYCLE');
   riderId = rider.id;
   riderUserId = ru.id;
 });
