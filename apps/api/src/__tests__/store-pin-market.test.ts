@@ -12,7 +12,7 @@ import { partnerRoutes } from '../modules/partner/partner.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { STORE_PIN_OUT_OF_MARKET } from '../modules/vendor/store-pin';
-import { VENDOR_PIN_MOVED } from '../modules/vendor/store-pin-move';
+import { lockStorePin, recordStorePinMove, VENDOR_PIN_MOVED } from '../modules/vendor/store-pin-move';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
@@ -27,8 +27,9 @@ import { purgeAuditLogs } from '../lib/audit-immutability';
 //   PUT  /vendor/profile  (a store moving its pin)
 //
 // [DS269 F1] And a moved pin leaves a trace: an audit row with who moved it,
-// from where and to where, in the transaction that moves it, and a notice to
-// the owner whenever the mover is someone else.
+// from where and to where, in the transaction that moves it. [PIN-OWNER] Only
+// the owner can move it now; retain primitive coverage for historical
+// non-owner notices and the owner's subsequent correction of such a move.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -240,6 +241,49 @@ describe('[DS269 F1] a moved pin is on the record, and the owner hears of a move
     return { ...manager, name: `${named.firstName} ${named.lastName}` };
   }
 
+  // The route now refuses managers. Retain the audit primitive's non-owner
+  // notice coverage, and model an earlier move without reopening that route.
+  function priorManagerMove(store: { vendorId: string }, manager: { userId: string }) {
+    return app.prisma.$transaction(async (tx) => {
+      const before = await lockStorePin(tx, store.vendorId);
+      await tx.vendor.update({ where: { id: store.vendorId }, data: ENTRANCE });
+      return recordStorePinMove(tx, { vendorId: store.vendorId, before, to: ENTRANCE, actorUserId: manager.userId, actorRole: 'MANAGER' });
+    });
+  }
+
+  it.each([
+    ['both coordinates', ENTRANCE],
+    ['latitude alone', { latitude: ENTRANCE.latitude }],
+    ['longitude alone', { longitude: ENTRANCE.longitude }],
+  ])('[PIN-OWNER] refuses a manager sending %s before any profile write', async (_label, pin) => {
+    const store = await storeAtGeorgetown();
+    const manager = await managerOf(store);
+    const before = await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId } });
+
+    const res = await putProfile(manager.token, store.vendorId, { ...pin, name: 'Unauthorised rename' });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ success: false, error: { code: 'STAFF_FORBIDDEN', message: 'Only the store owner can do this' } });
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId } })).toEqual(before);
+    expect(await pinAudits(store.vendorId)).toHaveLength(0);
+    expect(await pinNotices(store.ownerUserId)).toHaveLength(0);
+  });
+
+  it('[PIN-OWNER] a manager can still edit the profile without coordinates', async () => {
+    const store = await storeAtGeorgetown();
+    const manager = await managerOf(store);
+    const description = 'Fresh roti every morning.';
+
+    const res = await putProfile(manager.token, store.vendorId, { description });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.description).toBe(description);
+    const saved = await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId } });
+    expect(saved.description).toBe(description);
+    expect(await pinOf(store.vendorId)).toEqual(GEORGETOWN);
+    expect(await pinAudits(store.vendorId)).toHaveLength(0);
+  });
+
   it('the owner moving the pin writes one audit row — who, from, to — and no notice to themselves', async () => {
     const store = await storeAtGeorgetown();
 
@@ -263,13 +307,13 @@ describe('[DS269 F1] a moved pin is on the record, and the owner hears of a move
     expect(await pinAudits(store.vendorId)).toHaveLength(0);
   });
 
-  it('a manager moving the pin is recorded as the manager, and the owner is told who moved it', async () => {
+  it('the audit primitive records a prior manager move and tells the owner who moved it', async () => {
     const store = await storeAtGeorgetown();
     const manager = await managerOf(store);
 
-    const res = await putProfile(manager.token, store.vendorId, ENTRANCE);
+    const noticeId = await priorManagerMove(store, manager);
 
-    expect(res.statusCode).toBe(200);
+    expect(noticeId).toEqual(expect.any(String));
     expect(await pinOf(store.vendorId)).toEqual(ENTRANCE);
     const rows = await pinAudits(store.vendorId);
     expect(rows).toHaveLength(1);
@@ -288,7 +332,7 @@ describe('[DS269 F1] a moved pin is on the record, and the owner hears of a move
   it('control: the owner moving it after a manager records a second move, and tells nobody', async () => {
     const store = await storeAtGeorgetown();
     const manager = await managerOf(store);
-    await putProfile(manager.token, store.vendorId, ENTRANCE);
+    await priorManagerMove(store, manager);
 
     const back = await putProfile(store.token, store.vendorId, GEORGETOWN);
 
@@ -329,7 +373,9 @@ describe('[DS269 F1] a moved pin is on the record, and the owner hears of a move
 
     const res = await putProfile(manager.token, store.vendorId, { latitude: 0, longitude: 0 });
 
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('STAFF_FORBIDDEN');
+    expect(await pinOf(store.vendorId)).toEqual(GEORGETOWN);
     expect(await pinAudits(store.vendorId)).toHaveLength(0);
     expect(await pinNotices(store.ownerUserId)).toHaveLength(0);
   });
