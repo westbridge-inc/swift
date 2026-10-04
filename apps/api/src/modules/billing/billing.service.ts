@@ -2945,14 +2945,14 @@ export class BillingService {
    * resuming must not silently reopen a closed account.
    */
   async setBillingRail(subscriptionId: string, method: 'CASH' | 'MOBILE_MONEY', mmgPayerMsisdn?: string) {
-    // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail to choose.
-    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     if (method !== 'CASH' && method !== 'MOBILE_MONEY') {
       throw new AppError(400, 'BILLING_RAIL_UNAVAILABLE', 'Choose cash or mobile money.');
     }
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
     }
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail to choose (before any write).
+    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     let resumedFromPause = false;
     // The instant charge below is anchored to exactly this due date (DS213 F2-1).
     const resumedAt = new Date();

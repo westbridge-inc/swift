@@ -114,6 +114,6 @@ export async function isReviewSubscription(prisma: Pick<PrismaClient, 'subscript
     }),
     'review-fee-seal',
   );
-  const kind = sub?.rider?.user.tenant.kind ?? sub?.driver?.user.tenant.kind ?? sub?.vendor?.tenant.kind;
+  const kind = sub?.rider?.user?.tenant?.kind ?? sub?.driver?.user?.tenant?.kind ?? sub?.vendor?.tenant?.kind;
   return kind === 'REVIEW';
 }

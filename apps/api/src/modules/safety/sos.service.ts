@@ -1,9 +1,9 @@
 import type { PrismaClient, SosStatus, SosTriggerSource, SosResolutionCode, OrderType } from '@prisma/client';
-import { isReviewAccount, ReviewDemoSosError } from '../review/demo-policy';
+import { ReviewDemoSosError } from '../review/demo-policy';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
+import { NotificationService, notifyAdmins, tenantOfUser, isReviewTenantId } from '../notification/notification.service';
 import { warRoomsFor } from './war-room';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
@@ -105,9 +105,6 @@ export class SosService {
    *  person's trigger into their own earlier one.
    */
   async create(input: SosCreateInput) {
-    // [REVIEW-PARTNER] An SOS in the store-review fiction is a demonstration: nothing is written,
-    // no operator, safety team or emergency contact is paged, and the reviewer is told so plainly.
-    if (await isReviewAccount(this.prisma, input.actorUserId)) throw new ReviewDemoSosError();
     let key = input.clientIdempotencyKey ?? null;
     if (key) {
       // [TA-S1-006] Bound by the ACTOR, so it runs outside the request's tenant
@@ -310,6 +307,11 @@ export class SosService {
       return null;
     });
     const tenantId = subjectTenant ?? (await tenantOfUser(this.prisma, input.actorUserId));
+    // [REVIEW-PARTNER] An SOS in the store-review fiction is a demonstration: nothing is written,
+    // no operator, safety team or emergency contact is paged, and the reviewer is told so plainly.
+    // Decided on the tenant this alert would route to, before the insert; a lookup that fails
+    // answers "not the fiction" (isReviewTenantId), so a real cry for help is never blocked by it.
+    if (tenantId && await isReviewTenantId(this.prisma, tenantId)) throw new ReviewDemoSosError();
     if (!tenantId) {
       // [F-028-04] This used to say "falling back to the platform tenant" while
       // the insert OMITTED the column — so the row took the schema default and

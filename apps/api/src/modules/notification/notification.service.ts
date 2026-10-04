@@ -225,10 +225,16 @@ function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
   return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 
-/** [REVIEW-PARTNER] Is this the store-review fiction? Tenants are not tenant-scoped rows. */
+/** [REVIEW-PARTNER] Is this the store-review fiction? Tenants are not tenant-scoped rows.
+ *  A lookup that fails answers "no": a real operator page is never lost to a lookup failure. */
 export async function isReviewTenantId(prisma: Pick<PrismaClient, 'tenant'>, tenantId: string): Promise<boolean> {
-  const t = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { kind: true } });
-  return t?.kind === 'REVIEW';
+  try {
+    const t = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { kind: true } });
+    return t?.kind === 'REVIEW';
+  } catch (err) {
+    log().error({ err }, '[REVIEW-PARTNER] could not read the tenant kind for a page — delivering it');
+    return false;
+  }
 }
 
 export async function notifyAdmins(

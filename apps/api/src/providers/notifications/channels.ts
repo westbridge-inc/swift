@@ -398,7 +398,8 @@ function getEmailProvider(): EmailProvider {
 export function getChannels(): NotificationChannels {
   const provider = process.env['NOTIFICATION_PROVIDER'] ?? 'dev';
   switch (provider) {
-    // [REVIEW-PARTNER] Every channel handed out is sealed for the store-review fiction (review-seal.ts).
+    // [REVIEW-PARTNER] Every channel handed out is sealed for the store-review fiction
+    // (review-seal.ts); the dev SMS stays ONE shared object, as it always was.
     case 'dev':
       return sealReviewChannels({ sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() });
     case 'twilio':

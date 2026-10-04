@@ -23,7 +23,7 @@
  * never lost to a database hiccup; the failure is logged loudly instead.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { NotificationChannels, PushOptions } from './channels';
+import type { NotificationChannels, PushOptions, SmsProvider, PushProvider, EmailProvider } from './channels';
 import { getTenantContext, runAsSystem } from '../../plugins/tenant-context';
 import { reviewSendSuppressedCounter } from '../../plugins/observability';
 import { log } from '../../utils/logger';
@@ -93,31 +93,48 @@ function suppressed(channel: Channel, reason: SuppressReason): void {
   log().info({ channel, reason }, 'review-tenant send suppressed');
 }
 
-/** The channels, sealed: a send of the fiction is suppressed before the provider is called. */
-export function sealReviewChannels(channels: NotificationChannels): NotificationChannels {
+/** One SMS provider, sealed. */
+export function sealSms(inner: SmsProvider): SmsProvider {
   return {
-    sms: {
-      sendSms: async (to: string, body: string) => {
-        const why = await reviewSendSuppression('sms', [to]);
-        if (why) { suppressed('sms', why); return { ref: 'review-suppressed' }; }
-        return channels.sms.sendSms(to, body);
-      },
-    },
-    push: {
-      sendPush: async (deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options?: PushOptions) => {
-        const why = await reviewSendSuppression('push', deviceTokens);
-        if (why) { suppressed('push', why); return { sent: 0, invalidTokens: [] }; }
-        return channels.push.sendPush(deviceTokens, title, body, data, options);
-      },
-    },
-    email: {
-      sendEmail: async (to: string, subject: string, body: string) => {
-        const why = await reviewSendSuppression('email', [to]);
-        if (why) { suppressed('email', why); return { ref: 'review-suppressed' }; }
-        return channels.email.sendEmail(to, subject, body);
-      },
+    sendSms: async (to: string, body: string) => {
+      const why = await reviewSendSuppression('sms', [to]);
+      if (why) { suppressed('sms', why); return { ref: 'review-suppressed' }; }
+      return inner.sendSms(to, body);
     },
   };
+}
+
+/** One push provider, sealed. A wrapper's `inner` (the selected provider) stays visible. */
+export function sealPush<P extends PushProvider>(inner: P): PushProvider & Pick<P & { inner?: PushProvider }, 'inner'> {
+  return {
+    ...('inner' in inner ? { inner: (inner as { inner?: PushProvider }).inner } : {}),
+    sendPush: async (deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options?: PushOptions) => {
+      const why = await reviewSendSuppression('push', deviceTokens);
+      if (why) { suppressed('push', why); return { sent: 0, invalidTokens: [] }; }
+      return inner.sendPush(deviceTokens, title, body, data, options);
+    },
+  } as PushProvider & Pick<P & { inner?: PushProvider }, 'inner'>;
+}
+
+/** One email provider, sealed. */
+export function sealEmail(inner: EmailProvider): EmailProvider {
+  return {
+    sendEmail: async (to: string, subject: string, body: string) => {
+      const why = await reviewSendSuppression('email', [to]);
+      if (why) { suppressed('email', why); return { ref: 'review-suppressed' }; }
+      return inner.sendEmail(to, subject, body);
+    },
+  };
+}
+
+/** A provider object is sealed once: a long-lived one (the dev SMS) stays one shared object. */
+const sealedSms = new WeakMap<SmsProvider, SmsProvider>();
+
+/** The channels, sealed: a send of the fiction is suppressed before the provider is called. */
+export function sealReviewChannels(channels: NotificationChannels): NotificationChannels {
+  let sms = sealedSms.get(channels.sms);
+  if (!sms) { sms = sealSms(channels.sms); sealedSms.set(channels.sms, sms); }
+  return { sms, push: sealPush(channels.push), email: sealEmail(channels.email) };
 }
 
 /** Test seam: forget cached tenant kinds. */
