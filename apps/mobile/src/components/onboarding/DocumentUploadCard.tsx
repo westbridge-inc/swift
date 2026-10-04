@@ -61,6 +61,7 @@ export function DocumentUploadCard({
   submittedAt,
   reviewNote,
   isNext,
+  faceMatched = false,
 }: {
   role: string;
   docType: string;
@@ -69,6 +70,8 @@ export function DocumentUploadCard({
   submittedAt?: string | null;
   reviewNote?: string | null;
   isNext?: boolean;
+  /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
+  faceMatched?: boolean;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -215,7 +218,10 @@ function explainPermissionDenied(
             {caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
-          {docType === 'national_id' || docType === 'owner_national_id' ? (
+          {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
+              this document. It used to show under every ID, while the
+              server's face-matching was switched off. */}
+          {faceMatched ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               Face-matched against your profile selfie
             </T>
