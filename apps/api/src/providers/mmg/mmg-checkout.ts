@@ -406,12 +406,13 @@ export function describeShape(value: unknown): Record<string, string> {
  * [DS632] How MMG's lookup `creationDate` is read: MMG_CHECKOUT_CREATION_ZONE.
  *  - GUYANA_WALL_CLOCK: a stamp ending in "Z", or with no zone, is Guyana
  *    wall-clock time; an explicit numeric offset is honoured as stated. This
- *    is what MMG UAT writes (verified 1 Oct): staging and UAT set it.
+ *    is what MMG writes (UAT verified 1 Oct; owner ruling 4 Oct: production
+ *    too): staging and production set it.
  *  - UTC: "Z" is UTC and an explicit offset is honoured as stated; a stamp
  *    with no zone cannot be read.
  * Unset, MMG's payment time cannot be checked against the checkout, so no MMG
- * payment is confirmed automatically: each one is held for a person. Production
- * stays unset until MMG confirms how it writes the stamp, or a real payment proves it.
+ * payment is confirmed automatically: each one is held for a person. That is
+ * the safety net for a missing setting, never a configuration.
  */
 export const MMG_CREATION_ZONES = ['GUYANA_WALL_CLOCK', 'UTC'] as const;
 export type MmgCreationZone = (typeof MMG_CREATION_ZONES)[number];

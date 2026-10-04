@@ -8,7 +8,7 @@ import {
   randomBytes,
   type KeyObject,
 } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fromMajor, fromMinor } from '../utils/currency-amount';
@@ -599,6 +599,14 @@ describe('[DS632] MMG_CHECKOUT_CREATION_ZONE: exactly GUYANA_WALL_CLOCK or UTC, 
       expect(() => assertMmgCheckoutConfig(productionEnv({ MMG_CHECKOUT_CREATION_ZONE: zone })), String(zone)).not.toThrow();
       expect(() => assertMmgCheckoutConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
     }
+  });
+
+  it('[owner, 4 Oct] the deploy template sets GUYANA_WALL_CLOCK for staging and production, a value the boot guard accepts', () => {
+    const template = readFileSync(join(process.cwd(), '../../deploy/.env.deploy.example'), 'utf8');
+    const declared = template.split('\n').map((line) => /^MMG_CHECKOUT_CREATION_ZONE=(\S*)\s*$/.exec(line)?.[1]).filter((v) => v !== undefined);
+    expect(declared).toEqual(['GUYANA_WALL_CLOCK']);
+    expect(mmgCreationZone({ MMG_CHECKOUT_CREATION_ZONE: declared[0] })).toBe('GUYANA_WALL_CLOCK');
+    expect(() => assertMmgCheckoutConfig(productionEnv({ MMG_CHECKOUT_CREATION_ZONE: declared[0] }))).not.toThrow();
   });
 
   it('at runtime, unset, empty or not valid is unverified (null), never a guessed zone', () => {

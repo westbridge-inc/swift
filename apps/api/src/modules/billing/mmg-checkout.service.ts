@@ -388,7 +388,7 @@ export function judge(
 /** [DS632] What operators need besides the reason code when the cause is how
  *  MMG's creationDate is read. */
 const HOLD_GUIDANCE: Readonly<Record<string, string>> = {
-  CREATION_ZONE_UNVERIFIED: ' MMG_CHECKOUT_CREATION_ZONE is not set to GUYANA_WALL_CLOCK or UTC, so the time MMG gives for the payment cannot be checked against the checkout, and no MMG payment is confirmed automatically. Confirm with MMG how creationDate is written, then set it.',
+  CREATION_ZONE_UNVERIFIED: ' MMG_CHECKOUT_CREATION_ZONE is not set to GUYANA_WALL_CLOCK or UTC, so the time MMG gives for the payment cannot be checked against the checkout, and no MMG payment is confirmed automatically. Set it to GUYANA_WALL_CLOCK (MMG writes Guyana time; owner ruling, 4 Oct).',
   CREATION_AFTER_REPLY: ' MMG says this payment was made after Swift had already received the MMG reply naming it, so the creationDate stamps from MMG may not match the configured MMG_CHECKOUT_CREATION_ZONE. Check that setting against a real payment before trusting any automatic confirmation.',
 };
 
