@@ -703,6 +703,25 @@ describe('[ZONE-FARES · Sol F1] another operator\'s fare is never READ — the 
     }
   });
 
+  it('the caller\'s own fare deleted: the delete selector carries the wall too, and the row is gone', async () => {
+    const mine = await sys(() => app.prisma.zoneFare.create({ data: { fromZoneId: zoneB.id, toZoneId: zoneA.id, fare: 2600 } }));
+    try {
+      seen.length = 0;
+      const res = await injectWithApproval(rec, {
+        method: 'DELETE', url: `/api/v1/admin/zone-fares/${mine.id}`,
+        headers: { authorization: `Bearer ${founder.token}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
+        payload: { fromZoneId: zoneB.id, toZoneId: zoneA.id },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      const named = byId(mine.id);
+      expect(named.map((q) => q.operation)).toContain('delete');
+      for (const q of named) expect(walledOn(q), `${q.operation} ${JSON.stringify(q.args)}`).toBe(true);
+      expect(await fareRow(zoneB.id, zoneA.id)).toBeNull();
+    } finally {
+      await sys(() => app.prisma.zoneFare.deleteMany({ where: { id: mine.id } }));
+    }
+  });
+
   it('the audit snapshot of a parent-walled entity reads nothing when no tenant is bound, and never another operator\'s row', async () => {
     const entity = ADMIN_ROUTE_AUTHORITY['PUT /zone-fares/:id']!.entity!;
     expect(entity.tenantVia).toEqual(['fromZone', 'toZone']);
