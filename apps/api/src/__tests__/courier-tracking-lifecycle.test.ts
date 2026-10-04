@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -8,8 +8,6 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { OrderService } from '../modules/order/order.service';
-import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
@@ -28,11 +26,6 @@ let seq = 0;
 // [SAFE-B · retained history] An issued drop-off proof is immutable evidence: its job and the people it names
 // are kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
 const PHONE_PREFIX = retainedPhonePrefix('12');
-
-/** [SAFE-B] The server's own issuer mints the drop-off proof for the assigned rider, in custody, exactly as
- *  /proof-photo does; it records the issued URL on the job itself. */
-const issueProof = async (orderId: string, moverUserId: string) =>
-  (await issueSyntheticHandoverPhoto(app.prisma, { orderId, actorId: moverUserId, role: 'RIDER' })).url;
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
