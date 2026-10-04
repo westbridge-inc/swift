@@ -121,6 +121,7 @@ export class AdEventService {
           tenantId: campaign.tenantId,
           campaignId, creativeId, placementKey, eventType: ev.eventType,
           userHash: currentUserHash, sessionId, occurredAt, tokenHash: th,
+          authorityVersion: 2,
           meta: { ...(ev.meta ?? {}), authorityVersion: 2 } as never,
         },
       });

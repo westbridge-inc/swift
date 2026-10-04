@@ -5640,8 +5640,11 @@ model AdEvent {
   receivedAt   DateTime    @default(now())
   tokenHash    String
   meta         Json?
+  /// Server-owned provenance; every pre-cutover event defaults to unverified.
+  authorityVersion Int     @default(0)
 
   @@index([campaignId, occurredAt])
+  @@index([campaignId, authorityVersion])
   @@index([occurredAt])
   @@map("ad_events")
 }

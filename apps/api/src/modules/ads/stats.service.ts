@@ -26,7 +26,7 @@ export class AdStatsService {
     const end = new Date(start.getTime() + 86_400_000);
     const events = await this.prisma.adEvent.findMany({
       where: { occurredAt: { gte: start, lt: end } },
-      select: { campaignId: true, creativeId: true, city: true, eventType: true, meta: true },
+      select: { campaignId: true, creativeId: true, city: true, eventType: true, authorityVersion: true },
     });
 
     // Group by (campaign, creative, city).
@@ -38,7 +38,7 @@ export class AdStatsService {
       if (!g) { g = { campaignId: e.campaignId, creativeId: e.creativeId, city, c: zero() }; groups.set(key, g); }
       // Keep the spend row even for legacy traffic, but only recorded-serve
       // events contribute to the repaired measurement counters.
-      if ((e.meta as { authorityVersion?: number } | null)?.authorityVersion !== 2) continue;
+      if (e.authorityVersion !== 2) continue;
       switch (e.eventType) {
         case 'IMPRESSION': g.c.impressions += 1; break;
         case 'VIEWABLE_IMPRESSION': g.c.viewableImpressions += 1; break;
@@ -156,7 +156,7 @@ export class AdStatsService {
       videoCompletes: t.videoCompletes + d.videoCompletes,
       spend: Math.round((t.spend + d.spend) * 100) / 100,
     }), { impressions: 0, viewableImpressions: 0, clicks: 0, videoStarts: 0, videoCompletes: 0, spend: 0 });
-    const acceptedEvents = await this.prisma.adEvent.count({ where: { campaignId, meta: { path: ['authorityVersion'], equals: 2 } } });
+    const acceptedEvents = await this.prisma.adEvent.count({ where: { campaignId, authorityVersion: 2 } });
     const retainedEvents = await this.prisma.adEvent.count({ where: { campaignId } });
     return {
       // A grant proves bounded client reporting, never a human view. Older
