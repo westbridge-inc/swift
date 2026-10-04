@@ -188,9 +188,10 @@ export async function recordAdServe(prisma: PrismaClient, input: {
     const creative = creatives[0];
     if (!creative) return null;
     const hour = Math.floor(now.getTime() / 3600_000);
-    // Lock order is always principal then network; a refusal may consume a
-    // principal attempt, but it allocates no grant and no metric authority.
-    for (const [prefix, identity, cap] of [['principal', input.principalHash, 20], ['network', input.networkHash, 100]] as const) {
+    // Lock order is always network then principal. A refused network allocates
+    // no new principal row; a principal refusal may consume a network attempt,
+    // but it allocates no grant and no metric authority.
+    for (const [prefix, identity, cap] of [['network', input.networkHash, 100], ['principal', input.principalHash, 20]] as const) {
       const key = `${prefix}:${hour}:${identity}`;
       const rows = await tx.$queryRaw<Array<{ count: number }>>(Prisma.sql`
         INSERT INTO "ad_serve_budgets" ("key", "count", "expiresAt") VALUES (${key}, 1, ${new Date((hour + 2) * 3600_000)})

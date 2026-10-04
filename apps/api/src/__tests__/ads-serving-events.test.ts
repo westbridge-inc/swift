@@ -613,6 +613,21 @@ describe('§12 HTTP principal authority', () => {
 });
 
 describe('MASTER-052 bounded serving authority', () => {
+  it('network refusal bounds storage even when guest continuity is reset', async () => {
+    const p = await makePlacement('network-budget');
+    await liveBookedCampaign(p.id, 'Network Budget Co');
+    const network = `network-${nanoid(16)}`;
+    const now = new Date(Math.floor(Date.now() / 3600_000) * 3600_000 + 120_000);
+    const guests = Array.from({ length: 106 }, () => `guest-${nanoid(16)}`);
+    let issued = 0;
+    for (const guestId of guests) {
+      const result = await serving.serve({ tenantId: tenant, city: '*', sessionId: guestId, userId: null, guestId, network, keys: [p.key] }, now);
+      issued += result.placements[p.key]!.items.filter((item) => item.impressionToken).length;
+    }
+    expect(issued).toBe(100);
+    const keys = guests.map((guestId) => `principal:${Math.floor(now.getTime() / 3600_000)}:${adIdentity(null, guestId)}`);
+    expect(await prisma.adServeBudget.count({ where: { key: { in: keys } } })).toBeLessThanOrEqual(100);
+  });
   it('rotating client session labels cannot multiply one account\'s serve allowance', async () => {
     const p = await makePlacement('home_top_card');
     await liveBookedCampaign(p.id, 'Bounded Co');
