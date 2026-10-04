@@ -12,6 +12,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { OrderService } from '../modules/order/order.service';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 3/8] The request and the reads, through the real routes,
@@ -58,7 +59,9 @@ const PORT_OF_SPAIN = { lat: 10.6596, lng: -61.5089, address: 'Port of Spain' };
 
 /** Today's request answer for PICKUP → DEST, byte for byte, as unmodified main
  *  writes it (recorded on main d2608e97 before this change; the ids, the
- *  order number and the PIN are the only values that vary). */
+ *  order number and the PIN are the only values that vary). Priced on the
+ *  legacy Guyana taxi card, which this suite pins (pinLegacyGuyanaTaxiCard):
+ *  the pin is about the request's shape, not about the October fare. */
 const PINNED_SINGLE_LEG_ANSWER = '{"success":true,"data":{"ride":{"id":"<ID>","orderNumber":"<NUMBER>","status":"PENDING","fare":1700,"rideClass":"ECONOMY","currencyCode":"GYD","fareSource":"formula","distanceKm":2,"durationMin":5,"ridePin":"<PIN>","pickupAddress":"Bartica Police Station","dropoffAddress":"Bartica Airstrip"},"message":"Looking for a driver near you…"}}';
 
 /** The keys of an open-board item and of the two offer cards today (main). */
@@ -71,6 +74,7 @@ let app: FastifyInstance;
 let osrmApp: FastifyInstance;
 /** A second instance standing in for the server after a restart; closed last. */
 let restarted: FastifyInstance | null = null;
+let restoreTaxiCard: () => Promise<void> = async () => {};
 let seq = 0;
 const tenantIds: string[] = [];
 const emitted: { room: string; event: string; payload: unknown }[] = [];
@@ -250,6 +254,7 @@ beforeAll(async () => {
     delete process.env['MAPS_PROVIDER'];
     delete process.env['OSRM_URL'];
   }
+  restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
   await purgeFixtures(app);
   // This file's own fare zones and their fixed fare (the zone model is tenant
   // scoped: written as the system, owned by the default tenant in GY).
@@ -272,6 +277,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await restoreTaxiCard();
   await purgeFixtures(app);
   // Deleting the zones cascades their fare.
   await sys(() => app.prisma.zone.deleteMany({ where: { name: { startsWith: `${FIXTURE} ` } } }));
