@@ -17,7 +17,6 @@ import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfi
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { addStop, canAddStop, maxStopsFrom, moveStop, removeStop, replaceStop, rideStops, sameWireStops, stopRefusalCopy, wireStops } from '../../../lib/taxiItinerary';
 import { fareBreakdownOf, liveWaiting, waitingDisclosure } from '../../../lib/taxiWaiting';
-import { rideRequestAttempt } from '../../../lib/rideRequestAttemptStore';
 import { AddStopRow, RideItinerary, RouteLegs, StopNumber, StopRows, WaitingCard, oneFareLine } from '../TaxiStops';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
@@ -35,7 +34,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
 import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
-import { useAuthStore } from '../../../stores/authStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
 import { taxiDoorFor } from '../../../lib/taxiDoors';
@@ -383,7 +382,6 @@ function TaxiBooking({ navigation }: any) {
       ? 'Stops aren’t available right now, so we removed them from this trip. Check your trip before you book.'
       : `You can add up to ${maxStops} ${maxStops === 1 ? 'stop' : 'stops'} now, so we removed the last ${dropped === 1 ? 'one' : dropped}. Check your trip before you book.`);
   }, [pickedStops.length, maxStops]);
-  const authUserId = useAuthStore((st) => st.user?.id ?? null);
 
   const { data: estimate, isFetching: estimating, error: estimateError } = useRideEstimate(pickupPoint, dropoffPoint, stopsWire);
   const estimateErrorBody = (estimateError as any)?.response?.data?.error;
@@ -393,11 +391,6 @@ function TaxiBooking({ navigation }: any) {
     if (estimateErrorCode === 'MULTI_STOP_UNAVAILABLE' || estimateErrorCode === 'TOO_MANY_STOPS') void capabilities.refetch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [estimateErrorCode]);
-  // A live ride on screen means any unanswered booking is resolved: its key is
-  // spent, and the next booking — even of the same trip — gets a new one.
-  useEffect(() => {
-    if (activeRide?.id && authUserId) rideRequestAttempt.liveRideSeen(authUserId);
-  }, [activeRide?.id, authUserId]);
 
   // Availability spec §2.1 (hooks live ABOVE the early returns — the active-ride
   // and loading branches must never change the hook order).
@@ -518,7 +511,9 @@ function TaxiBooking({ navigation }: any) {
 
   const onRequest = () => {
     const payload = requestPayload();
-    if (payload) requestRide.mutate(payload);
+    // The booking belongs to the account that tapped, captured now: if the
+    // account changes before it leaves, nothing is sent.
+    if (payload) requestRide.mutate({ ...payload, authSession: getAuthSessionSnapshot() ?? undefined });
   };
 
   const onAddStop = () => openSearch((p) => { setStopsDropped(null); setStops((s) => addStop(s.slice(0, maxStopsRef.current), p, maxStopsRef.current)); }, 'Add a stop');

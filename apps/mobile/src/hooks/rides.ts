@@ -3,21 +3,32 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { rideApi, type RideClass, type RideRequestBody, type TaxiStopInput, type TieredEstimate } from '../services/api';
 import { customerKeys } from './customer';
 import { rideRequestAttempt } from '../lib/rideRequestAttemptStore';
-import { getAuthSessionSnapshot } from '../stores/authStore';
+import { requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../stores/authStore';
+import type { AuthSessionSnapshot } from '../lib/authSession';
 
 type Point = { lat: number; lng: number };
 
 const errorCodeOf = (error: unknown): string | undefined =>
   (error as { response?: { data?: { error?: { code?: string } } } } | null)?.response?.data?.error?.code;
 
-/** Codes that do NOT settle an attempt: the ride may have been made. */
-const OUTCOME_UNKNOWN_CODES = new Set(['RIDE_REQUEST_OUTCOME_UNKNOWN', 'DUPLICATE_REQUEST']);
+/**
+ * The 4xx refusals the ride-request contract (CONTRACT §3.1) lists as checked
+ * BEFORE anything is written — the only answers that retire a booking key.
+ * Everything else keeps it for the retry: any 5xx (the server can fail after
+ * the ride was saved), DUPLICATE_REQUEST (a twin still in flight), a code the
+ * app does not know, a network error or a timeout.
+ */
+const REFUSED_WROTE_NOTHING = new Set([
+  'TAXI_MOBILE_APP_REQUIRED', 'VALIDATION_ERROR', 'MULTI_STOP_UNAVAILABLE', 'TOO_MANY_STOPS',
+  'STOP_TOO_CLOSE', 'STOP_OUT_OF_MARKET', 'EXPECTED_FARE_REQUIRED', 'IDEMPOTENCY_KEY_REUSED',
+  'RIDE_IN_PROGRESS', 'ACCOUNT_RESTRICTED', 'NO_DRIVERS_NEARBY', 'STRIKE_RESTRICTED', 'SELFIE_REQUIRED',
+  'MULTI_STOP_ZONE_PRICED', 'INVALID_RIDE_CLASS', 'TOO_MANY_PASSENGERS', 'FARE_CHANGED', 'ID_VERIFICATION_REQUIRED',
+]);
 
-/** The server answered with its own refusal code (the contract: nothing is
- *  written on any refusal), so the attempt's outcome is known. */
-function requestDefinitelyRefused(error: unknown): boolean {
+function requestRefusedWroteNothing(error: unknown): boolean {
+  const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
   const code = errorCodeOf(error);
-  return !!(error as { response?: unknown } | null)?.response && !!code && !OUTCOME_UNKNOWN_CODES.has(code);
+  return typeof status === 'number' && status >= 400 && status < 500 && !!code && REFUSED_WROTE_NOTHING.has(code);
 }
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
@@ -159,20 +170,22 @@ export function useLeaveQueue() {
 export function useRequestRide() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (data: RideRequestBody) => {
-      const userId = getAuthSessionSnapshot()?.userId ?? '';
-      // The key of THIS request, held here so only its own answer retires it.
-      const key = await rideRequestAttempt.begin(data, userId, () => unwrap(rideApi.active()));
+    // `authSession` is the account that tapped Request, captured at the tap.
+    mutationFn: async ({ authSession, ...data }: RideRequestBody & { authSession?: AuthSessionSnapshot }) => {
+      const owner = authSession ?? requireAuthSessionSnapshot();
+      // An account switch since the tap sends NOTHING: A's booking never
+      // leaves under B's session, and no key is touched for either.
+      const current = requireAuthSessionForPrincipal(owner);
+      // The key of THIS request (one synchronous step), so only its own
+      // answer can retire it.
+      const key = rideRequestAttempt.begin(data, owner.userId);
       try {
-        const answer = await unwrap(rideApi.request(data, key));
+        const answer = await unwrap(rideApi.request(data, key, current));
         // Answered (a new ride, or the replay of one already made): spent.
-        rideRequestAttempt.settle(key, userId);
+        rideRequestAttempt.settle(key, owner.userId);
         return answer;
       } catch (error) {
-        // A refusal the server answered with its own code wrote nothing: this
-        // attempt is over. A lost answer, an unknown outcome or a twin still in
-        // flight keeps the key for the retry.
-        if (requestDefinitelyRefused(error)) rideRequestAttempt.settle(key, userId);
+        if (requestRefusedWroteNothing(error)) rideRequestAttempt.settle(key, owner.userId);
         throw error;
       }
     },
@@ -185,7 +198,7 @@ export function useRequestRide() {
       const answered = !!(error as { response?: unknown } | null)?.response;
       // The ride may exist without its answer having reached the phone: read
       // the live ride before anything else (CONTRACT §3.1 #18), never book again.
-      if (!answered || code === 'RIDE_REQUEST_OUTCOME_UNKNOWN' || code === 'DUPLICATE_REQUEST' || code === 'RIDE_IN_PROGRESS' || code === 'RIDE_ALREADY_BOOKED') {
+      if (!answered || code === 'RIDE_REQUEST_OUTCOME_UNKNOWN' || code === 'DUPLICATE_REQUEST' || code === 'RIDE_IN_PROGRESS') {
         void qc.invalidateQueries({ queryKey: ['rides', 'active'] });
       }
       if (code === 'IDEMPOTENCY_KEY_REUSED') void qc.invalidateQueries({ queryKey: ['rides', 'active'] });

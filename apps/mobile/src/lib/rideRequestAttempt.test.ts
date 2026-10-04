@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { createRideRequestAttempt, mintRideRequestKey, type RideKeyStore } from './rideRequestAttempt';
 import { REQUEST_BODY_WITH_ONE_STOP } from './taxiContract.fixtures';
 
@@ -7,10 +7,11 @@ import { REQUEST_BODY_WITH_ONE_STOP } from './taxiContract.fixtures';
 // should ALWAYS send one: a new key per new booking intent, the SAME key when
 // retrying that request (network error, timeout, app restart)."
 //
-// An attempt whose outcome is unknown keeps its key until it is reconciled —
-// however long that takes and whoever signs in meanwhile. It is retired only
-// by the answer to THAT request, or by the server's own read of the live ride.
-// Every sequence the PR #1426 review gave is here.
+// An attempt is one account + one request body. It keeps its key until ITS
+// OWN request gets a definitive answer — never on a clock, never on another
+// account's activity, never on a read of some other state. A different trip
+// simply gets its own key and leaves older unresolved attempts alone. Every
+// sequence from the PR #1426 reviews is here.
 // ---------------------------------------------------------------------------
 
 function memoryStore(): RideKeyStore & { raw: string | null } {
@@ -30,132 +31,130 @@ function counterMint() {
 
 const body = REQUEST_BODY_WITH_ONE_STOP;
 const otherBody = { ...REQUEST_BODY_WITH_ONE_STOP, rideClass: 'COMFORT', expectedFare: 3800 };
-const noLiveRide = async () => null;
 const DAY = 24 * 60 * 60_000;
 
 describe('one booking intent = one key', () => {
-  it('a retry of the same body by the same account gets the same key', async () => {
+  it('a retry of the same body by the same account gets the same key', () => {
     const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const first = await attempt.begin(body, 'rider-a', noLiveRide);
-    expect(await attempt.begin({ ...body }, 'rider-a', noLiveRide)).toBe(first);
+    const first = attempt.begin(body, 'rider-a');
+    expect(attempt.begin({ ...body }, 'rider-a')).toBe(first);
   });
 
-  it('a stop order change is a different body', async () => {
+  it('the definitive answer to the request spends its key: the same trip later is a new booking', () => {
+    const attempt = createRideRequestAttempt(memoryStore(), counterMint());
+    const first = attempt.begin(body, 'rider-a');
+    attempt.settle(first, 'rider-a');
+    expect(attempt.begin(body, 'rider-a')).not.toBe(first);
+  });
+
+  it('a stop order change is a different body, with its own key', () => {
     const attempt = createRideRequestAttempt(memoryStore(), counterMint());
     const two = { ...body, stops: [{ lat: 6.8143, lng: -58.1443, address: 'Camp Street' }, { lat: 6.825, lng: -58.15, address: 'Sheriff Street' }] };
-    const first = await attempt.begin(two, 'rider-a', noLiveRide);
-    attempt.settle(first, 'rider-a');
-    expect(await attempt.begin({ ...two, stops: [...two.stops].reverse() }, 'rider-a', noLiveRide)).not.toBe(first);
-  });
-
-  it('the answer to the request spends its key: the same trip later is a new booking', async () => {
-    const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const first = await attempt.begin(body, 'rider-a', noLiveRide);
-    attempt.settle(first, 'rider-a');
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).not.toBe(first);
+    expect(attempt.begin({ ...two, stops: [...two.stops].reverse() }, 'rider-a')).not.toBe(attempt.begin(two, 'rider-a'));
   });
 });
 
-describe('an unresolved attempt keeps its key until it is reconciled', () => {
-  it('[review 4] the same unanswered booking a day later is still the same key', async () => {
+describe('an unresolved attempt keeps its key until its own answer', () => {
+  it('[review 1.4] the same unanswered booking a day later is still the same key', () => {
     let now = 1_000_000;
     const attempt = createRideRequestAttempt(memoryStore(), counterMint(), () => now);
-    const first = await attempt.begin(body, 'rider-a', noLiveRide);
+    const first = attempt.begin(body, 'rider-a');
     now += DAY;
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).toBe(first);
+    expect(attempt.begin(body, 'rider-a')).toBe(first);
   });
 
-  it('[review 4] A → B → A: account A’s unanswered booking keeps its key', async () => {
+  it('[review 2.1] a different trip gets its own key and leaves the unresolved one alone: retrying A keeps A’s key', () => {
     const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const a = await attempt.begin(body, 'rider-a', noLiveRide);
-    const b = await attempt.begin(body, 'rider-b', noLiveRide);
+    const a = attempt.begin(body, 'rider-a');
+    const b = attempt.begin(otherBody, 'rider-a');
     expect(b).not.toBe(a);
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).toBe(a);
+    expect(attempt.begin(body, 'rider-a')).toBe(a);
+    expect(attempt.begin(otherBody, 'rider-a')).toBe(b);
   });
 
-  it('[review 5] A’s late answer settles only A’s attempt: B retries with B’s key', async () => {
+  it('[review 2.1] concurrent identical requests share one key', () => {
     const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const a = await attempt.begin(body, 'rider-a', noLiveRide);
-    const b = await attempt.begin(otherBody, 'rider-b', noLiveRide);
+    const keys = [attempt.begin(otherBody, 'rider-a'), attempt.begin({ ...otherBody }, 'rider-a')];
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('two app instances on one store see each other’s attempts at once', () => {
+    const store = memoryStore();
+    const one = createRideRequestAttempt(store, counterMint());
+    const two = createRideRequestAttempt(store, () => 'ride_never_minted');
+    const key = one.begin(body, 'rider-a');
+    expect(two.begin(body, 'rider-a')).toBe(key);
+  });
+
+  it('[review 1.4] A → B → A: account A’s unanswered booking keeps its key', () => {
+    const attempt = createRideRequestAttempt(memoryStore(), counterMint());
+    const a = attempt.begin(body, 'rider-a');
+    expect(attempt.begin(body, 'rider-b')).not.toBe(a);
+    expect(attempt.begin(body, 'rider-a')).toBe(a);
+  });
+
+  it('[review 1.5] A’s late answer settles only A’s attempt: B retries with B’s key', () => {
+    const attempt = createRideRequestAttempt(memoryStore(), counterMint());
+    const a = attempt.begin(body, 'rider-a');
+    const b = attempt.begin(otherBody, 'rider-b');
     attempt.settle(a, 'rider-a');
-    expect(await attempt.begin(otherBody, 'rider-b', noLiveRide)).toBe(b);
+    expect(attempt.begin(otherBody, 'rider-b')).toBe(b);
   });
 
-  it('settle needs the exact key AND account: a stray answer retires nothing', async () => {
+  it('settle needs the exact key AND account: a stray answer retires nothing', () => {
     const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const a = await attempt.begin(body, 'rider-a', noLiveRide);
+    const a = attempt.begin(body, 'rider-a');
     attempt.settle(a, 'rider-b');
     attempt.settle('ride_some_other_key', 'rider-a');
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).toBe(a);
+    expect(attempt.begin(body, 'rider-a')).toBe(a);
   });
+});
 
-  it('a new trip while one is unresolved first asks the server about the live ride', async () => {
+describe('[review 2.4] the store never drops an unresolved attempt', () => {
+  it('21 accounts with unanswered bookings: the first account still has its key', () => {
     const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const a = await attempt.begin(body, 'rider-a', noLiveRide);
-    const read = vi.fn(async () => null);
-    const fresh = await attempt.begin(otherBody, 'rider-a', read);
-    expect(read).toHaveBeenCalledOnce();
-    expect(fresh).not.toBe(a);
-    // The old attempt was reconciled (no live ride): it is gone, so retrying
-    // the old trip is a new booking, not a replay.
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).not.toBe(a);
+    const first = attempt.begin(body, 'rider-0');
+    for (let i = 1; i <= 20; i++) attempt.begin(body, `rider-${i}`);
+    expect(attempt.begin(body, 'rider-0')).toBe(first);
   });
 
-  it('a live ride on the server refuses a second booking and mints nothing', async () => {
-    const store = memoryStore();
-    const attempt = createRideRequestAttempt(store, counterMint());
-    await attempt.begin(body, 'rider-a', noLiveRide);
-    const before = store.raw;
-    await expect(attempt.begin(otherBody, 'rider-a', async () => ({ id: 'ride-live' }))).rejects.toMatchObject({ code: 'RIDE_ALREADY_BOOKED' });
-    expect(store.raw).not.toBe(before);
-    // The live ride reconciles the old attempt; nothing new was minted.
-    expect(JSON.parse(store.raw ?? '{"attempts":[]}').attempts).toEqual([]);
+  it('at the cap a NEW booking is refused with a clear message; nothing is evicted', () => {
+    const attempt = createRideRequestAttempt(memoryStore(), counterMint(), Date.now, 3);
+    const keys = ['rider-a', 'rider-b', 'rider-c'].map((u) => attempt.begin(body, u));
+    let refused: unknown;
+    try { attempt.begin(body, 'rider-d'); } catch (e) { refused = e; }
+    expect(refused).toMatchObject({ code: 'RIDE_KEYS_FULL', response: { data: { error: { code: 'RIDE_KEYS_FULL' } } } });
+    expect((refused as Error).message).toMatch(/still waiting for an answer/);
+    // Every unresolved attempt is still there, and its own retry still works.
+    expect(['rider-a', 'rider-b', 'rider-c'].map((u) => attempt.begin(body, u))).toEqual(keys);
   });
 
-  it('when the server cannot be asked, no new key is minted and the old one survives', async () => {
-    const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const a = await attempt.begin(body, 'rider-a', noLiveRide);
-    await expect(attempt.begin(otherBody, 'rider-a', async () => { throw new Error('offline'); })).rejects.toMatchObject({ code: 'RIDE_STILL_CHECKING' });
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).toBe(a);
-  });
-
-  it('another account’s unresolved attempt never blocks or reads for this one', async () => {
-    const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    await attempt.begin(body, 'rider-a', noLiveRide);
-    const read = vi.fn(async () => ({ id: 'a-ride' }));
-    await attempt.begin(otherBody, 'rider-b', read);
-    expect(read).not.toHaveBeenCalled();
-  });
-
-  it('a live ride seen on screen reconciles only that account’s attempts', async () => {
-    const attempt = createRideRequestAttempt(memoryStore(), counterMint());
-    const a = await attempt.begin(body, 'rider-a', noLiveRide);
-    const b = await attempt.begin(body, 'rider-b', noLiveRide);
-    attempt.liveRideSeen('rider-a');
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).not.toBe(a);
-    expect(await attempt.begin(body, 'rider-b', noLiveRide)).toBe(b);
+  it('a settled attempt frees its place', () => {
+    const attempt = createRideRequestAttempt(memoryStore(), counterMint(), Date.now, 1);
+    const a = attempt.begin(body, 'rider-a');
+    attempt.settle(a, 'rider-a');
+    expect(() => attempt.begin(body, 'rider-b')).not.toThrow();
   });
 });
 
 describe('an app restart retries with the same key', () => {
-  it('a new process reading the same storage reuses the unanswered key', async () => {
+  it('a new process reading the same storage reuses the unanswered key', () => {
     const store = memoryStore();
-    const first = await createRideRequestAttempt(store, counterMint()).begin(body, 'rider-a', noLiveRide);
-    const afterRestart = createRideRequestAttempt(store, () => 'ride_never_minted');
-    expect(await afterRestart.begin(body, 'rider-a', noLiveRide)).toBe(first);
+    const first = createRideRequestAttempt(store, counterMint()).begin(body, 'rider-a');
+    expect(createRideRequestAttempt(store, () => 'ride_never_minted').begin(body, 'rider-a')).toBe(first);
   });
 
-  it('storage that fails still protects a retry in memory', async () => {
+  it('storage that fails still protects a retry in memory', () => {
     const broken: RideKeyStore = { get: () => { throw new Error('locked'); }, set: () => { throw new Error('locked'); }, clear: () => { throw new Error('locked'); } };
     const attempt = createRideRequestAttempt(broken, counterMint());
-    const first = await attempt.begin(body, 'rider-a', noLiveRide);
-    expect(await attempt.begin(body, 'rider-a', noLiveRide)).toBe(first);
+    const first = attempt.begin(body, 'rider-a');
+    expect(attempt.begin(body, 'rider-a')).toBe(first);
   });
 
-  it('a corrupt stored record is ignored', async () => {
+  it('a corrupt stored record is ignored', () => {
     const store = memoryStore();
     store.raw = '{"attempts":[{"key":"x"}]}';
-    expect(await createRideRequestAttempt(store, () => 'ride_fresh_0001').begin(body, 'rider-a', noLiveRide)).toBe('ride_fresh_0001');
+    expect(createRideRequestAttempt(store, () => 'ride_fresh_0001').begin(body, 'rider-a')).toBe('ride_fresh_0001');
   });
 });
 

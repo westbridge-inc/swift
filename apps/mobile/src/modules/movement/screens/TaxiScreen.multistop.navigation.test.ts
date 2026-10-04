@@ -180,15 +180,18 @@ vi.mock('../../../stores/authStore', () => {
   const useAuthStore = Object.assign((select: (s: typeof state) => unknown) => select(state), {
     getState: () => ({ ...state, rotateTokensIfCurrent: () => null, logoutIfCurrent: () => false }),
   });
+  const session = () => ({ userId: 'rider-1', generation: 1, accessToken: 'synthetic-access', refreshToken: 'synthetic-refresh' });
   return {
     useAuthStore,
-    getAuthSessionSnapshot: () => ({ userId: 'rider-1', generation: 1, accessToken: 'synthetic-access', refreshToken: 'synthetic-refresh' }),
+    AuthSessionBoundaryError: class extends Error {},
+    getAuthSessionSnapshot: session,
+    requireAuthSessionSnapshot: session,
+    requireAuthSessionForPrincipal: session,
     isAuthSessionSnapshotCurrent: () => true,
   };
 });
 
 import { api } from '../../../services/api';
-import { rideRequestAttempt } from '../../../lib/rideRequestAttemptStore';
 import { TaxiScreen } from './TaxiScreen';
 
 const LAMAHA = { lat: 6.82, lng: -58.16, label: 'Lamaha Street' };
@@ -256,7 +259,6 @@ beforeEach(() => {
   fx.seen.length = 0;
   fx.storage.clear();
   fx.socketHandlers.clear();
-  rideRequestAttempt.liveRideSeen('rider-1');
   fx.routes = {
     'get /rides/active': () => ok(null),
     'get /rides/capabilities': () => refuse(404, 'NOT_FOUND'),

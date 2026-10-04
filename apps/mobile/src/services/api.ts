@@ -695,8 +695,10 @@ export const rideApi = {
   // [TAXI multi-stop] The key is the booking INTENT's (lib/rideRequestAttempt):
   // the same on every retry of this trip, so a lost answer is replayed by the
   // server instead of becoming a second booking.
-  request: (data: RideRequestBody, idempotencyKey: string) =>
-    api.post('/rides/request', data, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  // Pinned to the account that tapped Request (`session`), never to whoever is
+  // signed in by the time the request leaves.
+  request: (data: RideRequestBody, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.post('/rides/request', data, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),

@@ -9,32 +9,24 @@ import { stableBodyHash } from './checkoutAttempt';
 // a retried request whose first answer was lost with the SAME ride
 // ("replayed": true) instead of a second booking.
 //
-// An ATTEMPT is the account plus the canonical hash of the body (the same hash
-// the checkout attempt uses), and it keeps its key until its outcome is KNOWN:
+// An ATTEMPT is one account plus the canonical hash of one request body (the
+// same hash the checkout attempt uses). Its key lives until ITS OWN request
+// gets a definitive answer — a ride (new or replayed), or a refusal the server
+// proves wrote nothing — and nothing else retires it: no clock, no other
+// account's activity, no read of the live ride, no other trip. A different
+// trip simply gets its own key and leaves older unresolved attempts alone.
 //
-//   * the answer to that very request — a ride, a replay, or a refusal that
-//     the server says wrote nothing — retires that attempt and no other
-//     (`settle(key, userId)`: a late answer for account A can never retire
-//     account B's attempt);
-//   * the server's own read of the live ride: before a NEW key is minted while
-//     another attempt of the same account is unresolved, `begin` asks
-//     `GET /rides/active`. A live ride means the booking already exists (or no
-//     second one could be made): nothing is minted. No live ride means the old
-//     attempt is reconciled and a new key is safe. If the read fails, nothing
-//     is minted either — an unknown outcome is never guessed;
-//   * a live ride on screen (`liveRideSeen`) reconciles that account's
-//     attempts the same way.
-//
-// Nothing expires on a clock, and an account switch (A → B → A) leaves each
-// account's attempt where it was. Persisted (rideRequestAttemptStore.ts) so an
-// app killed mid-request retries with the same key; a storage fault degrades
-// to memory. Pure, so every sequence is proved without a native store.
+// The store has ONE writer and no awaits: every read-modify-write finishes in
+// one synchronous step, so two identical taps in flight share one key. It
+// re-reads the persisted slot on every step (one source of truth even with
+// two instances on one slot) and falls back to memory when storage fails.
+// An unresolved attempt is never evicted: when the store is full, a NEW
+// booking is refused with a plain message instead.
 // ---------------------------------------------------------------------------
 
-export const RIDE_REQUEST_ATTEMPT_STORAGE_KEY = 'swift.rides.requestAttempt.v2';
-/** Old, single-intent records (v1) are not read: an attempt without its
- *  account and body cannot be matched safely. */
-const MAX_ATTEMPTS = 20;
+export const RIDE_REQUEST_ATTEMPT_STORAGE_KEY = 'swift.rides.requestAttempt.v3';
+/** The most unresolved attempts the phone holds at once (all accounts). */
+export const RIDE_REQUEST_ATTEMPT_CAP = 50;
 
 export interface RideKeyStore {
   get(): string | null;
@@ -49,11 +41,11 @@ interface RideRequestAttemptRecord {
   createdAt: number;
 }
 
-/** Why `begin` minted nothing — shaped like the server's refusal envelope so
- *  the booking screen shows it the way it shows any refusal. */
+/** Why no key was given — shaped like the server's refusal envelope so the
+ *  booking screen shows it the way it shows any refusal. */
 export class RideAttemptBlocked extends Error {
   readonly response: { status: number; data: { success: false; error: { code: string; message: string } } };
-  constructor(readonly code: 'RIDE_ALREADY_BOOKED' | 'RIDE_STILL_CHECKING', message: string) {
+  constructor(readonly code: 'RIDE_KEYS_FULL', message: string) {
     super(message);
     this.response = { status: 409, data: { success: false, error: { code, message } } };
   }
@@ -86,61 +78,47 @@ export function createRideRequestAttempt(
   store: RideKeyStore,
   mint: () => string = mintRideRequestKey,
   now: () => number = Date.now,
+  cap: number = RIDE_REQUEST_ATTEMPT_CAP,
 ) {
-  let memory: RideRequestAttemptRecord[] | undefined;
+  // Memory mirrors the last state written; it answers only when storage fails.
+  let memory: RideRequestAttemptRecord[] = [];
   const read = (): RideRequestAttemptRecord[] => {
-    if (memory !== undefined) return memory;
-    try { memory = decode(store.get()); } catch { memory = []; }
+    try { memory = decode(store.get()); } catch { /* keep the in-memory copy */ }
     return memory;
   };
   const write = (attempts: RideRequestAttemptRecord[]) => {
-    memory = attempts.slice(-MAX_ATTEMPTS);
+    memory = attempts;
     try {
-      if (memory.length) store.set(JSON.stringify({ version: 2, attempts: memory }));
+      if (attempts.length) store.set(JSON.stringify({ version: 3, attempts }));
       else store.clear();
     } catch { /* memory still holds the attempts for this run */ }
   };
-  const dropUser = (userId: string) => write(read().filter((a) => a.userId !== userId));
   return {
     /**
-     * The key for this request. The same account and body re-use their
-     * unresolved attempt's key, however old (a retry). A new trip while this
-     * account has another unresolved attempt first asks the server for the
-     * live ride (`readLiveRide`): a live ride refuses with RIDE_ALREADY_BOOKED,
-     * a failed read with RIDE_STILL_CHECKING — neither mints a key.
+     * The key for this request, in one synchronous step. The same account and
+     * body re-use their unresolved attempt's key, however old; any other trip
+     * gets a key of its own. A full store refuses a NEW trip (RIDE_KEYS_FULL)
+     * rather than drop an attempt whose outcome is still unknown.
      */
-    async begin(body: unknown, userId: string, readLiveRide: () => Promise<unknown>): Promise<string> {
+    begin(body: unknown, userId: string): string {
       const bodyHash = stableBodyHash(body);
-      const same = read().find((a) => a.userId === userId && a.bodyHash === bodyHash);
+      const attempts = read();
+      const same = attempts.find((a) => a.userId === userId && a.bodyHash === bodyHash);
       if (same) return same.key;
-      if (read().some((a) => a.userId === userId)) {
-        let live: unknown;
-        try {
-          live = await readLiveRide();
-        } catch {
-          throw new RideAttemptBlocked('RIDE_STILL_CHECKING', 'We couldn’t check your last booking. Check your connection, then tap Request again.');
-        }
-        // Either way the server has answered for this account's old attempts.
-        dropUser(userId);
-        if (live) throw new RideAttemptBlocked('RIDE_ALREADY_BOOKED', 'You already have a ride booked. Opening it now.');
-        // A retry of the same trip may have raced in while the server was asked.
-        const raced = read().find((a) => a.userId === userId && a.bodyHash === bodyHash);
-        if (raced) return raced.key;
+      if (attempts.length >= cap) {
+        throw new RideAttemptBlocked('RIDE_KEYS_FULL',
+          'Too many bookings on this phone are still waiting for an answer. Check your connection and try one of them again, or contact support.');
       }
       const fresh: RideRequestAttemptRecord = { key: mint(), userId, bodyHash, createdAt: now() };
-      write([...read(), fresh]);
+      write([...attempts, fresh]);
       return fresh.key;
     },
-    /** The answer to the request sent with `key` by `userId` (a ride, a replay,
-     *  or a refusal that wrote nothing): that attempt — and only it — is done. */
+    /** The definitive answer to the request sent with `key` by `userId`: that
+     *  attempt — and only it — is done. Anything else retires nothing. */
     settle(key: string, userId: string): void {
-      const left = read().filter((a) => !(a.key === key && a.userId === userId));
-      if (left.length !== read().length) write(left);
-    },
-    /** This account's live ride is on screen: its unresolved attempts are
-     *  reconciled by the server's own read (no second ride can be booked). */
-    liveRideSeen(userId: string): void {
-      if (read().some((a) => a.userId === userId)) dropUser(userId);
+      const attempts = read();
+      const left = attempts.filter((a) => !(a.key === key && a.userId === userId));
+      if (left.length !== attempts.length) write(left);
     },
   };
 }
