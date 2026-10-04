@@ -3282,11 +3282,17 @@ export async function adminRoutes(app: FastifyInstance) {
     return { from, to };
   };
 
+  /** The ONE selector for a fare by id: the id, and both of its zones the
+   *  caller's. Every read and every write of a fare by id uses it, so another
+   *  operator's fare is never read — the database answers "no such row". */
+  const zoneFareWhere = (id: string, tenantId: string) => ({ id, fromZone: { tenantId }, toZone: { tenantId } });
+
   /** A fare row of the caller's tenant, or 404 — another operator's fare reads
-   *  exactly as one that does not exist. */
+   *  exactly as one that does not exist. The explicit check below stays as the
+   *  second wall. */
   const zoneFareOfTenant = async (id: string) => {
     const tenantId = requireTenantId();
-    const row = await app.prisma.zoneFare.findUnique({ where: { id }, include: { fromZone: ZONE_OF_FARE, toZone: ZONE_OF_FARE } });
+    const row = await app.prisma.zoneFare.findUnique({ where: zoneFareWhere(id, tenantId), include: { fromZone: ZONE_OF_FARE, toZone: ZONE_OF_FARE } });
     if (!row || row.fromZone.tenantId !== tenantId || row.toZone.tenantId !== tenantId) throw new NotFoundError('ZoneFare', id);
     return row;
   };
@@ -3354,7 +3360,7 @@ export async function adminRoutes(app: FastifyInstance) {
     assertSamePair(row, body);
     // [ADM-002] The new fare and its audit row (before → after) commit together.
     const updated = await mutationOrNotFound('ZoneFare', id, () => app.prisma.$transaction(async (tx) => {
-      const next = await tx.zoneFare.update({ where: { id }, data: { fare: body.fare, updatedBy: request.user.userId } });
+      const next = await tx.zoneFare.update({ where: zoneFareWhere(id, requireTenantId()), data: { fare: body.fare, updatedBy: request.user.userId } });
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
       return next;
     }));
@@ -3370,7 +3376,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // commits with it, or neither happens. Trips between the two zones price
     // by the formula from the next quote.
     await mutationOrNotFound('ZoneFare', id, () => app.prisma.$transaction(async (tx) => {
-      await tx.zoneFare.delete({ where: { id } });
+      await tx.zoneFare.delete({ where: zoneFareWhere(id, requireTenantId()) });
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
     }));
     return {

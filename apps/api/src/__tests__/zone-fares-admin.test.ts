@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
-import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
+import fp from 'fastify-plugin';
+import { beginRequestTenantContext, prismaPlugin, runWithoutTenant, scopedPrisma } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
@@ -14,7 +15,9 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { FareService, formulaFare } from '../modules/rides/fare.service';
 import { DEFAULT_TENANT_ID } from '../modules/rides/fare-zones';
 import { readTaxiRates } from '../modules/country/pricing-config';
-import { adminAuditCounter } from '../plugins/observability';
+import { adminAuditCounter, adminAuditSnapshotCounter } from '../plugins/observability';
+import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
+import { snapshot, tenantPredicateOf } from '../modules/admin/audit-change';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, dropAuditRefusal } from './helpers/audit-refusal';
@@ -611,5 +614,106 @@ describe('[ZONE-FARES] the staging path: ask → a second admin decides → the 
     zoneIds.push(slug);
     const made = await sys(() => app.prisma.zone.findUniqueOrThrow({ where: { id: slug } }));
     expect({ id: made.id, perKm: Number(made.taxiPerKm), tenant: made.tenantId, country: made.countryCode }).toEqual({ id: slug, perKm: 295, tenant: DEFAULT_TENANT_ID, country: 'GY' });
+  });
+});
+
+describe('[ZONE-FARES · Sol F1] another operator\'s fare is never READ — the tenant wall is in every query by id', () => {
+  // A second app whose client records every query on the fare table: the
+  // operation, its arguments, and what the database answered. The routes, the
+  // approval replay and the audit snapshots all run through it.
+  type Seen = { operation: string; args: Record<string, unknown>; result: unknown };
+  const seen: Seen[] = [];
+  let rec: FastifyInstance;
+  let theirs: { id: string };
+
+  const recordingClient = (scopedPrisma as unknown as { $extends: (e: unknown) => unknown }).$extends({
+    name: 'zoneFareRecorder',
+    query: {
+      zoneFare: {
+        async $allOperations({ operation, args, query }: { operation: string; args: Record<string, unknown>; query: (a: unknown) => Promise<unknown> }) {
+          const result = await query(args);
+          seen.push({ operation, args: JSON.parse(JSON.stringify(args ?? {})), result: JSON.parse(JSON.stringify(result ?? null)) });
+          return result;
+        },
+      },
+    },
+  });
+
+  beforeAll(async () => {
+    rec = Fastify({ logger: false });
+    registerErrorHandler(rec);
+    registerEmptyJsonBodyParser(rec);
+    rec.addHook('onRequest', async () => { beginRequestTenantContext(); });
+    await rec.register(fp(async (instance: FastifyInstance) => { instance.decorate('prisma', recordingClient as never); }));
+    await rec.register(redisPlugin);
+    await rec.register(authPlugin);
+    await rec.register(socketPlugin);
+    await rec.register(adminRoutes, { prefix: '/api/v1/admin' });
+    await rec.ready();
+    theirs = await sys(() => app.prisma.zoneFare.create({ data: { fromZoneId: bA.id, toZoneId: bB.id, fare: 7777 } }));
+  });
+  afterAll(async () => {
+    await cleanupSecondApprovers(rec);
+    await sys(() => app.prisma.zoneFare.deleteMany({ where: { id: theirs.id } }));
+    await rec.close();
+  });
+
+  const byId = (id: string) => seen.filter((q) => JSON.stringify(q.args).includes(id));
+  const walledOn = (q: Seen) => {
+    const where = (q.args['where'] ?? {}) as Record<string, unknown>;
+    return JSON.stringify(where['fromZone']) === JSON.stringify({ tenantId: DEFAULT_TENANT_ID })
+      && JSON.stringify(where['toZone']) === JSON.stringify({ tenantId: DEFAULT_TENANT_ID });
+  };
+
+  it('change and delete of another operator\'s fare by id: every query that names it carries BOTH zones\' tenant, and none returns it', async () => {
+    seen.length = 0;
+    const via = (method: string, payload: unknown) => injectWithApproval(rec, {
+      method: method as never, url: `/api/v1/admin/zone-fares/${theirs.id}`,
+      headers: { authorization: `Bearer ${founder.token}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
+      payload: payload as Record<string, unknown>,
+    });
+    expect((await via('PUT', { fromZoneId: bA.id, toZoneId: bB.id, fare: 100 })).statusCode).toBe(404);
+    expect((await via('DELETE', { fromZoneId: bA.id, toZoneId: bB.id })).statusCode).toBe(404);
+    const named = byId(theirs.id);
+    // the lookup and the audit snapshot, for both routes, at the least
+    expect(named.length, JSON.stringify(seen.map((q) => q.operation))).toBeGreaterThanOrEqual(4);
+    for (const q of named) {
+      expect(walledOn(q), `${q.operation} ${JSON.stringify(q.args)}`).toBe(true);
+      expect(JSON.stringify(q.result), `${q.operation} returned the foreign fare`).not.toContain(theirs.id);
+    }
+    expect(Number((await sys(() => app.prisma.zoneFare.findUniqueOrThrow({ where: { id: theirs.id } }))).fare)).toBe(7777);
+  });
+
+  it('the caller\'s own fare: the lookup, the snapshot and the mutation selector all carry the wall, and the change lands', async () => {
+    const mine = await sys(() => app.prisma.zoneFare.create({ data: { fromZoneId: zoneA.id, toZoneId: zoneB.id, fare: 2600 } }));
+    try {
+      seen.length = 0;
+      const res = await injectWithApproval(rec, {
+        method: 'PUT', url: `/api/v1/admin/zone-fares/${mine.id}`,
+        headers: { authorization: `Bearer ${founder.token}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
+        payload: { fromZoneId: zoneA.id, toZoneId: zoneB.id, fare: 2700 },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      const named = byId(mine.id);
+      expect(named.map((q) => q.operation)).toContain('update');
+      expect(named.filter((q) => q.operation === 'findUnique').length).toBeGreaterThanOrEqual(2); // lookup + before/after snapshots
+      for (const q of named) expect(walledOn(q), `${q.operation} ${JSON.stringify(q.args)}`).toBe(true);
+    } finally {
+      await sys(() => app.prisma.zoneFare.deleteMany({ where: { id: mine.id } }));
+    }
+  });
+
+  it('the audit snapshot of a parent-walled entity reads nothing when no tenant is bound, and never another operator\'s row', async () => {
+    const entity = ADMIN_ROUTE_AUTHORITY['PUT /zone-fares/:id']!.entity!;
+    expect(entity.tenantVia).toEqual(['fromZone', 'toZone']);
+    expect(tenantPredicateOf(entity, null)).toBeNull();
+    expect(tenantPredicateOf(entity, 'swift-default')).toEqual({ fromZone: { tenantId: 'swift-default' }, toZone: { tenantId: 'swift-default' } });
+    expect(tenantPredicateOf({}, null)).toEqual({});
+    const before = (await adminAuditSnapshotCounter.get()).values.find((v) => v.labels['outcome'] === 'no_tenant' && v.labels['model'] === 'zoneFare')?.value ?? 0;
+    seen.length = 0;
+    expect(await runWithoutTenant(() => snapshot(recordingClient as never, entity, theirs.id))).toMatchObject({ exists: false });
+    expect(byId(theirs.id), 'with no tenant bound nothing is read').toEqual([]);
+    const after = (await adminAuditSnapshotCounter.get()).values.find((v) => v.labels['outcome'] === 'no_tenant' && v.labels['model'] === 'zoneFare')?.value ?? 0;
+    expect(after).toBe(before + 1);
   });
 });

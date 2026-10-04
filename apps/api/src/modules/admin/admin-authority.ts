@@ -109,6 +109,14 @@ export interface AdminRouteEntity {
    *  regardless, so this is what a reader sees first, not the limit of what is
    *  detected. */
   readonly fields: readonly string[];
+  /**
+   * [ZONE-FARES] For a model with no tenant column of its own, walled only
+   * through its parents: the relations whose `tenantId` must be the caller's
+   * tenant. The snapshot puts them IN its query, so another operator's row is
+   * never read — not read and then refused. With no tenant bound it reads
+   * nothing at all.
+   */
+  readonly tenantVia?: readonly string[];
 }
 
 export interface AdminRouteAuthority {
@@ -147,7 +155,8 @@ const E = {
   // [ZONE-FARES] taxiPerKm is a price: a change to it is named in the diff.
   zone: { model: 'zone', fields: ['isActive', 'name', 'priority', 'taxiPerKm'] },
   // [ZONE-FARES] A fixed zone-to-zone fare: the price and the pair it joins.
-  zoneFare: { model: 'zoneFare', fields: ['fare', 'fromZoneId', 'toZoneId', 'updatedBy'] },
+  // A fare has no tenant column: both of its zones must be the caller's.
+  zoneFare: { model: 'zoneFare', fields: ['fare', 'fromZoneId', 'toZoneId', 'updatedBy'], tenantVia: ['fromZone', 'toZone'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },

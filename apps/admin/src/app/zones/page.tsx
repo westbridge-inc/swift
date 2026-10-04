@@ -174,6 +174,9 @@ function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZ
 
       {(adding || editing) && (
         <FareForm
+          // [Sol F2] One form per row (or one for "add"): switching rows mounts a
+          // fresh form from that row, never the previous row's pair and amount.
+          key={editing ? `edit-${editing.id}` : 'add'}
           zones={zones}
           editing={editing}
           busy={busy}
@@ -199,7 +202,14 @@ function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
   const [fromZoneId, setFrom] = useState(editing?.fromZoneId ?? '');
   const [toZoneId, setTo] = useState(editing?.toZoneId ?? '');
   const [fare, setFare] = useState(editing?.fare != null ? String(editing.fare) : '');
-  const problem = !fromZoneId || !toZoneId ? 'Choose both zones.' : fareProblem(fare);
+  // [Sol F3] A fixed fare joins two zones of ONE market (the server refuses
+  // anything else): the To list offers the From zone's market only, and a pair
+  // that still ends up across two markets is never sent.
+  const market = (id: string) => zones.find((z) => z.id === id)?.countryCode ?? null;
+  const toChoices = fromZoneId ? zones.filter((z) => z.countryCode === market(fromZoneId)) : zones;
+  const problem = !fromZoneId || !toZoneId ? 'Choose both zones.'
+    : market(fromZoneId) !== market(toZoneId) ? 'Both zones must be in the same market.'
+      : fareProblem(fare);
   const name = (id: string) => zones.find((z) => z.id === id)?.name ?? id;
 
   const submit = () => {
@@ -224,7 +234,10 @@ function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
         <Field label="To zone">
           <select value={toZoneId} onChange={(e) => setTo(e.target.value)} disabled={!!editing} className={inputCls}>
             <option value="">Choose a zone</option>
-            {zones.map((z) => <option key={z.id} value={z.id}>{z.name} ({z.countryCode})</option>)}
+            {toChoices.map((z) => <option key={z.id} value={z.id}>{z.name} ({z.countryCode})</option>)}
+            {toZoneId && !toChoices.some((z) => z.id === toZoneId)
+              ? <option value={toZoneId}>{name(toZoneId)} ({market(toZoneId)}) — another market</option>
+              : null}
           </select>
         </Field>
         <Field label="Fare (whole amount)">

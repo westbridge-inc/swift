@@ -28,11 +28,11 @@ const PAIR = {
 
 type Write = { method: string; path: string; body: unknown; reason: string | null };
 
-function server(reply: (_w: Write) => { status: number; body: unknown }) {
+function server(reply: (_w: Write) => { status: number; body: unknown }, data: { fares: unknown[]; zones: unknown[] } = { fares: [PAIR], zones: ZONES }) {
   const writes: Write[] = [];
   const fetchMock = mockApi((request: ApiRequest) => {
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/zone-fares') {
-      return { body: { success: true, data: { fares: [PAIR], zones: ZONES } } };
+      return { body: { success: true, data } };
     }
     if (request.url.pathname.startsWith('/api/v1/admin/zone-fares')) {
       const headers = new Headers(request.init?.headers);
@@ -138,6 +138,69 @@ describe('[ZONE-FARES] the zones screen', () => {
     await user.selectOptions(screen.getByLabelText('From zone'), 'georgetown-central');
     await user.selectOptions(screen.getByLabelText('To zone'), 'cjia-airport');
     await user.type(screen.getByLabelText('Fare (whole amount)'), '99');
+    expect((screen.getByRole('button', { name: 'Send for approval' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+});
+
+describe('[ZONE-FARES · Sol F2] the fare form always shows the row being edited', () => {
+  const OTHER = {
+    ...PAIR, id: 'zf_2', fromZoneId: 'georgetown-south', toZoneId: 'georgetown-central',
+    fromZoneName: 'Georgetown South', toZoneName: 'Georgetown Central', fare: 2400,
+  };
+  const field = (label: string) => screen.getByLabelText(label) as HTMLInputElement | HTMLSelectElement;
+
+  it('Edit A, then Edit B without cancelling: the form shows B, and sends B\'s pair to B', async () => {
+    const { writes } = server(queued, { fares: [PAIR, OTHER], zones: ZONES });
+    stubPrompt(REASON);
+    const { user } = renderWithQuery(<ZonesPage />);
+    const edits = await screen.findAllByRole('button', { name: 'Edit' });
+    await user.click(edits[0]!);
+    expect([field('From zone').value, field('To zone').value, field('Fare (whole amount)').value]).toEqual(['georgetown-central', 'georgetown-south', '2000']);
+    await user.click(screen.getAllByRole('button', { name: 'Edit' })[1]!);
+    expect([field('From zone').value, field('To zone').value, field('Fare (whole amount)').value]).toEqual(['georgetown-south', 'georgetown-central', '2400']);
+    const fare = field('Fare (whole amount)');
+    await user.clear(fare);
+    await user.type(fare, '2500');
+    await user.click(screen.getByRole('button', { name: 'Send for approval' }));
+    await screen.findByText(/Queued for a second admin/);
+    expect(writes).toEqual([{ method: 'PUT', path: '/api/v1/admin/zone-fares/zf_2', body: { fromZoneId: 'georgetown-south', toZoneId: 'georgetown-central', fare: 2500 }, reason: REASON }]);
+  });
+
+  it('Edit, then Add: the new form is empty, not the edited row', async () => {
+    server(queued, { fares: [PAIR, OTHER], zones: ZONES });
+    const { user } = renderWithQuery(<ZonesPage />);
+    await user.click((await screen.findAllByRole('button', { name: 'Edit' }))[0]!);
+    await user.click(screen.getByRole('button', { name: 'Add fixed fare' }));
+    expect([field('From zone').value, field('To zone').value, field('Fare (whole amount)').value]).toEqual(['', '', '']);
+    expect((field('From zone') as HTMLSelectElement).disabled).toBe(false);
+  });
+});
+
+describe('[ZONE-FARES · Sol F3] a fixed fare joins two zones of ONE market — the console never asks for anything else', () => {
+  const MIXED = [...ZONES, { id: 'port-of-spain', name: 'Port of Spain', countryCode: 'TT', isActive: true, priority: 0, taxiPerKm: null }];
+  const options = (label: string) => Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map((o) => o.value).filter(Boolean);
+
+  it('once a From zone is chosen, the To zone offers only zones of its market', async () => {
+    server(queued, { fares: [], zones: MIXED });
+    const { user } = renderWithQuery(<ZonesPage />);
+    await user.click(await screen.findByRole('button', { name: 'Add fixed fare' }));
+    await user.selectOptions(screen.getByLabelText('From zone'), 'georgetown-central');
+    expect(options('To zone')).not.toContain('port-of-spain');
+    expect(options('To zone')).toContain('cjia-airport');
+  });
+
+  it('a pair that ends up across two markets is refused before any reason is asked or request sent', async () => {
+    const { writes } = server(queued, { fares: [], zones: MIXED });
+    const prompt = stubPrompt(REASON);
+    const { user } = renderWithQuery(<ZonesPage />);
+    await user.click(await screen.findByRole('button', { name: 'Add fixed fare' }));
+    await user.selectOptions(screen.getByLabelText('From zone'), 'port-of-spain');
+    await user.selectOptions(screen.getByLabelText('To zone'), 'port-of-spain');
+    await user.selectOptions(screen.getByLabelText('From zone'), 'georgetown-central');
+    await user.type(screen.getByLabelText('Fare (whole amount)'), '3000');
+    expect(screen.getByText('Both zones must be in the same market.')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Send for approval' }) as HTMLButtonElement).disabled).toBe(true);
     expect(prompt).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
