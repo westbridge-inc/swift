@@ -1,3 +1,4 @@
+import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
@@ -191,53 +192,61 @@ export async function driverRoutes(app: FastifyInstance) {
       await assertVelocity(app, request, 'money.mmg-link'); // [R048-007] a money surface: fails closed when the control is down
     }
 
-    const driver = await app.prisma.driver.update({
-      where: { userId: request.user.userId },
-      data: {
-        ...(body.vehicleMake !== undefined && { vehicleMake: body.vehicleMake }),
-        ...(body.vehicleModel !== undefined && { vehicleModel: body.vehicleModel }),
-        ...(body.vehicleYear !== undefined && { vehicleYear: body.vehicleYear }),
-        ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
-        ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
-        // [REPORT-014 F-014-01] rideClass and vehicleCapacity are TAXONOMY
-        // authority (derived from the verified vehicle type at provisioning/
-        // admin verification), never self-serve: an online driver could
-        // otherwise tag a 4-seat car GROUP and receive 14-passenger work.
-        // The fields remain accepted-and-ignored so legacy clients don't 400.
-        ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
-        ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
-        ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
-        ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
-        ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
-        // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
-        // NOW (same atomic shape as the admin reject path) and clear the legacy verification
-        // flag, so the new vehicle must be verified before this driver is dispatchable again.
-        ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            phone: true,
-            email: true,
-            avatar: true,
-            activeRole: true,
-            lastMoverRole: true,
+    const driver = await app.prisma.$transaction(async (tx) => {
+      await lockUserRoleAuthority(tx, request.user.userId);
+      const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
+        SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
+      if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
+      const driver = await tx.driver.update({
+        where: { userId: request.user.userId },
+        data: {
+          ...(body.vehicleMake !== undefined && { vehicleMake: body.vehicleMake }),
+          ...(body.vehicleModel !== undefined && { vehicleModel: body.vehicleModel }),
+          ...(body.vehicleYear !== undefined && { vehicleYear: body.vehicleYear }),
+          ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
+          ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
+          // [REPORT-014 F-014-01] rideClass and vehicleCapacity are TAXONOMY
+          // authority (derived from the verified vehicle type at provisioning/
+          // admin verification), never self-serve: an online driver could
+          // otherwise tag a 4-seat car GROUP and receive 14-passenger work.
+          // The fields remain accepted-and-ignored so legacy clients don't 400.
+          ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
+          ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
+          ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
+          ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
+          ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
+          // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
+          // NOW (same atomic shape as the admin reject path) and clear the legacy verification
+          // flag, so the new vehicle must be verified before this driver is dispatchable again.
+          ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              email: true,
+              avatar: true,
+              activeRole: true,
+              lastMoverRole: true,
+            },
           },
         },
-      },
-    });
-    if (plateChanged) {
-      // A plate change never inherits another subject's approved documents: every open
-      // vehicle link closes. New submissions for the new plate create a PENDING assignment
-      // that an admin must approve before its evidence propagates.
-      await app.prisma.subjectLink.updateMany({
-        where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-        data: { validTo: new Date() },
       });
-    }
+      if (plateChanged) {
+        // A plate change never inherits another subject's approved documents: every open
+        // vehicle link closes. New submissions for the new plate create a PENDING assignment
+        // that an admin must approve before its evidence propagates.
+        await tx.subjectLink.updateMany({
+          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
+          data: { validTo: new Date() },
+        });
+      }
+
+      return driver;
+    });
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'DRIVER', entityId: me.id, userId: request.user.userId });
     } else if (mmgPayUrl !== undefined) {
@@ -394,32 +403,21 @@ export async function driverRoutes(app: FastifyInstance) {
       // User lock document decisions take — an expiry/rejection committing
       // after the route's preview can no longer write stale supply online.
       // Persisted vehicle class; legacy flag from the LOCKED snapshot.
-      const liveGate = await verification.getLiveOperationStatus(request.user.userId, {
-        vehicleType: driver.vehicleType,
-        legacyVerified: snapshot.documentsVerified,
-      }, tx);
-      if (!liveGate.allowed) {
-        throw liveGate.reason === 'insurance'
-          ? new AppError(403, 'INSURANCE_HIRE_CLASS_REQUIRED', 'A current hire-class motor insurance must be verified before you can carry passengers')
-          : new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
-      }
-
-      const activated = await tx.driver.update({
-        where: { id: driver.id },
-        data: {
-          isOnline: true,
-          isAvailable: !snapshot.currentRideId,
-          currentLat: location.latitude,
-          currentLng: location.longitude,
-          lastLocationUpdate: new Date(),
-          locationSessionId,
-        },
-      });
+      const liveGate = await lockMoverDocuments(tx, request.user.userId, 'DRIVER');
+      assertMoverDocuments(liveGate);
+      const activated = await tx.$queryRaw<Array<{ isOnline: boolean; isAvailable: boolean }>>`
+        UPDATE drivers SET "isOnline" = true, "isAvailable" = ${!snapshot.currentRideId},
+          "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
+          "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          "updatedAt" = clock_timestamp()
+        WHERE id = ${driver.id} AND ${documentDeadlineSql(liveGate)}
+        RETURNING "isOnline", "isAvailable"`;
+      if (!activated[0]) throw expiredDocumentAuthority();
       await tx.user.update({
         where: { id: request.user.userId },
         data: { lastMoverRole: 'DRIVER' },
       });
-      return { updated: activated, retiredRiderId };
+      return { updated: activated[0], retiredRiderId };
     });
 
     // PostgreSQL is authoritative. Redis only debounces later GPS writes; a

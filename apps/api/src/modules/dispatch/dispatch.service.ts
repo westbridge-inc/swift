@@ -1,5 +1,6 @@
+import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { randomUUID } from 'node:crypto';
-import type { Order, OrderStatus, PrismaClient, RideClass, VehicleType } from '@prisma/client';
+import type { Order, OrderStatus, PrismaClient, RideClass } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import type Redis from 'ioredis';
@@ -2721,6 +2722,12 @@ export class DispatchService {
       ) {
         throw new AppError(409, 'OFFER_EXPIRED', 'Delivery ownership changed; refresh for the current offer');
       }
+      // Re-read this profile after acquiring User and Order: the JOIN used to
+      // find its User may have waited behind a vehicle change.
+      const driverDocuments = pool === 'DRIVER' ? await lockMoverDocuments(tx, moverAuthority.userId, 'DRIVER') : null;
+      if (driverDocuments) assertMoverDocuments(driverDocuments);
+      const currentDriver = pool === 'DRIVER'
+        ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true } }) : null;
       // [REPORT-014 F-014-01] PHYSICAL capacity is authoritative at the claim:
       // discovery/board filters are conveniences — a 14-passenger GROUP ride
       // must never commit to a 9-seat bus (or a default 4-seat profile that
@@ -2731,7 +2738,7 @@ export class DispatchService {
       // the money-moving claim. (The column is separately healed + set from
       // taxonomy at provisioning; this makes it non-authoritative here.)
       if (pool === 'DRIVER' && lockedOrder.taxiPassengerCount != null) {
-        const seats = VEHICLE_CLASSES[moverAuthority.vehicleType as VehicleType]?.seats ?? 0;
+        const seats = VEHICLE_CLASSES[currentDriver!.vehicleType]?.seats ?? 0;
         if (seats < lockedOrder.taxiPassengerCount) {
           throw new AppError(409, 'CAPACITY_EXCEEDED',
             `This ride needs ${lockedOrder.taxiPassengerCount} seats; your vehicle seats ${seats}.`);
@@ -2821,18 +2828,14 @@ export class DispatchService {
       }
 
       if (pool === 'DRIVER') {
-        const reserved = await tx.driver.updateMany({
-          where: {
-            id: moverId,
-            isOnline: true,
-            isAvailable: true,
-            ...capacityWhere('DRIVER'),
-            locationSessionId: { not: null },
-            user: { status: 'ACTIVE', activeRole: { in: ['MOVER', 'DRIVER'] } },
-          },
-          data: { isAvailable: false, currentRideId: orderId },
-        });
-        if (reserved.count === 0) {
+        const reserved = await tx.$executeRaw`
+          UPDATE drivers d SET "isAvailable" = false, "currentRideId" = ${orderId}, "updatedAt" = clock_timestamp()
+          FROM users u WHERE d.id = ${moverId} AND d."userId" = u.id
+            AND d."isOnline" = true AND d."isAvailable" = true
+            ${capacityPredicateSql('DRIVER')} AND d."locationSessionId" IS NOT NULL
+            AND u.status = 'ACTIVE' AND u."activeRole"::text IN ('MOVER', 'DRIVER')
+            AND ${documentDeadlineSql(driverDocuments!)}`;
+        if (reserved === 0) {
           throw new AppError(409, 'DRIVER_BUSY', 'You already have an active ride — finish it before taking another');
         }
       } else {
