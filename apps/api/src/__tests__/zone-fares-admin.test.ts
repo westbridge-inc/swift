@@ -583,3 +583,33 @@ describe('[ZONE-FARES] a change prices NEW quotes only — a requested ride keep
     });
   });
 });
+
+describe('[ZONE-FARES] the staging path: ask → a second admin decides → the asker applies the STORED request', () => {
+  /** What the console's approvals page does, and what the staging calls do. */
+  async function throughApplyRoute(method: string, url: string, payload: unknown) {
+    const approver = await makeUser(['SUPER_ADMIN', 'CUSTOMER'], 'SUPER_ADMIN', { permissions: ['*'] });
+    const ask = await call(founder.token, method, url, payload, { 'x-swift-reason': REASON });
+    expect(ask.statusCode, ask.body).toBe(202);
+    const approvalId = ask.json().error.details.approvalId as string;
+    const decided = await call(approver.token, 'POST', `/api/v1/admin/approvals/${approvalId}/decide`, { approve: true, note: 'Checked against the owner ruling' }, { 'x-swift-reason': REASON });
+    expect(decided.statusCode, decided.body).toBe(200);
+    const applied = await call(founder.token, 'POST', `/api/v1/admin/approvals/${approvalId}/apply`, {});
+    expect(applied.statusCode, applied.body).toBe(200);
+    expect(applied.json().data).toMatchObject({ id: approvalId, status: 'APPLIED' });
+    return approvalId;
+  }
+
+  it('a DELETE with its pair in the body is replayed exactly: the fare is gone', async () => {
+    const row = await sys(() => app.prisma.zoneFare.create({ data: { fromZoneId: zoneB.id, toZoneId: zoneA.id, fare: 2000 } }));
+    await throughApplyRoute('DELETE', `/api/v1/admin/zone-fares/${row.id}`, { fromZoneId: zoneB.id, toZoneId: zoneA.id });
+    expect(await fareRow(zoneB.id, zoneA.id)).toBeNull();
+  });
+
+  it('a zone with its seed id and its per-km rate is created exactly as asked', async () => {
+    const slug = `zf-apply-${RUN}`;
+    await throughApplyRoute('POST', '/api/v1/admin/zones', { id: slug, name: `${TAG} applied`, boundary: ZPK_ELSEWHERE, taxiPerKm: 295, countryCode: 'GY', priority: 0 });
+    zoneIds.push(slug);
+    const made = await sys(() => app.prisma.zone.findUniqueOrThrow({ where: { id: slug } }));
+    expect({ id: made.id, perKm: Number(made.taxiPerKm), tenant: made.tenantId, country: made.countryCode }).toEqual({ id: slug, perKm: 295, tenant: DEFAULT_TENANT_ID, country: 'GY' });
+  });
+});
