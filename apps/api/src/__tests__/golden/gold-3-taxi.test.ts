@@ -17,6 +17,7 @@ import { NotificationService } from '../../modules/notification/notification.ser
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../../modules/auth/browser-session';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
+import { plantGeorgetownPair, GEORGETOWN_PAIR_FARE } from '../helpers/zone-fare-fixture';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · TAXI-01..05 — the taxi journey, end to end through the REAL mounted
@@ -51,7 +52,8 @@ import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } f
 // Dispatch runs through the suite's acknowledged route→worker double
 // (helpers/dispatch-queue.ts); the queue scan is the worker's own function.
 // Fixture range: +5920333nnn (this file only). Zones: georgetown-central →
-// georgetown-south, whose seeded fixed fare is 2000 GYD.
+// georgetown-south, whose fixed fare of 2000 GYD this suite plants for itself
+// (helpers/zone-fare-fixture: the seed stopped planting it in October 2026).
 //
 // NOT asserted here (reported with probes, no contract yet): G3-F4 the taxi
 // assignment notice is the delivery copy ("Rider On The Way!", RIDER_ASSIGNED),
@@ -72,7 +74,8 @@ const SOUTH = { lat: 6.75517, lng: -58.15532 };
 // within 90 days is (rightly) a collusion flag that sends a claim to review.
 const NOSHOW_DOOR = { lat: 6.76321, lng: -58.16147 };
 const G3F1_DOOR = { lat: 6.74418, lng: -58.14271 };
-const SEEDED_ZONE_FARE = 2000;
+const SEEDED_ZONE_FARE = GEORGETOWN_PAIR_FARE;
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 const WEB_ORIGIN = 'https://web.gold3.example';
 
 let app: FastifyInstance;
@@ -303,9 +306,11 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   await purgeFixtures();
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
 });
 
 afterAll(async () => {
+  await removeGeorgetownPair();
   await purgeFixtures();
   await app.close();
 });
