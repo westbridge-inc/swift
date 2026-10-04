@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] POST /rides/estimate with stops, through the real
@@ -37,7 +38,7 @@ const STOP_1 = { lat: 6.8143, lng: -58.1443, address: 'Camp Street' };
 const STOP_2 = { lat: 6.825, lng: -58.15, address: 'Sheriff Street' };
 const STOP_3 = { lat: 6.805, lng: -58.17, address: 'Stabroek Market' };
 const DESTINATION = { lat: 6.82, lng: -58.16 };
-// The seeded Central ↔ South zone fare (2000), and a point in neither zone.
+// The Central ↔ South zone fare (2000, planted by this suite: helpers/zone-fare-fixture), and a point in neither zone.
 const CENTRAL = { lat: 6.81, lng: -58.155 };
 const SOUTH = { lat: 6.755, lng: -58.155 };
 const EAST_OF_ZONES = { lat: 6.78, lng: -58.10, address: 'East Bank Road' };
@@ -72,6 +73,7 @@ let app: FastifyInstance;
 let token: string;
 let seq = 0;
 let restoreTaxiCard: () => Promise<void> = async () => {};
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -120,12 +122,14 @@ beforeAll(async () => {
   delete process.env['OSRM_URL'];
   app = await buildApp();
   restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
   await restoreTaxiCard();
+  await removeGeorgetownPair();
   await purgeFixtures(app);
   await app.close();
 });

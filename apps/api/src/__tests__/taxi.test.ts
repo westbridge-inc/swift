@@ -20,6 +20,7 @@ import { syntheticLocationOwner } from './helpers/online-mover';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { readDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // [R048-001] this suite quiets the WHOLE driver pool between cases (an unscoped Driver.updateMany) so no leftover driver takes a trip — a stated, reviewable capability.
 grantSuiteCapability('unscoped-mutation');
@@ -40,6 +41,8 @@ const NOWHERE = { lat: 6.95, lng: -58.4 }; // outside every zone
 let app: FastifyInstance;
 let fare: FareService;
 let dispatch: DispatchService;
+// [ZONE-FARES] The Central ↔ South 2,000 fare is no longer seeded: this suite plants it for itself.
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 const createdUserIds: string[] = [];
 
@@ -196,9 +199,11 @@ beforeAll(async () => {
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
 
   await purgeFixtures();
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
 });
 
 afterAll(async () => {
+  await removeGeorgetownPair();
   await purgeFixtures();
   await app.close();
 });
@@ -218,7 +223,7 @@ describe('Fare engine — table first, formula fallback, deterministic', () => {
   it('uses the zone-to-zone table when both ends resolve', async () => {
     const estimate = await fare.estimate(CENTRAL, SOUTH, 'GY');
     expect(estimate.source).toBe('zone_table');
-    expect(estimate.fare).toBe(2000); // seeded fixed fare
+    expect(estimate.fare).toBe(2000); // the suite's fixed fare (helpers/zone-fare-fixture)
     expect(estimate.currencyCode).toBe('GYD');
   });
 

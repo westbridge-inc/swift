@@ -439,7 +439,7 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
     // Guyana-only launch config, which this card is layered on; 2026-09-23.3
     // carried the 8,000 rider rate (applied on staging) before the owner's
     // 2026-09-29 change to 6,000.
-    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1', '2026-09-30.1', '2026-10-01.1']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
+    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1', '2026-09-30.1', '2026-10-01.1', '2026-10-01.2', '2026-10-04.1']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 
   it('the three mover classes together are exactly the fleet, split by the passenger-vehicle rule provisioning uses', () => {
