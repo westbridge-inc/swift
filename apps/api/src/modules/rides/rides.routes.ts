@@ -2,8 +2,29 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
 import { z } from 'zod';
 import { FareService } from './fare.service';
-import { assertRideGates, assertL2, createRideRequest } from './rides.service';
-import { planTaxiStops, taxiMaxStops } from './taxi-stops-flag';
+import {
+  assertRideGates,
+  assertL2,
+  createRideRequest,
+  replayRideRequestAnswer,
+  rideRequestClaimKey,
+  rideRequestReceiptKey,
+  RideRequestOutcomeUnknownError,
+  type RideRequestBody,
+} from './rides.service';
+import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
+import { readRideItinerary } from './taxi-stops-read';
+import {
+  CHECKOUT_CLAIM_TTL_S,
+  checkoutRequestHash,
+  checkoutUnknownSettleSeconds,
+  findCheckoutReceipt,
+  isCheckoutClaim,
+  newCheckoutClaim,
+  releaseCheckoutClaim,
+  settleCheckoutClaim,
+} from '../order/checkout-outbox';
+import { zMoneyWhole } from '../../utils/money-schema';
 import { getSupplySnapshot, queueStatusFor, presenceNear, RIDE_QUEUE_TTL_MIN } from './queue.service';
 import { OrderService } from '../order/order.service';
 import { SosService } from '../safety/sos.service';
@@ -42,6 +63,12 @@ const requestRideSchema = z.object({
   dropoffAddress: z.string().trim().min(3).max(200),
   passengerCount: z.number().int().min(1).max(14).default(1),
   rideClass: z.nativeEnum(RideClass).default(RideClass.ECONOMY),
+  // [TAXI multi-stop] The intermediate stops, in the passenger's order
+  // (judged by planTaxiStops, as on /estimate), and the route fare the
+  // passenger was quoted for them: required with stops, compared with the
+  // server's own fare, never used as the price.
+  stops: z.array(z.unknown()).nullish(),
+  expectedFare: zMoneyWhole.optional(),
 });
 
 const cancelSchema = z.object({
@@ -154,34 +181,113 @@ export async function ridesRoutes(app: FastifyInstance) {
     return { success: true, data: { ...estimate, maxStops: taxiMaxStops(), stopCount: stops.length } };
   });
 
+  /** GET /capabilities — [TAXI multi-stop] what the app may offer before a
+   *  booking: how many stops a ride may carry (TAXI_MAX_STOPS, 0 = none). The
+   *  app shows "+ Add stop" only while this is above 0. */
+  app.get('/capabilities', auth, async () => ({ success: true, data: { maxStops: taxiMaxStops() } }));
+
   /** POST /request — create the ride at the quoted fare and start dispatch.
    *  The core lives in rides.service createRideRequest (one source of truth
-   *  with the 5.5B queue's auto-request); this handler is HTTP only. */
+   *  with the 5.5B queue's auto-request); this handler is HTTP only.
+   *
+   *  [TAXI multi-stop 3/8] With `stops` (TAXI_MAX_STOPS above 0) the ride is
+   *  one trip over its whole road at the server's fare, booked only at the
+   *  route fare the passenger was quoted (expectedFare). Without them it is
+   *  exactly the ride of today. An Idempotency-Key makes the request one
+   *  command, the checkout way: a retry under the same key is answered with
+   *  the first answer (201, replayed) and never books a second ride. */
   app.post('/request', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
-    const { order, estimate, ridePin } = await createRideRequest(app, fareService, dispatch, request.user.userId, body);
-
-    reply.code(201);
-    return {
-      success: true,
-      data: {
-        ride: {
-          id: order.id,
-          orderNumber: order.orderNumber,
-          status: order.status,
-          fare: estimate.fare,
-          rideClass: body.rideClass,
-          currencyCode: estimate.currencyCode,
-          fareSource: estimate.source,
-          distanceKm: estimate.distanceKm,
-          durationMin: estimate.durationMin,
-          ridePin,
-          pickupAddress: body.pickupAddress,
-          dropoffAddress: body.dropoffAddress,
-        },
-        message: 'Looking for a driver near you…',
-      },
+    // Judged before anything is read, priced or claimed: the switch, the
+    // count, each stop and where the route lies, then the quoted fare a ride
+    // with stops must carry. A malformed request never consumes a key.
+    const stops = planTaxiStops(body);
+    assertQuotedFare(stops.length, body.expectedFare);
+    const ride: RideRequestBody = {
+      pickup: body.pickup,
+      dropoff: body.dropoff,
+      pickupAddress: body.pickupAddress,
+      dropoffAddress: body.dropoffAddress,
+      passengerCount: body.passengerCount,
+      rideClass: body.rideClass,
+      ...(stops.length > 0 ? { stops, expectedFare: body.expectedFare } : {}),
     };
+    const userId = request.user.userId;
+
+    const idemKey = request.headers['idempotency-key'];
+    const key = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128 ? idemKey : null;
+    if (!key) {
+      const { answer } = await createRideRequest(app, fareService, dispatch, userId, ride);
+      reply.code(201);
+      return { success: true, data: answer };
+    }
+
+    // One key, one request, one answer: the fingerprint is of what was asked
+    // (the validated trip; the quoted fare only where it means something).
+    const requestHash = checkoutRequestHash(ride);
+    const receiptKey = rideRequestReceiptKey(key);
+    const claimKey = rideRequestClaimKey(userId, key);
+    const keyReused = () => new AppError(422, 'IDEMPOTENCY_KEY_REUSED',
+      'This Idempotency-Key was already used for a different ride request. Use a new key for a new ride.');
+    const replay = async (receipt: { orderIds: string[]; result: Parameters<typeof replayRideRequestAnswer>[0] }) => {
+      // The ride's PIN is read from the ride, never kept in the receipt.
+      const current = receipt.orderIds[0]
+        ? await app.prisma.order.findFirst({
+          where: { id: receipt.orderIds[0], customerId: userId, orderType: 'TAXI' },
+          select: { ridePin: true },
+        })
+        : null;
+      reply.code(201);
+      return { success: true, data: replayRideRequestAnswer(receipt.result, current?.ridePin ?? null), replayed: true };
+    };
+
+    // The DATABASE is the truth for a replay: asked before the in-flight lock.
+    const receipt = await findCheckoutReceipt(app.prisma, userId, receiptKey);
+    if (receipt) {
+      if (receipt.requestHash !== requestHash) throw keyReused();
+      return replay(receipt);
+    }
+    const claim = newCheckoutClaim();
+    const claimed = await app.redis.set(claimKey, claim, 'EX', CHECKOUT_CLAIM_TTL_S, 'NX');
+    if (!claimed) {
+      const existing = await app.redis.get(claimKey);
+      if (existing && !isCheckoutClaim(existing)) {
+        // A finished request under this key committed between the lookup above
+        // and the claim: answer from its receipt, checked against this body.
+        const committed = await findCheckoutReceipt(app.prisma, userId, receiptKey);
+        if (committed && committed.requestHash !== requestHash) throw keyReused();
+        if (committed) return replay(committed);
+      }
+      throw new AppError(409, 'DUPLICATE_REQUEST', 'This ride is already being requested — hold on.');
+    }
+
+    let committed = false;
+    try {
+      const { answer } = await createRideRequest(app, fareService, dispatch, userId, ride, true, undefined, {
+        idempotency: { key: receiptKey, requestHash },
+        onCommitted: () => { committed = true; },
+      });
+      // The receipt is the truth; this marks the key finished (never the
+      // answer itself, which holds the PIN).
+      await app.redis.set(claimKey, 'RECEIPT', 'EX', CHECKOUT_CLAIM_TTL_S).catch(() => {});
+      reply.code(201);
+      return { success: true, data: answer };
+    } catch (err) {
+      if (!committed) {
+        if (err instanceof RideRequestOutcomeUnknownError) {
+          // Unknown is not "nothing booked": the claim holds the key for the
+          // settle window, after which a missing receipt is conclusive.
+          await settleCheckoutClaim(app.redis, claimKey, claim, checkoutUnknownSettleSeconds()).catch((settleErr: unknown) => {
+            request.log.warn({ err: settleErr }, '[TAXI multi-stop] could not shorten the ride claim to its settle window; it holds its full TTL');
+          });
+        } else {
+          // A CONFIRMED rollback booked nothing: release this request's own
+          // claim, so the same key can retry once the passenger fixes it.
+          await releaseCheckoutClaim(app.redis, claimKey, claim).catch(() => {});
+        }
+      }
+      throw err;
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -196,6 +302,9 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  same semantic as the supply watch). */
   app.post('/queue/join', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
+    // [TAXI multi-stop] The queue never holds a trip with stops (v1): its entry
+    // has no place for them, and the trip would be booked later without them.
+    refuseQueuedStops(body.stops);
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);
 
@@ -314,7 +423,10 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
       orderBy: { placedAt: 'desc' },
     });
-    if (!ride?.driver) return { success: true, data: ride };
+    // [TAXI multi-stop] A ride with stops shows them in order, with the one it
+    // is heading for; a ride without them gains no key.
+    const itinerary = ride ? await readRideItinerary(app.prisma, ride) : null;
+    if (!ride?.driver) return { success: true, data: ride && itinerary ? { ...ride, ...itinerary } : ride };
     // Vehicle visual identity [rides spec 6B]: shape + tint the client renders
     // on the card, the map marker, and the arrival screen. Classify-on-read
     // heals rows born before the assignment hook/backfill.
@@ -329,7 +441,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? safeMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
-    return { success: true, data: { ...ride, driver } };
+    return { success: true, data: { ...ride, driver, ...itinerary } };
   });
 
   /** GET /:id — one owned ride. */
@@ -360,7 +472,9 @@ export async function ridesRoutes(app: FastifyInstance) {
         ? safeMmgPayUrl(ride.driver.mmgPayUrl)
         : null;
     }
-    return { success: true, data: ride };
+    // [TAXI multi-stop] As /active: the stops in order, and the next one.
+    const itinerary = await readRideItinerary(app.prisma, ride);
+    return { success: true, data: itinerary ? { ...ride, ...itinerary } : ride };
   });
 
   /** POST /:id/cancel — rides ride the same state machine as everything else. */

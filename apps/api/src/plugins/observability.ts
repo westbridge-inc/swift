@@ -222,7 +222,7 @@ export const adminAuditCounter = new client.Counter({
  */
 export const adminAuditSnapshotCounter = new client.Counter({
   name: 'swift_admin_audit_snapshot_total',
-  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate) and model',
+  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate|no_tenant) and model',
   labelNames: ['outcome', 'model'] as const,
   registers: [registry],
 });
