@@ -15,6 +15,7 @@ import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
+import { loadTaxiStops, offerItinerary, readRideItinerary } from '../rides/taxi-stops-read';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
@@ -718,6 +719,9 @@ export async function driverRoutes(app: FastifyInstance) {
     // one batched read from the ONE mapper.
     const { ratingSurfaces } = await import('../rating/rating-surface');
     const passengerSurfaces = await ratingSurfaces(app.prisma, 'CUSTOMER', orders.map((o) => o.customer?.id).filter((x): x is string => !!x));
+    // [TAXI multi-stop] The stops of the rides that have them, in one read (none
+    // when no ride on the board has stops).
+    const itineraries = await loadTaxiStops(app.prisma, orders.filter((o) => o.taxiStopCount != null).map((o) => o.id));
 
     // Enrich with distance from driver to pickup
     const enriched = orders.map((order) => {
@@ -750,6 +754,10 @@ export async function driverRoutes(app: FastifyInstance) {
           ? { ...order.customer, displayRating: passengerSurfaces.get(order.customer.id)?.displayRating ?? null }
           : order.customer,
         createdAt: order.createdAt,
+        // [TAXI multi-stop] A ride with stops: how many and where, in order. The
+        // dropoff above stays the FINAL destination; distance, duration and
+        // fare are the whole route's. A ride without stops gains no key.
+        ...offerItinerary(order, itineraries),
       };
     });
 
@@ -783,7 +791,10 @@ export async function driverRoutes(app: FastifyInstance) {
       const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [order.customer.id])).get(order.customer.id);
       (order.customer as { displayRating?: number | null }).displayRating = surface?.displayRating ?? null;
     }
-    return { success: true, data: order };
+    // [TAXI multi-stop] A ride with stops: each with its progress, in order, and
+    // the one the ride is heading for. A ride without them gains no key.
+    const itinerary = order ? await readRideItinerary(app.prisma, order) : null;
+    return { success: true, data: order && itinerary ? { ...order, ...itinerary } : order };
   });
 
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
