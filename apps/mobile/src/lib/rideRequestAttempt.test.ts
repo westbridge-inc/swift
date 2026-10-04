@@ -137,6 +137,88 @@ describe('[review 2.4] the store never drops an unresolved attempt', () => {
   });
 });
 
+/** A slot whose writes fail while `failing` is set; reads always work and
+ *  return whatever was last saved successfully (stale while writes fail). */
+function flakyStore(initial: string | null = null) {
+  const s = {
+    raw: initial,
+    failing: false,
+    writes: 0,
+    get: () => s.raw,
+    set: (v: string) => { s.writes++; if (s.failing) throw new Error('disk full'); s.raw = v; },
+    clear: () => { s.writes++; if (s.failing) throw new Error('disk full'); s.raw = null; },
+  };
+  return s;
+}
+
+describe('[review 3] a failed save never loses an unresolved key', () => {
+  it('the save fails, the answer is lost, the retry of the same trip carries the SAME key', () => {
+    // Another account's booking is already saved, so later reads succeed and
+    // return that (stale) list — it does not hold rider-a's new attempt.
+    const store = flakyStore();
+    const attempt = createRideRequestAttempt(store, counterMint());
+    attempt.begin(otherBody, 'rider-z');
+    store.failing = true;
+    const first = attempt.begin(body, 'rider-a');
+    expect(JSON.parse(store.raw!).attempts.map((a: { userId: string }) => a.userId)).toEqual(['rider-z']);
+    expect(attempt.begin(body, 'rider-a')).toBe(first);
+  });
+
+  it('the save fails, then storage recovers: the key is the same and is saved for good', () => {
+    const store = flakyStore();
+    const attempt = createRideRequestAttempt(store, counterMint());
+    store.failing = true;
+    const first = attempt.begin(body, 'rider-a');
+    store.failing = false;
+    expect(attempt.begin(body, 'rider-a')).toBe(first);
+    // Saved now: a fresh process on the same slot finds it.
+    expect(createRideRequestAttempt(store, () => 'ride_never_minted').begin(body, 'rider-a')).toBe(first);
+  });
+
+  it('while saving keeps failing, a NEW trip is refused in plain words; the unsaved trip can still be retried', () => {
+    const store = flakyStore();
+    const attempt = createRideRequestAttempt(store, counterMint());
+    store.failing = true;
+    const first = attempt.begin(body, 'rider-a');
+    let refused: unknown;
+    try { attempt.begin(otherBody, 'rider-a'); } catch (e) { refused = e; }
+    expect(refused).toMatchObject({ code: 'RIDE_KEYS_UNSAVED', response: { data: { error: { code: 'RIDE_KEYS_UNSAVED' } } } });
+    expect((refused as Error).message).toMatch(/can’t save your booking/);
+    expect(attempt.begin(body, 'rider-a')).toBe(first);
+  });
+
+  it('a failing save cannot slip a booking past the cap', () => {
+    const store = flakyStore();
+    const attempt = createRideRequestAttempt(store, counterMint(), Date.now, 1);
+    store.failing = true;
+    attempt.begin(body, 'rider-a');
+    store.failing = false;
+    expect(() => attempt.begin(body, 'rider-b')).toThrow(/still waiting for an answer/);
+  });
+
+  it('an answer settled while saving failed stays settled when the stale list is read back', () => {
+    const store = flakyStore();
+    const attempt = createRideRequestAttempt(store, counterMint());
+    const first = attempt.begin(body, 'rider-a');
+    store.failing = true;
+    attempt.settle(first, 'rider-a');
+    store.failing = false;
+    expect(attempt.begin(body, 'rider-a')).not.toBe(first);
+  });
+
+  it('records another app instance saved meanwhile are kept, the unsaved one too', () => {
+    const store = flakyStore();
+    const one = createRideRequestAttempt(store, counterMint());
+    const two = createRideRequestAttempt(store, () => 'ride_from_two_0001');
+    store.failing = true;
+    const unsaved = one.begin(body, 'rider-a');
+    store.failing = false;
+    const fromTwo = two.begin(otherBody, 'rider-b');
+    expect(one.begin(body, 'rider-a')).toBe(unsaved);
+    expect(one.begin(otherBody, 'rider-b')).toBe(fromTwo);
+  });
+});
+
 describe('an app restart retries with the same key', () => {
   it('a new process reading the same storage reuses the unanswered key', () => {
     const store = memoryStore();

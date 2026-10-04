@@ -18,8 +18,12 @@ import { stableBodyHash } from './checkoutAttempt';
 //
 // The store has ONE writer and no awaits: every read-modify-write finishes in
 // one synchronous step, so two identical taps in flight share one key. It
-// re-reads the persisted slot on every step (one source of truth even with
-// two instances on one slot) and falls back to memory when storage fails.
+// re-reads the persisted slot on every step (so two instances on one slot see
+// each other). A save that FAILS never loses a key: memory stays the
+// authoritative copy until a save succeeds — a later read merges the saved
+// list into it (unsaved records win; an answer settled while unsaved stays
+// settled) and retries the save. While saving keeps failing, a NEW trip is
+// refused in plain words; the unsaved trip itself can still be retried.
 // An unresolved attempt is never evicted: when the store is full, a NEW
 // booking is refused with a plain message instead.
 // ---------------------------------------------------------------------------
@@ -45,7 +49,7 @@ interface RideRequestAttemptRecord {
  *  booking screen shows it the way it shows any refusal. */
 export class RideAttemptBlocked extends Error {
   readonly response: { status: number; data: { success: false; error: { code: string; message: string } } };
-  constructor(readonly code: 'RIDE_KEYS_FULL', message: string) {
+  constructor(readonly code: 'RIDE_KEYS_FULL' | 'RIDE_KEYS_UNSAVED', message: string) {
     super(message);
     this.response = { status: 409, data: { success: false, error: { code, message } } };
   }
@@ -80,18 +84,50 @@ export function createRideRequestAttempt(
   now: () => number = Date.now,
   cap: number = RIDE_REQUEST_ATTEMPT_CAP,
 ) {
-  // Memory mirrors the last state written; it answers only when storage fails.
+  // Memory is the last state this instance wrote. While `unsaved`, it holds
+  // changes storage has not taken yet and is the authority over what a read
+  // returns; `settledUnsaved` remembers answers retired in that window so the
+  // stale saved list cannot bring them back.
   let memory: RideRequestAttemptRecord[] = [];
-  const read = (): RideRequestAttemptRecord[] => {
-    try { memory = decode(store.get()); } catch { /* keep the in-memory copy */ }
-    return memory;
-  };
-  const write = (attempts: RideRequestAttemptRecord[]) => {
-    memory = attempts;
+  let unsaved = false;
+  const settledUnsaved = new Set<string>();
+  const idOf = (a: Pick<RideRequestAttemptRecord, 'userId' | 'key'>) => `${a.userId}\u0000${a.key}`;
+  const save = (attempts: RideRequestAttemptRecord[]): boolean => {
     try {
       if (attempts.length) store.set(JSON.stringify({ version: 3, attempts }));
       else store.clear();
-    } catch { /* memory still holds the attempts for this run */ }
+      unsaved = false;
+      settledUnsaved.clear();
+      return true;
+    } catch {
+      unsaved = true;
+      return false;
+    }
+  };
+  const read = (): RideRequestAttemptRecord[] => {
+    let saved: RideRequestAttemptRecord[] | null;
+    try { saved = decode(store.get()); } catch { saved = null; }
+    if (!unsaved) {
+      if (saved) memory = saved;
+      return memory;
+    }
+    // Unsaved changes win; records saved meanwhile (another instance) join
+    // them unless this instance already settled them.
+    if (saved) {
+      const merged = [...memory];
+      for (const r of saved) {
+        if (settledUnsaved.has(idOf(r))) continue;
+        if (merged.some((m) => m.userId === r.userId && (m.bodyHash === r.bodyHash || m.key === r.key))) continue;
+        merged.push(r);
+      }
+      memory = merged;
+    }
+    save(memory); // retry the save that failed
+    return memory;
+  };
+  const write = (attempts: RideRequestAttemptRecord[]): boolean => {
+    memory = attempts;
+    return save(attempts);
   };
   return {
     /**
@@ -105,6 +141,10 @@ export function createRideRequestAttempt(
       const attempts = read();
       const same = attempts.find((a) => a.userId === userId && a.bodyHash === bodyHash);
       if (same) return same.key;
+      if (unsaved) {
+        throw new RideAttemptBlocked('RIDE_KEYS_UNSAVED',
+          'This phone can’t save your booking safely right now. Close and reopen the app, then try again, or contact support.');
+      }
       if (attempts.length >= cap) {
         throw new RideAttemptBlocked('RIDE_KEYS_FULL',
           'Too many bookings on this phone are still waiting for an answer. Check your connection and try one of them again, or contact support.');
@@ -118,7 +158,8 @@ export function createRideRequestAttempt(
     settle(key: string, userId: string): void {
       const attempts = read();
       const left = attempts.filter((a) => !(a.key === key && a.userId === userId));
-      if (left.length !== attempts.length) write(left);
+      if (left.length === attempts.length) return;
+      if (!write(left)) settledUnsaved.add(idOf({ userId, key }));
     },
   };
 }
