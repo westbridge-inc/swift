@@ -9,7 +9,7 @@ import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_STATUSES, applicantId, docLabel, roleLabel, vehicleLabel, timelineLabel, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_STATUSES, applicantId, docLabel, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -55,11 +55,23 @@ export default function VerificationPage() {
   const [mutationError, setMutationError] = useState<unknown>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const workspace = useRef<HTMLDivElement>(null);
+  const actions = useRef<HTMLElement>(null);
   const inFlight = useRef(false);
 
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 60_000); return () => clearInterval(timer); }, []);
   useEffect(() => { if (applicant) { heading.current?.focus({ preventScroll: true }); heading.current?.closest('.rc-applicant')?.scrollIntoView?.({ block: 'start' }); } }, [applicant]);
   useEffect(() => { if (workspace.current) workspace.current.scrollTop = 0; }, [selected?.id]);
+  useEffect(() => {
+    const pane = workspace.current;
+    const footer = actions.current;
+    if (!pane) return;
+    if (!footer) { pane.style.setProperty('--rc-actions-height', '0px'); return; }
+    const reserve = () => pane.style.setProperty('--rc-actions-height', `${footer.getBoundingClientRect().height}px`);
+    reserve();
+    const observer = new ResizeObserver(reserve);
+    observer.observe(footer);
+    return () => observer.disconnect();
+  }, [applicant?.id, selected?.status]);
   const queue = useQuery({ queryKey: ['verification', status, lane], queryFn: () => loadReviewQueue(status, lane) });
   const counts = useQuery({ queryKey: ['verification-counts'], queryFn: fetchVerificationCounts });
   const profile = useQuery({ queryKey: ['review-profile', applicant?.id], queryFn: () => fetchUserDetail(applicant!.id), enabled: !!applicant });
@@ -68,6 +80,7 @@ export default function VerificationPage() {
     queryFn: async () => (await Promise.all(REVIEW_STATUSES.filter((s) => s !== status).map((s) => loadReviewQueue(s, lane)))).flat(),
   });
   const custody = useQuery({ queryKey: ['document-custody', selected?.id], queryFn: () => fetchDocumentCustody(selected!.id), enabled: !!selected });
+  const timeline = reviewTimeline(custody.data?.data?.timeline ?? []);
   const groups = groupApplicants(queue.data ?? []);
   const filtered = groups.filter((a) => {
     const q = search.trim().toLowerCase();
@@ -192,10 +205,11 @@ export default function VerificationPage() {
           {profile.isError && <p className="rc-error">Profile facts could not be loaded. <button onClick={() => void profile.refetch()}>Retry profile</button></p>}
         </div><span className="rc-muted">{waitingSince(applicant.oldest, now)}</span></header>
         <div ref={workspace} className="rc-workspace">
-          <nav className="rc-documents" aria-label="Applicant documents"><h3>Documents in this lane <span>{documents.length}</span></h3>
+          <nav className="rc-documents" aria-label="Applicant documents"><h3>Documents in this lane <span>{documents.findIndex((d) => d.id === selected.id) + 1} of {documents.length}</span></h3>
+            {documents.length > 1 && <p className="rc-document-cue">Swipe to see more documents</p>}
             {history.isLoading && <p className="rc-muted">Loading other statuses…</p>}
             {history.isError && <p className="rc-error">Other document statuses could not be loaded. <button onClick={() => void history.refetch()}>Retry documents</button></p>}
-            {documents.map((d) => <button key={d.id} disabled={busy} aria-pressed={selected.id === d.id} onClick={() => selectDocument(d)}><span>{docLabel(d.docType)}</span><Chip status={d.status} /></button>)}
+            <div className="rc-document-list">{documents.map((d) => <button key={d.id} disabled={busy} aria-pressed={selected.id === d.id} onClick={() => selectDocument(d)}><span>{docLabel(d.docType)}</span><Chip status={d.status} /></button>)}</div>
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
@@ -212,12 +226,12 @@ export default function VerificationPage() {
               </fieldset>}
             </div>}
             <section className="rc-history"><h3>History and audit timeline</h3>
-              {custody.isLoading ? <p>Loading history…</p> : custody.isError ? <p className="rc-error">History unavailable. <button onClick={() => void custody.refetch()}>Retry history</button></p> : custody.data?.data?.timeline?.length ?
-                <ol>{custody.data.data.timeline.map((event: { at: string; what: string; actor: string | null }, i: number) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{new Date(event.at).toLocaleString()}</time><span>{timelineLabel(event.what)}</span><TimelineActor actor={event.actor} applicant={applicant} /></li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
+              {custody.isLoading ? <p>Loading history…</p> : custody.isError ? <p className="rc-error">History unavailable. <button onClick={() => void custody.refetch()}>Retry history</button></p> : timeline.length ?
+                <ol>{timeline.map((event, i) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{new Date(event.at).toLocaleString()}</time><span>{event.label}</span><TimelineActor actor={event.actor} applicant={applicant} /></li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
             </section>
           </div>
         </div>
-        {selected.status === 'PENDING' && <footer className="rc-actions"><p>{viewed ? 'Evidence opened. Record your decision.' : 'Open the evidence to unlock approval.'}<small>Desktop: A approve · R reject · J/K navigate</small></p><button disabled={busy} onClick={() => openDecision('reject')}>Reject</button><button className="rc-primary" disabled={busy || !!approveBlocked} onClick={() => openDecision('approve')}>Approve</button></footer>}
+        {selected.status === 'PENDING' && <footer ref={actions} className="rc-actions"><p>{viewed ? 'Evidence opened. Record your decision.' : 'Open the evidence to unlock approval.'}<small>Desktop: A approve · R reject · J/K navigate</small></p><button disabled={busy} onClick={() => openDecision('reject')}>Reject</button><button className="rc-primary" disabled={busy || !!approveBlocked} onClick={() => openDecision('approve')}>Approve</button></footer>}
       </section>}
     </div>
     {decision && selected && applicant && <Modal title={decision === 'approve' ? 'Approve document' : 'Reject document'} busy={busy} onClose={() => setDecision(null)}>

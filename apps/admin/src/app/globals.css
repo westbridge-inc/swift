@@ -107,8 +107,10 @@ body {
 .rc-applicant-heading h2 { scroll-margin-block-start: 5rem; outline: none; font-size: 1.25rem; font-weight: 650; margin-bottom: .25rem; }
 .rc-applicant-heading p { margin-top: .3rem; overflow-wrap: anywhere; }
 .rc-applicant-heading strong { color: var(--text); }
-.rc-workspace { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 .25rem 1rem; display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 1.25rem; align-items: start; }
-.rc-documents { display: grid; gap: .5rem; }
+.rc-workspace { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 .25rem 1rem; display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 1.25rem; align-items: start; padding-bottom: calc(var(--rc-actions-height, 0px) + 1rem); }
+.rc-documents { min-width: 0; }
+.rc-document-list { display: grid; gap: .5rem; }
+.rc-document-cue { display: none; }
 .rc-documents h3, .rc-history h3 { font-weight: 600; padding-bottom: .5rem; }
 .rc-documents h3 span { color: var(--muted); }
 .rc-documents button { text-align: left; display: flex; flex-direction: column; align-items: start; gap: .5rem; overflow-wrap: anywhere; }
@@ -152,7 +154,8 @@ body {
 @media (max-width: 1100px) {
   .rc-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rc-workspace { grid-template-columns: minmax(0, 1fr); }
-  .rc-documents { display: flex; flex-wrap: wrap; }
+  .rc-workspace { align-content: start; grid-auto-rows: max-content; }
+  .rc-document-list { display: flex; flex-wrap: wrap; }
   .rc-documents h3, .rc-documents > p { width: 100%; }
   .rc-documents button { flex: 1 1 10rem; }
 }
@@ -162,8 +165,11 @@ body {
   .rc-filters { display: none; grid-template-columns: minmax(0, 1fr); gap: .75rem; }
   .rc-filters.rc-filters-open { display: grid; }
   .rc-applicant { height: calc(100dvh - 6rem); }
-  .rc-documents { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .5rem; }
-  .rc-documents h3 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  /* Normal flow: an overflow rail must never collapse a grid row below its cards. */
+  .rc-workspace { display: block; }
+  .rc-documents { margin-bottom: 1rem; }
+  .rc-document-list { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .5rem; }
+  .rc-document-cue { display: block; color: var(--muted); font-size: .75rem; margin-bottom: .5rem; }
   .rc-documents button { flex: 0 0 10rem; }
   .rc-documents > p { flex: 0 0 12rem; }
   .rc-applicant-heading { padding: .75rem 0; margin-bottom: .75rem; }

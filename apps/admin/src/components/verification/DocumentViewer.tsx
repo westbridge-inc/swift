@@ -15,6 +15,13 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   const [rotation, setRotation] = useState(0);
   const [full, setFull] = useState(false);
   const generation = useRef(0);
+  const evidenceViewport = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!url || !window.matchMedia('(max-width: 767px)').matches) return;
+    const evidence = evidenceViewport.current;
+    const pane = evidence?.closest<HTMLElement>('.rc-workspace');
+    if (evidence && pane) pane.scrollTop += evidence.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+  }, [url]);
   useEffect(() => () => { generation.current++; }, []);
   const view = async () => {
     const attempt = ++generation.current;
@@ -48,7 +55,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
     } finally { if (generation.current === attempt) setLoading(false); }
   };
   const failed = () => { setError('The document did not render. Retry the view before approving.'); setLoaded(false); setUrl(''); onViewed(false); };
-  const evidence = <div className="rc-evidence-viewport">
+  const evidence = <div ref={evidenceViewport} className="rc-evidence-viewport">
     {pdf ? <>
       <div className="rc-pdf-fallback">
         <p>{pdfFailed ? 'The inline PDF could not be displayed.' : 'If the PDF preview is blank or unreadable, open the document in a new tab.'}</p>

@@ -30,7 +30,7 @@ const LABELS: Record<string, string> = {
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
   V_PLATE_CLASS: 'Plate class check', V_PLATE_FORMAT: 'Plate format check',
-  V_NOT_EXPIRED: 'Expiry check', V_EXPIRY_PLAUSIBLE: 'Expiry date check',
+  V_NOT_EXPIRED: 'Expiry check', V_EXPIRY_PLAUSIBLE: 'Expiry check',
   V_LICENCE_CLASS: 'Licence class check', V_INSURANCE_SCOPE: 'Insurance coverage check',
   V_ALL_REQUIRED_PRESENT: 'Required information check', V_PLATE_CROSS_MATCH: 'Plate match check',
   V_TYPE_MATCH: 'Document type check', V_PAGE_COMPLETE: 'Page completeness check',
@@ -65,12 +65,38 @@ export function timelineLabel(what: string): string {
   if (what.startsWith('DESTROYED') || what.startsWith('IMAGE PURGED')) return 'Document file removed; record retained';
   if (what === 'SUBMISSION PURGED') return 'Submission removed under the retention policy';
   if (what.startsWith('AUDIT ')) {
+    const decisionAudit: Record<string, string> = {
+      'AUDIT APPROVE_VERIFICATION_DOC': 'Approval recorded',
+      'AUDIT REJECT_VERIFICATION_DOC': 'Rejection recorded',
+      'AUDIT ESCALATE_VERIFICATION_DOC': 'Sent for another review',
+      'AUDIT REVOKE_VERIFICATION_DOC': 'Approval revoked',
+    };
+    if (decisionAudit[what]) return decisionAudit[what];
     if (what === 'AUDIT VIEW_VERIFICATION_DOC') return 'Document opened for review';
     if (/\/reject$/.test(what)) return 'Rejection request recorded';
     if (/\/approve$/.test(what)) return 'Approval request recorded';
-    return 'Review activity recorded';
+    return ''; // Unknown audit actions carry no operator-relevant fact we can safely name.
   }
   return 'Document activity recorded';
+}
+export interface ReviewTimelineEvent { at: string; actor: string | null; what: string }
+/** Collapse only equivalent expiry checks from the same recorded evaluation; keep distinct facts. */
+export function reviewTimeline(events: ReviewTimelineEvent[]): Array<ReviewTimelineEvent & { label: string }> {
+  const consumed = new Set<number>();
+  return events.flatMap((event, index) => {
+    if (consumed.has(index)) return [];
+    let label = timelineLabel(event.what);
+    if (!label) return [];
+    const expiry = /^(V_EXPIRY_PLAUSIBLE|V_NOT_EXPIRED)( .+)$/.exec(event.what);
+    if (expiry) {
+      const counterpart = expiry[1] === 'V_EXPIRY_PLAUSIBLE' ? 'V_NOT_EXPIRED' : 'V_EXPIRY_PLAUSIBLE';
+      const pair = events.findIndex((other, j) => j > index && !consumed.has(j) &&
+        other.at === event.at && other.actor === event.actor && other.what === counterpart + expiry[2]);
+      if (pair >= 0) consumed.add(pair);
+      else label = label.replace('Expiry check: ', `Expiry check: ${expiry[1] === 'V_EXPIRY_PLAUSIBLE' ? 'date plausibility' : 'not expired'} — `);
+    }
+    return [{ ...event, label }];
+  });
 }
 export const applicantId = (doc: ReviewDocument) => doc.userId || doc.user?.id || doc.id;
 export const maskedPhone = (phone?: string) => phone ? `••• ••• ${phone.slice(-4)}` : 'No phone on file';
