@@ -5,6 +5,7 @@ import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
+import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
 
 /**
  * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
@@ -195,6 +196,16 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (pusher === 'dev') {
     throw new Error('FATAL: PUSH_PROVIDER is dev (in-memory) in production — every push would be silently swallowed while reporting success: no new-order alerts, no dispatch offers, no safety pings. Set PUSH_PROVIDER=expo. Refusing to start.');
   }
+
+  // Transactional email contains bank receipts, export notices and account
+  // closure confirmations. A dev/unset adapter would retain a durable outbox
+  // row but deliver nothing. Refuse this production posture at boot; the SMTP
+  // parser also makes every partial configuration explicit before a receipt is
+  // owed.
+  if (env['EMAIL_PROVIDER'] !== 'smtp') {
+    throw new Error('FATAL: EMAIL_PROVIDER must be smtp in production — dev or unset email would never reach receipt, export and closure recipients. Refusing to start.');
+  }
+  smtpConfigFromEnv(env);
 
   // Verification documents are envelope-encrypted at rest ONLY when MASTER_KEK
   // is set; unset silently stores KYC PII in the clear (plaintext on disk with

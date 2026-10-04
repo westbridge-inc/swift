@@ -78,6 +78,7 @@ afterAll(async () => {
   await app.prisma.address.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
+  await app.prisma.emailOutbox.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   await app.close();
 });
@@ -102,6 +103,11 @@ describe('D9-05 — account deletion (erasure)', () => {
   it('crypto-shreds documents, revokes sessions, de-identifies, and drops addresses', async () => {
     const u = await makeUser(['CUSTOMER']);
     await app.prisma.address.create({ data: { userId: u.userId, label: 'Home', addressLine1: '1 Main St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.1 } });
+    const { queueTransactionalEmailInTransaction } = await import('../modules/notification/email-outbox');
+    await app.prisma.$transaction((tx) => queueTransactionalEmailInTransaction(tx, {
+      kind: 'DATA_EXPORT_READY', eventId: `delete-pending-${u.userId}`, userId: u.userId,
+      recipient: `pending-${u.userId}@example.test`, template: { kind: 'DATA_EXPORT_READY' },
+    }));
 
     const fileKey = await ownedVerificationFixture(app.prisma, u.userId);
     const doc = await app.prisma.verificationDocument.create({ data: { userId: u.userId, role: 'CUSTOMER', docType: 'ID_CARD', fileUrl: fileKey } });
@@ -118,6 +124,9 @@ describe('D9-05 — account deletion (erasure)', () => {
 
     expect(await app.prisma.session.count({ where: { userId: u.userId } })).toBe(0);
     expect(await app.prisma.address.count({ where: { userId: u.userId } })).toBe(0);
+    await expect(app.prisma.emailOutbox.findUniqueOrThrow({ where: { dedupeKey: `email:DATA_EXPORT_READY:delete-pending-${u.userId}` } })).resolves.toMatchObject({
+      cancelledAt: expect.any(Date), recipient: '[redacted]', body: '[redacted]',
+    });
 
     const enc = await app.prisma.encryptedObject.findUnique({ where: { fileKey } });
     expect(enc?.wrappedDek).toBeNull(); // crypto-shredded — ciphertext now unrecoverable

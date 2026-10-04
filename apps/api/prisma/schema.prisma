@@ -4002,6 +4002,10 @@ model Notification {
 model EmailOutbox {
   id          String    @id
   dedupeKey   String    @unique
+  /// The recipient's account, retained only to cancel unsent mail at erasure.
+  /// This deliberately has no FK: the de-identified User row stays as the
+  /// financial-record subject, while delivered email PII is scrubbed by policy.
+  userId      String
   kind        String
   recipient   String
   subject     String
@@ -4011,12 +4015,18 @@ model EmailOutbox {
   claimedAt   DateTime?
   claimToken  String?
   processedAt DateTime?
+  /// Terminal delivery states. A failed/cancelled row is never claimable.
+  failedAt    DateTime?
+  cancelledAt DateTime?
   lastError   String?
+  lastErrorHistory Json @default("[]")
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   @@index([processedAt, availableAt])
   @@index([claimedAt])
+  @@index([userId, processedAt])
+  @@index([failedAt])
   @@map("email_outbox")
 }
 

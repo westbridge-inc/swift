@@ -1140,6 +1140,7 @@ export class VerificationService {
         await queueTransactionalEmailInTransaction(tx, {
           kind,
           eventId: docId,
+          userId: updated.userId,
           recipient: subject.email,
           template: { kind },
         });

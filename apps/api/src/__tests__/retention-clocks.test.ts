@@ -73,6 +73,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await app.prisma.emailOutbox.deleteMany({ where: { userId } });
   await app.prisma.notification.deleteMany({ where: { userId } });
   await app.prisma.session.deleteMany({ where: { userId } });
   await app.prisma.user.delete({ where: { id: userId } }).catch(() => {});
@@ -208,6 +209,31 @@ describe('retention clocks [DCR-1 NR-2]', () => {
     await runRetentionSweep(app.prisma);
     expect(await app.prisma.notification.findUnique({ where: { id: old.id } })).not.toBeNull();
     await app.prisma.notification.delete({ where: { id: old.id } });
+  });
+
+  it('scrubs delivered transactional-email recipient and content after its registered 30-day window, never an unsent obligation', async () => {
+    const delivered = await app.prisma.emailOutbox.create({
+      data: {
+        id: `ret-email-${nanoid(12)}`, dedupeKey: `ret-email-delivered-${nanoid(12)}`, userId,
+        kind: 'DATA_EXPORT_READY', recipient: 'person@example.test', subject: 'Export ready', body: 'Personal export content',
+        processedAt: daysAgo(31), createdAt: daysAgo(31),
+      },
+    });
+    const pending = await app.prisma.emailOutbox.create({
+      data: {
+        id: `ret-email-${nanoid(12)}`, dedupeKey: `ret-email-pending-${nanoid(12)}`, userId,
+        kind: 'DATA_EXPORT_READY', recipient: 'person@example.test', subject: 'Export ready', body: 'Personal export content',
+        createdAt: daysAgo(31),
+      },
+    });
+    const results = await runRetentionSweep(app.prisma);
+    expect(results.find((result) => result.dataClass === 'email_outbox.processed')?.deleted).toBeGreaterThanOrEqual(1);
+    await expect(app.prisma.emailOutbox.findUniqueOrThrow({ where: { id: delivered.id } })).resolves.toMatchObject({
+      recipient: '[redacted]', subject: '[redacted]', body: '[redacted]',
+    });
+    await expect(app.prisma.emailOutbox.findUniqueOrThrow({ where: { id: pending.id } })).resolves.toMatchObject({
+      recipient: 'person@example.test', subject: 'Export ready', body: 'Personal export content',
+    });
   });
 
   it('[F-021-24] published legal documents are immutable at the database and retain the exact words', async () => {

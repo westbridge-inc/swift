@@ -1171,9 +1171,30 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     QUEUE_NAMES.NOTIFICATION,
     async (job: Job) => {
       if (job.name === 'email-outbox-sweep') {
-        const { drainEmailOutbox } = await import('../modules/notification/email-outbox');
+        const { drainEmailOutbox, emailOutboxHealth } = await import('../modules/notification/email-outbox');
         const { getChannels } = await import('../providers/notifications/channels');
-        await drainEmailOutbox(ctx.prisma, getChannels().email);
+        const delivered = await drainEmailOutbox(ctx.prisma, getChannels().email);
+        const health = await emailOutboxHealth(ctx.prisma);
+        // Parked poison messages and mail owed for a full day are operational
+        // failures. Log the metric every sweep and page platform operators
+        // periodically; neither can remain an invisible database column.
+        if (health.parked > 0 || health.longPending > 0) {
+          ctx.log.error({ delivered, ...health }, 'email outbox requires operator attention');
+          const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'email-outbox-health', 6 * 3600, () => notifyAdmins(
+            ctx.prisma,
+            new NotificationService(ctx.prisma, ctx.io),
+            {
+              tenantId: null,
+              title: 'Transactional email needs attention',
+              body: `${health.parked} email delivery obligation(s) are parked and ${health.longPending} have been pending for over 24 hours. Review the email outbox and provider configuration.`,
+              data: { kind: 'ops_email_outbox_health', ...health },
+              dedupeKey: 'ops:email-outbox-health',
+            },
+          ));
+        } else {
+          ctx.log.info({ delivered, ...health }, 'email outbox sweep complete');
+        }
         return;
       }
       if (job.name !== 'vendor-alert-escalate') return;

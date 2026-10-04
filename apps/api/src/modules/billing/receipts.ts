@@ -46,17 +46,20 @@ export async function issueReceipt(
     where: { id: input.subscriptionId },
     select: {
       currencyCode: true,
-      vendor: { select: { owner: { select: { user: { select: { email: true } } } } } },
-      rider: { select: { user: { select: { email: true } } } },
-      driver: { select: { user: { select: { email: true } } } },
+      vendor: { select: { owner: { select: { userId: true, user: { select: { id: true, email: true } } } } } },
+      rider: { select: { userId: true, user: { select: { id: true, email: true } } } },
+      driver: { select: { userId: true, user: { select: { id: true, email: true } } } },
     },
   });
-  const recipient = subscription?.vendor?.owner.user.email ?? subscription?.rider?.user.email ?? subscription?.driver?.user.email;
-  if (recipient) {
+  // Must mirror BillingService.payerUserId: rider, then driver, then vendor
+  // owner. Receipt email is a payer confirmation, never a vendor-first guess.
+  const payer = subscription?.rider?.user ?? subscription?.driver?.user ?? subscription?.vendor?.owner.user;
+  if (payer?.email) {
     await queueTransactionalEmailInTransaction(db, {
       kind: 'FEE_RECEIPT',
       eventId: input.billingEventId,
-      recipient,
+      userId: payer.id,
+      recipient: payer.email,
       template: { kind: 'FEE_RECEIPT', receiptNumber, amount: input.amount, currencyCode: subscription?.currencyCode ?? 'GYD' },
     });
   }
