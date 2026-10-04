@@ -1,3 +1,24 @@
+import type { FastifyRequest } from 'fastify';
+
+/** Raw targets can contain document grants and permanent path credentials.
+ * Only server-registered route templates may identify a request in logs. */
+export function requestLogContext(request: Pick<FastifyRequest, 'method' | 'routeOptions'>) {
+  return { method: request.method, route: request.routeOptions?.url };
+}
+
+/** Error messages, stacks, causes and custom properties may carry complete
+ * upstream requests. Keep only a bounded classification; reqId and the safe
+ * route template supply correlation without retaining those credentials. */
+export const loggerSerializers = {
+  req(request: FastifyRequest) {
+    return { ...requestLogContext(request), id: request.id };
+  },
+  err(error: unknown) {
+    const code = (error as { code?: unknown } | null)?.code;
+    return { type: 'Error', message: '[redacted]', stack: '[redacted]', ...(typeof code === 'string' && /^(?:P\d{4}|FST_ERR_[A-Z_]+|E[A-Z]{2,20})$/.test(code) ? { code } : {}) };
+  },
+};
+
 /**
  * Shared pino options: structured logs with request correlation,
  * and secrets redacted before they can ever reach log output. server.ts and
@@ -6,6 +27,8 @@
  */
 export const loggerRedactConfig = {
   paths: [
+    // Authentication-store failure logs include a raw target outside `req`.
+    'url',
     'req.headers.authorization',
     'req.headers.cookie',
     '*.password',
