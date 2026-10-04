@@ -281,6 +281,23 @@ describe('[seal 3] role grants: refused inside every authority', () => {
     expect(demoGrant.statusCode, demoGrant.body).toBe(403);
     expect(demoGrant.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
     expect(await system(() => app.prisma.vendorStaff.count({ where: { userId: { in: [ids.customer, ids.rider] } } }))).toBe(0);
+    // An existing membership (planted) is never raised by a demo owner either.
+    const planted = await system(() => app.prisma.vendorStaff.create({ data: { vendorId: ids.reviewVendor, userId: ids.rider, role: 'STAFF', invitedBy: ids.customer } }));
+    const raise = await app.inject({ method: 'PUT', url: `/api/v1/vendor/staff/${planted.id}`, headers: { authorization: `Bearer ${tokens.customer}`, 'x-vendor-id': ids.reviewVendor }, payload: { role: 'MANAGER' } });
+    expect(raise.statusCode, raise.body).toBe(403);
+    expect(raise.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
+    expect((await system(() => app.prisma.vendorStaff.findUniqueOrThrow({ where: { id: planted.id } }))).role).toBe('STAFF');
+    await system(() => app.prisma.vendorStaff.delete({ where: { id: planted.id } }));
+    // An advertiser a demo account owns (planted) grants no membership.
+    const adv = await system(async () => {
+      const a = await app.prisma.advertiser.create({ data: { companyName: `Demo Co ${RUN}`, industry: 'Retail', contactName: 'Demo', contactEmail: 'demo@example.com', contactPhone: '+5926001234', createdByUserId: ids.customer, tenantId: REVIEW } as never });
+      await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ids.customer, role: 'OWNER' } });
+      return a;
+    });
+    const member = await call('POST', `/api/v1/ads/advertiser/${adv.id}/members`, tokens.customer, { phone: riderPhone, role: 'MANAGER' });
+    expect(member.statusCode, member.body).toBe(403);
+    expect(member.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
+    expect(await system(() => app.prisma.advertiserMember.count({ where: { advertiserId: adv.id, userId: ids.rider } }))).toBe(0);
     // restore the pack store's owner
     await system(async () => {
       const packOwner = await app.prisma.vendorOwner.findUniqueOrThrow({ where: { id: planReviewContentPack(REVIEW).vendorOwnerId } });

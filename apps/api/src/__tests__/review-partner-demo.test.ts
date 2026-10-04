@@ -708,7 +708,7 @@ describe('[REVIEW-PARTNER · DL-5 · Sol F1] a demo login cannot grow into a mon
     const advertiser = await post('/api/v1/ads/advertiser/register', tokens.customer, { companyName: `Demo Ads ${RUN}`, industry: 'Food & Beverage', contactName: 'Demo', contactEmail: 'demo@example.com', contactPhone: '+5926001234' });
     expect(advertiser.statusCode, advertiser.body).toBe(403);
     expect(advertiser.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
-    const provider = await post('/api/v1/services/providers', tokens.customer, { trade: 'barber' });
+    const provider = await post('/api/v1/services/providers', tokens.customer, { trade: 'carpenter' });
     expect(provider.statusCode, provider.body).toBe(403);
     expect(provider.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
     await system(async () => {
