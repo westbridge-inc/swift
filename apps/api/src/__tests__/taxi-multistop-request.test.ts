@@ -13,6 +13,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { OrderService } from '../modules/order/order.service';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 3/8] The request and the reads, through the real routes,
@@ -125,6 +126,7 @@ async function makeDriver(at: Point, extra: Record<string, unknown> = {}): Promi
       averageRating: 4.9, acceptanceRate: 90,
     } as never,
   }));
+  await sys(() => currentMoverDocuments(app.prisma, u.userId, driver.vehicleType, true));
   return { ...u, driverId: driver.id };
 }
 
