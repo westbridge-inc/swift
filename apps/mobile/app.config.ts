@@ -1,5 +1,13 @@
 import type { ExpoConfig } from 'expo/config';
 
+// Expo still consumes this native-build flag, while the installed ExpoConfig
+// declaration does not yet include it. Keep the runtime configuration typed
+// without removing the setting from generated native builds.
+interface SwiftExpoConfig extends ExpoConfig {
+  newArchEnabled: boolean;
+  [key: string]: unknown;
+}
+
 // One "Swift" app. The role you pick on the entry screen ("How will you use
 // Swift?") chooses the experience at runtime — there is no longer a build-time
 // variant. Background location + push belong to the driver/rider flow and are
@@ -98,6 +106,10 @@ const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
  * would be the gate doing more harm than the bug.
  */
 const androidMapsApiKey = process.env['ANDROID_GOOGLE_MAPS_API_KEY'];
+// EAS materialises the sensitive FILE_BASE64 variable as a local file and
+// exposes its path here during the Android build. Local builds intentionally
+// omit the field: Expo then does not try to resolve a Firebase config file.
+const googleServicesFile = process.env['GOOGLE_SERVICES_JSON'];
 const isDistributableBuild =
   process.env['EAS_BUILD'] === 'true' || process.env['CI'] === 'true';
 
@@ -128,7 +140,7 @@ if (!androidMapsApiKey && buildsAndroidArtifact) {
   console.warn(`[swift] WARNING — ${consequence} Maps screens will crash in this local build.`);
 }
 
-const config: ExpoConfig = {
+const config: SwiftExpoConfig = {
   // Native project/module name — 'Swift' itself is reserved by Apple's
   // standard library, so the Xcode target needs a distinct name. What users
   // see is CFBundleDisplayName below: 'Swift'.
@@ -205,6 +217,7 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'gy.swift.app',
+    ...(googleServicesFile ? { googleServicesFile } : {}),
     // Android adaptive icon [LAUNCH-3]. Only `backgroundColor` was set, and it
     // was WHITE behind a maroon brand mark — but it never showed, because with
     // no `foregroundImage` Expo emits no adaptive icon at all and the launcher
@@ -290,7 +303,18 @@ const config: ExpoConfig = {
         resizeMode: 'contain',
       },
     ],
-    ['expo-notifications', { color: '#803B3B' }],
+    [
+      'expo-notifications',
+      {
+        // The runtime registers this same channel before asking Expo for the
+        // device token. It is the safe default for background FCM v1 messages;
+        // versioned loud-alert channels remain owned by their separate lane.
+        defaultChannel: 'default',
+        // Android notification icons are white silhouettes on transparency.
+        icon: './assets/notification-icon.png',
+        color: brandMaroon,
+      },
+    ],
     // react-native-maps ships its own config plugin, and Expo gives IT the
     // manifest instead of the built-in step that reads
     // `android.config.googleMaps.apiKey` above. That plugin writes
