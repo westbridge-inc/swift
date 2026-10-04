@@ -7,7 +7,12 @@ const MOBILE = process.cwd();
 const REPOSITORY = join(MOBILE, '../..');
 
 type AppConfig = {
-  android: { package?: string; googleServicesFile?: unknown; [key: string]: unknown };
+  android: {
+    package?: string;
+    googleServicesFile?: unknown;
+    adaptiveIcon?: { backgroundColor?: unknown };
+    [key: string]: unknown;
+  };
   plugins: unknown[];
 };
 
@@ -51,13 +56,14 @@ describe('Android FCM build configuration', () => {
   it('routes background FCM v1 notifications to the existing default channel with a monochrome icon', async () => {
     vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
 
-    const options = notificationPlugin(await loadConfig());
+    const config = await loadConfig();
+    const options = notificationPlugin(config);
 
     expect(options).toMatchObject({
       defaultChannel: 'default',
-      color: '#803B3B',
       icon: './assets/notification-icon.png',
     });
+    expect(options['color']).toBe(config.android.adaptiveIcon?.backgroundColor);
     const icon = join(MOBILE, String(options['icon']).replace(/^\.\//, ''));
     expect(existsSync(icon)).toBe(true);
     expect(readFileSync(icon).subarray(0, 8)).toEqual(
