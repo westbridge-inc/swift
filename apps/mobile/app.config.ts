@@ -1,5 +1,13 @@
 import type { ExpoConfig } from 'expo/config';
 
+// Expo still consumes this native-build flag, while the installed ExpoConfig
+// declaration does not yet include it. Keep the runtime configuration typed
+// without removing the setting from generated native builds.
+interface SwiftExpoConfig extends ExpoConfig {
+  newArchEnabled: boolean;
+  [key: string]: unknown;
+}
+
 // One "Swift" app. The role you pick on the entry screen ("How will you use
 // Swift?") chooses the experience at runtime — there is no longer a build-time
 // variant. Background location + push belong to the driver/rider flow and are
@@ -132,7 +140,7 @@ if (!androidMapsApiKey && buildsAndroidArtifact) {
   console.warn(`[swift] WARNING — ${consequence} Maps screens will crash in this local build.`);
 }
 
-const config: ExpoConfig = {
+const config: SwiftExpoConfig = {
   // Native project/module name — 'Swift' itself is reserved by Apple's
   // standard library, so the Xcode target needs a distinct name. What users
   // see is CFBundleDisplayName below: 'Swift'.
