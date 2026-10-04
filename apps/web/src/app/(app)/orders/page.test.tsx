@@ -19,6 +19,6 @@ describe('customer order total presentation', () => {
     renderWithQuery(<OrdersPage />);
     const row = await screen.findByText('Fixture Market');
     expect(row.closest('a')?.textContent).toContain('—');
-    expect(row.closest('a')?.textContent).not.toContain('GY$0');
+    expect(row.closest('a')?.textContent).not.toContain('$0');
   });
 });

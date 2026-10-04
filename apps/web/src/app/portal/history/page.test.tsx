@@ -15,7 +15,7 @@ describe('phone history', () => {
     const card = await screen.findByRole('article', { name: 'Delivery SW-1001' });
     expect(card.textContent).toContain('Fixture Market');
     expect(card.textContent).toContain('DELIVERED');
-    expect(card.textContent).toContain('GY$800');
+    expect(card.textContent).toContain('$800');
     expect(card.className).toContain('sm:hidden');
   });
 
@@ -29,7 +29,7 @@ describe('phone history', () => {
     renderWithQuery(<HistoryPage />);
     const card = await screen.findByRole('article', { name: 'Ride SW-2001' });
     expect(card.textContent).toContain('COMPLETED');
-    expect(card.textContent).toContain('GY$2,500');
-    expect(card.textContent).toContain('GY$200');
+    expect(card.textContent).toContain('$2,500');
+    expect(card.textContent).toContain('$200');
   });
 });

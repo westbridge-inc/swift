@@ -18,11 +18,11 @@ describe('weekly fee contract', () => {
   it('renders the amount due without inventing zero or a next bill', () => {
     expect(dueLine({ status: 'ACTIVE' })).toBe('Amount due unavailable.');
     expect(dueLine({ status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z' })).toBe('Nothing due right now: your next bill is 6 Oct 2026');
-    expect(dueLine({ status: 'PAST_DUE', amountDueGyd: '1200.50', gracePeriodEnd: '2026-10-01T12:00:00Z' })).toBe('GY$1,200.5 due by 1 Oct 2026');
+    expect(dueLine({ status: 'PAST_DUE', amountDueGyd: '1200.50', gracePeriodEnd: '2026-10-01T12:00:00Z' })).toBe('$1,200.5 due by 1 Oct 2026');
   });
   it.each([
     ['OPEN', 'Finish paying on the MMG page.'], ['CONFIRMING', "Confirming your payment with MMG. Don't pay again."],
-    ['CONFIRMED', 'Paid: GY$1,200 received on 29 Sept 2026.'], ['NOT_PAID', "MMG didn't complete this payment. You can try again."],
+    ['CONFIRMED', 'Paid: GYD $1,200 received on 29 Sept 2026.'], ['NOT_PAID', "MMG didn't complete this payment. You can try again."],
     ['EXPIRED', 'This checkout expired. If you paid, it will be credited once MMG confirms it.'],
     ['HELD', "We're checking this payment by hand. Don't pay again. Support will contact you."],
   ] as const)('%s has truthful words', (state, words) => expect(checkoutWords(checkout(state))).toBe(words));

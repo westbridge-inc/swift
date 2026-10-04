@@ -75,7 +75,7 @@ export function formatAmount(value: unknown, prefix: string): string {
 
 /** The single currency display used by orders and both business consoles. */
 export function formatMoney(value: unknown): string {
-  return formatAmount(value, 'GY$');
+  return formatAmount(value, '$');
 }
 
 /** A receipt fallback may multiply a known unit price; missing prices stay unknown. */

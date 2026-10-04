@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import InventoryPage from './page';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
@@ -13,7 +13,10 @@ describe('inventory count and phone column order', () => {
     renderWithQuery(<InventoryPage />);
     await screen.findByText('Rice');
     expect(screen.getByText('1 item')).toBeTruthy();
-    const headings = screen.getAllByRole('columnheader').map((heading) => heading.textContent);
-    expect(headings.slice(0, 5)).toEqual(['Item', 'Category', 'Price', 'Stock', 'SKU']);
+    const item = screen.getByRole('article', { name: 'Rice' });
+    expect(within(item).getByRole('button', { name: '$1,200' })).toBeTruthy();
+    expect(within(item).getByRole('button', { name: '7 in stock · Adjust stock' })).toBeTruthy();
+    expect(within(item).getByText('SKU: RICE-1')).toBeTruthy();
+    expect(within(item).getByRole('switch', { name: 'In stock: Rice' }).getAttribute('aria-checked')).toBe('true');
   });
 });

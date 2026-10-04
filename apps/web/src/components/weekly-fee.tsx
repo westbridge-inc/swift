@@ -32,16 +32,16 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     window.addEventListener('focus', focus);
     return () => window.removeEventListener('focus', focus);
   }, [client, queryKey, session]);
-  if (q.isLoading) return <p>Loading your weekly fee…</p>;
-  if (q.isError || !q.data) return <div role="alert"><p>Could not load your weekly fee.</p><button onClick={() => void q.refetch()}>Try again</button></div>;
+  if (q.isLoading) return <p role="status" className="sw-empty">Loading your weekly fee…</p>;
+  if (q.isError || !q.data) return <div role="alert" className="sw-card space-y-3 p-6"><p>Could not load your weekly fee.</p><button className="sw-btn sw-btn-md sw-btn-outline" onClick={() => void q.refetch()}>Try again</button></div>;
   const sub = q.data;
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
   const blocked = view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
   return <section className="max-w-2xl space-y-6">
-    <h1 className="text-2xl font-extrabold">Weekly fee</h1>
-    <div className="space-y-4 rounded-2xl border border-black/5 bg-white p-6">
-      <p className="text-xl font-bold">{dueLine(sub)}</p>
+    <h1 className="sw-title">Weekly fee</h1>
+    <div className="space-y-4 sw-card p-6">
+      <p className="sw-heading">{dueLine(sub)}</p>
       <p>{subscriptionWords(checkout?.subscriptionStatus ?? sub.status)}</p>
       {checkout && <p role="status">{checkoutWords(checkout, view.returned)}</p>}
       {view.returned && !checkout && <p role="status">Waiting for MMG…</p>}
@@ -52,9 +52,9 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
       <div><button className="text-sm font-semibold underline" onClick={() => { void q.refetch(); session.focus(); }}>Refresh status</button></div>
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
-    <h2 className="text-lg font-bold">Recent checkouts</h2>
-    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
-      <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
+    <h2 className="sw-heading">Recent checkouts</h2>
+    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => <div key={c.ref} className="space-y-2 sw-card p-5">
+      <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · GYD {feeMoney(c.amountGyd)}</p>
       <p>{checkoutWords(c.ref === view.checkout?.ref ? view.checkout : c, c.ref === view.checkout?.ref && view.returned)}</p>
     </div>) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
   </section>;

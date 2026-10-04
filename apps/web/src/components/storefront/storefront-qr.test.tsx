@@ -212,9 +212,9 @@ describe('QR-01-W: real guest Add → sign-in → same item continuation', () =>
     nav.query = startingState === 'Add prompt' ? loginUrl.split('?')[1]! : '';
     const login = render(<LoginPage />);
     fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001001' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
     await waitFor(() => expect(nav.replace).toHaveBeenCalledWith('/store/garden-kitchen?src=qr&c=BCDFGHJKMN'));
     login.unmount();
     vi.mocked(auth.sessionProbe).mockResolvedValue({ ok: true });
@@ -258,7 +258,8 @@ describe('QR-01-W continuation boundaries', () => {
     const resumed = render(await page());
     const dialog = await screen.findByRole('dialog', { name: 'Pumpkin roti' });
     expect((screen.getByRole('radio', { name: /Chickpea/ }) as HTMLInputElement).checked).toBe(true);
-    expect(dialog.textContent).toContain('GY$1,300');
+    expect(dialog.textContent).toContain('$1,300');
+    expect(dialog.textContent).not.toContain('GY$');
     expect(sessionStorage.getItem('swift_storefront_add')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Close item options' }));
     resumed.unmount();

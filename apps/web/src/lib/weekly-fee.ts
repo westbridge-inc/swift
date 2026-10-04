@@ -12,7 +12,7 @@ export interface FeeSubscription {
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
 }
 export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl: string | null; amountGyd: number; currencyCode: 'GYD'; expiresAt: string }
-export const feeMoney = (n: number) => `GY$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+export const feeMoney = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 export function feeDate(value?: string | null): string {
   return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' }) : '';
 }
@@ -35,7 +35,7 @@ export function checkoutWords(c: CheckoutStatus, returned = false): string {
   switch (c.status) {
     case 'OPEN': return returned ? 'Waiting for MMG…' : 'Finish paying on the MMG page.';
     case 'CONFIRMING': return "Confirming your payment with MMG. Don't pay again.";
-    case 'CONFIRMED': return `Paid: ${feeMoney(c.amountGyd)} received${feeDate(c.confirmedAt) ? ` on ${feeDate(c.confirmedAt)}` : ''}.`;
+    case 'CONFIRMED': return `Paid: GYD ${feeMoney(c.amountGyd)} received${feeDate(c.confirmedAt) ? ` on ${feeDate(c.confirmedAt)}` : ''}.`;
     case 'NOT_PAID': return "MMG didn't complete this payment. You can try again.";
     case 'EXPIRED': return 'This checkout expired. If you paid, it will be credited once MMG confirms it.';
     case 'HELD': return "We're checking this payment by hand. Don't pay again. Support will contact you.";

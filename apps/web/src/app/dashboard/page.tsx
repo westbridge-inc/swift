@@ -9,9 +9,9 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="min-w-0 rounded-2xl border border-black/5 bg-white p-5">
-      <p className="break-words text-xs font-medium uppercase tracking-wide text-[var(--swift-muted)]">{label}</p>
-      <p className="mt-2 break-words text-2xl font-extrabold">{value}</p>
+    <div className="min-w-0 sw-card p-5">
+      <p className="break-words text-xs font-medium  text-[var(--swift-muted)]">{label}</p>
+      <p className="mt-2 break-words sw-title">{value}</p>
       {sub && <p className="mt-1 text-xs text-[var(--swift-muted)]">{sub}</p>}
     </div>
   );
@@ -20,16 +20,17 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 function Toggle({ label, on, onChange, busy }: { label: string; on: boolean; onChange: (_next: boolean) => void; busy: boolean }) {
   return (
     <button
+      role="switch" aria-label={label} aria-checked={on}
       onClick={() => onChange(!on)}
       disabled={busy}
-      className="flex items-center justify-between gap-4 rounded-2xl border border-black/5 bg-white p-5 text-left disabled:opacity-60"
+      className="flex items-center justify-between gap-4 sw-card p-5 text-left disabled:opacity-60"
     >
       <div>
         <p className="font-semibold">{label}</p>
         <p className={`mt-0.5 text-sm font-medium ${on ? 'text-green-600' : 'text-[var(--swift-red)]'}`}>{on ? 'On' : 'Off'}</p>
       </div>
-      <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${on ? 'bg-green-500' : 'bg-black/15'}`}>
-        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${on ? 'left-[22px]' : 'left-0.5'}`} />
+      <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${on ? 'bg-[var(--swift-red)]' : 'bg-[var(--swift-border-strong)]'}`}>
+        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-[var(--swift-card)] shadow transition-all ${on ? 'left-[22px]' : 'left-0.5'}`} />
       </span>
     </button>
   );
@@ -55,7 +56,7 @@ export default function TodayPage() {
     <div className="space-y-6">
       <MutationNotice errors={[openMut.error, ordersMut.error]} />
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-extrabold">Today</h1>
+        <h1 className="sw-title">Today</h1>
         <div className="flex items-center gap-1 text-sm text-[var(--swift-muted)]">
           <Star className="h-4 w-4 fill-amber-400 text-amber-400" />
           {Number(d.vendor.averageRating).toFixed(1)} ({d.vendor.totalRatings} ratings)
@@ -109,7 +110,7 @@ export default function TodayPage() {
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             {low.slice(0, 12).map((i) => (
-              <span key={i.id} className="rounded-full bg-white px-3 py-1 text-sm">
+              <span key={i.id} className="rounded-full bg-[var(--swift-card)] px-3 py-1 text-sm">
                 {i.name} <span className="font-bold text-amber-700">{i.stockQuantity ?? 0}</span>
               </span>
             ))}

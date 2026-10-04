@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import type { UserEvent } from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import OrdersPage from './page';
@@ -100,14 +100,14 @@ describe('vendor order board — money is never invented', () => {
     await dismissTakeover(user);
 
     // The list row: `totalAmount` arrived as the STRING "4500.00".
-    expect(row.textContent).toContain(`GY$${(4500).toLocaleString()}`);
+    expect(row.textContent).toContain(`$${(4500).toLocaleString()}`);
 
     // The detail pane: order total plus each line total (`totalCustomer`).
     await user.click(row);
     await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
-    expect(screen.getByText(`GY$${(4500).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`GY$${(3000).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`GY$${(1000).toLocaleString()}`)).toBeTruthy();
+    expect(within(screen.getByRole('dialog', { name: 'Order details' })).getByText(`$${(4500).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`$${(3000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`$${(1000).toLocaleString()}`)).toBeTruthy();
 
     // The headline guarantee: the letters N-a-N reach no part of this page.
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
@@ -135,7 +135,7 @@ describe('vendor order board — money is never invented', () => {
     mockApi(boardHandler([pickupBoard], pickupDetail));
     const { user } = renderWithQuery(<OrdersPage />);
 
-    await user.click(await screen.findByRole('button', { name: /Ready \/ handoff/ }));
+    await screen.findByRole('region', { name: 'Ready orders' });
     await user.click(await rowFor('SW-1001'));
 
     // HND-003: the hint is driven by `fulfillment`, a field the API DOES send.
@@ -167,7 +167,7 @@ describe('vendor order board — money is never invented', () => {
   it('renders an empty bucket without inventing a figure', async () => {
     mockApi(boardHandler([], wireVendorOrderDetail()));
     renderWithQuery(<OrdersPage />);
-    await screen.findByText(/Nothing in/);
+    expect(await screen.findAllByText('Nothing here right now')).toHaveLength(3);
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
   });
 });
@@ -184,8 +184,7 @@ describe('delivery owner controls', () => {
     });
     const fetchMock = mockApi(deliveryOwnerHandler(detail));
     const { user } = renderWithQuery(<OrdersPage />);
-    const bucket = detail.status === 'PENDING' ? /New/ : /Ready \/ handoff/;
-    await user.click(await screen.findByRole('button', { name: bucket }));
+    await screen.findByRole('region', { name: detail.status === 'PENDING' ? 'New orders' : 'Ready orders' });
     await user.click(await rowFor('SW-1001'));
     await screen.findByRole('region', { name: 'Delivery owner' });
     return { user, fetchMock };
@@ -259,7 +258,7 @@ describe('delivery owner controls', () => {
     const detail = wireVendorOrderDetail({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP' });
     mockApi(deliveryOwnerHandler(detail));
     const { user } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /Ready \/ handoff/ }));
+    await screen.findByRole('region', { name: 'Ready orders' });
     await user.click(await rowFor('SW-1001'));
     expect(screen.queryByRole('region', { name: 'Delivery owner' })).toBeNull();
     expect(screen.getByText(/Customer collects with a pickup code/)).toBeTruthy();
@@ -343,8 +342,8 @@ describe('[W-27] removing a line is not a refund', () => {
     const o = shelf(over);
     mockApi(boardHandler([wireVendorOrder(o)], wireVendorOrderDetail(o)));
     const { user } = renderWithQuery(<OrdersPage />);
-    // A PREPARING order lives in the "In progress" lane; the board opens on New.
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    // Preparing is now visible beside New and Ready; no filter click is needed.
+    await screen.findByRole('region', { name: 'Preparing orders' });
     const row = await rowFor('SW-1001');
     await dismissTakeover(user);
     await user.click(row);
@@ -471,7 +470,7 @@ describe('order detail stays dismissible while its request settles', () => {
       throw new Error(`Unexpected request: ${request.url}`);
     });
     const { user } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await screen.findByRole('region', { name: 'Preparing orders' });
     await user.click(await rowFor('SW-1001'));
     await screen.findByText('Loading…');
     await user.click(screen.getByRole('button', { name: 'Close order detail' }));
@@ -492,7 +491,7 @@ describe('order detail stays dismissible while its request settles', () => {
       throw new Error(`Unexpected request: ${request.url}`);
     });
     const { user } = renderWithQuery(<OrdersPage />);
-    await user.click(await screen.findByRole('button', { name: /In progress/ }));
+    await screen.findByRole('region', { name: 'Preparing orders' });
     await user.click(await rowFor('SW-1001'));
     await screen.findByText(/Could not load this order/);
     await user.click(screen.getByRole('button', { name: 'Retry order detail' }));

@@ -32,9 +32,10 @@ async function signIn(query: string) {
   const phone = screen.getByLabelText('Phone number');
   await user.clear(phone);
   await user.type(phone, '+5926001001');
-  await user.click(screen.getByRole('button', { name: 'Send code' }));
+  // [WEB-REDESIGN] The design's words: Continue, then Verify.
+  await user.click(screen.getByRole('button', { name: 'Continue' }));
   await user.type(await screen.findByLabelText('Verification code'), '246810');
-  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  await user.click(screen.getByRole('button', { name: 'Verify' }));
   await waitFor(() => expect(mocked.replace).toHaveBeenCalledTimes(1));
   return String(mocked.replace.mock.calls[0]?.[0]);
 }
@@ -54,6 +55,8 @@ describe('[Q7b] signing in from the customer app', () => {
     ['Market', '/market'],
     ['a store, on one item', '/order/vendor/v1?item=i1'],
     ['the cart', '/cart'],
+    ['an advertising account', '/advertiser'],
+    ['an advertising campaign', '/advertiser/campaigns/a1/c1'],
   ])('from %s is a customer sign-in that returns there', async (_name, next) => {
     expect(await signIn(`next=${encodeURIComponent(next)}`)).toBe(next);
     expect(mocked.verifyCustomerLogin).toHaveBeenCalledWith('+5926001001', '246810');

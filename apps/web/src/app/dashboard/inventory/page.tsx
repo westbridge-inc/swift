@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
 import { adjustStock, getCategories, getItems, money, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
+import { Pictogram } from '@/components/glyphs';
+import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 
@@ -27,12 +29,12 @@ function StockAdjust({ item, onDone }: { item: CatalogItem; onDone: () => void }
         value={delta || ''}
         onChange={(e) => setDelta(Number(e.target.value))}
         placeholder="+/- qty"
-        className="w-24 rounded-lg border border-black/10 px-2 py-1.5 text-sm"
+        className="w-24 rounded-lg border border-[var(--swift-border)] px-2 py-1.5 text-sm"
       />
       <select
         value={reason}
         onChange={(e) => setReason(e.target.value as AdjustReason)}
-        className="rounded-lg border border-black/10 px-2 py-1.5 text-sm"
+        className="rounded-lg border border-[var(--swift-border)] px-2 py-1.5 text-sm"
       >
         <option value="RECEIVED">Received stock</option>
         <option value="DAMAGED">Damaged</option>
@@ -117,7 +119,7 @@ export default function InventoryPage() {
     <div className="space-y-5">
       <MutationNotice errors={[availMut.error]} />
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-extrabold">Inventory</h1>
+        <h1 className="sw-title">Menu</h1>
         <Link
           href="/dashboard/inventory/import"
           className="flex items-center gap-2 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)]"
@@ -133,13 +135,13 @@ export default function InventoryPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search name or SKU"
-            className="w-full rounded-lg border border-black/10 bg-white py-2 pl-9 pr-3 text-sm"
+            className="w-full rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] py-2 pl-9 pr-3 text-sm"
           />
         </div>
         <select
           value={categoryId}
           onChange={(e) => setCategoryId(e.target.value)}
-          className="rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
+          className="rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-2 text-sm"
         >
           <option value="">All categories</option>
           {(categories.data ?? []).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -151,92 +153,32 @@ export default function InventoryPage() {
         <span className="text-sm text-[var(--swift-muted)]">{list.length} {list.length === 1 ? 'item' : 'items'}</span>
       </div>
 
-      <div className="max-w-full overflow-x-auto rounded-2xl border border-black/5 bg-white">
-        <table className="min-w-[760px] w-full text-sm">
-          <thead className="border-b border-black/5 bg-[var(--swift-subtle)] text-left text-xs uppercase tracking-wide text-[var(--swift-muted)]">
-            <tr>
-              <th className="px-4 py-3">Item</th>
-              <th className="px-4 py-3">Category</th>
-              <th className="px-4 py-3">Price</th>
-              <th className="px-4 py-3">Stock</th>
-              <th className="px-4 py-3">SKU</th>
-              <th className="px-4 py-3">Live</th>
-              <th className="px-4 py-3" />
-            </tr>
-          </thead>
-          <tbody>
-            {items.isLoading && (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--swift-muted)]">Loading…</td></tr>
-            )}
-            {!items.isLoading && list.length === 0 && (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-[var(--swift-muted)]">No items match.</td></tr>
-            )}
-            {list.map((i) => {
-              const low = i.stockQuantity != null && i.stockQuantity <= (i.lowStockThreshold ?? 5);
-              return (
-                <>
-                  <tr key={i.id} className="border-b border-black/5 last:border-0">
-                    <td className="px-4 py-3 font-medium">{i.name}</td>
-                    <td className="px-4 py-3 text-[var(--swift-muted)]">{i.category?.name ?? '—'}</td>
-                    <td className="px-4 py-3">
-                      {editingPrice === i.id ? (
-                        <PriceEdit item={i} onDone={() => { setEditingPrice(null); refresh(); }} />
-                      ) : (
-                        <button onClick={() => setEditingPrice(i.id)} className="font-medium hover:text-[var(--swift-red)] hover:underline">
-                          {money(i.basePrice)}
-                        </button>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      {i.stockQuantity == null ? (
-                        <span className="text-[var(--swift-muted)]">untracked</span>
-                      ) : (
-                        <button
-                          onClick={() => setAdjusting(adjusting === i.id ? null : i.id)}
-                          className={`font-bold hover:underline ${low ? 'text-amber-600' : ''}`}
-                        >
-                          {i.stockQuantity}{low ? ' ⚠' : ''}
-                        </button>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-[var(--swift-muted)]">{i.sku ?? '—'}</td>
-                    <td className="px-4 py-3">
-                      <button
-                        onClick={() => availMut.mutate({ id: i.id, isAvailable: !i.isAvailable })}
-                        disabled={availMut.isPending}
-                        className={`relative h-5 w-9 rounded-full transition-colors ${i.isAvailable ? 'bg-green-500' : 'bg-black/15'}`}
-                        title={i.isAvailable ? 'Live — customers can order it' : 'Hidden / sold out'}
-                      >
-                        <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${i.isAvailable ? 'left-[18px]' : 'left-0.5'}`} />
-                      </button>
-                    </td>
-                    <td className="px-4 py-3">
-                      {i.stockQuantity != null && (
-                        <button
-                          onClick={() => setAdjusting(adjusting === i.id ? null : i.id)}
-                          className="text-xs font-semibold text-[var(--swift-red)] hover:underline"
-                        >
-                          Adjust stock
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                  {adjusting === i.id && (
-                    <tr key={`${i.id}-adjust`}>
-                      <td colSpan={7} className="px-4 pb-3">
-                        <StockAdjust item={i} onDone={() => { setAdjusting(null); refresh(); }} />
-                      </td>
-                    </tr>
-                  )}
-                </>
-              );
-            })}
-          </tbody>
-        </table>
+      {items.isError && <DataUnavailable what="your menu" error={items.error} onRetry={() => void items.refetch()} />}
+      {categories.isError && <DataUnavailable what="your menu categories" error={categories.error} onRetry={() => void categories.refetch()} />}
+      {items.isLoading && <div className="sw-empty" role="status"><span className="sw-skeleton h-24 w-full" />Loading your menu…</div>}
+      {!items.isLoading && !items.isError && !list.length && <p className="sw-board-empty">No items match.</p>}
+      <div className="grid gap-x-8 wide:grid-cols-2">
+        {list.map(i => <article key={i.id} aria-label={i.name} className="border-b border-[var(--swift-border)] py-5">
+          <div className="flex items-center gap-3">
+            <span className="grid h-12 w-12 flex-none place-items-center rounded-xl bg-[var(--swift-sunken)]"><Pictogram name="food" size={26} /></span>
+            <div className={`min-w-0 flex-1 ${i.isAvailable ? '' : 'opacity-60'}`}><h2 className="sw-label">{i.name}</h2><p className="sw-caption">{i.category?.name ?? 'Uncategorised'}</p>
+              {editingPrice === i.id ? <PriceEdit item={i} onDone={() => { setEditingPrice(null); refresh(); }} /> : <button onClick={() => setEditingPrice(i.id)} className="min-h-8 font-semibold hover:underline">{money(i.basePrice)}</button>}
+            </div>
+            <button role="switch" aria-label={`In stock: ${i.name}`} aria-checked={i.isAvailable} onClick={() => availMut.mutate({ id: i.id, isAvailable: !i.isAvailable })} disabled={availMut.isPending}
+              className="grid h-11 w-16 flex-none place-items-center" title={i.isAvailable ? 'Live — customers can order it' : 'Hidden / sold out'}>
+              <span className={`sw-stock-switch ${i.isAvailable ? 'bg-[var(--swift-red)]' : 'bg-[var(--swift-border-strong)]'}`}><span className={`sw-stock-knob ${i.isAvailable ? 'translate-x-5' : ''}`} /></span>
+            </button>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px] text-[var(--swift-muted)]">
+            {!i.isAvailable && <span>Sold out</span>}
+            {i.sku && <span>SKU: {i.sku}</span>}
+            {i.stockQuantity == null ? <span>Stock untracked</span> : <button onClick={() => setAdjusting(adjusting === i.id ? null : i.id)} className="sw-link-btn min-h-8">{i.stockQuantity} in stock · Adjust stock</button>}
+          </div>
+          {adjusting === i.id && <StockAdjust item={i} onDone={() => { setAdjusting(null); refresh(); }} />}
+        </article>)}
       </div>
       <p className="text-xs text-[var(--swift-muted)]">
-        Photos, descriptions, options and new single items are managed in the Swift app — this table is built for fast
-        price / stock / availability work on a big screen.
+        Photos, descriptions, options and new single items are managed in the Swift app — you can edit prices, stock and availability here.
       </p>
     </div>
   );
