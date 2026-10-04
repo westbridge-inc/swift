@@ -54,7 +54,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, tena
 async function approveProviderDocs(userId: string, docTypes = ['national_id', 'police_clearance']) {
   for (const docType of docTypes) {
     await app.prisma.verificationDocument.create({
-      data: { userId, role: 'CUSTOMER', docType, fileUrl: `storage://t/${docType}.jpg`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
+      data: { userId, role: 'CUSTOMER', docType, fileUrl: `verification/${userId}/${docType}.enc`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
     });
   }
 }
@@ -213,7 +213,7 @@ describe('Services — provider verification + qualification badge', () => {
     const u = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     // Only national_id approved — police clearance missing.
     await app.prisma.verificationDocument.create({
-      data: { userId: u.userId, role: 'CUSTOMER', docType: 'national_id', fileUrl: 'storage://t/id.jpg', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
+      data: { userId: u.userId, role: 'CUSTOMER', docType: 'national_id', fileUrl: `verification/${u.userId}/id.enc`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
     });
     let res = await inject('POST', '/api/v1/services/providers', { trade: 'plumber' }, u.token);
     expect(res.json().data.isVerified).toBe(false);
@@ -221,7 +221,7 @@ describe('Services — provider verification + qualification badge', () => {
 
     // Add police clearance → verified on next upsert.
     await app.prisma.verificationDocument.create({
-      data: { userId: u.userId, role: 'CUSTOMER', docType: 'police_clearance', fileUrl: 'storage://t/pc.jpg', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
+      data: { userId: u.userId, role: 'CUSTOMER', docType: 'police_clearance', fileUrl: `verification/${u.userId}/pc.enc`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
     });
     res = await inject('POST', '/api/v1/services/providers', { trade: 'plumber' }, u.token);
     expect(res.json().data.isVerified).toBe(true);

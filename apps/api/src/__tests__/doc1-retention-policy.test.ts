@@ -1,3 +1,4 @@
+import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
 /**
  * [DOC-1 Part I · §9.1 · P1-1] test_retention_policy_per_doc_type
  *
@@ -40,7 +41,7 @@ beforeAll(async () => {
   registerErrorHandler(app);
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(socketPlugin);
   await app.ready();
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(documentMaintenanceScope(app.prisma, users), new NotificationService(app.prisma, app.io), new SandboxKycProvider());
   await system(() => seedDocRegistry(app.prisma));
   await system(() => app.prisma.docType.createMany({ data: [
     {
@@ -90,7 +91,7 @@ describe('[DOC-1 P1-1] retention is a policy row per (country, type, role)', () 
     users.push(u.id);
     const purgeType = await system(() => app.prisma.docType.findUniqueOrThrow({ where: { code: registryCode('GY', 'owner_national_id') }, select: { persistRetentionDays: true, imagePolicy: true } }));
     expect(purgeType.imagePolicy).toBe('PURGE_AFTER_REVIEW'); expect(purgeType.persistRetentionDays).toBeNull(); // → country default
-    const mk = (docType: string) => system(() => app.prisma.verificationDocument.create({ data: { userId: u.id, role: 'VENDOR_OWNER', docType, fileUrl: `x/${RUN}/${docType}`, status: 'APPROVED' } }));
+    const mk = (docType: string) => system(() => app.prisma.verificationDocument.create({ data: { userId: u.id, role: 'VENDOR_OWNER', docType, fileUrl: `/uploads/verification/${u.id}/${docType}.enc`, status: 'APPROVED' } }));
     const personal = await mk('owner_national_id'); const reg = await mk(REGISTRY_TYPE); const tin = await mk(AML_TYPE);
     const before = Date.now();
     expect(await service.scheduleDocumentRetention(u.id)).toBe(3);

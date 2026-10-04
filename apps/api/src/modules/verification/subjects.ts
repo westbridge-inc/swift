@@ -15,6 +15,7 @@
  */
 import type { DocSubjectKind, Prisma, PrismaClient, SubjectRelation } from '@prisma/client';
 import { BUCKET_OF, registryCode } from './doc-registry';
+import { lockPurgeUser, lockDocumentSource } from './purge-fence';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
@@ -164,7 +165,7 @@ export async function backfillSubjects(prisma: PrismaClient, opts: { batch?: num
   for (;;) {
     if (opts.limit !== undefined && scanned >= opts.limit) break;
     const rows = await prisma.verificationDocument.findMany({
-      where: { subjectId: null, ...(skip.size ? { id: { notIn: [...skip] } } : {}) },
+      where: { subjectId: null, legalHoldId: null, activePurgeClaimId: null, imageCompletionClaimId: null, ...(skip.size ? { id: { notIn: [...skip] } } : {}) },
       select: { id: true, userId: true, docType: true, user: { select: { countryCode: true, tenantId: true } } },
       orderBy: { createdAt: 'asc' }, take: batch,
     });
@@ -172,7 +173,10 @@ export async function backfillSubjects(prisma: PrismaClient, opts: { batch?: num
     for (const r of rows) {
       scanned += 1;
       const done = await prisma.$transaction(async (tx) => {
-        const s = await resolveSubject(tx, { userId: r.userId, countryCode: r.user.countryCode, docType: r.docType, tenantId: r.user.tenantId });
+        const user = await lockPurgeUser(tx, r.userId, r.user.tenantId);
+        const doc = await lockDocumentSource(tx, r.id, user.id);
+        if (!doc || doc.subjectId || doc.legalHoldId || doc.activePurgeClaimId || doc.imageCompletionClaimId) return false;
+        const s = await resolveSubject(tx, { userId: user.id, countryCode: user.countryCode, docType: doc.docType, tenantId: user.tenantId });
         if (!s) return false;
         await tx.verificationDocument.updateMany({ where: { id: r.id, subjectId: null }, data: { subjectId: s.subjectId } });
         return true;

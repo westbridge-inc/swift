@@ -1,12 +1,9 @@
 import type { PrismaClient } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
-import { afterAll } from 'vitest';
+import { syntheticDocumentStorage } from './synthetic-verification-storage';
 
-const seeded = new Map<PrismaClient, string[]>();
-afterAll(async () => {
-  for (const [db, keys] of seeded) await db.encryptedObject.deleteMany({ where: { fileKey: { in: keys } } });
-});
+// Permanent source names stay reserved after each synthetic test.
 
 /** Explicit per-subject metadata for tests whose processor is a stub. These
  * fixtures do not claim storage/encryption integration; byte/render suites use
@@ -14,12 +11,13 @@ afterAll(async () => {
 export async function ownedVerificationFixture(db: PrismaClient, userId: string, marker = 'manual'): Promise<string> {
   const label = marker.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 160);
   const fileKey = `/uploads/verification/${userId}/${nanoid(16)}-${label}.enc`;
+  const bytes = Buffer.from(`synthetic ciphertext:${fileKey}`);
   await db.encryptedObject.create({ data: {
-    fileKey, createdBy: userId, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2),
-    wrappedDek: Buffer.alloc(60, 3), mimeType: 'image/jpeg', sizeBytes: 1,
-    sha256: createHash('sha256').update(fileKey).digest('hex'),
+    fileKey, createdBy: userId, storageNamespace: await syntheticDocumentStorage.purgeNamespace(), iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2),
+    wrappedDek: Buffer.alloc(60, 3), mimeType: 'image/jpeg', sizeBytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
   } });
-  seeded.set(db, [...(seeded.get(db) ?? []), fileKey]);
+  syntheticDocumentStorage.objects.set(fileKey, bytes);
   return fileKey;
 }
 

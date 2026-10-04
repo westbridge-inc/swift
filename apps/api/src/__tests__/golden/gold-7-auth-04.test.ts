@@ -10,7 +10,7 @@ import { documentHarness } from './gold-7-documents';
 // its bytes are uploaded through the real encrypted upload route. KYC review
 // itself belongs to AUTH-03. The completed order remains with redacted contact.
 // Phone +5920972nnn: range-audited. Live provider deletion is staging-only;
-// this suite proves the local storage adapter's actual ciphertext deletion.
+// this suite proves ciphertext deletion through a synthetic provider.
 // Append-only deletion receipts remain as the erasure evidence by design.
 // ---------------------------------------------------------------------------
 const h = createGolden('+5920972', 'gold7-auth04');
@@ -70,7 +70,7 @@ describe('GOLD-7 · AUTH-04 — completed-order erasure retry', () => {
     expect(completed.status).toBe('COMPLETED');
     await h.rememberClusters(customer.userId); // deletion removes the membership
     const deleted = await h.call('DELETE', '/api/v1/customer/account', customer.token);
-    expect(deleted.statusCode, deleted.json().error?.code).toBe(200);
+    expect(deleted.statusCode, deleted.body).toBe(200);
     expect(deleted.json()).toMatchObject({ success: true, data: { deleted: true } });
     const tombstone = await h.sys(() => h.app.prisma.user.findUniqueOrThrow({ where: { id: customer.userId } }));
     expect(tombstone).toMatchObject({ status: 'DEACTIVATED', phone: `deleted:${customer.userId}`,

@@ -1,3 +1,4 @@
+import './helpers/synthetic-verification-storage';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -12,7 +13,6 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
-import { getStorageProvider } from '../providers/storage/storage-provider';
 
 // ---------------------------------------------------------------------------
 // [DOC-1 §10.5] test_characterization_legacy_upload_paths
@@ -36,7 +36,6 @@ let adminApp: FastifyInstance; // admin routes (the review surface) — mounted 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const userIds: string[] = [];
 const docIds: string[] = [];
-const uploadedKeys: string[] = [];
 let moverToken = '';
 let adminToken = '';
 const REASON = 'Document review, onboarding queue, ticket GY-8001';
@@ -58,7 +57,7 @@ const approve = (docId: string, payload: Record<string, unknown> = {}) => adminA
   headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON } });
 async function pendingDoc(docType: string) {
   const d = await app.prisma.verificationDocument.create({ data: {
-    userId: userIds[1]!, role: 'RIDER', docType, fileUrl: `verification/${userIds[1]}/${docType}-${RUN}`, status: 'PENDING',
+    userId: userIds[1]!, role: 'RIDER', docType, fileUrl: `verification/${userIds[1]}/${docType}-${RUN}.enc`, status: 'PENDING',
     consentAt: new Date(), privacyNoticeVersion: 'test-1' } });
   docIds.push(d.id); return d;
 }
@@ -94,9 +93,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   delete process.env['MASTER_KEK']; resetKeyProviderForTests();
-  for (const key of uploadedKeys) await getStorageProvider().delete(key).catch(() => {});
   await runWithoutTenant(async () => {
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: userIds } } }).catch(() => {});
+    // Source-name reservations are permanent; the provider is in-memory.
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'doc1').catch(() => 0);
@@ -145,7 +143,6 @@ describe('test_characterization_legacy_upload_paths', () => {
         const up = await uploadAs(moverToken, PNG_1x1, 'image/png');
         expect(up.statusCode, up.body).toBe(200);
         const { url } = up.json().data as { url: string };
-        uploadedKeys.push(url);
         expect(url.endsWith('.enc')).toBe(true);
         const doc = await app.prisma.verificationDocument.create({ data: {
           userId: userIds[1]!, role: 'RIDER', docType: 'national_id', fileUrl: url, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'test-1' } });

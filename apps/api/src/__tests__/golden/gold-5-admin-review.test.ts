@@ -1,10 +1,8 @@
+import '../helpers/synthetic-verification-storage';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import multipart from '@fastify/multipart';
-import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { randomBytes, randomInt } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
@@ -48,17 +46,16 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutabi
 // The two reviewers hold the ADMIN default grant, as the pilot's operators
 // do; the recusal reviewers carry the DOC_REVIEWER preset and the wrong-role
 // operator the SUPPORT preset, exactly as scoped accounts are provisioned. The key service
-// is a per-file test KEK; storage is a per-file temp directory. Fixture range:
-// +5920354nnn (this file only; audited range-aware).
+// is a per-file test KEK; storage is an in-memory ciphertext provider. Fixture range:
+// +5920354 + random run + sequence (this file only).
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONE_PREFIX = '+5920354';
+const PHONE_PREFIX = `+5920354${randomInt(10000, 100000)}`;
 const FIXTURE = 'gold5-admin-review-fixture';
 const TENANT_SLUG_PREFIX = 'gold5-review-';
 const TENANT_B = `${TENANT_SLUG_PREFIX}${nanoid(6).toLowerCase()}`;
 const REASON = { 'x-swift-reason': 'GOLD-5 golden journey: reviewing a partner document' };
-const UPLOAD_DIR = mkdtempSync(path.join(os.tmpdir(), 'swift-gold5-review-'));
 const DOC_TYPE = 'business_registration';
 
 let app: FastifyInstance;
@@ -161,7 +158,9 @@ const caseRow = (id: string) => sys(() => app.prisma.reviewCase.findUniqueOrThro
 async function purgeFixtures() {
   await sys(async () => {
     const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
-    const ids = users.map((u) => u.id);
+    const held = await app.prisma.docLegalHold.findMany({ where: { subjectUserId: { in: users.map((u) => u.id) } }, select: { subjectUserId: true } });
+    const permanent = new Set(held.map((h) => h.subjectUserId));
+    const ids = users.map((u) => u.id).filter((id) => !permanent.has(id));
     if (ids.length > 0) {
       const docs = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
       const cases = (await app.prisma.reviewCase.findMany({ where: { submissionId: { in: docs } }, select: { id: true } })).map((c) => c.id);
@@ -171,13 +170,10 @@ async function purgeFixtures() {
       await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...docs, ...cases, ...vendorIds] } }] }, 'test-cleanup:gold-5-admin-review fixtures');
       await purgeSensitiveReadLogs(app.prisma, { OR: [{ actorUserId: { in: ids } }, { subjectId: { in: docs } }] }, 'test-cleanup:gold-5-admin-review fixture reads');
       await app.prisma.fraudCase.deleteMany({ where: { OR: [{ subjectUserId: { in: ids } }, { submissionId: { in: docs } }] } });
-      await app.prisma.verificationDocument.updateMany({ where: { id: { in: docs } }, data: { legalHoldId: null } });
-      await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: ids } } });
       await app.prisma.enforcementAction.deleteMany({ where: { accountId: { in: ids } } });
       await app.prisma.reviewDecision.deleteMany({ where: { caseId: { in: cases } } });
       await app.prisma.reviewCase.deleteMany({ where: { id: { in: cases } } });
       await app.prisma.verificationDocument.deleteMany({ where: { id: { in: docs } } });
-      await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: ids } } });
       await app.prisma.identityKey.deleteMany({ where: { accountId: { in: ids } } });
       await app.prisma.trialGrant.deleteMany({ where: { accountId: { in: ids } } });
       await app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
@@ -209,7 +205,7 @@ async function purgeFixtures() {
       await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
       await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
     }
-    await app.prisma.tenant.deleteMany({ where: { slug: { startsWith: TENANT_SLUG_PREFIX } } });
+    await app.prisma.tenant.deleteMany({ where: { id: TENANT_B, users: { none: {} } } });
   });
 }
 
@@ -250,7 +246,6 @@ async function allRedisKeys(): Promise<Set<string>> {
 
 beforeAll(async () => {
   vi.stubEnv('MASTER_KEK', randomBytes(32).toString('base64'));
-  vi.stubEnv('UPLOAD_DIR', UPLOAD_DIR);
   resetKeyProviderForTests();
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -284,7 +279,6 @@ afterAll(async () => {
   await app.close();
   vi.unstubAllEnvs();
   resetKeyProviderForTests();
-  rmSync(UPLOAD_DIR, { recursive: true, force: true });
 }, 60_000);
 
 describe('GOLD-5 · ADMIN-01 — partner document review', () => {
@@ -334,9 +328,13 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
       .toEqual([rev1.userId, rev2.userId].sort().map((to) => ({ to, title: 'Verification review needed', kind: 'verification_pending' })));
 
     // FETCH: the queue lists it; the audited view link returns exactly the partner's bytes.
-    const queue = await admin({ method: 'GET', url: '/api/v1/admin/verification/queue?status=PENDING', token: rev1.token });
-    expect(queue.statusCode, queue.body).toBe(200);
-    const listed = (queue.json().data as Array<{ id: string; user: { id: string } }>).find((d) => d.id === docId);
+    const pending = await sys(() => app.prisma.verificationDocument.count({ where: { status: 'PENDING' } }));
+    let listed: { id: string; user: { id: string } } | undefined;
+    for (let page = 1; page <= Math.max(1, Math.ceil(pending / 50)) && !listed; page += 1) {
+      const queue = await admin({ method: 'GET', url: `/api/v1/admin/verification/queue?status=PENDING&limit=50&page=${page}`, token: rev1.token });
+      expect(queue.statusCode, queue.body).toBe(200);
+      listed = (queue.json().data as Array<{ id: string; user: { id: string } }>).find((d) => d.id === docId);
+    }
     expect(listed?.user.id).toBe(partner.userId);
     const link = await admin({ method: 'GET', url: `/api/v1/admin/verification/${docId}/document-url`, token: rev1.token });
     expect(link.statusCode, link.body).toBe(200);

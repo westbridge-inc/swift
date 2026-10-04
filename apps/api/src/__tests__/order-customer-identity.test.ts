@@ -90,12 +90,12 @@ beforeAll(async () => {
     data: { phone: `${PHONE_PREFIX}02`, firstName: 'Bail', lastName: 'Customer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
   });
   customerId = customer.id;
-  const live = await app.prisma.verificationDocument.create({ data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: `storage://t/${nanoid(6)}.jpg`, status: 'APPROVED', reviewedAt: new Date(), kycRef: 'kyc-ref-secret' } });
-  const purged = await app.prisma.verificationDocument.create({ data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: `storage://t/${nanoid(6)}.jpg`, status: 'APPROVED', purgedAt: new Date() } });
+  const live = await app.prisma.verificationDocument.create({ data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: `verification/${customerId}/${nanoid(6)}.enc`, status: 'APPROVED', reviewedAt: new Date(), kycRef: 'kyc-ref-secret' } });
+  const purged = await app.prisma.verificationDocument.create({ data: { userId: customerId, role: 'CUSTOMER', docType: 'national_id', fileUrl: `verification/${customerId}/${nanoid(6)}.enc`, status: 'APPROVED', purgedAt: new Date() } });
   docIds = [live.id, purged.id];
   // A mover document on the same person must NOT ride along: this door opens
   // customer identity for a bailed ORDER, nothing wider.
-  await app.prisma.verificationDocument.create({ data: { userId: customerId, role: 'MOVER', docType: 'police_clearance', fileUrl: `storage://t/${nanoid(6)}.jpg`, status: 'PENDING' } });
+  await app.prisma.verificationDocument.create({ data: { userId: customerId, role: 'MOVER', docType: 'police_clearance', fileUrl: `verification/${customerId}/${nanoid(6)}.enc`, status: 'PENDING' } });
 
   const ownerUser = await app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}03`, firstName: 'Bail', lastName: 'Owner', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });

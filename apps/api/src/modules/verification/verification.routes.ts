@@ -148,27 +148,17 @@ export async function verificationRoutes(app: FastifyInstance) {
 
       const dek = generateDek();
       const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
+      const wrappedDek = new Uint8Array(await keys.wrapDek(dek));
       const { url } = await storage.upload({
-        buffer: ciphertext,
-        // Multipart normalizes empty/path-only names to ''. Appending .enc
-        // would then make a dotfile, which adapters name .bin. The envelope
-        // extension is server-owned and must satisfy object authority.
-        filename: 'verification.enc',
-        mimeType: 'application/octet-stream',
-        folder: `verification/${request.user.userId}`,
-      });
-      await app.prisma.encryptedObject.create({
-        data: {
-          fileKey: url,
-          iv: new Uint8Array(iv),
-          authTag: new Uint8Array(authTag),
-          wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
-          mimeType: file.mimetype,
-          sizeBytes: buffer.length,
-          sha256,
-          createdBy: request.user.userId,
+        buffer: ciphertext, filename: 'verification.enc', mimeType: 'application/octet-stream', folder: `verification/${request.user.userId}`,
+        reserve: async (fileKey, storageNamespace) => {
+          await app.prisma.encryptedObject.create({ data: {
+            fileKey, storageNamespace, uploadState: 'PENDING', iv: new Uint8Array(iv), authTag: new Uint8Array(authTag),
+            wrappedDek, mimeType: file.mimetype, sizeBytes: buffer.length, sha256, createdBy: request.user.userId,
+          } });
         },
       });
+      await app.prisma.encryptedObject.update({ where: { fileKey: url }, data: { uploadState: 'READY' } });
 
       if (dup) {
         // The hash, not the document, goes to admins — never the PII itself.

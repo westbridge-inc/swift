@@ -32,6 +32,7 @@ const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const TENANT = 'swift-default';
+const previousPublicTenant = process.env['PUBLIC_TENANT_ID'];
 
 /** §18.3 seed rules, pinned FROM the spec as literals: [category (slug or kind:KIND), document type, enforcement]. */
 const SPEC_GATES: ReadonlyArray<readonly [string, string, string]> = [
@@ -93,7 +94,7 @@ async function category(slug: string, kind: 'RETAIL' | 'AISLE') {
   return c;
 }
 const licence = (ownerUserId: string, docType: string, expiresAt: Date | null) => runWithTenant(TENANT, () => app.prisma.verificationDocument.create({ data: {
-  userId: ownerUserId, role: 'VENDOR_OWNER', docType, fileUrl: `verification/${RUN}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'test', reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1', expiresAt,
+  userId: ownerUserId, role: 'VENDOR_OWNER', docType, fileUrl: `verification/${ownerUserId}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'test', reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1', expiresAt,
 } }));
 async function customerWithCart(vendorId: string, itemId: string) {
   const customerId = await user(['CUSTOMER'], 'CUSTOMER');
@@ -105,6 +106,7 @@ const checkout = (customerId: string, vendorId: string) => runWithTenant(TENANT,
 const feed = (slug: string) => app.inject({ method: 'GET', url: `/api/v1/market/items?category=${slug}&limit=50` });
 
 beforeAll(async () => {
+  process.env['PUBLIC_TENANT_ID'] = TENANT;
   process.env['NODE_ENV'] = 'test';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -119,6 +121,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (previousPublicTenant === undefined) delete process.env['PUBLIC_TENANT_ID'];
+  else process.env['PUBLIC_TENANT_ID'] = previousPublicTenant;
   await system(async () => {
     await app.prisma.order.deleteMany({ where: { vendorId: { in: vendorIds } } }).catch(() => {});
     await app.prisma.cart.deleteMany({ where: { vendorId: { in: vendorIds } } });
@@ -162,7 +166,7 @@ describe('[DOC-1 P18-2] documents control what can be sold', () => {
     await runWithTenant(TENANT, () => discovery.addItemTag(rum.id, 'alcohol', 'VENDOR'));
     expect((await system(() => blockedCategoryIdsForVendors(app.prisma, TENANT, [s.vendorId]))).get(s.vendorId)?.has(alcohol.id)).toBe(false);
     const listed = await feed('alcohol');
-    expect(listed.statusCode).toBe(200);
+    expect(listed.statusCode, listed.body).toBe(200);
     expect(listed.json().data.items.some((i: { id: string }) => i.id === rum.id)).toBe(true);
     const c1 = await customerWithCart(s.vendorId, rum.id);
     const ok = await checkout(c1, s.vendorId);

@@ -104,6 +104,7 @@ export async function resolveVerificationObject(db: VerificationObjectStore, ref
       ]);
     const object = objects[0];
     if (objects.length !== 1 || !object || object.fileKey !== ref.fileKey || object.createdBy !== ref.userId
+      || object.retiredClaimId !== null || object.uploadState !== 'READY'
       || object.shreddedAt !== null || !object.wrappedDek?.length || object.iv.length !== 12 || object.authTag.length !== 16
       || !/^[a-f0-9]{64}$/i.test(object.sha256) || !Number.isSafeInteger(object.sizeBytes) || object.sizeBytes <= 0
       || !['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(object.mimeType)) {

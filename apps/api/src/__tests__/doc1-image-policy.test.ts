@@ -1,3 +1,5 @@
+import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
+import { syntheticDocumentStorage } from './helpers/synthetic-verification-storage';
 /**
  * [DOC-1 §1.3 · P1-3] test_bucket_drives_image_policy
  *
@@ -55,11 +57,17 @@ async function owner(n: number) {
 async function committed(userId: string, docType: string, extra: Record<string, unknown> = {}) {
   const { getStorageProvider } = await import('../providers/storage/storage-provider');
   const bytes = Buffer.from(`image ${RUN}`);
-  const { url } = await getStorageProvider().upload({ buffer: bytes, filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
-  await app.prisma.encryptedObject.create({ data: {
-    fileKey: url, createdBy: userId, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(60, 3),
-    mimeType: 'image/jpeg', sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
-  } });
+  const { url } = await getStorageProvider().upload({
+    buffer: bytes, filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}`,
+    reserve: async (fileKey, storageNamespace) => {
+      await app.prisma.encryptedObject.create({ data: {
+        fileKey, storageNamespace, uploadState: 'PENDING', createdBy: userId, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(60, 3),
+        mimeType: 'image/jpeg', sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+      } });
+    },
+  });
+  await app.prisma.encryptedObject.update({ where: { fileKey: url }, data: { uploadState: 'READY' } });
+  expect(syntheticDocumentStorage.objects.has(url)).toBe(true);
   return system(() => app.prisma.verificationDocument.create({ data: {
     userId, role: 'VENDOR_OWNER', docType, fileUrl: url, status: 'APPROVED', reviewedBy: 'policy-test', reviewedAt: new Date(), expiresAt: new Date(Date.now() + 100 * DAY), ...extra,
   } }));
@@ -82,19 +90,14 @@ beforeAll(async () => {
   await app.ready();
   const tables = ['subject', 'subject_link', 'person_profile', 'business_profile', 'vehicle_profile', 'document_record'];
   await installDdl(app.prisma, [...tables.flatMap((t) => rlsDdlFor(t)), ...tenantLineageDdl().filter((s) => tables.some((t) => s.includes(`${t}_tenant_matches`))), ...docStateMachineDdl(), ...documentRecordDdl()]);
-  service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+  service = new VerificationService(documentMaintenanceScope(app.prisma, users), new NotificationService(app.prisma, app.io), new SandboxKycProvider());
   await system(() => seedDocRegistry(app.prisma));
 });
 
 afterAll(async () => {
   await system(async () => {
     if (activated.length) await app.prisma.docType.updateMany({ where: { code: { in: activated } }, data: { isActive: false, legalFactsVerifiedAt: null } });
-    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
-    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
-    await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
+    // Retain synthetic hold/claim/source custody records; do not bypass permanent guards.
   });
   await app.close();
 });
@@ -130,12 +133,12 @@ describe('[DOC-1 P1-3] the bucket drives the image policy', () => {
     const held = await committed(u4, PERSONAL, { legalHoldId: hold.id }); await extractedOk(held.id);
 
     // inactive type: nothing happens
-    const before = await system(() => applyImagePolicy(app.prisma, service));
+    const before = await system(() => applyImagePolicy(documentMaintenanceScope(app.prisma, users), service));
     expect((await docOf(target.id)).imagePurgedAt).toBeNull();
     expect(before.purged).toBe(0);
 
     await activate(PERSONAL);
-    const run = await system(() => applyImagePolicy(app.prisma, service));
+    const run = await system(() => applyImagePolicy(documentMaintenanceScope(app.prisma, users), service));
     expect(run.purged).toBeGreaterThanOrEqual(1);
     expect(await docOf(target.id)).toMatchObject({ purgedAt: null, fileUrl: '', state: 'COMMITTED' });
     expect((await docOf(target.id)).imagePurgedAt).not.toBeNull();
@@ -145,7 +148,7 @@ describe('[DOC-1 P1-3] the bucket drives the image policy', () => {
     expect(await system(() => service.isVerifiedForList(u, [PERSONAL]))).toBe(true);
     for (const d of [unextracted, partial, business, held]) expect((await docOf(d.id)).imagePurgedAt, d.docType).toBeNull();
 
-    const again = await system(() => applyImagePolicy(app.prisma, service));
+    const again = await system(() => applyImagePolicy(documentMaintenanceScope(app.prisma, users), service));
     expect(again.purged).toBe(0);
   });
 });

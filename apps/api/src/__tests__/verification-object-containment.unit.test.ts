@@ -9,7 +9,15 @@ import { eraseDocumentsFor } from '../modules/verification/dsar';
 import { retryStorageOrphans } from '../lib/storage-orphans';
 import type { NotificationService } from '../modules/notification/notification.service';
 import { isOwnedAvatarKey, resolveSignupSelfie, resolveVerificationObject } from '../modules/verification/object-authority';
-import { shredAndProbe } from '../modules/verification/purge-receipt';
+import { claimDocumentPurge, probeCommittedPurge, type PurgeStorage } from '../modules/verification/purge-fence';
+
+// Exercise the new committed-authority entry before the external sink.
+async function shredAndProbe(db: PrismaClient, store: PurgeStorage, ref: { fileKey: string; userId: string; documentId: string }) {
+  const user = await db.user.findUniqueOrThrow({ where: { id: ref.userId } });
+  const claim = await claimDocumentPurge(db, store, { documentId: ref.documentId, userId: ref.userId, tenantId: user.tenantId, mode: 'FULL_RETENTION', initiatedBy: 'synthetic-containment-test' });
+  if (!claim) throw Object.assign(new Error('Source unavailable'), { code: 'VERIFICATION_OBJECT_UNAVAILABLE' });
+  return probeCommittedPurge(db, store, claim.id, claim.tenantId);
+}
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
@@ -25,6 +33,7 @@ import { DECLARATION_DOC_TYPE } from '../modules/verification/doc-registry';
 import { openEscrow } from '../modules/safety/deletion-hold';
 
 const storage = vi.hoisted(() => ({
+  purgeNamespace: vi.fn(async () => 'synthetic:containment'),
   upload: vi.fn(), getObject: vi.fn(), delete: vi.fn(), getSignedUrl: vi.fn(),
 }));
 vi.mock('../providers/storage/storage-provider', async (original) => ({ ...await original<object>(), getStorageProvider: () => storage }));
@@ -54,6 +63,7 @@ function referencePage(rows: any[], query: any, column: string) {
 
 function rawSecurityCensus(people: Map<string, any>, orphans: Map<string, any>, query: unknown, values: unknown[]) {
   const sql = String(query);
+  if (sql.includes('purge-global-census-visibility')) return [{ documents: false, objects: false }];
   if (sql.includes('avatar-global-census-visibility') || sql.includes('avatar-obligation-global-census-visibility')) {
     return [{ active: false }];
   }
@@ -90,12 +100,14 @@ function harness() {
     status: 'ACTIVE', avatar: avatar(id), selfieCapturedAt: new Date(),
   }]));
   const objects = new Map([A, B].map((id) => [key(id), {
+    sourceId: `source-${id}`, retiredClaimId: null, uploadState: 'READY', storageNamespace: 'synthetic:containment',
     fileKey: key(id), createdBy: id, wrappedDek: new Uint8Array(60).fill(1),
     shreddedAt: null as Date | null, iv: new Uint8Array(12), authTag: new Uint8Array(16),
     sha256: 'a'.repeat(64), sizeBytes: 1, mimeType: 'image/jpeg', createdAt: new Date(),
   }]));
   const documents: Array<{ id: string; userId: string; fileUrl: string } & Record<string, any>> = [];
   const orphans = new Map<string, any>();
+  const claims = new Map<string, any>();
   const db: any = {
     user: {
       findUnique: vi.fn(async ({ where }: any) => people.get(where.id)),
@@ -112,25 +124,27 @@ function harness() {
         .slice(0, take)),
     },
     encryptedObject: {
-      findUnique: vi.fn(async ({ where }: any) => objects.get(where.fileKey) ?? null),
-      findMany: vi.fn(async (query: any) => referencePage([...objects.values()], query, 'fileKey')),
+      findUnique: vi.fn(async ({ where }: any) => (where.fileKey ? objects.get(where.fileKey) : [...objects.values()].find((o) => o.sourceId === where.sourceId)) ?? null),
+      findMany: vi.fn(async (query: any) => referencePage([...objects.values()].filter((o) => (!query.where?.createdBy || o.createdBy === query.where.createdBy) && (query.where?.retiredClaimId !== null || o.retiredClaimId === null)), query, 'fileKey')),
       findFirst: vi.fn(async () => null), updateMany: vi.fn(async ({ where }: any) => {
         const object = objects.get(where.fileKey);
         if (object) { (object as any).wrappedDek = null; object.shreddedAt = new Date(); }
         return { count: object ? 1 : 0 };
       }),
-      create: vi.fn(async ({ data }: any) => { objects.set(data.fileKey, { ...data, shreddedAt: null, createdAt: new Date() }); }),
+      update: vi.fn(async ({ where, data }: any) => { const o = where.fileKey ? objects.get(where.fileKey) : [...objects.values()].find((v) => v.sourceId === where.sourceId); if (!o) throw new Error('missing source'); Object.assign(o, data); return o; }),
+      create: vi.fn(async ({ data }: any) => { objects.set(data.fileKey, { sourceId: `source-${data.fileKey}`, retiredClaimId: null, uploadState: 'READY', ...data, shreddedAt: null, createdAt: new Date() }); }),
     },
     verificationDocument: {
       findUnique: vi.fn(async ({ where }: any) => documents.find((d) => d.id === where.id)),
-      findFirst: vi.fn(async () => null),
+      findFirst: vi.fn(async ({ where }: any) => documents.find((d) => (!where.id || d.id === where.id) && (!where.userId || d.userId === where.userId) && (!where.fileUrl || d.fileUrl === where.fileUrl)) ?? null),
       findMany: vi.fn(async (query: any) => referencePage(documents.filter((d) =>
         (!query.where?.fileUrl?.in || query.where.fileUrl.in.includes(d.fileUrl))
         && (!query.where?.userId || d.userId === query.where.userId)
         && (query.where?.purgedAt !== null || d['purgedAt'] === null)
         && (query.where?.legalHoldId !== null || d['legalHoldId'] === null)
         && (!query.where?.retentionExpiresAt || d['retentionExpiresAt'] < query.where.retentionExpiresAt.lt)), query, 'id')),
-      create: vi.fn(), update: vi.fn(), updateMany: vi.fn(async () => ({ count: 0 })),
+      count: vi.fn(async ({ where }: any) => documents.filter((d) => (!where.userId || d.userId === where.userId) && (where.OR ? d['fieldsPurgedAt'] == null || d['activePurgeClaimId'] != null : where.fieldsPurgedAt !== null || d['fieldsPurgedAt'] == null)).length),
+      create: vi.fn(), update: vi.fn(async ({ where, data }: any) => { const d = documents.find((v) => v.id === where.id); Object.assign(d!, data); return d; }), updateMany: vi.fn(async () => ({ count: 0 })),
     },
     storageOrphan: {
       findUnique: vi.fn(async ({ where }: any) => where.id
@@ -158,12 +172,23 @@ function harness() {
         orphans.set(row.id, row); return row;
       }),
     },
+    documentPurgeClaim: {
+      count: vi.fn(async ({ where }: any) => [...claims.values()].filter((c) => c.userId === where.userId && c.tenantId === where.tenantId && c.state === where.state && where.sourceId.in.includes(c.sourceId)).length),
+      findUnique: vi.fn(async ({ where }: any) => claims.get(where.id) ?? null),
+      findUniqueOrThrow: vi.fn(async ({ where }: any) => { const c = claims.get(where.id); if (!c) throw new Error('missing claim'); return c; }),
+      findFirst: vi.fn(async ({ where }: any) => [...claims.values()].find((c) => Object.entries(where).every(([k, v]) => c[k] === v)) ?? null),
+      findMany: vi.fn(async ({ where }: any) => [...claims.values()].filter((c) => c.state === where.state && (where.documentId?.not !== null || c.documentId != null))),
+      create: vi.fn(async ({ data }: any) => { const c = { id: `claim-${claims.size}`, state: 'COMMITTED', createdAt: new Date(), ...data }; claims.set(c.id, c); return c; }),
+      update: vi.fn(async ({ where, data }: any) => { const c = claims.get(where.id); Object.assign(c, data); return c; }),
+    },
+    documentPurgeEvent: { create: vi.fn(async ({ data }: any) => data) },
+    docLegalHold: { count: vi.fn(async () => 0) },
     auditLog: { create: vi.fn() }, deletionReceipt: { create: vi.fn(), findFirst: vi.fn() },
     vendor: { count: vi.fn(async () => 0) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
     serviceProvider: { findUnique: vi.fn(async () => null) }, vendorOwner: { findUnique: vi.fn(async () => null) },
     docType: { findUnique: vi.fn(async () => null) },
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },
-    extractionRun: { updateMany: vi.fn() }, extractedField: { updateMany: vi.fn() },
+    extractionRun: { findMany: vi.fn(async () => []), count: vi.fn(async () => 0), updateMany: vi.fn() }, extractedField: { findMany: vi.fn(async () => []), count: vi.fn(async () => 0), updateMany: vi.fn() },
     integritySettings: { findUnique: vi.fn() },
     $transaction: vi.fn(async (fn: any) => fn(db)),
     $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
@@ -193,13 +218,13 @@ function harness() {
   const account = new AccountService({ prisma: db, log, io: {} } as unknown as FastifyInstance);
   const poison = () => {
     const doc = { id: 'poison', userId: A, fileUrl: key(B), docType: 'vehicle_registration',
-      state: 'COMMITTED', status: 'REJECTED', legalHoldId: null, imagePurgedAt: null, purgedAt: null,
+      state: 'COMMITTED', status: 'REJECTED', legalHoldId: null, imagePurgedAt: null, purgedAt: null, fieldsPurgedAt: null, activePurgeClaimId: null, subjectId: null,
       retentionExpiresAt: new Date(0) as Date | null, user: { tenantId: 'tenant-a' } };
     documents.push(doc); return doc;
   };
   storage.getObject.mockResolvedValue(Buffer.from('ciphertext'));
   storage.delete.mockResolvedValue(undefined);
-  storage.upload.mockImplementation(async ({ folder }: any) => ({ url: `/uploads/${folder}/${'a'.repeat(16)}.enc` }));
+  storage.upload.mockImplementation(async ({ folder, reserve }: any) => { const url = `/uploads/${folder}/${'a'.repeat(16)}.enc`; await reserve?.(url, 'synthetic:containment'); return { url }; });
   return { db, people, objects, documents, orphans, provider, service, capture, account, poison, log };
 }
 
@@ -256,6 +281,7 @@ describe('verification object containment at real service boundaries', () => {
       // Independent avatar cleanup is separately authorized; this negative
       // control has no avatar so every storage side effect remains forbidden.
       h.people.get(A)!.avatar = '';
+      h.objects.delete(key(A)); // No unrelated unattached upload in this negative control.
       h.db.$transaction.mockResolvedValueOnce({ alreadyComplete: false, resweep: true, hold: null });
       action = h.account.deleteAccount(A);
     } else {
@@ -290,7 +316,8 @@ describe('verification object containment at real service boundaries', () => {
     const h = harness();
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
     const routes = await handlers(h, verificationRoutes);
-    storage.upload.mockImplementationOnce(async ({ buffer }: any) => {
+    storage.upload.mockImplementationOnce(async ({ buffer, reserve }: any) => {
+      await reserve(key(A), 'synthetic:containment');
       storage.getObject.mockResolvedValue(buffer); return { url: key(A) };
     });
     await routes.get('post /upload')!(uploadRequest(A));
@@ -324,9 +351,11 @@ describe('verification object containment at real service boundaries', () => {
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
     // Exercise the name derivation shared by the real adapters, not a fixed
     // .enc URL that would conceal parser-normalized empty client filenames.
-    storage.upload.mockImplementation(async ({ folder, filename: storedName, buffer }: any) => {
+    storage.upload.mockImplementation(async ({ folder, filename: storedName, buffer, reserve }: any) => {
       storage.getObject.mockResolvedValue(buffer);
-      return { url: `${provider === 'local' ? '/uploads/' : ''}${folder}/${createOpaqueStorageName(storedName)}` };
+      const url = `${provider === 'local' ? '/uploads/' : ''}${folder}/${createOpaqueStorageName(storedName)}`;
+      await reserve(url, 'synthetic:containment');
+      return { url };
     });
     const content = mimetype === 'application/pdf' ? Buffer.from('%PDF-1.7\nsynthetic document')
       : mimetype === 'image/jpeg' ? Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 8, 0, 0, 0, 0, 0, 0])
@@ -433,7 +462,7 @@ describe('verification object containment at real service boundaries', () => {
   });
 
   it('poisoned account avatar cannot delete a verification object', async () => {
-    const h = harness(); h.people.get(A)!.avatar = key(B);
+    const h = harness(); h.people.get(A)!.avatar = key(B); h.objects.delete(key(A));
     const orphan = addOrphan(h, { key: key(B), reason: 'ACCOUNT_AVATAR_AUTHORITY_UNPROVEN' });
     h.db.$transaction.mockResolvedValueOnce({ alreadyComplete: false, resweep: true, hold: null, avatarOrphanId: orphan.id });
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, pendingAvatarObjects: 1 });
@@ -614,7 +643,8 @@ describe('verification object containment at real service boundaries', () => {
     const h = harness(); addOrphan(h, { key: key(A) });
     storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
     expect(await retryStorageOrphans(h.db, storage, h.log)).toBe(1);
-    expect(storage.delete).toHaveBeenCalledWith(key(A)); expect(h.db.storageOrphan.updateMany).toHaveBeenCalledOnce();
+    expect(storage.delete).toHaveBeenCalledWith(key(A)); expect(h.db.storageOrphan.update).toHaveBeenCalledOnce();
+    expect(h.db.documentPurgeClaim.create).toHaveBeenCalledOnce();
   });
 });
 
@@ -731,7 +761,10 @@ describe('existing metadata authority fails closed', () => {
     const h = harness(); const doc = h.poison(); doc.fileUrl = key(A);
     if (fault === 'before-read') storage.getObject.mockRejectedValue(new Error('storage unavailable'));
     else storage.getObject.mockResolvedValueOnce(Buffer.from('ciphertext')).mockRejectedValueOnce(fault === 'after-read' ? new Error('storage unavailable') : { code: 'ENOENT' });
-    if (fault === 'after-metadata') h.db.encryptedObject.findUnique.mockRejectedValue(new Error('metadata unavailable'));
+    if (fault === 'after-metadata') {
+      const read = h.db.encryptedObject.findUnique.getMockImplementation()!;
+      h.db.encryptedObject.findUnique.mockImplementationOnce(read).mockRejectedValueOnce(new Error('metadata unavailable'));
+    }
     const result = await shredAndProbe(h.db, storage, { fileKey: key(A), userId: A, documentId: doc.id });
     expect(result.probe).toBe('FAILED');
     if (fault === 'before-read') expect(storage.delete).not.toHaveBeenCalled();
@@ -744,7 +777,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     h.db.auditLog.create.mockResolvedValue({});
     vi.spyOn(AccountService.prototype, 'deleteAccount').mockResolvedValue({
       deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1,
-      pendingAvatarObjects: 1, message: 'Personal-data erasure pending.',
+      pendingAvatarObjects: 1, pendingVerificationObjects: 0, message: 'Personal-data erasure pending.',
     });
     const routes = await handlers(h, customerRoutes);
     const reply = { code: vi.fn() };
@@ -813,11 +846,13 @@ describe('review corrections: deletion obligations and retry progress', () => {
     const h = accountHarness(); const doc = h.poison(); doc.fileUrl = key(A);
     doc.retentionExpiresAt = new Date(Date.now() + 86_400_000);
     h.person.avatar = '';
+    h.db.extractionRun.findMany.mockResolvedValue([{ id: 'synthetic-run' }]);
+    h.db.extractedField.findMany.mockResolvedValue([{ id: 'synthetic-field' }]);
     const run = { wrappedDek: Buffer.alloc(60, 2) as Buffer | null };
     const field = { valueCt: Buffer.from('synthetic field ciphertext') as Buffer | null };
     for (const [table, row] of [['extractionRun', run], ['extractedField', field]] as const) {
       h.db[table].updateMany.mockImplementation(async ({ where, data }: any) => {
-        expect(where).toEqual({ submissionId: doc.id }); Object.assign(row, data); return { count: 1 };
+        expect(where).toEqual({ submissionId: doc.id, tenantId: 'tenant-a', id: { in: [table === 'extractionRun' ? 'synthetic-run' : 'synthetic-field'] } }); Object.assign(row, data); return { count: 1 };
       });
     }
     let objectPresent = true;
@@ -930,7 +965,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     Object.assign(h.doc, { role: 'CUSTOMER', docType: 'national_id' });
     h.db.$queryRaw.mockImplementation(async (query: unknown, userId: string) => {
       const user = h.people.get(userId);
-      return String(query).includes('FROM "users"') && user ? [{ ...user }] : [];
+      return rawSecurityCensus(h.people, h.orphans, query, [userId]) ?? ((String(query).includes('FROM "users"') || String(query).includes('FROM users')) && user ? [{ ...user }] : []);
     });
     h.db.countryConfig = { findUnique: vi.fn(async () => ({ code: 'GY', dataRetentionDays: 365 })) };
     h.db.docType.findUnique.mockResolvedValue({ persistRetentionDays: null, amlRecordClass: 'NOT_APPLICABLE' });
@@ -1062,7 +1097,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     let resumeRead!: () => void;
     const readPaused = new Promise<void>((resolve) => { resumeRead = resolve; });
     h.db.storageOrphan.findMany.mockImplementationOnce(async () => {
-      expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ documentId: h.doc.id }), expect.stringContaining('erasure pending'));
+      expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ documentId: h.doc.id }), expect.stringContaining('erasure remains pending'));
       expect(h.person.status).toBe('DEACTIVATED'); expect(h.person.firstName).toBe('Synthetic');
       h.objects.set(key(A), meta);
       vi.setSystemTime(new Date(Date.now() + 1));
@@ -1084,7 +1119,8 @@ describe('review corrections: deletion obligations and retry progress', () => {
       return [];
     });
     try {
-      await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
+      const accountResult = await h.account.deleteAccount(A);
+      expect(accountResult).toMatchObject(schedule === 'before-final-cleanup' ? { deleted: true } : { deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
       expect(h.person).toMatchObject({ phone: `deleted:${A}`, firstName: 'Deleted', status: 'DEACTIVATED' });
       resumeRead();
       await expect(reaping).resolves.toBe(1);
@@ -1130,7 +1166,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
   });
 
   it('F-220-01: early tombstoning preserves the original phone in the already-authorized safety escrow', async () => {
-    const h = accountHarness(); h.person.avatar = '';
+    const h = accountHarness(); h.objects.delete(key(A)); // This fixture exercises safety escrow, with no document upload. h.person.avatar = '';
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
     h.db.sosAlert.findMany.mockResolvedValue([{ id: 'synthetic-alert' }]);
     h.db.emergencyContact.findMany = vi.fn(async () => []);
@@ -1160,7 +1196,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     const h = accountHarness(); const doc = h.poison();
     doc.fileUrl = fault === 'legacy' ? `/uploads/verification/${A}/legacy.jpg` : key(A);
     doc.retentionExpiresAt = null; doc.user = h.person;
-    if (fault === 'metadata-missing') h.objects.delete(key(A));
+    if (fault === 'metadata-missing' || fault === 'legacy') h.objects.delete(key(A));
     if (fault === 'metadata-outage') h.db.encryptedObject.findMany.mockRejectedValue(new Error('metadata offline'));
     const originalPointer = doc.fileUrl;
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
@@ -1193,7 +1229,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     await expect(h.service.purgeExpiredDocuments()).rejects.toMatchObject(unavailable);
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(key(A));
     expect(doc.purgedAt).toBeInstanceOf(Date); expect(doc.fileUrl).toBe('');
-    expect(h.db.extractionRun.updateMany).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ where: { submissionId: doc.id } }));
+    expect(h.db.extractionRun.updateMany).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ where: { submissionId: doc.id, tenantId: 'tenant-a', id: { in: [] } } }));
     expect(h.db.deletionReceipt.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: expect.objectContaining({ submissionId: doc.id, verificationProbeResult: 'CONFIRMED_ABSENT' }) }));
     expect(legacy.purgedAt).toBeNull(); expect(legacy.fileUrl).toContain('legacy.jpg');
     expect(h.db.platformConfig.upsert).not.toHaveBeenCalled(); // partial sweep must still alarm
@@ -1208,7 +1244,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
       userId: A, key: i < 6 ? avatar(A) + i : key(A, String(i)), reason: 'ERASURE_PURGE_PROBE_FAILED',
     }));
     for (const row of rows) h.orphans.set(row.id, row);
-    for (const row of rows.slice(6)) h.objects.set(row.key, { ...h.objects.get(key(A))!, fileKey: row.key });
+    for (const row of rows.slice(6)) h.objects.set(row.key, { ...h.objects.get(key(A))!, sourceId: `source-${row.id}`, fileKey: row.key });
     storage.getObject.mockRejectedValue(Object.assign(new Error('absent'), { code: 'ENOENT' }));
     h.db.storageOrphan.findMany.mockImplementation(async ({ take, where, orderBy, cursor, skip }: any) => {
       expect(take).toBeLessThanOrEqual(5);
@@ -1231,7 +1267,8 @@ describe('review corrections: deletion obligations and retry progress', () => {
     storage.getObject.mockRejectedValue(new Error('object store offline'));
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
     expect(doc).toMatchObject({ purgedAt: null, fileUrl: key(A) });
-    expect(h.db.deletionReceipt.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: expect.objectContaining({ verificationProbeResult: 'FAILED' }) }));
+    expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+    expect(h.db.documentPurgeEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ kind: 'PROBE_FAILED' }) }));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();
     expect(h.db.session.deleteMany).toHaveBeenCalledOnce();
     expect(h.db.user.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ phone: `deleted:${A}` }) }));

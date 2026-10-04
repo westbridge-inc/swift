@@ -105,6 +105,8 @@ afterAll(async () => {
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: createdVendorIds } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: createdUserIds } } });
+  // A document never leaves by cascade from its owner: remove these unclaimed fixtures first.
+  await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
   await app.close();
 });

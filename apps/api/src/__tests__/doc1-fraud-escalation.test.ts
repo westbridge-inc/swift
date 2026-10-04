@@ -95,21 +95,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.fraudCase.deleteMany({ where: { subjectUserId: { in: users } } });
-    await app.prisma.enforcementAction.deleteMany({ where: { accountId: { in: users } } });
-    await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
-    await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
-    const docs = await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } });
-    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs.map((d) => d.id) } } } });
-    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.identityKey.deleteMany({ where: { accountId: { in: users } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.admin.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  });
+  // Hold/source provenance is permanent; keep this suite's synthetic custody records.
   await adminApp.close();
   await app.close();
 });

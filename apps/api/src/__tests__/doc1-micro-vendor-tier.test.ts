@@ -1,3 +1,4 @@
+import './helpers/synthetic-verification-storage';
 /**
  * [DOC-1 §3.6 · FD-DOC-1 · P3-2 · E2E-DOC-1] The micro-vendor tier: capped, not bypassed.
  *
@@ -72,7 +73,6 @@ afterAll(async () => {
     await app.prisma.order.deleteMany({ where: { OR: [{ id: { in: orderIds } }, { customerId }] } });
     await app.prisma.documentRecord.deleteMany({ where: { accountId: { in: users } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
     // consent_records is append-only (DCR-1 NR-1): the signature rows stay, keyed to fixture ids
     await app.prisma.vendor.deleteMany({ where: { id: { in: extraVendorIds } } });
     // audit rows are hash-chained and append-only (P20-1): the promotion row stays, as it should
@@ -159,13 +159,13 @@ describe('[DOC-1 P3-2] the micro-vendor tier is capped, not bypassed', () => {
     expect(await system(() => promoteIfRegistered(app.prisma, ownerUserId))).toEqual([]); // no record yet
     // A registration whose record has EXPIRED proves nothing: no promotion.
     const stale = await system(() => app.prisma.verificationDocument.create({ data: {
-      userId: ownerUserId, role: 'VENDOR_OWNER', docType: REGISTRATION_DOC_TYPES[0]!, fileUrl: `storage://t/${RUN}-old.jpg`, status: 'APPROVED', reviewedAt: new Date(), reviewedBy: 'admin-fixture', expiresAt: new Date(Date.now() - 86_400_000),
+      userId: ownerUserId, role: 'VENDOR_OWNER', docType: REGISTRATION_DOC_TYPES[0]!, fileUrl: `/uploads/verification/${ownerUserId}/${RUN}-old.enc`, status: 'APPROVED', reviewedAt: new Date(), reviewedBy: 'admin-fixture', expiresAt: new Date(Date.now() - 86_400_000),
     } as never }));
     expect((await system(() => app.prisma.documentRecord.findFirst({ where: { submissionId: stale.id } })))?.expiresOn).not.toBeNull();
     expect(await system(() => promoteIfRegistered(app.prisma, ownerUserId))).toEqual([]);
     expect((await vendor()).tier).toBe('UNREGISTERED');
     const doc = await system(() => app.prisma.verificationDocument.create({ data: {
-      userId: ownerUserId, role: 'VENDOR_OWNER', docType: REGISTRATION_DOC_TYPES[0]!, fileUrl: `storage://t/${RUN}-reg.jpg`, status: 'APPROVED', reviewedAt: new Date(), reviewedBy: 'admin-fixture',
+      userId: ownerUserId, role: 'VENDOR_OWNER', docType: REGISTRATION_DOC_TYPES[0]!, fileUrl: `/uploads/verification/${ownerUserId}/${RUN}-reg.enc`, status: 'APPROVED', reviewedAt: new Date(), reviewedBy: 'admin-fixture',
     } as never }));
     // The durable record is kept by trigger from the state machine (P4-2); assert it exists before relying on it.
     const record = await system(() => app.prisma.documentRecord.findFirst({ where: { submissionId: doc.id } }));
@@ -225,7 +225,7 @@ describe('[DOC-1 P3-2] the build against the contract: declaration, requirement 
     expect((await post({ tradingName: 'x y', activityClass: 'home_cook', declaredAddress: '2 Stall Row, Georgetown', attestationVersion: 'v1' })).json().error.code).toBe('DECLARATION_EXISTS');
     // The first owner holds a VALID, unexpired registration record (the promotion test expired its earlier one).
     await system(() => app.prisma.verificationDocument.create({ data: {
-      userId: ownerUserId, role: 'VENDOR_OWNER', docType: REGISTRATION_DOC_TYPES[0]!, fileUrl: `storage://t/${RUN}-reg2.jpg`, status: 'APPROVED', reviewedAt: new Date(), reviewedBy: 'admin-fixture',
+      userId: ownerUserId, role: 'VENDOR_OWNER', docType: REGISTRATION_DOC_TYPES[0]!, fileUrl: `/uploads/verification/${ownerUserId}/${RUN}-reg2.enc`, status: 'APPROVED', reviewedAt: new Date(), reviewedBy: 'admin-fixture',
     } as never }));
     const ownerToken = app.jwt.sign({ userId: ownerUserId, role: 'VENDOR_OWNER', jti: nanoid(8) });
     await runWithTenant('swift-default', () => app.prisma.session.create({ data: { userId: ownerUserId, token: ownerToken, refreshToken: nanoid(24), deviceId: `mv1-${NUM}`, deviceType: 'test', expiresAt: new Date(Date.now() + 3_600_000) } }));

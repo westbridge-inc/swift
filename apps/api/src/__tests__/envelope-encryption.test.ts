@@ -1,3 +1,6 @@
+import './helpers/synthetic-verification-storage';
+import { documentMaintenanceScope } from './helpers/document-maintenance-scope';
+import { claimDocumentPurge, probeCommittedPurge } from '../modules/verification/purge-fence';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
@@ -74,13 +77,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();
-  if (userId) {
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: userId } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId } });
-    await app.prisma.session.deleteMany({ where: { userId } });
-    await app.prisma.customer.deleteMany({ where: { userId } });
-    await app.prisma.user.deleteMany({ where: { id: userId } });
-  }
+  // Source reservations and purge custody are permanent.
   await app.close();
 });
 
@@ -192,10 +189,10 @@ describe('encrypted upload → render → shred', () => {
   });
 
   it('crypto-shred makes the document permanently unrecoverable', async () => {
-    await app.prisma.encryptedObject.update({
-      where: { fileKey },
-      data: { wrappedDek: null, shreddedAt: new Date() },
-    });
+    const claim = await claimDocumentPurge(app.prisma, getStorageProvider(), { documentId: docId, userId, tenantId: 'swift-default', mode: 'FULL_ERASURE', initiatedBy: 'envelope-test' });
+    expect(claim).not.toBeNull();
+    await probeCommittedPurge(app.prisma, getStorageProvider(), claim!.id, claim!.tenantId);
+    expect((await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey } })).wrappedDek).toBeNull();
     const minted = mintRenderPath(docId, 60);
     const res = await app.inject({ method: 'GET', url: minted.path });
     expect(res.statusCode).toBe(400);
@@ -217,7 +214,7 @@ describe('retention purge shreds the envelope', () => {
     const { VerificationService } = await import('../modules/verification/verification.service');
     const { NotificationService } = await import('../modules/notification/notification.service');
     const { getKycProvider } = await import('../providers/kyc/kyc-provider');
-    const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+    const svc = new VerificationService(documentMaintenanceScope(app.prisma, [userId]), new NotificationService(app.prisma, app.io), getKycProvider());
     const purged = await svc.purgeExpiredDocuments();
     expect(purged).toBeGreaterThanOrEqual(1);
 
@@ -255,7 +252,6 @@ describe('duplicate-document detection [SWIFT-078]', () => {
     });
     expect(alert).not.toBeNull();
 
-    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: [userB.id] } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: [admin.id, userB.id] } } });
     await app.prisma.session.deleteMany({ where: { userId: userB.id } });
     await app.prisma.user.deleteMany({ where: { id: { in: [admin.id, userB.id] } } });

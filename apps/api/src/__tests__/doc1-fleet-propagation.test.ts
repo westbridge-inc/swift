@@ -69,7 +69,7 @@ async function riderMover(n: number) {
   return u.id;
 }
 const approved = (userId: string, docType: string, extra: Record<string, unknown> = {}) => system(() => app.prisma.verificationDocument.create({ data: {
-  userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${RUN}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'fleet-test', reviewedAt: new Date(),
+  userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${userId}/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'fleet-test', reviewedAt: new Date(),
   expiresAt: new Date(Date.now() + 200 * DAY), ...extra,
 } }));
 const online = (userId: string) => system(() => app.prisma.driver.findUniqueOrThrow({ where: { userId }, select: { isOnline: true } })).then((d) => d.isOnline);
@@ -218,7 +218,7 @@ describe('[High #9 · DS109] adopting another car\'s plate inherits nothing', ()
     expect(subjectB.owned).toBe(false);
     await system(() => app.prisma.verificationDocument.create({ data: {
       userId: b, role: 'MOVER', docType: 'vehicle_registration', subjectId: subjectB.subjectId,
-      fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING',
+      fileUrl: `/uploads/verification/${b}/${nanoid(5)}.enc`, status: 'PENDING',
     } }));
 
     // RED on main: the open ASSIGNED_DRIVER link makes A's approved documents B's — GO allowed.
@@ -351,7 +351,7 @@ describe('[High #9 · DS109] adopting another car\'s plate inherits nothing', ()
     expect(subjectB.owned).toBe(false);
     await system(() => app.prisma.verificationDocument.create({ data: {
       userId: b, role: 'MOVER', docType: 'vehicle_registration', subjectId: subjectB.subjectId,
-      fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING',
+      fileUrl: `/uploads/verification/${b}/${nanoid(5)}.enc`, status: 'PENDING',
     } }));
 
     // RED on main: rider GO used isRoleVerified, whose open link counted A's documents for B.

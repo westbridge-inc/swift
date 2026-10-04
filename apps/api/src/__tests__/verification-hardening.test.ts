@@ -38,7 +38,7 @@ async function makeProvider(trade: string, docs: string[]) {
   for (const docType of docs) {
     await app.prisma.verificationDocument.create({
       data: {
-        userId: user.id, role: 'MOVER', docType, fileUrl: `test/${marker}/${docType}`,
+        userId: user.id, role: 'MOVER', docType, fileUrl: `verification/${user.id}/${docType}-${marker}.enc`,
         status: 'APPROVED', expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
       },
     });
@@ -105,7 +105,7 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
     const doc = await app.prisma.verificationDocument.create({
       data: {
         userId: sparky.id, role: 'MOVER', docType: 'gei_electrical_licence',
-        fileUrl: `test/${marker}/gei`, status: 'PENDING',
+        fileUrl: `verification/${sparky.id}/gei-${marker}.enc`, status: 'PENDING',
       },
     });
     await svc.approveDocument(doc.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
@@ -119,7 +119,7 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
     await app.prisma.verificationDocument.create({
       data: {
         userId: sparky.id, role: 'MOVER', docType: 'gei_electrical_licence',
-        fileUrl: `test/${marker}/gei2`, status: 'APPROVED',
+        fileUrl: `verification/${sparky.id}/gei2-${marker}.enc`, status: 'APPROVED',
         expiresAt: new Date(Date.now() - 60_000), // lapsed a minute ago
       },
     });
@@ -135,7 +135,7 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
     const doc = await app.prisma.verificationDocument.create({
       data: {
         userId: sparky.id, role: 'MOVER', docType: 'gei_electrical_licence',
-        fileUrl: `test/${marker}/gei-replay`, status: 'PENDING',
+        fileUrl: `verification/${sparky.id}/gei-replay-${marker}.enc`, status: 'PENDING',
       },
     });
     const notifications = new NotificationService(app.prisma, app.io);
@@ -179,7 +179,7 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
     const lapsed = await app.prisma.verificationDocument.create({
       data: {
         userId: sparky.id, role: 'MOVER', docType: 'gei_electrical_licence',
-        fileUrl: `test/${marker}/gei-expiry-replay`, status: 'APPROVED',
+        fileUrl: `verification/${sparky.id}/gei-expiry-replay-${marker}.enc`, status: 'APPROVED',
         expiresAt: new Date(Date.now() - 60_000),
       },
     });
@@ -218,7 +218,7 @@ describe('rejection reason codes (spec §9.3)', () => {
   it('templates the message and prefixes the review note with the code', async () => {
     const pro = await makeProvider('mason', []);
     const doc = await app.prisma.verificationDocument.create({
-      data: { userId: pro.id, role: 'MOVER', docType: 'national_id', fileUrl: `test/${marker}/id`, status: 'PENDING' },
+      data: { userId: pro.id, role: 'MOVER', docType: 'national_id', fileUrl: `verification/${pro.id}/id-${marker}.enc`, status: 'PENDING' },
     });
     const rejected = await svc.rejectDocument(doc.id, 'admin-test', 'Top corner cut off.', 'INCOMPLETE');
     expect(rejected.reviewNote).toContain('[INCOMPLETE]');
@@ -234,7 +234,7 @@ describe('review-SLA watchdog (spec §13)', () => {
   it('alerts admins when documents wait past the SLA, silent when fresh', async () => {
     const pro = await makeProvider('welder', []);
     const stale = await app.prisma.verificationDocument.create({
-      data: { userId: pro.id, role: 'MOVER', docType: 'national_id', fileUrl: `test/${marker}/sla`, status: 'PENDING' },
+      data: { userId: pro.id, role: 'MOVER', docType: 'national_id', fileUrl: `verification/${pro.id}/sla-${marker}.enc`, status: 'PENDING' },
     });
     await app.prisma.$executeRaw`UPDATE verification_documents SET "createdAt" = NOW() - INTERVAL '30 hours' WHERE id = ${stale.id}`;
 

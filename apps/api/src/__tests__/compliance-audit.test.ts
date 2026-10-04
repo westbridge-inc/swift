@@ -81,7 +81,7 @@ async function makeMover(opts: { docStatus?: 'APPROVED' | 'EXPIRED' | 'REJECTED'
           userId: user.id,
           role: 'MOVER',
           docType,
-          fileUrl: `test/${marker}/${docType}`,
+          fileUrl: `verification/${user.id}/${docType}-${marker}.enc`,
           status: opts.docStatus,
           expiresAt: opts.docExpiresAt === undefined ? new Date(Date.now() + 365 * 24 * 3600 * 1000) : opts.docExpiresAt,
         },
@@ -171,7 +171,7 @@ describe('runAudit — the invariant check', () => {
         userId: insured.id,
         role: 'MOVER',
         docType: 'vehicle_insurance',
-        fileUrl: `test/${marker}/hire-ins`,
+        fileUrl: `verification/${insured.id}/hire-ins-${marker}.enc`,
         status: 'APPROVED',
         expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
         coverageClass: 'HIRE',
@@ -251,7 +251,7 @@ describe('resolveViolation', () => {
     // an EXPIRED document never returns to APPROVED (the machine refuses EXPIRED → APPROVED).
     const lapsed = await app.prisma.verificationDocument.findMany({ where: { userId: mover.id } });
     await app.prisma.verificationDocument.createMany({ data: lapsed.map((d) => ({
-      userId: d.userId, role: d.role, docType: d.docType, fileUrl: `${d.fileUrl}-renewed`,
+      userId: d.userId, role: d.role, docType: d.docType, fileUrl: `verification/${d.userId}/${d.docType}-${nanoid(8)}.enc`,
       status: 'APPROVED' as const, expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000),
     })) });
     const resolved = await svc.resolveViolation(violation.id);

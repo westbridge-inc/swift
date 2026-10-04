@@ -1,3 +1,4 @@
+import '../helpers/synthetic-verification-storage';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { customAlphabet, nanoid } from 'nanoid';
@@ -96,7 +97,13 @@ export function createGolden(phonePrefix: string, fixture: string) {
         { id: { in: [...createdIds] } },
         { id: { startsWith: `${fixturePrefix}-` } },
       ] }, select: { id: true } });
-      const ids = users.map((u) => u.id);
+      const candidates = users.map((u) => u.id);
+      const [claims, holds] = await Promise.all([
+        app.prisma.documentPurgeClaim.findMany({ where: { userId: { in: candidates } }, select: { userId: true } }),
+        app.prisma.docLegalHold.findMany({ where: { subjectUserId: { in: candidates } }, select: { subjectUserId: true } }),
+      ]);
+      const permanent = new Set([...claims.map((c) => c.userId), ...holds.map((h) => h.subjectUserId)]);
+      const ids = candidates.filter((id) => !permanent.has(id));
       if (!ids.length) return;
       const vendorIds = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: ids } } }, select: { id: true } })).map((v) => v.id);
       const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
@@ -108,7 +115,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       await app.prisma.reviewDecision.deleteMany({ where: { caseId: { in: cases } } });
       await app.prisma.reviewCase.deleteMany({ where: { id: { in: cases } } });
       await app.prisma.verificationDocument.deleteMany({ where: { id: { in: docs } } });
-      await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: ids } } });
+      // Permanent source reservations and claimed/held custody remain.
       await app.prisma.storageOrphan.deleteMany({ where: { userId: { in: ids } } });
       await app.prisma.identityKey.deleteMany({ where: { accountId: { in: ids } } });
       await app.prisma.trialGrant.deleteMany({ where: { accountId: { in: ids } } });

@@ -1,3 +1,6 @@
+import './helpers/synthetic-verification-storage';
+import { VerificationService } from '../modules/verification/verification.service';
+import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 /**
  * [DOC-1 §20.1 · P20-1] test_audit_chain_is_append_only · test_chain_verifier_detects_tampering — DOC-INV-35.
  *
@@ -45,14 +48,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.notification.deleteMany({ where: { userId: adminId } });
-    const docs = await app.prisma.verificationDocument.findMany({ where: { userId: subjectId }, select: { id: true } });
-    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs.map((d) => d.id) } } } });
-    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs.map((d) => d.id) } } });
-    await app.prisma.verificationDocument.deleteMany({ where: { userId: subjectId } });
-    await app.prisma.user.deleteMany({ where: { id: { in: [adminId, subjectId] } } });
-  });
+  // Keep immutable claim/receipt provenance with its subject.
   await app.close();
 });
 
@@ -76,7 +72,7 @@ describe('[DOC-1 P20-1] the tamper-evident audit chain', () => {
     const doc = await runWithTenant('swift-default', () => app.prisma.verificationDocument.create({ data: { userId: subjectId, role: 'VENDOR_OWNER', docType: 'business_registration', fileUrl: '', status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1' } }));
     const kase = await runWithTenant('swift-default', () => app.prisma.reviewCase.create({ data: { submissionId: doc.id, slaDueAt: new Date(Date.now() + 86_400_000) } }));
     await runWithTenant('swift-default', () => app.prisma.reviewDecision.create({ data: { caseId: kase.id, reviewerId: adminId, outcome: 'APPROVE', reasonCode: 'APPROVED', actorFacingCategory: 'APPROVED' } }));
-    await runWithTenant('swift-default', () => app.prisma.deletionReceipt.create({ data: { submissionId: doc.id, subjectId, docTypeCode: 'business_registration', bytesDeleted: 0n, deletedBy: 'reaper', storeLocations: [], verificationProbeResult: 'CONFIRMED_ABSENT' } }));
+    await runWithTenant('swift-default', () => new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider()).purgeDocumentNow({ ...doc, user: { tenantId: 'swift-default' } }, 'reaper', { requireRetentionElapsed: false, shredFields: false }));
     const chained = await entries({ submissionRef: doc.id });
     expect(chained.map((e) => [e.eventType, e.actorRole, e.actorId])).toEqual([['REVIEW_DECISION_APPROVE', 'REVIEWER', adminId], ['DELETION_RECEIPT', 'REAPER', 'reaper']]);
   });
