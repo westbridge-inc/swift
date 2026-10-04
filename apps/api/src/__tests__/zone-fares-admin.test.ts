@@ -501,6 +501,13 @@ describe('[ZONE-FARES] a change prices NEW quotes only — a requested ride keep
         lastLocationUpdate: new Date(), locationSessionId: u.sessionId,
       },
     }));
+    // [#1405] Taking work reads the driver's CURRENT documents: an approved,
+    // unexpired hire-class insurance, as taxi.test.ts's online fixture holds.
+    await sys(() => app.prisma.verificationDocument.create({ data: {
+      userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
+      fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
+      coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
+    } }));
     return { ...u, driverId: driver.id };
   }
 
@@ -552,20 +559,25 @@ describe('[ZONE-FARES] a change prices NEW quotes only — a requested ride keep
     const created = await twoPerson(founder.token, 'POST', '/api/v1/admin/zone-fares', { fromZoneId: zoneA.id, toZoneId: zoneB.id, fare: 3000 });
     expect(created.statusCode, created.body).toBe(200);
     const fareId = created.json().data.id as string;
-    const outcome = await bookChangeAndRide(IN_A, IN_B, async () => {
-      const raised = await twoPerson(founder.token, 'PUT', `/api/v1/admin/zone-fares/${fareId}`, { fromZoneId: zoneA.id, toZoneId: zoneB.id, fare: 4200 });
-      expect(raised.statusCode, raised.body).toBe(200);
-    });
-    expect(outcome).toEqual({
-      booked: 3000,
-      next: 4200,
-      order: { total: 3000, fare: 3000, status: 'DELIVERED' },
-      earnings: [{ type: 'TAXI_FARE', amount: 3000 }],
-      notice: 'You have arrived at your destination. Total fare: $3,000 GYD.',
-    });
-    // and deleting the fare after a booking does not reach back either
-    const removed = await twoPerson(founder.token, 'DELETE', `/api/v1/admin/zone-fares/${fareId}`, { fromZoneId: zoneA.id, toZoneId: zoneB.id });
-    expect(removed.statusCode, removed.body).toBe(200);
+    try {
+      const outcome = await bookChangeAndRide(IN_A, IN_B, async () => {
+        const raised = await twoPerson(founder.token, 'PUT', `/api/v1/admin/zone-fares/${fareId}`, { fromZoneId: zoneA.id, toZoneId: zoneB.id, fare: 4200 });
+        expect(raised.statusCode, raised.body).toBe(200);
+      });
+      expect(outcome).toEqual({
+        booked: 3000,
+        next: 4200,
+        order: { total: 3000, fare: 3000, status: 'DELIVERED' },
+        earnings: [{ type: 'TAXI_FARE', amount: 3000 }],
+        notice: 'You have arrived at your destination. Total fare: $3,000 GYD.',
+      });
+      // and deleting the fare after a booking does not reach back either
+      const removed = await twoPerson(founder.token, 'DELETE', `/api/v1/admin/zone-fares/${fareId}`, { fromZoneId: zoneA.id, toZoneId: zoneB.id });
+      expect(removed.statusCode, removed.body).toBe(200);
+    } finally {
+      // a failure above must not leave this pair behind for the suites after it
+      await sys(() => app.prisma.zoneFare.deleteMany({ where: { id: fareId } }));
+    }
   });
 
   it('a zone\'s per-km rate raised after booking: the ride is paid the booked fare; the next quote is priced at the new rate', async () => {
