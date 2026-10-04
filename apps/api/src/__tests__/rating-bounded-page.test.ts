@@ -106,7 +106,11 @@ describe('MASTER-039 database-bounded ranking', () => {
       expect(res.statusCode, errors.mock.calls.map(([entry]) => (entry as { err?: Error })?.err?.message).join('\n')).toBe(200);
       expect(res.json().data).toHaveLength(2);
       expect(res.json().meta.total).toBe(12);
-      for (const [args] of ratingReads.mock.calls) expect(args?.where?.subjectId?.in?.length).toBeLessThanOrEqual(2);
+      for (const [args] of ratingReads.mock.calls) {
+        const subjects = args?.where?.subjectId;
+        if (!subjects || typeof subjects === 'string' || !Array.isArray(subjects.in)) throw new Error('Expected a bounded subject-ID array');
+        expect(subjects.in.length).toBeLessThanOrEqual(2);
+      }
       for (const [args] of vendorReads.mock.calls) {
         if (args?.take == null) expect((args?.where?.id as { in?: string[] })?.in?.length).toBeLessThanOrEqual(2);
       }
@@ -149,7 +153,11 @@ it('bounds application allocation on a 1,000-vendor population and records page/
     expect(res.statusCode).toBe(200);
     expect(res.json().meta.total).toBe(1000);
     expect(res.json().data).toHaveLength(2);
-    for (const [args] of stats.mock.calls) expect(args?.where?.subjectId?.in?.length).toBeLessThanOrEqual(2);
+    for (const [args] of stats.mock.calls) {
+      const subjects = args?.where?.subjectId;
+      if (!subjects || typeof subjects === 'string' || !Array.isArray(subjects.in)) throw new Error('Expected a bounded subject-ID array');
+      expect(subjects.in.length).toBeLessThanOrEqual(2);
+    }
     const queries = reads.mock.calls.slice(0, 2).map(([q]) => q as Prisma.Sql);
     reads.mockRestore();
     for (const q of queries) console.info('MASTER-039 PLAN', JSON.stringify(await app.prisma.$queryRaw(Prisma.sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${q}`)));

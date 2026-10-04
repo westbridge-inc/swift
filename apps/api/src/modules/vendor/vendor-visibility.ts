@@ -131,10 +131,10 @@ export function visibleVendorSqlForCaller(now = new Date()): Prisma.Sql {
     if (typeof clause.status === 'object' && clause.status && Array.isArray(clause.status.notIn)) {
       return Prisma.sql`s."status"::text NOT IN (${Prisma.join(clause.status.notIn)})`;
     }
-    if (typeof clause.status === 'string' && typeof clause.gracePeriodEnd === 'object' && clause.gracePeriodEnd && clause.gracePeriodEnd.lt instanceof Date) {
+    if (typeof clause.status === 'string' && typeof clause.gracePeriodEnd === 'object' && clause.gracePeriodEnd && 'lt' in clause.gracePeriodEnd && clause.gracePeriodEnd.lt instanceof Date) {
       return Prisma.sql`(s."status"::text = ${clause.status} AND s."gracePeriodEnd" < ${clause.gracePeriodEnd.lt})`;
     }
-    if (typeof clause.autoRenew === 'boolean' && typeof clause.currentPeriodEnd === 'object' && clause.currentPeriodEnd && clause.currentPeriodEnd.lte instanceof Date) {
+    if (typeof clause.autoRenew === 'boolean' && typeof clause.currentPeriodEnd === 'object' && clause.currentPeriodEnd && 'lte' in clause.currentPeriodEnd && clause.currentPeriodEnd.lte instanceof Date) {
       return Prisma.sql`(s."autoRenew" = ${clause.autoRenew} AND s."currentPeriodEnd" <= ${clause.currentPeriodEnd.lte})`;
     }
     throw new Error('Unsupported subscription visibility rule');
