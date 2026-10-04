@@ -47,7 +47,9 @@ import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
-import { assertNoZoneOverlap } from '../rides/fare-zones';
+import {
+  assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
+} from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { readFareBreakdown } from '../rides/taxi-waiting';
 import { createHash } from 'node:crypto';
@@ -221,10 +223,32 @@ const createZoneSchema = z.object({
   // tenant is the caller's — never a body field.
   countryCode: z.string().trim().length(2).transform((c) => c.toUpperCase()).optional(),
   priority: z.number().int().min(0).max(100).optional(),
+  // [ZONE-FARES] The taxi per-km rate for a trip that starts or ends here, in
+  // whole units of the market's currency; null or absent = the market's rate.
+  taxiPerKm: z.number().int().min(ZONE_TAXI_PER_KM_MIN).max(ZONE_TAXI_PER_KM_MAX).nullable().optional(),
+  // [ZONE-FARES] An optional stable id — a lowercase slug, the shape the seeded
+  // zones carry — so a zone drawn here on an existing install can be the very
+  // row a fresh install's seed creates (`cjia-airport`): a later seed run
+  // finds it by id and never adds a second, overlapping copy. Never changed
+  // after creation; absent, the database mints one as before.
+  id: z.string().min(ZONE_ID_MIN).max(ZONE_ID_MAX).regex(ZONE_ID_PATTERN, 'A zone id is a lowercase slug: letters, digits and single hyphens').optional(),
 });
 
-const updateZoneSchema = createZoneSchema.partial().extend({
+// [ZONE-FARES] An id is chosen once, at creation.
+const updateZoneSchema = createZoneSchema.omit({ id: true }).partial().extend({
   isActive: z.boolean().optional(),
+});
+
+// [ZONE-FARES] A fixed zone-to-zone fare, in whole units of the zones' market
+// currency. The pair travels in every write so the second admin reads which
+// two zones they are signing for, and so an approved change cannot land on a
+// different pair than the one reviewed.
+const zoneFarePairSchema = z.object({
+  fromZoneId: z.string().trim().min(1).max(64),
+  toZoneId: z.string().trim().min(1).max(64),
+});
+const zoneFareSchema = zoneFarePairSchema.extend({
+  fare: z.number().int().min(ZONE_FARE_MIN).max(ZONE_FARE_MAX),
 });
 
 const subscriptionsQuerySchema = z.object({
@@ -3089,7 +3113,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const zones = await app.prisma.zone.findMany({
       orderBy: { name: 'asc' },
     });
-    return { success: true, data: zones };
+    // [ZONE-FARES] The money columns (the delivery fees, the taxi per-km) as
+    // numbers, never Decimal strings — see coerceMoney.
+    return { success: true, data: coerceMoney(zones) };
   });
 
   app.post('/zones', { preHandler: [platformControlGuard] }, async (request) => {
@@ -3103,11 +3129,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const zone = await app.prisma.$transaction(async (tx) => {
       const created = await tx.zone.create({
         data: {
+          // [ZONE-FARES] The caller's stable id when given; minted otherwise.
+          ...(body.id !== undefined && { id: body.id }),
           name: body.name,
           description: body.description,
           boundary: body.boundary,
           deliveryBaseFee: body.deliveryBaseFee,
           deliveryPerKm: body.deliveryPerKm,
+          taxiPerKm: body.taxiPerKm ?? null,
           surgeMultiplier: body.surgeMultiplier || 1.0,
           tenantId: market.tenantId,
           countryCode: market.countryCode,
@@ -3120,9 +3149,15 @@ export async function adminRoutes(app: FastifyInstance) {
       // created. (The legacy `CREATE_ZONE` row carried this; nothing else did.)
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
       return created;
+    }).catch((error: unknown) => {
+      // [ZONE-FARES] A chosen id that is already a zone's: say so, never a raw constraint error.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new AppError(409, 'ZONE_ID_TAKEN', 'A zone with this id already exists. Choose another id, or change that zone instead.', { id: body.id ?? null });
+      }
+      throw error;
     });
 
-    return { success: true, data: zone };
+    return { success: true, data: coerceMoney(zone) };
   });
 
   app.put('/zones/:id', { preHandler: [platformControlGuard] }, async (request) => {
@@ -3143,7 +3178,11 @@ export async function adminRoutes(app: FastifyInstance) {
       isActive: body.isActive ?? existing.isActive,
     };
     await assertNoZoneOverlap(app.prisma, merged, id);
-    const termsChanged = (body.boundary !== undefined && JSON.stringify(body.boundary) !== JSON.stringify(existing.boundary)) || (body.priority !== undefined && body.priority !== existing.priority);
+    // [ZONE-FARES] A per-km rate is a pricing term too: changing (or clearing)
+    // it is a new version, like a boundary or a priority.
+    const perKmBefore = existing.taxiPerKm === null ? null : Number(existing.taxiPerKm);
+    const perKmChanged = body.taxiPerKm !== undefined && body.taxiPerKm !== perKmBefore;
+    const termsChanged = (body.boundary !== undefined && JSON.stringify(body.boundary) !== JSON.stringify(existing.boundary)) || (body.priority !== undefined && body.priority !== existing.priority) || perKmChanged;
     // [ADM-002] A zone's boundary and fees are pricing. The audit row commits
     // inside the same transaction as the change it describes.
     const zone = await app.prisma.$transaction(async (tx) => {
@@ -3156,6 +3195,7 @@ export async function adminRoutes(app: FastifyInstance) {
           ...(body.isActive !== undefined && { isActive: body.isActive }),
           ...(body.deliveryBaseFee !== undefined && { deliveryBaseFee: body.deliveryBaseFee }),
           ...(body.deliveryPerKm !== undefined && { deliveryPerKm: body.deliveryPerKm }),
+          ...(body.taxiPerKm !== undefined && { taxiPerKm: body.taxiPerKm }),
           ...(body.surgeMultiplier !== undefined && { surgeMultiplier: body.surgeMultiplier }),
           ...(body.countryCode !== undefined && { countryCode: merged.countryCode }),
           ...(body.priority !== undefined && { priority: body.priority }),
@@ -3166,7 +3206,7 @@ export async function adminRoutes(app: FastifyInstance) {
       return updated;
     });
 
-    return { success: true, data: zone };
+    return { success: true, data: coerceMoney(zone) };
   });
 
   app.delete('/zones/:id', { preHandler: [platformControlGuard] }, async (request) => {
@@ -3187,6 +3227,169 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, message: 'Zone deactivated' };
+  });
+
+  // ─── Zone fares ([ZONE-FARES]) ─────────────────────────────────────────
+  //
+  // A FIXED zone-to-zone taxi fare. When a trip's pickup and dropoff resolve
+  // to a pair with a row here, that fare is the price: it wins over the
+  // country formula and over any per-km rate the two zones set. Directional
+  // on purpose — A → B and B → A are two rows. Until this, the platform seed
+  // was the only writer and nothing could remove a pair; a seeded 2,000
+  // Georgetown Central ↔ South fare contradicted the owner's formula and
+  // could not be taken back.
+  //
+  // Platform pricing (C5): a stated reason, a second admin, and the audit row
+  // inside the transaction that makes the change. A change prices NEW quotes
+  // only: a requested ride froze its fare on the order when it was booked
+  // (rides.service createRideRequest), and nothing re-reads the table for it.
+  //
+  // THE TENANT WALL. The fare table carries no tenant of its own — it is
+  // walled by its zones (tenant-lineage: ZoneFare → Zone) — so every read and
+  // write here names the caller's tenant on BOTH zones explicitly. A fare row
+  // found by id is never trusted until both its zones are proven the caller's.
+
+  const ZONE_OF_FARE = { select: { id: true, name: true, tenantId: true, countryCode: true, isActive: true } } as const;
+  type ZoneOfFare = { id: string; name: string; tenantId: string; countryCode: string; isActive: boolean };
+
+  /** What the console reads: the pair by name and id, the market, the fare as a number. */
+  const zoneFareView = (row: { id: string; fromZoneId: string; toZoneId: string; fare: unknown; updatedBy: string | null; createdAt: Date; updatedAt: Date; fromZone: ZoneOfFare; toZone: ZoneOfFare }) => ({
+    id: row.id,
+    fromZoneId: row.fromZoneId,
+    toZoneId: row.toZoneId,
+    fromZoneName: row.fromZone.name,
+    toZoneName: row.toZone.name,
+    countryCode: row.fromZone.countryCode,
+    fare: decimalToNumber(row.fare),
+    // A fare on an inactive zone prices nothing until the zone serves again.
+    zonesActive: row.fromZone.isActive && row.toZone.isActive,
+    updatedBy: row.updatedBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+
+  /** The two zones of a pair: both the caller's, both in ONE market. A zone of
+   *  another operator reads exactly as a zone that does not exist. */
+  const zonePairOf = async (fromZoneId: string, toZoneId: string): Promise<{ from: ZoneOfFare; to: ZoneOfFare }> => {
+    const tenantId = requireTenantId();
+    const zones = await app.prisma.zone.findMany({ where: { id: { in: [fromZoneId, toZoneId] }, tenantId }, ...ZONE_OF_FARE });
+    const from = zones.find((zone) => zone.id === fromZoneId && zone.tenantId === tenantId);
+    const to = zones.find((zone) => zone.id === toZoneId && zone.tenantId === tenantId);
+    if (!from) throw new NotFoundError('Zone', fromZoneId);
+    if (!to) throw new NotFoundError('Zone', toZoneId);
+    // The fare engine resolves both ends inside ONE market (tenant + country):
+    // a pair across two markets could never price a trip, so it is refused
+    // rather than stored as a fare that silently does nothing.
+    if (from.countryCode !== to.countryCode) {
+      throw new AppError(409, 'ZONE_FARE_MARKET_MISMATCH',
+        `A fixed fare joins two zones of one market; "${from.name}" is in ${from.countryCode} and "${to.name}" is in ${to.countryCode}.`,
+        { fromCountryCode: from.countryCode, toCountryCode: to.countryCode });
+    }
+    return { from, to };
+  };
+
+  /** The ONE selector for a fare by id: the id, and both of its zones the
+   *  caller's. Every read and every write of a fare by id uses it, so another
+   *  operator's fare is never read — the database answers "no such row". */
+  const zoneFareWhere = (id: string, tenantId: string) => ({ id, fromZone: { tenantId }, toZone: { tenantId } });
+
+  /** A fare row of the caller's tenant, or 404 — another operator's fare reads
+   *  exactly as one that does not exist. The explicit check below stays as the
+   *  second wall. */
+  const zoneFareOfTenant = async (id: string) => {
+    const tenantId = requireTenantId();
+    const row = await app.prisma.zoneFare.findUnique({ where: zoneFareWhere(id, tenantId), include: { fromZone: ZONE_OF_FARE, toZone: ZONE_OF_FARE } });
+    if (!row || row.fromZone.tenantId !== tenantId || row.toZone.tenantId !== tenantId) throw new NotFoundError('ZoneFare', id);
+    return row;
+  };
+
+  /** The pair the caller names must be the row's pair: an approved change can
+   *  only land on the pair the second admin read. */
+  const assertSamePair = (row: { fromZoneId: string; toZoneId: string }, pair: { fromZoneId: string; toZoneId: string }) => {
+    if (row.fromZoneId !== pair.fromZoneId || row.toZoneId !== pair.toZoneId) {
+      throw new AppError(409, 'ZONE_FARE_PAIR_MISMATCH',
+        'This fixed fare joins a different pair of zones than the one named. Reload the fares and try again.',
+        { fromZoneId: row.fromZoneId, toZoneId: row.toZoneId });
+    }
+  };
+
+  // The fares, and the zones a fare can join (the console picks the pair from
+  // them and shows each zone's own per-km rate beside its fixed fares).
+  app.get('/zone-fares', { preHandler: [platformControlGuard] }, async () => {
+    const tenantId = requireTenantId();
+    const [rows, zones] = await Promise.all([
+      app.prisma.zoneFare.findMany({
+        where: { fromZone: { tenantId }, toZone: { tenantId } },
+        include: { fromZone: ZONE_OF_FARE, toZone: ZONE_OF_FARE },
+        orderBy: [{ fromZone: { name: 'asc' } }, { toZone: { name: 'asc' } }],
+      }),
+      app.prisma.zone.findMany({
+        where: { tenantId },
+        select: { id: true, name: true, countryCode: true, isActive: true, priority: true, taxiPerKm: true },
+        orderBy: { name: 'asc' },
+      }),
+    ]);
+    return { success: true, data: { fares: rows.map(zoneFareView), zones: coerceMoney(zones) } };
+  });
+
+  app.post('/zone-fares', { preHandler: [platformControlGuard] }, async (request) => {
+    const body = zoneFareSchema.parse(request.body);
+    const { from, to } = await zonePairOf(body.fromZoneId, body.toZoneId);
+    const taken = await app.prisma.zoneFare.findUnique({ where: { fromZoneId_toZoneId: { fromZoneId: from.id, toZoneId: to.id } }, select: { id: true } });
+    const exists = (id: string | null) => new AppError(409, 'ZONE_FARE_EXISTS',
+      'This pair already has a fixed fare. Change that one instead of adding a second.', { id });
+    if (taken) throw exists(taken.id);
+    // [ADM-002] The fare and the row naming who set it commit together.
+    const created = await app.prisma.$transaction(async (tx) => {
+      const row = await tx.zoneFare.create({
+        data: { fromZoneId: from.id, toZoneId: to.id, fare: body.fare, updatedBy: request.user.userId },
+      });
+      // A create has no id in its params: name the row it made, and the pair
+      // and the price as facts — the generic row cannot derive them.
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, {
+        entityId: row.id,
+        extra: { fromZoneId: from.id, toZoneId: to.id, fare: body.fare },
+      });
+      return row;
+    }).catch((error: unknown) => {
+      // Two admins adding the same pair at once: the unique pair index decides.
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw exists(null);
+      throw error;
+    });
+    return { success: true, data: zoneFareView({ ...created, fromZone: from, toZone: to }) };
+  });
+
+  app.put('/zone-fares/:id', { preHandler: [platformControlGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = zoneFareSchema.parse(request.body);
+    const row = await zoneFareOfTenant(id);
+    assertSamePair(row, body);
+    // [ADM-002] The new fare and its audit row (before → after) commit together.
+    const updated = await mutationOrNotFound('ZoneFare', id, () => app.prisma.$transaction(async (tx) => {
+      const next = await tx.zoneFare.update({ where: zoneFareWhere(id, requireTenantId()), data: { fare: body.fare, updatedBy: request.user.userId } });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      return next;
+    }));
+    return { success: true, data: zoneFareView({ ...updated, fromZone: row.fromZone, toZone: row.toZone }) };
+  });
+
+  app.delete('/zone-fares/:id', { preHandler: [platformControlGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const pair = zoneFarePairSchema.parse(request.body ?? {});
+    const row = await zoneFareOfTenant(id);
+    assertSamePair(row, pair);
+    // [ADM-002] The pair goes and the row recording it (its before digest)
+    // commits with it, or neither happens. Trips between the two zones price
+    // by the formula from the next quote.
+    await mutationOrNotFound('ZoneFare', id, () => app.prisma.$transaction(async (tx) => {
+      await tx.zoneFare.delete({ where: zoneFareWhere(id, requireTenantId()) });
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    }));
+    return {
+      success: true,
+      data: { id, fromZoneId: row.fromZoneId, toZoneId: row.toZoneId, deleted: true },
+      message: 'Fixed fare removed. Trips between these zones price by the formula from the next quote.',
+    };
   });
 
   // ─── Subscriptions ─────────────────────────────────────────────────────

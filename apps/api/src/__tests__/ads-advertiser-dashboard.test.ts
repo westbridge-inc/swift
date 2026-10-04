@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { AdsRefundService } from '../modules/ads/refund.service';
+import { mondayOf } from '../modules/ads/ads-weeks';
 
 // Ads §14 — the advertiser-dashboard API. The load-bearing law: the refund
 // PREVIEW must equal what the cancel actually EXECUTES (same assembly, same
@@ -22,9 +23,10 @@ const campaignIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_840_000_000 + Math.floor(Math.random() * 150_000_000);
 
-// A future Monday relative to the anchor dates used across the ads suite.
-const WEEK_FUTURE = new Date('2026-11-02T00:00:00Z'); // Monday, weeks out
-const NOW = new Date('2026-10-05T12:00:00Z');
+// Both injected service calls and the HTTP preview's live clock must see a
+// Monday at least seven days ahead, preserving the full-refund assertion.
+const NOW = new Date();
+const WEEK_FUTURE = new Date(mondayOf(NOW).getTime() + 28 * 86_400_000);
 
 async function makeUser(roles: 'CUSTOMER'[] = ['CUSTOMER']) {
   seq += 1;
