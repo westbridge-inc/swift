@@ -82,7 +82,7 @@ export function GlobalSearch() {
     'w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left text-sm hover:bg-white/10 transition-colors';
 
   return (
-    <div ref={boxRef} className="relative w-96">
+    <div ref={boxRef} className="relative min-w-0 flex-1 max-w-96">
       <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" size={18} />
       <input
         ref={inputRef}
