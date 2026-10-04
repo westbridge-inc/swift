@@ -2,6 +2,7 @@ import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
 import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isReviewSubscription, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
@@ -2944,6 +2945,8 @@ export class BillingService {
    * resuming must not silently reopen a closed account.
    */
   async setBillingRail(subscriptionId: string, method: 'CASH' | 'MOBILE_MONEY', mmgPayerMsisdn?: string) {
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail to choose.
+    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     if (method !== 'CASH' && method !== 'MOBILE_MONEY') {
       throw new AppError(400, 'BILLING_RAIL_UNAVAILABLE', 'Choose cash or mobile money.');
     }
@@ -3074,6 +3077,8 @@ export class BillingService {
    * actor, matching the billing module's top-up precedent.
    */
   async stopBilling(subscriptionId: string, actorUserId: string) {
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no weekly billing to stop.
+    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     return this.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus; autoRenew: boolean; currencyCode: string; updatedAt: Date }>>`
         SELECT "id", "status", "autoRenew", "currencyCode", "updatedAt" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE

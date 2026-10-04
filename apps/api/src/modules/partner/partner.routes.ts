@@ -60,7 +60,6 @@ export async function partnerRoutes(app: FastifyInstance) {
 
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {
-    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError(); // [REVIEW-PARTNER] a demo login keeps its role
     const body = becomeSchema.parse(request.body);
     // [TA-S1-008] Acceptance is a precondition of the authority, not a courtesy of the client.
     if (body.acceptAgreement !== true) {
@@ -103,7 +102,8 @@ export async function partnerRoutes(app: FastifyInstance) {
    * onboarding changes freely.
    */
   app.put('/vehicle', auth, async (request) => {
-    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError(); // [REVIEW-PARTNER] a demo login keeps its role
+    // [REVIEW-PARTNER] Answered before the step-up below; the service (changeVehicleWithAuthority) is the authority.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
     const body = changeVehicleSchema.parse(request.body);
     const userId = request.user.userId;
     const [rider, driver] = await Promise.all([

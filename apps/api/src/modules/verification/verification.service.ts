@@ -2032,6 +2032,8 @@ export class VerificationService {
     if (owner) {
       for (const vendor of owner.vendors) {
         if (!vendor.isVerified) continue;
+        // [REVIEW-PARTNER] The fiction's stores are never billed: no trial is born (createRow would refuse it).
+        if (await this.subscriptions.isFiction({ vendorId: vendor.id })) continue;
         // A newly-live vendor must be searchable now, not at the next boot [SWIFT-UG-SRCH-01].
         const search = new SearchService(this.prisma);
         void search.syncVendor(vendor.id).then(() => search.syncVendorItems(vendor.id)).catch(() => {});
@@ -2055,8 +2057,9 @@ export class VerificationService {
           type: 'PLATE', normalizedValue: normalizePlate(driver.licensePlate), source: 'ONBOARDING_DOC',
         });
       }
-      if (driver) await this.subscriptions.startTrialForDriver(driver.id);
-      if (rider) await this.subscriptions.startTrialForRider(rider.id);
+      // [REVIEW-PARTNER] The fiction's partners are never billed: no trial is born (createRow would refuse it).
+      if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
+      if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
 
   }

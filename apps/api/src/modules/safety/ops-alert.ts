@@ -1,5 +1,5 @@
 import type { PrismaClient, OpsAlertKind } from '@prisma/client';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, isReviewTenantId } from '../notification/notification.service';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { opsAlertCounter, opsAlertGauge } from '../../plugins/observability';
@@ -47,6 +47,11 @@ export async function openOpsAlert(
   input: { kind: OpsAlertKind; tenantId: string | null; sosAlertId?: string | null; title: string; body: string; data: Record<string, unknown>; now?: Date; recipientIds?: string[] },
 ): Promise<{ opsAlertId: string; recipients: number; delivered: number }> {
   const now = input.now ?? new Date();
+  // [REVIEW-PARTNER] The store-review fiction pages no real operator: no obligation, no recipients.
+  if (input.tenantId && await isReviewTenantId(prisma, input.tenantId)) {
+    log().info({ kind: input.kind }, 'review-tenant send suppressed: ops alert');
+    return { opsAlertId: '', recipients: 0, delivered: 0 };
+  }
   // [R048-006] the recipient set is resolvable by the caller (a test seam; production uses the admin resolver)
   const userIds = input.recipientIds ?? (await adminRecipientIds(prisma, input.tenantId));
   const alert = await prisma.opsAlert.create({

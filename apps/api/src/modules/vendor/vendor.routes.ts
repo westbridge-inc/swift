@@ -36,7 +36,7 @@ import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from '../../ut
 import { parseMenuText } from '../../utils/menu-text-parse';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
-import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { ReviewDemoMoneyRefusedError, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
@@ -746,6 +746,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (target.id === request.user.userId) {
       throw new AppError(400, 'SELF_STAFF', 'You already own this store');
     }
+    // [REVIEW-PARTNER] No store membership is granted by, or to, a demo account.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, target.id);
     const existing = await app.prisma.vendorStaff.findUnique({
       where: { vendorId_userId: { vendorId, userId: target.id } },
     });
@@ -776,6 +778,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const body = updateStaffSchema.parse(request.body);
     const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
+    // [REVIEW-PARTNER] No store membership is raised by, or for, a demo account.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, existing.userId);
 
     const member = await app.prisma.vendorStaff.update({
       where: { id: request.params.id },

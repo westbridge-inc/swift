@@ -17,8 +17,9 @@
  * them, exactly as the pack's stores hold none, and every fee or MMG surface
  * answers with the refusal below before any step-up, provider or SMS.
  */
-import type { TenantKind } from '@prisma/client';
+import type { PrismaClient, TenantKind } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 
 export const REVIEW_DEMO_NO_ORDERS = 'REVIEW_DEMO_NO_ORDERS';
 export const REVIEW_DEMO_NO_ORDERS_MESSAGE =
@@ -52,6 +53,18 @@ export class ReviewDemoOrderRefusedError extends AppError {
   }
 }
 
+export const REVIEW_DEMO_NO_SOS = 'REVIEW_DEMO_NO_SOS';
+export const REVIEW_DEMO_NO_SOS_MESSAGE =
+  "This is Swift's App Review demo, so nobody was alerted: no safety team, operator or emergency contact. In a real emergency, call your local emergency number.";
+
+/** [REVIEW-PARTNER] SOS in the fiction: an honest, demo-only answer; nothing is written and nobody is paged. */
+export class ReviewDemoSosError extends AppError {
+  constructor() {
+    super(403, REVIEW_DEMO_NO_SOS, REVIEW_DEMO_NO_SOS_MESSAGE);
+    this.name = 'ReviewDemoSosError';
+  }
+}
+
 export class ReviewDemoMoneyRefusedError extends AppError {
   constructor() {
     super(403, REVIEW_DEMO_NO_MONEY, REVIEW_DEMO_NO_MONEY_MESSAGE);
@@ -71,4 +84,36 @@ export function weeklyFeeMissingRowPolicy(
   otherwise: 'BLOCK' | 'GRANDFATHER',
 ): 'BLOCK' | 'GRANDFATHER' {
   return kind === 'REVIEW' ? 'GRANDFATHER' : otherwise;
+}
+
+/** [REVIEW-PARTNER] Is this account a person of the store-review fiction? A system read (the
+ *  answer must not depend on whose request it runs inside); a missing account is not the fiction. */
+export async function isReviewAccount(prisma: Pick<PrismaClient, 'user'>, userId: string): Promise<boolean> {
+  const user = await runWithoutTenant(
+    () => prisma.user.findUnique({ where: { id: userId }, select: { tenant: { select: { kind: true } } } }),
+    'review-account-seal',
+  );
+  return user?.tenant.kind === 'REVIEW';
+}
+
+/** [REVIEW-PARTNER] The role-grant seal: a demo account never gains a role or a membership. */
+export async function refuseReviewAccountRoleGrant(prisma: Pick<PrismaClient, 'user'>, ...userIds: string[]): Promise<void> {
+  for (const userId of userIds) if (await isReviewAccount(prisma, userId)) throw new ReviewDemoRoleRefusedError();
+}
+
+/** [REVIEW-PARTNER] Does this weekly-fee subscription belong to the store-review fiction? (Its rider, driver or store.) */
+export async function isReviewSubscription(prisma: Pick<PrismaClient, 'subscription'>, subscriptionId: string): Promise<boolean> {
+  const sub = await runWithoutTenant(
+    () => prisma.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: {
+        rider: { select: { user: { select: { tenant: { select: { kind: true } } } } } },
+        driver: { select: { user: { select: { tenant: { select: { kind: true } } } } } },
+        vendor: { select: { tenant: { select: { kind: true } } } },
+      },
+    }),
+    'review-fee-seal',
+  );
+  const kind = sub?.rider?.user.tenant.kind ?? sub?.driver?.user.tenant.kind ?? sub?.vendor?.tenant.kind;
+  return kind === 'REVIEW';
 }

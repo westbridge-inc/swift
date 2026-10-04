@@ -109,7 +109,6 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   /** POST /providers — create/update the caller's provider profile. */
   app.post('/providers', auth, async (request) => {
-    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError(); // [REVIEW-PARTNER] a demo login keeps its role
     const body = providerProfileSchema.parse(request.body);
     const trade = requireCanonicalServiceTrade(body.trade);
     const userId = request.user.userId;
@@ -118,14 +117,16 @@ export async function servicesRoutes(app: FastifyInstance) {
       // so concurrent first saves cannot race the unique upsert, and persist the
       // trade BEFORE evaluating its legal checklist (electricians must never get
       // a base-doc-only verification window on first save or trade change).
-      const users = await tx.$queryRaw<Array<{ id: string; status: string }>>`
-        SELECT "id", "status"::text FROM "users"
-        WHERE "id" = ${userId}
-        FOR UPDATE /* service-provider-profile-authority */
+      const users = await tx.$queryRaw<Array<{ id: string; status: string; tenantKind: string }>>`
+        SELECT u."id", u."status"::text, t."kind"::text AS "tenantKind" FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
+        WHERE u."id" = ${userId}
+        FOR UPDATE OF u /* service-provider-profile-authority */
       `;
       if (!users[0] || users[0].status !== 'ACTIVE') {
         throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot publish a provider profile right now.');
       }
+      // [REVIEW-PARTNER] A demo account never becomes a service provider.
+      if (users[0].tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
       await tx.serviceProvider.upsert({
         where: { userId },
         create: {

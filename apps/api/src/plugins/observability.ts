@@ -237,6 +237,14 @@ export const browserSessionCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [REVIEW-PARTNER] Sends of the store-review fiction stopped at the outbound seal, by channel and reason. */
+export const reviewSendSuppressedCounter = new client.Counter({
+  name: 'swift_review_send_suppressed_total',
+  help: 'Outbound SMS/push/email of the store-review fiction suppressed at the channel seal',
+  labelNames: ['channel', 'reason'] as const,
+  registers: [registry],
+});
+
 export const moneySurfaceCounter = new client.Counter({
   name: 'swift_money_surface_total',
   help: 'Money-surface authority transitions and refusals by event',

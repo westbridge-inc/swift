@@ -9,6 +9,7 @@ import { isProduction } from '../../utils/runtime-mode';
 import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
+import { sealReviewChannels } from './review-seal';
 
 export interface SmsProvider {
   sendSms(to: string, body: string): Promise<{ ref: string }>;
@@ -397,10 +398,11 @@ function getEmailProvider(): EmailProvider {
 export function getChannels(): NotificationChannels {
   const provider = process.env['NOTIFICATION_PROVIDER'] ?? 'dev';
   switch (provider) {
+    // [REVIEW-PARTNER] Every channel handed out is sealed for the store-review fiction (review-seal.ts).
     case 'dev':
-      return { sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() };
+      return sealReviewChannels({ sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() });
     case 'twilio':
-      return { sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: getEmailProvider() };
+      return sealReviewChannels({ sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: getEmailProvider() });
     default:
       throw new Error('Unknown NOTIFICATION_PROVIDER');
   }
