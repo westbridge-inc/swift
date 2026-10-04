@@ -1,6 +1,8 @@
 import type { PrismaClient } from '@prisma/client';
 import { applySeedPlan, buildSeedPlan, type ApplyOptions, type DesiredConfig, type SeedPlan } from './seed-plan';
 import { isProduction } from '../../utils/runtime-mode';
+import { DEFAULT_DELIVERY_RATES } from '../../utils/markup';
+import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
 
 /**
  * The platform SPINE — the rows a Swift database cannot function without,
@@ -26,6 +28,8 @@ import { isProduction } from '../../utils/runtime-mode';
  */
 
 /** Bump when any value below changes; recorded with every apply.
+ *  2026-10-01.1: the owner's Georgetown fares — Guyana's taxiRates, and the
+ *  delivery columns a fresh Georgetown Central zone is created with.
  *  2026-10-01.2 [ZONE-FARES]: the CJIA and Ogle airport zones with their own
  *  taxi per-km rate, and no fixed zone-to-zone fares at all (the Georgetown
  *  Central ↔ South 2,000 pair is gone). */
@@ -82,6 +86,9 @@ const peggedMarketAnchor = {
   largeVendor: 30000,
   departmentVendor: 50000,
 };
+// The same for taxi: the pegged markets keep the launch taxi card (GYD) they
+// were derived from. Guyana's own fare is DEFAULT_TAXI_RATES (below).
+const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
 
 /**
  * The LAUNCH document checklists, as code. The CountryConfig row carries a copy the
@@ -146,7 +153,9 @@ export function desiredPlatformConfig(): DesiredConfig {
   // entry is the one trade-specific requirement; every other trade falls back
   // to the SERVICE_PROVIDER checklist.
   const guyanaChecklists = DEFAULT_DOCUMENT_CHECKLISTS;
-  const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
+  // Guyana's taxi fare IS the code default (one place, country/pricing-config):
+  // a fresh database starts on it, and its first quote records it as version 1.
+  const guyanaTaxiRates = { ...DEFAULT_TAXI_RATES };
   const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
   const guyanaCashRules = {
     maxClaimsPerRiderPerMonth: 3,
@@ -198,7 +207,12 @@ export function desiredPlatformConfig(): DesiredConfig {
     largeVendor: peggedMarketAnchor.largeVendor / gydPerUsd,
     departmentVendor: peggedMarketAnchor.departmentVendor / gydPerUsd,
   };
-  const USD_TAXI = { base: 1000 / gydPerUsd, perKm: 300 / gydPerUsd, perMin: 25 / gydPerUsd, minimum: 1500 / gydPerUsd };
+  const USD_TAXI = {
+    base: peggedTaxiAnchor.base / gydPerUsd,
+    perKm: peggedTaxiAnchor.perKm / gydPerUsd,
+    perMin: peggedTaxiAnchor.perMin / gydPerUsd,
+    minimum: peggedTaxiAnchor.minimum / gydPerUsd,
+  };
   const USD_FLOAT = { l1: 8000 / gydPerUsd, l2: 20000 / gydPerUsd, l3: 40000 / gydPerUsd };
   const niceRound = (n: number) => {
     if (n >= 1000) return Math.round(n / 100) * 100;
@@ -281,8 +295,11 @@ export function desiredPlatformConfig(): DesiredConfig {
           name: 'Georgetown Central',
           description: 'Central Georgetown delivery zone',
           boundary: { type: 'Polygon', coordinates: [[[-58.18, 6.78], [-58.13, 6.78], [-58.13, 6.83], [-58.18, 6.83], [-58.18, 6.78]]] },
-          deliveryBaseFee: 500,
-          deliveryPerKm: 200,
+          // No price reads these two zone columns (delivery prices from
+          // CountryConfig.deliveryRates, else DEFAULT_DELIVERY_RATES); a fresh
+          // zone still shows the same schedule, read from that one place.
+          deliveryBaseFee: DEFAULT_DELIVERY_RATES.baseFee,
+          deliveryPerKm: DEFAULT_DELIVERY_RATES.perKmRate,
         },
       },
       {

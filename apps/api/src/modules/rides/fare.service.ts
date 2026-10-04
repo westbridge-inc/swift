@@ -76,13 +76,15 @@ export function applyClassMultiplier(baseFare: number, multiplier: number, baseM
 }
 
 /**
- * The country formula, applied ONCE to ONE trip: the base and the minimum
- * once, the trip's billable kilometres and minutes, one cash-friendly
- * rounding to 100. A ride with stops is one trip over its whole route: it
- * comes here once, never once per leg — no fee per stop, none for waiting.
+ * The country formula, applied ONCE to ONE trip: the base, the kilometres it
+ * includes and the minimum once, the trip's billable kilometres and minutes,
+ * one cash-friendly rounding to 100. A ride with stops is one trip over its
+ * whole route: it comes here once, never once per leg — no fee per stop,
+ * none for waiting. With no included kilometres (0, or unnamed) the formula
+ * is exactly what it was before they existed.
  */
 export function formulaFare(rates: TaxiRates, billableKm: number, durationMin: number): number {
-  const raw = rates.base + rates.perKm * billableKm + rates.perMin * durationMin;
+  const raw = rates.base + rates.perKm * Math.max(0, billableKm - (rates.includedKm ?? 0)) + rates.perMin * durationMin;
   return assertSaneFare(Math.max(rates.minimum, Math.round(raw / 100) * 100), 'formula');
 }
 
