@@ -1,3 +1,7 @@
+# Explicit alternative to the default S3-compatible topology.
+# Always combine -f docker-compose.yml -f docker-compose.storage-local.yml;
+# base Compose alone intentionally refuses local storage. pilot-up.sh keeps
+# the base-only S3 path; selecting this overlay is an operator cutover.
 # Optional managed-local storage topology. This is not an activation or
 # migration command. Before selecting this overlay, inventory existing
 # references and bytes, copy them into the designated external volume, and
