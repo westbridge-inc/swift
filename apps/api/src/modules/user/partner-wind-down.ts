@@ -1,39 +1,10 @@
 import type { Prisma } from '@prisma/client';
 
-/**
- * [Apple 5.1.1(v)] A mover or vendor can close their own account.
- *
- * They could not. `deleteAccount` refused every non-CUSTOMER role outright:
- *
- *   PARTNER_ACCOUNT — "Mover and vendor accounts are closed through Support,
- *   so payouts and listings are handled correctly."
- *
- * The app has a Delete account button, so a driver pressing it was told to
- * write an email. App Review guideline 5.1.1(v) requires that an app which
- * lets you CREATE an account lets you delete it IN the app, and states plainly
- * that pointing at support does not satisfy it. Swift creates mover and vendor
- * accounts, so this is not a nicety — it is a rejection, and the file already
- * said so in a comment while nothing acted on it.
- *
- * The refusal was not wrong about the risk, only about the remedy. A partner
- * genuinely does hold things a customer does not, and they divide cleanly:
- *
- *   MONEY IN FLIGHT — blocks. Cash they are holding on someone else's behalf,
- *   a settlement neither side has confirmed, earnings owed to them. Erasing
- *   over any of these either loses somebody's money or takes the person's own.
- *   Each is finite and ends on its own; none needs an email to Support.
- *
- *   EVERYTHING ELSE — winds down. A live storefront, staff with keys, an
- *   active subscription. These are consequences of leaving, not reasons to
- *   refuse, and the same file already winds down ad campaigns and vendor staff
- *   for exactly this reason (LAUNCH-2).
- *
- * The obligations are enumerated in the caller's transaction, under the same
- * user row lock as the safety holds, so a settlement opened concurrently with
- * a deletion is either seen or waits behind the lock.
+/** Account closure preserves financial history. Earnings describe direct payments
+ * between participants; Swift holds no balance to pay out. Only open cash
+ * obligations block erasure. The caller also checks live work under authority locks.
  */
-
-export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'EARNINGS_OWED'] as const;
+export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH'] as const;
 export type PartnerBlocker = (typeof PARTNER_BLOCKERS)[number];
 
 export interface PartnerObligations {
@@ -41,7 +12,7 @@ export interface PartnerObligations {
   committedFloat: number;
   /** Cash handovers neither the rider nor the store has closed out. */
   unsettledCashCount: number;
-  /** Earnings owed TO them: PENDING or AVAILABLE, never PAID_OUT. */
+  /** Historical direct-payment earnings; not a Swift payout obligation. */
   earningsOwed: number;
 }
 
@@ -62,7 +33,6 @@ export function verdictFor(o: PartnerObligations): PartnerDeletionVerdict {
   const blockers: PartnerBlocker[] = [];
   if (o.committedFloat > 0) blockers.push('CASH_HELD');
   if (o.unsettledCashCount > 0) blockers.push('UNSETTLED_CASH');
-  if (o.earningsOwed > 0) blockers.push('EARNINGS_OWED');
   return { blockers, clear: blockers.length === 0 };
 }
 
@@ -75,11 +45,9 @@ export function verdictFor(o: PartnerObligations): PartnerDeletionVerdict {
  */
 export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
   CASH_HELD:
-    'You are holding vendor cash from a delivery that has not been settled. Hand it in — the account closes as soon as your float is back to zero.',
+    'You are holding vendor cash from a delivery that has not been settled. Hand it in, then return here to delete your account. Use Get help if you cannot resolve the handover.',
   UNSETTLED_CASH:
-    'A cash handover is still open between you and a store. Confirm it in Settlements, and this closes on its own.',
-  EARNINGS_OWED:
-    'You have earnings that have not been paid out yet. Deleting now would forfeit them — request the payout first, and close the account once it lands.',
+    'A cash settlement is still open between you and a store. Confirm the handover, then return here to delete your account. Use Get help if the other party cannot confirm.',
 };
 
 /** The whole refusal, as one sentence a person can act on. */
@@ -90,8 +58,8 @@ export function refusalMessage(blockers: PartnerBlocker[]): string {
 /**
  * Read the obligations inside the caller's transaction.
  *
- * `rider` may be absent (a vendor-only partner) and that is not an obligation:
- * a person with no rider row holds no float and is owed no delivery earnings.
+ * Inspect both sides of a cash handover, including a vendor-only partner.
+ * Historical earnings are kept; they are not a balance held by Swift.
  */
 export async function partnerObligations(
   tx: Prisma.TransactionClient,
@@ -101,26 +69,19 @@ export async function partnerObligations(
     where: { userId },
     select: { id: true, committedFloat: true },
   });
-  if (!rider) return { committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0 };
+  if (!rider && await tx.vendor.count({ where: { owner: { userId } } }) === 0) {
+    return { committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0 };
+  }
 
-  const [unsettled, owed] = await Promise.all([
-    tx.deliveryCashSettlement.count({
-      // SETTLED is the only terminal state. OWED, RIDER_CONFIRMED and
-      // STORE_CONFIRMED all mean one side is still waiting on the other.
-      where: { riderId: rider.id, status: { not: 'SETTLED' } },
-    }),
-    tx.earning.aggregate({
-      // PAID_OUT is money that has already reached them. PENDING and AVAILABLE
-      // are both still owed, and deleting over either forfeits it.
-      where: { riderId: rider.id, status: { in: ['PENDING', 'AVAILABLE'] } },
-      _sum: { amount: true },
-    }),
-  ]);
-
+  const unsettled = await tx.deliveryCashSettlement.count({
+    where: { status: { not: 'SETTLED' }, OR: [
+      ...(rider ? [{ riderId: rider.id }] : []), { vendor: { owner: { userId } } },
+    ] },
+  });
   return {
-    committedFloat: Number(rider.committedFloat ?? 0),
+    committedFloat: Number(rider?.committedFloat ?? 0),
     unsettledCashCount: unsettled,
-    earningsOwed: Number(owed._sum.amount ?? 0),
+    earningsOwed: 0,
   };
 }
 
@@ -188,7 +149,7 @@ export async function windDownPartner(
       : Promise.resolve({ count: 0 }),
     vendorIds.length
       ? prisma.vendor.updateMany({
-          where: { id: { in: vendorIds }, status: { not: 'SUSPENDED' } },
+          where: { id: { in: vendorIds } },
           data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false },
         })
       : Promise.resolve({ count: 0 }),
@@ -196,6 +157,20 @@ export async function windDownPartner(
       ? prisma.vendorStaff.deleteMany({ where: { vendorId: { in: vendorIds } } })
       : Promise.resolve({ count: 0 }),
   ]);
+
+  // Retain mover rows and their earnings/FKs, but remove live location,
+  // vehicle identity and personal payment destinations after account closure.
+  if (rider) await prisma.rider.update({ where: { id: rider.id }, data: {
+    isOnline: false, isAvailable: false, locationSessionId: null,
+    currentLat: null, currentLng: null, lastLocationUpdate: null,
+    licensePlate: null,
+  } });
+  if (driver) await prisma.driver.update({ where: { id: driver.id }, data: {
+    isOnline: false, isAvailable: false, locationSessionId: null,
+    currentLat: null, currentLng: null, lastLocationUpdate: null,
+    licensePlate: 'Deleted', mmgPayUrl: null, mmgPayUrlPending: null,
+    mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null,
+  } });
 
   return {
     vendorsClosed: vendors.count,

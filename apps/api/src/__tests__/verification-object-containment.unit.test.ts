@@ -31,7 +31,7 @@ vi.mock('../providers/storage/storage-provider', async (original) => ({ ...await
 vi.mock('../modules/notification/notification.service', () => ({
   NotificationService: class {}, notifyAdmins: vi.fn(), tenantOfUser: vi.fn(async () => 'tenant-a'),
 }));
-vi.mock('../modules/user/partner-wind-down', () => ({ windDownPartner: vi.fn(async () => null) }));
+vi.mock('../modules/user/partner-wind-down', async (original) => ({ ...await original<object>(), windDownPartner: vi.fn(async () => null) }));
 
 const A = 'subject-a';
 const B = 'subject-b';
@@ -159,7 +159,7 @@ function harness() {
       }),
     },
     auditLog: { create: vi.fn() }, deletionReceipt: { create: vi.fn(), findFirst: vi.fn() },
-    vendor: { count: vi.fn(async () => 0) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
+    vendor: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => ({ count: 0 })) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
     serviceProvider: { findUnique: vi.fn(async () => null) }, vendorOwner: { findUnique: vi.fn(async () => null) },
     docType: { findUnique: vi.fn(async () => null) },
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },

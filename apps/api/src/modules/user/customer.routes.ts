@@ -871,8 +871,20 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
+  app.post('/account/closure-request', async (request: AuthRequest, reply) => {
+    const result = await account.requestClosure(request.user.userId);
+    reply.code(202);
+    return { success: true, data: result };
+  });
+
   app.delete('/account', async (request: AuthRequest, reply) => {
-    const result = await account.deleteAccount(request.user.userId);
+    const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
+      const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      if (user?.phone !== `deleted:${request.user.userId}`) throw error;
+      app.log.error({ err: error, userId: request.user.userId }, 'Account erasure pending automatic retry');
+      return { deleted: false, status: 'PENDING_ACCOUNT_ERASURE' as const,
+        message: 'Your account is closed. Personal-data erasure is pending and will be retried automatically; no further sign-in is needed.' };
+    });
     if (!result.deleted) reply.code(202);
     // Leave an audit trail (the de-identified row is retained, so its id stays a
     // valid FK). Best-effort; a pending document obligation is not completion.
@@ -880,11 +892,13 @@ export async function customerRoutes(app: FastifyInstance) {
       .create({
         data: {
           userId: request.user.userId,
-          action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
+          action: result.status === 'CLOSURE_REQUESTED' ? 'ACCOUNT_CLOSURE_REQUESTED'
+            : result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
           entity: 'User',
           entityId: request.user.userId,
           changes: {
             reason: 'DPA right to erasure (self-serve)',
+            ...(result.status && { status: result.status }),
             ...(result.status === 'PENDING_DOCUMENT_ERASURE' && {
               status: result.status,
               pendingDocuments: result.pendingDocuments,

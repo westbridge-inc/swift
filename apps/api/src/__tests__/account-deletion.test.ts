@@ -9,6 +9,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { AccountService } from '../modules/user/account.service';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ afterAll(async () => {
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
   await app.prisma.address.deleteMany({ where: { userId: { in: createdUserIds } } });
+  await app.prisma.supportTicket.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
@@ -219,7 +221,11 @@ describe('D9-05 — account deletion (erasure)', () => {
     });
 
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(202);
+    expect(res.json().data.status).toBe('CLOSURE_REQUESTED');
+    expect(await app.prisma.session.count({ where: { userId: u.userId } })).toBe(1);
+    // Authorized closure completion retains the existing wind-down invariants.
+    await new AccountService(app).deleteAccount(u.userId);
 
     const afterCampaign = await app.prisma.adCampaign.findUnique({ where: { id: campaign.id } });
     expect(afterCampaign?.status).toBe('PAUSED'); // stops serving; NOT cancelled — no refund/inventory money moves on an erasure
@@ -244,7 +250,8 @@ describe('D9-05 — account deletion (erasure)', () => {
     });
     advertiserIds.push(adv.id);
 
-    expect((await inject('DELETE', '/api/v1/customer/account', owner.token)).statusCode).toBe(200);
+    expect((await inject('DELETE', '/api/v1/customer/account', owner.token)).statusCode).toBe(202);
+    await new AccountService(app).deleteAccount(owner.userId);
 
     const afterAdv = await app.prisma.advertiser.findUnique({ where: { id: adv.id } });
     expect(afterAdv?.status).toBe('APPROVED'); // the company still has an owner

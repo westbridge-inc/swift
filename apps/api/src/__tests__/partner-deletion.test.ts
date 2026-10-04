@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -8,6 +8,9 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import type { PrismaClient } from '@prisma/client';
+import { retryAccountErasures } from '../modules/user/account-erasure-retry';
+import { AccountService } from '../modules/user/account.service';
 import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS } from '../modules/user/partner-wind-down';
 
 // ---------------------------------------------------------------------------
@@ -26,6 +29,7 @@ import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS } from '.
 let app: FastifyInstance;
 const userIds: string[] = [];
 const orderIds: string[] = [];
+const vendorIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_817_000_000 + Math.floor(Math.random() * 100_000_000);
 
@@ -90,10 +94,11 @@ beforeAll(async () => {
 afterAll(async () => {
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: userIds } }, select: { id: true } });
   const riderIds = riders.map((r) => r.id);
-  await app.prisma.earning.deleteMany({ where: { riderId: { in: riderIds } } });
-  await app.prisma.deliveryCashSettlement.deleteMany({ where: { riderId: { in: riderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+  await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.subscription.deleteMany({ where: { riderId: { in: riderIds } } });
+  await app.prisma.supportTicket.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
@@ -106,10 +111,10 @@ describe('[5.1.1v] the verdict, without a database', () => {
     expect(verdictFor({ committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0 }).clear).toBe(true);
   });
 
-  it('blocks on each kind of money, separately', () => {
+  it('blocks on unsettled cash but not direct-payment earnings records', () => {
     expect(verdictFor({ committedFloat: 500, unsettledCashCount: 0, earningsOwed: 0 }).blockers).toEqual(['CASH_HELD']);
     expect(verdictFor({ committedFloat: 0, unsettledCashCount: 1, earningsOwed: 0 }).blockers).toEqual(['UNSETTLED_CASH']);
-    expect(verdictFor({ committedFloat: 0, unsettledCashCount: 0, earningsOwed: 250 }).blockers).toEqual(['EARNINGS_OWED']);
+    expect(verdictFor({ committedFloat: 0, unsettledCashCount: 0, earningsOwed: 250 }).blockers).toEqual([]);
   });
 
   it('reports every blocker at once, not the first one', () => {
@@ -117,7 +122,7 @@ describe('[5.1.1v] the verdict, without a database', () => {
     // refused for a different reason they were never shown. That is the
     // "contact Support" dead end with extra steps.
     const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250 });
-    expect(all.blockers).toHaveLength(3);
+    expect(all.blockers).toHaveLength(2);
     for (const b of PARTNER_BLOCKERS) expect(refusalMessage(all.blockers)).toContain(BLOCKER_MESSAGE[b]);
   });
 
@@ -133,6 +138,78 @@ describe('[5.1.1v] the verdict, without a database', () => {
 });
 
 describe('[5.1.1v] a partner deletes their own account', () => {
+  it('starts one durable closure request in-app without revoking access', async () => {
+    const p = await makePartner(['VENDOR_OWNER']);
+    const request = () => app.inject({ method: 'POST', url: '/api/v1/customer/account/closure-request', headers: { authorization: `Bearer ${p.token}` } });
+    const [a, b] = await Promise.all([request(), request()]);
+    expect(a.statusCode, a.payload).toBe(202);
+    expect(b.statusCode, b.payload).toBe(202);
+    expect(a.json().data).toMatchObject({ deleted: false, status: 'CLOSURE_REQUESTED' });
+    expect(a.json().data.ticketId).toBe(b.json().data.ticketId);
+    const viaDelete = await del(p.token);
+    expect(viaDelete.statusCode, viaDelete.payload).toBe(202);
+    expect(viaDelete.json().data.ticketId).toBe(a.json().data.ticketId);
+    expect(await app.prisma.supportTicket.count({ where: { userId: p.userId } })).toBe(1);
+    expect(await app.prisma.session.count({ where: { userId: p.userId } })).toBe(1);
+  });
+
+  it.each(['RIDER', 'DRIVER'] as const)('blocks active work assigned to a %s even in customer mode', async (role) => {
+    const p = await makePartner(['CUSTOMER', role]);
+    const order = await makeCashOrder(p.riderId);
+    if (role === 'DRIVER') {
+      const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: nanoid(8), driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
+      await app.prisma.order.update({ where: { id: order.orderId }, data: { riderId: null, driverId: driver.id, status: 'PICKED_UP' } });
+    } else await app.prisma.order.update({ where: { id: order.orderId }, data: { status: 'PICKED_UP' } });
+    const res = await del(p.token);
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('ACTIVE_ORDERS');
+    expect(await app.prisma.session.count({ where: { userId: p.userId } })).toBe(1);
+    await app.prisma.order.update({ where: { id: order.orderId }, data: { status: 'DELIVERED' } });
+    expect((await del(p.token)).statusCode).toBe(200);
+  });
+
+  it('blocks live work at an owned store before winding it down', async () => {
+    const p = await makePartner(['CUSTOMER', 'VENDOR_OWNER']);
+    const owner = await app.prisma.vendorOwner.create({ data: { userId: p.userId } });
+    const vendor = await app.prisma.vendor.create({ data: {
+      ownerId: owner.id, name: 'Synthetic deletion store', slug: `del-${nanoid(12)}`, vendorType: 'RESTAURANT',
+      phone: 'synthetic', addressLine1: 'Synthetic', city: 'Synthetic', region: 'Synthetic', latitude: 0, longitude: 0,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true,
+    } });
+    vendorIds.push(vendor.id);
+    const order = await makeCashOrder(p.riderId);
+    await app.prisma.order.update({ where: { id: order.orderId }, data: { vendorId: vendor.id, riderId: null, status: 'PREPARING' } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toMatchObject({ code: 'ACTIVE_ORDERS' });
+    expect(await app.prisma.vendor.findUnique({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
+    await app.prisma.order.update({ where: { id: order.orderId }, data: { status: 'DELIVERED' } });
+    const settlement = await app.prisma.deliveryCashSettlement.create({ data: { orderId: order.orderId, riderId: p.riderId, vendorId: vendor.id, amount: 1500, status: 'OWED' } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
+    await app.prisma.deliveryCashSettlement.update({ where: { id: settlement.id }, data: { status: 'SETTLED' } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+    expect(await app.prisma.vendor.findUnique({ where: { id: vendor.id } })).toMatchObject({ status: 'SUSPENDED', acceptingOrders: false });
+  });
+
+  it('does not bypass cash obligations when only the customer role remains', async () => {
+    const p = await makePartner(['CUSTOMER'], { committedFloat: 4000 });
+    expect((await del(p.token)).statusCode).toBe(409);
+  });
+
+  it('does not claim completion when partner wind-down fails after cutoff', async () => {
+    const p = await makePartner(['MOVER']);
+    await app.prisma.deviceToken.create({ data: { userId: p.userId, token: `synthetic-${nanoid(16)}`, platform: 'test' } });
+    const failure = vi.spyOn(app.prisma.vendorOwner, 'findUnique').mockRejectedValueOnce(new Error('synthetic cleanup outage'));
+    try {
+      await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toThrow('synthetic cleanup outage');
+    } finally { failure.mockRestore(); }
+    expect(await app.prisma.user.findUnique({ where: { id: p.userId } })).toMatchObject({ phone: `deleted:${p.userId}` });
+    expect(await app.prisma.session.count({ where: { userId: p.userId } })).toBe(0);
+    expect(await app.prisma.deviceToken.count({ where: { userId: p.userId } })).toBe(0);
+    // Keep the production pagination predicate intact, restricting the scope by AND.
+    const scopedDb = app.prisma.$extends({ query: { user: { findMany: ({ args, query }) => query({ ...args, where: { AND: [args.where ?? {}, { id: p.userId }] } }) } } }) as unknown as PrismaClient;
+    await retryAccountErasures({ prisma: scopedDb, io: app.io, log: app.log });
+    expect(await app.prisma.user.findUnique({ where: { id: p.userId } })).toMatchObject({ firstName: 'Deleted' });
+  });
+
   it('a mover holding nothing is erased, in the app', async () => {
     const p = await makePartner(['CUSTOMER', 'MOVER']);
     const res = await del(p.token);
@@ -169,13 +246,17 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     expect(res.json().error.message).toMatch(/settlement/i);
   });
 
-  it('unpaid earnings block, so nobody deletes away their own money', async () => {
+  it('direct-payment earnings survive deletion without an impossible payout requirement', async () => {
     const p = await makePartner(['CUSTOMER', 'MOVER']);
     const eo = await makeCashOrder(p.riderId);
     await app.prisma.earning.create({ data: { riderId: p.riderId, orderId: eo.orderId, type: 'DELIVERY_FEE', amount: 900, status: 'AVAILABLE' } });
     const res = await del(p.token);
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error.message).toMatch(/forfeit/i);
+    expect(res.statusCode, res.payload).toBe(200);
+    const earning = await app.prisma.earning.findFirstOrThrow({ where: { orderId: eo.orderId } });
+    expect(earning.status).toBe('AVAILABLE');
+    expect(Number(earning.amount)).toBe(900);
+    expect(await app.prisma.rider.findUnique({ where: { id: p.riderId } })).toMatchObject({ isOnline: false, isAvailable: false, licensePlate: null, currentLat: null, currentLng: null });
+    expect(await app.prisma.user.findUnique({ where: { id: p.userId } })).toMatchObject({ firstName: 'Deleted', email: null });
   });
 
   it('money already PAID OUT does not block — it has already reached them', async () => {
