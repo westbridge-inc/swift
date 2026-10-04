@@ -151,6 +151,7 @@ services:
       TEST_CONTROL_SECRET_FILE: /run/secrets/TEST_CONTROL_SECRET
       # The API process serves HTTP only; the worker service below owns jobs.
       RUN_WORKERS: "0"
+      STORAGE_DEPLOYMENT: managed
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     # No host port: Caddy is the only public entrance.
@@ -194,6 +195,7 @@ services:
       SCAN_IP_SALT_FILE: /run/secrets/SCAN_IP_SALT
       ADS_EVENT_SECRET_FILE: /run/secrets/ADS_EVENT_SECRET
       RUN_WORKERS: "1"
+      STORAGE_DEPLOYMENT: managed
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     # The API image's HEALTHCHECK fetches its own HTTP readiness endpoint, but
