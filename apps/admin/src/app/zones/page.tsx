@@ -194,7 +194,7 @@ function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
   editing: ZoneFare | null;
   busy: boolean;
   onCancel: () => void;
-  onSubmit: (body: { fromZoneId: string; toZoneId: string; fare: number }, reason: string) => void;
+  onSubmit: (_body: { fromZoneId: string; toZoneId: string; fare: number }, _reason: string) => void;
 }) {
   const [fromZoneId, setFrom] = useState(editing?.fromZoneId ?? '');
   const [toZoneId, setTo] = useState(editing?.toZoneId ?? '');

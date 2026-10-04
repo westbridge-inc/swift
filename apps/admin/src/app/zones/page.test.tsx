@@ -28,7 +28,7 @@ const PAIR = {
 
 type Write = { method: string; path: string; body: unknown; reason: string | null };
 
-function server(reply: (w: Write) => { status: number; body: unknown }) {
+function server(reply: (_w: Write) => { status: number; body: unknown }) {
   const writes: Write[] = [];
   const fetchMock = mockApi((request: ApiRequest) => {
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/zone-fares') {
@@ -45,6 +45,13 @@ function server(reply: (w: Write) => { status: number; body: unknown }) {
   return { writes, fetchMock };
 }
 
+/** The reason prompt (happy-dom has no window.prompt): answers with `answer`. */
+function stubPrompt(answer: string | null) {
+  const prompt = vi.fn().mockReturnValue(answer);
+  vi.stubGlobal('prompt', prompt);
+  return prompt;
+}
+
 const queued = () => ({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens. It is in the approvals queue.', details: { approvalId: 'apr_1' } } } });
 
 describe('[ZONE-FARES] the zones screen', () => {
@@ -53,7 +60,7 @@ describe('[ZONE-FARES] the zones screen', () => {
     renderWithQuery(<ZonesPage />);
     const cjia = (await screen.findByText('CJIA Airport')).closest('tr')!;
     expect(within(cjia).getByText('$295')).toBeTruthy();
-    expect(within(screen.getByText('Georgetown Central', { selector: 'td' }).closest('tr')!).getByText('market rate')).toBeTruthy();
+    expect(within(screen.getByText('georgetown-central').closest('tr')!).getByText('market rate')).toBeTruthy();
     const fare = screen.getByText('$2,000').closest('tr')!;
     expect(within(fare).getByText('Georgetown Central')).toBeTruthy();
     expect(within(fare).getByText('Georgetown South')).toBeTruthy();
@@ -61,7 +68,7 @@ describe('[ZONE-FARES] the zones screen', () => {
 
   it('adding a fare asks why, sends the pair and the whole fare with the reason, and says it is queued — it never shows the fare as made', async () => {
     const { writes } = server(queued);
-    const prompt = vi.spyOn(window, 'prompt').mockReturnValue(REASON);
+    const prompt = stubPrompt(REASON);
     const { user } = renderWithQuery(<ZonesPage />);
     await user.click(await screen.findByRole('button', { name: 'Add fixed fare' }));
     await user.selectOptions(screen.getByLabelText('From zone'), 'georgetown-central');
@@ -80,7 +87,7 @@ describe('[ZONE-FARES] the zones screen', () => {
 
   it('a cancelled reason prompt sends nothing', async () => {
     const { writes } = server(queued);
-    vi.spyOn(window, 'prompt').mockReturnValue(null);
+    stubPrompt(null);
     const { user } = renderWithQuery(<ZonesPage />);
     await user.click(await screen.findByRole('button', { name: 'Delete' }));
     expect(writes).toEqual([]);
@@ -88,7 +95,7 @@ describe('[ZONE-FARES] the zones screen', () => {
 
   it('editing sends the new fare WITH the pair it belongs to; deleting sends the pair', async () => {
     const { writes } = server(queued);
-    vi.spyOn(window, 'prompt').mockReturnValue(REASON);
+    stubPrompt(REASON);
     const { user } = renderWithQuery(<ZonesPage />);
     await user.click(await screen.findByRole('button', { name: 'Edit' }));
     const fare = screen.getByLabelText('Fare (whole amount)');
@@ -107,7 +114,7 @@ describe('[ZONE-FARES] the zones screen', () => {
 
   it('the server\'s refusal is shown as it said it', async () => {
     server(() => ({ status: 409, body: { success: false, error: { code: 'ZONE_FARE_EXISTS', message: 'This pair already has a fixed fare. Change that one instead of adding a second.' } } }));
-    vi.spyOn(window, 'prompt').mockReturnValue(REASON);
+    stubPrompt(REASON);
     const { user } = renderWithQuery(<ZonesPage />);
     await user.click(await screen.findByRole('button', { name: 'Add fixed fare' }));
     await user.selectOptions(screen.getByLabelText('From zone'), 'georgetown-central');
@@ -125,7 +132,7 @@ describe('[ZONE-FARES] the zones screen', () => {
     expect(fareProblem('100')).toBeNull();
     expect(fareProblem('1000000')).toBeNull();
     const { writes } = server(queued);
-    const prompt = vi.spyOn(window, 'prompt').mockReturnValue(REASON);
+    const prompt = stubPrompt(REASON);
     const { user } = renderWithQuery(<ZonesPage />);
     await user.click(await screen.findByRole('button', { name: 'Add fixed fare' }));
     await user.selectOptions(screen.getByLabelText('From zone'), 'georgetown-central');

@@ -25,8 +25,9 @@ import type { MapsProvider, LatLng, RouteLegsEstimate } from '../providers/maps/
 //
 // Every expectation here is computed from Guyana's LIVE rates through the same
 // formula the engine uses, so it holds whatever the market's formula is; the
-// owner's worked examples (41 km → 12,000, 9 km → 2,600, 2 km → 800) are pinned
-// against the October formula in zone-taxi-per-km-worked.test.ts.
+// owner's worked examples (41 km → 12,000, 9 km → 2,600, 2 km → 800, in town
+// 175 a km) are pinned as literal numbers in the last block, against the
+// October formula a fresh database is seeded with.
 // ---------------------------------------------------------------------------
 
 const box = (lng1: number, lat1: number, lng2: number, lat2: number) => ({ type: 'Polygon', coordinates: [[[lng1, lat1], [lng2, lat1], [lng2, lat2], [lng1, lat2], [lng1, lat1]]] });
@@ -319,5 +320,36 @@ describe('the seeded airports price per kilometre at 295; town does not', () => 
 
   it('in town — Georgetown Central → South, no fixed fare any more — the market\'s own per-km', async () => {
     expect(await quote(GEORGETOWN_CENTRAL, GEORGETOWN_SOUTH, 8, 20)).toMatchObject({ fare: national(8, 20), source: 'formula', fromZoneId: 'georgetown-central', toZoneId: 'georgetown-south' });
+  });
+});
+
+describe('the owner\'s worked examples, as literal numbers (October formula: 800 includes 3 km, then 175 a km; airports 295)', () => {
+  it('this database prices Guyana by the October formula', () => {
+    expect(gy).toMatchObject({ base: 800, includedKm: 3, perKm: 175, perMin: 0, minimum: 800 });
+  });
+
+  it('Georgetown → CJIA, 41 km: 800 + 295 × 38 = 12,010 → 12,000, both directions, from Central or South', async () => {
+    for (const [from, to] of [[GEORGETOWN_CENTRAL, CJIA_TERMINAL], [CJIA_TERMINAL, GEORGETOWN_CENTRAL], [GEORGETOWN_SOUTH, CJIA_TERMINAL], [CJIA_TERMINAL, GEORGETOWN_SOUTH]] as const) {
+      expect((await quote(from, to, 41, 50)).fare).toBe(12_000);
+    }
+  });
+
+  it('Georgetown → Ogle, 9 km: 800 + 295 × 6 = 2,570 → 2,600, both directions', async () => {
+    for (const [from, to] of [[GEORGETOWN_CENTRAL, OGLE_TERMINAL], [OGLE_TERMINAL, GEORGETOWN_CENTRAL], [GEORGETOWN_SOUTH, OGLE_TERMINAL]] as const) {
+      expect((await quote(from, to, 9, 15)).fare).toBe(2_600);
+    }
+  });
+
+  it('2 km from an airport: inside the included kilometres, 800', async () => {
+    expect((await quote(CJIA_TERMINAL, { lat: 6.51, lng: -58.23 }, 2, 5)).fare).toBe(800);
+    expect((await quote({ lat: 6.82, lng: -58.09 }, OGLE_TERMINAL, 2, 5)).fare).toBe(800);
+  });
+
+  it('in town, 175 a km: Georgetown Central → South, 8 km: 800 + 175 × 5 = 1,675 → 1,700 (it was a fixed 2,000)', async () => {
+    expect(await quote(GEORGETOWN_CENTRAL, GEORGETOWN_SOUTH, 8, 20)).toMatchObject({ fare: 1_700, source: 'formula' });
+  });
+
+  it('the same 41 km with no airport at either end is the town rate: 800 + 175 × 38 = 7,450 → 7,500', async () => {
+    expect((await quote(GEORGETOWN_CENTRAL, { lat: 6.70, lng: -57.28 }, 41, 50)).fare).toBe(7_500);
   });
 });
