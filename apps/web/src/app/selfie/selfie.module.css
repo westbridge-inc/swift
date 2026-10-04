@@ -1,20 +1,21 @@
 .page {
   min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: var(--swift-space-xl);
+  display: flex;
+  justify-content: center;
+  padding: 32px 24px 40px;
   background: var(--swift-canvas);
 }
 
+@media (min-width: 47.5rem) {
+  .page { padding: 96px 40px 40px; }
+}
+
 .card {
-  width: min(100%, var(--swift-modal-width));
+  width: 100%;
+  max-width: 420px;
   display: grid;
+  align-content: start;
   gap: var(--swift-space-lg);
-  padding: var(--swift-space-2xl);
-  border: thin solid var(--swift-border);
-  border-radius: var(--swift-radius-xl);
-  background: var(--swift-card);
-  box-shadow: var(--swift-elevation-raised);
 }
 
 .brandHome {
@@ -27,8 +28,8 @@
 
 .eyebrow {
   margin: 0;
-  color: var(--swift-red);
-  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  color: var(--swift-muted);
+  font-family: var(--swift-font-body-medium), system-ui, sans-serif;
   font-size: var(--swift-type-micro);
   line-height: var(--swift-leading-micro);
   letter-spacing: var(--swift-tracking-micro);
@@ -37,9 +38,9 @@
 
 .title {
   margin: 0;
-  font-family: var(--swift-font-display), system-ui, sans-serif;
-  font-size: var(--swift-type-display);
-  line-height: var(--swift-leading-display);
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: 22px;
+  line-height: 28px;
 }
 
 .copy,
@@ -85,13 +86,14 @@
 .primary,
 .secondary,
 .back {
-  min-height: calc(var(--swift-touch) + var(--swift-space-xs));
+  min-height: 56px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--swift-radius-full);
   padding-inline: var(--swift-space-lg);
-  font-family: var(--swift-font-body-bold), system-ui, sans-serif;
+  font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
+  font-size: 15px;
   text-decoration: none;
 }
 
@@ -103,7 +105,7 @@
 }
 
 .secondary {
-  border: thin solid var(--swift-border-strong);
+  border: thin solid var(--swift-border);
   background: var(--swift-card);
   color: var(--swift-ink);
   cursor: pointer;
@@ -116,15 +118,17 @@
 }
 
 .back {
-  border: thin solid var(--swift-border-strong);
-  color: var(--swift-ink);
+  border: 0;
+  min-height: 44px;
+  color: var(--swift-muted);
+  font-size: 13px;
 }
 
 .alert {
   margin: 0;
   padding: var(--swift-space-md);
-  border: thin solid var(--swift-error);
   border-radius: var(--swift-radius-md);
+  background: var(--swift-soft-danger);
   color: var(--swift-error);
 }
 

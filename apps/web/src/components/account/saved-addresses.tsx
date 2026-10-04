@@ -47,7 +47,7 @@ export function SavedAddresses() {
     {addresses.isError ? <DataUnavailable what="your saved addresses" error={addresses.error} onRetry={() => void addresses.refetch()} />
       : !addresses.data ? <p role="status">Loading your addresses…</p>
       : addresses.data.length === 0 ? <p>No addresses yet. Add where deliveries should go.</p>
-      : <ul className="space-y-3">{addresses.data.map((address) => <li key={address.id} className="space-y-3 rounded-2xl border border-black/5 bg-white p-4">
+      : <ul className="space-y-3">{addresses.data.map((address) => <li key={address.id} className="space-y-3 sw-card p-4">
         <h2 className="font-bold">{address.label} {address.isDefault && <span className="ml-2 text-sm text-[var(--swift-red)]">Default</span>}</h2>
         <p>{[address.addressLine1, address.addressLine2, address.city].filter(Boolean).join(', ')}</p>
         {address.instructions && <p className="text-sm text-[var(--swift-muted)]">{address.instructions}</p>}
@@ -57,7 +57,7 @@ export function SavedAddresses() {
           <button className={secondaryClass} disabled={busy || editing !== null} onClick={() => setRemoving(address)}>Remove {address.label}</button>
         </div>
       </li>)}</ul>}
-    {removing && <div role="dialog" aria-label={`Remove ${removing.label}?`} className="space-y-3 rounded-2xl border border-black/15 bg-white p-4">
+    {removing && <div role="dialog" aria-label={`Remove ${removing.label}?`} className="space-y-3 rounded-2xl border border-[var(--swift-border-strong)] bg-[var(--swift-card)] p-4">
       <p>Remove {removing.label}? {removing.addressLine1}, {removing.city}</p>
       <div className="flex gap-2"><button className={secondaryClass} disabled={busy} onClick={() => setRemoving(null)}>Keep address</button><button className={buttonClass} disabled={busy} onClick={() => void change(() => accountApi.deleteAddress(removing.id))}>Confirm removal</button></div>
     </div>}
@@ -118,7 +118,7 @@ function AddressForm({ address, onSaved, onCancel }: { address?: Address; onSave
     } catch (e) { setError((e as Error).message); }
     finally { sending.current = false; setBusy(false); }
   }
-  return <form onSubmit={save} className="space-y-4 rounded-2xl border border-black/10 bg-white p-5">
+  return <form onSubmit={save} className="space-y-4 sw-card p-5">
     <h2 className="font-bold">{address ? 'Edit address' : 'Add address'}</h2>
     <fieldset disabled={busy} className="space-y-3">
       <label className="block space-y-1"><span>Label</span><input className={fieldClass} required maxLength={50} value={form.label} onChange={(e) => edit({ label: e.target.value })} /></label>
