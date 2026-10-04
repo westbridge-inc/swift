@@ -13,9 +13,9 @@ import {
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="min-w-0 rounded-2xl border border-black/5 bg-white p-5">
-      <p className="break-words text-xs font-medium uppercase tracking-wide text-[var(--swift-muted)]">{label}</p>
-      <p className="mt-2 break-words text-2xl font-extrabold">{value}</p>
+    <div className="min-w-0 sw-card p-5">
+      <p className="break-words text-xs font-medium  text-[var(--swift-muted)]">{label}</p>
+      <p className="mt-2 break-words sw-title">{value}</p>
       {sub && <p className="mt-1 text-xs text-[var(--swift-muted)]">{sub}</p>}
     </div>
   );
@@ -35,7 +35,7 @@ function SubscriptionCard({ title, sub, isError, error, onRetry }: {
   const status = String(sub['status'] ?? '');
   const good = status === 'ACTIVE' || status === 'TRIAL';
   return (
-    <div className="rounded-2xl border border-black/5 bg-white p-5">
+    <div className="sw-card p-5">
       <p className="font-bold">{title}</p>
       <Link href="/portal/weekly-fee" className="text-sm font-semibold underline">Weekly fee — view and pay</Link>
       <p className="mt-1 text-sm">
@@ -97,7 +97,7 @@ export default function PortalHome() {
   }
   if (!isRider && !isDriver) {
     return (
-      <p className="rounded-2xl border border-dashed border-black/10 bg-white p-10 text-center text-sm text-[var(--swift-muted)]">
+      <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
         No earner profile on this account — start driving or delivering from the Swift app.
       </p>
     );
@@ -105,7 +105,7 @@ export default function PortalHome() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-extrabold">Earnings</h1>
+      <h1 className="sw-title">Earnings</h1>
 
       {isRider && summary.isError && (
         <DataUnavailable what="your earnings" error={summary.error} onRetry={() => void summary.refetch()} />
@@ -151,7 +151,7 @@ export default function PortalHome() {
               const orderNo = (r['order'] as { orderNumber?: string } | null)?.orderNumber;
               const status = String(r['status']);
               return (
-                <div key={id} className="flex flex-col gap-3 rounded-lg bg-white p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                <div key={id} className="flex flex-col gap-3 rounded-lg bg-[var(--swift-card)] p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
                   <span>
                     #{orderNo} · {vendorName} · <b>{money(r['amount'])}</b>
                     {status === 'STORE_CONFIRMED' && <span className="ml-2 text-xs text-green-600">store confirmed</span>}

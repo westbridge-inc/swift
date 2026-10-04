@@ -128,9 +128,10 @@ describe('[W-11] the board uses it', () => {
   });
 
   it('an outage is not an empty queue', () => {
-    expect(code).toMatch(/\{orders\.isError && \(/);
+    expect(code).toMatch(/\{orders\.isError && <DataUnavailable/);
     // the calm empty state is reachable only when the read SUCCEEDED
-    expect(code).toMatch(/!orders\.isLoading && !orders\.isError && list\.length === 0/);
+    expect(code).toMatch(/!orders\.isError && !orders\.isLoading && <>/);
+    expect(code).toMatch(/!byBucket\.get\(c\.key\)\?\.length/);
   });
 
   it('says when it is not showing everything', () => {

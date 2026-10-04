@@ -17,9 +17,9 @@ describe('rendered weekly fee', () => {
       return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } };
     });
     const view = renderWithQuery(<WeeklyFee family="vendor" />);
-    await view.user.click(await screen.findByRole('button', { name: 'Pay GY$1,200 with MMG' }));
+    await view.user.click(await screen.findByRole('button', { name: 'Pay $1,200 with MMG' }));
     await screen.findByText('Waiting for MMG…');
-    await view.user.click(await screen.findByRole('button', { name: 'Pay GY$1,200 with MMG' }));
+    await view.user.click(await screen.findByRole('button', { name: 'Pay $1,200 with MMG' }));
     await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
     expect(assign).toHaveBeenCalledWith('https://checkout.test/opaque');
     expect(keys).toHaveLength(2); expect(keys[0]).not.toBe(keys[1]);
@@ -28,7 +28,7 @@ describe('rendered weekly fee', () => {
   it.each(['live', 'off', 'absent'])('MMG %s controls the actual button; deprecated fields cannot render', async (state) => {
     mockApi(() => ({ body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: state === 'absent' ? undefined : [{ id: 'MMG_CHECKOUT', state, amountGyd: 1200, currencyCode: 'GYD' }, { id: 'CARD', state: 'off' }], sanFormatted: 'private-number', payCashSteps: ['Go to MMG agent'], activationCopy: 'instant restoration' } } }));
     const view = renderWithQuery(<WeeklyFee family="vendor" />); await screen.findByText('Nothing due right now: your next bill is 6 Oct 2026');
-    const button = screen.queryByRole('button', { name: 'Pay GY$1,200 with MMG' });
+    const button = screen.queryByRole('button', { name: 'Pay $1,200 with MMG' });
     if (state === 'live') expect(button).toBeTruthy(); else expect(button).toBeNull();
     expect(document.body.textContent).not.toMatch(/coming soon|private-number|MMG agent|instant restoration|card/i); view.unmount();
   });
@@ -47,7 +47,7 @@ describe('rendered weekly fee', () => {
       if (url.pathname.endsWith('/earlier-ref')) return { body: { success: true, data: { ref: 'earlier-ref', status: 'CONFIRMING', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'PAST_DUE' } } };
       return { body: { success: true, data: { status: 'PAST_DUE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } };
     });
-    const view = renderWithQuery(<WeeklyFee family={family} />); await view.user.click(await screen.findByRole('button', { name: 'Pay GY$1,200 with MMG' }));
+    const view = renderWithQuery(<WeeklyFee family={family} />); await view.user.click(await screen.findByRole('button', { name: 'Pay $1,200 with MMG' }));
     await screen.findByText("Confirming your payment with MMG. Don't pay again.");
     expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull();
     await waitFor(() => expect(calls.mock.calls.some(([url]) => String(url).endsWith(`/${family}/subscription/mmg-checkout/earlier-ref`))).toBe(true)); view.unmount();
@@ -63,7 +63,7 @@ describe('rendered weekly fee', () => {
     status = 'CONFIRMED';
     if (trigger === 'subscription refresh') await act(async () => { await view.queryClient.invalidateQueries({ queryKey: ['weekly-fee'] }); });
     else act(() => { window.dispatchEvent(new Event('focus')); });
-    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Paid: GY$1,200'));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Paid: GYD $1,200'));
     expect(document.body.textContent).not.toContain('This checkout expired');
     view.unmount();
   });
@@ -80,7 +80,7 @@ describe('rendered weekly fee', () => {
         : { status: 'ACTIVE', amountDueGyd: 3400, latestMmgCheckout: null, recentCheckouts: [], payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 3400, currencyCode: 'GYD' }] } } };
     });
     const view = renderWithQuery(<WeeklyFee family="vendor" />);
-    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Paid: GY$1,200'));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Paid: GYD $1,200'));
     calls.length = 0;
     // Tab 2 updates their shared storage. Tab 1 has not rendered yet.
     localStorage.setItem('swift_web_store', 'store-B');
@@ -89,7 +89,7 @@ describe('rendered weekly fee', () => {
       if (order !== 'focus before storage') storage();
       if (order !== 'storage only') window.dispatchEvent(new Event('focus'));
     });
-    await screen.findByText('GY$3,400 due now');
+    await screen.findByText('$3,400 due now');
     if (order === 'focus before storage') act(storage);
     expect(calls.some(([url, store]) => url.endsWith('/ref-A') && store === 'store-B')).toBe(false);
     expect(document.body.textContent).not.toContain('Paid:');

@@ -63,7 +63,7 @@ export default function ImportPage() {
   return (
     <div className="max-w-4xl space-y-6">
       <div>
-        <h1 className="text-2xl font-extrabold">Bulk import</h1>
+        <h1 className="sw-title">Bulk import</h1>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           Upload your whole catalogue at once — CSV or Excel, up to thousands of rows. Swift maps your columns
           automatically; you confirm before anything is created.
@@ -73,7 +73,7 @@ export default function ImportPage() {
       <div className="flex flex-wrap gap-3">
         <button
           onClick={downloadTemplate}
-          className="flex items-center gap-2 rounded-lg border border-black/10 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-[var(--swift-subtle)]"
+          className="flex items-center gap-2 rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 py-2.5 text-sm font-semibold hover:bg-[var(--swift-subtle)]"
         >
           <Download className="h-4 w-4" /> Download the template
         </button>
@@ -100,7 +100,7 @@ export default function ImportPage() {
       {error && <p className="rounded-xl bg-[var(--swift-red)]/5 p-4 text-sm text-[var(--swift-red)]">{error}</p>}
 
       {preview && (
-        <div className="rounded-2xl border border-black/5 bg-white p-6">
+        <div className="sw-card p-6">
           <p className="flex items-center gap-2 font-bold">
             <FileSpreadsheet className="h-5 w-5 text-[var(--swift-red)]" />
             {fileName} — {preview.rowCount.toLocaleString()} rows ready
@@ -109,14 +109,14 @@ export default function ImportPage() {
             Columns mapped: {Object.entries(preview.mapping).filter(([, v]) => v).map(([k, v]) => `${v} → ${k}`).join(' · ')}
           </p>
 
-          <div className="mt-4 overflow-x-auto rounded-xl border border-black/5">
+          <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--swift-border)]">
             <table className="w-full text-xs">
-              <thead className="bg-[var(--swift-subtle)] text-left uppercase tracking-wide text-[var(--swift-muted)]">
+              <thead className="bg-[var(--swift-subtle)] text-left  text-[var(--swift-muted)]">
                 <tr>{cols.map((c) => <th key={c} className="px-3 py-2">{c}</th>)}</tr>
               </thead>
               <tbody>
                 {preview.preview.map((row, i) => (
-                  <tr key={i} className="border-t border-black/5">
+                  <tr key={i} className="border-t border-[var(--swift-border)]">
                     {cols.map((c) => <td key={c} className="max-w-48 truncate px-3 py-2">{row[c]}</td>)}
                   </tr>
                 ))}
@@ -139,8 +139,8 @@ export default function ImportPage() {
       )}
 
       {result && (
-        <div className="rounded-2xl border border-black/5 bg-white p-6">
-          <p className="text-lg font-extrabold text-green-700">✓ {result.imported.toLocaleString()} items imported</p>
+        <div className="sw-card p-6">
+          <p className="sw-heading text-green-700">✓ {result.imported.toLocaleString()} items imported</p>
           {result.failedCount > 0 && (
             <>
               <p className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{result.failedCount} rows failed:</p>

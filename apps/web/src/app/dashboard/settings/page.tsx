@@ -47,11 +47,11 @@ function HoursEditor() {
     // [VG-006] A failed read used to leave "Loading…" forever.
     if (hours.isError) {
       return (
-        <div className="rounded-2xl border border-black/5 bg-white p-6">
+        <div className="sw-card p-6">
           <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">
             Couldn&apos;t load your hours: {(hours.error as Error).message}
           </p>
-          <button onClick={() => hours.refetch()} className="mt-3 rounded-lg border border-black/10 px-3 py-1.5 text-sm font-semibold">
+          <button onClick={() => hours.refetch()} className="mt-3 rounded-lg border border-[var(--swift-border)] px-3 py-1.5 text-sm font-semibold">
             Retry
           </button>
         </div>
@@ -69,11 +69,11 @@ function HoursEditor() {
   };
 
   return (
-    <div className="rounded-2xl border border-black/5 bg-white p-6">
+    <div className="sw-card p-6">
       <h2 className="font-bold">Operating hours</h2>
       <div className="mt-4 space-y-2">
         {rows.map((r) => (
-          <div key={r.dayOfWeek} className="flex flex-wrap items-center gap-3 border-b border-black/5 py-3 text-sm last:border-0 sm:flex-nowrap sm:py-0">
+          <div key={r.dayOfWeek} className="flex flex-wrap items-center gap-3 border-b border-[var(--swift-border)] py-3 text-sm last:border-0 sm:flex-nowrap sm:py-0">
             <span className="w-24 shrink-0 font-medium">{DAYS[r.dayOfWeek]}</span>
             <label className="flex items-center gap-1.5">
               <input
@@ -90,14 +90,14 @@ function HoursEditor() {
                   type="time"
                   value={r.openTime}
                   onChange={(e) => set(r.dayOfWeek, { openTime: e.target.value })}
-                  className="rounded-lg border border-black/10 px-2 py-1"
+                  className="rounded-lg border border-[var(--swift-border)] px-2 py-1"
                 />
                 <span className="text-[var(--swift-muted)]">to</span>
                 <input
                   type="time"
                   value={r.closeTime}
                   onChange={(e) => set(r.dayOfWeek, { closeTime: e.target.value })}
-                  className="rounded-lg border border-black/10 px-2 py-1"
+                  className="rounded-lg border border-[var(--swift-border)] px-2 py-1"
                 />
               </span>
             )}
@@ -125,7 +125,7 @@ function SubscriptionCard() {
   const s = sub.data;
   if (sub.isLoading) return null;
   return (
-    <div className="rounded-2xl border border-black/5 bg-white p-6">
+    <div className="sw-card p-6">
       <h2 className="font-bold">Subscription</h2>
       {!s ? (
         <p className="mt-2 text-sm text-[var(--swift-muted)]">No subscription on this store yet — it starts when your documents are verified.</p>
@@ -171,7 +171,7 @@ function SettlementsCard() {
   if (!d) return null;
   const rows: Array<Record<string, unknown>> = d.unsettled ?? [];
   return (
-    <div className="rounded-2xl border border-black/5 bg-white p-6">
+    <div className="sw-card p-6">
       <h2 className="font-bold">Rider fees owed (MMG orders)</h2>
       <MutationNotice errors={[confirm.error]} className="mt-2" />
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
@@ -242,10 +242,10 @@ export default function SettingsPage() {
 
   return (
     <div className="max-w-3xl space-y-6">
-      <h1 className="text-2xl font-extrabold">Settings</h1>
+      <h1 className="sw-title">Settings</h1>
 
       {p && (
-        <div className="rounded-2xl border border-black/5 bg-white p-6">
+        <div className="sw-card p-6">
           <h2 className="font-bold">{p.name}</h2>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
             {p.vendorType === 'SUPERMARKET' ? 'Grocery' : p.vendorType === 'STORE' ? 'Shop' : p.vendorType === 'SERVICE' ? 'Services' : 'Restaurant'}

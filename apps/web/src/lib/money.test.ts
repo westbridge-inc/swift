@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // Two defects, one parser. The live one: a price the server never sent became
 // ZERO — `Number(item.customerPrice ?? item.basePrice ?? 0)` — so a broken row
 // rendered as free and could still be added to a cart and ordered, and
-// `Math.round(n ?? 0)` printed "GY$0" for an absent price and "GY$NaN" for a
+// `Math.round(n ?? 0)` printed "$0" for an absent price and "$NaN" for a
 // malformed one. The latent one: Prisma sends `Decimal` columns as STRINGS,
 // the cart typed them as `number`, and `serverSubtotal + deliveryFee` was one
 // schema change from `"4000" + 500` — a total off by a thousand, displayed and
@@ -90,14 +90,14 @@ describe('[W-13] a total is never built from a part that could not be read', () 
 
 describe('[W-13] formatting never invents a figure', () => {
   it('renders an em-dash for anything that is not money, and zero for a real zero', () => {
-    expect(formatAmount(0, 'GY$')).toBe('GY$0');
-    expect(formatAmount('4000', 'GY$')).toBe('GY$4,000');
+    expect(formatAmount(0, '$')).toBe('$0');
+    expect(formatAmount('4000', '$')).toBe('$4,000');
     for (const bad of [undefined, null, '', 'abc', NaN]) {
-      expect(formatAmount(bad, 'GY$'), String(bad)).toBe(MONEY_UNKNOWN);
+      expect(formatAmount(bad, '$'), String(bad)).toBe(MONEY_UNKNOWN);
     }
   });
 
-  it('the customer formatter no longer prints GY$0 for an absent price, or GY$NaN for a broken one', () => {
+  it('the customer formatter no longer prints $0 for an absent price, or $NaN for a broken one', () => {
     expect(money(undefined)).toBe(MONEY_UNKNOWN);
     expect(money(null)).toBe(MONEY_UNKNOWN);
     expect(money(NaN)).toBe(MONEY_UNKNOWN);
@@ -106,11 +106,11 @@ describe('[W-13] formatting never invents a figure', () => {
     expect(money('4000.00')).toBe('$4,000');
   });
 
-  it('the vendor and customer formatters read the same figure (GY$ for partners, $ for customers, as in the phone app)', () => {
+  it('the vendor and customer formatters read the same figure ($ for partners, $ for customers, as in the phone app)', () => {
     expect(vendorMoney(undefined)).toBe(MONEY_UNKNOWN);
-    expect(vendorMoney('4500.00')).toBe('GY$4,500');
+    expect(vendorMoney('4500.00')).toBe('$4,500');
     expect(money('4500.00')).toBe('$4,500');
-    expect(vendorMoney('4500.00').replace('GY$', '')).toBe(money('4500.00').replace('$', ''));
+    expect(vendorMoney('4500.00').replace('$', '')).toBe(money('4500.00').replace('$', ''));
     expect(toAmount('4500.00')).toBe(4500);
     expect(toAmount('')).toBeNull();
   });

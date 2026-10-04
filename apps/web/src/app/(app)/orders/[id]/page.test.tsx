@@ -72,7 +72,7 @@ describe('receipt amount presentation', () => {
     const receipt = (await screen.findByText('Receipt preview')).closest('aside');
     expect(receipt?.textContent).toMatch(/2× Rice—/);
     expect(receipt?.textContent).toMatch(/Total—/);
-    expect(receipt?.textContent).not.toContain('GY$0');
+    expect(receipt?.textContent).not.toContain('$0');
   });
 });
 

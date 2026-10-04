@@ -226,6 +226,7 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
               <OfflineNotice />
               {showBack && backClaims === 0 ? <BackRow /> : null}
               <div key={pathname} className="swift-route-in">{content}</div>
+              <footer className="sw-caption mt-8">Prices in GYD</footer>
             </div>
           </main>
           <TabBar activeTab={route.tab} marketVisible={marketVisible} cartCount={cartCount} />

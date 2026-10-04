@@ -1,7 +1,11 @@
 'use client';
 
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useQueryClient } from '@tanstack/react-query';
+import { sessionProbe } from '@/lib/auth';
+import { getAdvertisers, switchWebRole, type WebRole } from '@/lib/partner-api';
 import { Check, ChevronLeft, Menu, RefreshCw, X } from 'lucide-react';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, TabGlyph, type PictogramName, type TabGlyphName } from '@/components/glyphs';
@@ -289,58 +293,73 @@ function Sheet({ label, onClose, children }: { label: string; onClose: () => voi
   );
 }
 
-const SWITCH_ROLES: { key: string; label: string; sub: string; pictogram: PictogramName; href: string | null }[] = [
-  { key: 'customer', label: 'Swift', sub: 'Order food, groceries and parcels', pictogram: 'food', href: null },
+const SWITCH_ROLES: { key: string; label: string; sub: string; pictogram: PictogramName; href: string }[] = [
+  { key: 'customer', label: 'Swift', sub: 'Order food, groceries and parcels', pictogram: 'food', href: '/' },
   { key: 'driver', label: 'Swift Driver', sub: 'Your earnings and documents — jobs are taken in the Swift app', pictogram: 'wheel', href: '/portal' },
-  { key: 'vendor', label: 'Swift Business', sub: 'Your store’s orders and menu', pictogram: 'shops', href: '/dashboard' },
-  { key: 'ads', label: 'Swift Ads', sub: 'Advertising is managed in the Swift app', pictogram: 'scan', href: null },
+  { key: 'vendor', label: 'Swift Business', sub: 'Your store’s orders and menu', pictogram: 'shops', href: '/dashboard/orders' },
+  { key: 'advertiser', label: 'Swift Ads', sub: 'Your campaigns and advertising account', pictogram: 'scan', href: '/advertiser' },
 ];
 
-/** "Switch app": one account, the other Swift apps it can open on the web. */
-export function SwitchAppSheet({ onClose }: { onClose: () => void }) {
-  return (
-    <Sheet label="Switch app" onClose={onClose}>
-      {(first) => (
-        <>
-          <div className="flex items-start gap-3">
-            <div className="flex-1">
-              <h2 className="sw-title">Switch app</h2>
-              <p className="sw-caption mt-0.5">One account — choose how you’re using Swift right now.</p>
-            </div>
-            <button ref={first} type="button" onClick={onClose} aria-label="Close" className="sw-icon-btn"><X size={20} aria-hidden /></button>
-          </div>
-          <ul className="mt-4">
-            {SWITCH_ROLES.map((role) => {
-              const current = role.key === 'customer';
-              const body = (
-                <>
-                  <span className={`grid h-12 w-12 flex-none place-items-center rounded-2xl ${current ? 'bg-[var(--swift-red)] text-[var(--swift-white)]' : 'bg-[var(--swift-sunken)] text-[var(--swift-ink)]'}`}>
-                    <Pictogram name={role.pictogram} size={24} />
-                  </span>
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="sw-label">{role.label}</span>
-                    <span className="sw-caption">{role.sub}</span>
-                  </span>
-                  {current ? <Check size={18} className="text-[var(--swift-red)]" aria-label="You are here" /> : null}
-                </>
-              );
-              return (
-                <li key={role.key}>
-                  {role.href ? (
-                    <Link href={role.href} onClick={onClose} className="sw-row py-3">{body}</Link>
-                  ) : current ? (
-                    <button type="button" onClick={onClose} aria-current="true" className="sw-row cursor-pointer py-3">{body}</button>
-                  ) : (
-                    <div className="sw-row py-3">{body}</div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-    </Sheet>
-  );
+/** The server authorizes a transition before the destination can open. */
+export function SwitchAppSheet({ onClose, current = 'customer' }: { onClose: () => void; current?: string }) {
+  const router = useRouter();
+  const client = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [moverChoice, setMoverChoice] = useState(false);
+  const inFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const pick = async (key: string, chosen?: WebRole) => {
+    if (inFlight.current) return;
+    if (key === current) { onClose(); return; }
+    inFlight.current = true; setBusy(true); setError('');
+    try {
+      const session = await sessionProbe();
+      if (!session.ok || !session.user) { router.push(signInPath(SWITCH_ROLES.find(r => r.key === key)!.href)); onClose(); return; }
+      const roles = Array.isArray(session.user['roles']) ? session.user['roles'] : [];
+      let payload: WebRole = 'CUSTOMER';
+      if (key === 'vendor') payload = 'VENDOR';
+      if (key === 'driver') {
+        const last = session.user['lastMoverRole'];
+        if (chosen) payload = chosen;
+        else if (roles.includes('MOVER')) payload = 'MOVER';
+        else if ((last === 'DRIVER' || last === 'RIDER') && roles.includes(last)) payload = last;
+        else if (roles.includes('DRIVER') && roles.includes('RIDER')) { setMoverChoice(true); return; }
+        else payload = roles.includes('RIDER') ? 'RIDER' : 'DRIVER';
+      }
+      if (key === 'advertiser') {
+        // Ads is AdvertiserMember-based, not a UserRole. CUSTOMER is the
+        // existing server transition out of mover supply; it still refuses a live job.
+        const memberships = await getAdvertisers();
+        if (!memberships.length) throw new Error('No advertising account yet. Register your business in the Swift app.');
+      }
+      await switchWebRole(payload);
+      if (!mounted.current) return;
+      client.clear();
+      router.push(SWITCH_ROLES.find(r => r.key === key)!.href);
+      onClose();
+    } catch (e) {
+      if (mounted.current) setError(e instanceof Error ? e.message : 'Could not switch apps. Try again.');
+    } finally { inFlight.current = false; if (mounted.current) setBusy(false); }
+  };
+  return <Sheet label="Switch app" onClose={() => { if (!busy) onClose(); }}>
+    {(first) => <>
+      <div className="flex items-start gap-3"><div className="flex-1"><h2 className="sw-title">Switch app</h2><p className="sw-caption mt-1">One account — choose how you’re using Swift.</p></div>
+        <button ref={first} type="button" disabled={busy} onClick={onClose} aria-label="Close" className="sw-icon-btn"><X size={20} aria-hidden /></button>
+      </div>
+      <ul className="mt-4">{SWITCH_ROLES.map(role => <li key={role.key}>
+        <button type="button" disabled={busy} onClick={() => void pick(role.key)} aria-current={current === role.key ? 'true' : undefined} className="sw-row w-full py-3 text-left disabled:opacity-50">
+          <span className={`grid h-12 w-12 flex-none place-items-center rounded-2xl ${current === role.key ? 'bg-[var(--swift-red)] text-white' : 'bg-[var(--swift-sunken)]'}`}><Pictogram name={role.pictogram} size={24} /></span>
+          <span className="flex min-w-0 flex-1 flex-col"><span className="sw-label">{role.label}</span><span className="sw-caption">{role.sub}</span></span>
+          {current === role.key && <Check size={18} aria-label="You are here" />}
+        </button>
+      </li>)}</ul>
+      {moverChoice && <div className="sw-card mt-3 p-4"><p className="sw-label">Choose your driving profile</p><div className="mt-3 flex gap-2"><button disabled={busy} className="sw-btn sw-btn-md" onClick={() => void pick('driver', 'DRIVER')}>Taxi</button><button disabled={busy} className="sw-btn sw-btn-md sw-btn-outline" onClick={() => void pick('driver', 'RIDER')}>Deliveries</button></div></div>}
+      {busy && <p role="status" className="sw-caption mt-3">Switching apps…</p>}
+      {error && <p role="alert" className="sw-note sw-note-error mt-3">{error}</p>}
+    </>}
+  </Sheet>;
 }
 
 /** Phone widths: the company pages, sign-in, and a way back out. */

@@ -163,11 +163,11 @@ describe('[WEB-REDESIGN] Switch app and the person signed in', () => {
     await screen.findByText('Page');
     fireEvent.click(screen.getByRole('button', { name: /Switch app/ }));
     const sheet = screen.getByRole('dialog', { name: 'Switch app' });
-    expect(within(sheet).getByRole('link', { name: /Swift Business/ }).getAttribute('href')).toBe('/dashboard');
-    expect(within(sheet).getByRole('link', { name: /Swift Driver/ }).getAttribute('href')).toBe('/portal');
-    // Advertising has no web console: it says so, and is not a dead link.
-    expect(within(sheet).queryByRole('link', { name: /Swift Ads/ })).toBeNull();
-    expect(within(sheet).getByText(/Advertising is managed in the Swift app/)).toBeTruthy();
+    // Picks are server-authorized actions now, not navigation-only links.
+    expect(within(sheet).getByRole('button', { name: /Swift Business/ })).toBeTruthy();
+    expect(within(sheet).getByRole('button', { name: /Swift Driver/ })).toBeTruthy();
+    expect(within(sheet).getByRole('button', { name: /Swift Ads/ })).toBeTruthy();
+    expect(within(sheet).getByText(/Your campaigns and advertising account/)).toBeTruthy();
     fireEvent.keyDown(sheet, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'Switch app' })).toBeNull();
   });

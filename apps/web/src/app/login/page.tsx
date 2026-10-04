@@ -16,7 +16,8 @@ const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/ex
  *  prefix cannot name, since every path starts with a slash. */
 function isCustomerReturn(next: string): boolean {
   const path = next.split(/[?#]/)[0] ?? '';
-  return path === '/' || CUSTOMER_ROUTES.some((route) => path.startsWith(route));
+  // Advertiser membership is checked by the existing ads endpoints after normal sign-in.
+  return path === '/advertiser' || path.startsWith('/advertiser/') || path === '/' || CUSTOMER_ROUTES.some((route) => path.startsWith(route));
 }
 
 /** "Keep browsing as a guest" goes back to the page that sent them here when a

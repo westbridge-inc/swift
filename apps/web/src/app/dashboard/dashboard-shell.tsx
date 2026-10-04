@@ -5,16 +5,17 @@ import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
+import type { ShellPerson } from '@/components/customer-shell';
 import { ConsoleShell } from '@/components/console-shell';
 import { sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
 
 export const NAV = [
-  { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true },
+  { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true, dock: false },
   { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
-  { href: '/dashboard/inventory', label: 'Inventory', icon: Boxes, exact: true },
-  { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false },
+  { href: '/dashboard/inventory', label: 'Menu', icon: Boxes, exact: true },
+  { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false, dock: false },
   { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
   { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },
 ];
@@ -42,7 +43,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
 
   if (isError) {
     return (
-      <p role="alert" className="rounded-lg border border-[var(--swift-red)]/30 bg-white px-3 py-2 text-xs font-semibold text-[var(--swift-red)]">
+      <p role="alert" className="rounded-lg border border-[var(--swift-red)]/30 bg-[var(--swift-card)] px-3 py-2 text-xs font-semibold text-[var(--swift-red)]">
         Couldn&apos;t load your stores. Actions are unavailable until this loads.
       </p>
     );
@@ -53,7 +54,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
     <div className="relative">
       <button
         onClick={() => (list.length > 1 || !selected) && setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-lg border border-black/10 bg-white px-3 py-2 text-left"
+        className="flex w-full items-center gap-2 rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-2 text-left"
       >
         <StoreIcon className="h-4 w-4 shrink-0 text-[var(--swift-red)]" />
         <span className={`min-w-0 flex-1 truncate text-sm font-semibold ${selected ? '' : 'text-[var(--swift-red)]'}`}>
@@ -62,7 +63,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
         {(list.length > 1 || !selected) && <ChevronDown className="h-4 w-4 shrink-0 text-[var(--swift-muted)]" />}
       </button>
       {open && (
-        <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-72 overflow-auto rounded-lg border border-black/10 bg-white py-1 shadow-lg">
+        <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-72 overflow-auto rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] py-1 shadow-lg">
           {list.map((s) => (
             <button
               key={s.id}
@@ -82,7 +83,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
   );
 }
 
-function StoreShell({ children }: { children: React.ReactNode }) {
+function StoreShell({ children, person }: { children: React.ReactNode; person: ShellPerson | null }) {
   const queryClient = useQueryClient();
   // The store is React state as well as localStorage: the shell must RE-RENDER
   // (and remount its subtree) the moment it changes, which a localStorage read
@@ -121,12 +122,12 @@ function StoreShell({ children }: { children: React.ReactNode }) {
   }, [storeId, list, stores.data?.selectedId, onSwitch]);
 
   return (
-    <ConsoleShell home="/dashboard" title="Business" navigation={NAV}
+    <ConsoleShell person={person} home="/dashboard" title="Business" navigation={NAV}
       switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
       contentKey={storeId ?? 'no-store'}>
       {storeId ? children : (
-        <p className="rounded-2xl border border-black/5 bg-white p-6 text-sm font-semibold text-[var(--swift-muted)]">
+        <p className="sw-card p-6 text-sm font-semibold text-[var(--swift-muted)]">
           Choose a store to continue.
         </p>
       )}
@@ -137,6 +138,7 @@ function StoreShell({ children }: { children: React.ReactNode }) {
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [ready, setReady] = useState(false);
+  const [person, setPerson] = useState<ShellPerson | null>(null);
 
   // [W-01] The session is an HttpOnly cookie the page cannot read, so the gate
   // asks the SERVER whether one exists instead of inspecting localStorage.
@@ -145,15 +147,15 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
     void sessionProbe().then((session) => {
       if (cancelled) return;
       if (!session.ok) router.replace('/login');
-      else setReady(true);
+      else { setPerson({ name: [session.user?.['firstName'], session.user?.['lastName']].filter(v => typeof v === 'string').join(' '), phone: null }); setReady(true); }
     });
     return () => { cancelled = true; };
   }, [router]);
 
-  if (!ready) return null;
+  if (!ready) return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
   return (
     <Providers>
-      <StoreShell>{children}</StoreShell>
+      <StoreShell person={person}>{children}</StoreShell>
     </Providers>
   );
 }
