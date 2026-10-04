@@ -661,7 +661,15 @@ export class MmgCheckoutService {
         await this.alertUnapplied(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), parsed, input.source);
         return 'CONFIRMED';
       }
-      return returnStateFor(await this.verify(intent.id, now));
+      const settled = await this.verify(intent.id, now);
+      if (settled === 'CONFIRMED') {
+        // [Sol] However the checkout came to be CONFIRMED (by this reply, or by
+        // another verifier after this reply merged its transaction), a success
+        // reply naming a transaction it did not credit pages operators. A reply
+        // naming the credited payment changes nothing (alertUnapplied).
+        await this.alertUnapplied(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), parsed, input.source);
+      }
+      return returnStateFor(settled);
     });
   }
 
@@ -791,7 +799,9 @@ export class MmgCheckoutService {
    *  the payment it credited): money MMG may hold for the partner that was
    *  never applied. The reply is already written down [I9]. It is never
    *  looked up for credit and never credited; operators are paged once per
-   *  checkout, whichever door and however often. */
+   *  checkout, whichever door and however often, and whichever path made the
+   *  checkout CONFIRMED (already confirmed, confirmed under the lock, or
+   *  confirmed by another verifier after this reply merged) [Sol]. */
   private async alertUnapplied(intent: MmgCheckoutIntent, reply: MmgCheckoutReply, source: 'RETURN' | 'NOTIFY'): Promise<void> {
     if (reply.resultCode !== '0' || !reply.transactionId) return;
     // Provider identities are stored trimmed and upper-cased; a reply's id has no spaces (MMG_TXN_ID).

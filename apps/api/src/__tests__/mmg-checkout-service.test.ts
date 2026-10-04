@@ -2140,6 +2140,61 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await toldOf(s.userId, 'HELD')).toHaveLength(0);
   });
 
+  it('[Sol] a second payment whose reply merges while a verifier confirms the first is written down, never credited, and operators are told once', async () => {
+    // The interleaving, made deterministic: verifier A has read the checkout's
+    // answers (transaction 1 only) and waits on MMG's lookup; reply B (transaction
+    // 2) is written down and merged while the checkout is still CONFIRMING; A then
+    // confirms transaction 1; only then does B's own verification run.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('RACEFIRST');
+    const second = tx('RACESECOND');
+    approved(first, 2100);
+    approved(second, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const bAtVerify = barrier();
+    const aDone = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first) { aInLookup.open(); await releaseA.wait; }
+      return plainLookup(id);
+    };
+    const target = service as unknown as { verify: (id: string, now: Date) => Promise<string> };
+    const plainVerify = target.verify.bind(service);
+    let calls = 0;
+    const spy = vi.spyOn(target, 'verify').mockImplementation(async (id, now) => {
+      if (id === row.id && (calls += 1) === 2) { bAtVerify.open(); await aDone.wait; }
+      return plainVerify(id, now);
+    });
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      const b = codeReply(row, '0', second, 'NOTIFY');
+      await bAtVerify.wait;
+      expect((await intentOf(row.id)).candidates).toEqual([first, second]);
+      releaseA.open();
+      await a;
+      aDone.open();
+      expect(await b).toBe('CONFIRMED');
+    } finally {
+      spy.mockRestore();
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
+    const named = (await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id, source: 'NOTIFY' } }))
+      .filter((o) => (o.body as Record<string, unknown> | null)?.['transactionId'] === second);
+    expect(named).toHaveLength(1);
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+  });
+
   it('the return door and the notify door at once, both carrying MMG’s answer, credit once', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);
