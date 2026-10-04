@@ -33,6 +33,8 @@ type ReceiptOrder = {
   items: Array<{ name: string; quantity: number; totalCustomer: unknown }>;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
   currencyCode?: string | null;
+  /** [TAXI waiting charge] A ride's frozen waiting, when it was charged one. */
+  fareBreakdown?: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null;
 };
 
 const esc = (s: string) =>
@@ -77,6 +79,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const tip = Number(order.tipAmount ?? 0);
   const deliveryFee = Number(order.deliveryFee ?? 0);
   const distance = billableDistance(order);
+  const waiting = order.fareBreakdown ?? null;
 
   return `<!doctype html>
 <html lang="en">
@@ -116,6 +119,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
     ${distance ? `<tr class="totals"><td>Distance (${esc(distance.sourceLabel)})</td><td class="num">${esc(distance.label)}</td></tr>` : ''}
     ${discount > 0 ? `<tr class="totals"><td>Discount</td><td class="num">−${money(discount)}</td></tr>` : ''}
     ${tip > 0 ? `<tr class="totals"><td>Rider tip</td><td class="num">${money(tip)}</td></tr>` : ''}
+    ${waiting && waiting.waitingCharge > 0 ? `<tr class="totals"><td>Waiting (${waiting.waitingMinutes} min)</td><td class="num">${money(waiting.waitingCharge)}</td></tr>` : ''}
     <tr class="grand"><td>Total</td><td class="num">${money(order.totalAmount)}</td></tr>
   </table>
   <div class="foot">

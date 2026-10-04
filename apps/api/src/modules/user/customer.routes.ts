@@ -2398,8 +2398,11 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'ORDER_NOT_COMPLETE', 'Receipts are issued once the order completes.');
     }
     const { renderReceiptHtml } = await import('../order/receipt');
+    // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
+    const { readFareBreakdown } = await import('../rides/taxi-waiting');
+    const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml(order as never);
+    return renderReceiptHtml((fareBreakdown ? { ...order, fareBreakdown } : order) as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {

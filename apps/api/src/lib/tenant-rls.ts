@@ -112,6 +112,8 @@ export const TENANT_TABLES = [
   'ride_queue_entries', 'safety_deletion_holds', 'san_tombstones',
   // [TAXI multi-stop] The intermediate stops of one ride, walled like the ride itself.
   'taxi_trip_stops',
+  // [TAXI waiting charge] One ride's waiting terms and frozen charge, walled like the ride.
+  'taxi_ride_waiting',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -265,6 +267,8 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
     parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
   // [TAXI multi-stop] one hop: a stop inherits the tenant of its ride (the delivery_cash_settlements shape)
   { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [TAXI waiting charge] one hop: a ride's waiting row inherits the tenant of its ride (the same shape)
+  { table: 'taxi_ride_waiting', trigger: 'taxi_ride_waiting_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
   // card and a hosted session belong to the person who pays the fee
   { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },

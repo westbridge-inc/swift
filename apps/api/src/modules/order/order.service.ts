@@ -52,6 +52,7 @@ import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
 import { newRidePin } from '../rides/ride-pin';
+import { freezeTaxiWaiting, frozenWaitingCharge } from '../rides/taxi-waiting';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   hasTaxiPassengerCustody,
@@ -2012,6 +2013,19 @@ export class OrderService {
     if (input.terminalMetadata?.courierProofPhotoUrl !== undefined) {
       data.courierProofPhotoUrl = input.terminalMetadata.courierProofPhotoUrl;
     }
+    // [TAXI waiting charge] A ride's waiting is frozen HERE, once: on the way to
+    // DELIVERED (and nowhere else, so a no-show, a refusal or a cancellation is
+    // never charged), on the locked row, after the stop guard above proved every
+    // wait closed. Its charge joins the order's total in this same write, so the
+    // fare earning below, the receipt and the total all read one frozen number;
+    // a rolled-back completion leaves nothing frozen and nothing added, and the
+    // freeze answers nothing a second time.
+    if (input.target === 'DELIVERED' && source.orderType === 'TAXI') {
+      const waiting = await freezeTaxiWaiting(tx, source, now);
+      if (waiting && waiting.waitingCharge > 0) {
+        data.totalAmount = new Prisma.Decimal(source.totalAmount).plus(waiting.waitingCharge);
+      }
+    }
     await tx.order.update({ where: { id: input.orderId }, data });
 
     // A REFUNDED transition after CANCELLED/DELIVERED/COMPLETED is accounting
@@ -2748,7 +2762,11 @@ export class OrderService {
         // Zero-commission model: the driver keeps the whole fare. A taxi
         // order's money lives in taxiFareTotal — deliveryFee is 0 for rides,
         // which silently paid drivers $0 before this read the right field.
-        amount: Number(order.taxiFareTotal ?? order.deliveryFee),
+        // [TAXI waiting charge] Plus the waiting charge frozen at completion
+        // (0 for every ride without one): the driver collected it in cash with
+        // the fare, and keeps it all.
+        amount: Number(order.taxiFareTotal ?? order.deliveryFee)
+          + (order.orderType === 'TAXI' ? await frozenWaitingCharge(db, orderId) : 0),
         status: 'AVAILABLE',
       });
 

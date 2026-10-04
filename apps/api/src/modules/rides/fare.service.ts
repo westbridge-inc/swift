@@ -8,6 +8,7 @@ import { resolveFareZones, zonePricedPairs, DEFAULT_TENANT_ID } from './fare-zon
 import { assertTaxiRouteInMarket, placeCode } from './taxi-itinerary';
 import { CountryConfigService } from '../country/country-config.service';
 import { readTaxiRates, readClassRates, assertSaneFare, type TaxiRates, type ClassRates } from '../country/pricing-config';
+import { waitingTermsFromRates, type TaxiWaitingTerms } from './taxi-waiting';
 
 // ---------------------------------------------------------------------------
 // Fare engine — deterministic, computed and shown BEFORE
@@ -235,6 +236,18 @@ export class FareService {
       fromZoneId: fromZone?.id,
       toZoneId: toZone?.id,
     };
+  }
+
+  /**
+   * [TAXI waiting charge] A market's waiting terms: its validated TAXI_RATES
+   * (the declared defaults where it names none), in the market's currency, and
+   * the pricing version they were read from (null = the declared defaults).
+   * What the estimate discloses and what a booking freezes on the ride.
+   */
+  async waitingTerms(countryCode: string): Promise<TaxiWaitingTerms & { version: number | null }> {
+    const config = await this.countryConfig.getByCode(countryCode);
+    const read = await readTaxiRates(this.prisma, countryCode);
+    return { ...waitingTermsFromRates(read.payload, config.currencyCode), version: read.version };
   }
 
   /**

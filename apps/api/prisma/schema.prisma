@@ -397,6 +397,7 @@ model Tenant {
   orders           Order[]
   rideQueueEntries RideQueueEntry[]
   taxiTripStops    TaxiTripStop[]
+  taxiRideWaitings TaxiRideWaiting[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -1886,6 +1887,10 @@ model Order {
   /// whole route.
   taxiStopCount      Int?
   taxiStops          TaxiTripStop[]
+  /// [TAXI waiting charge] The ride's waiting terms, frozen at booking, and the
+  /// charge frozen at "Fare collected" (one row, only for a ride booked while
+  /// TAXI_WAITING_CHARGE was on). The charge itself is in totalAmount.
+  taxiRideWaiting    TaxiRideWaiting?
   /// [ALG-18] THE billable distance — decided once at quote time and frozen
   /// here, with the engine that produced it. The fee path priced this number;
   /// the receipt states it; the earnings sentence will read it. Null on
@@ -2169,6 +2174,43 @@ model TaxiTripStop {
   @@unique([orderId, sequence])
   @@index([tenantId])
   @@map("taxi_trip_stops")
+}
+
+/// [TAXI waiting charge · owner ruling 1 Oct 2026] One taxi ride's waiting:
+/// a charge per FULL block of waiting (pickup: the driver's arrival to the trip
+/// start; each intermediate stop: its arrival to its departure or skip), summed
+/// over the trip and paid in cash on top of the route fare.
+///
+/// Written at booking, only while TAXI_WAITING_CHARGE is on, with the terms the
+/// passenger was shown (chargePerBlock per blockMinutes, from TAXI_RATES); a
+/// trigger refuses any later change to them. Frozen ONCE inside the completion
+/// transaction ("Fare collected"): the summed seconds, the minutes and the
+/// charge, which CHECKs tie to the terms, and frozenAt. A frozen row never
+/// changes again. The order's totalAmount carries the charge; the route fare
+/// stays in taxiFareTotal. A ride without this row is never charged for
+/// waiting. Read it through modules/rides/taxi-waiting.ts.
+model TaxiRideWaiting {
+  id             String    @id @default(cuid())
+  tenantId       String    @default("swift-default")
+  tenant         Tenant    @relation(fields: [tenantId], references: [id])
+  orderId        String    @unique
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// Whole local-currency units per full block (TAXI_RATES.waitingChargePerBlock).
+  chargePerBlock Decimal   @db.Decimal(12, 2)
+  /// Minutes in one block (TAXI_RATES.waitingBlockMinutes).
+  blockMinutes   Int
+  currencyCode   String
+  /// The TAXI_RATES version the terms were read from; null = the declared defaults.
+  termsVersion   Int?
+  /// Frozen at completion, all four together or none.
+  waitingSeconds Int?
+  waitingMinutes Int?
+  waitingCharge  Decimal?  @db.Decimal(12, 2)
+  frozenAt       DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([tenantId])
+  @@map("taxi_ride_waiting")
 }
 
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle
