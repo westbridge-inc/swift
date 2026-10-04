@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { mmgDispatchBlocked } from '../modules/order/mmg-claim.service';
+import { readOfferItinerary } from '../modules/rides/taxi-stops-read';
 
 // Execute production method bodies, not copies of the algorithm. Isolating the
 // class from module wiring makes accidental provider/service boot impossible.
@@ -46,6 +47,9 @@ const context = vm.createContext({
   // [ORDER-SPINE S1-6] dispatchOrder's direct-MMG offer gate — the production
   // predicate itself, not a copy (these orders are CASH, so it lets them by).
   mmgDispatchBlocked,
+  // [TAXI multi-stop 3/8] the offer card's stops — the production reader itself
+  // (these rides have no stops, so it reads nothing and adds nothing).
+  readOfferItinerary,
   TERMINAL_ORDER_STATUSES: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'],
 });
 

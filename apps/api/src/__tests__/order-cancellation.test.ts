@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -147,6 +148,7 @@ async function makeRider() {
       isAvailable: false,
     },
   });
+  await currentMoverDocuments(app.prisma, owned.userId, 'MOTORCYCLE');
   return { ...owned, riderId: rider.id };
 }
 

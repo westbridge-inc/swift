@@ -107,7 +107,7 @@ async function makeDriverDeviceSession(userId: string, deviceId: string) {
   return { token, sessionId: session.id };
 }
 
-async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
+async function makeDriver(opts: { lat?: number; lng?: number; currentInsurance?: boolean } = {}) {
   const u = await makeUserWithSession(['DRIVER', 'CUSTOMER'], 'DRIVER');
   const driver = await app.prisma.driver.create({
     data: {
@@ -122,6 +122,13 @@ async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
       locationSessionId: u.sessionId,
     },
   });
+  // Online fixtures must satisfy the same current insurance gate at custody
+  // as at GO. Negative GO cases opt out explicitly below.
+  if (opts.currentInsurance !== false) await app.prisma.verificationDocument.create({ data: {
+    userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
+    fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
+    coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
+  } });
   return { ...u, driverId: driver.id };
 }
 
@@ -918,7 +925,7 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   }
 
   async function offlineDriver() {
-    const d = await makeDriver();
+    const d = await makeDriver({ currentInsurance: false });
     await app.prisma.driver.update({ where: { id: d.driverId }, data: { isOnline: false } });
     return d;
   }
