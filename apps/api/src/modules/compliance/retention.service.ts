@@ -43,6 +43,12 @@ export const RETENTION_DEFAULTS: RetentionDefault[] = [
     retainDays: 180,
     legalBasis: 'Service communication history; users retain receipts/orders separately.',
   },
+  {
+    dataClass: 'email_outbox.processed',
+    description: 'Delivered transactional-email content and recipient address; retain only briefly for delivery support, then scrub.',
+    retainDays: 30,
+    legalBasis: 'Delivery support; the underlying receipt, export and account records remain in their own retention classes.',
+  },
 ];
 
 /** Idempotent: insert missing defaults, never overwrite operator-tuned rows. */
@@ -93,6 +99,17 @@ const ENFORCERS: Record<string, Enforcer> = {
     DELETE FROM notifications WHERE id IN (
       SELECT id FROM notifications
       WHERE "createdAt" < ${cutoff} AND type <> 'SAFETY' LIMIT ${BATCH})`)),
+  // Email content is copied only to make a committed delivery obligation
+  // possible. Once delivered, retain no address/body beyond the configured
+  // support window; terminal failures keep only operational error history.
+  'email_outbox.processed': (tx, cutoff) => drain(() => tx.$executeRaw(Prisma.sql`
+    UPDATE email_outbox
+    SET recipient = '[redacted]', subject = '[redacted]', body = '[redacted]'
+    WHERE id IN (
+      SELECT id FROM email_outbox
+      WHERE "processedAt" < ${cutoff}
+        AND (recipient <> '[redacted]' OR subject <> '[redacted]' OR body <> '[redacted]')
+      LIMIT ${BATCH})`)),
 };
 
 export interface SweepResult {

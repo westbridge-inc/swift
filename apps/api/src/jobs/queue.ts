@@ -1170,6 +1170,33 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const notificationWorker = buildWorker(
     QUEUE_NAMES.NOTIFICATION,
     async (job: Job) => {
+      if (job.name === 'email-outbox-sweep') {
+        const { drainEmailOutbox, emailOutboxHealth } = await import('../modules/notification/email-outbox');
+        const { getChannels } = await import('../providers/notifications/channels');
+        const delivered = await drainEmailOutbox(ctx.prisma, getChannels().email);
+        const health = await emailOutboxHealth(ctx.prisma);
+        // Parked poison messages and mail owed for a full day are operational
+        // failures. Log the metric every sweep and page platform operators
+        // periodically; neither can remain an invisible database column.
+        if (health.parked > 0 || health.longPending > 0) {
+          ctx.log.error({ delivered, ...health }, 'email outbox requires operator attention');
+          const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
+          await opsPageOnce(ctx, 'email-outbox-health', 6 * 3600, () => notifyAdmins(
+            ctx.prisma,
+            new NotificationService(ctx.prisma, ctx.io),
+            {
+              tenantId: null,
+              title: 'Transactional email needs attention',
+              body: `${health.parked} email delivery obligation(s) are parked and ${health.longPending} have been pending for over 24 hours. Review the email outbox and provider configuration.`,
+              data: { kind: 'ops_email_outbox_health', ...health },
+              dedupeKey: 'ops:email-outbox-health',
+            },
+          ));
+        } else {
+          ctx.log.info({ delivered, ...health }, 'email outbox sweep complete');
+        }
+        return;
+      }
       if (job.name !== 'vendor-alert-escalate') return;
       const { escalateVendorAlert } = await import('../modules/notification/notification.service');
       const { getChannels } = await import('../providers/notifications/channels');
@@ -2181,6 +2208,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 }
 
 export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueues>) {
+  // Transactional emails are committed in the database with the fact they
+  // announce. A failed provider call stays owed and is retried by this sweep.
+  await queues.notificationQueue.add('email-outbox-sweep', {}, {
+    repeat: { every: 60_000 },
+    removeOnComplete: 100,
+    removeOnFail: 50,
+  });
+
   // Subscription billing: check every hour
   await queues.subscriptionQueue.add('process-billing', {}, {
     repeat: { pattern: '0 * * * *' }, // every hour

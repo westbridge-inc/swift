@@ -26,6 +26,7 @@ import { isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classe
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
+import { queueTransactionalEmailInTransaction } from '../notification/email-outbox';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { assertExternalProcessingPermitted } from '../legal/processor-register';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
@@ -1133,6 +1134,17 @@ export class VerificationService {
       if (approve) await this.assertActivationPriceable(candidate.userId, tx);
       await projectProviderVerificationLocked(tx, updated.userId);
       await this.projectVendorActivation(tx, updated.userId);
+      const subject = await tx.user.findUnique({ where: { id: updated.userId }, select: { email: true } });
+      if (subject?.email) {
+        const kind = approve ? 'PARTNER_APPROVED' : 'PARTNER_REJECTED';
+        await queueTransactionalEmailInTransaction(tx, {
+          kind,
+          eventId: docId,
+          userId: updated.userId,
+          recipient: subject.email,
+          template: { kind },
+        });
+      }
       return { kind: 'UPDATED' as const, document: updated };
     });
     if (outcome.kind === 'NOT_PENDING') {

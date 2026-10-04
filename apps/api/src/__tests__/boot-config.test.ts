@@ -30,6 +30,12 @@ const good: Record<string, string | undefined> = {
   TWILIO_API_KEY_SECRET: 'test-key-secret',
   TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
+  EMAIL_PROVIDER: 'smtp',
+  SMTP_HOST: 'smtp.example.test',
+  SMTP_PORT: '587',
+  SMTP_USER: 'swift@example.test',
+  SMTP_PASS: 'test-smtp-password',
+  EMAIL_FROM: 'Swift <swift@example.test>',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
   KYC_PROVIDER: 'didit',
   DIDIT_API_KEY: 'didit-live-key',
@@ -121,6 +127,11 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('boots when every required secret is present', () => {
     expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
+  it('refuses production without a complete SMTP transactional-email provider', () => {
+    expect(() => assertSafeBootConfig({ ...good, EMAIL_PROVIDER: undefined })).toThrow(/EMAIL_PROVIDER must be smtp/);
+    expect(() => assertSafeBootConfig({ ...good, SMTP_HOST: undefined })).toThrow(/EMAIL_PROVIDER=smtp needs .*SMTP_HOST/);
   });
 
   it('refuses to boot in production without MASTER_KEK (KYC would store plaintext)', () => {

@@ -16,6 +16,8 @@ import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion
 import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { isOwnedAvatarKey } from '../verification/object-authority';
+import { cancelPendingEmailOutboxForUser, queueTransactionalEmailInTransaction } from '../notification/email-outbox';
+import { createHash } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -110,7 +112,7 @@ export class AccountService {
       }),
     ]);
 
-    return {
+    const data = {
       exportedAt: new Date().toISOString(),
       notice:
         'This is the personal data Swift holds about your account. Money amounts are in your local minor unit. Verification document contents are never exported — they are encrypted and access-logged.',
@@ -120,6 +122,21 @@ export class AccountService {
       ratingsGiven,
       serviceJobs,
     };
+    if (user.email) {
+      // The timestamp of the HTTP response is not an event identity. Hash the
+      // exported snapshot instead: a client retry of the same snapshot creates
+      // no second delivery obligation, while changed personal data can notify
+      // the person again.
+      const exportSnapshotId = createHash('sha256').update(JSON.stringify({ account: user, addresses, orders, ratingsGiven, serviceJobs })).digest('hex');
+      await queueTransactionalEmailInTransaction(prisma, {
+        kind: 'DATA_EXPORT_READY',
+        eventId: `${userId}:${exportSnapshotId}`,
+        userId,
+        recipient: user.email,
+        template: { kind: 'DATA_EXPORT_READY' },
+      });
+    }
+    return data;
   }
 
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
@@ -138,7 +155,7 @@ export class AccountService {
       if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
       const user = await tx.user.findUniqueOrThrow({
         where: { id: userId },
-        select: { id: true, phone: true, roles: true, status: true, avatar: true, tenantId: true },
+        select: { id: true, phone: true, email: true, roles: true, status: true, avatar: true, tenantId: true },
       });
       const queueAvatarBeforePointerClear = async () => {
         if (!user.avatar) return null;
@@ -231,6 +248,18 @@ export class AccountService {
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
+      // No previously owed message may retain an address after erasure. This
+      // precedes the one explicit closure confirmation below.
+      await cancelPendingEmailOutboxForUser(tx, userId);
+      if (user.email) {
+        await queueTransactionalEmailInTransaction(tx, {
+          kind: 'ACCOUNT_DELETION',
+          eventId: userId,
+          userId,
+          recipient: user.email,
+          template: { kind: 'ACCOUNT_DELETION' },
+        });
+      }
       return { alreadyComplete: false, hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if (preflight.alreadyComplete) return { deleted: true };
