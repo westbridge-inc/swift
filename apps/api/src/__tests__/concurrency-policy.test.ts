@@ -133,13 +133,13 @@ describe('every capacity gate goes through the seam — no fifth one appears qui
 
   it('the gates still route through the seam — counts updated for B5', () => {
     const src = stripComments(readFileSync(SERVICE, 'utf8'));
-    // 2 SQL candidate predicates (unchanged). The RIDER offer-gate and accept
+    // 2 SQL candidate predicates plus the DRIVER custody SQL write. The RIDER offer-gate and accept
     // CAS moved from capacityWhere (a null-check that cannot count) to
     // riderLiveLegCount/reserveRiderLeg — still THIS module's exports, so the
-    // capacity answer still has one home. DRIVER keeps its two capacityWhere
-    // uses: the null check IS the law for taxis.
-    expect((src.match(/capacityPredicateSql\(/g) ?? []).length).toBe(2);
-    expect((src.match(/capacityWhere\(/g) ?? []).length).toBe(2);
+    // capacity answer still has one home. The driver claim now uses SQL to
+    // enforce its document deadline at the write; its offer gate uses Prisma.
+    expect((src.match(/capacityPredicateSql\(/g) ?? []).length).toBe(3);
+    expect((src.match(/capacityWhere\(/g) ?? []).length).toBe(1);
     expect((src.match(/riderLiveLegCount\(/g) ?? []).length).toBeGreaterThanOrEqual(1);
     expect((src.match(/reserveRiderLeg\(/g) ?? []).length).toBe(1);
   });
