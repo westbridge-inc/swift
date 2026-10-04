@@ -5,6 +5,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import {
   adPrincipalScope,
+  adIdentity, adNetwork, recordAdServe, cleanupAdAuthorities,
   adTokenMatchesPrincipal,
   signImpressionToken,
   verifyImpressionToken,
@@ -34,7 +35,7 @@ process.env['ADS_EVENT_SECRET'] = process.env['ADS_EVENT_SECRET'] || 'test-ads-e
 const serving = new AdServingService(prisma);
 const events = new AdEventService(prisma);
 let httpApp: FastifyInstance;
-const eventPrincipal = (userId: string | null, authPresented = userId !== null) => ({ userId, authPresented });
+const eventPrincipal = (userId: string | null, authPresented = userId !== null) => ({ userId, authPresented, guestId: 'test-continuity' });
 
 const advertiserIds: string[] = [];
 const placementIds: string[] = [];
@@ -196,7 +197,7 @@ describe('§11 serving', () => {
     const p = await makePlacement('home_ad_bar');
     await liveBookedCampaign(p.id, 'Survival Supermarket');
     AdServingService.invalidateTenant(tenant);
-    const res = await serving.serve({ tenantId: tenant, city: 'georgetown', sessionId: 'sess-1', userId: null, keys: [p.key] });
+    const res = await serving.serve({ tenantId: tenant, city: 'georgetown', sessionId: 'sess-1', userId: null, guestId: 'test-continuity', keys: [p.key] });
     const slot = res.placements[p.key]!;
     expect(slot.items.length).toBe(1);
     expect(slot.items[0]!.advertiserName).toBe('Survival Supermarket'); // client renders "Ad · {this}"
@@ -210,7 +211,7 @@ describe('§11 serving', () => {
     const h = await prisma.houseAd.create({ data: { tenantId: tenant, placementId: p.id, kind: 'IMAGE', fileUrl: 'https://cdn/house.png', headline: 'Swift', active: true } });
     houseIds.push(h.id);
     AdServingService.invalidateTenant(tenant);
-    const withHouse = await serving.serve({ tenantId: tenant, city: '*', sessionId: 's', userId: null, keys: [p.key] });
+    const withHouse = await serving.serve({ tenantId: tenant, city: '*', sessionId: 's', userId: null, guestId: 'test-continuity', keys: [p.key] });
     expect(withHouse.placements[p.key]!.items[0]!.advertiserName).toBe('Swift');
     expect(withHouse.placements[p.key]!.items[0]!.impressionToken).toBeUndefined(); // house not tracked
     expect(withHouse._house[p.key]).toBe(true);
@@ -218,7 +219,7 @@ describe('§11 serving', () => {
     // Remove the house ad → collapsed (empty items), still no error.
     await prisma.houseAd.update({ where: { id: h.id }, data: { active: false } });
     AdServingService.invalidateTenant(tenant);
-    const collapsed = await serving.serve({ tenantId: tenant, city: '*', sessionId: 's', userId: null, keys: [p.key] });
+    const collapsed = await serving.serve({ tenantId: tenant, city: '*', sessionId: 's', userId: null, guestId: 'test-continuity', keys: [p.key] });
     expect(collapsed.placements[p.key]!.items).toHaveLength(0);
   });
 
@@ -233,12 +234,24 @@ describe('§11 serving', () => {
   });
 });
 
+
+// Fixture authority comes from the same current-serving revalidation as the
+// product. Signing alone deliberately cannot create an ingestible grant.
+async function servedToken(payload: { c: string; r: string; p: string; s: string }, userId: string | null, now = Date.now(), age = 5000): Promise<string> {
+  const campaign = await prisma.adCampaign.findUniqueOrThrow({ where: { id: payload.c } });
+  const issuedAt = now - age;
+  const identity = adIdentity(userId, 'test-continuity')!;
+  const grant = await recordAdServe(prisma, { tenantId: campaign.tenantId, campaignId: payload.c, creativeId: payload.r, placementKey: payload.p, principalHash: identity, networkHash: adNetwork(identity), week: WK, city: '*' }, new Date(issuedAt));
+  expect(grant).toBeTruthy();
+  return signImpressionToken({ ...payload, i: grant!, t: campaign.tenantId }, userId, issuedAt);
+}
+
 describe('§12 events', () => {
   it('accepts a valid token once, dedupes a replay, rejects a forged token', async () => {
     const p = await makePlacement('home_ad_bar');
     const c = await liveBookedCampaign(p.id, 'Event Co');
     const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
-    const token = signImpressionToken({ c: c.id, r: creative.id, p: 'home_ad_bar', s: 'sess-ev' }, null);
+    const token = await servedToken({ c: c.id, r: creative.id, p: p.key, s: 'sess-ev' }, null);
 
     const first = await events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: new Date().toISOString() }], eventPrincipal(null));
     expect(first).toEqual(['accepted']);
@@ -258,9 +271,10 @@ describe('§12 events', () => {
     const c = await liveBookedCampaign(p.id, 'View Co');
     const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
     const uh = userHash('user-view', new Date().toISOString().slice(0, 10));
-    const token = signImpressionToken({ c: c.id, r: creative.id, p: 'home_top_card', s: 'sess-v' }, 'user-view');
+    const token = await servedToken({ c: c.id, r: creative.id, p: p.key, s: 'sess-v' }, 'user-view');
+    expect(await events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: new Date().toISOString() }], eventPrincipal('user-view'))).toEqual(['accepted']);
     await events.ingest([{ token, eventType: 'VIEWABLE_IMPRESSION', occurredAt: new Date().toISOString() }], eventPrincipal('user-view'));
-    const counter = await prisma.adFreqCounter.findUnique({ where: { userHash_placementKey_day: { userHash: uh, placementKey: 'home_top_card', day: new Date(new Date().toISOString().slice(0, 10)) } } });
+    const counter = await prisma.adFreqCounter.findUnique({ where: { userHash_placementKey_day: { userHash: uh, placementKey: p.key, day: new Date(new Date().toISOString().slice(0, 10)) } } });
     expect(counter?.count).toBe(1);
     const ev = await prisma.adEvent.findFirstOrThrow({ where: { campaignId: c.id, eventType: 'VIEWABLE_IMPRESSION' } });
     expect(ev.userHash).toBe(uh); // pseudonymous, never a raw id
@@ -272,11 +286,12 @@ describe('§12 events', () => {
     const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
     const now = new Date('2035-01-02T12:00:00.000Z');
     const principal = eventPrincipal(`atomic-user-${nanoid(6)}`);
-    const token = signImpressionToken(
+    const token = await servedToken(
       { c: c.id, r: creative.id, p: p.key, s: 'atomic-retry-session' },
       principal.userId,
       now.getTime(),
     );
+    expect(await events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: now.toISOString() }], principal, now)).toEqual(['accepted']);
     const event = { token, eventType: 'VIEWABLE_IMPRESSION' as const, occurredAt: now.toISOString() };
     const th = createHash('sha256').update(token).digest('hex');
     const uh = userHash(principal.userId!, now.toISOString().slice(0, 10));
@@ -323,11 +338,12 @@ describe('§12 events', () => {
     const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
     const now = new Date('2035-01-03T09:00:00.000Z');
     const principal = eventPrincipal(`p2002-user-${nanoid(6)}`);
-    const token = signImpressionToken(
+    const token = await servedToken(
       { c: c.id, r: creative.id, p: p.key, s: 'non-dedupe-conflict-session' },
       principal.userId,
       now.getTime(),
     );
+    expect(await events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: now.toISOString() }], principal, now)).toEqual(['accepted']);
     const event = { token, eventType: 'VIEWABLE_IMPRESSION' as const, occurredAt: now.toISOString() };
     const th = createHash('sha256').update(token).digest('hex');
     const uh = userHash(principal.userId!, now.toISOString().slice(0, 10));
@@ -376,11 +392,12 @@ describe('§12 events', () => {
     const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
     const now = new Date('2035-01-03T12:00:00.000Z');
     const principal = eventPrincipal(`concurrent-user-${nanoid(6)}`);
-    const token = signImpressionToken(
+    const token = await servedToken(
       { c: c.id, r: creative.id, p: p.key, s: 'concurrent-event-session' },
       principal.userId,
       now.getTime(),
     );
+    expect(await events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: now.toISOString() }], principal, now)).toEqual(['accepted']);
     const event = { token, eventType: 'VIEWABLE_IMPRESSION' as const, occurredAt: now.toISOString() };
     const th = createHash('sha256').update(token).digest('hex');
     const uh = userHash(principal.userId!, now.toISOString().slice(0, 10));
@@ -410,11 +427,12 @@ describe('§12 events', () => {
     const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
     const now = new Date('2035-01-04T12:00:00.000Z');
     const principal = eventPrincipal(`frequency-user-${nanoid(6)}`);
-    const tokens = ['frequency-session-a', 'frequency-session-b'].map((sessionId) => signImpressionToken(
+    const tokens = await Promise.all(['frequency-session-a', 'frequency-session-b'].map(async (sessionId) => servedToken(
       { c: c.id, r: creative.id, p: p.key, s: sessionId },
       principal.userId,
       now.getTime(),
-    ));
+    )));
+    await Promise.all(tokens.map((token) => events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: now.toISOString() }], principal, now)));
     const incoming = tokens.map((token) => ({
       token,
       eventType: 'VIEWABLE_IMPRESSION' as const,
@@ -450,7 +468,7 @@ describe('§12 events', () => {
     const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
     const now = new Date('2035-01-05T12:00:00.000Z');
     const principal = eventPrincipal(`deleted-campaign-user-${nanoid(6)}`);
-    const token = signImpressionToken(
+    const token = await servedToken(
       { c: c.id, r: creative.id, p: p.key, s: 'deleted-campaign-session' },
       principal.userId,
       now.getTime(),
@@ -489,11 +507,11 @@ describe('§12 events', () => {
     const userB = `user-b-${nanoid(6)}`;
     const userSession = 'app-session-user';
     const guestSession = 'app-session-guest';
-    const userToken = signImpressionToken(
+    const userToken = await servedToken(
       { c: c.id, r: creative.id, p: p.key, s: userSession },
       userA,
     );
-    const guestToken = signImpressionToken(
+    const guestToken = await servedToken(
       { c: c.id, r: creative.id, p: p.key, s: guestSession },
       null,
     );
@@ -505,10 +523,11 @@ describe('§12 events', () => {
 
     expect(await events.ingest([{ token: guestToken, eventType: 'CLICK', occurredAt }], eventPrincipal(userB))).toEqual(['invalid']);
     expect(await events.ingest([{ token: guestToken, eventType: 'CLICK', occurredAt }], eventPrincipal(null, true))).toEqual(['invalid']);
+    expect(await events.ingest([{ token: guestToken, eventType: 'IMPRESSION', occurredAt }], eventPrincipal(null))).toEqual(['accepted']);
     expect(await events.ingest([{ token: guestToken, eventType: 'CLICK', occurredAt }], eventPrincipal(null))).toEqual(['accepted']);
 
     const stored = await prisma.adEvent.findMany({ where: { campaignId: c.id } });
-    expect(stored).toHaveLength(2);
+    expect(stored).toHaveLength(3);
     expect(stored.find((event) => event.eventType === 'IMPRESSION')?.userHash)
       .toBe(userHash(userA, new Date().toISOString().slice(0, 10)));
     expect(stored.find((event) => event.eventType === 'CLICK')?.userHash).toBeNull();
@@ -576,16 +595,88 @@ describe('§12 HTTP principal authority', () => {
     expect(guestWithInvalidAuth.statusCode).toBe(200);
     expect(guestWithInvalidAuth.json().data.results).toEqual(['invalid']);
 
+    const cookie = String(servedForGuest.headers['set-cookie']).split(';')[0]!;
+    const guestImpression = await httpApp.inject({ method: 'POST', url: '/api/v1/ads/events', headers: { cookie }, payload: eventPayload(guestToken, 'IMPRESSION') });
+    expect(guestImpression.json().data.results).toEqual(['accepted']);
     const guestNoAuth = await httpApp.inject({
-      method: 'POST', url: '/api/v1/ads/events', payload: eventPayload(guestToken, 'CLICK'),
+      method: 'POST', url: '/api/v1/ads/events', headers: { cookie }, payload: eventPayload(guestToken, 'CLICK'),
     });
     expect(guestNoAuth.statusCode).toBe(200);
     expect(guestNoAuth.json().data.results).toEqual(['accepted']);
 
     const stored = await prisma.adEvent.findMany({ where: { campaignId: c.id } });
-    expect(stored).toHaveLength(2);
+    expect(stored).toHaveLength(3);
     expect(stored.find((event) => event.eventType === 'IMPRESSION')?.userHash)
       .toBe(userHash(userA.userId, new Date().toISOString().slice(0, 10)));
     expect(stored.find((event) => event.eventType === 'CLICK')?.userHash).toBeNull();
   });
+});
+
+describe('MASTER-052 bounded serving authority', () => {
+  it('rotating client session labels cannot multiply one account\'s serve allowance', async () => {
+    const p = await makePlacement('home_top_card');
+    await liveBookedCampaign(p.id, 'Bounded Co');
+    const userId = `bounded-${nanoid(12)}`;
+    const tokens = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      const result = await serving.serve({ tenantId: tenant, city: 'georgetown', sessionId: `rotated-${i}`, userId, keys: [p.key] });
+      for (const item of result.placements[p.key]?.items ?? []) if (item.impressionToken) tokens.add(item.impressionToken);
+    }
+    expect(tokens.size).toBeGreaterThan(0);
+    expect(tokens.size).toBeLessThanOrEqual(20);
+  });
+  it('a signed token not backed by a real serve never enters campaign metrics', async () => {
+    const p = await makePlacement('home_top_card');
+    const c = await liveBookedCampaign(p.id, 'No Grant Co');
+    const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
+    for (const i of [undefined, `invented-${nanoid(16)}`]) {
+      const token = signImpressionToken({ c: c.id, r: creative.id, p: p.key, s: 'not-served', i, t: c.tenantId }, null);
+      expect(await events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: new Date().toISOString() }], eventPrincipal(null))).toEqual(['invalid']);
+    }
+    expect(await prisma.adEvent.count({ where: { campaignId: c.id } })).toBe(0);
+  });
+});
+
+it('MASTER-052 enforces impression and video timing, then accepts one coherent progression', async () => {
+  const p = await makePlacement('video-progress');
+  const c = await liveBookedCampaign(p.id, 'Video Progress');
+  const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
+  await prisma.adCreative.update({ where: { id: creative.id }, data: { kind: 'VIDEO', durationSeconds: 4 } });
+  const now = new Date();
+  const principal = eventPrincipal(`video-${nanoid(12)}`);
+  const token = await servedToken({ c: c.id, r: creative.id, p: p.key, s: 'video' }, principal.userId, now.getTime(), 0);
+  const event = async (eventType: 'IMPRESSION' | 'CLICK' | 'VIEWABLE_IMPRESSION' | 'VIDEO_START' | 'VIDEO_Q25' | 'VIDEO_Q50' | 'VIDEO_Q75' | 'VIDEO_COMPLETE', delay: number) => events.ingest([{ token, eventType, occurredAt: new Date(now.getTime() + delay).toISOString() }], principal, new Date(now.getTime() + delay));
+  expect(await event('CLICK', 0)).toEqual(['invalid']);
+  expect(await event('VIDEO_COMPLETE', 0)).toEqual(['invalid']);
+  expect(await event('IMPRESSION', 0)).toEqual(['accepted']);
+  expect(await event('VIEWABLE_IMPRESSION', 0)).toEqual(['invalid']);
+  expect(await event('VIDEO_START', 0)).toEqual(['accepted']);
+  expect(await event('VIDEO_Q25', 0)).toEqual(['invalid']);
+  expect(await event('VIDEO_Q25', 1000)).toEqual(['accepted']);
+  expect(await event('VIDEO_Q75', 2000)).toEqual(['invalid']);
+  expect(await event('VIDEO_Q50', 2000)).toEqual(['accepted']);
+  expect(await event('VIDEO_Q75', 3000)).toEqual(['accepted']);
+  expect(await event('VIDEO_COMPLETE', 3919)).toEqual(['invalid']);
+  expect(await event('VIDEO_COMPLETE', 3920)).toEqual(['accepted']);
+  expect(await event('VIDEO_COMPLETE', 3920)).toEqual(['duplicate']);
+});
+
+it('MASTER-052 expires grant storage in bounded batches while active authority remains usable', async () => {
+  const p = await makePlacement('cleanup-authority');
+  const c = await liveBookedCampaign(p.id, 'Cleanup Authority');
+  const creative = await prisma.adCreative.findFirstOrThrow({ where: { campaignId: c.id } });
+  const principal = eventPrincipal(`cleanup-${nanoid(12)}`);
+  const now = new Date();
+  const token = await servedToken({ c: c.id, r: creative.id, p: p.key, s: 'cleanup' }, principal.userId, now.getTime());
+  const base = await prisma.adServeGrant.findFirstOrThrow({ where: { campaignId: c.id } });
+  await prisma.adServeGrant.createMany({ data: Array.from({ length: 450 }, () => ({ ...base, id: `expired-${nanoid(20)}`, expiresAt: new Date(now.getTime() - 1) })) });
+  const expired = () => prisma.adServeGrant.count({ where: { campaignId: c.id, expiresAt: { lte: now } } });
+  expect(await expired()).toBe(450);
+  await cleanupAdAuthorities(prisma, now, c.tenantId);
+  expect(await expired()).toBe(250);
+  await cleanupAdAuthorities(prisma, now, c.tenantId);
+  expect(await expired()).toBe(50);
+  await cleanupAdAuthorities(prisma, now, c.tenantId);
+  expect(await expired()).toBe(0);
+  expect(await events.ingest([{ token, eventType: 'IMPRESSION', occurredAt: now.toISOString() }], principal, now)).toEqual(['accepted']);
 });

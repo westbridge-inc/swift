@@ -93,6 +93,7 @@ export const TENANT_TABLES = [
   'algo_decisions',
   'vendor_prep_stats',
   'eta_pad_stats',
+  'ad_serve_grants',
   'ad_campaigns', 'ad_events', 'ad_invoices', 'ad_placements',
   'ad_refund_intents', 'ad_refund_items', 'ad_refund_outbox', 'ads_audit_log',
   'ads_settings', 'advertisers', 'attribution_claims', 'batch_evaluations',

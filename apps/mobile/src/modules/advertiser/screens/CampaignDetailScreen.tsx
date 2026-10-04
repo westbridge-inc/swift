@@ -178,11 +178,16 @@ export function CampaignDetailScreen() {
           ) : null}
         </Card>
 
-        {/* §12.3 stats — the rollup numbers (reconciled with raw events). */}
+        {/* §12.3 stats — accepted measurement reports, with historical uncertainty. */}
         <Card style={{ padding: space.xl, marginTop: space.lg }}>
           <T variant="label" weight="semibold">
             Performance
           </T>
+          {stats.data?.measurement?.historicalRollups === 'UNVERIFIED' ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              Performance comes from app reports. Historical figures are unverified.
+            </T>
+          ) : null}
           {totals ? (
             <View style={{ flexDirection: 'row', marginTop: space.lg }}>
               <StatCell label="Viewable" value={Number(totals.viewableImpressions).toLocaleString('en-US')} />
