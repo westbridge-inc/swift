@@ -3,8 +3,9 @@ import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, LabeledInput, LinkText, PillButton, Screen, T, useLogoutConfirm } from '../../../kit';
-import { SwiftMark } from '../../../components/SwiftLogo';
+import { Card, LabeledInput, LinkText, PillButton, T, useLogoutConfirm } from '../../../kit';
+import { BackToSwiftButton } from '../../../components/onboarding/BackToSwiftButton';
+import { BackToSwiftScreen, useBackToSwift } from '../../../components/onboarding/backToSwift';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
@@ -235,6 +236,10 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
     body: 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
   });
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // [Owner, 1 Oct] Never a one-way door: "‹ Swift", Android's back and the iOS
+  // edge swipe go back to ordering. The saved vehicle and every uploaded
+  // document stay on the server.
+  const back = useBackToSwift('mover');
   const savedVehicle: VehicleKind | null = status?.vehicleType ?? null;
   // Default the vehicle from what they picked on the entry screen: a taxi
   // driver starts on Car, a rider on Motorcycle. A saved vehicle always wins.
@@ -254,9 +259,9 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   const checklistStatus = preview ?? status;
 
   return (
-    <Screen>
+    <BackToSwiftScreen onBack={back.leave}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: GUTTER, height: 56 }}>
-        <SwiftMark size={28} />
+        <BackToSwiftButton onPress={back.leave} busy={back.leaving} />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
           <LinkText label="Switch app" onPress={() => setSwitcherOpen(true)} />
           <LinkText label="Log out" tone="muted" onPress={requestLogout} />
@@ -337,6 +342,6 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
       {stepUp.sheet}
       {logoutDialog}
-    </Screen>
+    </BackToSwiftScreen>
   );
 }

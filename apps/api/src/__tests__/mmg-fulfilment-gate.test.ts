@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { handoverAuthorityFor, handoverVersionFor } from '../modules/order/handover-authority';
 import { handoverBlockCounter } from '../plugins/observability';
@@ -79,6 +80,7 @@ async function makeRider(userId: string) {
   const rider = await app.prisma.rider.create({
     data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' },
   });
+  await currentMoverDocuments(app.prisma, userId, 'MOTORCYCLE');
   return rider.id;
 }
 
