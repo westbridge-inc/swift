@@ -359,6 +359,8 @@ export const customerApi = {
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
   exportAccount: (session?: AuthSessionSnapshot) =>
     api.get('/customer/account/export', capturedAuthConfig(session)),
+  requestAccountClosure: (session?: AuthSessionSnapshot) =>
+    api.post('/customer/account/closure-request', {}, capturedAuthConfig(session)),
   deleteAccount: (session?: AuthSessionSnapshot) =>
     api.delete('/customer/account', capturedAuthConfig(session)),
   switchRole: (role: string, session?: AuthSessionSnapshot) =>

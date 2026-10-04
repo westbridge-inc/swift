@@ -323,6 +323,7 @@ vi.mock('../../components/onboarding/WentLive', () => ({
   useWentLive: () => ({ celebrate: false, dismiss: vi.fn() }),
   WentLivePopup: 'WentLivePopup',
 }));
+vi.mock('../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('../profile/screens/GetHelpScreen', () => ({ GetHelpScreen: 'GetHelpScreen' }));
 vi.mock('./NewOrderTakeover', () => ({ NewOrderTakeover: 'NewOrderTakeover' }));
 vi.mock('./screens/VendorAccountScreen', () => ({ VendorAccountScreen: 'VendorAccountScreen' }));

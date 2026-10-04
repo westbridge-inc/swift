@@ -10,6 +10,7 @@ import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { VendorTierScreen } from './screens/VendorTierScreen';
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -165,6 +166,7 @@ function MenuStackNav() {
       <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
       {canEdit ? <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} /> : null}
       {canEdit ? <Stack.Screen name="VendorBulkImport" component={VendorBulkImportScreen} /> : null}
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }

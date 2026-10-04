@@ -13,6 +13,7 @@ import { NewCampaignScreen } from './screens/NewCampaignScreen';
 import { CampaignDetailScreen } from './screens/CampaignDetailScreen';
 import { AdvertiserBillingScreen } from './screens/AdvertiserBillingScreen';
 import { AdvertiserTeamScreen } from './screens/AdvertiserTeamScreen';
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 
 // The advertiser surface (ads-platform spec §14) — role-routed like the vendor
@@ -80,6 +81,7 @@ export function AdvertiserStack() {
           <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         </>
       )}
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }

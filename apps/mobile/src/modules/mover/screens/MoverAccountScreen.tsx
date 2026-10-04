@@ -227,6 +227,7 @@ export function MoverAccountScreen({ navigation }: any) {
             sub="View your fee and recent payments"
             onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
+          <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData')} />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </Card>

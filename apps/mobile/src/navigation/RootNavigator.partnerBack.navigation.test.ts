@@ -48,6 +48,7 @@ const fx = vi.hoisted(() => ({
   toasts: [] as string[],
 }));
 
+vi.mock('../modules/profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react-native', async () => {
   const R = await import('react');
   const kids = (children: unknown) =>
