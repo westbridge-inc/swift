@@ -3,7 +3,6 @@ import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { z } from 'zod';
-import { nanoid } from 'nanoid';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
@@ -364,8 +363,12 @@ export default async function courierRoutes(app: FastifyInstance) {
       if (now >= (order.deliveredAt ?? order.updatedAt).getTime() + TRACKING_GRACE_MS) throw trackingUnavailable();
       return { success: true, data: { orderNumber: order.orderNumber, status: order.status, rider: null } };
     }
-    const { orderType: _type, placedAt: _placed, updatedAt: _updated, deliveredAt: _delivered, ...view } = order;
-    return { success: true, data: redactLiveLocation(view) };
+    return { success: true, data: redactLiveLocation({
+      orderNumber: order.orderNumber, status: order.status,
+      courierRecipientName: order.courierRecipientName,
+      pickupAddress: order.pickupAddress, deliveryAddress: order.deliveryAddress,
+      estimatedDeliveryTime: order.estimatedDeliveryTime, rider: order.rider,
+    }) };
   });
 
   /** POST /order/:id/cancel — sender cancels before rider pickup. */
