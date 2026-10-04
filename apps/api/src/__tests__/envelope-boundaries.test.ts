@@ -3,6 +3,19 @@ import { describe, expect, it } from 'vitest';
 import { EnvKeyProvider, decryptBuffer, encryptBuffer, generateDek } from '../providers/storage/envelope';
 
 describe('MASTER-080 envelope helper boundaries', () => {
+  it('rejects string keys instead of accepting character counts as byte lengths', async () => {
+    const key = 'k'.repeat(32) as unknown as Buffer;
+    expect(() => encryptBuffer(Buffer.from('fixture'), key)).toThrow();
+    await expect(new EnvKeyProvider(generateDek().toString('base64')).wrapDek(key)).rejects.toThrow();
+  });
+  it('rejects a twelve-character UTF-8 IV carrying twenty-four bytes', () => {
+    const key = generateDek();
+    const iv = 'é'.repeat(12);
+    expect(Buffer.byteLength(iv)).toBe(24);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const ciphertext = Buffer.concat([cipher.update('synthetic document'), cipher.final()]);
+    expect(() => decryptBuffer(ciphertext, key, iv as unknown as Buffer, cipher.getAuthTag())).toThrow();
+  });
   it.each([0, 4, 8, 12, 13, 14, 15, 17])('rejects a %i-byte authentication tag', (length) => {
     const key = generateDek();
     const value = encryptBuffer(Buffer.from('synthetic document'), key);

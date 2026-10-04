@@ -28,7 +28,7 @@ const TAG_BYTES = 16;
 const WRAPPED_KEY_BYTES = IV_BYTES + TAG_BYTES + KEY_BYTES;
 
 function requireLength(value: Buffer, length: number, name: string): void {
-  if (value.length !== length) throw new Error(`Invalid ${name} length`);
+  if (!Buffer.isBuffer(value) || value.length !== length) throw new Error(`Invalid ${name} length`);
 }
 
 /** KEK from MASTER_KEK (base64, 32 bytes); wrap = AES-256-GCM over the DEK. */
