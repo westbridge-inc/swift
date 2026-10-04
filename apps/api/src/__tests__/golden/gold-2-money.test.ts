@@ -14,6 +14,7 @@ import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { rateLimitKey } from '../../utils/rate-limit-key';
 import { customerRoutes } from '../../modules/user/customer.routes';
+import { AccountService } from '../../modules/user/account.service';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { agentCashRoutes } from '../../modules/billing/agent-cash.routes';
@@ -84,6 +85,19 @@ const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
 type Actor = { userId: string; token: string; sessionId: string };
 type Partner = { owner: Actor; vendorId: string; subId: string; san: string };
+
+/** Business self-service starts the support flow; its completion performs the
+ * permanent wind-down whose money invariants these journeys exercise. */
+async function closeBusinessAccount(p: Partner) {
+  const requested = await call('DELETE', '/api/v1/customer/account', p.owner.token);
+  expect(requested.statusCode, requested.body).toBe(202);
+  expect(requested.json().data).toMatchObject({ deleted: false, status: 'CLOSURE_REQUESTED', ticketId: expect.any(String) });
+  expect(await sys(() => app.prisma.supportTicket.findUnique({ where: { id: requested.json().data.ticketId } })))
+    .toMatchObject({ userId: p.owner.userId, category: 'ACCOUNT', status: 'OPEN' });
+  expect(await sys(() => app.prisma.user.findUnique({ where: { id: p.owner.userId } }))).toMatchObject({ status: 'ACTIVE' });
+  expect((await call('GET', '/api/v1/vendor/subscription', p.owner.token, undefined, { 'x-vendor-id': p.vendorId })).statusCode).toBe(200);
+  expect(await sys(() => new AccountService(app).deleteAccount(p.owner.userId))).toEqual({ deleted: true });
+}
 let admin: Actor;
 let approver: Actor;
 let outsider: Actor;
@@ -296,6 +310,7 @@ async function purgeFixtures() {
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.customer.deleteMany({ where: { userId: { in: without(ids, kept.userIds) } } });
+    await app.prisma.supportTicket.deleteMany({ where: { userId: { in: without(ids, kept.userIds) } } });
     await app.prisma.user.deleteMany({ where: { id: { in: without(ids, kept.userIds) } } });
     // What stays is taken out of service: its stores close and its subscriptions are cancelled without renewal.
     await retireKeptScaffolding(app.prisma, kept);
@@ -471,9 +486,7 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
 
     // Closing the account is the PERMANENT stop (the self-serve pause, E12, is
     // pinned in its own describe below).
-    const closed = await call('DELETE', '/api/v1/customer/account', p.owner.token);
-    expect(closed.statusCode, closed.body).toBe(200);
-    expect(closed.json().data).toEqual({ deleted: true });
+    await closeBusinessAccount(p);
     const cancelled = await subRow(p.subId);
     expect({ status: cancelled.status, autoRenew: cancelled.autoRenew, nextRetryAt: cancelled.nextRetryAt }).toEqual({ status: 'CANCELLED', autoRenew: false, nextRetryAt: null });
     expect(await vendorRow(p.vendorId)).toEqual({ status: 'SUSPENDED', acceptingOrders: false });
@@ -676,8 +689,7 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
     await chooseMmg(p, `${PAYER_PREFIX}804`);
     const { request } = await mmgRequestPending(p);
 
-    const closed = await call('DELETE', '/api/v1/customer/account', p.owner.token);
-    expect(closed.statusCode, closed.body).toBe(200);
+    await closeBusinessAccount(p);
     expect((await subRow(p.subId)).status).toBe('CANCELLED');
     const titlesBefore = await noticesTo(p.owner.userId);
 
