@@ -15,7 +15,7 @@ function render(settings: Record<string, string>, local = false): Model {
   const dir = mkdtempSync(join(tmpdir(), 'swift-storage-compose-'));
   try {
     const base = readFileSync(join(deploy, 'docker-compose.yml'), 'utf8');
-    writeFileSync(join(dir, 'compose.yml'), base.replace(/^    env_file: .env$/gm, '    env_file: settings.fixture'));
+    writeFileSync(join(dir, 'compose.yml'), base.replace(/^ {4}env_file: \.env$/gm, '    env_file: settings.fixture'));
     writeFileSync(join(dir, 'settings.fixture'), Object.entries(settings).map(([key, value]) => `${key}=${value}`).join('\n'));
     const args = ['compose', '--env-file', '/dev/null', '-f', join(dir, 'compose.yml')];
     if (local) args.push('-f', join(deploy, 'docker-compose.storage-local.yml'));
