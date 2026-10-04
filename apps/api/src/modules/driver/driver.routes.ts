@@ -17,6 +17,7 @@ import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { loadTaxiStops, offerItinerary, readRideItinerary } from '../rides/taxi-stops-read';
+import { decorateRideWaiting, readFareBreakdown, type TaxiFareBreakdown } from '../rides/taxi-waiting';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
@@ -792,7 +793,10 @@ export async function driverRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] A ride with stops: each with its progress, in order, and
     // the one the ride is heading for. A ride without them gains no key.
     const itinerary = order ? await readRideItinerary(app.prisma, order) : null;
-    return { success: true, data: order && itinerary ? { ...order, ...itinerary } : order };
+    // [TAXI waiting charge] From the arrival on, the live wait: what the driver
+    // collects on top of the route fare, the same number the freeze will take.
+    const waiting = order ? await decorateRideWaiting(app.prisma, order, itinerary?.stops ?? null) : {};
+    return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...waiting } : order };
   });
 
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
@@ -1311,6 +1315,36 @@ export async function driverRoutes(app: FastifyInstance) {
     gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
     photoUrl: z.string().max(2048).optional(),
   });
+  /** [TAXI waiting charge] What a finished ride tells the passenger: the
+   *  DELIVERED event's fare object (with its breakdown once a waiting charge is
+   *  frozen, CONTRACT §8.4) and the completion notice. A ride with no frozen
+   *  charge gets today's object and today's sentence, exactly. */
+  const finishedFare = async (
+    order: Parameters<typeof readFareBreakdown>[1] & { taxiFareBase: unknown; taxiFarePerKm: unknown; taxiFarePerMin: unknown; taxiFareSurge: unknown },
+    status: string,
+    log: { warn: (obj: unknown, msg: string) => void },
+  ) => {
+    let breakdown: TaxiFareBreakdown | null = null;
+    if (status === 'DELIVERED') {
+      breakdown = await readFareBreakdown(app.prisma, order).catch((err: unknown) => {
+        log.warn({ err, orderId: order.id }, 'taxi fare breakdown could not be read after commit');
+        return null;
+      });
+    }
+    const fare = {
+      base: order.taxiFareBase,
+      perKm: order.taxiFarePerKm,
+      perMin: order.taxiFarePerMin,
+      surge: order.taxiFareSurge,
+      total: order.taxiFareTotal,
+      ...(breakdown ? { fareBreakdown: breakdown } : {}),
+    };
+    const body = breakdown && breakdown.waitingCharge > 0
+      ? `You have arrived at your destination. Total fare: $${breakdown.total.toLocaleString()} GYD (trip $${breakdown.routeFare.toLocaleString()} + waiting $${breakdown.waitingCharge.toLocaleString()}).`
+      : `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`;
+    return { fare, body };
+  };
+
   app.post('/rides/:id/handover-photo', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
@@ -1343,17 +1377,12 @@ export async function driverRoutes(app: FastifyInstance) {
       };
     });
     if (!replayed) {
+      const finished = await finishedFare(order, data.status, request.log);
       try {
         app.io.to(`order:${id}`).emit('order:status_changed', {
           orderId: id,
           status: data.status,
-          fare: {
-            base: order.taxiFareBase,
-            perKm: order.taxiFarePerKm,
-            perMin: order.taxiFarePerMin,
-            surge: order.taxiFareSurge,
-            total: order.taxiFareTotal,
-          },
+          fare: finished.fare,
           actualDuration: data.actualDuration,
         });
       } catch (error) {
@@ -1364,7 +1393,7 @@ export async function driverRoutes(app: FastifyInstance) {
           userId: order.customerId,
           type: 'ORDER_UPDATE',
           title: 'Ride Complete',
-          body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+          body: finished.body,
           data: { orderId: id, status: 'DELIVERED' },
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
       }
@@ -1409,17 +1438,12 @@ export async function driverRoutes(app: FastifyInstance) {
       invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
     });
 
+    const finished = await finishedFare(order, 'DELIVERED', request.log);
     try {
       app.io.to(`order:${id}`).emit('order:status_changed', {
         orderId: id,
         status: 'DELIVERED',
-        fare: {
-          base: order.taxiFareBase,
-          perKm: order.taxiFarePerKm,
-          perMin: order.taxiFarePerMin,
-          surge: order.taxiFareSurge,
-          total: order.taxiFareTotal,
-        },
+        fare: finished.fare,
         actualDuration,
       });
     } catch (error) {
@@ -1430,7 +1454,7 @@ export async function driverRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Ride Complete',
-      body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
+      body: finished.body,
       data: { orderId: id, status: 'DELIVERED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
 

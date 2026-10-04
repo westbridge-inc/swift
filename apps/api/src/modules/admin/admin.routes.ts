@@ -51,6 +51,7 @@ import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
 } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
+import { readFareBreakdown } from '../rides/taxi-waiting';
 import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
@@ -2188,7 +2189,12 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}) } };
+    // [TAXI waiting charge] A ride whose waiting charge was frozen shows it,
+    // itemised and read-only (route fare + waiting = total). Any other order
+    // gains no key.
+    const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), ...(fareBreakdown ? { fareBreakdown } : {}) } };
   });
 
   /**

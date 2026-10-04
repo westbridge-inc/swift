@@ -69,6 +69,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   });
 
   const o: any = data?.data;
+  // [TAXI waiting charge] The ride's frozen breakdown, when the server sends one.
+  const waiting: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null =
+    o?.fareBreakdown && typeof o.fareBreakdown.total === 'number' ? o.fareBreakdown : null;
 
   if (isLoading) {
     return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
@@ -313,9 +316,22 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   <span>-{gyd(o.discount)}</span>
                 </div>
               )}
+              {/* [TAXI waiting charge] A ride charged for waiting: the frozen line, read-only. */}
+              {waiting && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--muted)]">Trip fare</span>
+                    <span>{gyd(waiting.routeFare)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-[var(--muted)]">Waiting ({waiting.waitingMinutes} min)</span>
+                    <span>{gyd(waiting.waitingCharge)}</span>
+                  </div>
+                </>
+              )}
               <div className="flex justify-between pt-2 mt-1 border-t border-[var(--border)] font-semibold">
                 <span>Total</span>
-                <span>{gyd(isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
+                <span>{gyd(waiting ? waiting.total : isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
               </div>
               <p className="text-xs text-[var(--muted)] pt-1">
                 {isMmg ? 'Paid to the vendor’s MMG wallet — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
