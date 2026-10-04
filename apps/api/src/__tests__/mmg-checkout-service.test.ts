@@ -2195,6 +2195,61 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
   });
 
+  it('[Sol delta2] the same race with the reply paused INSIDE its own verification: its lookups fail, it reschedules a checkout another verifier has just confirmed, and operators are still told once', async () => {
+    // Verifier A waits on MMG's lookup of transaction 1. Reply B (transaction 2)
+    // merges, then starts its own verification, reading the checkout as
+    // CONFIRMING; it waits on its lookup of transaction 2. A confirms
+    // transaction 1. B's lookups fail (an error, then not found), so B
+    // reschedules: a compare-and-set that now matches no row.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('RESCHEDFIRST');
+    const second = tx('RESCHEDSECOND');
+    approved(first, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const bInLookup = barrier();
+    const aDone = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    let firstCalls = 0;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first && (firstCalls += 1) === 1) { aInLookup.open(); await releaseA.wait; return plainLookup(id); }
+      if (id === first) return { outcome: 'error', reason: 'MMG lookup HTTP 503' };
+      if (id === second) { bInLookup.open(); await aDone.wait; return { outcome: 'not_found' }; }
+      return plainLookup(id);
+    };
+    let answer: string | undefined;
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      const b = codeReply(row, '0', second, 'NOTIFY').then((state) => { answer = state; });
+      await bInLookup.wait;
+      expect((await intentOf(row.id)).status).toBe('CONFIRMING');
+      releaseA.open();
+      await a;
+      expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+      aDone.open();
+      await b;
+    } finally {
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    // The page is the point: the second payment is recorded and never credited.
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+    // The reply answers what is committed, not what it read before the race.
+    expect(answer).toBe('CONFIRMED');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
+    const named = (await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id, source: 'NOTIFY' } }))
+      .filter((o) => (o.body as Record<string, unknown> | null)?.['transactionId'] === second);
+    expect(named).toHaveLength(1);
+  });
+
   it('the return door and the notify door at once, both carrying MMG’s answer, credit once', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);

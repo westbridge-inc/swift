@@ -661,15 +661,22 @@ export class MmgCheckoutService {
         await this.alertUnapplied(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), parsed, input.source);
         return 'CONFIRMED';
       }
-      const settled = await this.verify(intent.id, now);
-      if (settled === 'CONFIRMED') {
-        // [Sol] However the checkout came to be CONFIRMED (by this reply, or by
-        // another verifier after this reply merged its transaction), a success
-        // reply naming a transaction it did not credit pages operators. A reply
-        // naming the credited payment changes nothing (alertUnapplied).
-        await this.alertUnapplied(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), parsed, input.source);
+      // [Sol · delta2] What verify() returns was decided on rows it read before
+      // its own writes: another verifier may confirm the checkout meanwhile
+      // (verify's own compare-and-set then matches nothing and it still says
+      // CONFIRMING). So the committed row is read again AFTER verification,
+      // however verification ends, and decides both the answer and the page:
+      // a CONFIRMED checkout, credited by another transaction than this reply
+      // names, pages operators once (alertUnapplied); a reply naming the
+      // credited payment changes nothing.
+      try {
+        await this.verify(intent.id, now);
+      } finally {
+        const settled = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: intent.id } });
+        if (settled?.status === 'CONFIRMED') await this.alertUnapplied(settled, parsed, input.source);
       }
-      return returnStateFor(settled);
+      const committed = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id }, select: { status: true } });
+      return returnStateFor(committed.status as CheckoutStatus);
     });
   }
 
