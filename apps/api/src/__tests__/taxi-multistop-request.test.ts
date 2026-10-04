@@ -125,6 +125,13 @@ async function makeDriver(at: Point, extra: Record<string, unknown> = {}): Promi
       averageRating: 4.9, acceptanceRate: 90,
     } as never,
   }));
+  // As the current main taxi fixtures: accepting new custody requires a
+  // durable, current hire-class approval, even for an already-online driver.
+  await sys(() => app.prisma.verificationDocument.create({ data: {
+    userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
+    fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
+    coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
+  } }));
   return { ...u, driverId: driver.id };
 }
 
