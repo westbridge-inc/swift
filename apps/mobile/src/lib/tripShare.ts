@@ -62,9 +62,10 @@ export function hoursLeft(share: Pick<MintedShare, 'expiresAt'>, now = new Date(
  * in the same breath, because the two facts answer the same worry.
  */
 export function shareStatusLine(share: MintedShare, now = new Date()): string {
+  const remaining = new Date(share.expiresAt).getTime() - now.getTime();
+  if (!Number.isFinite(remaining) || remaining <= 0) return 'This link has expired and no longer shows anything.';
   const h = hoursLeft(share, now);
-  if (h <= 0) return 'This link has expired and no longer shows anything.';
-  const window = h === 1 ? 'about an hour' : `about ${h} hours`;
+  const window = h === 0 ? 'less than an hour' : h === 1 ? 'about an hour' : `about ${h} hours`;
   return `Anyone with this link can follow the ride for ${window}. You can stop it at any time.`;
 }
 

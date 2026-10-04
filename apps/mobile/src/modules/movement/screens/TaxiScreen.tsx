@@ -1511,7 +1511,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               they created — so the window and the stop control sit together,
               because they answer the same worry. */}
           <View style={{ marginTop: space.md, gap: space.sm }}>
-              {activeShare ? <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T> : null}
+              {activeShare ? <T variant="caption" tone="muted">{shareStatusLine(activeShare, new Date(nowTs))}</T> : null}
               {ownedShares.data?.length ? <T variant="caption" tone="muted">{ownedShares.data.length} active links for this ride.</T> : null}
               <PillButton
                 label="Stop all sharing"

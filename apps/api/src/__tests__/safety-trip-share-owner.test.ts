@@ -112,3 +112,13 @@ afterAll(async () => {
     expect(await svc.publicView(link.token)).not.toBeNull();
   });
 });
+
+it('MASTER-049 public expiry agrees with the exact timestamp boundary', async () => {
+  const { customer, order } = await mkTrip();
+  const link = await svc.mint(customer.id, order.id);
+  const at = new Date();
+  await prisma.tripShareToken.update({ where: { tokenDigest: tripShareDigest(link.token) }, data: { expiresAt: at } });
+  expect(await svc.publicView(link.token, new Date(at.getTime() - 1))).not.toBeNull();
+  expect(await svc.publicView(link.token, at)).toBeNull();
+  expect(await svc.publicView(link.token, new Date(at.getTime() + 1))).toBeNull();
+});
