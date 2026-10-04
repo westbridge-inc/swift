@@ -16,6 +16,7 @@ import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion
 import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from './partner-wind-down';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { isOwnedAvatarKey } from '../verification/object-authority';
+import { queueTransactionalEmailInTransaction } from '../notification/email-outbox';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
@@ -110,7 +111,7 @@ export class AccountService {
       }),
     ]);
 
-    return {
+    const data = {
       exportedAt: new Date().toISOString(),
       notice:
         'This is the personal data Swift holds about your account. Money amounts are in your local minor unit. Verification document contents are never exported — they are encrypted and access-logged.',
@@ -120,6 +121,15 @@ export class AccountService {
       ratingsGiven,
       serviceJobs,
     };
+    if (user.email) {
+      await queueTransactionalEmailInTransaction(prisma, {
+        kind: 'DATA_EXPORT_READY',
+        eventId: `${userId}:${data.exportedAt}`,
+        recipient: user.email,
+        template: { kind: 'DATA_EXPORT_READY' },
+      });
+    }
+    return data;
   }
 
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
@@ -138,7 +148,7 @@ export class AccountService {
       if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
       const user = await tx.user.findUniqueOrThrow({
         where: { id: userId },
-        select: { id: true, phone: true, roles: true, status: true, avatar: true, tenantId: true },
+        select: { id: true, phone: true, email: true, roles: true, status: true, avatar: true, tenantId: true },
       });
       const queueAvatarBeforePointerClear = async () => {
         if (!user.avatar) return null;
@@ -231,6 +241,14 @@ export class AccountService {
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
+      if (user.email) {
+        await queueTransactionalEmailInTransaction(tx, {
+          kind: 'ACCOUNT_DELETION',
+          eventId: userId,
+          recipient: user.email,
+          template: { kind: 'ACCOUNT_DELETION' },
+        });
+      }
       return { alreadyComplete: false, hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if (preflight.alreadyComplete) return { deleted: true };

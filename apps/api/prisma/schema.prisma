@@ -3996,6 +3996,30 @@ model Notification {
   @@index([createdAt]) // retention sweep cutoff [F-021-20]
 }
 
+/// A transactional email obligation is committed with the fact it announces.
+/// It is deliberately independent of User: an account-deletion confirmation
+/// must survive the user's email being removed from the de-identified record.
+model EmailOutbox {
+  id          String    @id
+  dedupeKey   String    @unique
+  kind        String
+  recipient   String
+  subject     String
+  body        String
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  claimedAt   DateTime?
+  claimToken  String?
+  processedAt DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([processedAt, availableAt])
+  @@index([claimedAt])
+  @@map("email_outbox")
+}
+
 enum NotificationType {
   ORDER_UPDATE
   PROMOTION

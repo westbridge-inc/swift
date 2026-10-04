@@ -1170,6 +1170,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const notificationWorker = buildWorker(
     QUEUE_NAMES.NOTIFICATION,
     async (job: Job) => {
+      if (job.name === 'email-outbox-sweep') {
+        const { drainEmailOutbox } = await import('../modules/notification/email-outbox');
+        const { getChannels } = await import('../providers/notifications/channels');
+        await drainEmailOutbox(ctx.prisma, getChannels().email);
+        return;
+      }
       if (job.name !== 'vendor-alert-escalate') return;
       const { escalateVendorAlert } = await import('../modules/notification/notification.service');
       const { getChannels } = await import('../providers/notifications/channels');
@@ -2181,6 +2187,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 }
 
 export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueues>) {
+  // Transactional emails are committed in the database with the fact they
+  // announce. A failed provider call stays owed and is retried by this sweep.
+  await queues.notificationQueue.add('email-outbox-sweep', {}, {
+    repeat: { every: 60_000 },
+    removeOnComplete: 100,
+    removeOnFail: 50,
+  });
+
   // Subscription billing: check every hour
   await queues.subscriptionQueue.add('process-billing', {}, {
     repeat: { pattern: '0 * * * *' }, // every hour

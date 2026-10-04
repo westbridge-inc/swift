@@ -1,4 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
+import { queueTransactionalEmailInTransaction } from '../notification/email-outbox';
 
 // Sequential receipts [san spec 20.1] — gapless per tenant per year, proven
 // under concurrency by a row lock on the counter (scenario R). Every credit
@@ -41,6 +42,24 @@ export async function issueReceipt(
       mmgRef: input.mmgRef ?? null,
     },
   });
+  const subscription = await db.subscription.findUnique({
+    where: { id: input.subscriptionId },
+    select: {
+      currencyCode: true,
+      vendor: { select: { owner: { select: { user: { select: { email: true } } } } } },
+      rider: { select: { user: { select: { email: true } } } },
+      driver: { select: { user: { select: { email: true } } } },
+    },
+  });
+  const recipient = subscription?.vendor?.owner.user.email ?? subscription?.rider?.user.email ?? subscription?.driver?.user.email;
+  if (recipient) {
+    await queueTransactionalEmailInTransaction(db, {
+      kind: 'FEE_RECEIPT',
+      eventId: input.billingEventId,
+      recipient,
+      template: { kind: 'FEE_RECEIPT', receiptNumber, amount: input.amount, currencyCode: subscription?.currencyCode ?? 'GYD' },
+    });
+  }
   return { receiptNumber };
 }
 
