@@ -1,3 +1,4 @@
+import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
@@ -531,34 +532,42 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new ValidationError('No valid fields to update');
     }
 
-    const updated = await app.prisma.rider.update({
-      where: { id: rider.id },
-      data: updateData,
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            phone: true,
-            avatar: true,
-            activeRole: true,
-            lastMoverRole: true,
+    const updated = await app.prisma.$transaction(async (tx) => {
+      await lockUserRoleAuthority(tx, request.user.userId);
+      const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
+        SELECT "updatedAt" FROM riders WHERE id = ${rider.id} FOR UPDATE`;
+      if (!profiles[0] || profiles[0].updatedAt.getTime() !== rider.updatedAt.getTime()) throw staleMoverAuthorityError();
+      const updated = await tx.rider.update({
+        where: { id: rider.id },
+        data: updateData,
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+              phone: true,
+              avatar: true,
+              activeRole: true,
+              lastMoverRole: true,
+            },
           },
         },
-      },
-    });
-
-    if (plateChanged) {
-      // A plate change never inherits another subject's approved documents: every open
-      // vehicle link closes. New submissions for the new plate create a PENDING assignment
-      // that an admin must approve before its evidence propagates.
-      await app.prisma.subjectLink.updateMany({
-        where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-        data: { validTo: new Date() },
       });
-    }
+
+      if (plateChanged) {
+        // A plate change never inherits another subject's approved documents: every open
+        // vehicle link closes. New submissions for the new plate create a PENDING assignment
+        // that an admin must approve before its evidence propagates.
+        await tx.subjectLink.updateMany({
+          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
+          data: { validTo: new Date() },
+        });
+      }
+
+      return updated;
+    });
 
     return { success: true, data: updated };
   });
@@ -591,14 +600,13 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     // Verification gate: the country's MOVER checklist must be fully approved.
-    // Legacy documentsVerified flag grandfathers pre-checklist accounts.
+    // Legacy approval covers only required types that were genuinely never filed.
     // [High #9 · DS109] VEHICLE-kind evidence must be about the EXACT vehicle the
-    // rider's current plate names (riderLiveOperation) — the legacy flag alone still
-    // grandfathered pre-checklist accounts, and is cleared by any plate change.
+    // rider's current plate names (riderLiveOperation). A plate change clears the
+    // legacy flag; known invalid evidence also refuses an unchanged legacy profile.
     // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
-    const verified = rider.documentsVerified
-      || await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
+    const verified = await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
     }
@@ -669,31 +677,23 @@ export async function riderRoutes(app: FastifyInstance) {
       // revocation committing after the preview above can no longer slip a
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
-      const liveVerified = snapshot.documentsVerified
-        || await verification.riderLiveOperation(request.user.userId, rider.vehicleType, tx);
-      if (!liveVerified) {
-        throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before you can go online');
-      }
+      const liveDocuments = await lockMoverDocuments(tx, request.user.userId, 'RIDER');
+      assertMoverDocuments(liveDocuments);
       const retiredDriverId = await lockAndRetireDriverSupply(tx, request.user.userId);
-
-      const activated = await tx.rider.update({
-        where: { id: rider.id },
-        data: {
-          isOnline: true,
-          // Stacking: available = room for another leg, from the live count —
-          // a rider mid-delivery with capacity spare is back on the board.
-          isAvailable: (await riderLiveLegCount(tx, rider.id)) < (await riderStackingCapacity(app.prisma)),
-          currentLat: location.latitude,
-          currentLng: location.longitude,
-          lastLocationUpdate: new Date(),
-          locationSessionId,
-        },
-      });
+      const available = (await riderLiveLegCount(tx, rider.id)) < (await riderStackingCapacity(app.prisma));
+      const activated = await tx.$queryRaw<Array<{ isOnline: boolean; isAvailable: boolean }>>`
+        UPDATE riders SET "isOnline" = true, "isAvailable" = ${available},
+          "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
+          "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          "updatedAt" = clock_timestamp()
+        WHERE id = ${rider.id} AND ${documentDeadlineSql(liveDocuments)}
+        RETURNING "isOnline", "isAvailable"`;
+      if (!activated[0]) throw expiredDocumentAuthority();
       await tx.user.update({
         where: { id: request.user.userId },
         data: { lastMoverRole: 'RIDER' },
       });
-      return { updated: activated, retiredDriverId };
+      return { updated: activated[0], retiredDriverId };
     });
 
     // These Redis keys are observability/debounce aids, not online authority.
