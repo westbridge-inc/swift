@@ -56,7 +56,7 @@ import { partnerRoutes } from '../modules/partner/partner.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { servicesRoutes } from '../modules/services/services.routes';
-import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange } from '../modules/integrity/money-surface';
+import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange, applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
 import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
 
@@ -731,6 +731,9 @@ describe('[REVIEW-PARTNER · DL-5 · Sol F1] a demo login cannot grow into a mon
       } })).id;
     });
     const smsBefore = devChannelLog.filter((e) => e.channel === 'sms').length;
+    // No step-up on this session: the refusal must come BEFORE the step-up demand, not from a later layer.
+    const customerSession = await system(() => app.prisma.session.findFirstOrThrow({ where: { token: tokens.customer }, select: { id: true } }));
+    await app.redis.del(stepUpKey(customerSession.id));
     // The store's own money routes refuse the fiction before any step-up or write ...
     for (const [method, url, body] of [['PUT', '/api/v1/vendor/profile', { mmgPayUrl: '' }], ['PUT', '/api/v1/vendor/subscription/billing-method', { method: 'NONE' }]] as const) {
       const res = await app.inject({ method, url, headers: auth(tokens.customer), payload: body });
@@ -748,6 +751,15 @@ describe('[REVIEW-PARTNER · DL-5 · Sol F1] a demo login cannot grow into a mon
       expect(await app.prisma.moneySurfaceCommand.count({ where: { entityId: { in: [vendorId, review.driverId] } } })).toBe(0);
       const v = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
       expect([v.mmgPayUrl, v.mmgPayUrlPending]).toEqual([null, null]);
+    });
+    // The executor never makes a fiction's link live, even one that was pending before this fix.
+    await system(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrlPending: 'https://mmg.example/pay/legacy', mmgPayUrlPendingAt: new Date(Date.now() - 2 * DAY), mmgPayUrlApplyAt: new Date(Date.now() - DAY) } }));
+    await system(() => applyDueMmgLinkChanges(deps));
+    await system(async () => {
+      const v = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+      expect(v.mmgPayUrl).toBeNull();
+      expect(await app.prisma.moneySurfaceCommand.count({ where: { entityId: vendorId } })).toBe(0);
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null } });
       await app.prisma.user.update({ where: { id: review.customerId }, data: { roles: ['CUSTOMER'] } });
     });
     expect(devChannelLog.filter((e) => e.channel === 'sms').length).toBe(smsBefore);
@@ -785,6 +797,15 @@ describe('[REVIEW-PARTNER · DL-6 · Sol F3] the review step-up window is consum
     expect(results.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason.code)).toEqual(['INVALID_CODE']);
     const granted = [await hasStepUp(app.redis, `rp-race-a-${RUN}`), await hasStepUp(app.redis, `rp-race-b-${RUN}`)];
     expect(granted.filter(Boolean)).toHaveLength(1);
+    await cleanup();
+  });
+
+  it('a window re-armed while the account is being looked up belongs to the NEW send: the old verifier does not consume it', async () => {
+    await arm();
+    const rearming = gated(async () => { await app.redis.del(`otp_rate:stepup:${review.riderUserId}`); await sendStepUpOtp(app, review.riderUserId); });
+    await expect(verifyStepUp(rearming, { userId: review.riderUserId, sessionId: `rp-expiry-${RUN}` }, creds.RIDER.code)).rejects.toMatchObject({ code: 'INVALID_CODE' });
+    expect(await hasStepUp(app.redis, `rp-expiry-${RUN}`)).toBe(false);
+    expect(await app.redis.get(reviewStepUpKey(review.riderUserId))).not.toBeNull(); // the new window is still open
     await cleanup();
   });
 
