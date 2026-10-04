@@ -7,7 +7,7 @@ import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClass
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
-import { approvedEvidenceFor, anyChecklistEvidenceFor, type EvidenceRow } from './evidence';
+import { approvedEvidenceFor } from './evidence';
 import { compileStorefrontDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
@@ -22,7 +22,9 @@ import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, Ide
 import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
-import { isPassengerVehicle } from '../../config/vehicle-classes';
+import { isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
+import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { assertExternalProcessingPermitted } from '../legal/processor-register';
@@ -50,6 +52,23 @@ export const IDENTITY_DOC_TYPE = 'identity_l2';
  *  camera-captured signup selfie (master plan §3 — "face-matched to profile
  *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
 const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
+
+/**
+ * [DOC-1 §0.5 · FD-D5] The face-match leg of a document submission: an
+ * identity document while the biometric switch is on. ONE predicate —
+ * submitDocument branches on it, and the status checklist's
+ * `faceMatchDocTypes` is read from it, so what the apps say about a document
+ * cannot drift from what the server does with it.
+ */
+export function identityFaceMatchLeg(docType: string, env: Record<string, string | undefined> = process.env): boolean {
+  return IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled(env);
+}
+
+/** The KYC engines whose identity check compares the document's face with the
+ *  selfie (Didit's face-match; ID Analyzer's biometric scan). The on-shore
+ *  manual review and the sandbox compare none, and an engine missing here is
+ *  never claimed to. */
+const FACE_COMPARING_ENGINES: ReadonlySet<string> = new Set(['didit', 'id-analyzer']);
 
 // Compatibility export for existing callers; the policy itself is registry data.
 export { AUTO_APPROVE_EXPIRY_DAYS } from './doc-registry';
@@ -301,16 +320,17 @@ export class VerificationService {
    *  paused (KYC latency), cannot land new PII after the purge committed. */
   private async createDocumentLively(
     data: Prisma.VerificationDocumentUncheckedCreateInput,
-    review: { queue: ReviewQueue; extraction?: ExtractionPlan } = { queue: 'STANDARD' },
+    review: { queue: ReviewQueue; extraction?: ExtractionPlan; authority?: SubmissionAuthority } = { queue: 'STANDARD' },
   ) {
     const doc = await this.projectionTransaction(async (tx) => {
       const alive = await tx.$queryRaw<{ status: string; tenantId: string; countryCode: string }[]>(
-        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} FOR SHARE`,
+        Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} ${review.authority ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR SHARE`}`,
       );
       const status = alive[0]?.status;
       if (!status || ['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(status)) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
       }
+      if (review.authority) await revalidateSubmissionAuthority(tx, data.userId, review.authority);
       if (data.status === 'APPROVED') {
         try { await requireIdentityAuthority(tx, data.userId); }
         catch (err) {
@@ -327,7 +347,7 @@ export class VerificationService {
       // [DOC-1 §4.3 · P1-2] Every new submission names its subject (person / business /
       // vehicle) and links the account to it — in the same transaction, so a submission
       // without a subject cannot exist (a mover without a plate has no vehicle subject).
-      const subject = await resolveSubject(tx, { userId: data.userId, countryCode: alive[0]!.countryCode, docType: data.docType, tenantId: alive[0]!.tenantId });
+      const subject = await resolveSubject(tx, { userId: data.userId, countryCode: alive[0]!.countryCode, docType: data.docType, tenantId: alive[0]!.tenantId, ...(review.authority && { vehicleProfile: review.authority.profile }) });
       const created = await tx.verificationDocument.create({ data: { ...born, status: 'PENDING', state: 'CAPTURED', subjectId: subject?.subjectId ?? null } });
       // [DOC-1 P4-4] The processor result lands as rows in the same transaction:
       // a submission without its extraction ledger cannot exist.
@@ -366,8 +386,9 @@ export class VerificationService {
    * and the cross-subject collision flag. Pure over its inputs (one registry read).
    */
   /** [DOC-1 §3 · P3-3] A Driver profile = taxi work; its plate anchors the cross-match. A Rider is delivery (exempt). */
-  private async validatorContextFor(userId: string, docType: string): Promise<ValidatorContext> {
+  private async validatorContextFor(userId: string, docType: string, authority?: SubmissionAuthority): Promise<ValidatorContext> {
     const bucket = BUCKET_OF[docType] ?? null;
+    if (authority) return { taxi: authority.profile?.kind === 'DRIVER', registrationMark: authority.profile?.licensePlate ? normalizeRegistrationMark(authority.profile.licensePlate) : null, docType, bucket, maxValidityDays: AUTO_APPROVE_EXPIRY_DAYS[docType] ?? null };
     const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
     const maxValidityDays = AUTO_APPROVE_EXPIRY_DAYS[docType] ?? null;
     if (driver) return { taxi: true, registrationMark: driver.licensePlate ? normalizeRegistrationMark(driver.licensePlate) : null, docType, bucket, maxValidityDays };
@@ -442,10 +463,11 @@ export class VerificationService {
     docType: string,
     fileUrl: string,
     privacyNoticeVersion: string,
+    authenticatedRole?: string,
   ) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true, status: true },
+      select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true, status: true, updatedAt: true },
     });
     if (!user) throw new NotFoundError('User', userId);
     // [NR-3 gap 3, REPORT-022 F-022-13] Deletion write barrier as a DENY-LIST:
@@ -455,6 +477,9 @@ export class VerificationService {
     if (['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(user.status)) {
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
     }
+    const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
+      ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;
+    if (authority && authority.userUpdatedAt.getTime() !== user.updatedAt.getTime()) throw moverAuthorityChanged();
     await resolveVerificationObject(this.prisma, { fileKey: fileUrl, userId });
 
     // Movers (riders + taxi drivers) may submit any doc required for a vehicle
@@ -508,7 +533,7 @@ export class VerificationService {
     // [DGP-1 · DOC-1 §2] No PERSONAL image leaves for an external engine unless the doc type allows
     // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
-    if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
+    if (identityFaceMatchLeg(docType)) {
       const selfieUrl = await resolveSignupSelfie(this.prisma, userId);
       // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
       result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl }));
@@ -546,7 +571,7 @@ export class VerificationService {
     // whether the processor's approval may stand: never past a blocking FAIL;
     // and once the registry speaks for the type, never for the always-review
     // set, a collision, an unvalidated document, or unknown / low confidence.
-    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt }, await this.validatorContextFor(userId, docType));
+    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt }, await this.validatorContextFor(userId, docType, authority));
     result = gateAutoApproval(result, extraction, registryType);
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
@@ -570,7 +595,7 @@ export class VerificationService {
           ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
         }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction });
+    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction, authority });
 
     // Provider listability is the first post-document projection. Everything
     // below (audit, integrity, notifications, trials) may fail independently;
@@ -758,27 +783,7 @@ export class VerificationService {
       select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
-    // [DOC-1 §3.4 · FD-DOC-6 · P2-2] covers_hire_and_reward is BLOCKING: a passenger-vehicle
-    // mover's insurance is approved only with the reviewer's confirmed HIRE class. Undeterminable
-    // (no 5-point check supplied) or PRIVATE is never approved — it is rejected with
-    // INSURANCE_NOT_HIRE (the spec's INSURANCE_SCOPE_INSUFFICIENT) so the actor is told the
-    // category, not waved through to fail at go-online.
-    // [DOC-1 §3.7 · LEGAL-CONFLICT-1 · E2E-DOC-2 · P3-3] A taxi's vehicle documents are approved only for an
-    // H-plate vehicle: the one plate rule both sources corroborate. The reviewer rejects with WRONG_PLATE_CLASS;
-    // the driver fixes the plate on the profile and resubmits. Delivery movers are exempt (§3.8).
-    if (candidate.status === 'PENDING' && candidate.role === 'MOVER' && BUCKET_OF[candidate.docType] === 'VEHICLE') {
-      const driver = await this.prisma.driver.findUnique({ where: { userId: candidate.userId }, select: { licensePlate: true } });
-      if (driver && driver.licensePlate && plateClassOf(driver.licensePlate) !== 'H') {
-        throw new AppError(400, 'WRONG_PLATE_CLASS', `A taxi must carry an H registration mark; this vehicle is registered as ${normalizeRegistrationMark(driver.licensePlate)}. Reject the document as WRONG_PLATE_CLASS.`);
-      }
-    }
-    if (candidate.status === 'PENDING' && candidate.docType === 'vehicle_insurance' && candidate.role === 'MOVER') {
-      const vehicleType = await this.getMoverVehicleType(candidate.userId);
-      if (vehicleType && isPassengerVehicle(vehicleType) && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
-        throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT',
-          'A passenger vehicle needs HIRE-class insurance with the hire class confirmed by the reviewer. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
-      }
-    }
+    // Vehicle checks run on the locked, stored subject at the decision boundary.
     // An already-decided document must report NOT_PENDING, not an expiry
     // complaint — the transition below owns that refusal, so only a genuine
     // candidate is asked for its date.
@@ -799,7 +804,7 @@ export class VerificationService {
           hireClassConfirmed: insurance.hireClassConfirmed,
           plateCrossChecked: insurance.plateCrossChecked,
         }),
-    }, { reviewerId: adminId });
+    }, { reviewerId: adminId, approval: { expiresAt, insurance } });
 
     if (updated.docType === IDENTITY_DOC_TYPE) {
       await this.promoteToL2(updated.userId);
@@ -962,11 +967,56 @@ export class VerificationService {
     } });
   }
 
+  /** User first, then the exact stored vehicle/link, then the submission. No current-profile redirection. */
+  private async lockApprovalSubject(tx: Prisma.TransactionClient, docId: string): Promise<VerificationDocument> {
+    const before = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+    if (before.subjectId) {
+      await tx.$queryRaw`SELECT "subjectId" FROM vehicle_profile WHERE "subjectId" = ${before.subjectId}::uuid FOR SHARE`;
+      await tx.$queryRaw`SELECT id FROM subject WHERE id = ${before.subjectId}::uuid FOR SHARE`;
+      await tx.$queryRaw`SELECT id FROM subject_link WHERE "subjectId" = ${before.subjectId}::uuid AND "accountId" = ${before.userId} ORDER BY id FOR SHARE`;
+    }
+    await tx.$queryRaw`SELECT id FROM verification_documents WHERE id = ${docId} FOR UPDATE`;
+    const current = await tx.verificationDocument.findUniqueOrThrow({ where: { id: docId } });
+    if (current.subjectId !== before.subjectId || current.userId !== before.userId) throw moverAuthorityChanged();
+    return current;
+  }
+
+  private async assertStoredVehicleApproval(tx: Prisma.TransactionClient, doc: VerificationDocument, insurance?: InsuranceReview): Promise<void> {
+    if (doc.role !== 'MOVER' || BUCKET_OF[doc.docType] !== 'VEHICLE') return;
+    let vehicleType: VehicleType | null;
+    let plate: string | null;
+    let taxi: boolean;
+    if (doc.subjectId) {
+      const vehicle = await tx.vehicleProfile.findUnique({ where: { subjectId: doc.subjectId } });
+      if (!vehicle || !(vehicle.vehicleKind in VEHICLE_CLASSES)) throw moverProfileRequired();
+      vehicleType = vehicle.vehicleKind as VehicleType;
+      plate = vehicle.registrationMark;
+      taxi = isPassengerVehicle(vehicleType);
+    } else {
+      // A legacy unbound row cannot acquire today's chosen role as historical authority.
+      const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
+      const driver = await tx.driver.findUnique({ where: { userId: doc.userId } });
+      if (rider && driver) throw moverProfileRequired();
+      const profile = driver ?? rider;
+      vehicleType = profile?.vehicleType ?? null;
+      plate = profile?.licensePlate ?? null;
+      taxi = driver !== null;
+    }
+    if (taxi && plate && plateClassOf(plate) !== 'H') {
+      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi must carry an H registration mark. Reject the document as WRONG_PLATE_CLASS.');
+    }
+    if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
+      && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
+      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT',
+        'A passenger vehicle needs HIRE-class insurance with the hire class confirmed by the reviewer. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
+    }
+  }
+
   private async transitionPendingDocument(
     docId: string,
     requestedStatus: 'APPROVED' | 'REJECTED',
     data: Prisma.VerificationDocumentUpdateManyMutationInput,
-    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode } },
+    review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode }; approval?: { expiresAt?: Date; insurance?: InsuranceReview } },
   ): Promise<VerificationDocument> {
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
@@ -986,6 +1036,14 @@ export class VerificationService {
         FOR UPDATE /* verification-document-decision-authority */
       `;
       if (!users[0]) throw new NotFoundError('User', candidate.userId);
+
+      if (requestedStatus === 'APPROVED') {
+        const pending = await this.lockApprovalSubject(tx, docId);
+        if (pending.status === 'PENDING') {
+          await this.assertStoredVehicleApproval(tx, pending, review.approval?.insurance);
+          data.expiresAt = resolveApprovalExpiry(pending.docType, review.approval?.expiresAt, pending.expiresAt);
+        }
+      }
 
       // This conditional write, not the earlier read, is the decision point.
       // At most one competing approve/reject can transition PENDING. Losers
@@ -1306,6 +1364,14 @@ export class VerificationService {
         : 'VENDOR';
     const trial = await previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
 
+    // [Owner, 1 Oct · truth] The checklist documents this server compares with
+    // the profile selfie right now: the submit path's face-match leg, run by an
+    // engine that compares faces. Empty while face-matching is off (FD-D5, the
+    // default) or the engine compares none (the on-shore manual review), so the
+    // apps never claim a check that does not run. Read-only.
+    const facesCompared = FACE_COMPARING_ENGINES.has(this.kyc.engine?.name ?? '');
+    const faceMatchDocTypes: string[] = facesCompared ? checklist.filter((docType) => identityFaceMatchLeg(docType)) : [];
+
     return {
       roleKey,
       trustLevel: user.trustLevel,
@@ -1316,6 +1382,7 @@ export class VerificationService {
       roleVerified: checklist.length > 0 && missing.length === 0,
       categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && checklist.length === 0,
       trial,
+      faceMatchDocTypes,
     };
   }
 
@@ -1532,142 +1599,11 @@ export class VerificationService {
    */
   async getLiveOperationStatus(
     userId: string,
-    opts: { vehicleType: VehicleType; legacyVerified?: boolean },
+    opts: { vehicleType: VehicleType; legacyVerified?: boolean; kind?: DocumentMoverKind },
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ): Promise<{ allowed: boolean; reason: 'ok' | 'docs' | 'insurance' }> {
-    // [EV-ACT-16/17 TOCTOU] Accepts a transaction client so GO can evaluate
-    // documents INSIDE its User/profile-locked transaction — an expiry or
-    // rejection committing between a pre-transaction check and the online
-    // write can no longer slip a stale verdict through. Same fail-closed
-    // evidence filters as isRoleVerified (purge/file/retention).
-    const user = await db.user.findUnique({
-      where: { id: userId },
-      select: { countryCode: true },
-    });
-    if (!user) return { allowed: false, reason: 'docs' };
-
-    const now = new Date();
-    // [AUD-L8b-001 · INV-15] The checklist is evaluated FIRST, always. This used
-    // to read `let baseOk = opts.legacyVerified ?? false` and only evaluate
-    // `if (!baseOk)` — and because `approvedEvidence(..., now)` is the ONLY place
-    // `now` is consulted, a true flag made document expiry unreachable code.
-    // `admin.routes.ts` sets `documentsVerified` on EVERY successful verification,
-    // so the clause named "legacy" in fact covered every verified mover on the
-    // platform: an expired licence or police clearance never took anyone off the
-    // road, and the daily sweep below could not either, because it passes this
-    // same flag back in.
-    //
-    // The grandfather clause keeps the job it was written for and loses the one it
-    // was never entitled to: it may rescue an account with NO checklist evidence at
-    // all (a genuine pre-checklist account, where nothing can have expired), and it
-    // may never override evidence that exists and is no longer current.
-    const required = await this.countryConfig.getMoverChecklist(user.countryCode, opts.vehicleType);
-    // [High #9 · DS109] VEHICLE-kind evidence must be about the EXACT vehicle the driver
-    // currently operates — the durable subject named by their profile plate. A retyped
-    // plate counts neither another subject's documents nor the old vehicle's.
-    const vehicleTypes = required.filter((docType) => BUCKET_OF[docType] === 'VEHICLE');
-    let baseOk: boolean;
-    if (required.length === 0) {
-      baseOk = true;
-    } else {
-      const approvedDocs = await this.approvedEvidence(db, userId, required, now);
-      const docs = vehicleTypes.length
-        ? await this.evidenceOnCurrentVehicle(db, userId, user.countryCode, approvedDocs, vehicleTypes)
-        : approvedDocs;
-      const approved = new Set(docs.map((d) => d.docType));
-      const missing = required.filter((docType) => !approved.has(docType));
-      baseOk = missing.length === 0;
-      if (!baseOk && (opts.legacyVerified ?? false)) {
-        // The question is asked of the MISSING types only, and that distinction
-        // is the whole rule. A type that is missing because a record EXISTS and
-        // is no longer current is an expiry — exactly what the flag must not be
-        // allowed to paper over. A type that is missing because no record was
-        // ever filed is an absence, which is the pre-checklist state the clause
-        // was written for, and which other gates (hire insurance below, the
-        // vendor checklist, admin review) still judge on their own terms.
-        baseOk = !(await anyChecklistEvidenceFor(db, userId, missing));
-      }
-    }
-    if (!baseOk) return { allowed: false, reason: 'docs' };
-
-    // Any PASSENGER vehicle (car, wagon, bus): a current, manually-confirmed
-    // HIRE-class policy is mandatory before carrying passengers, and the reviewer
-    // must have cross-checked the policy's plate against the plate on the
-    // registration + photos. PRIVATE insurance never qualifies. Cargo-only movers
-    // (bike/motorbike/canter/box-truck) are not gated on hire insurance.
-    if (isPassengerVehicle(opts.vehicleType)) {
-      // The policy may belong to the vehicle's subject (a fleet car) rather than this account.
-      const insurance = (await this.evidenceOnCurrentVehicle(db, userId, user.countryCode, await this.approvedEvidence(db, userId, ['vehicle_insurance'], now), ['vehicle_insurance']))
-        .sort((a, b) => (b.reviewedAt?.getTime() ?? 0) - (a.reviewedAt?.getTime() ?? 0))[0];
-      if (
-        !insurance ||
-        insurance.coverageClass !== 'HIRE' ||
-        !insurance.hireClassConfirmed ||
-        !insurance.plateCrossChecked
-      ) {
-        return { allowed: false, reason: 'insurance' };
-      }
-    }
-
-    return { allowed: true, reason: 'ok' };
-  }
-
-  /**
-   * [High #9 · DS109] The durable vehicle subject named by the mover's CURRENT profile
-   * plate, if any. `enforce: false` = the profile carries no plate (nothing to adopt; the
-   * legacy evidence rules stand). When a plate exists, vehicle-kind evidence must sit on
-   * ITS subject — `subjectId: null` means the plate has no subject yet, and only
-   * pre-subject legacy rows (subjectId null) may count.
-   */
-  private async currentVehicleSubject(
-    db: Prisma.TransactionClient | PrismaClient,
-    userId: string,
-    countryCode: string,
-  ): Promise<{ enforce: boolean; subjectId: string | null }> {
-    const driver = await db.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
-    const rider = driver ? null : await db.rider.findUnique({ where: { userId }, select: { licensePlate: true } });
-    const rawMark = (driver?.licensePlate ?? rider?.licensePlate ?? '').trim();
-    if (!rawMark) return { enforce: false, subjectId: null };
-    const vehicle = await db.vehicleProfile.findUnique({
-      where: { registrationMark_countryCode: { registrationMark: normalizeRegistrationMark(rawMark), countryCode } },
-      select: { subjectId: true },
-    });
-    if (!vehicle) return { enforce: true, subjectId: null };
-    return { enforce: true, subjectId: await rootSubjectId(db, vehicle.subjectId) };
-  }
-
-  /**
-   * Keep non-vehicle rows; keep vehicle rows only when they are about the current plate's
-   * subject. A vehicle row bound to a DIFFERENT subject never counts (the old vehicle's
-   * evidence must not follow a plate change). A legacy row not yet bound to any subject
-   * (`subjectId` null — the pre-backfill posture) still counts for a type the current
-   * subject has no record of, so a partially-backfilled fleet is not refused at GO for
-   * evidence that is real, current and on the plate in question.
-   */
-  private async evidenceOnCurrentVehicle(
-    db: Prisma.TransactionClient | PrismaClient,
-    userId: string,
-    countryCode: string,
-    rows: EvidenceRow[],
-    vehicleTypes: readonly string[],
-  ): Promise<EvidenceRow[]> {
-    if (!rows.some((r) => vehicleTypes.includes(r.docType))) return rows;
-    const target = await this.currentVehicleSubject(db, userId, countryCode);
-    if (!target.enforce) return rows;
-    const kept: EvidenceRow[] = [];
-    for (const row of rows) {
-      if (!vehicleTypes.includes(row.docType) || row.subjectId === target.subjectId) {
-        kept.push(row);
-        continue;
-      }
-      if (target.subjectId !== null && row.subjectId === null) {
-        // Mixed backfill posture: the plate's subject has no record of this type, so the
-        // account's own unbound (legacy) record is the only evidence it can have.
-        const onSubject = rows.some((r) => r.docType === row.docType && r.subjectId === target.subjectId);
-        if (!onSubject) kept.push(row);
-      }
-    }
-    return kept;
+    const { allowed, reason } = await evaluateMoverDocuments(db, userId, { ...opts, kind: opts.kind ?? 'DRIVER' });
+    return { allowed, reason };
   }
 
   /**
@@ -1677,53 +1613,46 @@ export class VerificationService {
    * retyped plate never inherits another subject's documents before this explicit, audited
    * decision. Idempotent — an already-approved or absent link approves nothing.
    */
-  async approveVehicleAssignment(userId: string): Promise<{ approved: number }> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-    if (!user) throw new NotFoundError('User', userId);
-    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
-    const rider = driver ? null : await this.prisma.rider.findUnique({ where: { userId }, select: { licensePlate: true } });
-    const rawMark = (driver?.licensePlate ?? rider?.licensePlate ?? '').trim();
-    if (!rawMark) {
-      throw new AppError(400, 'NO_PLATE', 'This mover has no registration mark on their profile to approve.');
-    }
-    const vehicle = await this.prisma.vehicleProfile.findUnique({
-      where: { registrationMark_countryCode: { registrationMark: normalizeRegistrationMark(rawMark), countryCode: user.countryCode } },
-      select: { subjectId: true },
+  async approveVehicleAssignment(userId: string, expectedDriver?: { id: string; updatedAt: Date; licensePlate: string }): Promise<{ approved: number }> {
+    // This action belongs to the explicit /drivers/:id route, even if Rider is active today.
+    const expected = expectedDriver ?? await this.prisma.driver.findUnique({ where: { userId }, select: { id: true, updatedAt: true, licensePlate: true } });
+    if (!expected) throw new NotFoundError('Driver');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE /* vehicle-assignment-authority */`;
+      await tx.$queryRaw`SELECT id FROM drivers WHERE "userId" = ${userId} FOR UPDATE`;
+      const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { countryCode: true } });
+      const driver = await tx.driver.findUnique({ where: { userId } });
+      if (!driver || driver.id !== expected.id || driver.updatedAt.getTime() !== expected.updatedAt.getTime()
+        || normalizeRegistrationMark(driver.licensePlate) !== normalizeRegistrationMark(expected.licensePlate)) throw moverAuthorityChanged();
+      const mark = normalizeRegistrationMark(driver.licensePlate.trim());
+      if (!mark) throw new AppError(400, 'NO_PLATE', 'This driver has no registration mark on their profile to approve.');
+      const [vehicle] = await tx.$queryRaw<Array<{ subjectId: string }>>`
+        SELECT "subjectId" FROM vehicle_profile WHERE "registrationMark" = ${mark} AND "countryCode" = ${user.countryCode} FOR SHARE`;
+      if (!vehicle) throw new AppError(404, 'NO_VEHICLE_SUBJECT', 'No vehicle is registered under this plate yet — the driver must submit a vehicle document first.');
+      const subjectId = await rootSubjectId(tx, vehicle.subjectId);
+      await tx.$queryRaw`SELECT id FROM subject WHERE id IN (${vehicle.subjectId}::uuid, ${subjectId}::uuid) ORDER BY id FOR SHARE`;
+      const updated = await tx.subjectLink.updateMany({
+        where: { accountId: userId, subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
+        data: { approvedAt: new Date() },
+      });
+      return { approved: updated.count };
     });
-    if (!vehicle) {
-      throw new AppError(404, 'NO_VEHICLE_SUBJECT', 'No vehicle is registered under this plate yet — the driver must submit a vehicle document first.');
-    }
-    const updated = await this.prisma.subjectLink.updateMany({
-      where: { accountId: userId, subjectId: vehicle.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null },
-      data: { approvedAt: new Date() },
-    });
-    return { approved: updated.count };
   }
 
   /**
    * [High #9 · DS109] The rider live-operation check: every MOVER-checklist type has an
    * approved, current record, with VEHICLE-kind evidence restricted to the EXACT vehicle
    * the rider's current plate names (the same current-vehicle filter the driver gate uses,
-   * minus the taxi-only hire-insurance gate). The legacy `documentsVerified` flag is
-   * applied by the route and is NOT consulted here — a plate change clears it, so a rider
-   * on a new plate must satisfy the checklist against that plate.
+   * minus the taxi-only hire-insurance gate). The persisted legacy flag covers only genuinely never-filed checklist types;
+   * known invalid proof never bypasses the current-evidence check.
    */
   async riderLiveOperation(
     userId: string,
     vehicleType: VehicleType,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ): Promise<boolean> {
-    const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-    if (!user) return false;
-    const required = await this.countryConfig.getMoverChecklist(user.countryCode, vehicleType);
-    if (required.length === 0) return true;
-    const vehicleTypes = required.filter((docType) => BUCKET_OF[docType] === 'VEHICLE');
-    const approvedDocs = await this.approvedEvidence(db, userId, required, new Date());
-    const docs = vehicleTypes.length
-      ? await this.evidenceOnCurrentVehicle(db, userId, user.countryCode, approvedDocs, vehicleTypes)
-      : approvedDocs;
-    const approved = new Set(docs.map((d) => d.docType));
-    return required.every((docType) => approved.has(docType));
+    const rider = await db.rider.findUnique({ where: { userId }, select: { documentsVerified: true } });
+    return (await evaluateMoverDocuments(db, userId, { kind: 'RIDER', vehicleType, legacyVerified: rider?.documentsVerified })).allowed;
   }
 
   // -------------------------------------------------------------------------
@@ -2084,19 +2013,16 @@ export class VerificationService {
         select: { vehicleType: true, documentsVerified: true },
       }),
     ]);
-    const vehicleType = driver?.vehicleType ?? rider?.vehicleType ?? (await this.getMoverVehicleType(userId));
-    if (!vehicleType) return false;
-
-    const live = await this.getLiveOperationStatus(userId, {
-      vehicleType,
-      legacyVerified: driver?.documentsVerified || rider?.documentsVerified,
-    });
-    if (live.allowed) return false;
-
-    const [driverOff, riderOff] = await Promise.all([
-      this.prisma.driver.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
-      this.prisma.rider.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }),
-    ]);
+    const driverLive = driver ? await this.getLiveOperationStatus(userId, {
+      ...driver, legacyVerified: driver.documentsVerified, kind: 'DRIVER',
+    }) : null;
+    const riderLive = rider ? await this.getLiveOperationStatus(userId, {
+      ...rider, legacyVerified: rider.documentsVerified, kind: 'RIDER',
+    }) : null;
+    const driverOff = driverLive && !driverLive.allowed
+      ? await this.prisma.driver.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }) : { count: 0 };
+    const riderOff = riderLive && !riderLive.allowed
+      ? await this.prisma.rider.updateMany({ where: { userId, isOnline: true }, data: { isOnline: false } }) : { count: 0 };
     if (driverOff.count + riderOff.count === 0) return false;
 
     await this.notifications.send({
