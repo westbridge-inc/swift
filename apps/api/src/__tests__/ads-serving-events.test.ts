@@ -607,6 +607,7 @@ describe('§12 HTTP principal authority', () => {
 
     const stored = await prisma.adEvent.findMany({ where: { campaignId: c.id } });
     expect(stored).toHaveLength(3);
+    expect(stored.every((event) => event.authorityVersion === 2)).toBe(true);
     expect(stored.find((event) => event.eventType === 'IMPRESSION')?.userHash)
       .toBe(userHash(userA.userId, new Date().toISOString().slice(0, 10)));
     expect(stored.find((event) => event.eventType === 'CLICK')?.userHash).toBeNull();
