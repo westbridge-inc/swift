@@ -98,6 +98,10 @@ const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
  * would be the gate doing more harm than the bug.
  */
 const androidMapsApiKey = process.env['ANDROID_GOOGLE_MAPS_API_KEY'];
+// EAS materialises the sensitive FILE_BASE64 variable as a local file and
+// exposes its path here during the Android build. Local builds intentionally
+// omit the field: Expo then does not try to resolve a Firebase config file.
+const googleServicesFile = process.env['GOOGLE_SERVICES_JSON'];
 const isDistributableBuild =
   process.env['EAS_BUILD'] === 'true' || process.env['CI'] === 'true';
 
@@ -205,6 +209,7 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'gy.swift.app',
+    ...(googleServicesFile ? { googleServicesFile } : {}),
     // Android adaptive icon [LAUNCH-3]. Only `backgroundColor` was set, and it
     // was WHITE behind a maroon brand mark — but it never showed, because with
     // no `foregroundImage` Expo emits no adaptive icon at all and the launcher
@@ -290,7 +295,18 @@ const config: ExpoConfig = {
         resizeMode: 'contain',
       },
     ],
-    ['expo-notifications', { color: '#803B3B' }],
+    [
+      'expo-notifications',
+      {
+        // The runtime registers this same channel before asking Expo for the
+        // device token. It is the safe default for background FCM v1 messages;
+        // versioned loud-alert channels remain owned by their separate lane.
+        defaultChannel: 'default',
+        // Android notification icons are white silhouettes on transparency.
+        icon: './assets/notification-icon.png',
+        color: brandMaroon,
+      },
+    ],
     'react-native-maps',
     'expo-image',
     'expo-secure-store',
