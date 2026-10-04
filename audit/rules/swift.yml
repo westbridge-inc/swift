@@ -1,0 +1,299 @@
+# audit/rules/swift.yml — Swift-specific rules, layered on top of the Semgrep community packs.
+# Each rule encodes an invariant from the Swift platform standard. Suppressing one
+# (// nosemgrep: <id>) requires a justification line in audit/REGISTER.md.
+
+rules:
+
+  # ------------------------------------------------------------------ SQL
+  - id: swift-prisma-raw-unsafe
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      $queryRawUnsafe / $executeRawUnsafe with a non-literal argument is SQL injection.
+      Use the $queryRaw`...` tagged template or Prisma.sql so values are parameterised.
+    patterns:
+      - pattern-either:
+          - pattern: $P.$queryRawUnsafe($SQL, ...)
+          - pattern: $P.$executeRawUnsafe($SQL, ...)
+      - pattern-not: $P.$queryRawUnsafe("...", ...)
+      - pattern-not: $P.$executeRawUnsafe("...", ...)
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      swift-invariant: "no string-built SQL"
+
+  # ------------------------------------------------------------------ randomness for codes/OTP/PIN
+  - id: swift-math-random-for-code
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Math.random() inside a function that generates a code/OTP/PIN/token/secret.
+      Handover PINs, ride start codes and OTPs must come from a CSPRNG:
+      crypto.randomInt() / crypto.randomBytes().
+    patterns:
+      - pattern: Math.random()
+      - pattern-either:
+          - pattern-inside: |
+              function $F(...) { ... }
+          - pattern-inside: |
+              const $F = (...) => { ... }
+          - pattern-inside: |
+              const $F = async (...) => { ... }
+          - pattern-inside: |
+              $F(...) { ... }
+      - metavariable-regex:
+          metavariable: $F
+          regex: (?i).*(otp|pin|code|token|secret|nonce|password|session|verif).*
+    metadata:
+      category: security
+      cwe: "CWE-338: Use of Cryptographically Weak PRNG"
+
+  - id: swift-math-random-server
+    languages: [typescript, javascript]
+    severity: WARNING
+    paths:
+      include:
+        - "**/apps/api/**"
+        - "**/apps/server/**"
+        - "**/apps/backend/**"
+        - "**/packages/**"
+      exclude:
+        - "**/__tests__/**"
+        - "**/*.test.*"
+        - "**/*.spec.*"
+        - "**/scripts/**"
+        - "**/prisma/seed*"
+    message: >-
+      Math.random() in server-side code. Acceptable only for jitter/backoff; anything
+      that becomes an identifier, code or token must use crypto.*.
+    pattern: Math.random()
+    metadata:
+      category: security
+
+  # ------------------------------------------------------------------ mobile token storage
+  - id: swift-token-in-asyncstorage
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      Auth token / secret written to AsyncStorage (plaintext on device, readable on a
+      rooted phone or backup). Use expo-secure-store or react-native-keychain.
+    patterns:
+      - pattern-either:
+          - pattern: AsyncStorage.setItem($KEY, ...)
+          - pattern: AsyncStorage.multiSet([[$KEY, ...], ...])
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i).*(token|jwt|secret|session|refresh|auth|password|credential).*
+    metadata:
+      category: security
+      cwe: "CWE-922: Insecure Storage of Sensitive Information"
+
+  # ------------------------------------------------------------------ client-exposed secrets
+  - id: swift-public-env-secret
+    languages: [generic]
+    severity: ERROR
+    paths:
+      include:
+        - "**/*.ts"
+        - "**/*.tsx"
+        - "**/*.js"
+        - "**/*.mjs"
+        - "**/.env*"
+        - "**/app.config.*"
+        - "**/app.json"
+        - "**/eas.json"
+    message: >-
+      A NEXT_PUBLIC_ / EXPO_PUBLIC_ variable is compiled into the client bundle and
+      shipped to every user. This one is named like a secret. Move it server-side.
+    pattern-regex: (?i)(NEXT_PUBLIC|EXPO_PUBLIC)_[A-Z0-9_]*(SECRET|PRIVATE|SERVICE_ROLE|SERVICE|API_KEY|TOKEN|PASSWORD|SIGNING)[A-Z0-9_]*
+    metadata:
+      category: security
+      cwe: "CWE-200: Exposure of Sensitive Information"
+
+  # ------------------------------------------------------------------ CORS
+  - id: swift-cors-wildcard-with-credentials
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      CORS origin '*' / true combined with credentials: any website can make
+      authenticated calls to the API from a logged-in user's browser.
+    pattern-either:
+      - pattern: |
+          $APP.register($CORS, {..., origin: true, ..., credentials: true, ...})
+      - pattern: |
+          $APP.register($CORS, {..., credentials: true, ..., origin: true, ...})
+      - pattern: |
+          $APP.register($CORS, {..., origin: "*", ..., credentials: true, ...})
+      - pattern: |
+          $APP.register($CORS, {..., credentials: true, ..., origin: "*", ...})
+    metadata:
+      category: security
+      cwe: "CWE-942: Permissive Cross-domain Policy"
+
+  # ------------------------------------------------------------------ JWT
+  - id: swift-jwt-decode-not-verify
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      jwt.decode() does not check the signature. If these claims drive any authz
+      decision this is an auth bypass. Use jwt.verify() / request.jwtVerify().
+    pattern-either:
+      - pattern: $JWT.decode(...)
+      - pattern: jwtDecode(...)
+    metadata:
+      category: security
+      cwe: "CWE-347: Improper Verification of Cryptographic Signature"
+
+  # ------------------------------------------------------------------ money types in Prisma schema
+  - id: swift-float-money-prisma
+    languages: [generic]
+    severity: ERROR
+    paths:
+      include:
+        - "**/*.prisma"
+    message: >-
+      Money-looking field typed Float in the Prisma schema. Swift invariant: money is
+      an integer in minor units (Int/BigInt cents). Float money = rounding drift in the
+      rider cash ledger and vendor-owes-rider obligations.
+    pattern-regex: (?im)^\s*\w*(amount|price|fee|total|cost|balance|earning|payout|subtotal|tax|tip|fare|cash|owed|debt)\w*\s+Float\b
+    metadata:
+      category: correctness
+
+  - id: swift-decimal-money-prisma
+    languages: [generic]
+    severity: WARNING
+    paths:
+      include:
+        - "**/*.prisma"
+    message: >-
+      Money-looking field typed Decimal. Exact, but the standard is integer minor units;
+      confirm every arithmetic site uses the same representation.
+    pattern-regex: (?im)^\s*\w*(amount|price|fee|total|cost|balance|earning|payout|subtotal|tax|tip|fare|cash|owed|debt)\w*\s+Decimal\b
+    metadata:
+      category: correctness
+
+  # ------------------------------------------------------------------ logging
+  - id: swift-log-sensitive-value
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      A value named like something on the never-log list (password, OTP, PIN, token,
+      authorization header, refresh token, clearance/ID document) reaches a logger.
+    patterns:
+      - pattern-either:
+          - pattern: console.$M(..., $X, ...)
+          - pattern: $LOG.info(..., $X, ...)
+          - pattern: $LOG.debug(..., $X, ...)
+          - pattern: $LOG.warn(..., $X, ...)
+          - pattern: $LOG.error(..., $X, ...)
+          - pattern: $LOG.trace(..., $X, ...)
+      - metavariable-regex:
+          metavariable: $X
+          regex: (?i).*(password|passwd|otp|pin\b|secret|token|authorization|refresh|clearance|idnumber|nationalid|passport).*
+    metadata:
+      category: security
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+
+  # ------------------------------------------------------------------ tests
+  - id: swift-test-disabled-or-focused
+    languages: [typescript, javascript]
+    severity: WARNING
+    paths:
+      include:
+        - "**/*.test.*"
+        - "**/*.spec.*"
+        - "**/__tests__/**"
+        - "**/e2e/**"
+    message: >-
+      Disabled or focused test. The regression pack cannot be trusted while these exist;
+      "green by deletion / green by skip" is a listed agent hazard. (Semgrep's default
+      ignore skips top-level test/ and tests/ dirs — audit/out/hygiene.txt greps those.)
+    pattern-either:
+      - pattern: $T.skip(...)
+      - pattern: $T.only(...)
+      - pattern: $T.todo(...)
+      - pattern: xit(...)
+      - pattern: xdescribe(...)
+      - pattern: xtest(...)
+    metadata:
+      category: quality
+
+  # ------------------------------------------------------------------ Fastify input validation
+  - id: swift-fastify-route-without-schema
+    languages: [typescript, javascript]
+    severity: WARNING
+    paths:
+      include:
+        - "**/apps/api/**"
+        - "**/apps/server/**"
+        - "**/apps/backend/**"
+        - "**/packages/**"
+    message: >-
+      Route registered with no options object, so no schema and no input validation.
+      Every route validates body/params/query (SPS-1); unvalidated input is how hostile
+      payloads reach Prisma and the order state machine.
+    patterns:
+      - pattern-either:
+          - pattern: $APP.$METHOD($PATH, function(...) { ... })
+          - pattern: $APP.$METHOD($PATH, (...) => { ... })
+          - pattern: $APP.$METHOD($PATH, async (...) => { ... })
+          - pattern: $APP.$METHOD($PATH, async function(...) { ... })
+      - metavariable-regex:
+          metavariable: $METHOD
+          regex: ^(get|post|put|patch|delete|head|options)$
+    metadata:
+      category: security
+      cwe: "CWE-20: Improper Input Validation"
+
+  # ------------------------------------------------------------------ tenancy
+  - id: swift-prisma-delete-many-no-where
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      deleteMany()/updateMany() with no where clause touches every row of every tenant.
+    patterns:
+      - pattern-either:
+          - pattern: $P.$MODEL.deleteMany()
+          - patterns:
+              - pattern: $P.$MODEL.deleteMany({...})
+              - pattern-not: '$P.$MODEL.deleteMany({... , where: $W, ...})'
+          - patterns:
+              - pattern: $P.$MODEL.updateMany({...})
+              - pattern-not: '$P.$MODEL.updateMany({... , where: $W, ...})'
+    metadata:
+      category: correctness
+      swift-invariant: "tenant isolation by construction"
+
+  - id: swift-prisma-bypass-rls-comment
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      Explicit RLS bypass / superuser / service-role usage. Must be inside the enforced
+      withTenant/system-context layer, never in a route handler.
+    pattern-regex: "(?i)(bypassrls|BYPASS\\s+RLS|set_config\\(\\s*['\"]row_security['\"]\\s*,\\s*['\"]off|SERVICE_ROLE|service_role)"
+    metadata:
+      category: security
+
+  # ------------------------------------------------------------------ handover / verification codes must never reach the verifier
+  - id: swift-code-in-push-payload
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A field named like a handover PIN / start code / OTP is being placed in a push,
+      notification or realtime payload. The VERIFIER must never receive the code
+      (delivery PIN, ride start code, pickup code go to the customer only).
+    patterns:
+      - pattern-either:
+          - pattern: |
+              { ..., $KEY: $VAL, ... }
+      - pattern-inside: |
+          $NOTIFY(...)
+      - metavariable-regex:
+          metavariable: $NOTIFY
+          regex: (?i).*(push|notify|notification|publish|broadcast|centrifugo|novu|sendSms|sendWhatsapp).*
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^(pin|otp|startCode|handoverCode|pickupCode|deliveryPin|verificationCode|code)$
+    metadata:
+      category: security
+      swift-invariant: "verifier never sees the code"

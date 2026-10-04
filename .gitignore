@@ -69,6 +69,7 @@ gitleaks
 
 # Security/launch audit reports — internal only, public repo
 /reports/
+/audit/out/
 
 # Internal engineering brains, handoff docs, and agent coordination — the
 # repo is PUBLIC; audit ledgers, security posture, and program state never
