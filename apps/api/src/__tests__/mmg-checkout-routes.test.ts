@@ -962,6 +962,38 @@ describe('[MMG-RETURN-PATH] the reply MMG puts in the address path', () => {
   });
 });
 
+describe('[MMG, 4 Oct] Notify: MMG\'s server sends the same tokenized reply as the redirect', () => {
+  beforeEach(() => enable(true));
+
+  it.each(['a form, the token as sent', 'a form, the token percent-encoded', 'JSON'] as const)('%s: Notify alone confirms through the same reply path as /return, and either door after it changes nothing', async (shape) => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const txn = String(20_000_000_000_000 + Math.floor(Math.random() * 9_000_000_000_000));
+    const token = sandbox.sandboxReplyToken({
+      merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0',
+      ResultMessage: 'Transaction Successful', htmlResponse: '<html><body><h1>Transaction Successful</h1></body></html>',
+    });
+    expect(token).toMatch(/=$/); // padded base64url, as MMG sends it
+    found(txn, 1500);
+    const res = shape === 'JSON'
+      ? await notify({ token })
+      : await notify(`token=${shape === 'a form, the token as sent' ? token : encodeURIComponent(token)}`, 'application/x-www-form-urlencoded');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ success: true });
+    // The same path as /return: written down as MMG's success answer, MMG's lookup decided, one credit.
+    expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['NOTIFY', 'MMG_RESULT_0'], ['LOOKUP', txn]]);
+    expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
+    expect(await creditsOf(p.subId)).toBe(1);
+    expect(await identitiesOf(txn)).toBe(1);
+    expect(await identitiesOf(ledgerOf(txn))).toBe(1);
+    // The partner's browser arrives afterwards with the same reply: CONFIRMED, nothing more.
+    expect((await ret('success', { token })).json().data.state).toBe('CONFIRMED');
+    expect((await notify({ token })).json()).toEqual({ success: true });
+    expect(await creditsOf(p.subId)).toBe(1);
+    expect((await toldOf(p.userId, 'CONFIRMED')).length).toBe(1);
+  });
+});
+
 describe('the kill switch mid-flight', () => {
   it('turning the flag off hides an open checkout everywhere and makes its reply inert; turning it on brings it back', async () => {
     enable(true);
