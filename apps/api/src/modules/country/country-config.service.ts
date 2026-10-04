@@ -396,8 +396,8 @@ export class CountryConfigService {
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */
-  async getMoverChecklist(code: string, vehicleType: VehicleType): Promise<string[]> {
-    const config = await this.getByCode(code);
+  async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+    const config = await this.getByCode(code, db);
     const lists = config.documentChecklists as Record<string, string[]>;
     const base = lists['MOVER'] ?? [];
     const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);

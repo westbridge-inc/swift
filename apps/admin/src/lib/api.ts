@@ -1,3 +1,5 @@
+import type { RejectionReasonCode } from './rejection-reasons';
+
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 /** The header the server reads first for the reason law (ADM-006). */
 const REASON_HEADER = 'x-swift-reason';
@@ -538,8 +540,11 @@ export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
 export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
-export const rejectDoc = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+// [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
+// reviewer's words and the server's reason code. The words also ride the
+// reason header [ADM-006].
+export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReasonCode) =>
+  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason, reasonCode }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been

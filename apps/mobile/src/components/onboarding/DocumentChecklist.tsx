@@ -3,7 +3,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { EmptyState, Spinner, T } from '../../kit';
 import { DocumentUploadCard } from './DocumentUploadCard';
-import { emptyChecklistCopy } from './documentChecklistPresentation';
+import { emptyChecklistCopy, faceMatchedDocTypes } from './documentChecklistPresentation';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
  *  theme maps no numeric spacing, so it was never a token. Named here so the
@@ -52,6 +52,8 @@ export function DocumentChecklist({
 
   const checklist: string[] = status?.checklist ?? [];
   const documents: any[] = status?.documents ?? [];
+  // Which of these the server face-matches right now (none while it is off).
+  const faceMatched = faceMatchedDocTypes(status);
 
   const latestDoc = (docType: string) => {
     const docs = documents
@@ -133,6 +135,7 @@ export function DocumentChecklist({
             submittedAt={doc?.createdAt ?? null}
             reviewNote={doc?.reviewNote ?? null}
             isNext={docType === nextDoc}
+            faceMatched={faceMatched.has(docType)}
           />
         );
       })}
