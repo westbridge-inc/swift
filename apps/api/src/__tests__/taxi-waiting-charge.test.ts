@@ -454,6 +454,33 @@ describe('"Fare collected" freezes the charge once, into every money surface (CO
     expect(admin.json().data.fareBreakdown).toEqual(breakdown);
   });
 
+  it('additive on whatever fare the server computed: a ride booked through /request at a zone per-km fare pays that fare + the waiting charge', async () => {
+    const box = { type: 'Polygon', coordinates: [[[-58.64, 6.40], [-58.61, 6.40], [-58.61, 6.41], [-58.64, 6.41], [-58.64, 6.40]]] };
+    const customer = await makeCustomer();
+    const plain = (await call('POST', '/api/v1/rides/estimate', customer.token, { pickup: PICKUP, dropoff: DEST })).json().data.tiers[0].fare as number;
+    const zone = await sys(() => app.prisma.zone.create({ data: { name: `${FIXTURE} pickup ${nanoid(6)}`, boundary: box as never, tenantId: 'swift-default', countryCode: 'GY', taxiPerKm: 900 } }));
+    try {
+      on();
+      const res = await call('POST', '/api/v1/rides/request', customer.token, trip());
+      expect(res.statusCode, res.body).toBe(201);
+      const fare = res.json().data.ride.fare as number;
+      expect(fare).not.toBe(plain); // the zone's per-km priced it, not the market's
+      const driver = await makeDriver();
+      const t = Date.now();
+      const id = res.json().data.ride.id as string;
+      await sys(() => app.prisma.order.update({ where: { id }, data: {
+        driverId: driver.driverId, status: 'RIDE_IN_PROGRESS', driverArrivedAt: new Date(t - 30 * MIN), pickedUpAt: new Date(t - 17 * MIN),
+        ridePinVerified: true, ridePinVerifiedAt: new Date(t - 17 * MIN),
+      } }));
+      await sys(() => app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: id } }));
+      const done = await call('POST', `/api/v1/driver/rides/${id}/handover`, driver.token, { outcome: 'paid', gps: DEST });
+      expect(done.statusCode, done.body).toBe(200);
+      expect(await money(id)).toEqual({ status: 'DELIVERED', total: fare + 500, route: fare, earnings: [fare + 500], waiting: { seconds: 780, minutes: 13, charge: 500, frozen: true } });
+    } finally {
+      await sys(() => app.prisma.zone.delete({ where: { id: zone.id } }));
+    }
+  });
+
   it('replays never add it twice: the repeated outcome, the completion tap and the reconciler change nothing', async () => {
     const t = Date.now();
     const r = await makeRide({ status: 'RIDE_IN_PROGRESS', driverArrivedAt: new Date(t - 50 * MIN), pickedUpAt: new Date(t - 25 * MIN) });
