@@ -256,7 +256,7 @@ beforeEach(() => {
   fx.seen.length = 0;
   fx.storage.clear();
   fx.socketHandlers.clear();
-  rideRequestAttempt.settle();
+  rideRequestAttempt.liveRideSeen('rider-1');
   fx.routes = {
     'get /rides/active': () => ok(null),
     'get /rides/capabilities': () => refuse(404, 'NOT_FOUND'),
@@ -369,6 +369,77 @@ describe('flag on — the passenger adds, removes and reorders stops up to the m
     expect(join?.hasAttribute('disabled')).toBe(true);
     expect(text()).toContain('The queue can’t hold stops. Remove your stops to join it.');
     expect(sent('post /rides/queue/join')).toHaveLength(0);
+  });
+});
+
+describe('[review 1] the server takes stops away after the rider chose some', () => {
+  it('maxStops drops to 0: the stops leave the screen, the quote and the booking, and the rider is told', async () => {
+    let max = 2;
+    fx.routes['get /rides/capabilities'] = () => ok({ maxStops: max });
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    await pickFromSearch(byTestId('taxi-add-stop'), CAMP);
+    expect(byTestId('taxi-stop-1')).toBeTruthy();
+
+    max = 0;
+    const quotedBefore = sent('post /rides/estimate').length;
+    await act(async () => { await client.invalidateQueries({ queryKey: ['rides', 'capabilities'] }); });
+    await settle();
+    snap('rider-booking-stops-switched-off');
+    // Not one quote after the switch went off may carry a stop — not even in
+    // the render before the trip is tidied up.
+    expect(sent('post /rides/estimate').length).toBeGreaterThan(quotedBefore);
+    for (const config of sent('post /rides/estimate').slice(quotedBefore)) expect(bodyOf(config).stops).toBeUndefined();
+    expect(host.querySelector('[data-testid^="taxi-stop-"]')).toBeNull();
+    expect(byTestId('taxi-add-stop')).toBeNull();
+    expect(byTestId('taxi-stops-dropped')?.textContent).toBe('Stops aren’t available right now, so we removed them from this trip. Check your trip before you book.');
+    expect(Object.keys(bodyOf(sent('post /rides/estimate').at(-1)))).toEqual(['pickup', 'dropoff']);
+
+    await click(requestButton() ?? null);
+    const [request] = sent('post /rides/request');
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass']);
+  });
+
+  it('maxStops lowered below the count: the extra stops go, the rest are booked', async () => {
+    let max = 2;
+    fx.routes['get /rides/capabilities'] = () => ok({ maxStops: max });
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    await pickFromSearch(byTestId('taxi-add-stop'), CAMP);
+    await pickFromSearch(byTestId('taxi-add-stop'), SHERIFF);
+    max = 1;
+    const quotedBefore = sent('post /rides/estimate').length;
+    await act(async () => { await client.invalidateQueries({ queryKey: ['rides', 'capabilities'] }); });
+    await settle();
+    for (const config of sent('post /rides/estimate').slice(quotedBefore)) expect(bodyOf(config).stops ?? []).toHaveLength(1);
+    expect(byTestId('taxi-stop-2')).toBeNull();
+    expect(byTestId('taxi-stop-1')?.textContent).toContain('Camp Street');
+    expect(byTestId('taxi-stops-dropped')?.textContent).toMatch(/up to 1 stop now, so we removed the last one/);
+    await click(requestButton() ?? null);
+    expect(bodyOf(sent('post /rides/request')[0]).stops).toEqual(REQUEST_BODY_WITH_ONE_STOP.stops);
+  });
+});
+
+describe('[review 2] without the waiting fields, every flag-off screen is main’s, byte for byte', () => {
+  // The snapshots under __flagoff__ were written by THIS harness rendering
+  // main’s own TaxiScreen (d1b84e13); this code must draw the same DOM.
+  it.each([
+    ['an older server (404)', () => refuse(404, 'NOT_FOUND')],
+    ['stops switched off (0)', () => ok({ maxStops: 0 })],
+  ])('booking with a destination — %s', async (_label, capabilities) => {
+    fx.routes['get /rides/capabilities'] = capabilities;
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/rider-booking.html');
+  });
+
+  it.each([
+    ['driver arrived', 'rider-active-arrived', { status: 'DRIVER_ARRIVED', ridePinVerified: false }],
+    ['on the trip', 'rider-active-riding', {}],
+  ])('the live ride — %s', async (_label, file, overrides) => {
+    fx.routes['get /rides/active'] = () => ok(riderRideWithoutStops(overrides));
+    await mount();
+    await expect(host.innerHTML).toMatchFileSnapshot(`./__flagoff__/${file}.html`);
   });
 });
 

@@ -2,7 +2,7 @@ import { uploadHandoverPhoto } from '../../../hooks/mover';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
 /** @jsxImportSource react */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, Platform, Pressable, View } from 'react-native';
+import { Platform, Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
@@ -33,7 +33,7 @@ import { telUrl } from '../../../lib/emergencyPolicy';
 import { canDriverHandbackRide } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
-import { DriverItinerary, DriverWaiting, TaxiStopActions } from '../TaxiItinerary';
+import { DriverItinerary, DriverWaiting, TaxiStopActions, openStopNavigation, useNoShowOpen } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
 const RIDE_PIN_LENGTH = 6;
@@ -189,6 +189,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // [TAXI waiting charge §8.3] The live wait on a taxi trip, from the driver's
   // arrival on — the same figures the passenger sees. Null without the field.
   const waitingClock = useWaitingClock(isDriver ? liveJob : null);
+  // [TAXI multi-stop · part 4] With a stop open, the passenger-didn't-come-back
+  // outcome opens only at the server's grace time for that stop.
+  const noShowOpen = useNoShowOpen(isDriver ? liveJob : null);
 
   // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
   // changes — a stacked-leg switch, a leg dropped from the run (the
@@ -411,10 +414,12 @@ export function ActiveJobScreen({ navigation }: any) {
     : null;
   const navTarget = nextStopPoint ?? (inProgress || riderToDrop ? drop : pickup);
   const targetLabel = nextStopPoint ? `stop ${nextItineraryStop!.sequence}` : inProgress || riderToDrop ? 'drop-off' : 'pickup';
+  // The phone's own maps, turn-by-turn: Apple Maps on iOS, Google Maps on
+  // Android (the web map when the app link cannot open) — one opener for the
+  // nav pill, the Navigate link and every stop's Navigate.
   const openNav = () => {
     if (!navTarget) return;
-    const q = `${navTarget.latitude},${navTarget.longitude}`;
-    Linking.openURL(`maps://?daddr=${q}`).catch(() => openExternal(`https://maps.google.com/?daddr=${q}`, "Couldn't open maps on this phone."));
+    void openStopNavigation({ lat: navTarget.latitude, lng: navTarget.longitude });
   };
   const step = isDriver && job ? driverStep(job) : null;
 
@@ -488,6 +493,9 @@ export function ActiveJobScreen({ navigation }: any) {
   const recordUnpaid = (outcome: FailedOutcome) => {
     setUnpaidSheet(false);
     if (preview || !job?.id) return;
+    // [TAXI multi-stop] A stop is still open: only "didn't come back", and only
+    // after the server's grace — never an early ending from a stale sheet.
+    if (stopGate && (outcome !== 'no_show' || !noShowOpen)) return;
     const photo = handoverPhoto && handoverPhoto.orderId === job.id && handoverPhoto.kind === kind ? handoverPhoto : null;
     if (photo) { try { requireAuthSessionForPrincipal(photo.owner); } catch { setHandoverPhoto(null); return; } }
     const proof = photo ? { photoUrl: photo.url, authSession: photo.owner } : {};
@@ -859,9 +867,20 @@ export function ActiveJobScreen({ navigation }: any) {
                   {/* [M-29] The other outcome at the destination. Never a plain
                       "complete" — the server refuses a cash ride without a
                       recorded fare (PAYMENT_NOT_CAPTURED). */}
-                  {step.action === 'handover' ? (
+                  {step.action === 'handover' && !stopGate ? (
                     <PillButton
                       label="Passenger didn't pay"
+                      variant="soft"
+                      style={{ marginTop: space.sm }}
+                      disabled={busy}
+                      onPress={() => setUnpaidSheet(true)}
+                    />
+                  ) : null}
+                  {/* [TAXI multi-stop] A stop is still open: the only ending is
+                      the passenger not coming back, after the server's grace. */}
+                  {step.action === 'handover' && stopGate && noShowOpen ? (
+                    <PillButton
+                      label="Passenger didn't come back"
                       variant="soft"
                       style={{ marginTop: space.sm }}
                       disabled={busy}
@@ -1190,13 +1209,15 @@ export function ActiveJobScreen({ navigation }: any) {
               : 'Record what happened. Add a photo if available; missing or insufficient evidence goes to review.'}
         </T>
         {<PillButton label={photoBusy ? 'Saving photo…' : handoverPhoto?.orderId === job?.id ? 'Replace photo' : 'Add photo'} disabled={busy} onPress={() => void addHandoverPhoto()} />}
-        <PillButton
-          label={isDriver || isCourier ? 'Refused to pay' : 'Refused to pay at the door'}
-          variant="outline"
-          style={{ alignSelf: 'stretch', marginTop: space.md }}
-          disabled={busy}
-          onPress={() => recordUnpaid('refused')}
-        />
+        {stopGate ? null : (
+          <PillButton
+            label={isDriver || isCourier ? 'Refused to pay' : 'Refused to pay at the door'}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={busy}
+            onPress={() => recordUnpaid('refused')}
+          />
+        )}
         <PillButton
           label={isDriver ? 'Left without paying' : isCourier ? 'Nobody there' : 'Nobody at the door'}
           variant="outline"

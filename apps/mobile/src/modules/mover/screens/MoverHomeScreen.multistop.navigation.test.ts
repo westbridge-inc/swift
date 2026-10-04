@@ -142,3 +142,16 @@ describe('the open board (§6.1)', () => {
     expect(stopLabels()).toEqual(['Stop 1: Camp Street', 'Stop 2: Sheriff Street']);
   });
 });
+
+describe('[review 2] flag off: the offer card and the board are main’s, byte for byte', () => {
+  it('the live offer without stops', async () => {
+    await draw(offerCard(baseOffer));
+    await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/driver-offer.html');
+  });
+
+  it('the board without stops', async () => {
+    fx.jobs = [{ id: 'plain-1', pickupAddress: 'Bourda Market', dropoffAddress: 'Kitty', fareTotal: 1800, paymentMethod: 'CASH' }];
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/driver-board.html');
+  });
+});

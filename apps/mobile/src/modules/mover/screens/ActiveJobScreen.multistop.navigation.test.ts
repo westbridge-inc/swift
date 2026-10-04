@@ -213,6 +213,94 @@ describe('Navigate opens the phone’s own maps at that stop', () => {
   });
 });
 
+describe('[review 6] the primary Navigate controls open the platform’s own maps', () => {
+  const pill = () => Array.from(host.querySelectorAll('[role="button"]')).find((e) => /km · ~\d+ min/.test(e.textContent ?? '')) ?? null;
+  const link = (label: string) => host.querySelector(`[aria-label="${label}"]`);
+
+  it('Android, a ride without stops: the Navigate link and the nav pill open Google Maps at the drop-off', async () => {
+    fx.platform.OS = 'android';
+    await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, paymentMethod: 'CASH' }));
+    await click(link('Navigate to drop-off'));
+    expect(fx.openURL).toHaveBeenLastCalledWith('google.navigation:q=6.82,-58.16');
+    await click(pill());
+    expect(fx.openURL).toHaveBeenLastCalledWith('google.navigation:q=6.82,-58.16');
+    expect(fx.openURL).not.toHaveBeenCalledWith(expect.stringMatching(/^maps:/));
+  });
+
+  it('Android, a ride with stops: they head for the next stop', async () => {
+    fx.platform.OS = 'android';
+    await render(driverRideWithStops());
+    await click(link('Navigate to stop 1'));
+    expect(fx.openURL).toHaveBeenLastCalledWith('google.navigation:q=6.8143,-58.1443');
+  });
+
+  it('iOS: Apple Maps', async () => {
+    fx.platform.OS = 'ios';
+    await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, paymentMethod: 'CASH' }));
+    await click(link('Navigate to drop-off'));
+    expect(fx.openURL).toHaveBeenLastCalledWith('maps://?daddr=6.82,-58.16');
+  });
+});
+
+describe('[review 7] with a stop open, ending for a missing passenger waits for the server’s grace', () => {
+  const graceAt = Date.parse('2026-10-01T21:10:00.000Z');
+  const atStop1 = () => driverRideWithStops({
+    stopWait: { sequence: 1, arrivedAt: '2026-10-01T21:00:00.000Z', noShowAvailableAt: '2026-10-01T21:10:00.000Z' },
+    stops: [{ ...RIDE_STOPS_PENDING[0], status: 'ARRIVED' }, { ...RIDE_STOPS_PENDING[1] }],
+  });
+
+  it('before noShowAvailableAt: no unpaid or no-show control at all', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(graceAt - 60_000);
+    await render(atStop1());
+    expect(buttonNamed("Passenger didn't come back")).toBeNull();
+    expect(buttonNamed("Passenger didn't pay")).toBeNull();
+  });
+
+  it('after it: "Passenger didn\'t come back" offers only the no-show outcome', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(graceAt + 1_000);
+    await render(atStop1());
+    await click(buttonNamed("Passenger didn't come back"));
+    expect(buttonNamed('Refused to pay')).toBeNull();
+    await click(buttonNamed('Left without paying'));
+    expect(fx.driverAct.mutate).toHaveBeenCalledWith(expect.objectContaining({ id: 'cm-ride-4', action: 'handover', outcome: 'no_show' }), expect.anything());
+  });
+
+  it('the control appears on its own when the grace time passes', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(graceAt - 2_000);
+    fx.job = atStop1();
+    await act(async () => root.render(React.createElement(ActiveJobScreen, { navigation })));
+    expect(buttonNamed("Passenger didn't come back")).toBeNull();
+    await act(async () => { vi.advanceTimersByTime(3_000); });
+    expect(buttonNamed("Passenger didn't come back")).toBeTruthy();
+  });
+
+  it('a part-3 server (no stopWait) never offers it while a stop is open', async () => {
+    await render(driverRideWithStops());
+    expect(buttonNamed("Passenger didn't come back")).toBeNull();
+    expect(buttonNamed("Passenger didn't pay")).toBeNull();
+  });
+
+  it('a ride without stops keeps today’s "Passenger didn\'t pay" with both outcomes', async () => {
+    await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, paymentMethod: 'CASH' }));
+    await click(buttonNamed("Passenger didn't pay"));
+    expect(buttonNamed('Refused to pay')).toBeTruthy();
+    expect(buttonNamed('Left without paying')).toBeTruthy();
+  });
+});
+
+describe('[review 2] without the waiting fields, the driver’s flag-off trip is main’s, byte for byte', () => {
+  it.each([
+    ['at the pickup', 'driver-active-arrived', { status: 'DRIVER_ARRIVED', ridePinVerified: false }],
+    ['on the trip', 'driver-active-riding', {}],
+  ])('%s', async (_label, file, overrides) => {
+    await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, paymentMethod: 'CASH', ...overrides }));
+    await expect(host.innerHTML).toMatchFileSnapshot(`./__flagoff__/${file}.html`);
+  });
+});
+
 describe('the part-4 stop actions, only with the capability', () => {
   it('"Arrived at stop 1" sends the contract’s action', async () => {
     await render(driverRideWithStops({ stopWait: null }));

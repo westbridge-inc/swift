@@ -10,6 +10,16 @@ type Point = { lat: number; lng: number };
 const errorCodeOf = (error: unknown): string | undefined =>
   (error as { response?: { data?: { error?: { code?: string } } } } | null)?.response?.data?.error?.code;
 
+/** Codes that do NOT settle an attempt: the ride may have been made. */
+const OUTCOME_UNKNOWN_CODES = new Set(['RIDE_REQUEST_OUTCOME_UNKNOWN', 'DUPLICATE_REQUEST']);
+
+/** The server answered with its own refusal code (the contract: nothing is
+ *  written on any refusal), so the attempt's outcome is known. */
+function requestDefinitelyRefused(error: unknown): boolean {
+  const code = errorCodeOf(error);
+  return !!(error as { response?: unknown } | null)?.response && !!code && !OUTCOME_UNKNOWN_CODES.has(code);
+}
+
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
   return r?.data?.data as T;
@@ -149,13 +159,24 @@ export function useLeaveQueue() {
 export function useRequestRide() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: RideRequestBody) => {
-      const key = rideRequestAttempt.keyFor(data, getAuthSessionSnapshot()?.userId ?? '');
-      return unwrap(rideApi.request(data, key));
+    mutationFn: async (data: RideRequestBody) => {
+      const userId = getAuthSessionSnapshot()?.userId ?? '';
+      // The key of THIS request, held here so only its own answer retires it.
+      const key = await rideRequestAttempt.begin(data, userId, () => unwrap(rideApi.active()));
+      try {
+        const answer = await unwrap(rideApi.request(data, key));
+        // Answered (a new ride, or the replay of one already made): spent.
+        rideRequestAttempt.settle(key, userId);
+        return answer;
+      } catch (error) {
+        // A refusal the server answered with its own code wrote nothing: this
+        // attempt is over. A lost answer, an unknown outcome or a twin still in
+        // flight keeps the key for the retry.
+        if (requestDefinitelyRefused(error)) rideRequestAttempt.settle(key, userId);
+        throw error;
+      }
     },
     onSuccess: () => {
-      // Answered (a new ride, or the replay of one already made): the key is spent.
-      rideRequestAttempt.settle();
       qc.invalidateQueries({ queryKey: ['rides', 'active'] });
       track('ride_requested', {});
     },
@@ -164,14 +185,10 @@ export function useRequestRide() {
       const answered = !!(error as { response?: unknown } | null)?.response;
       // The ride may exist without its answer having reached the phone: read
       // the live ride before anything else (CONTRACT §3.1 #18), never book again.
-      if (!answered || code === 'RIDE_REQUEST_OUTCOME_UNKNOWN' || code === 'DUPLICATE_REQUEST' || code === 'RIDE_IN_PROGRESS') {
+      if (!answered || code === 'RIDE_REQUEST_OUTCOME_UNKNOWN' || code === 'DUPLICATE_REQUEST' || code === 'RIDE_IN_PROGRESS' || code === 'RIDE_ALREADY_BOOKED') {
         void qc.invalidateQueries({ queryKey: ['rides', 'active'] });
       }
-      // The server refused the key itself: the next tap starts a new intent.
-      if (code === 'IDEMPOTENCY_KEY_REUSED') {
-        rideRequestAttempt.settle();
-        void qc.invalidateQueries({ queryKey: ['rides', 'active'] });
-      }
+      if (code === 'IDEMPOTENCY_KEY_REUSED') void qc.invalidateQueries({ queryKey: ['rides', 'active'] });
       // The quote moved under the passenger: fetch the new one to show.
       if (code === 'FARE_CHANGED') void qc.invalidateQueries({ queryKey: ['rides', 'estimate'] });
       // The stop switch moved: re-read how many stops this server takes.

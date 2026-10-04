@@ -366,8 +366,24 @@ function TaxiBooking({ navigation }: any) {
   const maxStops = maxStopsFrom(capabilities.data);
   const maxStopsRef = useRef(maxStops);
   maxStopsRef.current = maxStops;
-  const [stops, setStops] = useState<readonly PickedPlace[]>([]);
+  const [pickedStops, setStops] = useState<readonly PickedPlace[]>([]);
+  // What the CURRENT capability allows is all that is ever shown, quoted or
+  // booked: with the switch at 0 (or lowered) the extra stops are gone from the
+  // estimate and the request at once, not only from the "Add" control.
+  const stops = useMemo(() => pickedStops.slice(0, maxStops), [pickedStops, maxStops]);
   const stopsWire = useMemo(() => wireStops(stops), [stops]);
+  const [stopsDropped, setStopsDropped] = useState<string | null>(null);
+  // The server took stops away (or lowered the max) after the rider chose
+  // some: drop the extra ones from the trip and say so.
+  useEffect(() => {
+    if (pickedStops.length <= maxStops) return;
+    const dropped = pickedStops.length - maxStops;
+    setStops((s) => s.slice(0, maxStops));
+    setStopsDropped(maxStops === 0
+      ? 'Stops aren’t available right now, so we removed them from this trip. Check your trip before you book.'
+      : `You can add up to ${maxStops} ${maxStops === 1 ? 'stop' : 'stops'} now, so we removed the last ${dropped === 1 ? 'one' : dropped}. Check your trip before you book.`);
+  }, [pickedStops.length, maxStops]);
+  const authUserId = useAuthStore((st) => st.user?.id ?? null);
 
   const { data: estimate, isFetching: estimating, error: estimateError } = useRideEstimate(pickupPoint, dropoffPoint, stopsWire);
   const estimateErrorBody = (estimateError as any)?.response?.data?.error;
@@ -380,8 +396,8 @@ function TaxiBooking({ navigation }: any) {
   // A live ride on screen means any unanswered booking is resolved: its key is
   // spent, and the next booking — even of the same trip — gets a new one.
   useEffect(() => {
-    if (activeRide?.id) rideRequestAttempt.settle();
-  }, [activeRide?.id]);
+    if (activeRide?.id && authUserId) rideRequestAttempt.liveRideSeen(authUserId);
+  }, [activeRide?.id, authUserId]);
 
   // Availability spec §2.1 (hooks live ABOVE the early returns — the active-ride
   // and loading branches must never change the hook order).
@@ -505,7 +521,7 @@ function TaxiBooking({ navigation }: any) {
     if (payload) requestRide.mutate(payload);
   };
 
-  const onAddStop = () => openSearch((p) => setStops((s) => addStop(s, p, maxStopsRef.current)), 'Add a stop');
+  const onAddStop = () => openSearch((p) => { setStopsDropped(null); setStops((s) => addStop(s.slice(0, maxStopsRef.current), p, maxStopsRef.current)); }, 'Add a stop');
   const onEditStop = (index: number) => openSearch((p) => setStops((s) => replaceStop(s, index, p)), `Stop ${index + 1}`);
   const onMoveStop = (index: number, by: -1 | 1) => setStops((s) => moveStop(s, index, by));
   const onRemoveStop = (index: number) => setStops((s) => removeStop(s, index));
@@ -621,6 +637,11 @@ function TaxiBooking({ navigation }: any) {
               onRemoveStop={onRemoveStop}
             />
           )}
+          {stopsDropped && !queued ? (
+            <T variant="label" tone="warning" testID="taxi-stops-dropped" accessibilityLiveRegion="polite" style={{ marginTop: space.sm, paddingHorizontal: space.xs }}>
+              {stopsDropped}
+            </T>
+          ) : null}
 
           {supplyChip && !queued ? (
             <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: space.md }}>

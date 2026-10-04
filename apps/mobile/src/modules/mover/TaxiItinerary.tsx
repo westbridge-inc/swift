@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Linking, Platform, Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { radius, space } from '@swift/ui';
@@ -175,7 +175,31 @@ export function DriverItinerary({ job }: { job: any }) {
   );
 }
 
-const SKIP_REASONS = ['Passenger asked to skip it', 'Couldn’t reach the stop', 'Road or access blocked'] as const;
+/**
+ * [TAXI multi-stop · part 4] While a stop is open, "the passenger didn't come
+ * back" belongs to the server's grace (CONTRACT §6.4: no_show at an arrived
+ * stop only after `noShowAvailableAt`). True only when the server's stopWait
+ * is for the stop the trip is at and its time has passed; the screen re-renders
+ * on the boundary. No stopWait (a part-3 server, or not waiting) = never.
+ */
+export function useNoShowOpen(job: any): boolean {
+  const sequence = nextStopSequence(job);
+  const wait = job?.stopWait as { sequence?: unknown; noShowAvailableAt?: unknown } | null | undefined;
+  const at = wait && sequence != null && wait.sequence === sequence && typeof wait.noShowAvailableAt === 'string'
+    ? Date.parse(wait.noShowAvailableAt)
+    : Number.NaN;
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!Number.isFinite(at)) return;
+    const ms = at - Date.now();
+    if (ms <= 0) return;
+    const t = setTimeout(() => setTick((n) => n + 1), ms + 50);
+    return () => clearTimeout(t);
+  }, [at]);
+  return Number.isFinite(at) && Date.now() >= at;
+}
+
+const SKIP_REASONS =['Passenger asked to skip it', 'Couldn’t reach the stop', 'Road or access blocked'] as const;
 
 /**
  * The stop step while the passenger is aboard and a stop is still open. With

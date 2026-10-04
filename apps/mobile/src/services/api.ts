@@ -8,7 +8,6 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { TAXI_STOPS_CAPABILITY } from '../lib/taxiItinerary';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
 import {
   getReactNativeBundleScriptUrl,
@@ -674,7 +673,7 @@ export const rideApi = {
     api.post('/rides/estimate', stops && stops.length > 0 ? { pickup, dropoff, stops } : { pickup, dropoff }),
   /** [TAXI multi-stop] How many stops this server takes ({ maxStops }). An
    *  older server has no such read; the app treats that as 0 (no stops). */
-  capabilities: () => api.get('/rides/capabilities'),
+  capabilities: (session?: AuthSessionSnapshot) => api.get('/rides/capabilities', capturedAuthConfig(session)),
   // Availability spec §1/§2.1: buckets only (GOOD/LOW/NONE), never counts.
   availability: (p: Point) => api.get(`/rides/availability?lat=${p.lat}&lng=${p.lng}`),
   watchAvailability: (p: Point) => api.post('/rides/availability/watch', p),
@@ -970,11 +969,13 @@ export const driverApi = {
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/driver/profile/mmg-pay-url/pending'),
-  // [TAXI multi-stop] Declares what this app can drive (CONTRACT §6.4): a server
-  // that knows the capability offers it rides with stops; an older server
-  // ignores the unknown key.
-  goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
-    api.post('/driver/go-online', { latitude, longitude, capabilities: [TAXI_STOPS_CAPABILITY] }, capturedAuthConfig(session)),
+  // [TAXI multi-stop] `capabilities` is sent ONLY when the caller passes it —
+  // that is, only when the server has advertised rides with stops (CONTRACT
+  // §6.4). Without it the body is exactly today's { latitude, longitude }.
+  goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot, capabilities?: readonly string[]) =>
+    api.post('/driver/go-online', capabilities && capabilities.length > 0
+      ? { latitude, longitude, capabilities: [...capabilities] }
+      : { latitude, longitude }, capturedAuthConfig(session)),
   goOffline: () => api.post('/driver/go-offline'),
   location: (latitude: number, longitude: number, session?: AuthSessionSnapshot, fix?: { accuracy?: number | null; mocked?: boolean | null }) =>
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),

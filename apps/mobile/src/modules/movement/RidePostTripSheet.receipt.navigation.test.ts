@@ -72,3 +72,10 @@ describe('the receipt', () => {
     expect(all.indexOf('Stop 1: Camp Street')).toBeLessThan(all.indexOf('Stop 2: Sheriff Street'));
   });
 });
+
+describe('[review 2] without a breakdown the receipt is main’s, byte for byte', () => {
+  it('a finished ride, no stops, no waiting fields', async () => {
+    await draw(riderRideWithoutStops({ taxiFareTotal: 2400 }));
+    await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/rider-receipt.html');
+  });
+});

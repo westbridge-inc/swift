@@ -3,7 +3,8 @@ import type { MutationGuard } from './useStepUp';
 import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { customerApi, riderApi, driverApi } from '../services/api';
+import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
+import { TAXI_STOPS_CAPABILITY, maxStopsFrom } from '../lib/taxiItinerary';
 import { track } from '../lib/analytics';
 import {
   publishMoverLocation,
@@ -52,6 +53,16 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
 }
 
 export type { MoverKind } from '../lib/moverLocation';
+
+/** [TAXI multi-stop] Has THIS server advertised rides with stops
+ *  (GET /rides/capabilities, maxStops > 0)? Every failure is "no". */
+async function serverOffersTaxiStops(session: AuthSessionSnapshot): Promise<boolean> {
+  try {
+    return maxStopsFrom(await unwrap(rideApi.capabilities(session))) > 0;
+  } catch {
+    return false;
+  }
+}
 function svc(kind: MoverKind) {
   return kind === 'DRIVER' ? driverApi : riderApi;
 }
@@ -351,7 +362,14 @@ export function useGoOnline(kind: MoverKind) {
       } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
         throw new AuthSessionBoundaryError();
       }
-      const result = await unwrap(svc(kind).goOnline(latitude, longitude, current));
+      // [TAXI multi-stop] A driver declares the stop capability only to a
+      // server that has advertised rides with stops; any other answer (an older
+      // server's 404, 0, an error) sends exactly today's go-online body.
+      const capabilities = kind === 'DRIVER' && await serverOffersTaxiStops(current) ? [TAXI_STOPS_CAPABILITY] : null;
+      if (capabilities) current = requireAuthSessionForPrincipal(owner);
+      const result = await unwrap(capabilities
+        ? driverApi.goOnline(latitude, longitude, current, capabilities)
+        : svc(kind).goOnline(latitude, longitude, current));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['mover'] });
       track('go_online', { kind });

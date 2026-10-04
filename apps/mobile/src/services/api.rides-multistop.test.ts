@@ -101,10 +101,16 @@ describe('GET /rides/capabilities', () => {
 });
 
 describe('the driver side', () => {
-  it('go-online declares the multi-stop capability beside the position', async () => {
+  it('go-online without a capability is exactly today’s body', async () => {
     const seen = capture();
     await driverApi.goOnline(6.8, -58.1);
     expect(seen[0]!.url).toBe('/driver/go-online');
+    expect(seen[0]!.data).toBe(JSON.stringify({ latitude: 6.8, longitude: -58.1 }));
+  });
+
+  it('go-online declares the multi-stop capability only when it is passed', async () => {
+    const seen = capture();
+    await driverApi.goOnline(6.8, -58.1, undefined, ['TAXI_STOPS_V1']);
     expect(bodyOf(seen[0]!)).toEqual({ latitude: 6.8, longitude: -58.1, capabilities: ['TAXI_STOPS_V1'] });
   });
 
