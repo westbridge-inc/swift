@@ -42,6 +42,17 @@ describe('round three timeline', () => {
     expect(rows.map((row) => row.querySelector('time')?.dateTime)).toEqual([at, at]);
     expect(history.textContent).not.toMatch(/UNKNOWN_ACTION|DSAR_|\/api\/|raw-id/);
   });
+  it('combines the separately timestamped audit companion only with the same second and reason', () => {
+    const decision = event('DECIDED ESCALATE under SUSPECTED_TAMPERING', 'reviewer', '2026-09-01T00:00:00.123Z');
+    const audit = { ...event('AUDIT ESCALATE_VERIFICATION_DOC', 'reviewer', '2026-09-01T00:00:00.456Z'), detail: { reasonCode: 'SUSPECTED_TAMPERING' } };
+    expect(reviewTimeline([decision, audit])).toEqual([{ ...decision, label: 'Sent for another review: Looks altered' }]);
+    expect(reviewTimeline([audit, decision])).toEqual([{ ...decision, label: 'Sent for another review: Looks altered' }]);
+    expect(reviewTimeline([decision, { ...audit, detail: { reasonCode: 'DUPLICATE' } }])).toHaveLength(2);
+    expect(reviewTimeline([decision, { ...audit, detail: undefined }])).toHaveLength(2);
+    expect(reviewTimeline([decision, { ...audit, at: decision.at, detail: { reasonCode: 'DUPLICATE' } }])).toHaveLength(2);
+    expect(reviewTimeline([decision, { ...audit, at: '2026-09-01T00:00:01.123Z' }])).toHaveLength(2);
+    expect(reviewTimeline([decision, { ...audit, actor: 'another-reviewer' }])).toHaveLength(2);
+  });
   it.each([false, true])('combines only matching escalation decision and audit pairs (audit first=%s)', (auditFirst) => {
     const decision = event('DECIDED ESCALATE under SUSPECTED_TAMPERING');
     const audit = event('AUDIT ESCALATE_VERIFICATION_DOC');

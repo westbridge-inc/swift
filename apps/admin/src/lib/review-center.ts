@@ -83,15 +83,25 @@ export function timelineLabel(what: string): string {
   }
   return 'Document activity recorded';
 }
-export interface ReviewTimelineEvent { at: string; actor: string | null; what: string }
-/** Collapse only equivalent expiry checks from the same recorded evaluation; keep distinct facts. */
+export interface ReviewTimelineEvent { at: string; actor: string | null; what: string; detail?: { reasonCode?: unknown } }
+function sameEscalationTime(event: ReviewTimelineEvent, other: ReviewTimelineEvent): boolean {
+  const audit = event.what === 'AUDIT ESCALATE_VERIFICATION_DOC' ? event : other;
+  const decision = audit === event ? other : event;
+  const reason = /^DECIDED ESCALATE under (\w+)$/.exec(decision.what)?.[1];
+  if (audit.detail?.reasonCode !== undefined && audit.detail.reasonCode !== reason) return false;
+  // The route writes the audit after the decision transaction. For subsecond
+  // differences, require its matching reason as well as the same displayed second.
+  return event.at === other.at || (audit.detail?.reasonCode === reason &&
+    Math.floor(Date.parse(event.at) / 1000) === Math.floor(Date.parse(other.at) / 1000));
+}
+/** Combine equivalent checks and matching decision/audit companions; keep distinct facts. */
 export function reviewTimeline(events: ReviewTimelineEvent[]): Array<ReviewTimelineEvent & { label: string }> {
   const consumed = new Set<number>();
   return events.flatMap((event, index) => {
     if (consumed.has(index)) return [];
     let label = timelineLabel(event.what);
     // A decision and its audit row may describe the same escalation. Pair once,
-    // only at the identical recorded time and reviewer, retaining the reason.
+    // only for the same reviewer and recorded second, retaining the reason.
     const escalation = (what: string) => {
       const match = /^DECIDED ESCALATE under (\w+)$/.exec(what);
       return !!match && isRejectionReasonCode(match[1]!);
@@ -99,7 +109,7 @@ export function reviewTimeline(events: ReviewTimelineEvent[]): Array<ReviewTimel
     const audit = 'AUDIT ESCALATE_VERIFICATION_DOC';
     if (event.what === audit || escalation(event.what)) {
       const pair = events.findIndex((other, j) => j > index && !consumed.has(j) &&
-        other.at === event.at && other.actor === event.actor &&
+        sameEscalationTime(event, other) && other.actor === event.actor &&
         (event.what === audit ? escalation(other.what) : other.what === audit));
       if (pair >= 0) {
         consumed.add(pair);
