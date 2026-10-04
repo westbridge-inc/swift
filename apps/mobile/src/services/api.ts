@@ -733,6 +733,8 @@ export const placesApi = {
 type CourierSize = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type CourierSpeed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 export const courierApi = {
+  rotateTracking: (id: string) => api.post(`/courier/order/${id}/tracking`),
+  revokeTracking: (id: string) => api.delete(`/courier/order/${id}/tracking`),
   estimate: (data: { pickup: Point; dropoff: Point; packageSize: CourierSize; speed: CourierSpeed }) =>
     api.post('/courier/estimate', data),
   order: (data: {
