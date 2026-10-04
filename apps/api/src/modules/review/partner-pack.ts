@@ -51,7 +51,7 @@
  */
 import type { CoverageClass, PrismaClient, RiderType, VehicleType } from '@prisma/client';
 import { CountryConfigService } from '../country/country-config.service';
-import { approvedEvidenceFor, type EvidenceRow } from '../verification/evidence';
+import { approvedEvidenceFor } from '../verification/evidence';
 import { AUTO_APPROVE_EXPIRY_DAYS, IDENTITY_DOC_TYPES } from '../verification/doc-registry';
 import { VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { renderPackPicture } from './pack-image';
@@ -150,13 +150,6 @@ async function partnerAccounts(db: Db, tenantId: string) {
   return accounts;
 }
 
-/** The hire-insurance facts the taxi gate demands of the newest approved policy. */
-function hireInsured(rows: EvidenceRow[]): boolean {
-  const policy = rows.filter((r) => r.docType === 'vehicle_insurance')
-    .sort((a, b) => (b.reviewedAt?.getTime() ?? 0) - (a.reviewedAt?.getTime() ?? 0))[0];
-  return !!policy && policy.coverageClass === 'HIRE' && policy.hireClassConfirmed && policy.plateCrossChecked;
-}
-
 /** What the checklist still lacks for this account now — by THE evidence query the gates read. */
 async function missingEvidence(db: Db, role: PartnerRole, userId: string, countryCode: string, now: Date): Promise<string[]> {
   const spec = REVIEW_PACK_PARTNERS[role];
@@ -164,7 +157,13 @@ async function missingEvidence(db: Db, role: PartnerRole, userId: string, countr
   const rows = await approvedEvidenceFor(db, userId, checklist, now);
   const held = new Set(rows.map((r) => r.docType));
   const missing = checklist.filter((t) => !held.has(t));
-  if (role === 'DRIVER' && checklist.includes('vehicle_insurance') && held.has('vehicle_insurance') && !hireInsured(rows)) missing.push('vehicle_insurance');
+  if (role === 'DRIVER') {
+    // A held policy that is not confirmed hire-class fails the taxi gate: renew it.
+    // (The verification service names the policy type: the registry, not this file, owns it.)
+    const { hireInsuranceShortfall } = await import('../verification/verification.service');
+    const shortfall = hireInsuranceShortfall(rows);
+    if (shortfall && !missing.includes(shortfall)) missing.push(shortfall);
+  }
   return missing;
 }
 
@@ -205,13 +204,14 @@ async function commitFixtureDocument(db: Db, spec: PartnerSpec, userId: string, 
   const { commitReviewFixtureDocument } = await import('../verification/verification.service');
   await commitReviewFixtureDocument(db, {
     userId, docType, expiresAt: fixtureExpiry(docType, now), reviewedBy: REVIEW_PACK_REVIEWER, reviewedAt: now, reviewNote: REVIEW_FIXTURE_NOTE,
-    ...(docType === 'vehicle_insurance' ? { insurance: {
+    // Applied by the service to the insurance policy document only.
+    insurance: {
       insurerName: spec.insurance.insurerName,
       policyNumber: spec.insurance.policyNumber,
       coverageClass: spec.insurance.coverageClass,
       hireClassConfirmed: spec.insurance.coverageClass === 'HIRE',
       plateCrossChecked: spec.insurance.coverageClass === 'HIRE',
-    } } : {}),
+    },
   });
 }
 

@@ -2252,6 +2252,7 @@ export async function commitReviewFixtureDocument(
     reviewedBy: string;
     reviewedAt: Date;
     reviewNote: string;
+    /** The policy facts; applied to the insurance document only (this service names that type). */
     insurance?: Pick<Prisma.VerificationDocumentUncheckedCreateInput, 'insurerName' | 'policyNumber' | 'coverageClass' | 'hireClassConfirmed' | 'plateCrossChecked'>;
   },
 ): Promise<string> {
@@ -2263,9 +2264,23 @@ export async function commitReviewFixtureDocument(
     data: {
       userId: input.userId, role: 'MOVER', docType: input.docType, fileUrl: '', status: 'APPROVED',
       expiresAt: input.expiresAt, reviewedBy: input.reviewedBy, reviewedAt: input.reviewedAt, reviewNote: input.reviewNote,
-      ...(input.insurance ?? {}),
+      ...(input.docType === 'vehicle_insurance' ? (input.insurance ?? {}) : {}),
     },
     select: { id: true },
   });
   return doc.id;
+}
+
+/**
+ * [REVIEW-PARTNER] The hire-insurance facts the taxi go-online gate demands of the
+ * newest approved policy (getLiveOperationStatus): HIRE class, confirmed, plate
+ * cross-checked. Returns the policy's type when a held policy falls short, else
+ * null (an ABSENT policy is the checklist's to name). Used by the review seed to
+ * know a demo driver's evidence would pass the gate.
+ */
+export function hireInsuranceShortfall(rows: EvidenceRow[]): string | null {
+  const policy = rows.filter((r) => r.docType === 'vehicle_insurance')
+    .sort((a, b) => (b.reviewedAt?.getTime() ?? 0) - (a.reviewedAt?.getTime() ?? 0))[0];
+  if (!policy) return null;
+  return policy.coverageClass === 'HIRE' && policy.hireClassConfirmed && policy.plateCrossChecked ? null : policy.docType;
 }
