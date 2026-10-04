@@ -31,6 +31,20 @@ export const REVIEW_DEMO_NO_MONEY = 'REVIEW_DEMO_NO_MONEY';
 export const REVIEW_DEMO_NO_MONEY_MESSAGE =
   "This is Swift's App Review demo: no money moves here, so there is no weekly fee to pay and no MMG pay link to set. Nothing was charged and nobody was contacted.";
 
+/** [REVIEW-PARTNER] A demo login keeps the role it was minted with: becoming a store, an
+ *  advertiser or a service provider, or swapping vehicle class, opens money surfaces and pages
+ *  the platform's admins — none of which the fiction may reach. */
+export const REVIEW_DEMO_NO_NEW_ROLES = 'REVIEW_DEMO_NO_NEW_ROLES';
+export const REVIEW_DEMO_NO_NEW_ROLES_MESSAGE =
+  "This is Swift's App Review demo: its logins are a customer, a rider and a driver, and they can't sign up as a store, advertiser or service provider or change vehicle here. Nothing was changed and nobody was contacted.";
+
+export class ReviewDemoRoleRefusedError extends AppError {
+  constructor() {
+    super(403, REVIEW_DEMO_NO_NEW_ROLES, REVIEW_DEMO_NO_NEW_ROLES_MESSAGE);
+    this.name = 'ReviewDemoRoleRefusedError';
+  }
+}
+
 export class ReviewDemoOrderRefusedError extends AppError {
   constructor(message: string = REVIEW_DEMO_NO_ORDERS_MESSAGE) {
     super(403, REVIEW_DEMO_NO_ORDERS, message);

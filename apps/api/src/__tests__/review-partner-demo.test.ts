@@ -52,6 +52,13 @@ import { hashReviewCode } from '../modules/review/credentials';
 import { PACK_IMAGE_WIDTH, PACK_IMAGE_HEIGHT } from '../modules/review/pack-image';
 import { CountryConfigService } from '../modules/country/country-config.service';
 import { commitReviewFixtureDocument } from '../modules/verification/verification.service';
+import { partnerRoutes } from '../modules/partner/partner.routes';
+import { vendorRoutes } from '../modules/vendor/vendor.routes';
+import { adsRoutes } from '../modules/ads/ads.routes';
+import { servicesRoutes } from '../modules/services/services.routes';
+import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange } from '../modules/integrity/money-surface';
+import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
+import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const REVIEW = `review-partner-${RUN}`;
@@ -133,6 +140,10 @@ beforeAll(async () => {
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
+  await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
+  await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
+  await app.register(adsRoutes, { prefix: '/api/v1/ads' });
+  await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   registerPublicUploads(app, UPLOAD_DIR);
   await app.ready();
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
@@ -190,6 +201,12 @@ afterAll(async () => {
     await app.prisma.order.deleteMany({ where: { id: { in: orders } } });
     await app.prisma.rideQueueEntry.deleteMany({ where: { customerId: { in: everyone } } });
     await app.prisma.moneySurfaceCommand.deleteMany({ where: { userId: { in: everyone } } });
+    await app.prisma.advertiserMember.deleteMany({ where: { userId: { in: everyone } } });
+    await app.prisma.advertiser.deleteMany({ where: { createdByUserId: { in: everyone } } });
+    await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: everyone } } });
+    const plantedVendors = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: everyone } } }, select: { id: true } })).map((v) => v.id);
+    await app.prisma.vendor.deleteMany({ where: { id: { in: plantedVendors } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: everyone } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: everyone } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: everyone } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: everyone } } });
@@ -652,5 +669,130 @@ describe('[REVIEW-PARTNER · DL-9] the partners live and die with the review ses
     }
     await system(() => app.prisma.reviewSession.create({ data: { tenantId: REVIEW, expiresAt: new Date(Date.now() + DAY) } }));
     expect((await get('/api/v1/rider/profile', tokens.rider)).statusCode).toBe(200);
+  });
+});
+
+
+describe('[REVIEW-PARTNER · DL-5 · Sol F1] a demo login cannot grow into a money surface', () => {
+  const business = { name: `Demo Grow ${RUN}`, vendorType: 'RESTAURANT', phone: '+5920009399', addressLine1: '1 Demo Way', city: 'Georgetown', latitude: SPOT.lat, longitude: SPOT.lng };
+
+  it('the exact sequence — become a store, step up with the static code, set an MMG link — ends in refusals: no store, no role, no money command, no SMS, no admin notice', async () => {
+    const t0 = new Date();
+    const smsBefore = devChannelLog.filter((e) => e.channel === 'sms').length;
+    const before = await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: review.customerId }, select: { roles: true, activeRole: true } }));
+    const become = await post('/api/v1/partner/become', tokens.customer, { role: 'VENDOR', acceptAgreement: true, business });
+    expect(become.statusCode, become.body).toBe(403);
+    expect(become.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
+    // The static code still confirms the session (it texts nobody) ...
+    await app.redis.del(`otp_rate:stepup:${review.customerId}`, reviewStepUpKey(review.customerId), `stepup:fail:${review.customerId}`);
+    expect((await post('/api/v1/auth/step-up', tokens.customer)).statusCode).toBe(200);
+    expect((await post('/api/v1/auth/step-up/verify', tokens.customer, { code: creds.CUSTOMER.code })).statusCode).toBe(200);
+    // ... and there is still no store, so no money surface to reach.
+    const link = await put('/api/v1/vendor/profile', tokens.customer, { mmgPayUrl: '' });
+    expect(link.statusCode, link.body).toBe(403);
+    expect(link.json().error.code).toBe('FORBIDDEN');
+    await system(async () => {
+      expect(await app.prisma.user.findUniqueOrThrow({ where: { id: review.customerId }, select: { roles: true, activeRole: true } })).toEqual(before);
+      expect(await app.prisma.vendorOwner.count({ where: { userId: review.customerId } })).toBe(0);
+      expect(await app.prisma.moneySurfaceCommand.count({ where: { userId: review.customerId } })).toBe(0);
+      expect(await app.prisma.notification.count({ where: { createdAt: { gte: t0 } } })).toBe(0);
+    });
+    expect(devChannelLog.filter((e) => e.channel === 'sms').length).toBe(smsBefore);
+  });
+
+  it('every other way to grow a role is refused too: a vehicle swap, an advertiser company, a service-provider profile', async () => {
+    const t0 = new Date();
+    const vehicle = await put('/api/v1/partner/vehicle', tokens.rider, { vehicleType: 'CAR', vehicle: { make: 'Demo', model: 'Car', year: 2020, color: 'Blue', licensePlate: 'H DEMO 9' } });
+    expect(vehicle.statusCode, vehicle.body).toBe(403);
+    expect(vehicle.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
+    const advertiser = await post('/api/v1/ads/advertiser/register', tokens.customer, { companyName: `Demo Ads ${RUN}`, industry: 'Food & Beverage', contactName: 'Demo', contactEmail: 'demo@example.com', contactPhone: '+5926001234' });
+    expect(advertiser.statusCode, advertiser.body).toBe(403);
+    expect(advertiser.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
+    const provider = await post('/api/v1/services/providers', tokens.customer, { trade: 'barber' });
+    expect(provider.statusCode, provider.body).toBe(403);
+    expect(provider.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
+    await system(async () => {
+      expect(await app.prisma.driver.count({ where: { userId: review.riderUserId } })).toBe(0);
+      expect((await app.prisma.rider.findUniqueOrThrow({ where: { userId: review.riderUserId } })).vehicleType).toBe('MOTORCYCLE');
+      expect(await app.prisma.advertiser.count({ where: { createdByUserId: review.customerId } })).toBe(0);
+      expect(await app.prisma.serviceProvider.count({ where: { userId: review.customerId } })).toBe(0);
+      expect(await app.prisma.notification.count({ where: { createdAt: { gte: t0 } } })).toBe(0);
+    });
+  });
+
+  it('the shared money-command authority refuses the fiction itself — a store or a driver of a REVIEW tenant — before any write, command or notice', async () => {
+    const vendorId = await system(async () => {
+      // A store a review account owns, planted directly: the state a pre-fix /partner/become left behind.
+      const vo = await app.prisma.vendorOwner.create({ data: { userId: review.customerId } });
+      await app.prisma.user.update({ where: { id: review.customerId }, data: { roles: ['CUSTOMER', 'VENDOR_OWNER'] } });
+      return (await app.prisma.vendor.create({ data: {
+        ownerId: vo.id, tenantId: REVIEW, name: `Planted ${RUN}`, slug: `planted-${RUN}`, vendorType: 'RESTAURANT', phone: '+5920009398',
+        addressLine1: '2 Demo Way', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: SPOT.lat, longitude: SPOT.lng, status: 'PENDING_APPROVAL',
+      } })).id;
+    });
+    const smsBefore = devChannelLog.filter((e) => e.channel === 'sms').length;
+    // The store's own money routes refuse the fiction before any step-up or write ...
+    for (const [method, url, body] of [['PUT', '/api/v1/vendor/profile', { mmgPayUrl: '' }], ['PUT', '/api/v1/vendor/subscription/billing-method', { method: 'NONE' }]] as const) {
+      const res = await app.inject({ method, url, headers: auth(tokens.customer), payload: body });
+      expect(res.statusCode, `${url} ${res.body}`).toBe(403);
+      expect(res.json().error.code).toBe(REVIEW_DEMO_NO_MONEY);
+    }
+    // ... and so does the shared authority itself, whoever calls it.
+    const deps = { prisma: app.prisma, io: app.io };
+    for (const [actor, entityId, userId] of [['VENDOR', vendorId, review.customerId], ['DRIVER', review.driverId, review.driverUserId]] as const) {
+      await expect(system(() => stageMmgLinkChange(deps, { actor, entityId, userId, sessionId: null, newUrl: 'https://mmg.example/pay/demo' }))).rejects.toMatchObject({ statusCode: 403, code: REVIEW_DEMO_NO_MONEY });
+      await expect(system(() => clearMmgLink(deps, { actor, entityId, userId }))).rejects.toMatchObject({ code: REVIEW_DEMO_NO_MONEY });
+      await expect(system(() => cancelMmgLinkChange(deps, { actor, entityId, userId, keepSessionId: null }))).rejects.toMatchObject({ code: REVIEW_DEMO_NO_MONEY });
+    }
+    await system(async () => {
+      expect(await app.prisma.moneySurfaceCommand.count({ where: { entityId: { in: [vendorId, review.driverId] } } })).toBe(0);
+      const v = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+      expect([v.mmgPayUrl, v.mmgPayUrlPending]).toEqual([null, null]);
+      await app.prisma.user.update({ where: { id: review.customerId }, data: { roles: ['CUSTOMER'] } });
+    });
+    expect(devChannelLog.filter((e) => e.channel === 'sms').length).toBe(smsBefore);
+  });
+});
+
+describe('[REVIEW-PARTNER · DL-6 · Sol F3] the review step-up window is consumed atomically', () => {
+  /** The real app, with the account lookup held at a gate so a test can act DURING verification. */
+  function gated(onLookup: () => Promise<void>) {
+    const prisma = new Proxy(app.prisma, {
+      get(target, prop, receiver) {
+        if (prop === 'user') return { findUnique: async (args: never) => { await onLookup(); return target.user.findUnique(args); } };
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    return { prisma, redis: app.redis } as unknown as FastifyInstance;
+  }
+  const arm = async () => {
+    await app.redis.del(`otp_rate:stepup:${review.riderUserId}`, `stepup:fail:${review.riderUserId}`, `stepup:lock:${review.riderUserId}`);
+    await sendStepUpOtp(app, review.riderUserId);
+  };
+  const cleanup = () => app.redis.del(stepUpKey(`rp-race-a-${RUN}`), stepUpKey(`rp-race-b-${RUN}`), stepUpKey(`rp-expiry-${RUN}`), `stepup:fail:${review.riderUserId}`, reviewStepUpKey(review.riderUserId));
+
+  it('two verifiers racing on one window: exactly one session is stepped up', async () => {
+    await arm();
+    let entered = 0;
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    const racer = gated(async () => { entered += 1; if (entered === 2) open(); await gate; });
+    const results = await Promise.allSettled([
+      verifyStepUp(racer, { userId: review.riderUserId, sessionId: `rp-race-a-${RUN}` }, creds.RIDER.code),
+      verifyStepUp(racer, { userId: review.riderUserId, sessionId: `rp-race-b-${RUN}` }, creds.RIDER.code),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected').map((r) => (r as PromiseRejectedResult).reason.code)).toEqual(['INVALID_CODE']);
+    const granted = [await hasStepUp(app.redis, `rp-race-a-${RUN}`), await hasStepUp(app.redis, `rp-race-b-${RUN}`)];
+    expect(granted.filter(Boolean)).toHaveLength(1);
+    await cleanup();
+  });
+
+  it('a window that expires while the account is being looked up does not succeed', async () => {
+    await arm();
+    const expiring = gated(async () => { await app.redis.del(reviewStepUpKey(review.riderUserId)); });
+    await expect(verifyStepUp(expiring, { userId: review.riderUserId, sessionId: `rp-expiry-${RUN}` }, creds.RIDER.code)).rejects.toMatchObject({ code: 'INVALID_CODE' });
+    expect(await hasStepUp(app.redis, `rp-expiry-${RUN}`)).toBe(false);
+    await cleanup();
   });
 });

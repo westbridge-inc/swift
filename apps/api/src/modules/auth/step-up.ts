@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Redis } from 'ioredis';
+import { randomBytes } from 'node:crypto';
 import { AppError } from '../../utils/errors';
 import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
@@ -85,7 +86,8 @@ export async function sendStepUpOtp(app: FastifyInstance, userId: string): Promi
     if (!(await checkOtpRateLimit(app.redis, stepUpCodeKey(userId)))) {
       throw new AppError(429, 'RATE_LIMITED', 'Please wait a minute before requesting another code');
     }
-    await app.redis.set(reviewStepUpKey(userId), '1', 'EX', REVIEW_CODE_TTL);
+    // A fresh generation per send: verification consumes exactly THIS window, once.
+    await app.redis.set(reviewStepUpKey(userId), randomBytes(16).toString('hex'), 'EX', REVIEW_CODE_TTL);
     return { sentTo: maskPhone(user.phone), validForSeconds: 300 };
   }
   // [AUD-L4-008] A code is texted only to a launch-market number, checked
@@ -120,14 +122,23 @@ export async function sendStepUpOtp(app: FastifyInstance, userId: string): Promi
   return { sentTo: maskPhone(user.phone), validForSeconds: 300 };
 }
 
-/** [REVIEW-PARTNER · DL-6] The static review code, only when a review "send" armed the window; single use. */
+/** Compare-and-delete: consumes the window only if it still holds the generation this verifier read. */
+const CONSUME_REVIEW_WINDOW = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end";
+
+/** [REVIEW-PARTNER · DL-6] The static review code, only when a review "send" armed the window.
+ *  Single use and expiry-exact: after the code is validated, the window is consumed ATOMICALLY by
+ *  the generation read at the start — two concurrent verifiers cannot both win, and a window that
+ *  expired (or was re-armed) during the lookup does not succeed. */
 async function verifyReviewStepUp(app: FastifyInstance, userId: string, code: string): Promise<{ valid: boolean; reason?: string } | null> {
-  if (!(await app.redis.get(reviewStepUpKey(userId)))) return null;
+  const key = reviewStepUpKey(userId);
+  const generation = await app.redis.get(key);
+  if (!generation) return null;
   const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, tenantId: true } });
   const credential = user ? await reviewStepUpCredential(app, user) : null;
   if (!credential) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
   if (!reviewCodeMatches(credential, code)) return { valid: false, reason: 'Invalid OTP code' };
-  await app.redis.del(reviewStepUpKey(userId));
+  const consumed = Number(await app.redis.eval(CONSUME_REVIEW_WINDOW, 1, key, generation));
+  if (consumed !== 1) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
   return { valid: true };
 }
 

@@ -72,6 +72,42 @@ export interface ProvisionResult {
 const sixDigits = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
 const identifierFor = (prefix: string) => `${prefix}${String(crypto.randomInt(0, 100)).padStart(2, '0')}`;
 
+export class ReviewProvisionRefusedError extends Error {
+  constructor(slug: string, kind: string) {
+    super(`[STA-1] review:provision refused for "${slug}": the tenant exists and is ${kind}, not REVIEW — nothing was changed`);
+    this.name = 'ReviewProvisionRefusedError';
+  }
+}
+
+/**
+ * Create the REVIEW tenant, or reuse it when it already IS one. An existing
+ * tenant of any other kind is refused and left exactly as it was: a slug that
+ * merely LOOKS like the fiction never turns a real operator into one.
+ *
+ * Concurrency-safe without a read-then-write window: the reuse is ONE
+ * conditional statement (`WHERE id = slug AND kind = 'REVIEW'`), and the create
+ * relies on the primary key — a racing creator's row is re-judged by kind.
+ */
+async function reviewTenantFor(prisma: PrismaClient, slug: string, name?: string): Promise<{ id: string }> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const reused = await prisma.tenant.updateMany({ where: { id: slug, kind: 'REVIEW' }, data: { purgeProtected: true, isActive: true } });
+    if (reused.count === 1) return { id: slug };
+    const existing = await prisma.tenant.findUnique({ where: { id: slug }, select: { kind: true } });
+    if (existing) {
+      if (existing.kind !== 'REVIEW') throw new ReviewProvisionRefusedError(slug, existing.kind);
+      continue; // became REVIEW between the two statements: reuse it on the next pass
+    }
+    try {
+      await prisma.tenant.create({ data: { id: slug, slug, name: name ?? `Store review — ${slug}`, kind: 'REVIEW', purgeProtected: true, isActive: true } });
+      return { id: slug };
+    } catch (err) {
+      // A concurrent provisioner (or another writer) created it first: judge THAT row by its kind.
+      if ((err as { code?: string }).code !== 'P2002') throw err;
+    }
+  }
+  throw new Error(`[STA-1] review:provision could not settle the tenant "${slug}"; nothing was provisioned`);
+}
+
 /** Idempotent on the tenant; a new session and fresh credentials each run. */
 export async function provisionReviewTenant(prisma: PrismaClient, input: ProvisionInput): Promise<ProvisionResult> {
   const now = input.now ?? new Date();
@@ -84,11 +120,7 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
   // app-side setting refuses to create the fiction at all. (Dev/test: no-op.)
   const activeAfter = (await prisma.tenant.count({ where: { isActive: true, NOT: { id: input.slug } } })) + 1;
   assertTenantWall(attestationOf(await readRlsFacts(prisma)), activeAfter);
-  const tenant = await prisma.tenant.upsert({
-    where: { id: input.slug },
-    create: { id: input.slug, slug: input.slug, name: input.name ?? `Store review — ${input.slug}`, kind: 'REVIEW', purgeProtected: true, isActive: true },
-    update: { kind: 'REVIEW', purgeProtected: true, isActive: true },
-  });
+  const tenant = await reviewTenantFor(prisma, input.slug, input.name);
   const session = await prisma.reviewSession.create({ data: { tenantId: tenant.id, expiresAt: new Date(now.getTime() + ttlDays * 86_400_000) } });
   const credentials: MintedCredential[] = [];
   for (const role of REVIEW_ROLES) {

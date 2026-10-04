@@ -18,6 +18,7 @@ import {
   tradeRiskTier,
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { deactivateRoom } from '../chat/chat-authority';
@@ -108,6 +109,7 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   /** POST /providers — create/update the caller's provider profile. */
   app.post('/providers', auth, async (request) => {
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError(); // [REVIEW-PARTNER] a demo login keeps its role
     const body = providerProfileSchema.parse(request.body);
     const trade = requireCanonicalServiceTrade(body.trade);
     const userId = request.user.userId;

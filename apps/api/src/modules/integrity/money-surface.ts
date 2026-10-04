@@ -10,6 +10,7 @@ import { getChannels } from '../../providers/notifications/channels';
 import { moneySurfaceCounter } from '../../plugins/observability';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
+import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
 // ---------------------------------------------------------------------------
 // [ALG-34 / ALG-INV-14] THE MONEY SURFACE — where a store's or a driver's money
@@ -117,15 +118,32 @@ async function nextGeneration(tx: Tx, entityId: string): Promise<number> {
   return (last?.generation ?? 0) + 1;
 }
 
-async function readLink(tx: Tx, actor: LinkActor, entityId: string): Promise<{ mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null; userId: string }> {
+type LinkState = { mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null; userId: string; fiction: boolean };
+
+/**
+ * The authority read every transition makes first, under the entity lock.
+ * [REVIEW-PARTNER · DL-5] It also says whether the entity belongs to the
+ * store-review fiction (a REVIEW tenant), which has no money rail: stage,
+ * cancel and clear REFUSE it here — before any write, decision, command or
+ * owner notice (whose SMS would reach a fictional number) — and the executor
+ * skips it. One check, at the one place every MMG-link change passes.
+ */
+async function readLink(tx: Tx, actor: LinkActor, entityId: string, onFiction: 'refuse' | 'report' = 'refuse'): Promise<LinkState> {
+  let state: LinkState;
   if (actor === 'VENDOR') {
-    const v = await tx.vendor.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, owner: { select: { userId: true } } } });
+    const v = await tx.vendor.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, tenant: { select: { kind: true } }, owner: { select: { userId: true } } } });
     if (!v) throw new AppError(404, 'NOT_FOUND', 'Store not found');
-    return { mmgPayUrl: v.mmgPayUrl, mmgPayUrlPending: v.mmgPayUrlPending, mmgPayUrlApplyAt: v.mmgPayUrlApplyAt, userId: v.owner.userId };
+    state = { mmgPayUrl: v.mmgPayUrl, mmgPayUrlPending: v.mmgPayUrlPending, mmgPayUrlApplyAt: v.mmgPayUrlApplyAt, userId: v.owner.userId, fiction: v.tenant.kind === 'REVIEW' };
+  } else {
+    const d = await tx.driver.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, userId: true, user: { select: { tenant: { select: { kind: true } } } } } });
+    if (!d) throw new AppError(404, 'NOT_FOUND', 'Driver not found');
+    state = { mmgPayUrl: d.mmgPayUrl, mmgPayUrlPending: d.mmgPayUrlPending, mmgPayUrlApplyAt: d.mmgPayUrlApplyAt, userId: d.userId, fiction: d.user.tenant.kind === 'REVIEW' };
   }
-  const d = await tx.driver.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, userId: true } });
-  if (!d) throw new AppError(404, 'NOT_FOUND', 'Driver not found');
-  return { mmgPayUrl: d.mmgPayUrl, mmgPayUrlPending: d.mmgPayUrlPending, mmgPayUrlApplyAt: d.mmgPayUrlApplyAt, userId: d.userId };
+  if (state.fiction && onFiction === 'refuse') {
+    moneySurfaceCounter.labels('refused_review_fiction').inc();
+    throw new ReviewDemoMoneyRefusedError();
+  }
+  return state;
 }
 
 /** A compare-and-set write on the entity: the authority moves only from the state this transition read. */
@@ -388,8 +406,9 @@ export async function applyDueMmgLinkChanges(deps: MoneySurfaceDeps, now = new D
     }
     const done = await deps.prisma.$transaction(async (tx) => {
       await lockEntity(tx, item.id);
-      const current = await readLink(tx, item.actor, item.id);
+      const current = await readLink(tx, item.actor, item.id, 'report');
       await deps.failpoint?.('tx:after-read');
+      if (current.fiction) return false; // [REVIEW-PARTNER] the fiction's links never go live (and are never staged)
       if (!current.mmgPayUrlPending || !current.mmgPayUrlApplyAt || current.mmgPayUrlApplyAt > now) return false;
       const stage = await tx.moneySurfaceCommand.findFirst({ where: { entityId: item.id, kind: 'MMG_LINK_STAGE', state: 'DECIDED' } });
       if (open && (!stage || stage.id !== open.id)) return false; // moved under us: cancelled or superseded

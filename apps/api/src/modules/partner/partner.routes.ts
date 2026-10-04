@@ -11,6 +11,7 @@ import {
 import { requireStepUp } from '../auth/step-up';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -59,6 +60,7 @@ export async function partnerRoutes(app: FastifyInstance) {
 
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError(); // [REVIEW-PARTNER] a demo login keeps its role
     const body = becomeSchema.parse(request.body);
     // [TA-S1-008] Acceptance is a precondition of the authority, not a courtesy of the client.
     if (body.acceptAgreement !== true) {
@@ -101,6 +103,7 @@ export async function partnerRoutes(app: FastifyInstance) {
    * onboarding changes freely.
    */
   app.put('/vehicle', auth, async (request) => {
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError(); // [REVIEW-PARTNER] a demo login keeps its role
     const body = changeVehicleSchema.parse(request.body);
     const userId = request.user.userId;
     const [rider, driver] = await Promise.all([

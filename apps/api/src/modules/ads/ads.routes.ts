@@ -8,6 +8,7 @@ import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
 import { mondayOfDate, weekSpan, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
 // the "under review" dashboard read. Ops/admin queue actions live in the admin
@@ -32,6 +33,7 @@ export async function adsRoutes(app: FastifyInstance) {
   /** POST /advertiser/register — a logged-in user registers a company; it
    *  lands PENDING_REVIEW in the founder queue and they become OWNER. */
   app.post('/advertiser/register', auth, async (request) => {
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError(); // [REVIEW-PARTNER] a demo login keeps its role
     const body = registerSchema.parse(request.body ?? {});
     const advertiser = await advertisers.register(request.user.userId, {
       ...body,

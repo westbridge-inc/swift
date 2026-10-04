@@ -13,7 +13,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
-import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, reviewStatus, DEFAULT_REVIEW_TTL_DAYS } from '../modules/review/provision';
+import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, reviewStatus, DEFAULT_REVIEW_TTL_DAYS, ReviewProvisionRefusedError } from '../modules/review/provision';
 import { hashReviewCode } from '../modules/review/credentials';
 
 const RUN = nanoid(6).replace(/[^a-z0-9]/gi, '0').toLowerCase();
@@ -29,8 +29,18 @@ beforeAll(async () => {
   await app.ready();
 });
 
+const REAL = `review-real-${RUN}`;
+const RACE = `review-race-${RUN}`;
+
 afterAll(async () => {
   await system(async () => {
+    for (const t of [REAL, RACE]) {
+      await app.prisma.reviewCredential.deleteMany({ where: { tenantId: t } });
+      await app.prisma.reviewSession.deleteMany({ where: { tenantId: t } });
+      await app.prisma.user.deleteMany({ where: { tenantId: t } });
+      await app.prisma.tenant.updateMany({ where: { id: t }, data: { purgeProtected: false } });
+      await app.prisma.tenant.deleteMany({ where: { id: t } });
+    }
     await app.prisma.reviewCredential.deleteMany({ where: { tenantId: SLUG } });
     await app.prisma.reviewSession.deleteMany({ where: { tenantId: SLUG } });
     await app.prisma.user.deleteMany({ where: { tenantId: SLUG } });
@@ -41,6 +51,29 @@ afterAll(async () => {
 });
 
 describe('[STA-1] review:provision and friends', () => {
+  it('refuses an EXISTING tenant of another kind, even with a review-style slug, and changes nothing: no conversion, session, login or user', async () => {
+    await system(() => app.prisma.tenant.create({ data: { id: REAL, slug: REAL, name: 'A real operator', kind: 'PRODUCTION', purgeProtected: false, isActive: true } }));
+    const before = await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: REAL } }));
+    const err = await system(() => provisionReviewTenant(app.prisma, { slug: REAL, phonePrefix: '+59200098' })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ReviewProvisionRefusedError);
+    expect((err as Error).message).toMatch(/PRODUCTION, not REVIEW/);
+    expect(await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: REAL } }))).toEqual(before);
+    expect(await system(() => app.prisma.reviewSession.count({ where: { tenantId: REAL } }))).toBe(0);
+    expect(await system(() => app.prisma.reviewCredential.count({ where: { tenantId: REAL } }))).toBe(0);
+    expect(await system(() => app.prisma.user.count({ where: { tenantId: REAL } }))).toBe(0);
+  });
+
+  it('two provisions racing on a fresh slug settle on ONE review tenant, each with its own session and logins', async () => {
+    const [a, b] = await Promise.all([
+      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: '+59200098' })),
+      system(() => provisionReviewTenant(app.prisma, { slug: RACE, phonePrefix: '+59200098' })),
+    ]);
+    expect([a.tenantId, b.tenantId]).toEqual([RACE, RACE]);
+    const t = await system(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: RACE } }));
+    expect([t.kind, t.purgeProtected, t.isActive]).toEqual(['REVIEW', true, true]);
+    expect(await system(() => app.prisma.reviewSession.count({ where: { tenantId: RACE } }))).toBe(2);
+  });
+
   it('refuses a slug that does not name the fiction', async () => {
     await expect(system(() => provisionReviewTenant(app.prisma, { slug: `prod-${RUN}` }))).rejects.toThrow(/review-/);
   });
