@@ -4,8 +4,13 @@
 -- any use, keep the schema and repair forward. The confirmation holds of
 -- 20260930180000_shared_billing_confirmation_clock reference these checkouts,
 -- so that migration is rolled back first.
+-- The tables force row-level security, so a role that sees only some rows
+-- could find them "empty". Row security is switched off for this transaction:
+-- a role that does not bypass it is refused with an error instead. Run this
+-- as a role that bypasses row-level security (a superuser or BYPASSRLS).
 BEGIN;
 SET LOCAL lock_timeout = '10s';
+SET LOCAL row_security = off;
 DO $$ BEGIN
   IF to_regclass('public.payment_confirmation_holds') IS NOT NULL THEN
     RAISE EXCEPTION 'mmg checkout rollback requires 20260930180000_shared_billing_confirmation_clock to be rolled back first';
