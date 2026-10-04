@@ -97,6 +97,11 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
     validFrom: '2026-01-01', validUntil: '2026-02-01',
   }], requiredBodyKeys: ['code', 'description', 'discountType', 'discountValue', 'validFrom', 'validUntil'] },
 
+  // [ZONE-FARES] Fixed zone-to-zone fares
+  { route: 'POST /zone-fares', helper: 'createZoneFare', args: [{ fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12000 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
+  { route: 'PUT /zone-fares/:id', helper: 'updateZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12500 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
+  { route: 'DELETE /zone-fares/:id', helper: 'deleteZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b' }], requiredBodyKeys: ['fromZoneId', 'toZoneId'] },
+
   // ── The decision itself ────────────────────────────────────────────────
   { route: 'POST /approvals/:id/decide', helper: 'decideApproval', args: ['apr_1', true], requiredBodyKeys: ['approve'] },
 ] as const;
