@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
-import { AUDIT_PURGE_SETTING, purgeAuditLogs } from '../lib/audit-immutability';
+import { AUDIT_PURGE_SETTING, purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
 // [ADM-003] THE RECORD OF A PRIVILEGED ACTION CANNOT BE EDITED AFTERWARDS.
@@ -25,6 +25,9 @@ import { AUDIT_PURGE_SETTING, purgeAuditLogs } from '../lib/audit-immutability';
 const prisma = new PrismaClient();
 const RUN = nanoid(8);
 const ids: string[] = [];
+const readIds: string[] = [];
+let probeRole = '';
+let roleCreated = false;
 
 async function seed(action = 'ADM003_SEED'): Promise<string> {
   const row = await prisma.auditLog.create({
@@ -34,9 +37,24 @@ async function seed(action = 'ADM003_SEED'): Promise<string> {
   return row.id;
 }
 
-beforeAll(async () => { await prisma.$connect(); });
+beforeAll(async () => {
+  await prisma.$connect();
+  const [row] = await prisma.$queryRaw<Array<{ db: string }>>`SELECT current_database()::text AS db`;
+  if (!row || !/^swift_test[a-z0-9_]*$/.test(row.db)) throw new Error('test namespace required');
+  probeRole = `${row.db.slice(0, 35)}_audit_${RUN.toLowerCase()}`;
+  await prisma.$executeRawUnsafe(`CREATE ROLE "${probeRole}" NOLOGIN`);
+  roleCreated = true;
+  await prisma.$executeRawUnsafe(`GRANT USAGE ON SCHEMA public TO "${probeRole}"`);
+  await prisma.$executeRawUnsafe(`GRANT SELECT, INSERT, UPDATE, DELETE ON audit_logs, sensitive_read_logs TO "${probeRole}"`);
+});
 afterAll(async () => {
   await purgeAuditLogs(prisma, { entity: `AuditProbe${RUN}` }, 'test-cleanup:audit-append-only');
+  await purgeSensitiveReadLogs(prisma, { id: { in: readIds } }, 'test-cleanup:audit-purge-authority');
+  if (roleCreated) {
+    await prisma.$executeRawUnsafe(`REVOKE SELECT, INSERT, UPDATE, DELETE ON audit_logs, sensitive_read_logs FROM "${probeRole}"`);
+    await prisma.$executeRawUnsafe(`REVOKE USAGE ON SCHEMA public FROM "${probeRole}"`);
+    await prisma.$executeRawUnsafe(`DROP ROLE "${probeRole}"`);
+  }
   await prisma.$disconnect();
 });
 
@@ -70,6 +88,15 @@ describe('[ADM-003] the database refuses to change an audit row', () => {
     await expect(prisma.auditLog.delete({ where: { id } })).rejects.toThrow(/append-only/);
     await expect(prisma.auditLog.deleteMany({ where: { id } })).rejects.toThrow(/append-only/);
     await expect(prisma.$executeRaw`DELETE FROM audit_logs WHERE id = ${id}`).rejects.toThrow(/append-only/);
+    expect(await prisma.auditLog.count({ where: { id } })).toBe(1);
+  });
+
+  it('a caller-selected purge setting does not license deletion', async () => {
+    const id = await seed();
+    await expect(prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, 'caller-selected-reason', true)`;
+      await tx.$executeRaw`DELETE FROM audit_logs WHERE id = ${id}`;
+    })).rejects.toThrow(/append-only/);
     expect(await prisma.auditLog.count({ where: { id } })).toBe(1);
   });
 
@@ -117,6 +144,56 @@ describe('[ADM-003] the one exception is a transaction that names itself', () =>
     await prisma.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, 'not-a-batch', true)`;
     await expect(prisma.auditLog.deleteMany({ where: { id } })).rejects.toThrow(/append-only/);
     expect(await prisma.auditLog.count({ where: { id } })).toBe(1);
+  });
+});
+
+describe('dedicated audit purge authority', () => {
+  it('an ordinary role cannot license a delete, call the purge function, or assume its owner', async () => {
+    const id = await seed();
+    for (const statement of [
+      `DELETE FROM audit_logs WHERE id = '${id}'`,
+      `SELECT public.swift_purge_audit_logs(ARRAY['${id}']::text[], 'test-cleanup:ordinary')`,
+      'SET LOCAL ROLE swift_audit_purge_owner',
+    ]) {
+      await expect(prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL SESSION AUTHORIZATION "${probeRole}"`);
+        await tx.$executeRaw`SELECT set_config('app.current_tenant', 'swift-default', true)`;
+        await tx.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, 'test-cleanup:caller', true)`;
+        await tx.$executeRawUnsafe(statement);
+      })).rejects.toThrow(/append-only|permission denied/);
+    }
+    expect(await prisma.auditLog.count({ where: { id } })).toBe(1);
+  });
+  it('the executor can select explicit ids and invoke only the dedicated purge path', async () => {
+    const id = await seed();
+    await prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe('SET LOCAL SESSION AUTHORIZATION swift_audit_purge_executor');
+      expect(await tx.auditLog.count({ where: { id } })).toBe(1);
+      const [result] = await tx.$queryRaw<Array<{ count: number }>>`
+        SELECT public.swift_purge_audit_logs(ARRAY[${id}]::text[], 'test-cleanup:executor') AS count`;
+      expect(result!.count).toBe(1);
+    });
+    expect(await prisma.auditLog.count({ where: { id } })).toBe(0);
+  });
+  it('protects sensitive reads from the same setting and from truncation', async () => {
+    const row = await prisma.sensitiveReadLog.create({ data: {
+      actorUserId: `probe-${RUN}`, action: 'AUDIT_PURGE_PROBE', capability: 'test', purpose: 'test fixture',
+    } });
+    readIds.push(row.id);
+    await expect(prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, 'caller-selected-reason', true)`;
+      await tx.$executeRaw`DELETE FROM sensitive_read_logs WHERE id = ${row.id}`;
+    })).rejects.toThrow(/append-only/);
+    await expect(prisma.$executeRawUnsafe('TRUNCATE sensitive_read_logs')).rejects.toThrow(/append-only/);
+    expect(await purgeSensitiveReadLogs(prisma, { id: row.id }, 'test-cleanup:sensitive-probe')).toBe(1);
+  });
+  it('the privileged path validates its reason and explicit-id bound at the database', async () => {
+    await expect(prisma.$queryRaw`SELECT public.swift_purge_audit_logs(ARRAY[]::text[], 'x')`).rejects.toThrow(/reason/);
+    const tooMany = Array(1001).fill('synthetic-absent');
+    await expect(prisma.$queryRaw`SELECT public.swift_purge_audit_logs(${tooMany}::text[], 'test-cleanup:bounds')`).rejects.toThrow(/1000/);
+    const kept = await seed(); const removed = await seed();
+    expect(await purgeAuditLogs(prisma, { id: removed }, 'test-cleanup:explicit-ids')).toBe(1);
+    expect(await prisma.auditLog.count({ where: { id: kept } })).toBe(1);
   });
 });
 
