@@ -309,6 +309,14 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: share };
   });
 
+  app.get<{ Params: { id: string } }>('/trips/:id/shares', auth, async (request) => {
+    return { success: true, data: await tripShare.listOwned(request.user.userId, request.params.id) };
+  });
+
+  app.delete<{ Params: { id: string } }>('/trips/:id/shares', auth, async (request) => {
+    return { success: true, data: await tripShare.revokeAll(request.user.userId, request.params.id) };
+  });
+
   app.delete<{ Params: { token: string } }>('/share/:token', auth, async (request) => {
     return { success: true, data: await tripShare.revoke(request.user.userId, request.params.token) };
   });

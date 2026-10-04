@@ -533,6 +533,8 @@ export const safetyApi = {
   // relative who does not have the app.
   shareTrip: (orderId: string, sendToPhone?: string) =>
     api.post(`/safety/trips/${orderId}/share`, sendToPhone ? { sendToPhone } : {}),
+  tripShares: (orderId: string) => api.get(`/safety/trips/${orderId}/shares`),
+  revokeAllTripShares: (orderId: string) => api.delete(`/safety/trips/${orderId}/shares`),
   revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
   /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
   monitoringPreference: () => api.get('/safety/monitoring-preference'),
