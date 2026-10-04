@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { io as ioClient, type Socket } from 'socket.io-client';
+import { performance } from 'node:perf_hooks';
 import type { AddressInfo } from 'node:net';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -16,6 +17,9 @@ import { LATE_CANCEL_FEE } from '../modules/order/cancel-policy';
 import { escalateVendorAlert } from '../modules/notification/notification.service';
 import { autoCancelUnresponsiveOrder, enqueueVendorAlertFollowup, releaseHeldOrdersJob } from '../jobs/queue';
 import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
+import { withDashboardClock } from './helpers/dashboard-clock';
+import { purgeHoldFixtures } from './helpers/order-hold-cleanup';
+import { trackMessageInserts } from './helpers/insert-ownership';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
 
 // ---------------------------------------------------------------------------
@@ -38,20 +42,23 @@ import { getChannels, devChannelLog } from '../providers/notifications/channels'
 // their order is kept) — the server clock owns the window, as in production.
 // ---------------------------------------------------------------------------
 
-// This file's fixture block (+5920861nnn, 11 characters): no phone literal,
+// This file's fixture block (+5920861 with a run-unique numeric suffix): no phone literal,
 // generator or purge prefix under apps/, packages/, tools/, scripts/ or
 // deploy/ contains "+59208" (the +59204… block is the staging live-test
 // reserve — deliberately avoided).
-const PHONE_PREFIX = '+5920861';
+const PHONE_PREFIX = `+5920861${customAlphabet('0123456789', 4)()}`;
 const DAY = 24 * 60 * 60 * 1000;
 const HOLD_MS = 5 * 60_000;
 
 let app: FastifyInstance;
+let messageInserts: ReturnType<typeof trackMessageInserts>;
 let socketUrl = '';
 const openSockets: Socket[] = [];
 let seq = 0;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
+const orderIds: string[] = [];
+const sweepOrderIds = new Set<string>();
 /** [AX289 F8] Fixtures deliberately OUTSIDE this file's release scope — the
  *  stand-in for another suite's orders in the shared database. */
 const foreignUserIds: string[] = [];
@@ -169,7 +176,10 @@ async function placeOrder(buyer: Actor, store: Store, quantity: number, body: Re
   expect(added.statusCode, added.body).toBe(201);
   const res = await call('POST', '/api/v1/customer/checkout', buyer.token, body, { 'idempotency-key': `q12-${nanoid(12)}` });
   expect(res.statusCode, res.body).toBe(200);
-  return res.json().data.order as Placed;
+  const order = res.json().data.order as Placed;
+  orderIds.push(order.id);
+  if (!foreignUserIds.includes(buyer.userId) && !foreignVendorIds.includes(store.vendorId)) sweepOrderIds.add(order.id);
+  return order;
 }
 
 const orderRow = (id: string) => app.prisma.order.findUniqueOrThrow({ where: { id } });
@@ -189,7 +199,8 @@ async function travel(orderId: string, ms: number) {
 /** The worker's own release-held-orders job (queue.ts) — the release, the
  *  store's alert, and the immediate publish of the alert ladder the release
  *  wrote — confined to THIS file's orders [AX289 F8]: the job's due-order read
- *  is narrowed to this file's customers and stores, so it never releases,
+ *  is narrowed to explicit successfully placed sweep-owned IDs. Cleanup also
+ *  owns synthetic peer controls, but those IDs never join the sweep. It never releases,
  *  counts or alerts an order another suite left due in the shared database,
  *  and a backlog there cannot keep ours from being reached. Everything else is
  *  the real job on the real client. */
@@ -198,7 +209,7 @@ async function releaseSweep(): Promise<string[]> {
   let scoped = 0;
   const spy = vi.spyOn(app.prisma.order, 'findMany').mockImplementation(((args: Prisma.OrderFindManyArgs = {}) => {
     scoped += 1;
-    return findMany({ ...args, where: { AND: [args.where ?? {}, { OR: [{ customerId: { in: userIds } }, { vendorId: { in: vendorIds } }] }] } });
+    return findMany({ ...args, where: { AND: [args.where ?? {}, { id: { in: [...sweepOrderIds] } }] } });
   }) as never);
   try {
     const released = await releaseHeldOrdersJob(ctx(), queues as never);
@@ -308,6 +319,16 @@ async function storeDashboard(store: Store) {
 }
 const DASHBOARD_EMPTY = { today: 0, week: 0, month: 0, pending: 0, totalOrders: 0, itemTotalOrdered: 0, itemRecent: 0, busyHours: 0, tierToday: 0 };
 
+/** The five-minute backdate can cross either the Guyana analytics day or the
+ * UTC tier-cap day. Assert the exact bucket of this order's own placement. */
+async function dayCounts(orderId: string) {
+  const placed = (await orderRow(orderId)).placedAt.getTime();
+  const now = Date.now();
+  const guyanaMidnight = Math.floor((now - 4 * 60 * 60_000) / DAY) * DAY + 4 * 60 * 60_000;
+  const utcMidnight = Math.floor(now / DAY) * DAY;
+  return { today: Number(placed >= guyanaMidnight), tierToday: Number(placed >= utcMidnight && placed <= now) };
+}
+
 /** The store's low-stock notices for its item: inbox rows and pushes. */
 async function lowStockNotices(store: Store) {
   const inbox = await app.prisma.notification.findMany({
@@ -353,9 +374,9 @@ function watchSubscribeDecisions() {
 }
 
 async function waitFor(what: string, predicate: () => boolean, ms = 5_000) {
-  const deadline = Date.now() + ms;
+  const deadline = performance.now() + ms;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    if (performance.now() >= deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
@@ -383,6 +404,7 @@ beforeAll(async () => {
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   // Socket.IO needs a real listening server — inject() cannot carry websockets.
   await app.listen({ port: 0, host: '127.0.0.1' });
+  messageInserts = trackMessageInserts(app.prisma);
   socketUrl = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 
   // Every room emit — order service, notification service, the ladder — is
@@ -400,37 +422,21 @@ beforeAll(async () => {
   }) as never);
 });
 
+// Each journey has one Date snapshot, including every awaited dashboard
+// read and later sweep. Only Date is frozen; socket timers remain real.
+beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); });
+afterEach(() => { vi.useRealTimers(); });
+
 afterAll(async () => {
   for (const socket of openSockets) socket.disconnect();
   vi.unstubAllEnvs();
   if (priorHoldMinutes !== undefined) process.env['ORDER_HOLD_MINUTES'] = priorHoldMinutes;
-  vi.restoreAllMocks();
   userIds.push(...foreignUserIds);
   vendorIds.push(...foreignVendorIds);
-  const orders = await app.prisma.order.findMany({
-    where: { OR: [{ customerId: { in: userIds } }, { vendorId: { in: vendorIds } }] },
-    select: { id: true },
-  });
-  const orderIds = orders.map((o) => o.id);
-  if (orderIds.length > 0) {
-    await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
-  }
-  await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: userIds } }] } });
-  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds] } } });
-  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
-  await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.cart.deleteMany({ where: { customerId: { in: userIds } } });
-  await app.prisma.address.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.deviceToken.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-  await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await purgeHoldFixtures(app.prisma, { userIds, vendorIds, orderIds,
+    alertIds: [...messageInserts.alertIds], notificationIds: [...messageInserts.notificationIds] });
+  messageInserts.restore();
+  vi.restoreAllMocks();
   await app.close();
 });
 
@@ -577,7 +583,7 @@ describe.each([
     expect(row.releasedToVendorAt).not.toBeNull();
     expect(row.status).toBe('PENDING'); // release is visibility, not a transition
     // Counted by the store's own counters at the release — once.
-    const counted = { today: 1, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1, tierToday: 1 };
+    const counted = { ...(await dayCounts(order.id)), week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1 };
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, banner: true, dashboard: counted });
 
     // Exactly once: every later sweep is a no-op on every channel and counter.
@@ -794,7 +800,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
 
     // The board shows it from the moment its hold lapsed; only the lifetime
     // counters wait for a release.
-    expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, dashboard: { today: 1, totalOrders: 0, itemTotalOrdered: 0 } });
+    expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, dashboard: { today: (await dayCounts(order.id)).today, totalOrders: 0, itemTotalOrdered: 0 } });
     const res = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, store.owner.token, {});
     expect(res.statusCode, res.body).toBe(200);
     const row = await orderRow(order.id);
@@ -879,6 +885,22 @@ describe('Q12 · the sweep this file drives touches only its own orders', () => 
       // Not left due for another suite's sweep to find.
       await call('POST', `/api/v1/customer/orders/${foreign.id}/cancel`, foreignBuyer.token, {});
     }
+  });
+});
+
+it('counts a released order placed before Guyana midnight in the prior day', async () => {
+  const store = await makeStore('RESTAURANT');
+  const buyer = await makeCustomer('Midnight');
+  const order = await placeOrder(buyer, store, 1);
+  const guyanaMidnight = Math.floor((Date.now() - 4 * 60 * 60_000) / DAY) * DAY + 4 * 60 * 60_000;
+  await app.prisma.order.update({ where: { id: order.id }, data: {
+    placedAt: new Date(guyanaMidnight - 6 * 60_000),
+    holdExpiresAt: new Date(guyanaMidnight - 60_000),
+  } });
+  expect((await dayCounts(order.id)).today).toBe(0);
+  expect(await releaseSweep()).toContain(order.id);
+  expect(await storeSees(store, order.id)).toMatchObject({
+    board: true, dashboard: { today: 0, week: 1, month: 1, pending: 1, totalOrders: 1 },
   });
 });
 
@@ -1063,4 +1085,92 @@ describe('Q12 · MMG — the one thing the store is told about an order cancelle
     const mine = await call('GET', `/api/v1/customer/orders/${paid.id}`, buyer.token);
     expect(mine.json().data).toMatchObject({ paymentStatus: 'CLAIMED', canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null });
   });
+});
+
+// AX395-5: a real timer advances the underlying wall across each midnight
+// between successive dashboard reads. Each assertion window must freeze Date;
+// a new window recomputes exact buckets rather than reusing the prior counts.
+it.each([
+  { label: 'UTC', hour: 0, after: { today: 1, tierToday: 0 } },
+  { label: 'Guyana', hour: 4, after: { today: 0, tierToday: 1 } },
+])('synchronizes dashboard reads across the $label midnight boundary with real timers', async ({ hour, after }) => {
+  vi.useRealTimers(); // simulate a changing wall beneath the assertion-window clock
+  const NativeDate = Date;
+  const boundaryDate = new NativeDate();
+  boundaryDate.setUTCDate(16); // interior of week/month windows, independent of wall date
+  boundaryDate.setUTCHours(hour, 0, 0, 0);
+  const boundary = boundaryDate.getTime();
+  const before = boundary - 1_000;
+  let wall = before;
+  class MovingDate extends NativeDate {
+    constructor(value?: string | number | Date) {
+      super(value === undefined ? wall : value instanceof NativeDate ? value.getTime() : value);
+    }
+    static override now() { return wall; }
+  }
+  vi.stubGlobal('Date', MovingDate);
+  try {
+    const store = await makeStore('RESTAURANT');
+    const buyer = await makeCustomer('Boundary');
+    const order = await placeOrder(buyer, store, 1);
+    await travel(order.id, HOLD_MS + 1_000);
+    expect(await releaseSweep()).toContain(order.id);
+    await withDashboardClock(before, async () => {
+      const counts = await dayCounts(order.id);
+      expect(counts).toEqual({ today: 1, tierToday: 1 });
+      expect(await storeDashboard(store)).toMatchObject(counts);
+      let timerRan = false;
+      await new Promise<void>((resolve) => setTimeout(() => {
+        wall = boundary + 1_000; timerRan = true; resolve();
+      }, 5));
+      expect(timerRan).toBe(true); // Date-only control must preserve real timers
+      expect(await storeDashboard(store)).toMatchObject(counts);
+    });
+    await withDashboardClock(boundary + 1_000, async () => {
+      const counts = await dayCounts(order.id);
+      expect(counts).toEqual(after);
+      expect(await storeDashboard(store)).toMatchObject(counts);
+      expect(await releaseSweep()).not.toContain(order.id);
+      expect(await storeDashboard(store)).toMatchObject(counts);
+    });
+  } finally {
+    vi.useRealTimers(); vi.unstubAllGlobals();
+  }
+});
+
+it('bounds a never-true wait with real monotonic time while business Date stays frozen', async () => {
+  const businessTime = Date.now();
+  const start = performance.now();
+  let reached = false;
+  const bound = new Promise((resolve) => setTimeout(() => resolve('outer deadline'), 250));
+  const result = waitFor('never true', () => reached, 40).then(() => 'unexpected success', (error: Error) => error.message);
+  try {
+    expect(await Promise.race([result, bound])).toBe('timed out waiting for never true');
+    expect(performance.now() - start).toBeLessThan(250);
+    expect(Date.now()).toBe(businessTime);
+  } finally { reached = true; await result; }
+  let ready = false;
+  setTimeout(() => { ready = true; }, 20);
+  await waitFor('real timer succeeds', () => ready, 200);
+  expect(ready).toBe(true);
+  expect(Date.now()).toBe(businessTime);
+});
+
+it('leaves a due peer order sharing an owned vendor wholly unchanged by the real release job', async () => {
+  const store = await makeStore('RESTAURANT');
+  const buyer = await makeCustomer('Peer', { foreign: true });
+  const order = await placeOrder(buyer, store, 1);
+  await travel(order.id, HOLD_MS + 1_000);
+  const snapshot = async () => ({
+    order: await orderRow(order.id),
+    outbox: await app.prisma.orderOutbox.findMany({ where: { orderId: order.id }, orderBy: { id: 'asc' } }),
+    notices: await app.prisma.notification.findMany({ where: { data: { path: ['orderId'], equals: order.id } }, orderBy: { id: 'asc' } }),
+    alerts: await app.prisma.alertDelivery.findMany({ where: { subjectId: order.id }, orderBy: { id: 'asc' } }),
+    heard: await storeHeard(store, order), dashboard: await storeDashboard(store), jobs: [...jobsFor(order.id)],
+  });
+  const before = await snapshot();
+  try {
+    expect(await releaseSweep()).not.toContain(order.id);
+    expect(await snapshot()).toEqual(before);
+  } finally { await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, buyer.token, {}); }
 });

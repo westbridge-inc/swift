@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
-import { Prisma, type UserRole } from '@prisma/client';
+import { customAlphabet, nanoid } from 'nanoid';
+import { PrismaClient, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
 import { authPlugin } from '../../plugins/auth';
@@ -11,7 +11,13 @@ import courierRoutes from '../../modules/courier/courier.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { makeDispatchService } from '../../modules/dispatch/dispatch.service';
 import { riderStackingCapacity } from '../../modules/dispatch/concurrency-policy';
+import * as algoStore from '../../modules/algo/algo-config';
+import { assertFixtureReferences, lockFixtureParents } from '../helpers/cleanup-parents';
+import { trackMessageInserts } from '../helpers/insert-ownership';
+import { proveMessageRefusal, provePeerOrderRefusal } from '../helpers/cleanup-race';
 import { recordDispatchQueue } from '../helpers/dispatch-queue';
+
+const { invalidateAlgoConfig } = algoStore;
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · RIDE-01 — a delivery mover goes online and streams a live location.
@@ -42,12 +48,11 @@ import { recordDispatchQueue } from '../helpers/dispatch-queue';
 // processor body (DispatchService.dispatchOrder) and delayed jobs are
 // recorded, so a recorded re-dispatch is driven the way the worker would.
 //
-// Fixture range: +5920331nnn (this file only). Phones and the crash-recovery
-// purge share PHONE_PREFIX, so a crashed run's rows are found next time.
+// Fixture range: +5920331 plus a run-unique numeric suffix.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONE_PREFIX = '+5920331';
+const PHONE_PREFIX = `+5920331${customAlphabet('0123456789', 4)()}`;
 const FIXTURE = 'gold3-ride01-fixture';
 // A quiet corner of Georgetown; fixes are 5-decimal literals so a round trip
 // through float8 is exact.
@@ -61,11 +66,22 @@ const FIX_LATE = { latitude: 6.80111, longitude: -58.14999 };
 const DB_WRITE_WINDOW_MS = 10_000;
 
 let app: FastifyInstance;
+let messageInserts: ReturnType<typeof trackMessageInserts>;
 let jobs: ReturnType<typeof recordDispatchQueue>;
 let seq = 0;
 /** Every mover this file made — each test's supply is retired afterwards so
  *  no test's dispatch pass can offer to another test's mover. */
 const movers: Array<{ riderId: string; device: Device }> = [];
+const userIds: string[] = [];
+const createdOrderIds: string[] = [];
+let restoreCapacityRead: (() => void) | undefined;
+let ownCapacityReads = 0;
+const peerCapacityClient = new PrismaClient();
+let peerCapacityBefore: number;
+const peerTenant = `gold3-peer-${nanoid(16)}`;
+let peerConfigId: string;
+let sharedConfigBefore: unknown;
+const sharedCapacityRows = () => peerCapacityClient.algoConfig.findMany({ where: { tenantId: 'swift-default', key: 'stacking.riderCapacity' }, orderBy: { id: 'asc' } });
 
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
 
@@ -85,6 +101,7 @@ async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRo
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
   }));
+  userIds.push(user.id);
   return { userId: user.id, device: await login(user.id, activeRole, `ride01-${seq}-a`) };
 }
 
@@ -127,8 +144,8 @@ async function retireSupply() {
   }
 }
 
-function call(method: 'GET' | 'POST' | 'PUT', url: string, token?: string, payload?: unknown) {
-  return app.inject({
+async function call(method: 'GET' | 'POST' | 'PUT', url: string, token?: string, payload?: unknown) {
+  const result = await app.inject({
     method,
     url,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
@@ -137,6 +154,12 @@ function call(method: 'GET' | 'POST' | 'PUT', url: string, token?: string, paylo
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     },
   });
+  if (method === 'POST' && url === '/api/v1/courier/order' && result.statusCode === 201) {
+    const id = result.json().data?.orderId;
+    if (typeof id !== 'string') throw new Error('GOLD-3 courier order returned no id');
+    createdOrderIds.push(id);
+  }
+  return result;
 }
 
 const riderRow = (riderId: string) => sys(() => app.prisma.rider.findUniqueOrThrow({ where: { id: riderId } }));
@@ -171,28 +194,26 @@ const COURIER_BODY = {
 
 async function purgeFixtures() {
   await sys(async () => {
-    const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
-    const ids = users.map((u) => u.id);
+    const ids = [...userIds];
     if (ids.length === 0) return;
-    const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
-    const orderIds = (await app.prisma.order.findMany({
-      where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
-      select: { id: true },
-    })).map((o) => o.id);
-    await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
-    await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
-    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
-    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
-    // Ops pages about these orders reach people outside this file's range.
-    if (orderIds.length > 0) {
-      await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
-    }
-    await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-    await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    const orderIds = [...createdOrderIds];
+    let riderIds: string[] = [];
+    await app.prisma.$transaction(async (tx) => {
+      const parents = await lockFixtureParents(tx, ids);
+      riderIds = parents.riderIds;
+      await assertFixtureReferences(tx, 'GOLD-3', ids, parents, orderIds, [...messageInserts.notificationIds]);
+      if (await tx.subscription.count({ where: { vendorId: { in: parents.vendorIds } } })) throw new Error('Foreign vendor subscriptions block fixture cleanup');
+      await tx.alertDelivery.deleteMany({ where: { id: { in: [...messageInserts.alertIds] } } });
+      await tx.notification.deleteMany({ where: { id: { in: [...messageInserts.notificationIds] } } });
+      await tx.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
+      await tx.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
+      await tx.earning.deleteMany({ where: { orderId: { in: orderIds } } });
+      await tx.order.deleteMany({ where: { id: { in: orderIds } } });
+      await tx.session.deleteMany({ where: { userId: { in: ids } } });
+      await tx.rider.deleteMany({ where: { id: { in: riderIds } } });
+      await tx.customer.deleteMany({ where: { userId: { in: ids } } });
+      await tx.user.deleteMany({ where: { id: { in: ids } } });
+    }, { timeout: 30_000 });
     await purgeRedis([...ids, ...riderIds, ...orderIds]);
   });
 }
@@ -212,6 +233,12 @@ async function purgeRedis(ids: string[]) {
 }
 
 beforeAll(async () => {
+  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+  peerCapacityBefore = await riderStackingCapacity(peerCapacityClient);
+  const peerConfig = await peerCapacityClient.algoConfig.create({ data: { tenantId: peerTenant, key: 'stacking.riderCapacity', value: 1, version: 1, updatedBy: FIXTURE } });
+  peerConfigId = peerConfig.id;
+  expect(await algoStore.algoValue(peerCapacityClient, 'stacking.riderCapacity', peerTenant)).toBe(1);
+  sharedConfigBefore = await sharedCapacityRows();
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   // The production composition root gives every request a fresh tenant store
@@ -225,12 +252,32 @@ beforeAll(async () => {
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.ready();
-  await purgeFixtures();
+  messageInserts = trackMessageInserts(app.prisma);
+  // Intercept only this client's capacity read at the existing config seam.
+  // No shared DB version, no cache entry, no dispatch/claim replacement. All
+  // other keys, tenants and clients still execute the production reader.
+  const readConfig = algoStore.algoValue;
+  const capacityRead = vi.spyOn(algoStore, 'algoValue').mockImplementation(((prisma, key, tenantId = 'swift-default') => {
+    if (prisma === app.prisma && key === 'stacking.riderCapacity' && tenantId === 'swift-default') {
+      ownCapacityReads += 1;
+      return Promise.resolve(3);
+    }
+    return readConfig(prisma, key, tenantId);
+  }) as typeof algoStore.algoValue);
+  restoreCapacityRead = () => capacityRead.mockRestore();
+
 });
 
 afterAll(async () => {
   await purgeFixtures();
+  messageInserts.restore();
+  restoreCapacityRead?.();
+  expect(await sharedCapacityRows()).toEqual(sharedConfigBefore);
+  invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
   await app.close();
+  if (peerConfigId) await peerCapacityClient.algoConfig.delete({ where: { id: peerConfigId } });
+  invalidateAlgoConfig(peerTenant, 'stacking.riderCapacity');
+  await peerCapacityClient.$disconnect();
 });
 
 afterEach(async () => {
@@ -238,6 +285,14 @@ afterEach(async () => {
 });
 
 describe('GOLD-3 · RIDE-01 — go online + live location', () => {
+  it('keeps the peer capacity-one reader unchanged while the harness gets capacity three', async () => {
+    expect(await algoStore.algoValue(peerCapacityClient, 'stacking.riderCapacity', peerTenant)).toBe(1);
+    expect(await riderStackingCapacity(app.prisma)).toBe(3);
+    invalidateAlgoConfig('swift-default', 'stacking.riderCapacity');
+    expect(await riderStackingCapacity(peerCapacityClient)).toBe(peerCapacityBefore);
+    expect(await sharedCapacityRows()).toEqual(sharedConfigBefore);
+  });
+
   it('only a verified mover with a selfie goes online; GO records the owning device session, the fix and the flags', async () => {
     const customer = await makeUser('Cora', ['CUSTOMER'], 'CUSTOMER');
     const noSelfie = await makeMover('Nell', { selfie: false });
@@ -378,6 +433,7 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60_000);
     await sys(() => app.prisma.rider.updateMany({ where: { id: { in: [stale.riderId, mover.riderId] } }, data: { lastLocationUpdate: fiveMinutesAgo } }));
 
+    const capacityReadsBefore = ownCapacityReads;
     const jobsBefore = jobs.length;
     const created = await call('POST', '/api/v1/courier/order', sender.device.token, COURIER_BODY);
     expect(created.statusCode, created.body).toBe(201);
@@ -453,9 +509,9 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
       sys(() => app.prisma.alertDelivery.findFirstOrThrow({ where: { kind: 'MOVER_OFFER', subjectId: orderId } })),
     ]);
     expect({ status: order.status, rider: order.riderId }).toEqual({ status: 'RIDER_ASSIGNED', rider: mover.riderId });
-    // The seeded founder directive stacks up to three legs per rider (raised
-    // from two on 2026-09-24), so one live leg still leaves room: the winner
-    // stays available for another leg.
+    expect(ownCapacityReads, 'real dispatch and accept traversed the private config read').toBeGreaterThan(capacityReadsBefore);
+    // This client reads stacking capacity three, so one live leg
+    // still leaves room: the winner stays available for another leg.
     expect(await riderStackingCapacity(app.prisma)).toBe(3);
     expect({ pointer: won.currentOrderId, available: won.isAvailable }).toEqual({ pointer: orderId, available: true });
     expect({ pointer: left.currentOrderId, available: left.isAvailable }).toEqual({ pointer: null, available: true });
@@ -473,4 +529,19 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     expect(again.json().data).toMatchObject({ orderId, status: 'RIDER_ASSIGNED' });
     expect(await sys(() => app.prisma.orderStatusLog.count({ where: { orderId, status: 'RIDER_ASSIGNED' } }))).toBe(1);
   });
+});
+
+it('atomically refuses existing and lock-scheduled late peer orders referencing a GOLD3 rider', async () => {
+  const mover = await makeMover('Cleanup');
+  await provePeerOrderRefusal(app.prisma, purgeFixtures, { table: 'riders', id: mover.riderId, userId: mover.userId });
+});
+
+it('owns GOLD3 messages only after successful inserts and refuses existing and late peer notices atomically', async () => {
+  const user = await makeUser('Cleanup messages', ['CUSTOMER'], 'CUSTOMER');
+  const order = await sys(() => app.prisma.order.create({ data: { customerId: user.userId, orderNumber: `G3MSG-${nanoid(16)}`, orderType: 'COURIER', fulfillment: 'DELIVERY', status: 'PENDING',
+    deliveryAddress: 'Fixture Lane', deliveryLat: 6.8, deliveryLng: -58.15, subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 1200, totalAmount: 1200, paymentMethod: 'CASH' } }));
+  createdOrderIds.push(order.id);
+  await retireSupply();
+  await proveMessageRefusal(app.prisma, purgeFixtures, user.userId, order.id);
+  movers.length = 0;
 });

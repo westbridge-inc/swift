@@ -13,13 +13,15 @@ import { registerErrorHandler } from '../../middleware/error-handler';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { authRoutes } from '../../modules/auth/auth.routes';
+import { assertFixtureReferences, discoverFixtureParents, lockFixtureParents } from '../helpers/cleanup-parents';
+import { auditClientInCleanup } from '../helpers/cleanup-transaction';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
 
 // GOLD-7 shares the GOLD-2/6 composition and fixture helpers, not product
 // substitutes. Each file owns a distinct, range-audited phone prefix. Every
 // defining action goes through a mounted production route, on real Postgres.
-// Every golden file must assert notifications only for users it owns: deleting
-// our own users inherently cascades their inbox, including peer-created rows.
+// A peer may send a notification to one of our users. Never let the user
+// cascade turn fixture cleanup into deletion of that peer's row.
 export type Actor = { userId: string; token: string; refreshToken: string; sessionId: string; phone: string };
 export const DAY = 86_400_000;
 
@@ -33,8 +35,9 @@ export function createGolden(phonePrefix: string, fixture: string) {
   const savedClusterIds = new Set<string>();
   const createdAlertIds = new Set<string>();
   const createdNotificationIds = new Set<string>();
-  let restoreNotificationTracking: (() => void) | undefined;
-  let restoreAlertTracking: (() => void) | undefined;
+  const createdOrderIds = new Set<string>();
+  const restoreTracking: Array<() => void> = [];
+  let disposal: Promise<void> | undefined;
   const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, fixture);
 
   async function rememberClusters(userId: string) {
@@ -42,11 +45,17 @@ export function createGolden(phonePrefix: string, fixture: string) {
     for (const member of members) savedClusterIds.add(member.clusterId);
   }
 
-  function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
-    return app.inject({ method, url, headers: {
+  async function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
+    const result = await app.inject({ method, url, headers: {
       ...headers, authorization: `Bearer ${token}`,
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
     }, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
+    if (method === 'POST' && url === '/api/v1/customer/checkout' && result.statusCode === 200) {
+      const id = result.json().data?.order?.id;
+      if (typeof id !== 'string') throw new Error(`GOLD-7 checkout returned no order id (${fixture})`);
+      createdOrderIds.add(id);
+    }
+    return result;
   }
 
   async function actor(roles: UserRole[] = ['CUSTOMER'], activeRole: UserRole = roles[0]!) {
@@ -90,69 +99,78 @@ export function createGolden(phonePrefix: string, fixture: string) {
     await sys(async () => {
       // Every alert kind can target another run's fixture. Ownership comes only
       // from successful inserts, even if none of our users survive erasure.
-      await app.prisma.alertDelivery.deleteMany({ where: { id: { in: [...createdAlertIds] } } });
-      await app.prisma.notification.deleteMany({ where: { id: { in: [...createdNotificationIds] } } });
       const users = await app.prisma.user.findMany({ where: { OR: [
         { id: { in: [...createdIds] } },
         { id: { startsWith: `${fixturePrefix}-` } },
       ] }, select: { id: true } });
-      const ids = users.map((u) => u.id);
-      if (!ids.length) return;
-      const vendorIds = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: ids } } }, select: { id: true } })).map((v) => v.id);
-      const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
-      const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
-      const docs = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
-      const cases = (await app.prisma.reviewCase.findMany({ where: { submissionId: { in: docs } }, select: { id: true } })).map((c) => c.id);
-      await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...docs, ...cases, ...vendorIds] } }] }, `test-cleanup:${fixture}`);
-      await purgeSensitiveReadLogs(app.prisma, { OR: [{ actorUserId: { in: ids } }, { subjectId: { in: docs } }] }, `test-cleanup:${fixture}`);
-      await app.prisma.reviewDecision.deleteMany({ where: { caseId: { in: cases } } });
-      await app.prisma.reviewCase.deleteMany({ where: { id: { in: cases } } });
-      await app.prisma.verificationDocument.deleteMany({ where: { id: { in: docs } } });
-      await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: ids } } });
-      await app.prisma.storageOrphan.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.identityKey.deleteMany({ where: { accountId: { in: ids } } });
-      await app.prisma.trialGrant.deleteMany({ where: { accountId: { in: ids } } });
-      const members = await app.prisma.identityClusterMember.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } });
-      await app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
-      for (const clusterId of new Set([...savedClusterIds, ...members.map((m) => m.clusterId)])) {
-        if (await app.prisma.identityClusterMember.count({ where: { clusterId } }) === 0) {
-          await app.prisma.identityCluster.deleteMany({ where: { id: clusterId, mergedIntoId: null } });
+      const ids = [...new Set([...createdIds, ...users.map((u) => u.id)])];
+      // The preflight is advisory only; the authoritative census follows all
+      // root/intermediate locks inside the transaction, never a saved list.
+      const preflight = await discoverFixtureParents(app.prisma, ids);
+      let vendorIds: string[] = [];
+      let riderIds: string[] = [];
+      let driverIds: string[] = [];
+      let sessionIds: string[] = [];
+      const orderIds = [...createdOrderIds];
+      await assertFixtureReferences(app.prisma, `GOLD-7 ${fixture}`, ids, preflight, orderIds, [...createdNotificationIds]);
+      await app.prisma.$transaction(async (tx) => {
+        const parents = await lockFixtureParents(tx, ids);
+        ({ vendorIds, riderIds, driverIds } = parents);
+        sessionIds = (await tx.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+        await assertFixtureReferences(tx, `GOLD-7 ${fixture}`, ids, parents, orderIds, [...createdNotificationIds]);
+        await tx.alertDelivery.deleteMany({ where: { id: { in: [...createdAlertIds] } } });
+        await tx.notification.deleteMany({ where: { id: { in: [...createdNotificationIds] } } });
+        const docs = (await tx.verificationDocument.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((d) => d.id);
+        const cases = (await tx.reviewCase.findMany({ where: { submissionId: { in: docs } }, select: { id: true } })).map((c) => c.id);
+        await purgeAuditLogs(auditClientInCleanup(tx), { OR: [{ userId: { in: ids } }, { entityId: { in: [...ids, ...docs, ...cases, ...vendorIds] } }] }, `test-cleanup:${fixture}`);
+        await purgeSensitiveReadLogs(auditClientInCleanup(tx), { OR: [{ actorUserId: { in: ids } }, { subjectId: { in: docs } }] }, `test-cleanup:${fixture}`);
+        await tx.reviewDecision.deleteMany({ where: { caseId: { in: cases } } });
+        await tx.reviewCase.deleteMany({ where: { id: { in: cases } } });
+        await tx.verificationDocument.deleteMany({ where: { id: { in: docs } } });
+        await tx.encryptedObject.deleteMany({ where: { createdBy: { in: ids } } });
+        await tx.storageOrphan.deleteMany({ where: { userId: { in: ids } } });
+        await tx.identityKey.deleteMany({ where: { accountId: { in: ids } } });
+        await tx.trialGrant.deleteMany({ where: { accountId: { in: ids } } });
+        const members = await tx.identityClusterMember.findMany({ where: { accountId: { in: ids } }, select: { clusterId: true } });
+        await tx.identityClusterMember.deleteMany({ where: { accountId: { in: ids } } });
+        for (const clusterId of new Set([...savedClusterIds, ...members.map((m) => m.clusterId)])) {
+          if (await tx.identityClusterMember.count({ where: { clusterId } }) === 0) {
+            await tx.identityCluster.deleteMany({ where: { id: clusterId, mergedIntoId: null } });
+          }
         }
-      }
-      const subIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
-      await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-      await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-      const orderIds = (await app.prisma.order.findMany({ where: { OR: [
-        { customerId: { in: ids } }, { vendorId: { in: vendorIds } },
-      ] }, select: { id: true } })).map((o) => o.id);
-      const ratings = (await app.prisma.rating.findMany({ where: { orderId: { in: orderIds } }, select: { id: true } })).map((r) => r.id);
-      await app.prisma.ratingReport.deleteMany({ where: { ratingId: { in: ratings } } });
-      await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: { in: ratings } } });
-      await app.prisma.rating.deleteMany({ where: { id: { in: ratings } } });
-      await app.prisma.actorRatingStat.deleteMany({ where: { subjectId: { in: [...ids, ...vendorIds] } } });
-      await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
-      await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
-      // Stock movements, consent and deletion receipts are append-only evidence.
-      // Their scalar subject IDs allow the mutable fixtures to be removed.
-      await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
-      await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
-      await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-      await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
-      await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
-      await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-      await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-      await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-      await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-      await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-      const wanted = new Set([...ids, ...vendorIds, ...orderIds, ...riderIds, ...sessionIds]);
+        const subIds = (await tx.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
+        await tx.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
+        await tx.subscription.deleteMany({ where: { id: { in: subIds } } });
+        const ratings = (await tx.rating.findMany({ where: { orderId: { in: orderIds } }, select: { id: true } })).map((r) => r.id);
+        await tx.ratingReport.deleteMany({ where: { ratingId: { in: ratings } } });
+        await tx.ratingOutbox.deleteMany({ where: { ratingId: { in: ratings } } });
+        await tx.rating.deleteMany({ where: { id: { in: ratings } } });
+        await tx.actorRatingStat.deleteMany({ where: { subjectId: { in: [...ids, ...vendorIds] } } });
+        await tx.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds, ...riderIds] } } });
+        await tx.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
+        // Stock movements, consent and deletion receipts are append-only evidence.
+        // Their scalar subject IDs allow the mutable fixtures to be removed.
+        await tx.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
+        await tx.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
+        await tx.earning.deleteMany({ where: { orderId: { in: orderIds } } });
+        await tx.order.deleteMany({ where: { id: { in: orderIds } } });
+        await tx.cart.deleteMany({ where: { customerId: { in: ids } } });
+        await tx.address.deleteMany({ where: { userId: { in: ids } } });
+        await tx.rider.deleteMany({ where: { id: { in: riderIds } } });
+        await tx.driver.deleteMany({ where: { id: { in: driverIds } } });
+        await tx.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
+        await tx.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
+        await tx.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+        await tx.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
+        await tx.session.deleteMany({ where: { userId: { in: ids } } });
+        await tx.admin.deleteMany({ where: { userId: { in: ids } } });
+        await tx.customer.deleteMany({ where: { userId: { in: ids } } });
+        await tx.user.deleteMany({ where: { id: { in: ids } } });
+      }, { timeout: 30_000 });
+      const wanted = new Set([...ids, ...vendorIds, ...orderIds, ...riderIds, ...driverIds, ...sessionIds]);
       let cursor = '0';
       do {
         const [next, keys] = await app.redis.scan(cursor, 'COUNT', 1000);
@@ -197,7 +215,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       for (const row of inserted) createdAlertIds.add(row.id);
       return { count: inserted.length };
     }) as unknown as typeof alerts.createMany);
-    restoreAlertTracking = () => { singleTracking.mockRestore(); bulkTracking.mockRestore(); };
+    restoreTracking.push(() => singleTracking.mockRestore(), () => bulkTracking.mockRestore());
     const notifications = app.prisma.notification;
     const createNotification = notifications.create.bind(notifications);
     const createNotifications = notifications.createManyAndReturn.bind(notifications);
@@ -212,7 +230,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
       for (const row of inserted) createdNotificationIds.add(row.id);
       return { count: inserted.length };
     }) as unknown as typeof notifications.createMany);
-    restoreNotificationTracking = () => { singleNotificationTracking.mockRestore(); bulkNotificationTracking.mockRestore(); };
+    restoreTracking.push(() => singleNotificationTracking.mockRestore(), () => bulkNotificationTracking.mockRestore());
     await purge();
   }
 
@@ -221,13 +239,36 @@ export function createGolden(phonePrefix: string, fixture: string) {
     expect(added.statusCode, added.json().error?.code).toBe(201);
   }
 
-  return { get app() { return app; }, sys, call, actor, vendor, start, purge, fillCart, rememberClusters, nextPhone,
-    close: async () => {
-      try {
-        // Admin audit writes may finish just after the response (GOLD-5).
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        await purge();
-      } finally { restoreAlertTracking?.(); restoreNotificationTracking?.(); await app.close(); }
-    },
-  };
+  function dispose() {
+    // Terminal resource disposal never purges data. Attempt every release,
+    // even if another release fails, and retain all failures for the caller.
+    return disposal ??= (async () => {
+      const errors: unknown[] = [];
+      for (const release of [...restoreTracking, app && (() => app.close())]) {
+        try { await release?.(); } catch (error) { errors.push(error); }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, `GOLD-7 ${fixture}: resource disposal failed`);
+    })();
+  }
+
+  async function close(options: { retainForRetry?: boolean } = {}) {
+    try {
+      // Admin audit writes may finish just after the response (GOLD-5).
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await purge();
+    } catch (error) {
+      // Intentional refusal tests must opt in and still dispose in finally.
+      // Default teardown releases resources without retrying or deleting data.
+      if (!options.retainForRetry) {
+        try { await dispose(); } catch (disposalError) {
+          throw new AggregateError([error, disposalError], `GOLD-7 ${fixture}: cleanup and disposal failed`, { cause: error });
+        }
+      }
+      throw error;
+    }
+    await dispose();
+  }
+
+  return { get app() { return app; }, sys, call, actor, vendor, start, purge, dispose, close, fillCart, rememberClusters, nextPhone };
 }

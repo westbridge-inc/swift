@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
+import { customAlphabet, nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { UserRole } from '@prisma/client';
@@ -24,7 +24,7 @@ import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config
 // by the dispatch loop itself, with declines and expiries logged apart.
 // ---------------------------------------------------------------------------
 
-const PHONE_PREFIX = '+59200668';
+const PHONE_PREFIX = `+59200668${customAlphabet('0123456789', 5)()}`;
 const DAY = 24 * 60 * 60 * 1000;
 const PICKUP = { lat: 6.8, lng: -58.15 };
 
@@ -32,25 +32,23 @@ let app: FastifyInstance;
 let dispatch: DispatchService;
 let customerId: string;
 let vendorId: string;
+let foreignDecisionId: string;
 const userIds: string[] = [];
 const riderIds: string[] = [];
 const orderIds: string[] = [];
+const configIds: string[] = [];
 let seq = 0;
 
 async function purge() {
-  const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
-  const ids = users.map((u) => u.id);
+  const ids = [...userIds];
   if (!ids.length) return;
-  const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
-  for (const r of riders) await app.redis.del(offersSentKey(r.id), offerOutcomeKey(r.id, 'declines'), offerOutcomeKey(r.id, 'expiries'));
-  const orders = await app.prisma.order.findMany({ where: { customerId: { in: ids } }, select: { id: true } });
-  await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-01', subjectId: { in: orders.map((o) => o.id) } } });
-  for (const o of orders) await app.redis.del(`dispatch:declined:${o.id}`, `dispatch:offer:${o.id}`);
-  await app.prisma.order.deleteMany({ where: { id: { in: orders.map((o) => o.id) } } });
+  for (const id of riderIds) await app.redis.del(offersSentKey(id), offerOutcomeKey(id, 'declines'), offerOutcomeKey(id, 'expiries'));
+  await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-01', subjectId: { in: orderIds } } });
+  for (const id of orderIds) await app.redis.del(`dispatch:declined:${id}`, `dispatch:offer:${id}`);
+  await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
-  const vos = await app.prisma.vendorOwner.findMany({ where: { userId: { in: ids } }, select: { id: true } });
-  await app.prisma.vendor.deleteMany({ where: { ownerId: { in: vos.map((v) => v.id) } } });
-  await app.prisma.vendorOwner.deleteMany({ where: { id: { in: vos.map((v) => v.id) } } });
+  if (vendorId) await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
+  await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
@@ -91,7 +89,8 @@ async function makeOrder() {
 
 async function setFairness(enabled: boolean) {
   const latest = await app.prisma.algoConfig.findFirst({ where: { tenantId: 'swift-default', key: 'fairness.enabled' }, orderBy: { version: 'desc' } });
-  await app.prisma.algoConfig.create({ data: { tenantId: 'swift-default', key: 'fairness.enabled', value: enabled, version: (latest?.version ?? 0) + 1, updatedBy: 'fairness-band.test' } });
+  const config = await app.prisma.algoConfig.create({ data: { tenantId: 'swift-default', key: 'fairness.enabled', value: enabled, version: (latest?.version ?? 0) + 1, updatedBy: 'fairness-band.test' } });
+  configIds.push(config.id);
   invalidateAlgoConfig();
 }
 
@@ -119,7 +118,13 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.ready();
-  await purge();
+  const foreign = await app.prisma.algoDecision.create({ data: {
+    algo: 'ALG-01', subjectType: 'ORDER', subjectId: `peer-${nanoid(12)}`,
+    outcome: 'WOULD_REORDER', shadow: true, sentence: 'A peer decision.',
+    inputs: { band: 0.05, groups: [{ size: 2 }] },
+    createdAt: new Date('2000-01-01T00:00:00.000Z'),
+  } });
+  foreignDecisionId = foreign.id;
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
 
   const customer = await app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}90`, firstName: 'Fair', lastName: 'Customer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
@@ -139,9 +144,10 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.algoConfig.deleteMany({ where: { key: 'fairness.enabled', updatedBy: 'fairness-band.test' } });
+  await app.prisma.algoConfig.deleteMany({ where: { id: { in: configIds } } });
   invalidateAlgoConfig();
   await purge();
+  if (foreignDecisionId) await app.prisma.algoDecision.deleteMany({ where: { id: foreignDecisionId } });
   await app.close();
 });
 
@@ -172,15 +178,17 @@ describe('three riders at equal ETA, twenty offers', () => {
 
   it('LIVE: the offers spread within ±1, the reorders are live rows, and the log is what the band read', async () => {
     for (const id of riderIds) await app.redis.del(offersSentKey(id));
-    await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-01' } });
+    await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-01', subjectId: { in: orderIds } } });
+    expect(await app.prisma.algoDecision.findUnique({ where: { id: foreignDecisionId } })).not.toBeNull();
     await setFairness(true);
     try {
       const counts = await twentyOffers();
       const values = [...counts.values()];
       expect(Math.max(...values) - Math.min(...values)).toBeLessThanOrEqual(1);
       expect(values.reduce((a, b) => a + b, 0)).toBe(20);
-      const live = await app.prisma.algoDecision.count({ where: { algo: 'ALG-01', outcome: 'REORDERED', shadow: false } });
+      const live = await app.prisma.algoDecision.count({ where: { algo: 'ALG-01', outcome: 'REORDERED', shadow: false, subjectId: { in: orderIds } } });
       expect(live).toBeGreaterThanOrEqual(10);
+      expect(await app.prisma.algoDecision.findUnique({ where: { id: foreignDecisionId } })).not.toBeNull();
       for (const id of riderIds) {
         expect(await app.redis.zcard(offersSentKey(id))).toBe(counts.get(id));
       }
@@ -190,13 +198,13 @@ describe('three riders at equal ETA, twenty offers', () => {
   });
 
   it('a pure ranking with nothing tied is never touched, and reports nothing', async () => {
-    await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-01' } });
+    await app.prisma.algoDecision.deleteMany({ where: { algo: 'ALG-01', subjectId: { in: orderIds } } });
     const lone = await makeRider();
     await app.prisma.rider.updateMany({ where: { id: { in: riderIds.filter((id) => id !== lone) } }, data: { isAvailable: false } });
     const order = await makeOrder();
     const ranked = await dispatch.findCandidates(order.id, PICKUP, 5, 'RIDER');
     expect(ranked.map((c) => c.riderId)).toEqual([lone]);
-    expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-01' } })).toBe(0);
+    expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-01', subjectId: order.id } })).toBe(0);
     await app.prisma.rider.updateMany({ where: { id: { in: riderIds } }, data: { isAvailable: true } });
   });
 });

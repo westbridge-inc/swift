@@ -23,6 +23,9 @@ let app: FastifyInstance;
 let billing: BillingService;
 // prisma alias assigned in beforeAll once the app is up.
 let prisma: FastifyInstance['prisma'];
+let tenantId: string;
+let modeBTenantId: string;
+let peerTenantId: string;
 
 const userIds: string[] = [];
 const subIds: string[] = [];
@@ -32,17 +35,18 @@ const rateIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_005_000_000 + Math.floor(Math.random() * 8_000_000);
 
-async function makePrepaidVendorSub(opts: { customRate?: number } = {}) {
+async function makePrepaidVendorSub(opts: { customRate?: number; tenantId?: string } = {}) {
   seq += 1;
+  const ownerTenantId = opts.tenantId ?? tenantId;
   const user = await prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Pin', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: `+${phoneBase + seq}`, tenantId: ownerTenantId, firstName: 'Pin', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   userIds.push(user.id);
   const owner = await prisma.vendorOwner.create({ data: { userId: user.id } });
   ownerIds.push(owner.id);
   const vendor = await prisma.vendor.create({
     data: {
-      ownerId: owner.id, name: `Pin Vendor ${seq}`, slug: `pin-${nanoid(8).toLowerCase()}`,
+      ownerId: owner.id, tenantId: ownerTenantId, name: `Pin Vendor ${seq}`, slug: `pin-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT', phone: `+${phoneBase + 600_000 + seq}`,
       addressLine1: '4 Pinned Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
@@ -80,6 +84,15 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.ready();
   prisma = app.prisma;
+  tenantId = (await prisma.tenant.create({ data: {
+    name: `Pinning ${nanoid(8)}`, slug: `pinning-${nanoid(12).toLowerCase()}`, isActive: false,
+  } })).id;
+  modeBTenantId = (await prisma.tenant.create({ data: {
+    name: `Pinning Mode B ${nanoid(8)}`, slug: `pinning-b-${nanoid(12).toLowerCase()}`, isActive: false,
+  } })).id;
+  peerTenantId = (await prisma.tenant.create({ data: {
+    name: `Pinning Peer ${nanoid(8)}`, slug: `pinning-peer-${nanoid(12).toLowerCase()}`, isActive: false,
+  } })).id;
   billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
 });
 
@@ -93,6 +106,8 @@ afterAll(async () => {
   await prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await prisma.fxRate.deleteMany({ where: { id: { in: rateIds } } });
+  await prisma.tenantBillingCurrency.deleteMany({ where: { tenantId: { in: [tenantId, modeBTenantId, peerTenantId] } } });
+  await prisma.tenant.deleteMany({ where: { id: { in: [tenantId, modeBTenantId, peerTenantId] } } });
   await app.close();
 });
 
@@ -155,14 +170,9 @@ describe('System 2 ② — the pinned trio', () => {
 
 describe('System 2 ④ — the >2% FX-change notice (Part 12)', () => {
   it('notices once per rate change, USD-framed, ≥7-days-out bills only; small moves stay silent', async () => {
-    // Enable the flag INSIDE this test and restore in finally — the notice
-    // path reads it; the pinning tests above inject context directly.
-    await prisma.tenantBillingCurrency.upsert({
-      where: { tenantId: 'swift-default' },
-      create: { tenantId: 'swift-default', settlementCurrency: 'GYD', roundingIncrement: 100, usdPricingEnabled: true },
-      update: { usdPricingEnabled: true },
-    });
-    try {
+    // Inject this run's payer, rate and book into the production notice path.
+    // No shared tenant flag or other payer is changed by the test.
+    {
       const oldRate = await prisma.fxRate.create({ data: { quote: 'GYD', rate: 208, source: 'FOUNDER_MANUAL', setByUserId: 'test', effectiveFrom: new Date(Date.now() - 86_400_000) } });
       rateIds.push(oldRate.id);
       // A payer whose last successful charge was at the old rate, next bill 10 days out.
@@ -171,15 +181,19 @@ describe('System 2 ④ — the >2% FX-change notice (Part 12)', () => {
       await prisma.billingEvent.create({
         data: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: 5200, currencyCode: 'GYD', idempotencyKey: `seed:${sub.id}` },
       });
-      // No price-book row for VENDOR|RESTAURANT? create one (the book is live data here).
-      const entry = await prisma.priceBookEntry.create({ data: { role: 'VENDOR', tier: 'RESTAURANT', amountUsd: 25 } });
-
+      const peer = await makePrepaidVendorSub({ tenantId: peerTenantId });
+      await prisma.subscription.update({ where: { id: peer.id }, data: { nextBillingDate: new Date(Date.now() + 10 * 86_400_000) } });
+      await prisma.billingEvent.create({
+        data: { subscriptionId: peer.id, type: 'CHARGE_SUCCESS', amount: 5200, currencyCode: 'GYD', idempotencyKey: `seed:${peer.id}` },
+      });
       // A big move: 208 → 230 (+10.6% → notice).
       const newRate = await prisma.fxRate.create({ data: { quote: 'GYD', rate: 230, source: 'FOUNDER_MANUAL', setByUserId: 'test', effectiveFrom: new Date() } });
       rateIds.push(newRate.id);
 
-      const first = await runFxChangeNotices(prisma, { to: () => ({ emit: () => {} }) } as never);
-      expect(first.notified).toBeGreaterThanOrEqual(1);
+      const noticeOptions = { tenant: { usdPricingEnabled: true, settlementCurrency: 'GYD', roundingIncrement: 100 },
+        subscriptionIds: [sub.id], rateIds: [newRate.id], book: new Map([['VENDOR|RESTAURANT', 25]]) };
+      const first = await runFxChangeNotices(prisma, { to: () => ({ emit: () => {} }) } as never, new Date(), noticeOptions);
+      expect(first.notified).toBe(1);
       const userId = sub.vendor!.owner.userId;
       const note = await prisma.notification.findFirst({ where: { userId, data: { path: ['kind'], equals: 'fx_change_notice' } } });
       expect(note).toBeTruthy();
@@ -187,14 +201,12 @@ describe('System 2 ④ — the >2% FX-change notice (Part 12)', () => {
       expect(note!.body).toContain('GY$5,800'); // 25×230=5750→HALF_UP→5,800
 
       // Dedup: a second run notices nothing new for the same rate.
-      const second = await runFxChangeNotices(prisma, { to: () => ({ emit: () => {} }) } as never);
+      const second = await runFxChangeNotices(prisma, { to: () => ({ emit: () => {} }) } as never, new Date(), noticeOptions);
       const notesAfter = await prisma.notification.count({ where: { userId, data: { path: ['kind'], equals: 'fx_change_notice' } } });
       expect(notesAfter).toBe(1);
-      expect(second.notified + 1).toBeGreaterThanOrEqual(1); // ran clean either way
-
-      await prisma.priceBookEntry.delete({ where: { id: entry.id } });
-    } finally {
-      await prisma.tenantBillingCurrency.update({ where: { tenantId: 'swift-default' }, data: { usdPricingEnabled: false } });
+      expect(second.notified).toBe(0);
+      expect(await prisma.notification.count({ where: { userId: peer.vendor!.owner.userId, data: { path: ['kind'], equals: 'fx_change_notice' } } })).toBe(0);
+      expect(await prisma.billingEvent.count({ where: { subscriptionId: peer.id, idempotencyKey: { startsWith: 'fxnotice:' } } })).toBe(0);
     }
   });
 });
@@ -202,53 +214,43 @@ describe('System 2 ④ — the >2% FX-change notice (Part 12)', () => {
 describe('System 2 ⑤ — Mode B grandfather → sunset (Part 13/20)', () => {
   it('freezes on customRate, notices T−30/T−7 exactly once each, flips at sunset with the notice check', async () => {
     const io = { to: () => ({ emit: () => {} }) } as never;
-    const sub = await makePrepaidVendorSub(); // weeklyRate 20000, customRate null
-    // enableModeB freezes EVERY unfrozen sub (its production semantic) — in a
-    // shared CI run that includes other suites' rows. Snapshot who was frozen
-    // BEFORE so the finally can thaw exactly the ones this test froze.
-    const frozenBefore = new Set((await prisma.subscription.findMany({ where: { customRate: { not: null } }, select: { id: true } })).map((x) => x.id));
+    const sub = await makePrepaidVendorSub({ tenantId: modeBTenantId }); // weeklyRate 20000, customRate null
     try {
       // Enable Mode B with a sunset 31 days out (passes the ≥30d rule).
       const sunset = new Date(Date.now() + 31 * 86_400_000);
-      const enabled = await enableModeB(prisma, sunset);
-      expect(enabled.grandfathered).toBeGreaterThanOrEqual(1);
+      const enabled = await enableModeB(prisma, sunset, modeBTenantId);
+      expect(enabled.grandfathered).toBe(1);
       const frozen = await prisma.subscription.findUnique({ where: { id: sub.id } });
       expect(Number(frozen!.customRate)).toBe(20000); // grandfathered on today's price
 
       // Day 1 (T−31): T−30 not due yet → no notice for this sub.
-      await sweepModeB(prisma, io, new Date());
+      await sweepModeB(prisma, io, new Date(), { tenantIds: [modeBTenantId] });
       expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, idempotencyKey: `usdmigB:${sub.id}:t30` } })).toBe(0);
 
       // T−20: the T−30 notice fires once; re-sweep does not duplicate.
       const t20 = new Date(sunset.getTime() - 20 * 86_400_000);
-      await sweepModeB(prisma, io, t20);
-      await sweepModeB(prisma, io, t20);
+      await sweepModeB(prisma, io, t20, { tenantIds: [modeBTenantId] });
+      await sweepModeB(prisma, io, t20, { tenantIds: [modeBTenantId] });
       expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, idempotencyKey: `usdmigB:${sub.id}:t30` } })).toBe(1);
 
       // T−6: the T−7 notice fires too.
-      await sweepModeB(prisma, io, new Date(sunset.getTime() - 6 * 86_400_000));
+      await sweepModeB(prisma, io, new Date(sunset.getTime() - 6 * 86_400_000), { tenantIds: [modeBTenantId] });
       expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, idempotencyKey: `usdmigB:${sub.id}:t7` } })).toBe(1);
 
       // Past sunset — [M-15] and a week past the T−7 delivery, the gate's
       // warning period: customRate clears (the USD book takes over) with zero
       // alerts, because both notices carry delivery proof.
-      const res = await sweepModeB(prisma, io, new Date(sunset.getTime() + 2 * 86_400_000));
-      expect(res.flipped).toBeGreaterThanOrEqual(1);
+      const res = await sweepModeB(prisma, io, new Date(sunset.getTime() + 2 * 86_400_000), { tenantIds: [modeBTenantId] });
+      expect(res.flipped).toBe(1);
       expect(res.alerts).toBe(0); // both notices verifiably sent
       const after = await prisma.subscription.findUnique({ where: { id: sub.id } });
       expect(after!.customRate).toBeNull();
     } finally {
       await prisma.tenantBillingCurrency.update({
-        where: { tenantId: 'swift-default' },
+        where: { tenantId: modeBTenantId },
         data: { usdMigrationMode: null, usdSunsetAt: null, usdPricingEnabled: false },
       }).catch(() => {});
-      // Thaw exactly what THIS test froze (snapshot diff) — never touch
-      // rows that carried a genuine customRate before.
-      const frozenNow = await prisma.subscription.findMany({ where: { customRate: { not: null } }, select: { id: true } });
-      const thaw = frozenNow.map((x) => x.id).filter((id) => !frozenBefore.has(id));
-      if (thaw.length > 0) {
-        await prisma.subscription.updateMany({ where: { id: { in: thaw } }, data: { customRate: null } });
-      }
+      await prisma.subscription.updateMany({ where: { id: sub.id }, data: { customRate: null } });
     }
   });
 });
