@@ -56,6 +56,8 @@ export default function VerificationPage() {
   const heading = useRef<HTMLHeadingElement>(null);
   const workspace = useRef<HTMLDivElement>(null);
   const actions = useRef<HTMLElement>(null);
+  const documentList = useRef<HTMLDivElement>(null);
+  const [documentsOverflow, setDocumentsOverflow] = useState(false);
   const inFlight = useRef(false);
 
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 60_000); return () => clearInterval(timer); }, []);
@@ -92,6 +94,21 @@ export default function VerificationPage() {
     ...applicant.documents, ...(history.data ?? []).filter((d) => applicantId(d) === applicant.id),
     ...(queue.data ?? []).filter((d) => applicantId(d) === applicant.id),
   ].map((d) => [d.id, d])).values()] : [];
+  useEffect(() => {
+    const list = documentList.current;
+    if (!list) return;
+    const measure = () => setDocumentsOverflow(list.scrollWidth > list.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(list);
+    for (const card of Array.from(list.children)) observer.observe(card);
+    window.addEventListener('resize', measure);
+    return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
+  }, [applicant?.id, documents.length]);
+  const backToDocuments = () => {
+    if (workspace.current) workspace.current.scrollTop = 0;
+    documentList.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
+  };
   const selectDocument = (doc: ReviewDocument) => {
     setSelected(doc); setViewed(false); setExpiresAt(''); setInsurance(EMPTY_INSURANCE);
     setMutationError(null); setDecision(null); setReason(''); setReasonCode('');
@@ -204,12 +221,13 @@ export default function VerificationPage() {
           {rider && <p>Rider: {rider.vehicleType ? vehicleLabel(rider.vehicleType) : 'Vehicle not recorded'}</p>}
           {profile.isError && <p className="rc-error">Profile facts could not be loaded. <button onClick={() => void profile.refetch()}>Retry profile</button></p>}
         </div><span className="rc-muted">{waitingSince(applicant.oldest, now)}</span></header>
+        <button className="rc-back-documents" onClick={backToDocuments}>Back to documents and zoom · {documents.findIndex((d) => d.id === selected.id) + 1} of {documents.length}</button>
         <div ref={workspace} className="rc-workspace">
           <nav className="rc-documents" aria-label="Applicant documents"><h3>Documents in this lane <span>{documents.findIndex((d) => d.id === selected.id) + 1} of {documents.length}</span></h3>
-            {documents.length > 1 && <p className="rc-document-cue">Swipe to see more documents</p>}
+            {documentsOverflow && <p className="rc-document-cue">Swipe to see more documents</p>}
             {history.isLoading && <p className="rc-muted">Loading other statuses…</p>}
             {history.isError && <p className="rc-error">Other document statuses could not be loaded. <button onClick={() => void history.refetch()}>Retry documents</button></p>}
-            <div className="rc-document-list">{documents.map((d) => <button key={d.id} disabled={busy} aria-pressed={selected.id === d.id} onClick={() => selectDocument(d)}><span>{docLabel(d.docType)}</span><Chip status={d.status} /></button>)}</div>
+            <div ref={documentList} className="rc-document-list">{documents.map((d) => <button key={d.id} disabled={busy} aria-pressed={selected.id === d.id} onClick={() => selectDocument(d)}><span>{docLabel(d.docType)}</span><Chip status={d.status} /></button>)}</div>
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>

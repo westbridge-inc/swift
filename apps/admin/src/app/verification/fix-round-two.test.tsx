@@ -28,6 +28,8 @@ describe('phone review regression fixes', () => {
     expect(phone).toMatch(/\.rc-documents\s*\{[^}]*margin-bottom:\s*1rem/);
   });
   it('shows the selected document position and swipe cue, then updates the position', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(350);
+    vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(496);
     fixture();
     const { user } = renderWithQuery(<VerificationPage />);
     await user.click(await screen.findByRole('button', { name: 'Review', exact: true }));
@@ -73,13 +75,14 @@ describe('phone review regression fixes', () => {
     await screen.findByAltText('National ID evidence');
     await waitFor(() => expect(pane.scrollTop).toBe(phone ? 400 : 20));
   });
-  it('renders one expiry row and hides audit events without operator-relevant facts', async () => {
+  it('renders one expiry row and retains unknown audit activity', async () => {
     fixture();
     const { user } = renderWithQuery(<VerificationPage />);
     await user.click(await screen.findByRole('button', { name: 'Review', exact: true }));
     expect(await screen.findByText('Expiry check: could not determine')).toBeTruthy();
     const history = screen.getByRole('heading', { name: 'History and audit timeline' }).parentElement!;
-    expect(history.querySelectorAll('li')).toHaveLength(1);
+    expect(history.querySelectorAll('li')).toHaveLength(2);
+    expect(within(history).getByText('Other activity')).toBeTruthy();
     expect(history.textContent).not.toContain('Review activity recorded');
   });
 });
@@ -99,7 +102,7 @@ describe('expiry timeline presentation', () => {
     expect(review.reviewTimeline([expiry('V_EXPIRY_PLAUSIBLE PASS'), expiry('V_NOT_EXPIRED PASS')]).map((e) => e.label)).toEqual(['Expiry check: passed']);
     expect(review.reviewTimeline([expiry('V_EXPIRY_PLAUSIBLE PASS'), expiry('V_NOT_EXPIRED PASS [blocking]')])).toHaveLength(2);
     expect(review.reviewTimeline([expiry('V_NOT_EXPIRED PASS'), { ...expiry('V_EXPIRY_PLAUSIBLE PASS'), actor: 'another-validator' }])).toHaveLength(2);
-    expect(review.reviewTimeline([{ at, actor: 'reviewer', what: 'AUDIT UNKNOWN_ACTION' }])).toEqual([]);
+    expect(review.reviewTimeline([{ at, actor: 'reviewer', what: 'AUDIT UNKNOWN_ACTION' }])).toEqual([{ at, actor: 'reviewer', what: 'AUDIT UNKNOWN_ACTION', label: 'Other activity' }]);
     expect(review.reviewTimeline([{ at, actor: 'reviewer', what: 'AUDIT ADMIN PUT /api/v1/admin/verification/:id/approve' }])[0]?.label).toBe('Approval request recorded');
     expect(review.reviewTimeline([expiry('V_EXPIRY_PLAUSIBLE PASS'), expiry('V_NOT_EXPIRED PASS', '2026-09-02T00:00:00Z')])).toHaveLength(2);
     expect(events[0]?.what).toBe('V_EXPIRY_PLAUSIBLE SKIP UNDETERMINABLE');

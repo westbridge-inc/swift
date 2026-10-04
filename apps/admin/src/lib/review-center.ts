@@ -70,12 +70,16 @@ export function timelineLabel(what: string): string {
       'AUDIT REJECT_VERIFICATION_DOC': 'Rejection recorded',
       'AUDIT ESCALATE_VERIFICATION_DOC': 'Sent for another review',
       'AUDIT REVOKE_VERIFICATION_DOC': 'Approval revoked',
+      'AUDIT DSAR_RECTIFICATION_REQUESTED': 'Correction requested by the applicant',
+      'AUDIT KYC_AUTO_APPROVE': 'Automatically approved',
+      'AUDIT KYC_AUTO_REJECT': 'Automatically rejected',
+      'AUDIT VERIFICATION_SUBMIT': 'Document submitted',
     };
     if (decisionAudit[what]) return decisionAudit[what];
     if (what === 'AUDIT VIEW_VERIFICATION_DOC') return 'Document opened for review';
     if (/\/reject$/.test(what)) return 'Rejection request recorded';
     if (/\/approve$/.test(what)) return 'Approval request recorded';
-    return ''; // Unknown audit actions carry no operator-relevant fact we can safely name.
+    return 'Other activity'; // Retain the actor and time without exposing internal action strings.
   }
   return 'Document activity recorded';
 }
@@ -86,7 +90,23 @@ export function reviewTimeline(events: ReviewTimelineEvent[]): Array<ReviewTimel
   return events.flatMap((event, index) => {
     if (consumed.has(index)) return [];
     let label = timelineLabel(event.what);
-    if (!label) return [];
+    // A decision and its audit row may describe the same escalation. Pair once,
+    // only at the identical recorded time and reviewer, retaining the reason.
+    const escalation = (what: string) => {
+      const match = /^DECIDED ESCALATE under (\w+)$/.exec(what);
+      return !!match && isRejectionReasonCode(match[1]!);
+    };
+    const audit = 'AUDIT ESCALATE_VERIFICATION_DOC';
+    if (event.what === audit || escalation(event.what)) {
+      const pair = events.findIndex((other, j) => j > index && !consumed.has(j) &&
+        other.at === event.at && other.actor === event.actor &&
+        (event.what === audit ? escalation(other.what) : other.what === audit));
+      if (pair >= 0) {
+        consumed.add(pair);
+        const decision = event.what === audit ? events[pair]! : event;
+        return [{ ...decision, label: timelineLabel(decision.what) }];
+      }
+    }
     const expiry = /^(V_EXPIRY_PLAUSIBLE|V_NOT_EXPIRED)( .+)$/.exec(event.what);
     if (expiry) {
       const counterpart = expiry[1] === 'V_EXPIRY_PLAUSIBLE' ? 'V_NOT_EXPIRED' : 'V_EXPIRY_PLAUSIBLE';

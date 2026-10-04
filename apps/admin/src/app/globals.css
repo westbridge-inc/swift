@@ -111,6 +111,7 @@ body {
 .rc-documents { min-width: 0; }
 .rc-document-list { display: grid; gap: .5rem; }
 .rc-document-cue { display: none; }
+.rc-back-documents { display: none; }
 .rc-documents h3, .rc-history h3 { font-weight: 600; padding-bottom: .5rem; }
 .rc-documents h3 span { color: var(--muted); }
 .rc-documents button { text-align: left; display: flex; flex-direction: column; align-items: start; gap: .5rem; overflow-wrap: anywhere; }
@@ -168,6 +169,7 @@ body {
   /* Normal flow: an overflow rail must never collapse a grid row below its cards. */
   .rc-workspace { display: block; }
   .rc-documents { margin-bottom: 1rem; }
+  .rc-back-documents { display: flex; flex-shrink: 0; align-items: center; min-height: 44px; margin-bottom: .5rem; font-size: .75rem; }
   .rc-document-list { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .5rem; }
   .rc-document-cue { display: block; color: var(--muted); font-size: .75rem; margin-bottom: .5rem; }
   .rc-documents button { flex: 0 0 10rem; }
