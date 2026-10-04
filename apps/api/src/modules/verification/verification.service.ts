@@ -51,6 +51,23 @@ export const IDENTITY_DOC_TYPE = 'identity_l2';
  *  photo"), through the same KycProvider.verifyIdentity seam the L2 flow uses. */
 const IDENTITY_FACE_MATCH_DOCS = new Set(['national_id', 'owner_national_id']);
 
+/**
+ * [DOC-1 §0.5 · FD-D5] The face-match leg of a document submission: an
+ * identity document while the biometric switch is on. ONE predicate —
+ * submitDocument branches on it, and the status checklist's
+ * `faceMatchDocTypes` is read from it, so what the apps say about a document
+ * cannot drift from what the server does with it.
+ */
+export function identityFaceMatchLeg(docType: string, env: Record<string, string | undefined> = process.env): boolean {
+  return IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled(env);
+}
+
+/** The KYC engines whose identity check compares the document's face with the
+ *  selfie (Didit's face-match; ID Analyzer's biometric scan). The on-shore
+ *  manual review and the sandbox compare none, and an engine missing here is
+ *  never claimed to. */
+const FACE_COMPARING_ENGINES: ReadonlySet<string> = new Set(['didit', 'id-analyzer']);
+
 // Compatibility export for existing callers; the policy itself is registry data.
 export { AUTO_APPROVE_EXPIRY_DAYS } from './doc-registry';
 
@@ -508,7 +525,7 @@ export class VerificationService {
     // [DGP-1 · DOC-1 §2] No PERSONAL image leaves for an external engine unless the doc type allows
     // it, the processor is registered and a transfer basis is recorded. Local engines pass through.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, docType), this.kyc.engine);
-    if (IDENTITY_FACE_MATCH_DOCS.has(docType) && biometricFaceMatchEnabled()) {
+    if (identityFaceMatchLeg(docType)) {
       const selfieUrl = await resolveSignupSelfie(this.prisma, userId);
       // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
       result = await extractWithLadder(() => this.kyc.verifyIdentity({ userId, idDocumentUrl: fileUrl, selfieUrl }));
@@ -1306,6 +1323,14 @@ export class VerificationService {
         : 'VENDOR';
     const trial = await previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
 
+    // [Owner, 1 Oct · truth] The checklist documents this server compares with
+    // the profile selfie right now: the submit path's face-match leg, run by an
+    // engine that compares faces. Empty while face-matching is off (FD-D5, the
+    // default) or the engine compares none (the on-shore manual review), so the
+    // apps never claim a check that does not run. Read-only.
+    const facesCompared = FACE_COMPARING_ENGINES.has(this.kyc.engine?.name ?? '');
+    const faceMatchDocTypes: string[] = facesCompared ? checklist.filter((docType) => identityFaceMatchLeg(docType)) : [];
+
     return {
       roleKey,
       trustLevel: user.trustLevel,
@@ -1316,6 +1341,7 @@ export class VerificationService {
       roleVerified: checklist.length > 0 && missing.length === 0,
       categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && checklist.length === 0,
       trial,
+      faceMatchDocTypes,
     };
   }
 
