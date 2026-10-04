@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -125,6 +126,7 @@ async function makeDriver(at: Point, extra: Record<string, unknown> = {}): Promi
       averageRating: 4.9, acceptanceRate: 90,
     } as never,
   }));
+  await sys(() => currentMoverDocuments(app.prisma, u.userId, driver.vehicleType, true));
   return { ...u, driverId: driver.id };
 }
 
