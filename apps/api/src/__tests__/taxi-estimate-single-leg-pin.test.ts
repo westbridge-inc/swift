@@ -11,6 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { FareService } from '../modules/rides/fare.service';
 import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
+import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] Today's single-leg estimate, pinned BEFORE multi-stop
@@ -23,6 +24,12 @@ import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-
 // perKm 300, perMin 25, minimum 1500; Comfort ×1.35, Group ×2.5) and the seeded
 // Georgetown zones (Central → South = 2000), then confirmed against the code
 // as it stood. Phone prefix +5923417 (grepped: unused elsewhere).
+//
+// [PRICING-GY-OCT] Guyana's default is now the owner's October fare (pinned in
+// fares-georgetown-defaults.test.ts). This file puts the card these bytes were
+// derived from — which names no included kilometres — on the Guyana row and
+// restores the seeded card after: the formula with included kilometres must
+// answer every byte below unchanged for a config that names none.
 // ---------------------------------------------------------------------------
 
 const DAY = 86_400_000;
@@ -105,6 +112,7 @@ async function buildApp(): Promise<FastifyInstance> {
 let app: FastifyInstance;
 let token: string;
 let seq = 0;
+let restoreTaxiCard: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -152,11 +160,13 @@ beforeAll(async () => {
   delete process.env['MAPS_PROVIDER'];
   delete process.env['OSRM_URL'];
   app = await buildApp();
+  restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
+  await restoreTaxiCard();
   await purgeFixtures(app);
   await app.close();
 });

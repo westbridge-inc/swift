@@ -217,13 +217,13 @@ describe('Fare engine — table first, formula fallback, deterministic', () => {
     const estimate = await fare.estimate(SOUTH, { lat: 6.76, lng: -58.14 }, 'GY');
     expect(estimate.source).toBe('formula');
     expect(estimate.fare % 100).toBe(0); // cash-friendly rounding
-    expect(estimate.fare).toBeGreaterThanOrEqual(1500); // minimum
+    expect(estimate.fare).toBeGreaterThanOrEqual(800); // minimum
   });
 
   it('falls back when an end is outside every zone, and enforces the minimum', async () => {
     const short = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(short.source).toBe('formula');
-    expect(short.fare).toBe(1500); // tiny hop -> minimum fare
+    expect(short.fare).toBe(800); // tiny hop -> minimum fare
 
     const sameTwice = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(sameTwice.fare).toBe(short.fare); // deterministic
