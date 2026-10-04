@@ -12,6 +12,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { OrderService } from '../modules/order/order.service';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
 
 // ---------------------------------------------------------------------------
@@ -125,13 +126,9 @@ async function makeDriver(at: Point, extra: Record<string, unknown> = {}): Promi
       averageRating: 4.9, acceptanceRate: 90,
     } as never,
   }));
-  // As the current main taxi fixtures: accepting new custody requires a
-  // durable, current hire-class approval, even for an already-online driver.
-  await sys(() => app.prisma.verificationDocument.create({ data: {
-    userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
-    fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
-    coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
-  } }));
+  // [#1405] Taking work re-checks the driver's current approved documents,
+  // HIRE-class insurance included, as for every taxi suite's driver.
+  await sys(() => currentMoverDocuments(app.prisma, u.userId, 'CAR', true));
   return { ...u, driverId: driver.id };
 }
 
