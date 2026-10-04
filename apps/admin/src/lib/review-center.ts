@@ -1,4 +1,5 @@
 import { fetchVerificationQueue } from './api';
+import { isRejectionReasonCode, rejectionLabel } from './rejection-reasons';
 
 export const REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
@@ -13,7 +14,64 @@ export interface ReviewDocument {
   };
 }
 export interface Applicant { id: string; name: string; phone: string; documents: ReviewDocument[]; oldest: number }
-export const docLabel = (type: string) => type.replaceAll('_', ' ');
+// Shared vocabulary for the queue, facts, dialogs and custody timeline.
+const LABELS: Record<string, string> = {
+  national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport',
+  drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA restaurant licence',
+  business_registration: 'Business registration', police_clearance: 'Police clearance',
+  fitness_cert: 'Vehicle fitness certificate', vehicle_insurance: 'Vehicle insurance',
+  hire_car_permit: 'Hire car permit', road_service_licence: 'Road service licence',
+  food_handler_cert: 'Food handler certificate', vehicle_registration: 'Vehicle registration',
+  liquor_licence: 'Liquor licence', sanitary_certificate: 'Sanitary certificate',
+  trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
+  nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
+  self_declaration_unregistered: 'Unregistered business declaration',
+  VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
+  RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
+  CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
+  V_PLATE_CLASS: 'Plate class check', V_PLATE_FORMAT: 'Plate format check',
+  V_NOT_EXPIRED: 'Expiry check', V_EXPIRY_PLAUSIBLE: 'Expiry date check',
+  V_LICENCE_CLASS: 'Licence class check', V_INSURANCE_SCOPE: 'Insurance coverage check',
+  V_ALL_REQUIRED_PRESENT: 'Required information check', V_PLATE_CROSS_MATCH: 'Plate match check',
+  V_TYPE_MATCH: 'Document type check', V_PAGE_COMPLETE: 'Page completeness check',
+  V_NAME_CONSISTENCY: 'Name consistency check', V_DATE_ORDER: 'Date order check',
+  V_DOB_ADULT: 'Age check', V_TIN_FORMAT: 'TIN format check',
+  V_FIELD_CONFIDENCE: 'Legibility check', V_TAMPER_HEURISTIC: 'Alteration check',
+  V_SELF_REPORTED_MATCH: 'Account details check', V_REQUIREMENT_COMPLETE: 'Requirements check',
+  V_SHA_COLLISION: 'Duplicate file check', V_NUMBER_COLLISION: 'Duplicate number check',
+  V_PHASH_NEAR: 'Similar document check', V_VELOCITY: 'Submission frequency check',
+  V_MRZ_CHECKSUM: 'Machine-readable information check', V_VEHICLE_COLOUR: 'Vehicle colour check',
+};
+export const docLabel = (type: string) => LABELS[type] ?? 'Document';
+export const roleLabel = (role: string) => LABELS[role] ?? 'Applicant';
+export const vehicleLabel = (type: string) => LABELS[type] ?? 'Vehicle';
+const OUTCOMES: Record<string, string> = { APPROVED: 'Approved', REJECTED: 'Rejected', PENDING: 'Awaiting review', EXPIRED: 'Expired', APPROVE: 'Approved', REJECT: 'Rejected', REQUEST_INFO: 'More information requested', ESCALATE: 'Sent for another review', SECOND_REVIEW: 'Awaiting a second reviewer', ACTIVE: 'Active', REVOKED: 'Revoked' };
+/** The custody API has a legacy textual event contract. Never expose its raw fallback. */
+export function timelineLabel(what: string): string {
+  const submitted = /^SUBMITTED (\S+) as (\S+)$/.exec(what);
+  if (submitted) return `Submitted ${docLabel(submitted[1]!)} as ${roleLabel(submitted[2]!)}`;
+  const check = /^(V_\w+) (PASS|FAIL|WARN|SKIP|ERROR)(?: (\w+))?(?: \[blocking\])?$/.exec(what);
+  if (check) {
+    const verdict = check[3] === 'UNDETERMINABLE' ? 'could not determine' : ({ PASS: 'passed', FAIL: 'failed', WARN: 'needs attention', SKIP: 'not completed', ERROR: 'could not complete' } as Record<string, string>)[check[2]!];
+    return `${LABELS[check[1]!] ?? 'Document check'}: ${verdict}${what.endsWith('[blocking]') ? ' — blocking' : ''}`;
+  }
+  const decision = /^(DECIDED|STATUS|RECORD) (\w+)(?: under (\w+))?$/.exec(what);
+  if (decision) return `${OUTCOMES[decision[2]!] ?? 'Decision recorded'}${decision[3] && isRejectionReasonCode(decision[3]) ? `: ${rejectionLabel(decision[3])}` : ''}`;
+  if (what.startsWith('CASE OPENED')) return 'Review case opened';
+  if (what.startsWith('EXTRACTED FAILED')) return 'Document reading failed';
+  if (what.startsWith('EXTRACTED PARTIAL')) return 'Document reading partially completed';
+  if (what === 'EXTRACTED OK') return 'Document reading completed';
+  if (what.startsWith('LEGAL HOLD')) return 'Document retained for legal review';
+  if (what.startsWith('DESTROYED') || what.startsWith('IMAGE PURGED')) return 'Document file removed; record retained';
+  if (what === 'SUBMISSION PURGED') return 'Submission removed under the retention policy';
+  if (what.startsWith('AUDIT ')) {
+    if (what === 'AUDIT VIEW_VERIFICATION_DOC') return 'Document opened for review';
+    if (/\/reject$/.test(what)) return 'Rejection request recorded';
+    if (/\/approve$/.test(what)) return 'Approval request recorded';
+    return 'Review activity recorded';
+  }
+  return 'Document activity recorded';
+}
 export const applicantId = (doc: ReviewDocument) => doc.userId || doc.user?.id || doc.id;
 export const maskedPhone = (phone?: string) => phone ? `••• ••• ${phone.slice(-4)}` : 'No phone on file';
 

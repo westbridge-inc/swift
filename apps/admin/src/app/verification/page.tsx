@@ -9,7 +9,7 @@ import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_STATUSES, applicantId, docLabel, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_STATUSES, applicantId, docLabel, roleLabel, vehicleLabel, timelineLabel, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 
 const EXPIRING_DOC_TYPES = [
   'police_clearance', 'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -25,11 +25,20 @@ const EMPTY_INSURANCE: InsuranceCheck = { insurerName: '', policyNumber: '', cov
 const LANES = [{ value: 'operator', label: 'Operators' }, { value: 'customer', label: 'Customers' }, { value: 'all', label: 'Everything' }] as const;
 function Chip({ status }: { status: string }) { return <span className={`rc-chip rc-chip-${status.toLowerCase()}`}>{status}</span>; }
 
+function TimelineActor({ actor, applicant }: { actor: string | null; applicant: Applicant }) {
+  const system = !actor || actor === 'validator' || actor.startsWith('engine:');
+  const isApplicant = actor === applicant.id;
+  const person = useQuery({ queryKey: ['review-actor', actor], queryFn: () => fetchUserDetail(actor!), enabled: !system && !isApplicant });
+  const name = [person.data?.data?.firstName, person.data?.data?.lastName].filter(Boolean).join(' ');
+  return <small>{system ? 'System' : isApplicant ? applicant.name : name || (person.isLoading ? 'Loading reviewer…' : 'Reviewer name unavailable')}</small>;
+}
+
 export default function VerificationPage() {
   const client = useQueryClient();
   const [status, setStatus] = useState<ReviewStatus>('PENDING');
   const [lane, setLane] = useState<ReviewLane>('operator');
   const [search, setSearch] = useState('');
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [role, setRole] = useState('');
   const [type, setType] = useState('');
   const [age, setAge] = useState('');
@@ -45,10 +54,12 @@ export default function VerificationPage() {
   const [notice, setNotice] = useState('');
   const [mutationError, setMutationError] = useState<unknown>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const workspace = useRef<HTMLDivElement>(null);
   const inFlight = useRef(false);
 
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 60_000); return () => clearInterval(timer); }, []);
-  useEffect(() => { if (applicant) { heading.current?.focus(); heading.current?.scrollIntoView?.({ block: 'start' }); } }, [applicant]);
+  useEffect(() => { if (applicant) { heading.current?.focus({ preventScroll: true }); heading.current?.closest('.rc-applicant')?.scrollIntoView?.({ block: 'start' }); } }, [applicant]);
+  useEffect(() => { if (workspace.current) workspace.current.scrollTop = 0; }, [selected?.id]);
   const queue = useQuery({ queryKey: ['verification', status, lane], queryFn: () => loadReviewQueue(status, lane) });
   const counts = useQuery({ queryKey: ['verification-counts'], queryFn: fetchVerificationCounts });
   const profile = useQuery({ queryKey: ['review-profile', applicant?.id], queryFn: () => fetchUserDetail(applicant!.id), enabled: !!applicant });
@@ -154,9 +165,10 @@ export default function VerificationPage() {
         {lane !== 'operator' && <p className="rc-muted">Customer IDs are shown deliberately in this lane. Every document view is audit-logged.</p>}
       </div>
       {!applicant ? <>
-        <div className="rc-filters">
+        <button className="rc-filter-toggle" aria-expanded={filtersOpen} aria-controls="review-filters" onClick={() => setFiltersOpen(!filtersOpen)}>Filters{search || role || type || age ? " · active" : ""}</button>
+        <div id="review-filters" className={`rc-filters${filtersOpen ? " rc-filters-open" : ""}`}>
           <label>Search applicants<input aria-label="Search applicants" type="search" placeholder="Name or phone" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
-          <label>Applicant role<select aria-label="Applicant role" value={role} onChange={(e) => setRole(e.target.value)}><option value="">All roles</option>{[...new Set(['CUSTOMER', ...(queue.data ?? []).map((d) => d.role)])].sort().map((r) => <option key={r}>{r}</option>)}</select></label>
+          <label>Applicant role<select aria-label="Applicant role" value={role} onChange={(e) => setRole(e.target.value)}><option value="">All roles</option>{[...new Set(['CUSTOMER', ...(queue.data ?? []).map((d) => d.role)])].sort().map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}</select></label>
           <label>Document type<select aria-label="Document type" value={type} onChange={(e) => setType(e.target.value)}><option value="">All documents</option>{[...new Set((queue.data ?? []).map((d) => d.docType))].sort().map((t) => <option key={t} value={t}>{docLabel(t)}</option>)}</select></label>
           <label>Waiting time<select aria-label="Waiting time" value={age} onChange={(e) => setAge(e.target.value)}><option value="">Any age</option><option value="24">Over 24 hours</option><option value="72">Over 3 days</option><option value="168">Over 7 days</option></select></label>
           <button onClick={clearFilters}>Clear filters</button>
@@ -166,20 +178,20 @@ export default function VerificationPage() {
           {!filtered.length ? <p className="rc-empty"><span>{groups.length ? 'No applicants match these filters.' : 'No documents'}</span> {groups.length ? 'Clear a filter to see more applicants.' : 'This lane has no documents with the selected status.'}</p> :
             <table className="rc-queue-table"><thead><tr><th>Applicant</th><th>Role / documents</th><th>Waiting for</th><th><span className="sr-only">Action</span></th></tr></thead><tbody>{filtered.map((a) => <tr key={a.id}>
               <td><strong>{a.name}</strong><small>{maskedPhone(a.phone)}</small></td>
-              <td><span>{[...new Set(a.documents.map((d) => d.role))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small></td>
+              <td><span>{[...new Set(a.documents.map((d) => roleLabel(d.role)))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small></td>
               <td><time dateTime={a.oldest ? new Date(a.oldest).toISOString() : undefined}>{waitingSince(a.oldest, now)}</time></td>
               <td><button className="rc-primary" onClick={() => openApplicant(a)}>Review</button></td>
             </tr>)}</tbody></table>}
         </section>}
       </> : selected && <section className="rc-applicant" aria-label="Applicant review">
         <div className="rc-applicant-navigation"><button disabled={busy} onClick={() => openApplicant(null)}>Back to queue</button><div><button disabled={busy || currentIndex <= 0} onClick={() => move(-1)}>Previous applicant</button><button disabled={busy || currentIndex < 0 || currentIndex >= filtered.length - 1} onClick={() => move(1)}>Next applicant</button></div></div>
-        <header className="rc-applicant-heading"><div><h2 ref={heading} tabIndex={-1}>{applicant.name}</h2><p>{maskedPhone(applicant.phone)} · {[...new Set(documents.map((d) => d.role))].join(', ')} · {selected.user?.countryCode}</p>
+        <header className="rc-applicant-heading"><div><h2 ref={heading} tabIndex={-1}>{applicant.name}</h2><p>{maskedPhone(applicant.phone)} · {[...new Set(documents.map((d) => roleLabel(d.role)))].join(', ')} · {selected.user?.countryCode}</p>
           {businesses.map((b, i) => <p key={b.id ?? i}>{b.name}</p>)}
-          {vehicle && <p>Vehicle on file: <strong>{vehicle.licensePlate ?? 'No plate on file'}</strong> · {[vehicle.vehicleMake, vehicle.vehicleModel, vehicle.vehicleType].filter(Boolean).join(' ')}</p>}
-          {rider && <p>Rider: {rider.vehicleType ?? 'Vehicle not recorded'}</p>}
+          {vehicle && <p>Vehicle on file: <strong>{vehicle.licensePlate ?? 'No plate on file'}</strong> · {[[vehicle.vehicleMake, vehicle.vehicleModel].filter(Boolean).join(' '), vehicle.vehicleType ? vehicleLabel(vehicle.vehicleType) : ''].filter(Boolean).join(' · ')}</p>}
+          {rider && <p>Rider: {rider.vehicleType ? vehicleLabel(rider.vehicleType) : 'Vehicle not recorded'}</p>}
           {profile.isError && <p className="rc-error">Profile facts could not be loaded. <button onClick={() => void profile.refetch()}>Retry profile</button></p>}
         </div><span className="rc-muted">{waitingSince(applicant.oldest, now)}</span></header>
-        <div className="rc-workspace">
+        <div ref={workspace} className="rc-workspace">
           <nav className="rc-documents" aria-label="Applicant documents"><h3>Documents in this lane <span>{documents.length}</span></h3>
             {history.isLoading && <p className="rc-muted">Loading other statuses…</p>}
             {history.isError && <p className="rc-error">Other document statuses could not be loaded. <button onClick={() => void history.refetch()}>Retry documents</button></p>}
@@ -187,9 +199,9 @@ export default function VerificationPage() {
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
-            <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} />
+            <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
-            {selected.status === 'PENDING' && <div className="rc-fields">
+            {selected.status === 'PENDING' && (needsExpiry || isInsurance) && <div className="rc-fields">
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
                 <label>Insurer<input placeholder="Insurer" value={insurance.insurerName} onChange={(e) => setInsurance({ ...insurance, insurerName: e.target.value })} /></label>
@@ -201,7 +213,7 @@ export default function VerificationPage() {
             </div>}
             <section className="rc-history"><h3>History and audit timeline</h3>
               {custody.isLoading ? <p>Loading history…</p> : custody.isError ? <p className="rc-error">History unavailable. <button onClick={() => void custody.refetch()}>Retry history</button></p> : custody.data?.data?.timeline?.length ?
-                <ol>{custody.data.data.timeline.map((event: { at: string; what: string; actor: string | null }, i: number) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{new Date(event.at).toLocaleString()}</time><span>{event.what}</span>{event.actor && <small>Actor: {event.actor}</small>}</li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
+                <ol>{custody.data.data.timeline.map((event: { at: string; what: string; actor: string | null }, i: number) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{new Date(event.at).toLocaleString()}</time><span>{timelineLabel(event.what)}</span><TimelineActor actor={event.actor} applicant={applicant} /></li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
             </section>
           </div>
         </div>

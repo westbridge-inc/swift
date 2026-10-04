@@ -44,7 +44,7 @@ describe('Review Center applicant workspace', () => {
     expect(screen.getByRole('button', { name: /national id.*PENDING/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /police clearance.*PENDING/i })).toBeTruthy();
     expect(await screen.findByText('Demo grocery')).toBeTruthy();
-    expect(await screen.findByText('CASE OPENED')).toBeTruthy();
+    expect(await screen.findByText('Review case opened')).toBeTruthy();
   });
   it('searches by name and phone and applies age and role filters', async () => {
     fixture();
@@ -75,7 +75,7 @@ describe('Review Center applicant workspace', () => {
     const { user } = renderWithQuery(<VerificationPage />);
     await openAlice(user);
     await user.click(screen.getByRole('button', { name: /View document/ }));
-    const preview = await screen.findByAltText('national id evidence');
+    const preview = await screen.findByAltText('National ID evidence');
     expect(preview.getAttribute('src')).toContain('/api/v1/verification/render/a?');
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.load(preview);
@@ -85,7 +85,7 @@ describe('Review Center applicant workspace', () => {
     expect(requestsByMethod(fetch, 'PUT')).toHaveLength(0);
     await user.click(within(dialog).getByRole('button', { name: 'Confirm approval' }));
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Bob Applicant' })).toBeTruthy());
-    expect(screen.getByRole('status').textContent).toContain('Approved national id');
+    expect(screen.getByRole('status').textContent).toContain('Approved National ID');
     expect(JSON.parse(String(requestsByMethod(fetch, 'PUT')[0]![1]?.body))).toEqual({});
   });
   it('shows PENDING honestly after a fraud-class verdict and advances to the next applicant', async () => {

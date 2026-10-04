@@ -93,7 +93,8 @@ export function GlobalSearch() {
           setOpen(true);
         }}
         onFocus={() => setOpen(true)}
-        placeholder="Search orders, users, vendors…"
+        placeholder="Search"
+        aria-label="Search orders, users, vendors"
         className="w-full bg-[var(--panel-2)] text-white pl-10 pr-12 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
       />
       <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-[var(--muted)] border border-[var(--border)] rounded px-1.5 py-0.5">

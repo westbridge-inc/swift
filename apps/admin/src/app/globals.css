@@ -70,11 +70,13 @@ body {
 .rc-page-heading { display: flex; flex-wrap: wrap; gap: 1rem; align-items: end; justify-content: space-between; margin-bottom: 1.5rem; }
 .rc-page-heading h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -.025em; }
 .rc-page-heading p, .rc-muted, .rc-review-facts, .rc-applicant-heading p { color: var(--muted); }
+.rc-applicant-heading h2:focus-visible { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: .3rem; }
 .rc-muted { font-size: .75rem; }
 .rc-tabs { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .75rem; }
 .rc-tabs button[aria-pressed=true] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .rc-tabs button span { margin-left: .5rem; font-variant-numeric: tabular-nums; color: var(--muted); }
 .rc-queue-controls { margin-bottom: 1rem; }
+.rc-filter-toggle { display: none; }
 .rc-filters { display: grid; grid-template-columns: minmax(12rem, 2fr) repeat(3, minmax(8rem, 1fr)) auto; gap: .75rem; align-items: end; padding: 1rem 0 1.5rem; }
 .rc-filters label, .rc-fields label { display: grid; gap: .4rem; color: var(--muted); font-size: .75rem; }
 .rc-filters input, .rc-filters select { font-size: .875rem; color: var(--text); }
@@ -95,13 +97,17 @@ body {
 .rc-skeleton { padding: 2rem; min-height: 14rem; border-radius: var(--admin-radius); background: repeating-linear-gradient(var(--panel) 0 54px, var(--ink) 54px 68px); color: var(--muted); }
 .rc-notice { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: .875rem 1rem; margin-bottom: 1rem; }
 .rc-error { color: #ffb4b8; line-height: 1.6; padding: .75rem 0; }
+/* Decision controls occupy a separate row: evidence never scrolls behind them. */
+.rc-is-review .rc-page-heading, .rc-is-review .rc-queue-controls { display: none; }
+.rc-applicant { display: flex; flex-direction: column; height: calc(100dvh - 7rem); min-height: 28rem; scroll-margin-block-start: 5rem; }
+.rc-applicant-navigation, .rc-applicant-heading, .rc-actions { flex-shrink: 0; }
 .rc-applicant-navigation { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: space-between; margin-bottom: 1rem; }
 .rc-applicant-navigation > div { display: flex; gap: .5rem; }
-.rc-applicant-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 1rem; border-block: 1px solid var(--border); padding: 1.25rem 0; margin-bottom: 1.25rem; }
-.rc-applicant-heading h2 { font-size: 1.25rem; font-weight: 650; margin-bottom: .25rem; }
+.rc-applicant-heading { scroll-margin-block-start: 5rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 1rem; border-block: 1px solid var(--border); padding: 1.25rem 0; margin-bottom: 1.25rem; }
+.rc-applicant-heading h2 { scroll-margin-block-start: 5rem; outline: none; font-size: 1.25rem; font-weight: 650; margin-bottom: .25rem; }
 .rc-applicant-heading p { margin-top: .3rem; overflow-wrap: anywhere; }
 .rc-applicant-heading strong { color: var(--text); }
-.rc-workspace { display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 1.25rem; align-items: start; }
+.rc-workspace { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 .25rem 1rem; display: grid; grid-template-columns: 13rem minmax(0, 1fr); gap: 1.25rem; align-items: start; }
 .rc-documents { display: grid; gap: .5rem; }
 .rc-documents h3, .rc-history h3 { font-weight: 600; padding-bottom: .5rem; }
 .rc-documents h3 span { color: var(--muted); }
@@ -121,24 +127,25 @@ body {
 .rc-viewer-tools button { padding-inline: .75rem; min-width: 44px; }
 .rc-viewer-empty { min-height: 20rem; padding: 4rem 2rem; display: grid; place-items: center; text-align: center; color: var(--muted); }
 .rc-viewer .rc-error { padding: 1rem; }
-.rc-evidence-viewport { overflow: auto; min-height: 20rem; max-height: 70dvh; padding: 1rem; background: #100e0f; text-align: center; }
-.rc-document-image { display: block; max-width: 100%; max-height: 62dvh; width: auto; height: auto; object-fit: contain; margin: 1rem auto; transform-origin: center; }
+.rc-evidence-viewport { overflow: auto; min-height: 20rem; padding: 1rem; background: #100e0f; text-align: center; }
+.rc-document-image { display: block; max-width: none; width: 100%; height: auto; margin: 0 auto; transform-origin: center; }
 .rc-pdf { width: 100%; height: 55dvh; border: none; background: white; }
 .admin-modal.rc-fullscreen { width: calc(100vw - 2rem); height: calc(100dvh - 2rem); padding: 0; }
 .rc-fullscreen .rc-evidence-viewport { max-height: calc(100dvh - 7rem); }
-.rc-fullscreen .rc-document-image { max-height: 80dvh; }
+.rc-pdf-fallback { padding: .75rem; color: var(--text); background: var(--panel-2); text-align: left; }
+.rc-pdf-fallback a { display: inline-flex; align-items: center; min-height: 44px; color: var(--text); text-decoration: underline; }
 .rc-review-facts { display: flex; flex-wrap: wrap; gap: 1rem; font-size: .75rem; margin: .75rem 0; }
 .rc-fields { display: grid; gap: 1rem; padding: 1rem 0; }
 .rc-fields fieldset { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; border: 1px solid var(--border); border-radius: var(--admin-radius); padding: 1rem; }
 .rc-fields legend { padding-inline: .5rem; }
 .rc-fields small { color: #e8b88b; }
-.rc-fields .rc-check, .rc-check { display: flex; align-items: center; gap: .75rem; min-height: 44px; text-align: left; color: var(--text); }
-.rc-check input { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent-deep); }
+.admin-modal label.rc-check, .rc-fields .rc-check, .rc-check { width: 100%; box-sizing: border-box; padding: .5rem; cursor: pointer; display: flex; align-items: center; gap: .75rem; min-height: 44px; text-align: left; color: var(--text); }
+.admin-modal .rc-check input, .rc-check input { width: 20px; height: 20px; min-height: 20px; padding: 0; flex: 0 0 auto; accent-color: var(--accent-deep); }
 .rc-history { margin-top: 1.5rem; border-top: 1px solid var(--border); padding-top: 1rem; }
 .rc-history ol { border-left: 2px solid var(--border); padding-left: 1rem; }
 .rc-history li { display: grid; gap: .2rem; padding: .5rem 0 1rem; overflow-wrap: anywhere; }
 .rc-history time, .rc-history small { color: var(--muted); font-size: .75rem; }
-.rc-actions { position: sticky; bottom: -1.5rem; display: flex; align-items: center; gap: .75rem; padding: 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: var(--admin-radius) var(--admin-radius) 0 0; margin-top: 1.5rem; z-index: 10; }
+.rc-actions { position: relative; display: flex; align-items: center; gap: .75rem; padding: 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: var(--admin-radius) var(--admin-radius) 0 0; margin-top: .75rem; z-index: 10; }
 .rc-actions p { margin-right: auto; }
 .rc-actions small { display: block; color: var(--muted); font-size: .75rem; }
 .rc-dialog-actions { display: flex; justify-content: end; gap: .75rem; margin-top: 1rem; }
@@ -151,8 +158,15 @@ body {
 }
 @media (max-width: 767px) {
   .rc-page-heading h1 { font-size: 1.5rem; }
-  .rc-is-review .rc-page-heading, .rc-is-review .rc-queue-controls { display: none; }
-  .rc-filters { grid-template-columns: minmax(0, 1fr); gap: .75rem; }
+  .rc-filter-toggle { display: inline-flex; margin-bottom: .75rem; }
+  .rc-filters { display: none; grid-template-columns: minmax(0, 1fr); gap: .75rem; }
+  .rc-filters.rc-filters-open { display: grid; }
+  .rc-applicant { height: calc(100dvh - 6rem); }
+  .rc-documents { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .5rem; }
+  .rc-documents h3 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .rc-documents button { flex: 0 0 10rem; }
+  .rc-documents > p { flex: 0 0 12rem; }
+  .rc-applicant-heading { padding: .75rem 0; margin-bottom: .75rem; }
   .rc-queue-table, .rc-queue-table tbody { display: block; }
   .rc-queue-table thead { display: none; }
   .rc-queue-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; padding: .75rem; gap: .5rem; }
@@ -164,7 +178,7 @@ body {
   .rc-applicant-navigation > div button { flex: 1; }
   .rc-viewer-empty { min-height: 14rem; padding: 2rem 1rem; }
   .rc-evidence-viewport { min-height: 14rem; padding: .5rem; }
-  .rc-actions { bottom: -1rem; flex-wrap: wrap; padding: .75rem; }
+  .rc-actions { flex-wrap: wrap; padding: .75rem; }
   .rc-actions p { width: 100%; font-size: .75rem; }
   .rc-actions small { display: none; }
   .rc-actions button { flex: 1; }

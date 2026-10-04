@@ -206,7 +206,7 @@ describe('verification mutations', () => {
     const fetchMock = mockApi(verificationHandler(() => { throw new Error('No mutation expected'); }));
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user); await reviewEvidence(user); await startApproval(user);
-    expect(screen.getByRole('dialog').textContent).toContain('Approve national id');
+    expect(screen.getByRole('dialog').textContent).toContain('Approve National ID');
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
@@ -214,7 +214,7 @@ describe('verification mutations', () => {
     const fetchMock = mockApi(verificationHandler(() => { throw new Error('No mutation expected'); }));
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user); await reviewEvidence(user); await startRejection(user);
-    expect(screen.getByRole('dialog').textContent).toContain('Reject national id');
+    expect(screen.getByRole('dialog').textContent).toContain('Reject National ID');
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
