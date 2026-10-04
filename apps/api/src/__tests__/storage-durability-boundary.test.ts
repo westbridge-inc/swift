@@ -8,6 +8,11 @@ import { assertSafeBootConfig } from '../utils/boot-config';
 afterEach(() => vi.unstubAllEnvs());
 
 describe('MASTER-074 storage durability boundary', () => {
+  it.each([undefined, 'prod'])('refuses an invalid runtime mode (%s) at the direct adapter boundary', (mode) => {
+    vi.stubEnv('NODE_ENV', mode);
+    vi.stubEnv('STORAGE_PROVIDER', 'local');
+    expect(() => new LocalStorageProvider()).toThrow(/NODE_ENV/);
+  });
   it('does not allow staging development mode to bypass storage posture', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', PILOT_ENV: 'staging', STORAGE_PROVIDER: 'local' })).toThrow(/storage|STORAGE/);
   });

@@ -1,14 +1,16 @@
 import path from 'node:path';
+import { runtimeMode } from '../../utils/runtime-mode';
 
 /** A declaration of the storage contract, not evidence of a mounted volume
  * or a successful backup. Managed Compose supplies the shared mount; other
  * orchestrators must prove equivalent topology before activation. */
 export function assertDurableStorageConfig(env: Record<string, string | undefined> = process.env): void {
+  const mode = runtimeMode(env);
   const deployment = env['STORAGE_DEPLOYMENT'];
   if (deployment !== undefined && deployment !== 'managed') throw new Error('Invalid STORAGE_DEPLOYMENT');
   const kind = env['STORAGE_PROVIDER'] ?? 'local';
   if (!['local', 's3', 'r2'].includes(kind)) throw new Error('Unsupported storage provider');
-  const managed = deployment === 'managed' || env['NODE_ENV'] === 'production'
+  const managed = deployment === 'managed' || mode === 'production'
     || env['PILOT_ENV'] === 'staging' || env['PILOT_ENV'] === 'production';
   if (!managed) return;
   if (kind !== 'local') {
