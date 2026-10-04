@@ -104,7 +104,7 @@ async function makeDriverDeviceSession(userId: string, deviceId: string) {
   return { token, sessionId: session.id };
 }
 
-async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
+async function makeDriver(opts: { lat?: number; lng?: number; currentInsurance?: boolean } = {}) {
   const u = await makeUserWithSession(['DRIVER', 'CUSTOMER'], 'DRIVER');
   const driver = await app.prisma.driver.create({
     data: {
@@ -119,6 +119,13 @@ async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
       locationSessionId: u.sessionId,
     },
   });
+  // Online fixtures must satisfy the same current insurance gate at custody
+  // as at GO. Negative GO cases opt out explicitly below.
+  if (opts.currentInsurance !== false) await app.prisma.verificationDocument.create({ data: {
+    userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
+    fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
+    coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
+  } });
   return { ...u, driverId: driver.id };
 }
 
@@ -217,13 +224,13 @@ describe('Fare engine — table first, formula fallback, deterministic', () => {
     const estimate = await fare.estimate(SOUTH, { lat: 6.76, lng: -58.14 }, 'GY');
     expect(estimate.source).toBe('formula');
     expect(estimate.fare % 100).toBe(0); // cash-friendly rounding
-    expect(estimate.fare).toBeGreaterThanOrEqual(1500); // minimum
+    expect(estimate.fare).toBeGreaterThanOrEqual(800); // minimum
   });
 
   it('falls back when an end is outside every zone, and enforces the minimum', async () => {
     const short = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(short.source).toBe('formula');
-    expect(short.fare).toBe(1500); // tiny hop -> minimum fare
+    expect(short.fare).toBe(800); // tiny hop -> minimum fare
 
     const sameTwice = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(sameTwice.fare).toBe(short.fare); // deterministic
@@ -913,7 +920,7 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   }
 
   async function offlineDriver() {
-    const d = await makeDriver();
+    const d = await makeDriver({ currentInsurance: false });
     await app.prisma.driver.update({ where: { id: d.driverId }, data: { isOnline: false } });
     return d;
   }

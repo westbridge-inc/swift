@@ -120,14 +120,14 @@ describe('the law (pure, property-style over every boundary and every partial)',
     expect(validatePricingConfig('COURIER_RATES', { sizeSurcharge: { LARGE: -5 } }).status).toBe('INVALID');
   });
   it('a valid partial merges over the defaults and the WHOLE payload is the answer; an unknown key is refused; one bad field poisons the whole', () => {
-    expect(validatePricingConfig('TAXI_RATES', { base: 2000 })).toMatchObject({ status: 'VALID', payload: { base: 2000, perKm: 300, perMin: 25, minimum: 1500 } });
-    expect(validatePricingConfig('DELIVERY_RATES', { includedKm: 0 })).toMatchObject({ status: 'VALID', payload: { baseFee: 500, perKmRate: 200, includedKm: 0, surgeMultiplier: 1 } });
+    expect(validatePricingConfig('TAXI_RATES', { base: 2000 })).toMatchObject({ status: 'VALID', payload: { base: 2000, perKm: 175, perMin: 0, minimum: 800 } });
+    expect(validatePricingConfig('DELIVERY_RATES', { includedKm: 0 })).toMatchObject({ status: 'VALID', payload: { baseFee: 500, perKmRate: 100, includedKm: 0, surgeMultiplier: 1 } });
     expect(validatePricingConfig('COURIER_RATES', { sizeSurcharge: { LARGE: 1500 } }).payload).toMatchObject({ sizeSurcharge: { SMALL: 0, MEDIUM: 500, LARGE: 1500, EXTRA_LARGE: 2000 } });
     expect(validatePricingConfig('TAXI_RATES', { base: 2000, perKmRate: 300 }).status).toBe('INVALID'); // a typo'd key can no longer silently do nothing
     expect(validatePricingConfig('TAXI_RATES', { base: 2000, perKm: -1 }).status).toBe('INVALID');    // never "keep the valid parts"
     // the full partial matrix over one kind: every subset of fields with valid values is VALID
-    const fields = ['base', 'perKm', 'perMin', 'minimum'];
-    for (let mask = 0; mask < 16; mask++) {
+    const fields = ['base', 'perKm', 'perMin', 'minimum', 'includedKm'];
+    for (let mask = 0; mask < 32; mask++) {
       const partial = Object.fromEntries(fields.filter((_, i) => mask & (1 << i)).map((f) => [f, 700]));
       expect(validatePricingConfig('TAXI_RATES', partial).status, JSON.stringify(partial)).toBe('VALID');
     }
@@ -163,7 +163,7 @@ describe('the register’s red test, end to end: an invalid column never prices 
     expect(nan.statusCode).toBe(400);
     const ok = await injectWithApproval(app, { method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: { base: 2000, minimum: 2500 } });
     expect(ok.statusCode, ok.body).toBe(200);
-    expect(ok.json().data).toMatchObject({ version: 1, payload: { base: 2000, perKm: 300, perMin: 25, minimum: 2500 } });
+    expect(ok.json().data).toMatchObject({ version: 1, payload: { base: 2000, perKm: 175, perMin: 0, minimum: 2500 } });
     const est = await svc().estimate(P, Q, ZZ);
     expect(est.source).toBe('formula');
     expect(est.fare).toBeGreaterThanOrEqual(2500);
@@ -178,7 +178,7 @@ describe('the register’s red test, end to end: an invalid column never prices 
       const read = await readPricingConfig(app.prisma, ZZ, 'TAXI_RATES');
       expect(read.source, corrupt).toBe('last_known_good');
       expect(read.version).toBe(1);
-      expect(read.payload).toEqual({ base: 2000, perKm: 300, perMin: 25, minimum: 2500 });
+      expect(read.payload).toEqual({ base: 2000, perKm: 175, perMin: 0, minimum: 2500 });
       expect(read.problems.length).toBeGreaterThan(0);
       const est = await svc().estimate(P, Q, ZZ);
       expect(est.fare, corrupt).toBe(good.fare);
@@ -193,7 +193,7 @@ describe('the register’s red test, end to end: an invalid column never prices 
     const taxi = view.json().data.kinds.find((k: { kind: string }) => k.kind === 'TAXI_RATES');
     expect(taxi.live.status).toBe('INVALID');
     expect(taxi.effective).toMatchObject({ source: 'last_known_good', version: 1 });
-    expect(taxi.units).toBe('GYD_WHOLE');
+    expect(taxi.units).toBe('GYD_WHOLE+KM');
   });
   it('a valid write heals it as version 2; rollback pins version 1 as version 3; the quote follows each', async () => {
     const v2 = await injectWithApproval(app, { method: 'PUT', url: `/api/v1/admin/countries/${ZZ}/pricing/TAXI_RATES`, headers: { ...headers(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: { base: 3000, minimum: 4000 } });
@@ -213,7 +213,7 @@ describe('the register’s red test, end to end: an invalid column never prices 
     const versions = await app.prisma.pricingConfigVersion.findMany({ where: { countryCode: ZZ, kind: 'TAXI_RATES' }, orderBy: { version: 'asc' } });
     expect(versions.map((v) => v.version)).toEqual([1, 2, 3]);
     expect(versions[2]!.restoredFrom).toBe(1);
-    expect(versions[0]!.units).toBe('GYD_WHOLE');
+    expect(versions[0]!.units).toBe('GYD_WHOLE+KM');
   });
   it('the database refuses a non-object pricing column outright', async () => {
     await expect(raw(`UPDATE "country_configs" SET "taxiRates" = '"free"'::jsonb WHERE "code" = '${ZZ}'`)).rejects.toThrow(/country_configs_taxi_rates_object_check/);
@@ -231,7 +231,7 @@ describe('the register’s red test, end to end: an invalid column never prices 
   it('a GY quote is unchanged by all of this: its seeded config is valid, the shadow agrees, and version 1 was recorded on first read', async () => {
     const read = await readPricingConfig(app.prisma, 'GY', 'TAXI_RATES');
     expect(read.source).toBe('config');
-    expect(read.payload).toEqual({ base: 1000, perKm: 300, perMin: 25, minimum: 1500 });
+    expect(read.payload).toEqual({ base: 800, includedKm: 3, perKm: 175, perMin: 0, minimum: 800 });
     expect(read.version).toBeGreaterThanOrEqual(1);
     const classes = await readPricingConfig(app.prisma, 'GY', 'TAXI_CLASS_RATES');
     expect(classes.payload).toEqual({ ECONOMY: 1, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 });
