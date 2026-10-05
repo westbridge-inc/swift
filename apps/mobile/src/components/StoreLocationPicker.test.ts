@@ -155,6 +155,8 @@ const fx = vi.hoisted(() => {
     token,
     geocode: vi.fn(),
     reverse: vi.fn(),
+    platform: { OS: 'android' },
+    openExternal: vi.fn(),
   };
 });
 
@@ -163,7 +165,8 @@ vi.mock('react', async (importOriginal) => {
   const hooks = { ...fx.hooks, useLayoutEffect: fx.hooks.useEffect };
   return { ...actual, ...hooks, default: { ...(actual.default ?? actual), ...hooks } };
 });
-vi.mock('react-native', () => ({ Modal: 'Modal', View: 'View', useColorScheme: () => 'light' }));
+vi.mock('react-native', () => ({ Modal: 'Modal', View: 'View', Platform: fx.platform, useColorScheme: () => 'light' }));
+vi.mock('../lib/openExternal', () => ({ openExternal: fx.openExternal }));
 vi.mock('react-native-maps', () => ({ default: 'MapView', PROVIDER_DEFAULT: 'default' }));
 vi.mock('expo-location', () => ({ geocodeAsync: fx.geocode, reverseGeocodeAsync: fx.reverse }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
@@ -270,6 +273,21 @@ afterEach(() => {
 });
 
 describe('where the store map opens', () => {
+  it.each([['android', 'Map data © Google'], ['ios', 'Map data © Apple']])('shows usable basemap credit on %s', async (platform, label) => {
+    fx.platform.OS = platform;
+    const { body } = await open({ device: phone });
+    const children = elements(body.output)
+      .filter((element) => typeof element.type === 'function')
+      .map((element) => fx.mount(element.type as (props: unknown) => unknown, element.props));
+    const allText = [...texts(body), ...children.flatMap(texts)];
+    expect(allText).toContain(label);
+    const link = children.flatMap((view) => ofType(view.output, 'T')).find((element) => element.props.children === label);
+    expect(link?.props.accessibilityRole).toBe('link');
+    link?.props.onPress();
+    expect(fx.openExternal).toHaveBeenCalledOnce();
+    expect(only(body.output, 'MapView').props.provider).toBe('default');
+  });
+
   it('closed, it mounts nothing and looks nothing up', () => {
     const picker = fx.mount(StoreLocationPicker, {
       visible: false, current: null, address: { line: '12 Regent Street', city: 'Georgetown' }, device: phone, onConfirm: vi.fn(), onClose: vi.fn(),
