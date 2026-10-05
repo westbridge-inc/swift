@@ -15,6 +15,7 @@ import { FX_NOTICE_WINDOW_DAYS } from '../modules/billing/fx';
 import { fxChargesIneligibleCounter } from '../plugins/observability';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [M-14 · S0] The FX notice is a CHARGE GATE, and the evidence follows delivery.
@@ -123,6 +124,7 @@ beforeAll(async () => {
 afterEach(() => { vi.restoreAllMocks(); delete process.env['FX_RATE_ACTIVATION_KILL']; });
 
 afterAll(async () => {
+  await cleanupBillingClocks(prisma, subIds);
   delete process.env['FX_RATE_ACTIVATION_KILL'];
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
