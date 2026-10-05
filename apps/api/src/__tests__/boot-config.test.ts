@@ -85,6 +85,24 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it.each(['didit', 'idanalyzer'])('manual-only launch refuses external production KYC %s even when configured', (provider) => {
+    expect(() => assertSafeBootConfig({
+      ...good, KYC_PROVIDER: provider, ID_ANALYZER_API_KEY: 'unit-test-only',
+    })).toThrow(/KYC_PROVIDER.*manual/);
+  });
+
+  it('manual-only launch refuses production biometric enablement', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, KYC_PROVIDER: 'manual', FEATURE_BIOMETRIC_FACE_MATCH: '1',
+    })).toThrow(/FEATURE_BIOMETRIC_FACE_MATCH/);
+  });
+
+  it('manual-only launch admits manual production without external verification keys', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, KYC_PROVIDER: 'manual', DIDIT_API_KEY: undefined, ID_ANALYZER_API_KEY: undefined,
+    })).not.toThrow();
+  });
+
   it('boots with the card rail explicitly disabled and no card credentials', () => {
     expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
   });
