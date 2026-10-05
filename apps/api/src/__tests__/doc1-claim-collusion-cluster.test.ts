@@ -18,9 +18,13 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
+/** [SAFE-B · retained history] A filed no-show is immutable evidence kept with the people it names, so the
+ *  phones live in a namespace no other suite uses or purges, unique to the run. */
+const PHONE_PREFIX = retainedPhonePrefix('21');
 const DOOR = { lat: 6.8611, lng: -58.1711 };
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-claim-collusion-cluster-test');
 let app: FastifyInstance;
@@ -37,38 +41,51 @@ beforeAll(async () => {
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.ready();
   const ioStub = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
   cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, ioStub), new OrderService(app.prisma, ioStub));
-  const o = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+59274${NUM}0`, firstName: 'Cl', lastName: `Owner${RUN}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true } as never }));
+  const o = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}000`, firstName: 'Cl', lastName: `Owner${RUN}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true } as never }));
   users.push(o.id);
-  const owner = await runWithTenant('swift-default', () => app.prisma.vendorOwner.create({ data: { userId: o.id, vendors: { create: { name: `Cluster Store ${RUN}`, slug: `cluster-store-${RUN.toLowerCase()}`, vendorType: 'RESTAURANT', phone: `+59274${NUM}9`, addressLine1: '1 Row', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.16, status: 'ACTIVE' } } }, include: { vendors: true } }));
+  const owner = await runWithTenant('swift-default', () => app.prisma.vendorOwner.create({ data: { userId: o.id, vendors: { create: { name: `Cluster Store ${RUN}`, slug: `cluster-store-${RUN.toLowerCase()}`, vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}999`, addressLine1: '1 Row', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.16, status: 'ACTIVE' } } }, include: { vendors: true } }));
   vendorId = owner.vendors[0]!.id;
   const cat = await system(() => app.prisma.category.create({ data: { vendorId, name: `Menu ${RUN}`, sortOrder: 0 } }));
   itemId = (await system(() => app.prisma.item.create({ data: { vendorId, categoryId: cat.id, name: 'Plate', basePrice: 1000 } as never }))).id;
 });
 afterAll(async () => {
-  await system(async () => {
-    await app.prisma.reimbursementClaim.deleteMany({ where: { id: { in: claimIds } } });
-    await app.prisma.strike.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.orderItem.deleteMany({ where: { orderId: { in: orderIds } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-    await app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: users } } });
-    if (clusterId) await app.prisma.identityCluster.deleteMany({ where: { id: clusterId } });
-    await app.prisma.rider.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.item.deleteMany({ where: { vendorId } }); await app.prisma.category.deleteMany({ where: { vendorId } });
-    await app.prisma.vendor.deleteMany({ where: { id: vendorId } }); await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: users } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: users } } });
-  });
-  await app.close();
+  // [SAFE-B · retained history] A filed no-show keeps its order, claim and the people and store it names; the
+  // rest goes as before, in one transaction, and what stays is taken out of service. The identity cluster is
+  // this suite's scaffolding and goes, so it can never reach another suite's accounts.
+  try {
+    await system(() => app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { orderIds });
+      const goneOrderIds = without(orderIds, kept.orderIds);
+      const goneUsers = without(users, kept.userIds);
+      await tx.reimbursementClaim.deleteMany({ where: { id: { in: claimIds }, orderId: { in: goneOrderIds } } });
+      await tx.strike.deleteMany({ where: { userId: { in: goneUsers } } });
+      await tx.orderItem.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+      await tx.order.deleteMany({ where: { id: { in: goneOrderIds } } });
+      await tx.identityClusterMember.deleteMany({ where: { accountId: { in: users } } });
+      if (clusterId) await tx.identityCluster.deleteMany({ where: { id: clusterId } });
+      await tx.rider.deleteMany({ where: { userId: { in: goneUsers } } });
+      if (!kept.vendorIds.has(vendorId)) {
+        await tx.item.deleteMany({ where: { vendorId } }); await tx.category.deleteMany({ where: { vendorId } });
+        await tx.vendor.deleteMany({ where: { id: vendorId } });
+      }
+      await tx.vendorOwner.deleteMany({ where: { userId: { in: goneUsers } } });
+      await tx.customer.deleteMany({ where: { userId: { in: goneUsers } } });
+      await tx.user.deleteMany({ where: { id: { in: goneUsers } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 }));
+  } finally {
+    await app.close();
+  }
 });
 let seq = 0;
 async function customer(): Promise<Cust> {
   seq += 1;
-  const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+5927${NUM}${String(seq).padStart(2, '0')}`, firstName: 'Cl', lastName: `Cust${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, trustLevel: 'L2', customer: { create: {} } } as never }));
+  const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`, firstName: 'Cl', lastName: `Cust${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, trustLevel: 'L2', customer: { create: {} } } as never }));
   users.push(u.id); return { id: u.id };
 }
 async function mover(): Promise<Mover> {
   seq += 1;
-  const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+5927${NUM}${String(seq).padStart(2, '0')}`, firstName: 'Cl', lastName: `Mover${seq}`, roles: ['MOVER'], activeRole: 'MOVER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, trustLevel: 'L2' } as never }));
+  const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`, firstName: 'Cl', lastName: `Mover${seq}`, roles: ['MOVER'], activeRole: 'MOVER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, trustLevel: 'L2' } as never }));
   users.push(u.id);
   const r = await system(() => app.prisma.rider.create({ data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', currentLat: DOOR.lat, currentLng: DOOR.lng, lastLocationUpdate: new Date() } }));
   return { userId: u.id, riderId: r.id };

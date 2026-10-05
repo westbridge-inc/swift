@@ -1,3 +1,5 @@
+import { lockIdentityAuthority } from './identity-review';
+import { recordMmgPayerObservation } from './mmg-payer-evidence';
 import type { PrismaClient } from '@prisma/client';
 import { IdentityService } from './identity.service';
 import {
@@ -76,7 +78,9 @@ export function captureSignup(
       const recent = await prisma.signupAttempt.count({ where: { deviceHash, createdAt: { gte: dayAgo } } });
       if (recent >= maxPerDevice) {
         await prisma.signupAttempt.update({ where: { id: attempt.id }, data: { outcome: 'REVIEW_FIRST' } });
-        await prisma.enforcementAction.create({
+        await prisma.$transaction(async (tx) => {
+          await lockIdentityAuthority(tx);
+        await tx.enforcementAction.create({
           data: {
             accountId: input.userId,
             level: 'REVIEW_FIRST',
@@ -84,6 +88,7 @@ export function captureSignup(
             signalsFired: [{ type: 'DEVICE', windowHours: 24, signups: recent, threshold: maxPerDevice }] as never,
             decidedBy: 'SYSTEM',
           },
+        });
         });
         log().warn({ userId: input.userId, signups: recent }, 'device velocity breach — account enters REVIEW_FIRST');
       }
@@ -115,16 +120,15 @@ export function capturePlate(
   }).catch((err) => log().error({ err, userId: input.userId }, 'plate identity capture failed — flow unaffected'));
 }
 
-/** MMG payer MSISDN (§2.1 MMG_PAYER — HARD: the money doesn't lie). Captured
- *  when a subscription's payer rail is declared and on successful charges;
- *  MMG is POLL-based in this stack, so "webhook time" reconciles to these
- *  two moments. */
+/** Advisory declaration only. Settlement does not authenticate the requested phone. */
 export function captureMmgPayer(
   prisma: PrismaClient,
-  input: { userId: string; role: string; payerMsisdn: string },
-): void {
-  void service(prisma).capture({
-    accountId: input.userId, actorRole: input.role,
-    type: 'MMG_PAYER', normalizedValue: normalizePhone(input.payerMsisdn), source: 'BILLING',
-  }).catch((err) => log().error({ err, userId: input.userId }, 'mmg-payer identity capture failed — flow unaffected'));
+  input: { userId: string; role: string; payerMsisdn: string; subscriptionId?: string;
+    observationId?: string; observed?: boolean; backfill?: boolean },
+): Promise<void> {
+  return recordMmgPayerObservation(prisma, {
+    ...input,
+    tier: input.backfill ? 'LEGACY_UNVERIFIED' : input.observed ? 'OBSERVED_UNVERIFIED' : 'DECLARED',
+    source: input.backfill ? 'BACKFILL' : input.observed ? 'AGENT_CREDIT' : 'BILLING_DECLARATION',
+  });
 }

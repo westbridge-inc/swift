@@ -4,7 +4,7 @@ import type Redis from 'ioredis';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { checkOtpRateLimit } from '../../utils/otp';
-import { checkOtpDailyBudget } from '../../utils/sms-budget';
+import { checkSafetySmsBudget, smsDestinationAllowed, type SmsBudgetReason } from '../../utils/sms-budget';
 import { log } from '../../utils/logger';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { tripShareCounter, tripShareGauge } from '../../plugins/observability';
@@ -44,6 +44,23 @@ const digestMatches = (secret: string, stored: string): boolean => {
 const SHARE_GRACE_MINUTES = Number(process.env['SHARE_GRACE_MINUTES'] ?? 60);
 const TERMINAL: string[] = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 
+/** [AUD-L4-008] Why a trip-link text was refused, in words the passenger can act on. */
+function tripLinkTextRefused(reason: SmsBudgetReason | undefined): AppError {
+  switch (reason) {
+    case 'destination_country':
+      return new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Trip links can only be texted to Guyana (+592) numbers for now. Share the trip another way.');
+    case 'recipient_daily':
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', 'You have texted this number too many trip links today. Share the trip another way.');
+    case 'sender_daily':
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', 'You have sent too many text messages today. Share the trip another way.');
+    case 'safety_daily':
+      log().error('[sms-budget] daily safety-text ceiling reached — refusing safety texts until reset');
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', 'Text messages are unavailable right now. Share the trip another way.');
+    default:
+      return new AppError(429, 'SMS_BUDGET_EXCEEDED', 'This number has received too many messages today.');
+  }
+}
+
 // Human-worded statuses for the public page — no internal enum leakage.
 const PUBLIC_STATUS: Record<string, string> = {
   PENDING: 'Finding a driver',
@@ -66,7 +83,8 @@ export class TripShareService {
    *  server-side SMS send (spec §6 — works for contacts without smartphones;
    *  the plate rides in the text so it survives an unopened link). The SMS is
    *  a cost/abuse vector, so it wears the same armour as the emergency-contact
-   *  handshake: 1/min per target + the shared daily budget. */
+   *  handshake: 1/min per target + the safety-text daily budget, and only to
+   *  a launch-market number [AUD-L4-008]. */
   async mint(userId: string, orderId: string, opts: { sendToPhone?: string } = {}) {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -79,6 +97,9 @@ export class TripShareService {
     if (!order || order.customerId !== userId) throw new NotFoundError('Trip', orderId);
     if (order.orderType !== 'TAXI') throw new AppError(400, 'NOT_A_TRIP', 'Trip share is for taxi trips.');
     if (TERMINAL.includes(order.status)) throw new AppError(409, 'TRIP_OVER', 'This trip has ended.');
+    // [AUD-L4-008] A number that could never be texted is refused before the
+    // link exists: nothing is written, counted or sent for it.
+    if (opts.sendToPhone && !smsDestinationAllowed(opts.sendToPhone)) throw tripLinkTextRefused('destination_country');
 
     // [S-16] 256-bit URL-safe secret, returned once; only its digest is stored.
     const token = randomBytes(32).toString('base64url');
@@ -100,14 +121,18 @@ export class TripShareService {
     if (opts.sendToPhone) {
       const allowed = await checkOtpRateLimit(this.redis, `tripshare:${opts.sendToPhone}`);
       if (!allowed) throw new AppError(429, 'RATE_LIMITED', 'That number was just sent a link. Try again in a minute.');
-      const budget = await checkOtpDailyBudget(this.redis, opts.sendToPhone);
-      if (!budget.allowed) throw new AppError(429, 'SMS_BUDGET_EXCEEDED', 'This number has received too many messages today.');
+      // [AUD-L4-008] The safety budget, never the login one: no flood of login
+      // codes can refuse this text, and it spends nobody's login allowance.
+      const budget = await checkSafetySmsBudget(this.redis, opts.sendToPhone, { senderId: userId });
+      if (!budget.allowed) throw tripLinkTextRefused(budget.reason);
       const plate = order.driver ? ` Vehicle: ${order.driver.vehicleColor} ${order.driver.vehicleMake} ${order.driver.vehicleModel}, plate ${order.driver.licensePlate}.` : '';
       await this.channels.sms.sendSms(
         opts.sendToPhone,
         `A Swift trip is being shared with you. Follow it live: ${url}.${plate}`,
-      ).catch((err: unknown) => {
+      ).catch(async (err: unknown) => {
         // The share still works via the link the app shows — log, don't fail.
+        // A text that never left gives back the budget it counted.
+        await budget.refund?.().catch(() => {});
         log().warn({ err, orderId }, 'trip-share SMS send failed');
       });
     }

@@ -4,16 +4,19 @@
  * (delivery/courier/taxi) are mover earnings, not platform revenue.
  */
 
+import { DEFAULT_COURIER_RATES, type DeliverySpeed } from '../modules/courier/courier.service';
+
 /**
  * Calculate delivery fee based on distance.
  * delivery_fee = base_fee + (distance_km - included_km) * per_km_rate
+ * The defaults are DEFAULT_DELIVERY_RATES (below), never numbers of their own.
  */
 export function calculateDeliveryFee(
   distanceKm: number,
-  baseFee: number = 500,
-  perKmRate: number = 200,
-  includedKm: number = 2,
-  surgeMultiplier: number = 1.0,
+  baseFee: number = DEFAULT_DELIVERY_RATES.baseFee,
+  perKmRate: number = DEFAULT_DELIVERY_RATES.perKmRate,
+  includedKm: number = DEFAULT_DELIVERY_RATES.includedKm,
+  surgeMultiplier: number = DEFAULT_DELIVERY_RATES.surgeMultiplier,
 ): number {
   const distanceFee = Math.max(0, distanceKm - includedKm) * perKmRate;
   const subtotal = baseFee + distanceFee;
@@ -26,9 +29,12 @@ export function calculateDeliveryFee(
  * (courierRates) and taxi (taxiRates) already use. Delivery was the one
  * remaining vertical whose fee was computed from `calculateDeliveryFee`'s
  * hardcoded parameter defaults instead of config: fine for Georgetown (the
- * defaults ARE its zone) but silently wrong for a second market. The defaults
- * below are byte-for-byte the old function defaults, so a null config changes
- * nothing.
+ * defaults ARE its zone) but silently wrong for a second market.
+ *
+ * The defaults below are the owner's Georgetown schedule (1 Oct 2026): 500
+ * covers the first 3 km, then 100 a kilometre, no surge. They are the ONE
+ * place these numbers live: `calculateDeliveryFee`'s parameter defaults read
+ * them, and a null deliveryRates column prices from them.
  */
 export interface DeliveryRates {
   baseFee: number;
@@ -39,8 +45,8 @@ export interface DeliveryRates {
 
 export const DEFAULT_DELIVERY_RATES: DeliveryRates = {
   baseFee: 500,
-  perKmRate: 200,
-  includedKm: 2,
+  perKmRate: 100,
+  includedKm: 3,
   surgeMultiplier: 1.0,
 };
 
@@ -77,40 +83,32 @@ export function expressDeliveryFee(standardFee: number): number {
 
 /**
  * Calculate courier fee based on distance, package size, and speed.
+ * The rates are DEFAULT_COURIER_RATES (courier.service), never numbers of
+ * their own; this helper keeps its own rounding (up).
  */
 export function calculateCourierFee(
   distanceKm: number,
   packageSize: 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE',
   speed: 'standard' | 'express' | 'rush' = 'standard',
 ): number {
-  const baseFee = 1000;
-  const perKmRate = 300;
-  const sizeSurcharge: Record<string, number> = {
-    SMALL: 0,
-    MEDIUM: 500,
-    LARGE: 1000,
-    EXTRA_LARGE: 2000,
-  };
-  const speedMultiplier: Record<string, number> = {
-    standard: 1.0,
-    express: 1.5,
-    rush: 2.0,
-  };
-
+  const { baseFee, perKmRate, sizeSurcharge, speedMultiplier } = DEFAULT_COURIER_RATES;
   const subtotal = baseFee + distanceKm * perKmRate + (sizeSurcharge[packageSize] ?? 0);
-  return Math.ceil(subtotal * (speedMultiplier[speed] ?? 1.0));
+  return Math.ceil(subtotal * (speedMultiplier[speed.toUpperCase() as DeliverySpeed] ?? 1.0));
 }
 
 /**
- * Calculate taxi fare.
+ * Calculate a taxi fare from explicit rates. A legacy helper with no
+ * production caller and no rates of its own: a rider is quoted formulaFare
+ * (rides/fare.service) over the market's TAXI_RATES (country/pricing-config),
+ * which also has an included distance and rounds to the nearest 100.
  */
 export function calculateTaxiFare(
   distanceKm: number,
   durationMin: number,
-  baseFare: number = 1000,
-  perKmRate: number = 300,
-  perMinRate: number = 50,
-  minimumFare: number = 1500,
+  baseFare: number,
+  perKmRate: number,
+  perMinRate: number,
+  minimumFare: number,
   surgeMultiplier: number = 1.0,
   vehicleMultiplier: number = 1.0,
 ): number {

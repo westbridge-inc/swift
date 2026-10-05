@@ -8,6 +8,8 @@ import { sendOtp } from '@/lib/auth';
 import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
+import { useWebOrderingOpen } from '@/lib/use-web-ordering';
+import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
@@ -31,6 +33,7 @@ const ROLES: { role: Role; title: string; desc: string; Icon: any }[] = [
 export default function SignupPage() {
   const router = useRouter();
   const continueJourney = useStorefrontAuthJourney();
+  const orderingOpen = useWebOrderingOpen();
   useEffect(() => { safeReturnPath(); }, []);
   const [step, setStep] = useState<Step>('role');
   const [role, setRole] = useState<Role>('CUSTOMER');
@@ -139,12 +142,17 @@ export default function SignupPage() {
         {step === 'role' && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>What brings you to Swift?</h1>
-            {ROLES.map(({ role: r, title, desc, Icon }) => (
-              <button key={r} type="button" onClick={() => { if (r !== 'CUSTOMER') clearStorefrontContinuation(); setRole(r); setStep('phone'); }} className={styles.roleButton}>
-                <span className={styles.roleIcon}><Icon size={22} aria-hidden="true" /></span>
-                <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{desc}</span></span>
-              </button>
-            ))}
+            {ROLES.map(({ role: r, title, desc, Icon }) => {
+              // [Item 7] Before launch, the public site cannot start a customer
+              // account; businesses and drivers can still sign up.
+              const closed = r === 'CUSTOMER' && !orderingOpen;
+              return (
+                <button key={r} type="button" disabled={closed} onClick={() => { if (r !== 'CUSTOMER') clearStorefrontContinuation(); setRole(r); setStep('phone'); }} className={styles.roleButton}>
+                  <span className={styles.roleIcon}><Icon size={22} aria-hidden="true" /></span>
+                  <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{closed ? `Launching soon in ${launchCity()}` : desc}</span></span>
+                </button>
+              );
+            })}
             <p className={styles.inlineText}>Already on Swift? <Link
               href="/login?next=/"
               onClick={(event) => {

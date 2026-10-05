@@ -34,6 +34,7 @@ import { parseCsvWithHeader } from '../../utils/csv';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from '../../utils/xlsx-zip-guard';
 import { parseMenuText } from '../../utils/menu-text-parse';
+import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
@@ -41,6 +42,7 @@ import { DeliveryCashSettlementService, assertSettlementId, settlementAttestatio
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
@@ -2618,8 +2620,8 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  items to CONFIRM (master plan §3.1). Deterministic guard rails: the AI
    *  parser reads the extracted text; rows without a parseable price are
    *  dropped, never invented, and nothing imports until the vendor confirms. */
-  app.post('/items/import/menu-parse', auth, async (request) => {
-    await requireVendor(app, request, 'MANAGER');
+  app.post('/items/import/menu-parse', { ...auth, config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a PDF menu');
     if (file.mimetype !== 'application/pdf') {
@@ -2627,28 +2629,18 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     const buffer = await file.toBuffer();
-    let text = '';
+    const abort = new AbortController();
+    const onAbort = () => abort.abort();
+    const onClose = () => { if (!reply.raw.writableFinished) abort.abort(); };
+    request.raw.once('aborted', onAbort);
+    reply.raw.once('close', onClose);
+    if (request.raw.aborted || reply.raw.destroyed) abort.abort();
+    let text: string;
     try {
-      const { PDFParse } = await import('pdf-parse');
-      const parser = new PDFParse({ data: new Uint8Array(buffer) });
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        // A crafted PDF (a "bomb": a tiny file that decompresses to millions of
-        // pages) can make getText() churn CPU/memory for a long time even within
-        // the 5MB upload cap. Bound it — a real menu parses in well under a second.
-        const parsed = await Promise.race([
-          parser.getText(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('menu PDF parse exceeded its time budget')), 15_000);
-          }),
-        ]);
-        text = (parsed.text ?? '').trim();
-      } finally {
-        if (timer) clearTimeout(timer);
-        await parser.destroy().catch(() => undefined);
-      }
-    } catch {
-      throw new AppError(400, 'BAD_MENU_FILE', 'Could not read that PDF');
+      text = await extractMenuPdf(buffer, vendorId, abort.signal);
+    } finally {
+      request.raw.off('aborted', onAbort);
+      reply.raw.off('close', onClose);
     }
     if (text.length < 20) {
       throw new AppError(422, 'MENU_NO_TEXT', 'That PDF has no readable text (a photo scan?) — use CSV/Excel or type items in');
@@ -3540,6 +3532,15 @@ export async function vendorRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /subscription — Current subscription details */
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the store's OWNER starts
+  // and follows a checkout for the selected store's subscription.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const { vendorId } = await requireVendor(app, request, 'OWNER');
+      return app.prisma.subscription.findFirst({ where: { vendorId } });
+    },
+  });
+
   app.get('/subscription', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     // NO operability gate here, deliberately [PINV-8]. A suspended store must
@@ -3559,6 +3560,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
             ...(await sanDisplay(app.prisma, subscription)),
             ...(await payInfo(app.prisma, subscription)),
+            // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+            ...(await mmgCheckout.feePayload(subscription, request.headers)),
             weeklyRate: Number(subscription.weeklyRate),
           }
         : null,
@@ -3576,6 +3579,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    await requireStepUp(app, request);
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId } });
     if (!sub) throw new NotFoundError('Subscription');
     const billingSvc = new BillingService(app.prisma, notifications, getPaymentProvider());
