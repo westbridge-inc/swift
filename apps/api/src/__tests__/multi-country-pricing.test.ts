@@ -80,9 +80,9 @@ describe('public pricing (price on the door)', () => {
     expect(d.countryCode).toBe('GY');
     expect(d.trialDays).toBe(TRIAL_DAYS);
     // Every vehicle is quoted at the rate of the role it provisions: delivery
-    // riders 6,000, taxi drivers 9,000 (car or bus), heavy delivery 9,000.
+    // riders 6,000, taxi drivers 8,000 (car or bus), heavy delivery 9,000.
     const rateFor = (v: string) => d.movers.find((q: { vehicleType: string }) => q.vehicleType === v)?.rate;
-    expect([rateFor('MOTORCYCLE'), rateFor('CAR'), rateFor('BUS_15'), rateFor('CANTER_LONG')]).toEqual([6000, 9000, 9000, 9000]);
+    expect([rateFor('MOTORCYCLE'), rateFor('CAR'), rateFor('BUS_15'), rateFor('CANTER_LONG')]).toEqual([6000, 8000, 8000, 9000]);
     expect(d.vendors).toEqual({
       service: 8000,
       catalogue: [

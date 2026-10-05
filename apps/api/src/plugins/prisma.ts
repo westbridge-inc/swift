@@ -93,7 +93,11 @@ const TENANT_QUERY_EXTENSIONS = {
   settlementImport: scoped,
   // [M-18] The provider-transaction identity behind every agent-cash observation.
   providerPayment: scoped,
+  // [MMG checkout 2/6] A partner's MMG checkout and every observation of it.
+  mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped,
+  billingDunningClock: scoped, billingObligationTransition: scoped, paymentConfirmationHold: scoped, billingFeeNotice: scoped, billingNoticeHandoff: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
+  moverFeeAuthority: scoped, moverFeeSubscription: scoped,
   // [M-08] The prepaid top-up as one persisted command.
   topUpCommand: scoped,
   // [PT-1] Card rail v2: an enrolled card, a hosted session, and the evidence

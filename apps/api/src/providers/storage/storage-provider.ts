@@ -12,6 +12,7 @@ import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
 import { stripImageMetadata } from '../../utils/images';
 import { storageSigningKeys } from '../../utils/signing-keys';
 import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from './storage-key';
+import { assertDurableStorageConfig } from './storage-config';
 
 // ---------------------------------------------------------------------------
 // StorageProvider — hard rule 4: swappable interface. Raw documents live in
@@ -65,7 +66,13 @@ export class LocalStorageProvider implements StorageProvider {
   private get signingSecret(): string { return storageSigningKeys().current.secret; }
   private publicBase = process.env['API_PUBLIC_URL'] ?? '';
 
+  constructor() {
+    assertDurableStorageConfig({ ...process.env, STORAGE_PROVIDER: 'local' });
+  }
+
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
+    assertDurableStorageConfig({ ...process.env, STORAGE_PROVIDER: 'local' });
+    if (localStorageBaseDir() !== this.baseDir) throw new Error('Storage root changed; restart with a validated storage configuration');
     const safe = sanitizeForStorage(input);
     const name = createOpaqueStorageName(safe.filename);
     const dir = path.join(this.baseDir, safe.folder);
@@ -158,6 +165,7 @@ export class S3StorageProvider implements StorageProvider {
 
 /** Provider selection is config, not code. */
 export function getStorageProvider(): StorageProvider {
+  assertDurableStorageConfig();
   const provider = storageProviderKind();
   switch (provider) {
     case 'local':
