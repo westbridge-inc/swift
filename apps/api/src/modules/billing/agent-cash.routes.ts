@@ -1,5 +1,5 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
-import type { Readable } from 'node:stream';
+import { errorCodes, type FastifyInstance, type FastifyRequest } from 'fastify';
+import { Readable } from 'node:stream';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { BillingService } from './billing.service';
@@ -21,10 +21,97 @@ import { weeklyFeeAmount } from './subscription-fee';
 
 const FRESHNESS_MS = 5 * 60_000;
 
+/** Webhooks are tiny (a bill notification is a few hundred bytes); 128 KB is
+ *  generous headroom. Anything larger is refused BEFORE it is buffered — an
+ *  attacker must not be able to stream a multi-GB body into the process heap
+ *  and OOM the shared API (audit High #3). */
+export const AGENT_CASH_MAX_RAW_BODY_BYTES = 128 * 1024;
+
 function secret(): string | null {
   const s = process.env['AGENT_CASH_WEBHOOK_SECRET'];
   if (!s || s.length < 16) return null;
   return s;
+}
+
+/**
+ * Raw-body capture for HMAC verification, bounded. The declared
+ * `content-length` is refused up front when it already exceeds the cap, and
+ * the same cap is enforced while accumulating so a lying or absent header
+ * cannot stream past it. On rejection nothing is attached to the request and
+ * the 413 is decided before the handler (and therefore before any signature
+ * or billing work).
+ *
+ * Deliberately written with listeners, not `for await`: breaking out of an
+ * async iterator destroys the request stream, and destroying a half-read
+ * request resets the socket — the client would see a connection reset instead
+ * of the 413, and fastify would be writing into a dead socket. Pausing the
+ * stream instead is no better: a paused request socket goes deaf and never
+ * sees the client hang up, so the connection lingers until requestTimeout.
+ * So on refusal the listeners are detached and the stream is left flowing
+ * with nobody attached: every further chunk is dropped the moment it arrives
+ * (node's own `_dump()` behaviour, applied at 128 KB instead of at the end of
+ * the body). The client always receives the 413, the socket closes as soon as
+ * the client leaves, nothing past the cap is ever retained, and the server's
+ * requestTimeout ends a client that keeps pushing, exactly as it does for any
+ * other unconsumed body on this server.
+ */
+export function captureRawBody(request: FastifyRequest, payload: Readable): Promise<Readable> {
+  return new Promise<Readable>((resolve, reject) => {
+    // How many body bytes this capture accepted before deciding — an
+    // observability seam (a test's onResponse hook reads it) that proves the
+    // decision was taken within one chunk of the cap, never after the whole
+    // upload. `rawBody` itself is only ever set on success.
+    const seen = (n: number) => { (request as FastifyRequest & { rawBodyBytesSeen?: number }).rawBodyBytesSeen = n; };
+    const refuse = () => reject(new errorCodes.FST_ERR_CTP_BODY_TOO_LARGE());
+
+    const declared = request.headers['content-length'];
+    if (typeof declared === 'string' && declared.length > 0) {
+      const declaredBytes = Number(declared);
+      if (Number.isFinite(declaredBytes) && declaredBytes > AGENT_CASH_MAX_RAW_BODY_BYTES) {
+        seen(0);
+        refuse(); // before a single body byte is read
+        return;
+      }
+    }
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const detach = () => {
+      payload.removeListener('data', onData);
+      payload.removeListener('end', onEnd);
+      payload.removeListener('error', onError);
+    };
+    const onData = (chunk: Buffer | string) => {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      size += buf.length;
+      if (size > AGENT_CASH_MAX_RAW_BODY_BYTES) {
+        detach();
+        chunks.length = 0; // let go of the partial buffer before refusing
+        payload.resume(); // keep it flowing with nobody attached: the rest is dropped on arrival
+        seen(size);
+        refuse();
+        return;
+      }
+      chunks.push(buf);
+    };
+    const onEnd = () => {
+      detach();
+      const raw = Buffer.concat(chunks);
+      seen(raw.length);
+      (request as FastifyRequest & { rawBody?: Buffer }).rawBody = raw;
+      const stream = Readable.from(raw) as Readable & { receivedEncodedLength?: number };
+      stream.receivedEncodedLength = raw.length;
+      resolve(stream);
+    };
+    const onError = (err: Error) => {
+      detach();
+      reject(err);
+    };
+    payload.on('data', onData);
+    payload.on('end', onEnd);
+    payload.on('error', onError);
+    payload.resume();
+  });
 }
 
 function verifySignature(req: FastifyRequest): { ok: boolean; code?: string } {
@@ -50,23 +137,18 @@ export async function agentCashRoutes(app: FastifyInstance) {
   // parser (empty-json), and re-adding one throws FST_ERR_CTP_ALREADY_PRESENT
   // at BOOT (found by the design session; CI never boots the full server).
   // Encapsulation keeps this hook off every other route.
-  app.addHook('preParsing', async (request, _reply, payload) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of payload) chunks.push(chunk as Buffer);
-    const raw = Buffer.concat(chunks);
-    (request as FastifyRequest & { rawBody?: Buffer }).rawBody = raw;
-    const { Readable } = await import('node:stream');
-    const stream = Readable.from(raw) as Readable & { receivedEncodedLength?: number };
-    stream.receivedEncodedLength = raw.length;
-    return stream;
-  });
+  app.addHook('preParsing', (request, _reply, payload) => captureRawBody(request, payload));
+
+  // Belt and braces: the same cap as a route-level bodyLimit, so fastify's own
+  // parser refuses an oversized body even if the hook above were ever removed.
+  const webhookBody = { bodyLimit: AGENT_CASH_MAX_RAW_BODY_BYTES };
 
   const notifications = new NotificationService(app.prisma, app.io);
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
   const svc = new AgentCashService(app.prisma, billing, notifications);
 
   /** Channel A — real-time agent-payment notification. */
-  app.post('/agent-notification', { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
+  app.post('/agent-notification', { ...webhookBody, config: { rateLimit: { max: 120, timeWindow: '1 minute' } } }, async (request, reply) => {
     const auth = verifySignature(request);
     if (!auth.ok) {
       if (auth.code === 'CHANNEL_DISABLED') return reply.status(503).send({ status: 'channel_disabled' });
@@ -106,7 +188,7 @@ export async function agentCashRoutes(app: FastifyInstance) {
 
   /** Channel A' — bill inquiry, THE TYPO-KILLER [4.2]: the agent keys the
    *  number BEFORE taking cash; the payer confirms the masked name. */
-  app.post('/inquiry', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
+  app.post('/inquiry', { ...webhookBody, config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, reply) => {
     const auth = verifySignature(request);
     if (!auth.ok) {
       if (auth.code === 'CHANNEL_DISABLED') return reply.status(503).send({ status: 'channel_disabled' });

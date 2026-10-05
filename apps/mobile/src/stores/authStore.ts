@@ -6,11 +6,13 @@ import type { AdEventScope } from '../lib/adsCore';
 import { retireAdEventScope } from '../lib/adsQueue';
 import { queryClient } from '../lib/queryClient';
 import { zustandStorage } from '../lib/storage';
-import { landingIntent } from '../lib/roleLanding';
+import { accountHoldsRole, landingIntent } from '../lib/roleLanding';
 import { normalizePersistedAuth, recordHydration, type HydrationReason } from '../lib/authHydration';
 import { track } from '../lib/analytics';
 import { useBookingStore } from './bookingStore';
+import { useBusinessSetupDraft } from './businessSetupDraft';
 import { useStoreSwitcher } from './storeSwitcher';
+import { useVendorPreview } from './vendorPreview';
 import {
   sameAuthSession,
   samePrincipalBoundary,
@@ -107,6 +109,15 @@ function nextLoggedOutState(state: Pick<AuthState, 'sessionGeneration'>) {
   };
 }
 
+/** Business-entry UI state is principal-scoped too. A sample-dashboard type
+ * swaps every vendor hook to canned data (real orders hidden, every action a
+ * no-op), and a half-typed List-your-business form holds a business phone and
+ * address; neither may reach the next session. */
+function clearBusinessEntryState(): void {
+  useVendorPreview.getState().exitPreview();
+  useBusinessSetupDraft.getState().clear();
+}
+
 async function revokeCapturedSession(session: AuthSessionSnapshot): Promise<void> {
   let pushToken: string | null = null;
   try {
@@ -143,6 +154,7 @@ function finishLocalLogout(session: AuthSessionSnapshot | null): void {
   // Vendor tenant selection is process-global, not part of the query cache.
   // A shared-device login must never inherit another account's store header.
   useStoreSwitcher.getState().setSelectedStore(null);
+  clearBusinessEntryState();
   if (!session) return;
   // Lazy imports can resolve after another account has already signed in and
   // claimed these process-global native resources. Pass the captured owner so
@@ -184,9 +196,10 @@ export const useAuthStore = create<AuthState>()(
         // driver signing in after a vendor session on a shared device never
         // lands in the vendor dashboard. Pure law + tests: lib/roleLanding.
         const u: any = user;
-        const roles: string[] = u?.roles ?? [];
-        const isMover = roles.includes('DRIVER') || roles.includes('RIDER') || roles.includes('MOVER') || !!u?.driver || !!u?.rider;
-        const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!u?.vendorOwner;
+        // The same predicate the switcher and the earner shells read
+        // (lib/roleLanding accountHoldsRole) — one definition of "holds".
+        const isMover = accountHoldsRole(u, 'mover');
+        const isVendor = accountHoldsRole(u, 'vendor');
         const intent = landingIntent(get().intent, {
           isVendor,
           isMover,
@@ -199,7 +212,14 @@ export const useAuthStore = create<AuthState>()(
         // teardown receives the captured old owner and cannot disturb the new
         // account installed immediately below.
         if (previousSession) finishLocalLogout(previousSession);
-        else useStoreSwitcher.getState().setSelectedStore(null);
+        else {
+          // Guest Home is public but lacks the new account's order and rails.
+          // Clear before installing the account so a fresh guest cache cannot
+          // be observed as that account's personalized response.
+          queryClient.clear();
+          useStoreSwitcher.getState().setSelectedStore(null);
+          clearBusinessEntryState();
+        }
         set((state) => ({
           user,
           accessToken,

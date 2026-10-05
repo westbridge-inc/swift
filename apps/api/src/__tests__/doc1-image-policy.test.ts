@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import { createHash } from 'node:crypto';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
@@ -53,7 +54,12 @@ async function owner(n: number) {
 /** A committed submission with bytes in storage (a real object, so the probe can confirm absence). */
 async function committed(userId: string, docType: string, extra: Record<string, unknown> = {}) {
   const { getStorageProvider } = await import('../providers/storage/storage-provider');
-  const { url } = await getStorageProvider().upload({ buffer: Buffer.from(`image ${RUN}`), filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${RUN}` });
+  const bytes = Buffer.from(`image ${RUN}`);
+  const { url } = await getStorageProvider().upload({ buffer: bytes, filename: `${docType}-${nanoid(5)}.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
+  await app.prisma.encryptedObject.create({ data: {
+    fileKey: url, createdBy: userId, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(60, 3),
+    mimeType: 'image/jpeg', sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+  } });
   return system(() => app.prisma.verificationDocument.create({ data: {
     userId, role: 'VENDOR_OWNER', docType, fileUrl: url, status: 'APPROVED', reviewedBy: 'policy-test', reviewedAt: new Date(), expiresAt: new Date(Date.now() + 100 * DAY), ...extra,
   } }));
@@ -86,6 +92,7 @@ afterAll(async () => {
     await app.prisma.verificationDocument.updateMany({ where: { userId: { in: users } }, data: { legalHoldId: null } });
     await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: users } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: users } } });
     await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   });

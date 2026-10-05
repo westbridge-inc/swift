@@ -64,6 +64,20 @@ export function weeksBetween(startWeek: Date, endWeek: Date): Date[] {
   return weeks;
 }
 
+/** Inclusive Monday count from startWeek to endWeek, computed arithmetically
+ *  in O(1) with no allocation — weeksBetween would materialise one Date per
+ *  week, so a hostile range must be refused with THIS before that allocation.
+ *  Same Monday/ordering guards as weeksBetween. */
+export function weekSpan(startWeek: Date, endWeek: Date): number {
+  if (!isMonday(startWeek) || !isMonday(endWeek)) {
+    throw new Error('weekSpan: both bounds must be Mondays');
+  }
+  const start = Date.UTC(startWeek.getUTCFullYear(), startWeek.getUTCMonth(), startWeek.getUTCDate());
+  const end = Date.UTC(endWeek.getUTCFullYear(), endWeek.getUTCMonth(), endWeek.getUTCDate());
+  if (end < start) throw new Error('weekSpan: endWeek precedes startWeek');
+  return Math.round((end - start) / (7 * DAY_MS)) + 1;
+}
+
 /** Inclusive week count. */
 export function weekCount(startWeek: Date, endWeek: Date): number {
   return weeksBetween(startWeek, endWeek).length;

@@ -1,3 +1,4 @@
+import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -11,6 +12,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { OrderService } from '../modules/order/order.service';
 import { DispatchService, sweepStaleMovers } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
@@ -37,13 +39,15 @@ let seq = 0;
 
 // Per-run random base keeps phones from colliding with other test files or
 // leftovers from a prior interrupted run (parallel vitest, shared dev DB).
-const phoneBase = 592_200_000_000 + Math.floor(Math.random() * 700_000_000);
+// [SAFE-B · retained history] A failed handover's filing keeps its order and the
+// people it names, so the phones live in a namespace no other suite uses or purges.
+const PHONE_PREFIX = retainedPhonePrefix('05');
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Freeing',
       lastName: `User${seq}`,
       roles,
@@ -77,7 +81,7 @@ async function makeVendor() {
       name: `Freeing Vendor ${seq}`,
       slug: `freeing-vendor-${nanoid(10).toLowerCase()}`,
       vendorType: 'RESTAURANT',
-      phone: `+${phoneBase + 900 + seq}`,
+      phone: `${PHONE_PREFIX}${String(900 + seq).padStart(3, '0')}`,
       addressLine1: '1 Freeing Way',
       city: 'Georgetown',
       region: 'Demerara-Mahaica',
@@ -227,6 +231,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  recordDispatchQueue(app);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
@@ -236,10 +241,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-  await app.close();
+  // [SAFE-B · retained history] A failed handover's filing is evidence: its order and everyone it names
+  // stay. Everything else is removed as before, in one transaction, and what stays is taken out of
+  // service. Nothing is swallowed and nothing half-commits.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { orderIds: createdOrderIds });
+      await tx.order.deleteMany({ where: { id: { in: without(createdOrderIds, kept.orderIds) } } });
+      await tx.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await tx.user.deleteMany({ where: { id: { in: without(createdUserIds, kept.userIds) } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -551,6 +566,10 @@ describe('vendor prep signal with rider assigned', () => {
       where: { userId: rider.userId, title: 'Order ready for pickup' },
     });
     expect(note).not.toBeNull();
+    // [Q10] ...as an EARNER push: the tag keeps it out of a shopping inbox, and
+    // the tap-router opens the rider's live job for this kind (the mobile
+    // census, notification-router.test.ts), not the customer order screen.
+    expect(note!.data).toEqual({ orderId: order.id, kind: 'prep_ready', audience: 'earner' });
 
     // Double-tap is idempotent, not an error.
     const again = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, {}, vendor.token);
@@ -693,17 +712,21 @@ describe('driver offer decline', () => {
     const driver = await makeDriver({ online: true, at: DECLINE_AT });
     const ride = await makeOrder(customer.userId, null, 'PENDING', { orderType: 'TAXI', taxiFareTotal: 2300, at: DECLINE_AT });
 
-    const dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider());
+    const dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
     const offered = await dispatch.dispatchOrder(ride.id);
     expect(offered.offered).toBe(driver.driverId);
+    // Introduce the successor after the first offer so ranking cannot pick it first.
+    const next = await makeDriver({ online: true, at: DECLINE_AT });
 
     const res = await inject('POST', '/api/v1/driver/offers/decline', { orderId: ride.id }, driver.token);
     expect(res.statusCode).toBe(200);
 
     const offerKey = await app.redis.get(`dispatch:offer:${ride.id}`);
-    expect(offerKey).toBeNull(); // this driver's offer is gone (cascade exhausted — no other drivers)
+    expect(offerKey!.split(':')[0]).toBe(next.driverId); // cascade advanced to the successor
     const declined = await app.redis.smembers(`dispatch:declined:${ride.id}`);
     expect(declined).toContain(driver.driverId);
+    expect(await app.redis.get(`dispatch:mover-offer:${driver.driverId}`)).toBeNull();
+    expect((await app.redis.get(`dispatch:mover-offer:${next.driverId}`))!.split(':')[0]).toBe(ride.id);
     await app.redis.del(`dispatch:declined:${ride.id}`, `dispatch:round:${ride.id}`, `dispatch:exhausts:${ride.id}`);
   });
 });

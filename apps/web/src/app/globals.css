@@ -2,6 +2,7 @@
 
 html {
   scroll-behavior: smooth;
+  overflow-x: clip;
 }
 
 body {
@@ -11,6 +12,13 @@ body {
   font-size: var(--swift-type-body);
   line-height: var(--swift-leading-body);
   -webkit-font-smoothing: antialiased;
+  /* [PWA-1] viewport-fit=cover (root layout) hands the notch to the page, so the
+     sides are padded back: no page puts content under the notch of an iPhone
+     held sideways. Zero everywhere else. Top and bottom belong to the customer
+     shell's header and main — a bottom pad here would make every full-height
+     page scroll by the height of the home bar. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 button,
@@ -23,6 +31,45 @@ textarea {
 :focus-visible {
   outline: medium solid var(--swift-focus);
   outline-offset: var(--swift-space-xs);
+}
+
+/* ── The customer app shell [Q7b] ──────────────────────────────────────────
+   What makes the ordering site behave like the phone app rather than a web
+   page: no grey flash where a finger lands (press feedback is drawn by the
+   controls themselves), a short fade as each page arrives, and — installed on
+   a home screen, where there is no browser to reload — a page that does not
+   rubber-band away from its own header. Everything that moves stops moving
+   for people who asked for less motion. */
+
+.swift-app {
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: clip;
+  min-width: 0;
+}
+
+.swift-route-in {
+  animation: swift-route-in 160ms ease-out;
+}
+
+@keyframes swift-route-in {
+  from {
+    opacity: 0.65;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swift-route-in {
+    animation: none;
+  }
+}
+
+@media (display-mode: standalone) {
+  html:has(.swift-app) {
+    overscroll-behavior-y: none;
+  }
 }
 
 /* ── Legal documents ───────────────────────────────────────────────────────
@@ -82,4 +129,45 @@ textarea {
 
 .legal-prose a:hover {
   color: var(--swift-red-600);
+}
+
+/* Reserve card geometry while data and images arrive. */
+.swift-menu-heading { min-height: 7.75rem; }
+.swift-menu-item { min-height: 7.5rem; }
+.swift-order-row { min-height: 6rem; gap: 1rem; }
+.swift-bone { animation: swift-bone 1.6s ease-in-out infinite alternate; }
+@keyframes swift-bone { to { opacity: 0.5; } }
+
+.swift-app :where(a, button, input, select, textarea, label[for]) {
+  touch-action: manipulation;
+}
+.swift-app :where(a, button, select, input:not([type=radio]):not([type=checkbox])) {
+  min-height: 44px;
+  min-width: 44px;
+}
+.swift-app label:has(input) {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+.swift-app :where(a, button):active {
+  filter: brightness(0.92);
+}
+.swift-console {
+  -webkit-tap-highlight-color: transparent;
+  min-width: 0;
+}
+.swift-console :where(a, button, input, select, textarea, label[for]) {
+  touch-action: manipulation;
+}
+.swift-console :where(a, button, select, input:not([type=radio]):not([type=checkbox])) {
+  min-height: 44px;
+  min-width: 44px;
+}
+.swift-console label:has(input) {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .swift-bone { animation: none; }
 }

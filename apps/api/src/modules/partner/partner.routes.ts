@@ -8,6 +8,9 @@ import {
   completeUserRoleAuthorityTransition,
   transitionUserRoleAuthorityInTransaction,
 } from '../mover-authority';
+import { requireStepUp } from '../auth/step-up';
+import { VerificationService } from '../verification/verification.service';
+import { getKycProvider } from '../../providers/kyc/kyc-provider';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -42,9 +45,17 @@ const becomeSchema = z.object({
 });
 export const AGREEMENT_REQUIRED = 'AGREEMENT_REQUIRED';
 
+/** [VEHICLES] PUT /vehicle — the vehicle a mover works with, changed. */
+const changeVehicleSchema = z.object({
+  vehicleType: z.nativeEnum(VehicleType),
+  vehicle: vehicleSchema.optional(),
+});
+
 export async function partnerRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
-  const service = new PartnerService(app.prisma, new NotificationService(app.prisma, app.io));
+  const notifications = new NotificationService(app.prisma, app.io);
+  const service = new PartnerService(app.prisma, notifications);
+  const verification = new VerificationService(app.prisma, notifications, getKycProvider());
 
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {
@@ -78,6 +89,52 @@ export async function partnerRoutes(app: FastifyInstance) {
         ...provisioned,
         activeRole: authorityCleanup.activeRole,
         lastMoverRole: authorityCleanup.lastMoverRole,
+      },
+    };
+  });
+
+  /**
+   * PUT /vehicle — [VEHICLES] change the vehicle a mover works with (PartnerService
+   * changeVehicleWithAuthority). A mover whose documents are verified steps up first: the
+   * change takes them offline and retires the papers about the old vehicle, so it is
+   * their livelihood, and a borrowed phone must not be able to do it. A mover still in
+   * onboarding changes freely.
+   */
+  app.put('/vehicle', auth, async (request) => {
+    const body = changeVehicleSchema.parse(request.body);
+    const userId = request.user.userId;
+    const [rider, driver] = await Promise.all([
+      app.prisma.rider.findUnique({ where: { userId }, select: { documentsVerified: true } }),
+      app.prisma.driver.findUnique({ where: { userId }, select: { documentsVerified: true } }),
+    ]);
+    const verified = !!rider?.documentsVerified || !!driver?.documentsVerified
+      || ((!!rider || !!driver) && await verification.isRoleVerified(userId, 'MOVER'));
+    if (verified) await requireStepUp(app, request);
+    const { result, authorityCleanup } = await service.changeVehicleWithAuthority(
+      userId,
+      body,
+      (tx, targetRole) => transitionUserRoleAuthorityInTransaction(tx, userId, targetRole),
+    );
+    if (authorityCleanup) {
+      // Every profile this change took offline gives up its held offer and closes its online session.
+      await completeUserRoleAuthorityTransition(app, {
+        ...authorityCleanup,
+        riderId: authorityCleanup.riderId ?? result.retiredRiderId,
+        driverId: authorityCleanup.driverId ?? result.retiredDriverId,
+      });
+    }
+    return {
+      success: true,
+      data: {
+        kind: result.kind,
+        id: result.id,
+        vehicleType: result.vehicleType,
+        previousVehicleType: result.previousVehicleType,
+        changed: result.changed,
+        retiredDocuments: result.retiredDocuments,
+        withdrawnDocuments: result.withdrawnDocuments,
+        activeRole: authorityCleanup?.activeRole ?? null,
+        lastMoverRole: authorityCleanup?.lastMoverRole ?? null,
       },
     };
   });

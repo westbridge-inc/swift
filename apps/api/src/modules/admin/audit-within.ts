@@ -310,4 +310,20 @@ export function wroteAuditInline(request: AuditRequestLike): boolean {
   return request.auditWrittenInline === true;
 }
 
+/**
+ * [ADM-002 · ORDER-SPINE S1-6 R5] A REPLAYED command changed nothing and writes
+ * no row: the decision it repeats was audited inline, inside its own
+ * transaction, when it was made. Mark this request with THAT row — the same
+ * marker `auditWithin` sets — so the backstop verifies the decision's row
+ * instead of writing a second one after the response (a duplicate trail, and a
+ * false `backstop` regression on a migrated route). With no row to point at,
+ * the request stays unmarked and the backstop still covers it.
+ */
+export function markReplayAudited(request: AuditRequestLike, decisionRowId: string | null | undefined): boolean {
+  if (!decisionRowId) return false;
+  request.auditWrittenInline = true;
+  request.auditInlineRowId = decisionRowId;
+  return true;
+}
+
 export { ABSENT };

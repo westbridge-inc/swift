@@ -1,4 +1,4 @@
-import type { OrderStatus } from '@prisma/client';
+import type { OrderStatus, TaxiStopStatus } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
 // THE terminality of an order status — ONE definition.
@@ -118,6 +118,10 @@ const STATUS_LAW: Record<OrderStatus, { custody: Custody; mover: Mover }> = {
   PICKED_UP: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
   EN_ROUTE_DELIVERY: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
   ARRIVED: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
+  // [E17] The return leg is custody too: the rider still physically holds the
+  // parcel on the way back, so no automatic release and no sender cancellation
+  // may touch it. Only the return-proof flow may leave this state.
+  RETURNING: { custody: 'MOVER_HOLDING', mover: 'RIDER' },
 
   // ── Taxi leg: driver committed, passenger not aboard ─────────────────────
   DRIVER_ASSIGNED: { custody: 'ASSIGNED_NOT_HOLDING', mover: 'DRIVER' },
@@ -133,6 +137,7 @@ const STATUS_LAW: Record<OrderStatus, { custody: Custody; mover: Mover }> = {
   CANCELLED: { custody: 'FINISHED', mover: 'NONE' },
   REFUNDED: { custody: 'FINISHED', mover: 'NONE' },
   FAILED: { custody: 'FINISHED', mover: 'NONE' },
+  RETURNED: { custody: 'FINISHED', mover: 'NONE' },
 };
 
 const ALL_STATUSES = Object.keys(STATUS_LAW) as OrderStatus[];
@@ -225,6 +230,62 @@ export function isMoverHolding(status: OrderStatus): boolean {
 // happy path may do, a recovery edge is something only a release may do.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// A BOOKING'S STATES — the NINTH member of this family.
+//
+// An APPOINTMENT is confirmed, completed or cancelled. It is never prepared,
+// marked ready, handed to a rider or delivered: it has no kitchen and no leg.
+// Nothing said so. The forward machine below is keyed by status alone, so a
+// booking in ACCEPTED could be moved to PREPARING and READY_FOR_PICKUP by the
+// vendor's kitchen routes (or any generic caller), the customer got "Being
+// Prepared" and "Food Ready!" pushes for a haircut, and the booking was then
+// stranded — complete-appointment requires ACCEPTED (review F03).
+//
+// Classified ONCE, in the same shape as custody: a `Record<OrderStatus, …>`
+// that fails to compile until a new state is deliberately classified. The
+// canonical transition seam enforces it on the locked row for every caller;
+// the kitchen routes refuse a booking before they reach it.
+// ---------------------------------------------------------------------------
+
+/** May an APPOINTMENT occupy this status? */
+const BOOKING_LAW: Record<OrderStatus, boolean> = {
+  PENDING: true,
+  ACCEPTED: true,
+  // No kitchen: a booking is never prepared or "ready".
+  PREPARING: false,
+  READY_FOR_PICKUP: false,
+  // No leg: nobody carries a haircut.
+  RIDER_ASSIGNED: false,
+  RIDER_EN_ROUTE_PICKUP: false,
+  RIDER_ARRIVED_PICKUP: false,
+  PICKED_UP: false,
+  EN_ROUTE_DELIVERY: false,
+  ARRIVED: false,
+  DRIVER_ASSIGNED: false,
+  DRIVER_EN_ROUTE: false,
+  DRIVER_ARRIVED: false,
+  RIDE_IN_PROGRESS: false,
+  // Over: completed by the provider, cancelled by either side, refunded after.
+  DELIVERED: false,
+  COMPLETED: true,
+  CANCELLED: true,
+  REFUNDED: true,
+  // A booking has no handover to fail; a no-show is a decline or a cancel.
+  FAILED: false,
+  // [E17] Only a parcel in a courier's custody can be sent back; a booking
+  // has nothing to return.
+  RETURNING: false,
+  RETURNED: false,
+};
+
+/** THE statuses a booking may occupy. Derived, never hand-written. */
+export const APPOINTMENT_STATUSES: OrderStatus[] = ALL_STATUSES.filter((s) => BOOKING_LAW[s]);
+
+/** True when a booking may be moved INTO `status`. */
+export function isAppointmentStatus(status: OrderStatus): boolean {
+  return BOOKING_LAW[status];
+}
+
 /**
  * The locked FORWARD state machine. Key = target state, value = the states it
  * may be entered from on the normal path. Compare-and-set on these makes a
@@ -270,7 +331,23 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   ],
   REFUNDED: ['CANCELLED', 'DELIVERED', 'COMPLETED'],
   FAILED: ['ARRIVED', 'RIDE_IN_PROGRESS', 'PICKED_UP', 'EN_ROUTE_DELIVERY'],
+  // [E17] A return starts from any custody state and ends ONLY at RETURNED —
+  // the return-proof flow is the sole exit, so a returning parcel can never be
+  // "delivered" or "failed" out from under the return.
+  RETURNING: ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'],
+  RETURNED: ['RETURNING'],
 };
+
+/**
+ * [E16] The rungs a RIDER confirms a pickup from: standing at the pickup, or
+ * handed an order that was already ready. Both doors into PICKED_UP read this
+ * one list — the generic rider leg (`PUT picked-up`) and the courier's
+ * pickup-proof step — so they cannot disagree about where custody may be
+ * claimed, and the courier's pickup photo can be issued only while its pickup
+ * can still be confirmed. Narrower than ORDER_TRANSITIONS.PICKED_UP, which is
+ * the state machine's outer bound for every caller, not the rider's rung.
+ */
+export const RIDER_PICKUP_FROM = ['RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP'] as const satisfies readonly OrderStatus[];
 
 /**
  * THE RELEASE EDGES. Key = the stage an order is returned to, value = the
@@ -311,6 +388,8 @@ export const RECOVERY_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   CANCELLED: [],
   REFUNDED: [],
   FAILED: [],
+  RETURNING: [],
+  RETURNED: [],
 };
 
 /** True when a RELEASE may move an order from `from` to `to`. */
@@ -359,4 +438,74 @@ export class UndeclaredRecoveryError extends Error {
  */
 export function assertRecoveryTransition(from: OrderStatus, to: OrderStatus): void {
   if (!isRecoveryTransition(from, to)) throw new UndeclaredRecoveryError(from, to);
+}
+
+// ---------------------------------------------------------------------------
+// A TAXI STOP — the TENTH member of this family. [TAXI multi-stop]
+//
+// A ride with intermediate stops adds NO OrderStatus. The passenger is aboard
+// from the pickup to the final destination, so every stop happens inside
+// RIDE_IN_PROGRESS, and the guardian, the custody law above and the cash
+// handover keep keying on that one status. What a stop adds is its own small
+// machine (pending, arrived, departed, skipped), and it is declared here,
+// beside the order's, in the same shape: a Record keyed by the Prisma enum, so
+// a new stop state fails the build until it is classified, and every list
+// derived from it, never hand-written. The single-source suite refuses a copy
+// of a stop list or a stop edge anywhere else.
+//
+// Inert today: nothing reads these yet (the stop endpoints arrive later).
+// ---------------------------------------------------------------------------
+
+/** The order status every stop lives inside. A stop moves only while the
+ *  passenger is aboard: before the pickup there is nothing to stop for, and
+ *  every way out of this status ends the ride. */
+export const TAXI_STOP_PARENT_STATUS = 'RIDE_IN_PROGRESS' as const satisfies OrderStatus;
+
+/** OPEN = the driver still owes the stop an arrival, a departure or a skip;
+ *  a ride is not over while one is open. RESOLVED = done with. */
+export type TaxiStopLaw = 'OPEN' | 'RESOLVED';
+
+/**
+ * Every TaxiStopStatus, classified. **Adding a value to the TaxiStopStatus
+ * enum makes this object fail to type-check until the new state is
+ * classified.** Do not widen the type; classify the state.
+ */
+export const TAXI_STOP_LAW: Record<TaxiStopStatus, TaxiStopLaw> = {
+  // Not reached yet.
+  PENDING: 'OPEN',
+  // The car is at the stop and the passenger may be out of it: the stop is
+  // still owed a departure (or, once the grace has run, a skip).
+  ARRIVED: 'OPEN',
+  DEPARTED: 'RESOLVED',
+  // Passed over, with a reason the passenger is told.
+  SKIPPED: 'RESOLVED',
+};
+
+/** THE open stop statuses. Derived from the law, never hand-written. */
+export const TAXI_STOP_OPEN_STATUSES: TaxiStopStatus[] = (Object.keys(TAXI_STOP_LAW) as TaxiStopStatus[])
+  .filter((s) => TAXI_STOP_LAW[s] === 'OPEN');
+
+/** Predicate form: does this stop still need the driver? */
+export function isTaxiStopOpen(status: TaxiStopStatus): boolean {
+  return TAXI_STOP_LAW[status] === 'OPEN';
+}
+
+/**
+ * The stop machine, in ORDER_TRANSITIONS' convention: key = the target state,
+ * value = the states it may be entered from. A stop is born PENDING; the
+ * driver arrives at it and then departs, or skips it (before arriving, or
+ * after waiting there). Nothing leaves DEPARTED or SKIPPED: a resolved stop is
+ * never re-opened, and the itinerary is frozen at request (no mid-trip add,
+ * change or reorder in v1).
+ */
+export const TAXI_STOP_TRANSITIONS: Record<TaxiStopStatus, TaxiStopStatus[]> = {
+  PENDING: [],
+  ARRIVED: ['PENDING'],
+  DEPARTED: ['ARRIVED'],
+  SKIPPED: ['PENDING', 'ARRIVED'],
+};
+
+/** True when a stop may move from `from` to `to`. */
+export function isTaxiStopTransition(from: TaxiStopStatus, to: TaxiStopStatus): boolean {
+  return TAXI_STOP_TRANSITIONS[to].includes(from);
 }

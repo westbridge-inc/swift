@@ -18,6 +18,7 @@ import {
   TonePill,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { rejectReasonsFor } from '../rejectReasons';
 import {
   BoardFirstRun,
   BoardFirstRunRow,
@@ -33,9 +34,9 @@ import {
   orderActions,
   type VendorOrderActionKind,
 } from '../shared';
-import { disconnectSocket } from '../../../services/socket';
 import { docLabel } from '../../../components/onboarding/DocumentUploadCard';
 import { useVerificationStatus } from '../../../hooks/verification';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import {
   useVendorProfile,
   useVendorOrderHistory,
@@ -334,7 +335,7 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
         <BoardFirstRunRow
           index={1}
           label={menuQ.isError ? 'Menu status unavailable' : 'Checking your menu'}
-          detail={menuQ.isError ? 'Open the menu to check its live items' : 'Loading your live catalogue facts'}
+          detail={menuQ.isError ? 'Open the menu to check its items' : 'Loading your menu details'}
           onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
         />
       ) : canManage && items.length === 0 ? (
@@ -647,8 +648,7 @@ function billingSummary(sub: any) {
   if (!sub) return 'Subscription not active';
   if (sub.isInGracePeriod && sub.gracePeriodEnd) return `Pay by ${fmtDate(sub.gracePeriodEnd)}`;
   const next = sub.nextBillingDate ? `Next bill ${fmtDate(sub.nextBillingDate)}` : null;
-  const rail = sub.billingMethod === 'MOBILE_MONEY' ? 'MMG' : sub.billingMethod === 'CASH' ? 'cash' : null;
-  return [next, rail].filter(Boolean).join(' · ') || String(sub.status ?? 'Subscription').toLowerCase();
+  return next || String(sub.status ?? 'Subscription').toLowerCase();
 }
 
 function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyticsStale, analyticsUpdatedAt }: any) {
@@ -675,9 +675,9 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
   const qrStale = qrQ.isError && !!qrQ.data;
   const subStale = subQ.isError && !!sub;
   const menuDetail = menuQ.isError && !menuQ.data
-    ? 'Catalogue unavailable'
+    ? 'Menu unavailable'
     : menuQ.isLoading && !menuQ.data
-      ? 'Checking live catalogue…'
+      ? 'Checking your menu…'
       : `${active} active · ${soldOut} sold out${menuStale ? ' · last loaded' : ''}`;
   const revenueDetail = revenueKnown
     ? `7d ${money(revenueWindow.cur.revenue)}`
@@ -760,7 +760,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           Share or pay
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          Your store QR is for customers. Your Swift Number is for the weekly fee.
+          Your store QR is for customers. View your weekly fee separately.
         </T>
         <PillButton
           label="Open store QR"
@@ -772,13 +772,13 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           }}
         />
         <PillButton
-          label="Open Swift Number"
+          label="Weekly fee"
           icon="hash"
           variant="soft"
           style={{ alignSelf: 'stretch', marginTop: space.md }}
           onPress={() => {
             setShareOpen(false);
-            afterDismiss(() => navigation.navigate('VendorMySwiftNumber'));
+            afterDismiss(() => navigation.navigate('WeeklyFee'));
           }}
         />
       </PopupCard>
@@ -793,7 +793,7 @@ function VendorStaffAvailability({ navigation }: any) {
   const detail = menuQ.isError && !menuQ.data
     ? 'Availability unavailable'
     : menuQ.isLoading && !menuQ.data
-      ? 'Checking live catalogue…'
+      ? 'Checking your menu…'
       : `${soldOut} sold out · one-tap updates${menuQ.isError && menuQ.data ? ' · last loaded' : ''}`;
   return (
     <View style={{ marginTop: space.lg, marginBottom: space.xl }}>
@@ -817,7 +817,10 @@ function VendorStaffAvailability({ navigation }: any) {
 
 export function VendorOps({ store, navigation }: any) {
   const [queueOpen, setQueueOpen] = useState(false);
-  const [switchingStore, setSwitchingStore] = useState(false);
+  // [E10 · DS200 D1] The board's Reject/Decline opens the same reason chooser
+  // as the order screen: the API refuses a rejection without a reason, so a
+  // bare tap used to fail with nothing on screen.
+  const [rejecting, setRejecting] = useState<{ id: string; fulfillment?: string | null } | null>(null);
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
   const setSelfDelivery = useSetSelfDelivery();
@@ -856,22 +859,11 @@ export function VendorOps({ store, navigation }: any) {
     : [];
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
   const qc = useQueryClient();
-  const switchStore = async (id: string) => {
-    if (id === store.id || switchingStore) return;
-    setSwitchingStore(true);
-    disconnectSocket();
-    setSelectedStore(id);
-    try {
-      // Store-aware query keys live outside this lane. Reset the shared cache
-      // so the next store never inherits the previous store's role or facts.
-      await Promise.all([
-        qc.resetQueries({ queryKey: ['vendor'] }),
-        qc.resetQueries({ queryKey: ['verification'] }),
-      ]);
-    } finally {
-      setSwitchingStore(false);
-    }
-  };
+  // The board polls its orders every few seconds. A spinner bound to
+  // isRefetching dropped the whole board behind a spinner on every poll; it
+  // now shows only while the owner's own pull is in flight (lib/pullToRefresh).
+  const pull = usePullToRefresh(() => qc.invalidateQueries({ queryKey: ['vendor'] }));
+  const switchStore = (id: string) => setSelectedStore(id);
   const fetched: any[] = ordersQ.data ?? [];
   const boardLoading = ordersQ.isLoading && !ordersQ.data;
   const boardUnavailable = ordersQ.isError && !ordersQ.data;
@@ -914,15 +906,6 @@ export function VendorOps({ store, navigation }: any) {
     </View>
   );
 
-  if (switchingStore) {
-    return (
-      <Screen>
-        <TabHeader title="Switching store…" eyebrow="LOADING BUSINESS" statusTone="muted" />
-        <LoadingBlock />
-      </Screen>
-    );
-  }
-
   return (
     <Screen>
       <TabHeader
@@ -936,8 +919,8 @@ export function VendorOps({ store, navigation }: any) {
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={ordersQ.isRefetching || analyticsQ.isRefetching}
-            onRefresh={() => void qc.invalidateQueries({ queryKey: ['vendor'] })}
+            refreshing={pull.refreshing}
+            onRefresh={() => { void pull.onRefresh(); }}
             tintColor={color.brand[500]}
           />
         }
@@ -1109,7 +1092,7 @@ export function VendorOps({ store, navigation }: any) {
                 key={o.id}
                 order={o}
                 busy={busy}
-                onAction={(action, code) => orderAction.mutate({ id: o.id, action, code })}
+                onAction={(action, code) => (action === 'reject' ? setRejecting({ id: o.id, fulfillment: o.fulfillment }) : orderAction.mutate({ id: o.id, action, code }))}
                 onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
               />
             ))}
@@ -1123,7 +1106,7 @@ export function VendorOps({ store, navigation }: any) {
                     key={o.id}
                     order={o}
                     busy={busy}
-                    onAction={(action, code) => orderAction.mutate({ id: o.id, action, code })}
+                    onAction={(action, code) => (action === 'reject' ? setRejecting({ id: o.id, fulfillment: o.fulfillment }) : orderAction.mutate({ id: o.id, action, code }))}
                     onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
                   />
                 ))}
@@ -1138,7 +1121,11 @@ export function VendorOps({ store, navigation }: any) {
             <VendorOrderCard
               order={newOrders[0] ?? inProgress[0]}
               busy={busy}
-              onAction={(action, code) => orderAction.mutate({ id: (newOrders[0] ?? inProgress[0]).id, action, code })}
+              onAction={(action, code) => {
+                const target = newOrders[0] ?? inProgress[0];
+                if (action === 'reject') setRejecting({ id: target.id, fulfillment: target.fulfillment });
+                else orderAction.mutate({ id: target.id, action, code });
+              }}
               onOpen={() => {
                 const order = newOrders[0] ?? inProgress[0];
                 navigation.navigate('VendorOrderDetail', { orderId: order.id, orderNumber: order.orderNumber });
@@ -1258,6 +1245,30 @@ export function VendorOps({ store, navigation }: any) {
         </T>
 
       </ScrollView>
+      <PopupCard visible={rejecting != null} onClose={() => setRejecting(null)}>
+        <IconChip icon="x-circle" size={56} tone="error" />
+        <PopupTitle variant="title" center style={{ marginTop: space.lg }}>
+          {rejecting?.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}
+        </PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          The customer is told right away — pick what happened. This can’t be undone.
+        </T>
+        {rejectReasonsFor(rejecting?.fulfillment).map((why) => (
+          <PillButton
+            key={why}
+            label={why}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={busy}
+            onPress={() => {
+              const target = rejecting;
+              setRejecting(null);
+              if (target) orderAction.mutate({ id: target.id, action: 'reject', reason: why });
+            }}
+          />
+        ))}
+        <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.lg }} onPress={() => setRejecting(null)} />
+      </PopupCard>
     </Screen>
   );
 }

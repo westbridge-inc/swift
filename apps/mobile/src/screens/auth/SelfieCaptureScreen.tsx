@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { View, Linking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
@@ -14,17 +15,20 @@ import {
   requireAuthSessionSnapshot,
   useAuthStore,
 } from '../../stores/authStore';
-import { PillButton, T } from '../../kit';
+import { PillButton, T, useLogoutConfirm } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
+import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
+import { useBackToSwift, useBackToSwiftGestures } from '../../components/onboarding/backToSwift';
 
 const FRAME = 260;
 
 /**
- * Mandatory signup selfie (master plan §3) — camera capture ONLY, no gallery.
- * Rendered by RootNavigator for any signed-in account without a selfie, so it
- * covers new registrations, existing accounts, and every role the same way.
- * The photo becomes the user's public profile picture: drivers see who they
- * pick up, customers see who's coming.
+ * Profile selfie (master plan §3) — camera capture ONLY, no gallery.
+ * Rendered by RootNavigator for a signed-in earner account without a selfie,
+ * and [E27] pushed by the taxi screen when a customer's ride request needs
+ * one (customers are not asked merely to browse or order). The photo becomes
+ * the user's public profile picture: drivers see who they pick up, customers
+ * see who's coming.
  */
 export function SelfieCaptureScreen() {
   const cameraRef = useRef<CameraView>(null);
@@ -34,8 +38,30 @@ export function SelfieCaptureScreen() {
   const [capturing, setCapturing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { setUserIfCurrent, logout } = useAuthStore();
+  const { setUserIfCurrent } = useAuthStore();
+  // The account already exists here; only a photo taken and not yet saved
+  // lives on this device, so that is what the ask names.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    title: 'Sign out of Swift?',
+    body: 'Your account stays — sign back in to finish. A photo you haven’t saved yet is discarded.',
+    confirmLabel: 'Sign out',
+  });
   const sessionGeneration = useAuthStore((state) => state.sessionGeneration);
+  // [E27] Pushed from a flow that needs the photo (taxi) rather than shown as
+  // the root gate: "Not now" goes back instead of signing out, and a saved
+  // photo returns the passenger to where they were.
+  const navigation = useNavigation<any>();
+  const stacked = navigation?.canGoBack?.() === true;
+  // [Owner, 1 Oct] As the first step of "Swift Business" or "Swift Driver"
+  // this photo is not a one-way door either: a signed-in account that picked
+  // a partner app by mistake goes back to ordering ("‹ Swift", Android's back,
+  // the iOS edge swipe) without signing out — customers are not asked for it
+  // merely to order [E27].
+  const intent = useAuthStore((s) => s.intent);
+  const hasUser = useAuthStore((s) => !!s.user);
+  const partnerGate = !stacked && hasUser && (intent === 'vendor' || intent === 'mover');
+  const back = useBackToSwift(intent === 'mover' ? 'mover' : 'vendor');
+  const gestures = useBackToSwiftGestures(back.leave, partnerGate);
 
   // The navigator can keep this same screen instance mounted when account A
   // signs out and account B also needs a selfie. Never carry A's captured
@@ -90,6 +116,7 @@ export function SelfieCaptureScreen() {
       if (!setUserIfCurrent(owner, { ...operationUser, ...updated } as never)) {
         throw new AuthSessionBoundaryError();
       }
+      if (stacked) navigation.goBack();
     } catch (uploadError) {
       if (uploadError instanceof AuthSessionBoundaryError) return;
       setError('Upload failed. Check your connection and try again.');
@@ -125,11 +152,18 @@ export function SelfieCaptureScreen() {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top', 'bottom']}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', paddingHorizontal: space.lg, paddingTop: space.md }}>
-        <PressableScale onPress={logout} hitSlop={12}>
-          <T variant="label" tone="muted">Sign out</T>
-        </PressableScale>
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top', 'bottom']} {...gestures}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: partnerGate ? 'space-between' : 'flex-end', paddingHorizontal: space.lg, paddingTop: space.md }}>
+        {partnerGate ? <BackToSwiftButton onPress={back.leave} busy={back.leaving} /> : null}
+        {stacked ? (
+          <PressableScale onPress={() => navigation.goBack()} hitSlop={12}>
+            <T variant="label" tone="muted">Not now</T>
+          </PressableScale>
+        ) : (
+          <PressableScale onPress={requestLogout} hitSlop={12}>
+            <T variant="label" tone="muted">Sign out</T>
+          </PressableScale>
+        )}
       </View>
 
       <View style={{ flex: 1, justifyContent: 'center', paddingHorizontal: space.lg }}>
@@ -174,6 +208,7 @@ export function SelfieCaptureScreen() {
       <T variant="micro" tone="muted" center style={{ marginBottom: space.md, paddingHorizontal: space.lg }}>
         Your photo is shown with your orders and rides. You can retake it any time.
       </T>
+      {logoutDialog}
     </SafeAreaView>
   );
 }

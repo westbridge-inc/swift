@@ -8,23 +8,14 @@ import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, Loa
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
-
-type TradeOption = { key: string; label: string; pictogram: PictogramName };
+import { useServiceCatalog } from '../useServiceCatalog';
+import { customerServiceCategories, SERVICE_GROUP_LABELS, selectedServiceCategory, serviceRequestTrade } from '../serviceCatalogPresentation';
 
 const SERVICES_TINT = VERTICAL_TINT.services ?? { bg: color.brand[50], ink: color.brand[600] };
-
-const TRADES: TradeOption[] = [
-  { key: 'electrician', label: 'Electrician', pictogram: 'electrician' },
-  { key: 'plumber', label: 'Plumber', pictogram: 'plumber' },
-  { key: 'carpenter', label: 'Carpenter', pictogram: 'carpenter' },
-  { key: 'cleaner', label: 'Cleaner', pictogram: 'services' },
-  { key: 'ac_refrigeration', label: 'AC repair', pictogram: 'ac-fridge' },
-  { key: 'mechanic', label: 'Mechanic', pictogram: 'services' },
-  { key: 'painter', label: 'Painter', pictogram: 'painter' },
-  { key: 'mason', label: 'Mason', pictogram: 'mason' },
-  { key: 'welder', label: 'Welder', pictogram: 'services' },
-  { key: 'gardener', label: 'Gardener', pictogram: 'services' },
-];
+const SERVICE_PICTOGRAMS: Record<string, PictogramName> = {
+  electrician: 'electrician', plumber: 'plumber', carpenter: 'carpenter',
+  ac_refrigeration: 'ac-fridge', painter: 'painter', mason: 'mason',
+};
 
 type ServiceProvider = {
   id: string;
@@ -57,16 +48,20 @@ export function ServicesScreen({ navigation }: any) {
   const [description, setDescription] = useState('');
   const [sentPopup, setSentPopup] = useState(false);
 
-  const { data, isFetching, isError } = useServiceProviders<ProviderBrowse>(trade);
+  const catalog = useServiceCatalog();
+  const categories = catalog.data?.categories ?? [];
+  const visibleCategories = customerServiceCategories(categories);
+  const requestTrade = catalog.isError ? undefined : serviceRequestTrade(categories, trade);
+  const { data, isFetching, isError } = useServiceProviders<ProviderBrowse>(requestTrade);
   const requestJob = useRequestJob();
 
   const providers = data?.providers ?? [];
-  const selectedTrade = TRADES.find((option) => option.key === trade);
-  const canSend = !!selectedProviderId && description.trim().length >= 10;
+  const selectedTrade = selectedServiceCategory(visibleCategories, trade);
+  const canSend = !!requestTrade && !!selectedProviderId && description.trim().length >= 10;
   const errMsg = (requestJob.error as any)?.response?.data?.message;
 
   const onSend = () => {
-    if (!selectedProviderId || description.trim().length < 10) return;
+    if (!canSend || !selectedProviderId) return;
     requestJob.mutate(
       { providerId: selectedProviderId, description: description.trim() },
       {
@@ -87,9 +82,9 @@ export function ServicesScreen({ navigation }: any) {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        <T variant="title">Hire a pro</T>
+        <T variant="title">Find the right service</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm, marginBottom: space.lg }}>
-          Verified tradespeople. Discuss the quote in chat, then pay cash on completion.
+          Choose an available service, discuss the quote, and agree a time with your provider.
         </T>
 
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.xl }}>
@@ -113,30 +108,43 @@ export function ServicesScreen({ navigation }: any) {
         </Card>
 
         <T variant="heading" style={{ marginBottom: space.sm }}>
-          Choose a trade
+          Choose a service
         </T>
         <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
-          Pick the work first, then compare verified providers.
+          Browse by category. Available providers accept quote requests; instant appointment booking is still being prepared.
         </T>
         {/* [Wave 3 · ref 13] The reference draws trade PILLS — the kit Chip —
             not pictogram tiles. Tiles were an unrecorded invention; the
             reference outranks them. */}
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
-          {TRADES.map((option) => (
-            <Chip
-              key={option.key}
-              label={option.label}
-              selected={option.key === trade}
-              onPress={() => {
-                setTrade(option.key);
-                setSelectedProviderId(undefined);
-              }}
-            />
-          ))}
-        </View>
+        {catalog.isPending ? <LoadingBlock /> : catalog.isError ? (
+          <EmptyState icon="alert-circle" title="Couldn’t load services" body="Try loading the service catalogue again." actionLabel="Try again" onAction={() => void catalog.refetch()} />
+        ) : Object.entries(SERVICE_GROUP_LABELS).filter(([group]) =>
+          visibleCategories.some((category) => category.group === group)).map(([group, label]) => (
+          <View key={group} style={{ marginBottom: space.lg, gap: space.sm }}>
+            <T variant="label" weight="semibold">{label}</T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+              {visibleCategories.filter((category) => category.group === group).map((option) => (
+                <Chip
+                  key={option.id}
+                  label={option.label}
+                  selected={option.id === trade}
+                  onPress={() => {
+                    setTrade(option.id);
+                    setSelectedProviderId(undefined);
+                  }}
+                />
+              ))}
+            </View>
+          </View>
+        ))}
+        {selectedTrade?.availabilityMessage ? (
+          <T variant="caption" tone="muted" style={{ marginVertical: space.md }}>
+            {selectedTrade.availabilityMessage}
+          </T>
+        ) : null}
 
         {/* Safety guidance from the API (licensed-trade nudges) */}
-        {trade && data?.guidance ? (
+        {requestTrade && data?.guidance ? (
           <View
             style={{
               flexDirection: 'row',
@@ -155,8 +163,10 @@ export function ServicesScreen({ navigation }: any) {
           </View>
         ) : null}
 
-        {!trade ? (
+        {catalog.isPending || catalog.isError ? null : !trade ? (
           <EmptyState icon="tool" title="What needs doing?" body="Pick a service to see verified pros near you." />
+        ) : !requestTrade ? (
+          <EmptyState icon="clock" title="This service is being prepared" body="You can browse other categories while the required provider checks are completed." />
         ) : isFetching ? (
           <LoadingBlock />
         ) : isError ? (
@@ -171,7 +181,7 @@ export function ServicesScreen({ navigation }: any) {
           <View style={{ marginTop: space.xl, gap: space.md }}>
             {providers.map((p) => {
               const selected = p.id === selectedProviderId;
-              const providerPictogram = TRADES.find((option) => option.key === p.trade)?.pictogram ?? 'services';
+              const providerPictogram = SERVICE_PICTOGRAMS[p.trade] ?? 'services';
               return (
                 <Card
                   key={p.id}
@@ -248,7 +258,7 @@ export function ServicesScreen({ navigation }: any) {
       </ScrollView>
 
       {/* Job composer — slides in when a provider is chosen */}
-      {selectedProviderId ? (
+      {requestTrade && selectedProviderId ? (
         <View
           style={{
             position: 'absolute',

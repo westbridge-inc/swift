@@ -4,8 +4,7 @@ import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
-import { countryFromPhone } from '../../utils/phone-country';
-import { generateOtp, storeOtp, verifyOtp, checkOtpRateLimit } from '../../utils/otp';
+import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -28,6 +27,19 @@ import {
   disconnectUserSockets as disconnectAuthorizationUserSockets,
 } from '../../utils/socket-revocation';
 import { isDevelopment, isProduction } from '../../utils/runtime-mode';
+import {
+  armDevelopmentSignupGeneration,
+  consumePasswordResetOtpGeneration,
+  consumeSignupContinuation,
+  consumeSignupOtpGeneration,
+  issueSignupContinuation,
+  storePasswordResetOtp,
+  storeSignupOtp,
+  verifyPasswordResetOtp,
+  verifySignupOtp,
+} from './signup-continuation';
+import { publicLaunchCountryFromPhone } from './launch-market';
+import { runWithoutTenant } from '../../plugins/tenant-context';
 
 interface DeviceInfo {
   deviceId: string;
@@ -39,11 +51,20 @@ interface DeviceInfo {
 /** Public signup roles (locked model) mapped to internal UserRole values. */
 export type SignupRole = 'CUSTOMER' | 'MOVER' | 'VENDOR';
 
-const OTP_VERIFIED_PREFIX = 'otp_verified:';
-const OTP_VERIFIED_TTL = 600; // 10 min window between verify-otp and register
-
 const MAX_FAILED_LOGINS = 5;
 const LOCKOUT_MINUTES = 15;
+/** What a one-time code was texted for. A code works only for its own purpose. */
+export type OtpPurpose = 'sign-in' | 'password-reset';
+/** [L04 · AUTH-2] Account states that may not start a session by any credential. */
+const BLOCKED_STATUSES: ReadonlySet<UserStatus> = new Set<UserStatus>(['SUSPENDED', 'BANNED', 'DEACTIVATED']);
+const accountSuspended = () => new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+/**
+ * [L04 · MASTER-054] Compared against when there is no account or no password,
+ * so every public password attempt costs one bcrypt comparison at the same
+ * work factor as a real hash (12). It is the hash of random bytes that were
+ * discarded when it was made: no password matches it.
+ */
+const NO_ACCOUNT_PASSWORD_HASH = '$2a$12$BtoqUaI0gAvmIblEDnOQbuHKARxmMbd/Kr6Kp0uvRhw35lrqjgZA2';
 /** Fields that must never leave the API on a user object. A deny-list (not a
  *  select) so the response keeps its shape — the app reads roles and the
  *  rider/driver/vendorOwner includes to route the account to its surface. */
@@ -73,11 +94,32 @@ export class AuthService {
     this.channels = channels ?? getChannels();
   }
 
-  async sendOtp(phone: string) {
-    // Rate limiting
+  async sendOtp(phone: string, ip: string, purpose: OtpPurpose = 'sign-in') {
+    // GY-only product rule (#1259). Refuse foreign and invalid numbers BEFORE
+    // any Redis counter is spent — a flood of throwaway numbers must not burn
+    // the shared daily SMS budget (audit High #2).
+    if (!publicLaunchCountryFromPhone(phone)) {
+      throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is currently available in Guyana only');
+    }
+
+    // Rate limiting: one code per number per window, claimed atomically.
+    const claimedAt = Date.now();
     const allowed = await checkOtpRateLimit(this.app.redis, phone);
     if (!allowed) {
-      throw new AppError(429, 'RATE_LIMITED', 'Please wait before requesting another OTP');
+      // The refusal says when the next send is allowed and whether the send
+      // holding the window delivered a code, which outlives the window (so
+      // the app can offer code entry instead of a dead end). It reads only
+      // the claim: never a code, never whether an account exists.
+      const { retryAfterSeconds, codeAlreadySent } = await readOtpCooldown(this.app.redis, phone);
+      const wait = `${retryAfterSeconds} second${retryAfterSeconds === 1 ? '' : 's'}`;
+      throw new AppError(
+        429,
+        'RATE_LIMITED',
+        codeAlreadySent
+          ? `We already sent a code to this number. You can request a new one in ${wait}.`
+          : `A code was just requested for this number. You can request a new one in ${wait}.`,
+        { retryAfterSeconds, codeAlreadySent },
+      );
     }
 
     // [STA-1 DL-6] A store reviewer's identifier is a fiction: no SMS can
@@ -85,7 +127,12 @@ export class AuthService {
     // the login screen must not be able to tell, and neither can anyone else.
     const review = await reviewCredentialFor(this.app.prisma, phone);
     if (review) {
+      // [L04 · AUTH-2] A reset request never arms the reviewer's sign-in code:
+      // a code asked for one purpose must not open another.
+      if (purpose === 'password-reset') return { message: 'OTP sent successfully', expiresIn: 300 };
       await armReviewCode(this.app.redis, phone, review.id);
+      // Same marker as a delivered SMS, so a refusal is the production one too.
+      await markOtpCooldownDelivered(this.app.redis, phone, claimedAt).catch(() => {});
       return { message: 'OTP sent successfully', expiresIn: 300 };
     }
 
@@ -103,20 +150,39 @@ export class AuthService {
       throw new AppError(429, 'RATE_LIMITED', `Too many codes requested for this number. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
     }
 
-    // Hard daily cost ceilings (per-phone + global circuit breaker) so an abuse
-    // spike can't run up the SMS bill. Checked before any SMS is generated/sent.
-    const budget = await checkOtpDailyBudget(this.app.redis, phone);
+    // Hard daily cost ceilings so an abuse spike can't run up the SMS bill,
+    // checked before any SMS is generated/sent. A number owned by an EXISTING
+    // verified account (or an admin) draws from the separate known-phone budget
+    // — a flood of new-number requests can never lock real logins out. The
+    // lookup is a system-mode read: authentication runs before any tenant is
+    // bound, and the deny posture must not turn the budget classifier into a 500.
+    const knownPhone = await runWithoutTenant(
+      () => this.app.prisma.user.findUnique({
+        where: { phone },
+        select: { isPhoneVerified: true, roles: true },
+      }).then((u) =>
+        !!u && (u.isPhoneVerified || u.roles.includes('ADMIN') || u.roles.includes('SUPER_ADMIN')),
+      ),
+      'otp-known-phone-budget',
+    );
+    const budget = await checkOtpDailyBudget(this.app.redis, phone, { ip, knownPhone });
     if (!budget.allowed) {
       if (budget.reason === 'global_daily') {
         this.app.log.error('[sms-budget] global daily OTP cap reached — refusing further sends until reset');
+      } else if (budget.reason === 'known_daily') {
+        this.app.log.error('[sms-budget] known-phone daily OTP cap reached — refusing further sends until reset');
       }
       throw new AppError(429, 'RATE_LIMITED', 'Too many verification requests right now. Please try again later.');
     }
 
     const otp = generateOtp();
 
-    // Store in Redis with 5-min TTL
-    await storeOtp(this.app.redis, phone, otp);
+    // Store the code and its ceremony generation atomically in one Redis
+    // Cluster slot. A later send supersedes both together. Each purpose has
+    // its own record: a sign-in code cannot reset a password, and a reset code
+    // cannot sign in.
+    if (purpose === 'password-reset') await storePasswordResetOtp(this.app.redis, phone, otp);
+    else await storeSignupOtp(this.app.redis, phone, otp);
 
     if (isDevelopment()) {
       this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
@@ -129,11 +195,24 @@ export class AuthService {
     // registered; failing loudly is honest and lets the user retry. The dev
     // adapter never throws, so local flows are unaffected.
     try {
-      await this.channels.sms.sendSms(phone, `Your Swift verification code is: ${otp}`);
+      await this.channels.sms.sendSms(
+        phone,
+        purpose === 'password-reset'
+          ? `Your Swift password reset code is: ${otp}`
+          : `Your Swift verification code is: ${otp}`,
+      );
     } catch (err) {
+      // The provider failed: give back the budget this attempt just spent so
+      // undeliverable sends don't permanently burn the day's ceiling.
+      await budget.refund?.().catch(() => {});
       this.app.log.error({ err, phone: phone.slice(0, 5) + '***' }, '[otp] SMS send failed');
       throw new AppError(502, 'SMS_SEND_FAILED', "We couldn't send your code right now. Please try again in a moment.");
     }
+
+    // Only now is a code on its way. Best effort: the SMS already left, so a
+    // failed mark must not fail the send; a later refusal just stays cautious
+    // (codeAlreadySent false).
+    await markOtpCooldownDelivered(this.app.redis, phone, claimedAt).catch(() => {});
 
     return { message: 'OTP sent successfully', expiresIn: 300 };
   }
@@ -152,16 +231,23 @@ export class AuthService {
       !isProduction() &&
       process.env['DEV_OTP_BYPASS'] === '1' &&
       code === '000000';
+    let signupOtpGeneration: string | undefined;
     if (review) {
       const result = await verifyReviewCode(this.app.redis, phone, code, review);
       if (!result.valid) {
         throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
       }
     } else if (!devBypass) {
-      const result = await verifyOtp(this.app.redis, phone, code);
+      const result = await verifySignupOtp(this.app.redis, phone, code);
       if (!result.valid) {
         throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
       }
+      signupOtpGeneration = result.generation;
+    } else {
+      signupOtpGeneration = await armDevelopmentSignupGeneration(this.app.redis, phone);
+    }
+    if (!review && !signupOtpGeneration) {
+      throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     }
 
     // Find existing user
@@ -180,18 +266,44 @@ export class AuthService {
     }
 
     if (!user) {
-      // Phone ownership proven — open a short registration window.
-      // register() requires this flag, so signups are OTP-mandatory (L1).
-      await this.app.redis.set(`${OTP_VERIFIED_PREFIX}${phone}`, '1', 'EX', OTP_VERIFIED_TTL);
-      return { isNewUser: true, phone };
+      // Phone ownership proven. The caller receives one unpredictable,
+      // purpose-bound continuation; knowing the phone is no longer enough to
+      // claim this signup. A later successful OTP ceremony supersedes it.
+      if (!signupOtpGeneration) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+      const continuation = await issueSignupContinuation(this.app.redis, phone, signupOtpGeneration);
+      if (!continuation) {
+        throw new AppError(400, 'INVALID_OTP', 'A newer verification code was requested. Verify the latest code.');
+      }
+      return { isNewUser: true, phone, ...continuation };
     }
 
-    const tokens = await this.createSession(user.id, user.activeRole, deviceInfo, 'OTP');
+    if (signupOtpGeneration) {
+      const current = await consumeSignupOtpGeneration(this.app.redis, phone, signupOtpGeneration);
+      if (!current) {
+        throw new AppError(400, 'INVALID_OTP', 'A newer verification code was requested. Verify the latest code.');
+      }
+    }
 
-    // Update last active
-    await this.app.prisma.user.update({
-      where: { id: user.id },
-      data: { lastActiveAt: new Date(), isPhoneVerified: true },
+    // [L04 · AUTH-2] The code proves the phone, not that the account may sign
+    // in. Status is read under the User lock (the order ban/suspend and
+    // password login use) in the same transaction that writes the session, so
+    // a blocked account gets the password path's refusal and no Session row.
+    const tokens = await this.app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ status: UserStatus }>>`
+        SELECT "status"
+        FROM "users"
+        WHERE "id" = ${user.id}
+        FOR UPDATE
+      `;
+      const status = rows[0]?.status;
+      if (!status) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+      if (BLOCKED_STATUSES.has(status)) throw accountSuspended();
+      const issued = await this.createSession(user.id, user.activeRole, deviceInfo, 'OTP', tx);
+      await tx.user.update({
+        where: { id: user.id },
+        data: { lastActiveAt: new Date(), isPhoneVerified: true },
+      });
+      return issued;
     });
 
     return { isNewUser: false, user: sanitizeUser(user), tokens };
@@ -220,6 +332,7 @@ export class AuthService {
     firstName: string;
     lastName: string;
     email?: string;
+    registrationProof: string;
     role?: SignupRole;
     countryCode?: string;
     acceptTerms?: boolean;
@@ -228,16 +341,22 @@ export class AuthService {
     deviceId?: string | null;
     ipAddress?: string | null;
   }) {
+    // Consume caller authority before any account lookup or write. This is a
+    // single Redis script: two callers presenting the same proof cannot both
+    // pass, and a proof minted for another normalized phone has different
+    // cluster-slot keys. A later failure intentionally requires a fresh OTP.
+    const authorized = await consumeSignupContinuation(
+      this.app.redis,
+      data.phone,
+      data.registrationProof,
+    );
+    if (!authorized) {
+      throw new AppError(403, 'REGISTRATION_PROOF_REQUIRED', 'Verify your phone again to continue registration');
+    }
+
     const existing = await this.app.prisma.user.findUnique({ where: { phone: data.phone } });
     if (existing) {
       throw new AppError(409, 'USER_EXISTS', 'User with this phone already exists');
-    }
-
-    // OTP at signup is MANDATORY (trust level L1) — verify-otp for this phone
-    // must have succeeded within the registration window.
-    const otpVerified = await this.app.redis.get(`${OTP_VERIFIED_PREFIX}${data.phone}`);
-    if (!otpVerified) {
-      throw new AppError(403, 'OTP_REQUIRED', 'Verify your phone with an OTP before registering');
     }
 
     if (data.email) {
@@ -248,9 +367,12 @@ export class AuthService {
     }
 
     // The PHONE decides the market: pricing, currency, and checklists follow
-    // the dial prefix, never a client-picked field (which is only a fallback
-    // for prefixes we don't know). Inactive countries stay waitlist-only.
-    const countryCode = countryFromPhone(data.phone) ?? data.countryCode ?? 'GY';
+    // the dial prefix, never a client-picked field. V1 is Guyana-only even if
+    // a future CountryConfig row was accidentally left active.
+    const countryCode = publicLaunchCountryFromPhone(data.phone);
+    if (!countryCode) {
+      throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is currently available in Guyana only');
+    }
     const activeCountries = await this.countryConfig.getActiveCountries();
     if (!activeCountries.some((c) => c.code === countryCode)) {
       throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is not live in this country yet — join the waitlist');
@@ -307,9 +429,6 @@ export class AuthService {
       }
       return created;
     });
-
-    // Single-use registration window
-    await this.app.redis.del(`${OTP_VERIFIED_PREFIX}${data.phone}`);
 
     // Identity-integrity capture (trial-integrity §2.1) — silent, fire-and-
     // forget: PHONE (STRONG) + EMAIL (SOFT) + the §5 SignupAttempt velocity
@@ -420,21 +539,14 @@ export class AuthService {
       ? await this.app.prisma.user.findUnique({ where: { phone: identifier.phone } })
       : await this.app.prisma.user.findUnique({ where: { email: identifier.email! } });
 
-    // One generic failure for unknown user / no password / wrong password —
-    // no account enumeration through this endpoint.
+    // [L04 · MASTER-054] One generic failure for an unknown account, an account
+    // without a password, a wrong password and a locked account: same status,
+    // same body. Every attempt runs exactly one comparison (against a hash
+    // nothing matches when there is no password), so neither the answer nor the
+    // work done tells an account that exists from one that does not.
     const invalid = new AppError(401, 'INVALID_CREDENTIALS', 'Invalid phone/email or password');
+    const matches = await bcrypt.compare(password, user?.passwordHash ?? NO_ACCOUNT_PASSWORD_HASH);
     if (!user || !user.passwordHash) throw invalid;
-
-    if (
-      user.lockedUntil
-      && user.lockedUntil > new Date()
-      && !requiresPrivilegedSessionAssurance(user.activeRole, user.roles)
-    ) {
-      const minutesLeft = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60_000);
-      throw new AppError(423, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${minutesLeft} min`);
-    }
-
-    const matches = await bcrypt.compare(password, user.passwordHash);
 
     // Password hashing stays outside the lock so one expensive comparison does
     // not block every security mutation for this user. Once it finishes, both
@@ -473,9 +585,10 @@ export class AuthService {
       }
 
       const now = new Date();
+      // A locked account answers exactly like a wrong password (MASTER-054):
+      // the lock is enforced, never announced. The OTP sign-in stays open.
       if (locked.lockedUntil && locked.lockedUntil > now) {
-        const minutesLeft = Math.ceil((locked.lockedUntil.getTime() - now.getTime()) / 60_000);
-        throw new AppError(423, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${minutesLeft} min`);
+        return { kind: 'invalid' as const };
       }
 
       if (!matches) {
@@ -493,13 +606,7 @@ export class AuthService {
         return { kind: 'invalid' as const };
       }
 
-      if (
-        locked.status === 'SUSPENDED'
-        || locked.status === 'BANNED'
-        || locked.status === 'DEACTIVATED'
-      ) {
-        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
-      }
+      if (BLOCKED_STATUSES.has(locked.status)) throw accountSuspended();
 
       const accessToken = this.app.jwt.sign({
         userId: user.id,
@@ -540,7 +647,9 @@ export class AuthService {
 
   /** Reset = prove phone ownership again via OTP, then rotate everything. */
   async resetPassword(phone: string, code: string, newPassword: string) {
-    const result = await verifyOtp(this.app.redis, phone, code);
+    // [L04 · AUTH-2] Only a code texted by /password/reset-request resets a
+    // password; a sign-in code is not looked at here.
+    const result = await verifyPasswordResetOtp(this.app.redis, phone, code);
     if (!result.valid) {
       throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
     }
@@ -554,6 +663,9 @@ export class AuthService {
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
       throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+    }
+    if (!result.generation || !(await consumePasswordResetOtpGeneration(this.app.redis, phone, result.generation))) {
+      throw new AppError(400, 'INVALID_OTP', 'A newer verification code was requested. Verify the latest code.');
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
@@ -970,11 +1082,12 @@ export class AuthService {
     role: string,
     deviceInfo: DeviceInfo,
     authMethod: SessionAuthMethod,
+    db: Pick<Prisma.TransactionClient, 'session'> = this.app.prisma,
   ) {
     const accessToken = this.app.jwt.sign({ userId, role, jti: nanoid(8) });
     const refreshToken = nanoid(64);
 
-    await this.app.prisma.session.create({
+    await db.session.create({
       data: {
         userId,
         token: accessToken,

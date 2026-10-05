@@ -9,6 +9,8 @@ import { socketPlugin } from '../plugins/socket';
 import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
+import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // Courier (spec §4.3). Send a parcel person-to-person: pickup != dropoff,
@@ -23,12 +25,20 @@ const SOUTH = { lat: 6.755, lng: -58.155 };
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
 let seq = 0;
+// [SAFE-B · retained history] An issued drop-off proof is immutable evidence: its job and the people it names
+// are kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('12');
+
+/** [SAFE-B] The server's own issuer mints the drop-off proof for the assigned rider, in custody, exactly as
+ *  /proof-photo does; it records the issued URL on the job itself. */
+const issueProof = async (orderId: string, moverUserId: string) =>
+  (await issueSyntheticHandoverPhoto(app.prisma, { orderId, actorId: moverUserId, role: 'RIDER' })).url;
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200166${String(seq).padStart(2, '0')}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Courier',
       lastName: `User${seq}`,
       roles,
@@ -45,7 +55,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
       deviceId: 'step19', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, phone: user.phone };
 }
 
 function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: string) {
@@ -63,7 +73,7 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
 async function purgeFixtures() {
   // Key off the phone prefix so leftovers from a crashed run are cleaned too.
   const users = await app.prisma.user.findMany({
-    where: { phone: { startsWith: '+59200166' } },
+    where: { phone: { startsWith: PHONE_PREFIX } },
     select: { id: true },
   });
   const userIds = users.map((u) => u.id);
@@ -74,8 +84,14 @@ async function purgeFixtures() {
     select: { id: true },
   });
   const ids = orders.map((o) => o.id);
-  await app.prisma.order.deleteMany({ where: { id: { in: ids } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  // [SAFE-B · retained history] A job with an issued proof is kept with the people it names; the rest goes as
+  // before, in one transaction, and what stays is taken out of service.
+  await app.prisma.$transaction(async (tx) => {
+    const kept = await retainedCohort(tx, { orderIds: ids });
+    await tx.order.deleteMany({ where: { id: { in: without(ids, kept.orderIds) } } });
+    await tx.user.deleteMany({ where: { id: { in: without(userIds, kept.userIds) } } });
+    await retireKeptScaffolding(tx, kept);
+  }, { timeout: 60_000 });
 }
 
 const ORDER_BODY = {
@@ -166,13 +182,13 @@ describe('Courier — create, track, deliver', () => {
     const rider = await app.prisma.rider.create({
       data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
     });
-    const issued = `storage://t/courier-proof/${created.orderId}/proof.jpg`;
     await app.prisma.order.update({
       where: { id: created.orderId },
-      // Simulate the /proof-photo upload that issued this URL to this rider.
       // [M-28] The sender paid at pickup (the collect step): the proof may close the job.
-      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
+      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED' },
     });
+    // The /proof-photo upload issues this URL to this rider.
+    const issued = await issueProof(created.orderId, moverUser.userId);
 
     const res = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`, { proofPhotoUrl: issued }, moverUser.token);
     expect(res.statusCode).toBe(200);
@@ -188,12 +204,13 @@ describe('Courier — create, track, deliver', () => {
       data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
     });
 
-    // The rider uploaded a photo (issued URL recorded), then went pre-custody.
-    const issued = `storage://t/courier-proof/${created.orderId}/proof.jpg`;
+    // The rider uploaded a photo in custody (issued URL recorded), then the job went back pre-custody.
     await app.prisma.order.update({
       where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'RIDER_ASSIGNED', paymentStatus: 'CAPTURED', courierProofIssuedUrl: issued, courierProofIssuedRiderId: rider.id },
+      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED' },
     });
+    const issued = await issueProof(created.orderId, moverUser.userId);
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { status: 'RIDER_ASSIGNED' } });
     // Pre-custody: assigned but never picked up — DELIVERED is unreachable even
     // WITH a genuine issued photo. Custody is the gate.
     const preCustody = await inject('POST', `/api/v1/courier/order/${created.orderId}/proof`,
@@ -243,11 +260,11 @@ describe('Courier — create, track, deliver', () => {
       data: { isAvailable: false, currentOrderId: created.orderId },
       select: { totalDeliveries: true },
     });
-    const atomicIssued = `storage://t/courier-proof/${created.orderId}/atomic-proof.jpg`;
     await app.prisma.order.update({
       where: { id: created.orderId },
-      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED', courierProofIssuedUrl: atomicIssued, courierProofIssuedRiderId: rider.id },
+      data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED' },
     });
+    const atomicIssued = await issueProof(created.orderId, moverUser.userId);
 
     const originalStage = OrderService.prototype.stageCanonicalOrderTransition;
     const stageSpy = vi
@@ -403,8 +420,8 @@ describe('Courier — create, track, deliver', () => {
     const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
     const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
     const rider = await app.prisma.rider.create({ data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
-    const raceIssued = `storage://t/courier-proof/${created.orderId}/p.jpg`;
-    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED', courierProofIssuedUrl: raceIssued, courierProofIssuedRiderId: rider.id } });
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP', paymentStatus: 'CAPTURED' } });
+    const raceIssued = await issueProof(created.orderId, moverUser.userId);
 
     // Sender cancels while the rider submits proof — same instant.
     const [a, b] = await Promise.allSettled([
@@ -478,5 +495,37 @@ describe('Courier — priority dispatch is REAL [SWIFT-061]', () => {
     expect((await mk('RUSH')).isExpress).toBe(true);
     expect((await mk('EXPRESS')).isExpress).toBe(true);
     expect((await mk('STANDARD')).isExpress).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [S1 response-shaping] The sender's own past parcel is not a licence to keep
+// the courier's personal phone. The number is a handover convenience while the
+// parcel is in flight; a closed job returns null — the identity still reads.
+// Fails on main: the detail returned `rider.user.phone` for every status.
+// ---------------------------------------------------------------------------
+
+describe("Courier — a closed parcel does not keep the courier's phone", () => {
+  it('shows the phone while in flight and nulls it once delivered', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const created = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, sender.token)).json().data;
+    const moverUser = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await app.prisma.rider.create({
+      data: { userId: moverUser.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true },
+    });
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { riderId: rider.id, status: 'PICKED_UP' } });
+
+    const inFlight = await inject('GET', `/api/v1/courier/order/${created.orderId}`, undefined, sender.token);
+    expect(inFlight.statusCode).toBe(200);
+    expect(inFlight.json().data.rider.user.phone).toBe(moverUser.phone);
+
+    await app.prisma.order.update({ where: { id: created.orderId }, data: { status: 'DELIVERED' } });
+    const closed = await inject('GET', `/api/v1/courier/order/${created.orderId}`, undefined, sender.token);
+    expect(closed.statusCode).toBe(200);
+    expect(closed.json().data.rider.user.phone).toBeNull();
+    // Who carried it still reads — only the contact detail goes.
+    expect(closed.json().data.rider.user.firstName).toBe('Courier');
+    // [F-028-11] and the live position went with it.
+    expect(closed.json().data.rider.currentLat).toBeNull();
   });
 });

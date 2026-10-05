@@ -53,6 +53,13 @@ export interface DarkFeature {
    * is not an absence of the feature.
    */
   defaultedInCode?: string;
+  /**
+   * For switches whose ON state is ONE exact env VALUE rather than mere
+   * presence: the entry is on only when the env var equals this string.
+   * Absence-based reading is right for fingerprints and sender lists, wrong
+   * for a flag like LIFECYCLE_V2 where '0' is a real, deliberate OFF.
+   */
+  enabledWhen?: string;
 }
 
 export const DARK_FEATURES: DarkFeature[] = [
@@ -98,6 +105,16 @@ export const DARK_FEATURES: DarkFeature[] = [
       'An alert raised by an UNANSWERED check-in pages ops but does not text the emergency contacts. This is the deliberate default (§5.3 L4 — the server guessing, not a person asking) and is recorded as a receipt, not a silence.',
     impact: 'ops',
   },
+  {
+    key: 'order_hold',
+    setting: 'LIFECYCLE_V2',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'The order hold (free-cancel window)',
+    whileOff:
+      'An order shows up on the vendor board the instant it is placed, so the store can accept it within seconds of checkout while the app still promises the customer a five-minute free-cancel window: the hidden grace period never exists.',
+    impact: 'product',
+  },
 ];
 
 export interface DarkFeatureStatus extends DarkFeature {
@@ -115,7 +132,9 @@ export function darkFeatureStatus(
     on: f.defaultedInCode
       ? true
       : f.source === 'env'
-        ? Boolean(env[f.setting]?.trim())
+        ? f.enabledWhen !== undefined
+          ? env[f.setting] === f.enabledWhen
+          : Boolean(env[f.setting]?.trim())
         : configOn[f.setting] === true,
   }));
 }

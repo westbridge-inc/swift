@@ -54,9 +54,28 @@ export function phoneLenState(dialCode: string | null | undefined, digits: strin
   return local.length >= 6 ? 'ok' : 'short';
 }
 
-/** Clamp typed digits to the longest prefix that isn't too long for the country. */
+/**
+ * The local digits in what the person typed or pasted. A leading copy of THIS
+ * market's calling code ("+592 600 1234", "00592 600 1234", or a bare
+ * "592 600 1234" too long to be a local number) is the country code, not part
+ * of the number, so it is dropped. Clamping alone kept the first digits
+ * ("5926001") and quietly composed a different number.
+ */
+function withoutCallingCode(dialCode: string | null | undefined, typed: string): string {
+  const digits = typed.replace(/\D/g, '');
+  const cc = (dialCode ?? '').replace(/\D/g, '');
+  if (!cc) return digits;
+  if (digits.startsWith(`00${cc}`)) return digits.slice(cc.length + 2);
+  if (!digits.startsWith(cc)) return digits;
+  const rest = digits.slice(cc.length);
+  if (typed.trimStart().startsWith('+')) return rest;
+  return phoneLenState(dialCode, digits) === 'long' && phoneLenState(dialCode, rest) !== 'long' ? rest : digits;
+}
+
+/** Clamp typed digits to the longest prefix that isn't too long for the country,
+ *  after dropping a pasted copy of the calling code (withoutCallingCode). */
 export function clampPhone(dialCode: string | null | undefined, digits: string): string {
-  let local = digits.replace(/\D/g, '').slice(0, 15); // hard E.164 ceiling
+  let local = withoutCallingCode(dialCode, digits).slice(0, 15); // hard E.164 ceiling
   while (local.length > 6 && phoneLenState(dialCode, local) === 'long') {
     local = local.slice(0, -1);
   }

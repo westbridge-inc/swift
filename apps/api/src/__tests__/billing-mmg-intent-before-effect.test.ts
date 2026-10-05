@@ -14,6 +14,7 @@ import {
   SandboxMmgProvider, sandboxAddHistory, sandboxResetMmg, sandboxSetTxStatus, type MmgInitiateRequest,
 } from '../providers/mmg/mmg-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [TA-S0-002 / M-03] No MMG request may exist without a durable local intent.
@@ -112,10 +113,14 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+  // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -213,14 +218,26 @@ describe('[TA-S0-002] the intent exists before the effect', () => {
     expect(after.nextBillingDate.getTime()).toBe(due.getTime()); // not advanced
   });
 
-  it('MMG approving at initiate settles the SAME row — CAPTURED with the provider id, never a second row', async () => {
+  it('MMG approving at initiate keeps the SAME row pending until lookup proves amount/currency/reference', async () => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due, msisdn: '6096723' });
+    const sub = await subWithRelations(subId);
     const txId = `mmgtx_approved_now_${nanoid(10)}`;
     vi.spyOn(SandboxMmgProvider.prototype, 'initiatePayment').mockResolvedValue({ status: 'approved', transactionId: txId });
+    vi.spyOn(SandboxMmgProvider.prototype, 'transactionLookup').mockResolvedValue({
+      status: 'approved', transactionId: txId, amountMinor: 1200000, currencyCode: 'GYD', reference: referenceFor(sub),
+    });
 
-    expect(await billing.billSubscription((await subWithRelations(subId)) as never)).toBe('succeeded');
-    const rows = await rowsFor(subId);
+    expect(await billing.billSubscription(sub as never)).toBe('pending');
+    let rows = await rowsFor(subId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'PENDING', externalRef: txId, failureCode: 'HISTORY_APPROVAL_UNVERIFIED',
+      failureRaw: { settlementHold: 'MMG_HISTORY_APPROVAL_UNVERIFIED', providerObservation: { status: 'approved', transactionId: txId } } });
+    expect(rows[0]!.paidAt).toBeNull();
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).nextBillingDate.getTime()).toBe(due.getTime());
+
+    expect(await billing.pollPendingMmgCharges(new Date(Date.now() + 60_000))).toMatchObject({ settled: 1 });
+    rows = await rowsFor(subId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: 'CAPTURED', externalRef: txId, failureCode: null });
     expect(rows[0]!.paidAt).not.toBeNull();

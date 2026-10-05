@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
+import { rejectReasonsFor } from '@/lib/reject-reasons';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1, web dashboard flavor): the moment
@@ -35,9 +37,14 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   const [seen, setSeen] = useState<Set<string> | null>(null); // null until first poll
   const [queue, setQueue] = useState<VendorOrder[]>([]);
   const [prepTime, setPrepTime] = useState(20);
+  // [E10] The API requires a reason on every rejection. The mobile takeover
+  // collects one of the same three presets; a non-empty default keeps Reject
+  // a single tap while still satisfying the contract.
+  const [rejectReason, setRejectReason] = useState('Out of stock');
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
   const titleRef = useRef<string | null>(null);
+  const currentBooking = queue[0]?.fulfillment === 'APPOINTMENT';
 
   // Detect unseen PENDING orders between polls. The FIRST poll only baselines —
   // a dashboard opened onto an old queue must not scream about stale orders.
@@ -54,6 +61,15 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     }
   }, [orders, seen]);
 
+  // [Q12] A queued order the latest poll shows is no longer PENDING — the
+  // customer cancelled it, another device answered it, the no-response timer
+  // reaped it — leaves the takeover: the chime is for an open decision.
+  useEffect(() => {
+    const settled = new Set(orders.filter((o) => (o.status || '').toUpperCase() !== 'PENDING').map((o) => o.id));
+    if (settled.size === 0) return;
+    setQueue((q) => (q.some((o) => settled.has(o.id)) ? q.filter((o) => !settled.has(o.id)) : q));
+  }, [orders]);
+
   // Chime + tab flash while the takeover is up.
   useEffect(() => {
     if (queue.length === 0) return;
@@ -66,7 +82,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     let flash = false;
     const titleTimer = setInterval(() => {
       flash = !flash;
-      document.title = flash ? `(${queue.length}) NEW ORDER — Swift` : titleRef.current!;
+      document.title = flash ? `(${queue.length}) NEW ${currentBooking ? 'BOOKING' : 'ORDER'} — Swift` : titleRef.current!;
     }, 1000);
 
     return () => {
@@ -74,7 +90,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
       clearInterval(titleTimer);
       if (titleRef.current) document.title = titleRef.current;
     };
-  }, [queue.length]);
+  }, [queue.length, currentBooking]);
 
   const done = (id: string) => {
     setQueue((q) => q.filter((o) => o.id !== id));
@@ -82,12 +98,17 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     queryClient.invalidateQueries({ queryKey: ['orders'] });
   };
   const accept = useMutation({
-    mutationFn: (id: string) => acceptOrder(id, prepTime),
+    mutationFn: (id: string) => acceptOrder(id, queue.find((o) => o.id === id)?.fulfillment === 'APPOINTMENT' ? undefined : prepTime),
     onSuccess: (_r, id) => done(id),
     onError: (e) => setError((e as Error).message),
   });
   const reject = useMutation({
-    mutationFn: (id: string) => rejectOrder(id),
+    // The chosen preset, or the first one that fits this order when the
+    // choice was made for a different kind (a booking after a food order).
+    mutationFn: (id: string) => {
+      const reasons = rejectReasonsFor(queue.find((o) => o.id === id)?.fulfillment);
+      return rejectOrder(id, reasons.includes(rejectReason) ? rejectReason : reasons[0]!);
+    },
     onSuccess: (_r, id) => done(id),
     onError: (e) => setError((e as Error).message),
   });
@@ -97,19 +118,20 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   const customer = [current.customer?.firstName, current.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-6">
-      <div className="w-full max-w-lg rounded-3xl bg-white p-8 text-center shadow-2xl">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/80 p-3 min-[400px]:p-6">
+      <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-4 text-center shadow-2xl min-[400px]:p-8">
         <p className="text-4xl">🔔</p>
         <h2 className="mt-2 text-3xl font-extrabold text-[var(--swift-red)]">
-          {queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
+          {current.fulfillment === 'APPOINTMENT' ? 'NEW BOOKING' : queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
         </h2>
         <p className="mt-3 text-lg font-bold">
           #{current.orderNumber} · {money(current.totalAmount)}
         </p>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           {customer} · {current.items.length} item{current.items.length === 1 ? '' : 's'} ·{' '}
-          {current.fulfillment === 'PICKUP' ? 'pickup' : 'delivery'}
+          {current.fulfillment === 'APPOINTMENT' ? 'appointment' : current.fulfillment === 'PICKUP' ? 'pickup' : 'delivery'}
         </p>
+        {current.fulfillment === 'APPOINTMENT' && current.appointmentSlot ? <p className="mt-2 font-semibold">{formatAppointmentSlot(current.appointmentSlot)}</p> : null}
         <div className="mx-auto mt-3 max-h-32 max-w-sm overflow-auto text-left text-sm">
           {current.items.map((i) => (
             <p key={i.id} className="text-[var(--swift-muted)]">
@@ -118,29 +140,40 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           ))}
         </div>
 
-        <div className="mt-5 flex items-center justify-center gap-2">
-          <select
+        <div className="mt-5 flex flex-col items-stretch gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-center">
+          {current.fulfillment !== 'APPOINTMENT' && <select
             value={prepTime}
             onChange={(e) => setPrepTime(Number(e.target.value))}
-            className="rounded-lg border border-black/10 px-2 py-3 text-sm"
+            aria-label="Preparation time"
+            className="min-h-11 w-full min-w-0 rounded-lg border border-black/10 px-2 py-3 text-sm min-[400px]:w-auto"
           >
             {[10, 15, 20, 30, 45, 60].map((m) => (
               <option key={m} value={m}>{m} min prep</option>
             ))}
-          </select>
+          </select>}
           <button
             onClick={() => accept.mutate(current.id)}
             disabled={accept.isPending || reject.isPending}
-            className="rounded-xl bg-green-600 px-8 py-3 text-lg font-extrabold text-white disabled:opacity-50"
+            className="min-h-11 w-full rounded-xl bg-green-600 px-8 py-3 text-lg font-extrabold text-white disabled:opacity-50 min-[400px]:w-auto"
           >
             Accept
           </button>
+          <select
+            value={rejectReasonsFor(current.fulfillment).includes(rejectReason) ? rejectReason : rejectReasonsFor(current.fulfillment)[0]}
+            onChange={(e) => setRejectReason(e.target.value)}
+            aria-label="Reject reason"
+            className="min-h-11 w-full min-w-0 rounded-lg border border-black/10 px-2 py-3 text-sm min-[400px]:w-auto"
+          >
+            {rejectReasonsFor(current.fulfillment).map((why) => (
+              <option key={why} value={why}>{why}</option>
+            ))}
+          </select>
           <button
             onClick={() => reject.mutate(current.id)}
             disabled={accept.isPending || reject.isPending}
-            className="rounded-xl border-2 border-[var(--swift-red)] px-6 py-3 text-lg font-bold text-[var(--swift-red)] disabled:opacity-50"
+            className="min-h-11 w-full rounded-xl border-2 border-[var(--swift-red)] px-6 py-3 text-lg font-bold text-[var(--swift-red)] disabled:opacity-50 min-[400px]:w-auto"
           >
-            Reject
+            {current.fulfillment === 'APPOINTMENT' ? 'Decline' : 'Reject'}
           </button>
         </div>
         {error && <p className="mt-3 text-sm text-[var(--swift-red)]">{error}</p>}
@@ -148,7 +181,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           onClick={() => done(current.id)}
           className="mt-4 text-xs text-[var(--swift-muted)] underline"
         >
-          View later (the order stays in your queue)
+          View later (the {current.fulfillment === 'APPOINTMENT' ? 'booking' : 'order'} stays in your queue)
         </button>
       </div>
     </div>

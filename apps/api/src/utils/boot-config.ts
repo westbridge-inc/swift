@@ -1,4 +1,27 @@
 import { runtimeMode } from './runtime-mode';
+import { firstInvalidTwilioConfig } from './twilio-identity';
+import { assertDisabledCardRailConfig } from './card-rail';
+import { testControlEnabled } from '../modules/ops/test-control';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
+import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
+import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
+import { assertDurableStorageConfig } from '../providers/storage/storage-config';
+
+/**
+ * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
+ * (TEST_CONTROL_ENABLED=1) and signs an expiring load lease with
+ * TEST_CONTROL_SECRET. The fallback in modules/ops/test-control.ts is a
+ * literal printed in this PUBLIC repository: fine for an isolated `test`
+ * process, fatal for a loadtest deployment anyone can reach, where every
+ * lease would be forgeable. Refuse to start instead.
+ */
+export function assertTestControlConfig(env: Record<string, string | undefined> = process.env): void {
+  if (!testControlEnabled(env) || runtimeMode(env) === 'test') return;
+  const secret = env['TEST_CONTROL_SECRET'];
+  if (!secret || secret.length < 32) {
+    throw new Error('FATAL: TEST_CONTROL_SECRET must be at least 32 characters when TEST_CONTROL_ENABLED=1 in loadtest — otherwise load leases are signed with a value printed in the public repository and anyone can forge one. Refusing to start.');
+  }
+}
 
 /**
  * Fail-closed boot configuration guard. Called before the server accepts
@@ -12,14 +35,53 @@ import { runtimeMode } from './runtime-mode';
  * decrypted ID. Neither failure is visible at runtime, so we assert them here.
  */
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
+  // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
+  assertTestControlConfig(env);
+  // MMG hosted checkout, in EVERY mode (staging runs development mode against
+  // MMG UAT): MMG_CHECKOUT_ENABLED is exactly 0 or 1, and once on, the live
+  // driver needs its whole configuration — keys parsed, the request proven to
+  // fit the key. Production also refuses the sandbox and a UAT page.
+  assertMmgCheckoutConfig(env);
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
-  if (runtimeMode(env) !== 'production') return;
+  if (runtimeMode(env) !== 'production') {
+    assertDurableStorageConfig(env);
+    return;
+  }
 
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
   }
+
+  // [ledger E08] The settled posture is hold ON: every order is born held for
+  // ORDER_HOLD_MINUTES (default 5) — the customer's free-cancel window, hidden
+  // from the vendor. But holdWindowMs() and checkoutQueueTiming() read an
+  // UNSET LIFECYCLE_V2 as hold OFF, so a deploy that merely omits the variable
+  // pushes new orders to the vendor instantly while the app still promises a
+  // free-cancel window. Production must choose explicitly: off may be chosen,
+  // never defaulted into.
+  const lifecycleV2 = env['LIFECYCLE_V2'];
+  if (lifecycleV2 !== '1' && lifecycleV2 !== '0') {
+    throw new Error('FATAL: LIFECYCLE_V2 must be exactly 1 or 0 in production — an unset variable silently disables the order hold, so new orders hit the vendor instantly while the app still promises the free-cancel window. Set LIFECYCLE_V2=1 (hold on, the settled posture) or LIFECYCLE_V2=0 (deliberately off). Refusing to start.');
+  }
+  // When the hold is on, a set-but-unparseable window makes holdWindowMs()
+  // return null — the same silent hold-off — so that too refuses, never
+  // silently defaults. [DS214 D1] And the hold may never be SHORTER than the
+  // free-cancel window it protects (FREE_CANCEL_WINDOW_MIN): a shorter hold
+  // puts an order on the vendor board while the customer may still cancel it
+  // free, which is exactly the REPORT-036 defect (order.service.ts holdWindowMs).
+  if (lifecycleV2 === '1' && env['ORDER_HOLD_MINUTES'] !== undefined) {
+    const holdMinutes = Number(env['ORDER_HOLD_MINUTES']);
+    if (!Number.isFinite(holdMinutes) || holdMinutes < FREE_CANCEL_WINDOW_MIN) {
+      throw new Error(`FATAL: ORDER_HOLD_MINUTES must be a number of minutes no shorter than the ${FREE_CANCEL_WINDOW_MIN}-minute free-cancel window when LIFECYCLE_V2=1 — an invalid value silently disables the order hold, and a shorter one shows orders to the vendor while the customer may still cancel free. Set ORDER_HOLD_MINUTES=${FREE_CANCEL_WINDOW_MIN} or unset it. Refusing to start.`);
+    }
+  }
+
+  // [AX352] SETTLEMENT_PUBLICATION_LEASE_MS is a test and drill setting: a
+  // shorter settlement publication lease can lapse while a slow row replays,
+  // before any progress is written, and strand the unpaid tail of a file.
+  assertSettlementPublicationLeaseConfig(env);
 
   // OTP records are only six digits; an unkeyed hash is recoverable offline in
   // seconds. Require a strong HMAC key (dedicated, or the already load-bearing
@@ -46,10 +108,39 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for
-  // synthetic tokens, so production must name and configure a live processor.
+  // synthetic tokens, so production must configure a live processor or
+  // explicitly disable cards. The disabled adapter refuses all instructions;
+  // enrollment/rail-selection boundaries never offer CARD.
   const paymentProvider = env['PAYMENT_PROVIDER'];
-  if (paymentProvider !== 'stripe' && paymentProvider !== 'powertranz') {
-    throw new Error('FATAL: PAYMENT_PROVIDER must be stripe or powertranz in production; sandbox/unset can record fake captured revenue. Refusing to start.');
+  if (paymentProvider !== 'stripe' && paymentProvider !== 'powertranz' && paymentProvider !== 'disabled') {
+    throw new Error('FATAL: PAYMENT_PROVIDER must be stripe, powertranz or disabled in production; sandbox/unset can record fake captured revenue. Refusing to start.');
+  }
+  assertDisabledCardRailConfig(env);
+  // [PT-1 · C10] Card rail v2. The card simulator is a test page with no real
+  // money: production refuses to start while it is even named — whatever the
+  // flag says. And this build has no production-capable v2 provider (the
+  // first real one is written from its provider's own documentation), so
+  // production refuses to switch the rail on rather than fail at a partner's
+  // first tap. The flag is 1 or 0 (or unset = 0), never a guess.
+  if (env['CARD_RAIL_PROVIDER'] === 'simulator') {
+    throw new Error('FATAL: CARD_RAIL_PROVIDER=simulator in production — the card simulator is a test page with no real money. Refusing to start.');
+  }
+  const cardRailV2 = env['CARD_RAIL_V2'];
+  if (cardRailV2 !== undefined && cardRailV2 !== '' && cardRailV2 !== '0' && cardRailV2 !== '1') {
+    throw new Error('FATAL: CARD_RAIL_V2 must be 1 or 0 in production. Refusing to start.');
+  }
+  if (cardRailV2 === '1') {
+    throw new Error('FATAL: CARD_RAIL_V2=1 in production, but this build has no production card rail v2 provider (only the simulator, which production refuses). Refusing to start.');
+  }
+  // [AX297 F5] Draining v2 after it was switched off is its own switch, held
+  // to the same rules: 1 or 0, and never 1 while production has no v2 provider
+  // (v2 has never run there, so there is nothing to drain).
+  const cardRailV2Drain = env['CARD_RAIL_V2_DRAIN'];
+  if (cardRailV2Drain !== undefined && cardRailV2Drain !== '' && cardRailV2Drain !== '0' && cardRailV2Drain !== '1') {
+    throw new Error('FATAL: CARD_RAIL_V2_DRAIN must be 1 or 0 in production. Refusing to start.');
+  }
+  if (cardRailV2Drain === '1') {
+    throw new Error('FATAL: CARD_RAIL_V2_DRAIN=1 in production, but this build has no production card rail v2 provider, so there is nothing to drain. Refusing to start.');
   }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
@@ -73,6 +164,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
     if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
   }
+  if (env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
+    throw new Error('FATAL: MMG_REFERENCE_ROUNDTRIP_VERIFIED must be exactly 1 after sandbox UAT proves the merchant reference in lookup and history. Refusing to start.');
+  }
   const mmgUrl = env['MMG_API_URL'];
   if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
     throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
@@ -85,6 +179,13 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   const notifier = env['NOTIFICATION_PROVIDER'] ?? 'dev';
   if (notifier === 'dev') {
     throw new Error('FATAL: NOTIFICATION_PROVIDER is dev (console) in production — OTP SMS would never be delivered, so no one can sign up or log in. Set NOTIFICATION_PROVIDER=twilio with the TWILIO_* credentials. Refusing to start.');
+  }
+  if (notifier !== 'twilio') {
+    throw new Error('FATAL: NOTIFICATION_PROVIDER must be twilio in production. Refusing to start.');
+  }
+  const invalidTwilioConfig = firstInvalidTwilioConfig(env);
+  if (invalidTwilioConfig) {
+    throw new Error(`FATAL: ${invalidTwilioConfig} when NOTIFICATION_PROVIDER=twilio. Refusing to start.`);
   }
 
   // [NOC-A F1/F2] The SAME trap, one door over, and it was unguarded: push
@@ -132,6 +233,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (storage === 'local' && env['STORAGE_ALLOW_LOCAL'] !== '1') {
     throw new Error('FATAL: STORAGE_PROVIDER is local (or unset) in production — uploads and verification documents would live on a single instance\'s disk. Set STORAGE_PROVIDER=s3|r2, or STORAGE_ALLOW_LOCAL=1 only for a deliberate single-instance pilot with a persistent volume.');
   }
+  assertDurableStorageConfig(env);
 
   // [V8] CONSENT_IP_PEPPER degrades SILENTLY: when missing or under 32 chars,
   // hashIp() returns null and the consent ledger simply stops recording IP

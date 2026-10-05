@@ -40,7 +40,16 @@ async function loginByOtp(phone: string): Promise<string> {
     const v = await http('POST', '/auth/verify-otp', { phone, code: '000000' });
     let t = pickToken(v.json);
     if (!t && v.json?.data?.isNewUser) {
-      const r = await http('POST', '/auth/register', { phone, firstName: 'ELV1', lastName: 'MartOwner', role: 'VENDOR', acceptTerms: true });
+      const registrationProof = v.json?.data?.registrationProof;
+      if (typeof registrationProof !== 'string') throw new Error(`missing signup continuation for ${phone}`);
+      const r = await http('POST', '/auth/register', {
+        phone,
+        registrationProof,
+        firstName: 'ELV1',
+        lastName: 'MartOwner',
+        role: 'VENDOR',
+        acceptTerms: true,
+      });
       t = pickToken(r.json);
     }
     if (t) return t;

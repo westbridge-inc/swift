@@ -1,3 +1,4 @@
+import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -17,6 +18,9 @@ import { pointInPolygon } from '../utils/geo';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { readDunningClock } from '../modules/billing/dunning-clock';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // [R048-001] this suite quiets the WHOLE driver pool between cases (an unscoped Driver.updateMany) so no leftover driver takes a trip — a stated, reviewable capability.
 grantSuiteCapability('unscoped-mutation');
@@ -37,6 +41,8 @@ const NOWHERE = { lat: 6.95, lng: -58.4 }; // outside every zone
 let app: FastifyInstance;
 let fare: FareService;
 let dispatch: DispatchService;
+// [ZONE-FARES] The Central ↔ South 2,000 fare is no longer seeded: this suite plants it for itself.
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 const createdUserIds: string[] = [];
 
@@ -52,9 +58,13 @@ async function purgeFixtures() {
     select: { id: true },
   });
   const orderIds = orders.map((o) => o.id);
+  // [ALG-01] Drivers tied at one spot make the fairness band record decisions
+  // about these rides; they outlive the rides unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: orderIds } } });
   await app.prisma.rating.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+  await cleanupPayerBillingClocks(app.prisma, ids);
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
 }
 
@@ -100,7 +110,7 @@ async function makeDriverDeviceSession(userId: string, deviceId: string) {
   return { token, sessionId: session.id };
 }
 
-async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
+async function makeDriver(opts: { lat?: number; lng?: number; currentInsurance?: boolean } = {}) {
   const u = await makeUserWithSession(['DRIVER', 'CUSTOMER'], 'DRIVER');
   const driver = await app.prisma.driver.create({
     data: {
@@ -115,6 +125,13 @@ async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
       locationSessionId: u.sessionId,
     },
   });
+  // Online fixtures must satisfy the same current insurance gate at custody
+  // as at GO. Negative GO cases opt out explicitly below.
+  if (opts.currentInsurance !== false) await app.prisma.verificationDocument.create({ data: {
+    userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
+    fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
+    coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
+  } });
   return { ...u, driverId: driver.id };
 }
 
@@ -173,6 +190,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  recordDispatchQueue(app, true);
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
@@ -181,9 +199,11 @@ beforeAll(async () => {
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
 
   await purgeFixtures();
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
 });
 
 afterAll(async () => {
+  await removeGeorgetownPair();
   await purgeFixtures();
   await app.close();
 });
@@ -203,7 +223,7 @@ describe('Fare engine — table first, formula fallback, deterministic', () => {
   it('uses the zone-to-zone table when both ends resolve', async () => {
     const estimate = await fare.estimate(CENTRAL, SOUTH, 'GY');
     expect(estimate.source).toBe('zone_table');
-    expect(estimate.fare).toBe(2000); // seeded fixed fare
+    expect(estimate.fare).toBe(2000); // the suite's fixed fare (helpers/zone-fare-fixture)
     expect(estimate.currencyCode).toBe('GYD');
   });
 
@@ -212,13 +232,13 @@ describe('Fare engine — table first, formula fallback, deterministic', () => {
     const estimate = await fare.estimate(SOUTH, { lat: 6.76, lng: -58.14 }, 'GY');
     expect(estimate.source).toBe('formula');
     expect(estimate.fare % 100).toBe(0); // cash-friendly rounding
-    expect(estimate.fare).toBeGreaterThanOrEqual(1500); // minimum
+    expect(estimate.fare).toBeGreaterThanOrEqual(800); // minimum
   });
 
   it('falls back when an end is outside every zone, and enforces the minimum', async () => {
     const short = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(short.source).toBe('formula');
-    expect(short.fare).toBe(1500); // tiny hop -> minimum fare
+    expect(short.fare).toBe(800); // tiny hop -> minimum fare
 
     const sameTwice = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(sameTwice.fare).toBe(short.fare); // deterministic
@@ -473,8 +493,11 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     expect((await app.redis.get(`dispatch:offer:${ride.id}`))!.split(':')[0]).toBe(driver.driverId); // [F-014-04 composite]
     const before = (await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.driverId } })).acceptanceRate;
     // The card RENDERED (the app stamps seen on render) — quitting now is a
-    // dodge and must cost. An unrendered card is spared [F-014-10].
-    const seen = await inject('POST', '/api/v1/driver/offers/seen', { orderId: ride.id }, driver.token);
+    // dodge and must cost. An unrendered card is spared [F-014-10]. The app
+    // names the card's attempt; a ping that names none never stamps a
+    // generated card [AX364].
+    const offerAttemptId = (await app.redis.get(`dispatch:offer:${ride.id}`))!.split(':')[1];
+    const seen = await inject('POST', '/api/v1/driver/offers/seen', { orderId: ride.id, offerAttemptId }, driver.token);
     expect(seen.statusCode).toBe(200);
 
     const off = await inject('POST', '/api/v1/driver/go-offline', {}, driver.token);
@@ -905,7 +928,7 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   }
 
   async function offlineDriver() {
-    const d = await makeDriver();
+    const d = await makeDriver({ currentInsurance: false });
     await app.prisma.driver.update({ where: { id: d.driverId }, data: { isOnline: false } });
     return d;
   }
@@ -976,14 +999,18 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   it('blocks go-online when PAST_DUE and the grace window has ended', async () => {
     const d = await offlineDriver();
     await setInsurance(d.userId, 'HIRE', true);
-    await app.prisma.subscription.create({
+    // [#1393] The owner's grace is 48 hours of unpaused overdue time on the
+    // shared clock: due 48 hours and a minute ago, nothing paused, it has ended.
+    const due = new Date(Date.now() - 2 * DAY - 60_000);
+    const sub = await app.prisma.subscription.create({
       data: {
         driverId: d.driverId, type: 'TAXI_DRIVER', status: 'PAST_DUE', weeklyRate: 12000,
-        currentPeriodStart: new Date(Date.now() - 8 * DAY), currentPeriodEnd: new Date(Date.now() - DAY),
-        nextBillingDate: new Date(Date.now() - DAY),
+        currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due,
+        nextBillingDate: due,
         gracePeriodEnd: new Date(Date.now() - 60_000), // grace ended a minute ago
       },
     });
+    await readDunningClock(app.prisma, sub.id);
     const res = await inject('POST', '/api/v1/driver/go-online', {
       latitude: CENTRAL.lat,
       longitude: CENTRAL.lng,
@@ -997,14 +1024,17 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   it('allows go-online while PAST_DUE but still within the grace window', async () => {
     const d = await offlineDriver();
     await setInsurance(d.userId, 'HIRE', true);
-    await app.prisma.subscription.create({
+    // [#1393] Due 46 hours ago on the shared clock: 2 hours of the 48-hour grace left.
+    const due = new Date(Date.now() - 46 * 3600 * 1000);
+    const sub = await app.prisma.subscription.create({
       data: {
         driverId: d.driverId, type: 'TAXI_DRIVER', status: 'PAST_DUE', weeklyRate: 12000,
-        currentPeriodStart: new Date(Date.now() - DAY), currentPeriodEnd: new Date(),
-        nextBillingDate: new Date(),
+        currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due,
+        nextBillingDate: due,
         gracePeriodEnd: new Date(Date.now() + 2 * 3600 * 1000), // 2h of grace left
       },
     });
+    await readDunningClock(app.prisma, sub.id);
     const res = await inject('POST', '/api/v1/driver/go-online', {
       latitude: CENTRAL.lat,
       longitude: CENTRAL.lng,
@@ -1308,9 +1338,11 @@ describe('Available-rides board — freshness window [SWIFT-064]', () => {
 
   it('shows a fresh request but hides a stale one (past the demand window)', async () => {
     const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    // The abandoned request is somebody else: one customer holds one live taxi.
+    const abandoner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver(); // online + available, in CENTRAL
     const fresh = await taxiRequest(cust.userId, 1);   // 1 min ago — live
-    const stale = await taxiRequest(cust.userId, 60);  // 60 min ago — abandoned
+    const stale = await taxiRequest(abandoner.userId, 60);  // 60 min ago — abandoned
 
     const res = await inject('GET', '/api/v1/driver/rides/available', undefined, driver.token);
     expect(res.statusCode).toBe(200);

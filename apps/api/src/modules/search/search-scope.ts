@@ -1,7 +1,8 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { enterTenant, getTenantContext } from '../../plugins/tenant-context';
 import { searchScopeCounter } from '../../plugins/observability';
+import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
 
 // ---------------------------------------------------------------------------
 // [R048-003] THE PUBLIC MARKET / SEARCH SCOPE.
@@ -29,11 +30,15 @@ export const VENDOR_INDEX = `vendors_${SEARCH_INDEX_VERSION}`;
 export const ITEM_INDEX = `items_${SEARCH_INDEX_VERSION}`;
 
 /** Meilisearch primary keys allow [A-Za-z0-9_-]; tenant ids and cuids do too.
- *  A part may hold a single underscore but never the double one, so the id
- *  parses back unambiguously. */
+ *  A part may hold a single underscore INSIDE it but never the double one, and
+ *  never at either end: tenant "t_" + entity "x" and tenant "t" + entity "_x"
+ *  would both be written "t___x" and read back as the second, so a sync would
+ *  take its own stale document for another tenant's and keep it. With both
+ *  rules the id parses back unambiguously. */
 const DOC_ID_SEP = '__';
 const ID_PART = /^[A-Za-z0-9_-]+$/;
-const isIdPart = (v: string): boolean => ID_PART.test(v) && !v.includes(DOC_ID_SEP);
+const isIdPart = (v: string): boolean =>
+  ID_PART.test(v) && !v.includes(DOC_ID_SEP) && !v.startsWith('_') && !v.endsWith('_');
 export function docId(tenantId: string, entityId: string): string {
   if (!isIdPart(tenantId) || !isIdPart(entityId)) {
     throw new Error(`[R048-003] cannot build a document id from tenant "${tenantId}" and entity "${entityId}"`);
@@ -159,6 +164,27 @@ export function bindPublicMarketTenant(app: FastifyInstance) {
     const tenantId = await resolvePublicMarketTenant(app);
     enterTenant(tenantId);
     request.publicTenantId = tenantId;
+  };
+}
+
+/** [R048-003] The binding of a browse surface that a signed-in customer and a
+ *  guest both call (search; the Home category rail). A request that carries a
+ *  credential — a Bearer header, or the browser's session cookies — takes the
+ *  strict session path: the caller's own tenant, and a credential that does not
+ *  verify is refused as it is everywhere else. A request that carries none is
+ *  a guest, bound to the public catalogue's tenant. Either way a tenant is
+ *  BOUND before the handler runs, so every tenant-scoped model it touches
+ *  partitions itself under TENANT_UNSCOPED_ACCESS=deny — never a system bypass. */
+export function bindBrowseTenant(app: FastifyInstance) {
+  const bindPublicTenant = bindPublicMarketTenant(app);
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const cookies = parseCookies(request.headers.cookie);
+    if (request.headers.authorization !== undefined ||
+      Object.hasOwn(cookies, ACCESS_COOKIE) || Object.hasOwn(cookies, REFRESH_COOKIE)) {
+      await app.authenticate(request, reply);
+    } else {
+      await bindPublicTenant(request);
+    }
   };
 }
 

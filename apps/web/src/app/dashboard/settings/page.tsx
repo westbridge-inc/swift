@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
@@ -72,8 +73,8 @@ function HoursEditor() {
       <h2 className="font-bold">Operating hours</h2>
       <div className="mt-4 space-y-2">
         {rows.map((r) => (
-          <div key={r.dayOfWeek} className="flex items-center gap-3 text-sm">
-            <span className="w-24 font-medium">{DAYS[r.dayOfWeek]}</span>
+          <div key={r.dayOfWeek} className="flex flex-wrap items-center gap-3 border-b border-black/5 py-3 text-sm last:border-0 sm:flex-nowrap sm:py-0">
+            <span className="w-24 shrink-0 font-medium">{DAYS[r.dayOfWeek]}</span>
             <label className="flex items-center gap-1.5">
               <input
                 type="checkbox"
@@ -84,7 +85,7 @@ function HoursEditor() {
               Open
             </label>
             {!r.isClosed && (
-              <>
+              <span className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
                 <input
                   type="time"
                   value={r.openTime}
@@ -98,7 +99,7 @@ function HoursEditor() {
                   onChange={(e) => set(r.dayOfWeek, { closeTime: e.target.value })}
                   className="rounded-lg border border-black/10 px-2 py-1"
                 />
-              </>
+              </span>
             )}
           </div>
         ))}
@@ -136,13 +137,13 @@ function SubscriptionCard() {
               {s.status}
             </b>
             {s.status === 'TRIAL' && s.trialEndsAt && (
-              <span className="text-[var(--swift-muted)]"> — free until {new Date(s.trialEndsAt).toLocaleDateString()}</span>
+              <span className="text-[var(--swift-muted)]"> — Free trial until {new Date(s.trialEndsAt).toLocaleDateString()}</span>
             )}
           </p>
           <p>Weekly fee: <b>{money(s.weeklyRate)}</b> — you keep 100% of every sale.</p>
-          {s.currentPeriodEnd && <p>Paid through: {new Date(s.currentPeriodEnd).toLocaleDateString()}</p>}
+          {s.currentPeriodEnd && <p>Next bill: {new Date(s.currentPeriodEnd).toLocaleDateString()}</p>}
           <p className="text-[var(--swift-muted)]">
-            Billing method: {s.billingMethod === 'MOBILE_MONEY' ? 'MMG (auto-charge)' : 'Cash / prepaid balance'} — change it in the Swift app.
+            <Link href="/dashboard/weekly-fee" className="font-semibold underline">Weekly fee — view and pay</Link>
           </p>
         </div>
       )}

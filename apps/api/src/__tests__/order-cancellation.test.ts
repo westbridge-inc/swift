@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -147,6 +148,7 @@ async function makeRider() {
       isAvailable: false,
     },
   });
+  await currentMoverDocuments(app.prisma, owned.userId, 'MOTORCYCLE');
   return { ...owned, riderId: rider.id };
 }
 
@@ -260,6 +262,37 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     });
     expect(log).not.toBeNull();
     expect(log!.note).toBe('Out of stock');
+
+    // [E10] The submitted reason is the durable cancellation fact the customer
+    // sees — never the generic fallback the API used to substitute.
+    const cancelled = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(cancelled.cancellationReason).toBe('Out of stock');
+  });
+
+  it('refuses to reject without a reason (E10 RED: the API used to substitute a default)', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('VALIDATION_ERROR');
+
+    const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(untouched.status).toBe('PENDING');
+    expect(untouched.cancellationReason).toBeNull();
+  });
+
+  it('refuses a blank reason (trimmed to nothing, E10 RED)', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: '   ' }, vendor.token);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('VALIDATION_ERROR');
+
+    const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(untouched.status).toBe('PENDING');
+    expect(untouched.cancellationReason).toBeNull();
   });
 
   it('SWIFT-024: notifies the customer, with the reason', async () => {
@@ -288,7 +321,7 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     });
     const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { riderId: rider.riderId });
 
-    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token);
+    const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Out of stock' }, vendor.token);
     expect(res.statusCode).toBe(200);
 
     const freed = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
@@ -460,8 +493,8 @@ describe('Vendor rejects an order — PUT /vendor/orders/:id/reject', () => {
     await app.prisma.item.update({ where: { id: item.id }, data: { stockQuantity: 2 } }); // post-checkout
 
     const [a, b] = await Promise.allSettled([
-      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token),
-      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, {}, vendor.token),
+      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Closing soon' }, vendor.token),
+      inject('PUT', `/api/v1/vendor/orders/${order.id}/reject`, { reason: 'Closing soon' }, vendor.token),
     ]);
     const codes = [a, b].map((r) => (r.status === 'fulfilled' ? r.value.statusCode : 0)).sort();
     expect(codes).toEqual([200, 400]); // one wins, the loser 400s — not a second restock
@@ -627,6 +660,97 @@ describe('Vendor-no-response auto-cancel [SWIFT-021]', () => {
     });
     expect(statusLog.changedBy).toBeNull();
     expect(statusLog.note).toBe('Auto-cancelled: vendor did not respond');
+  });
+
+  it('[E20] a PENDING booking is auto-cancelled with the provider/booking wording', async () => {
+    const vendor = await makeVendor();
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `BX-${nanoid(10)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: customer.userId,
+        vendorId: vendor.vendorId,
+        status: 'PENDING',
+        fulfillment: 'APPOINTMENT',
+        appointmentSlot: new Date(Date.now() + 3 * DAY),
+        deliveryAddress: 'chair',
+        deliveryLat: 6.8,
+        deliveryLng: -58.15,
+        subtotalBase: 1000,
+        subtotalMarkup: 0,
+        subtotalCustomer: 1000,
+        deliveryFee: 0,
+        totalAmount: 1000,
+        paymentMethod: 'CASH',
+      },
+    });
+    createdOrderIds.push(order.id);
+
+    const did = await autoCancelUnresponsiveOrder(ctx(), order.id);
+    expect(did).toBe(true);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('CANCELLED');
+
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, type: 'ORDER_UPDATE', data: { path: ['orderId'], equals: order.id } },
+    });
+    expect(note).not.toBeNull();
+    expect(note!.title).toBe('Booking cancelled — no response');
+    expect(note!.body).toBe(
+      `We're sorry — the provider didn't confirm your booking ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another time or provider.`,
+    );
+  });
+
+  it('[E20] a food order keeps the store wording byte for byte', async () => {
+    const vendor = await makeVendor();
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'PENDING');
+
+    const did = await autoCancelUnresponsiveOrder(ctx(), order.id);
+    expect(did).toBe(true);
+
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, type: 'ORDER_UPDATE', data: { path: ['orderId'], equals: order.id } },
+    });
+    expect(note).not.toBeNull();
+    expect(note!.title).toBe('Order cancelled — no response');
+    expect(note!.body).toBe(
+      `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`,
+    );
+  });
+
+  it('[E20] a booking paid by unattested MMG keeps the provider refund guidance', async () => {
+    const vendor = await makeVendor();
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `BX-${nanoid(10)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: customer.userId,
+        vendorId: vendor.vendorId,
+        status: 'PENDING',
+        fulfillment: 'APPOINTMENT',
+        appointmentSlot: new Date(Date.now() + 3 * DAY),
+        paymentMethod: 'MOBILE_MONEY',
+        deliveryAddress: 'chair',
+        deliveryLat: 6.8,
+        deliveryLng: -58.15,
+        subtotalBase: 1000,
+        subtotalMarkup: 0,
+        subtotalCustomer: 1000,
+        deliveryFee: 0,
+        totalAmount: 1000,
+      },
+    });
+    createdOrderIds.push(order.id);
+
+    const did = await autoCancelUnresponsiveOrder(ctx(), order.id);
+    expect(did).toBe(true);
+
+    const note = await app.prisma.notification.findFirst({
+      where: { userId: customer.userId, type: 'ORDER_UPDATE', data: { path: ['orderId'], equals: order.id } },
+    });
+    expect(note).not.toBeNull();
+    expect(note!.body).toBe(
+      `We're sorry — the provider didn't confirm your booking ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the provider refunds you directly; please try another time or provider.`,
+    );
   });
 
   it('does NOT cancel an order still within its hold window', async () => {

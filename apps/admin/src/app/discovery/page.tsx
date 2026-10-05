@@ -15,6 +15,7 @@ import {
   type DiscoveryRequest,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { askReason } from '@/lib/ask-reason';
 
 // ---------------------------------------------------------------------------
 // The taxonomy, and the two decisions nobody could make.
@@ -88,7 +89,7 @@ export default function DiscoveryPage() {
     onSuccess: done, onError: setMutationError,
   });
   const merge = useMutation({
-    mutationFn: ({ id, targetId }: { id: string; targetId: string }) => mergeDiscoveryCategory(id, targetId),
+    mutationFn: ({ id, targetId, reason }: { id: string; targetId: string; reason: string }) => mergeDiscoveryCategory(id, targetId, reason),
     onSuccess: done, onError: setMutationError,
   });
   const backfill = useMutation({
@@ -319,7 +320,13 @@ export default function DiscoveryPage() {
                       <select
                         aria-label={`Merge ${c.name} into`}
                         value=""
-                        onChange={(e) => e.target.value && merge.mutate({ id: c.id, targetId: e.target.value })}
+                        onChange={(e) => {
+                          const targetId = e.target.value;
+                          if (!targetId) return;
+                          const target = cats.find((o) => o.id === targetId);
+                          const reason = askReason({ action: 'merge this category', subject: `${c.name} into ${target?.name ?? targetId}` });
+                          if (reason) merge.mutate({ id: c.id, targetId, reason });
+                        }}
                         className="rounded border border-neutral-200 px-1 py-0.5 text-xs"
                       >
                         <option value="">Merge into…</option>

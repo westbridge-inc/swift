@@ -32,13 +32,30 @@ export type VendorProfileState = 'loading' | 'ready' | 'absent' | 'error';
 /**
  * Absence is a 404. Anything else throws — the caller decides how to say so,
  * but it never gets to say "no business".
+ *
+ * ONE addition, for the account that has never been a vendor. The server
+ * answers the self-profile read of a role the caller does not hold with 403
+ * — deliberately, and pinned by its authz matrix ("authz answers, not
+ * existence"), so that a wrong-role token never gets a route oracle. For a
+ * customer who tapped "Swift Business" to list their first store, that 403
+ * is the server confirming exactly what the app already knows: this account
+ * holds no vendor role, so there is no business — the setup wizard is the
+ * honest screen, not "this account cannot open that store". The caller
+ * passes `outsider` from the account's OWN roles (lib/roleLanding
+ * accountHoldsRole); a 403 for an account that DOES hold the role stays an
+ * error, because then something is genuinely wrong.
  */
-export async function unwrapOptionalVendorProfile<T>(request: Promise<any>): Promise<T | null> {
+export async function unwrapOptionalVendorProfile<T>(
+  request: Promise<any>,
+  opts: { outsider?: boolean } = {},
+): Promise<T | null> {
   try {
     const response = await request;
     return response?.data?.data as T;
   } catch (error: any) {
-    if (error?.response?.status === 404) return null;
+    const status = error?.response?.status;
+    if (status === 404) return null;
+    if (status === 403 && opts.outsider === true) return null;
     throw error;
   }
 }

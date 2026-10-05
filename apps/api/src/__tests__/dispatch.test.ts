@@ -1,3 +1,4 @@
+import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -11,8 +12,13 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import {
   DISPATCH_LOCATION_FRESH_SECONDS,
   DispatchService,
+  EXHAUST_CAP,
+  RECONCILE_STUCK_MINUTES,
   normalizeDispatchLocationFreshSeconds,
+  reconcileStuckDispatch,
 } from '../modules/dispatch/dispatch.service';
+import { dispatchReplayTag, redispatchJobId } from '../modules/dispatch/dispatch-generation-keys';
+import { Queue, type ConnectionOptions } from 'bullmq';
 import { scoreCandidate, rankCandidates } from '../modules/dispatch/scoring';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { runWithoutTenant } from '../plugins/tenant-context';
@@ -23,6 +29,7 @@ import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { devChannelLog } from '../providers/notifications/channels';
 
 // [R048-001] this suite quiets the WHOLE rider pool between cases (an unscoped Rider.updateMany) so no leftover rider takes a dispatch — a stated, reviewable capability.
 grantSuiteCapability('unscoped-mutation');
@@ -39,7 +46,7 @@ const PICKUP = { lat: 6.8, lng: -58.15 };
 
 let app: FastifyInstance;
 let dispatch: DispatchService;
-const scheduled: Array<{ orderId: string; riderId: string; delayMs: number }> = [];
+const scheduled: Array<{ orderId: string; riderId: string; delayMs: number; attemptId?: string; scheduledAt: number }> = [];
 
 const createdUserIds: string[] = [];
 const createdOrderIds: string[] = [];
@@ -62,6 +69,9 @@ async function purgeFixtures() {
     select: { id: true },
   });
   const orderIds = orders.map((o) => o.id);
+  // [ALG-01] Riders tied at one spot make the fairness band record decisions
+  // about these orders; they outlive the orders unless they go with them.
+  await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   // Carts have a restrict FK to the customer — must go before the user or the
@@ -178,6 +188,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  recordDispatchQueue(app);
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.ready();
 
@@ -208,8 +219,8 @@ beforeAll(async () => {
     app.redis,
     app.io,
     new HaversineMapsProvider(),
-    async (orderId, riderId, delayMs) => {
-      scheduled.push({ orderId, riderId, delayMs });
+    async (orderId, riderId, delayMs, attemptId) => {
+      scheduled.push({ orderId, riderId, delayMs, attemptId, scheduledAt: Date.now() });
     },
   );
 
@@ -874,12 +885,19 @@ describe('The offer cascade', () => {
     createdUserIds.push(admin.id);
 
     // 1) Best candidate gets the offer + a timeout is scheduled
+    const startedAt = Date.now();
     const first = await dispatch.dispatchOrder(order.id);
     expect(first.offered).toBe(a.riderId);
-    expect(scheduled.at(-1)).toMatchObject({ orderId: order.id, riderId: a.riderId, delayMs: 20_000 });
+    const timeout = scheduled.at(-1)!;
+    expect(timeout).toMatchObject({ orderId: order.id, riderId: a.riderId });
+    // Preparation consumes the original deadline; arming never resets it.
+    expect(timeout.delayMs).toBeGreaterThan(0);
+    expect(timeout.delayMs).toBeLessThanOrEqual(20_000);
+    expect(timeout.scheduledAt + timeout.delayMs).toBeGreaterThanOrEqual(startedAt + 20_000);
 
-    // 2) A declines -> B is offered; A's acceptance EMA dropped
-    await dispatch.declineOffer(order.id, a.userId);
+    // 2) A declines -> B is offered; A's acceptance EMA dropped. The app names
+    //    the card's attempt; a decline that names none is never charged [AX358].
+    await dispatch.declineOffer(order.id, a.userId, timeout.attemptId);
     const offerNow = await app.redis.get(`dispatch:offer:${order.id}`);
     expect(offerNow!.split(':')[0]).toBe(b.riderId); // value is `<mover>:<attemptId>` [F-014-04]
     const aAfter = await app.prisma.rider.findUniqueOrThrow({ where: { id: a.riderId } });
@@ -887,7 +905,10 @@ describe('The offer cascade', () => {
 
     // 3) B times out (goes dark mid-offer) -> nobody left in 5km -> radius
     //    widens -> still nobody -> honest exhaustion to customer AND vendor
-    await dispatch.handleOfferTimeout(order.id, b.riderId);
+    const secondTimeout = scheduled.at(-1)!;
+    expect(secondTimeout).toMatchObject({ orderId: order.id, riderId: b.riderId });
+    expect(secondTimeout.attemptId).toBeTruthy();
+    await dispatch.handleOfferTimeout(order.id, b.riderId, secondTimeout.attemptId);
 
     const customerNote = await app.prisma.notification.findFirst({
       where: { userId: customerId, title: 'No movers available right now' },
@@ -1007,35 +1028,58 @@ describe('The offer cascade', () => {
     await app.redis.del(`dispatch:exhausts:${order.id}`, `ops_page:dispatch_exhausted:${order.id}`);
   });
 
-  it('ALERTS_LOUD: an offer lands a push-backed notification with expiry; flag off is silent (alerts spec A2)', async () => {
-    const quiet = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 });
-    const loud = await makeRider({ lat: PICKUP.lat + 0.02, acceptance: 100 }); // farther: not offered while quiet is online
+  // [Q10 loud alerts 1/4] This case used to pin the OPPOSITE: with no flag an
+  // offer notified nobody, and only ALERTS_LOUD=1 (set by no environment)
+  // produced the push. So a mover with the phone in a pocket never heard an
+  // offer. The new truth: every offer pushes, high priority, dying with the
+  // offer; OFFER_PUSH=0 is the kill switch.
+  it('every offer lands a high-priority push that dies with the offer; OFFER_PUSH=0 is the kill switch (alerts spec A2)', async () => {
+    const pushed = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 });
+    const killed = await makeRider({ lat: PICKUP.lat + 0.02, acceptance: 100 }); // farther: not offered while pushed is online
+    const device = `ExponentPushToken[q10d${nanoid(12)}]`;
+    await app.prisma.deviceToken.create({ data: { userId: pushed.userId, token: device, platform: 'android' } });
     try {
-      const orderQuiet = await makeDeliveryOrder();
-      delete process.env['ALERTS_LOUD'];
-      await dispatch.dispatchOrder(orderQuiet.id);
-      expect(await app.prisma.notification.count({ where: { userId: quiet.userId } })).toBe(0);
-
-      // Park quiet; with the flag ON the offer goes to loud and must notify.
-      await app.prisma.rider.update({ where: { id: quiet.riderId }, data: { isOnline: false } });
-      process.env['ALERTS_LOUD'] = '1';
-      const orderLoud = await makeDeliveryOrder();
-      await dispatch.dispatchOrder(orderLoud.id);
+      // No flag at all: the offer is pushed.
+      delete process.env['OFFER_PUSH'];
+      const order = await makeDeliveryOrder();
+      const before = Date.now();
+      await dispatch.dispatchOrder(order.id);
       const note = await app.prisma.notification.findFirst({
-        where: { userId: loud.userId },
+        where: { userId: pushed.userId },
         orderBy: { createdAt: 'desc' },
       });
       expect(note).toBeTruthy();
       expect(note!.title).toContain('Order available nearby');
-      const data = note!.data as { kind: string; orderId: string; expiresAt: string };
+      const data = note!.data as { kind: string; orderId: string; expiresAt: string; audience: string };
       expect(data.kind).toBe('dispatch_offer');
-      expect(data.orderId).toBe(orderLoud.id);
-      expect(new Date(data.expiresAt).getTime()).toBeGreaterThan(Date.now());
+      expect(data.orderId).toBe(order.id);
+      expect(data.audience).toBe('earner');
+      const expiresAt = new Date(data.expiresAt).getTime();
+      expect(expiresAt).toBeGreaterThan(Date.now());
+      expect(expiresAt).toBeLessThanOrEqual(before + 20_000 + 1_000);
+      // ...and it left for the phone as a ring_offer: high priority, the
+      // device sound, and the offer's own deadline (the adapter turns that
+      // into a ttl of the seconds left and never retries past it).
+      const pushes = devChannelLog.filter((e) => e.channel === 'push' && e.to === device);
+      expect(pushes.map((p) => ({ title: p.title, options: p.options }))).toEqual([{
+        title: note!.title,
+        options: { alertClass: 'ring_offer', priority: 'high', sound: 'default', deadlineMs: expiresAt },
+      }]);
+
+      // Kill switch: park the first rider; with OFFER_PUSH=0 the next offer is
+      // still made (socket + Redis), but nobody is pushed.
+      await app.prisma.rider.update({ where: { id: pushed.riderId }, data: { isOnline: false } });
+      process.env['OFFER_PUSH'] = '0';
+      const quietOrder = await makeDeliveryOrder();
+      await dispatch.dispatchOrder(quietOrder.id);
+      expect((await app.redis.get(`dispatch:offer:${quietOrder.id}`))!.split(':')[0]).toBe(killed.riderId);
+      expect(await app.prisma.notification.count({ where: { userId: killed.userId } })).toBe(0);
     } finally {
-      delete process.env['ALERTS_LOUD'];
+      delete process.env['OFFER_PUSH'];
+      await app.prisma.deviceToken.deleteMany({ where: { token: device } });
       // Park this test's riders so later field-geometry tests stay clean.
       await app.prisma.rider.updateMany({
-        where: { id: { in: [quiet.riderId, loud.riderId] } },
+        where: { id: { in: [pushed.riderId, killed.riderId] } },
         data: { isOnline: false },
       });
     }
@@ -1051,6 +1095,193 @@ describe('The offer cascade', () => {
     expect((await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[0]).toBe(a.riderId);
 
     await app.prisma.rider.update({ where: { id: a.riderId }, data: { isOnline: false } });
+  });
+
+  it('[E36] a redelivered exhaustion job burns the attempt counter once and collapses the retry push and the REAL BullMQ re-arm', async () => {
+    // The replay needs a retrying cycle (attempts 1 < cap) and a second one
+    // (attempts 2 < cap). A deployment that lowers DISPATCH_EXHAUST_CAP below 3
+    // changes that premise; say so instead of failing on a count.
+    expect(EXHAUST_CAP).toBeGreaterThanOrEqual(3);
+    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool
+    const order = await makeDeliveryOrder();
+    const exhaustsKey = `dispatch:exhausts:${order.id}`;
+
+    // The re-arm goes to a REAL BullMQ queue (no worker consumes it), so the
+    // job id must be one BullMQ accepts — a custom id with ':' in anything but
+    // three parts throws at add — and a duplicate id is BullMQ's own no-op.
+    const queue = new Queue(`e36-redispatch-${nanoid(6)}`, { connection: app.redis.duplicate() as unknown as ConnectionOptions });
+    const redispatch = async (orderId: string, delayMs: number, replayJobId?: string) => {
+      await queue.add('dispatch-order', { orderId }, { ...(replayJobId ? { jobId: replayJobId } : {}), delay: delayMs });
+      return true;
+    };
+    const replay = new DispatchService(
+      app.prisma, app.redis, app.io, new HaversineMapsProvider(),
+      async (orderId, riderId, delayMs, attemptId) => {
+        scheduled.push({ orderId, riderId, delayMs, attemptId, scheduledAt: Date.now() });
+      },
+      redispatch,
+    );
+    const tag1 = dispatchReplayTag('41');
+    const tag2 = dispatchReplayTag('42');
+    const retrying = () => app.prisma.notification.count({
+      where: { userId: customerId, dedupeKey: { startsWith: `dispatch-retrying:${order.id}:` } },
+    });
+
+    try {
+      const first = await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '41');
+      expect(first).toMatchObject({ exhausted: true });
+      expect(await app.redis.get(exhaustsKey)).toBe('1');
+      expect(await queue.getDelayedCount()).toBe(1);
+      expect((await queue.getJob(redispatchJobId(order.id, tag1)))?.data).toEqual({ orderId: order.id });
+      expect(await retrying()).toBe(1);
+
+      // BullMQ redelivers the SAME job (id 41) after its worker died: the 30s
+      // job lock lapsed, and the 10s exhaust single-flight is long gone —
+      // clear it to model that expiry exactly.
+      await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '41');
+      expect(await app.redis.get(exhaustsKey)).toBe('1'); // main: '2'
+      expect(await queue.getDelayedCount()).toBe(1); // main: a second re-arm
+      expect(await retrying()).toBe(1); // main: a second "still looking" push
+
+      // A genuine next cycle is a DIFFERENT job: the counter accumulates, and
+      // it gets its own re-arm and its own notice.
+      await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '42');
+      expect(await app.redis.get(exhaustsKey)).toBe('2');
+      expect(await queue.getDelayedCount()).toBe(2);
+      expect(await queue.getJob(redispatchJobId(order.id, tag2))).toBeTruthy();
+      expect(await retrying()).toBe(2);
+
+      // Durable order state untouched: still unassigned and waiting on the vendor.
+      const final = await app.prisma.order.findUniqueOrThrow({
+        where: { id: order.id }, select: { status: true, riderId: true },
+      });
+      expect(final.riderId).toBeNull();
+      expect(final.status).toBe('ACCEPTED');
+      expect(await app.prisma.dispatchSearch.count({
+        where: { subjectId: order.id, status: 'SEARCHING' },
+      })).toBe(0);
+    } finally {
+      await queue.obliterate({ force: true }).catch(() => {});
+      await queue.close();
+      await app.redis.del(
+        exhaustsKey,
+        `dispatch:exhaust-job:${order.id}:${tag1}`,
+        `dispatch:exhaust-job:${order.id}:${tag2}`,
+        `ops_page:dispatch_exhausted:${order.id}`,
+      );
+    }
+  });
+
+  it('[E36] a manual retry that restarts the counter still arms and still tells the customer', async () => {
+    // Keyed by attempt count, the second cycle's re-arm id and push key would
+    // equal the first cycle's: BullMQ keeps a completed job's id (removeOnComplete
+    // 100) and the (user, dedupeKey) unique collapses the push — a legitimate
+    // re-sweep and its notice silently dropped. Keyed by the run, they differ.
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const order = await makeDeliveryOrder();
+    const exhaustsKey = `dispatch:exhausts:${order.id}`;
+    const armedIds: Array<string | undefined> = [];
+    const replay = new DispatchService(
+      app.prisma, app.redis, app.io, new HaversineMapsProvider(),
+      async () => {},
+      async (_orderId, _delayMs, replayJobId) => { armedIds.push(replayJobId); return true; },
+    );
+    try {
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '51');
+      expect(await app.redis.get(exhaustsKey)).toBe('1');
+      // The vendor's retry clears the search memory, counter included.
+      await app.redis.del(exhaustsKey, `dispatch:exhaust-lock:${order.id}`);
+      await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '52');
+      expect(await app.redis.get(exhaustsKey)).toBe('1'); // the counter restarted
+      expect(armedIds).toHaveLength(2);
+      expect(new Set(armedIds).size).toBe(2);
+      expect(await app.prisma.notification.count({
+        where: { userId: customerId, dedupeKey: { startsWith: `dispatch-retrying:${order.id}:` } },
+      })).toBe(2);
+    } finally {
+      await app.redis.del(
+        exhaustsKey,
+        `dispatch:exhaust-job:${order.id}:${dispatchReplayTag('51')}`,
+        `dispatch:exhaust-job:${order.id}:${dispatchReplayTag('52')}`,
+        `ops_page:dispatch_exhausted:${order.id}`,
+      );
+    }
+  });
+
+  it('[E36] a redelivered offer timeout consumes the pair once: one decay, one cascade', async () => {
+    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    const rider = await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
+    const order = await makeDeliveryOrder();
+
+    const first = await dispatch.dispatchOrder(order.id);
+    expect(first.offered).toBe(rider.riderId);
+    const live = await app.redis.get(`dispatch:offer:${order.id}`);
+    expect(live).not.toBeNull();
+    const attemptId = live!.split(':')[1]; // `<riderId>:<attemptId>` [F-014-04]
+    // The client provably rendered the card, so this timeout is a scored miss.
+    await dispatch.markOfferSeen(order.id, rider.userId, attemptId);
+
+    await dispatch.handleOfferTimeout(order.id, rider.riderId, attemptId);
+    const afterFirst = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(afterFirst.acceptanceRate)).toBeCloseTo(80, 5); // one EMA step
+
+    // The first timeout's own cascade ran (the only rider declined, so the
+    // search exhausted); remember what it left in the counter.
+    const exhaustsAfterFirst = await app.redis.get(`dispatch:exhausts:${order.id}`);
+
+    // A crash redelivers the SAME timeout job. The atomic pair-consume now
+    // reads `removed === false` and returns before any consequence re-runs:
+    // no second decay, and no second cascade to burn another attempt.
+    await dispatch.handleOfferTimeout(order.id, rider.riderId, attemptId);
+    const afterSecond = await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } });
+    expect(Number(afterSecond.acceptanceRate)).toBeCloseTo(80, 5); // still one step
+    expect(await app.redis.get(`dispatch:offer:${order.id}`)).toBeNull();
+    expect(await app.redis.get(`dispatch:exhausts:${order.id}`)).toBe(exhaustsAfterFirst);
+
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false } });
+    await app.redis.del(
+      `dispatch:exhausts:${order.id}`,
+      `dispatch:declined:${order.id}`,
+      `ops_page:dispatch_exhausted:${order.id}`,
+    );
+  });
+
+  it('[E36] a redelivered reconcile sweep re-drives a stranded order once and writes nothing durable', async () => {
+    // Stranded: ready, riderless, no live offer, untouched past the stuck
+    // window — the state a Redis restart leaves behind.
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    const stale = new Date(Date.now() - (RECONCILE_STUCK_MINUTES + 30) * 60_000);
+    // Raw, because Prisma's @updatedAt would stamp "now" over any value given.
+    await app.prisma.$executeRaw`UPDATE "orders" SET "updatedAt" = ${stale} WHERE "id" = ${order.id}`;
+    const cursorKey = 'dispatch:reconcile-scan:v1';
+    const claimKey = `dispatch:reconciled:${order.id}`;
+    await app.redis.del(cursorKey, claimKey);
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    const enqueued: string[] = [];
+    const enqueue = async (orderId: string) => { enqueued.push(orderId); };
+
+    try {
+      const first = await reconcileStuckDispatch(app.prisma, app.redis, enqueue);
+      expect(first.recovered).toContain(order.id);
+      expect(await app.redis.get(claimKey)).not.toBeNull();
+
+      // The worker died mid-sweep and BullMQ redelivers the SAME job. Model the
+      // worst case: the crash came before the cursor advanced, so the replay
+      // scans the same window again. The per-order NX cooldown claim is what
+      // stands between it and a second re-drive.
+      await app.redis.del(cursorKey);
+      const second = await reconcileStuckDispatch(app.prisma, app.redis, enqueue);
+      expect(second.recovered).not.toContain(order.id);
+      expect(enqueued.filter((id) => id === order.id)).toHaveLength(1);
+
+      // The sweep's only durable effect is the re-drive itself (a certified
+      // dispatch-order job): the order row is exactly as it was.
+      expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).toEqual(before);
+    } finally {
+      await app.redis.del(cursorKey, claimKey);
+    }
   });
 
   it('widens the radius when the inner ring is empty', async () => {
@@ -1092,8 +1323,11 @@ describe('The offer cascade', () => {
     expect((await app.redis.get(`dispatch:mover-offer:${a.riderId}`))!.split(':')[0]).toBe(order.id); // reverse index set [F-014-04 composite]
     // The card RENDERED on A's screen (the app stamps seen on render) — so
     // quitting now is a dodge and MUST cost. An unrendered card would be
-    // spared instead [F-014-10 evidence-aware release].
-    await dispatch.markOfferSeen(order.id, a.userId);
+    // spared instead [F-014-10 evidence-aware release]. The app names the
+    // card's attempt; a render ping that names none never stamps a generated
+    // card [AX364].
+    const heldAttempt = (await app.redis.get(`dispatch:offer:${order.id}`))!.split(':')[1];
+    await dispatch.markOfferSeen(order.id, a.userId, heldAttempt);
 
     // A taps "Go offline" through the REAL route while still holding the live offer.
     const res = await app.inject({
@@ -1842,13 +2076,55 @@ describe('Atomic acceptance — the concurrency proof', () => {
       dispatch.dispatchOrder(order.id),
       dispatch.dispatchOrder(order.id),
     ]);
-    // Exactly one live offer key, owned by ONE mover; both calls REPORT the
-    // same owner (the loser returns the winner's offer, never a second card).
+    // The loser may observe the still-unpublished reservation and return {};
+    // any reported offer must be the single acknowledged winner's pair.
     const owner = await app.redis.get(`dispatch:offer:${order.id}`);
     expect(owner).toBeTruthy();
     const ownerId = owner!.split(':')[0]; // `<mover>:<attemptId>` [F-014-04]
-    expect(a.offered).toBe(ownerId);
-    expect(b.offered).toBe(ownerId);
+    expect([a, b].filter(result => result.offered === ownerId).length).toBeGreaterThanOrEqual(1);
+    for (const result of [a, b]) expect(result).toEqual(result.offered ? { offered: ownerId } : {});
+    expect((await app.redis.get(`dispatch:mover-offer:${ownerId}`))!.split(':')[0]).toBe(order.id);
+    expect(scheduled.filter(job => job.orderId === order.id)).toHaveLength(1);
+    // Exactly one alert-delivery row: the loser emitted nothing.
+    const pings = await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } });
+    expect(pings).toBe(1);
+    await app.redis.del(`dispatch:offer:${order.id}`, `dispatch:mover-offer:${ownerId}`);
+    for (const r of [r1, r2]) {
+      await app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: true, currentOrderId: null } });
+    }
+  });
+
+  it('a concurrent trigger cannot report an offer before its timeout acknowledgement', async () => {
+    const r1 = await makeRider({ lat: PICKUP.lat + 0.006 });
+    const r2 = await makeRider({ lat: PICKUP.lat + 0.007 });
+    const order = await makeDeliveryOrder('READY_FOR_PICKUP');
+    // Suspend the winner at timeout acknowledgement. A duplicate that sees
+    // the unpublished reservation must report no offer; it cannot expose it.
+    let atSchedule!: () => void, acknowledge!: () => void;
+    const scheduling = new Promise<void>(resolve => { atSchedule = resolve; });
+    const acknowledgement = new Promise<void>(resolve => { acknowledge = resolve; });
+    let scheduledCount = 0;
+    const concurrentDispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {
+      scheduledCount += 1; atSchedule(); await acknowledgement;
+    });
+    const first = concurrentDispatch.dispatchOrder(order.id);
+    await scheduling;
+    let second;
+    try {
+      second = await concurrentDispatch.dispatchOrder(order.id);
+      expect(second).toEqual({});
+      expect(await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } })).toBe(0);
+    } finally {
+      acknowledge();
+    }
+    const winner = await first;
+    const owner = await app.redis.get(`dispatch:offer:${order.id}`);
+    expect(owner).toBeTruthy();
+    const ownerId = owner!.split(':')[0];
+    expect(winner.offered).toBe(ownerId);
+    expect(scheduledCount).toBe(1);
+    // After acknowledgement, an idempotent trigger may report that live offer.
+    expect(await concurrentDispatch.dispatchOrder(order.id)).toEqual({ offered: ownerId });
     // Exactly one alert-delivery row: the loser emitted nothing.
     const pings = await app.prisma.alertDelivery.count({ where: { subjectId: order.id, kind: 'MOVER_OFFER' } });
     expect(pings).toBe(1);

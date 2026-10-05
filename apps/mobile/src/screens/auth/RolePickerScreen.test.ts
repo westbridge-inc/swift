@@ -77,4 +77,18 @@ describe('RolePickerScreen first-open contract', () => {
     expect(src).toMatch(/maxWidth: '100%',[\s\S]*?textAlign: 'center'/);
     expect(src.match(/<QuietRow/g) ?? []).toHaveLength(3);
   });
+
+  it('seeds the single Guyana launch market for every entry path', () => {
+    const pickStart = src.indexOf('const pick =');
+    const pick = src.slice(pickStart, src.indexOf('  return (', pickStart));
+    expect(pick).toContain('setCountry(DEFAULT_COUNTRY)');
+    expect(pick).not.toContain("intent === 'customer'");
+    expect(src).toContain("onPress={() => {\n                setCountry(DEFAULT_COUNTRY);\n                setIntent('advertiser');");
+  });
+
+  it('makes clear that Driver starts provider sign-up rather than booking a taxi', () => {
+    expect(src).toContain("title: 'Become a Swift Driver'");
+    expect(src).toContain("sub: 'Sign up to deliver orders or drive taxi trips — you keep 100%'");
+    expect(src).toContain("hint: 'Start driver sign-up'");
+  });
 });

@@ -26,7 +26,7 @@ import {
 const NOW = new Date('2026-09-04T12:00:00.000Z');
 const SHARE = (hours = 4): MintedShare => ({
   token: 'x'.repeat(43),
-  url: 'https://swift.gy/trip/' + 'x'.repeat(43),
+  url: 'https://swiftgy.com/trip/' + 'x'.repeat(43),
   expiresAt: new Date(NOW.getTime() + hours * 3_600_000).toISOString(),
 });
 

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from
 import { AppError } from '../utils/errors';
 import { ZodError } from 'zod';
 import { isDevelopment } from '../utils/runtime-mode';
+import { requestLogContext } from '../utils/logger-config';
 
 export function registerErrorHandler(app: FastifyInstance) {
   app.setErrorHandler((error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
@@ -25,6 +26,12 @@ export function registerErrorHandler(app: FastifyInstance) {
 
     // Custom app errors
     if (error instanceof AppError) {
+      // A throttle that knows when the caller may retry says so in the
+      // standard header too (whole seconds), not only in the body details.
+      const retryAfter = error.details?.['retryAfterSeconds'];
+      if (error.statusCode === 429 && typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
+        reply.header('Retry-After', String(Math.ceil(retryAfter)));
+      }
       return reply.status(error.statusCode).send({
         success: false,
         error: {
@@ -67,7 +74,7 @@ export function registerErrorHandler(app: FastifyInstance) {
     }
 
     // Unknown errors
-    app.log.error({ err: error, url: request.url, method: request.method }, 'Unhandled error');
+    request.log.error({ err: error, ...requestLogContext(request) }, 'Unhandled error');
     // SWIFT-AUD-D7-02: an error-rate SPIKE pages (dedup'd via the exact-count
     // trigger + a redis NX guard). Per-minute window counter; fire-and-caught
     // — accounting must never slow the error response, and minimal test

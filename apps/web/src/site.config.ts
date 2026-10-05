@@ -30,15 +30,28 @@
 
 import { SITE_DOMAIN, SITE_ORIGIN } from './site.domain';
 
+// Next's compiler inlines NEXT_PUBLIC_* only for this exact dot-form lookup;
+// the ambient member makes that syntax type-safe under
+// noPropertyAccessFromIndexSignature (the lib/browser-api-origin.ts pattern).
+/* eslint-disable no-unused-vars */
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      NEXT_PUBLIC_WEB_ORDERING?: string;
+    }
+  }
+}
+/* eslint-enable no-unused-vars */
+
 export const site = {
   /** Exact D&B spelling. Appears on /about, /contact and every footer. */
-  legalEntityName: '{{LEGAL_ENTITY_NAME}}',
+  legalEntityName: 'Westbridge Inc.',
 
   /** Exact D&B address, one line. Apple matches this against the D&B record. */
-  address: '{{COMPANY_ADDRESS}}',
+  address: 'Lot 165 New Trafalgar Building Waterloo Street Georgetown Guyana',
 
   /** The number the founder actually answers. Apple may call it. */
-  phone: '{{COMPANY_PHONE}}',
+  phone: '+592 7163534',
 
   /** Support inbox. Already live on the domain's mail — do not change. */
   supportEmail: 'support@swiftgy.com',
@@ -47,6 +60,28 @@ export const site = {
    *  Declared in site.domain.ts so next.config can read it without tripping
    *  the unfilled-token guard below. */
   domain: SITE_DOMAIN,
+
+  // ── [Q36] What the card bank requires the site to state ─────────────────
+  //  The bank is sent a screenshot of each of these and may visit the site.
+  //  /about, /legal/refunds, /legal/delivery and every footer read them here.
+
+  /** The name the service trades under, and the other way it is written. */
+  tradeName: 'Swift',
+  tradeNameAlt: 'SwiftGY',
+
+  /** Where the company is officially registered and located. */
+  registeredCity: 'Georgetown',
+
+  /** The domicile country, and the only country Swift operates in. */
+  country: 'Guyana',
+  countryCode: 'GY',
+
+  /** The transaction currency: every price on Swift is in Guyana dollars. */
+  currencyCode: 'GYD',
+  currencyName: 'Guyana dollars',
+
+  /** How soon support answers a question about a Swift charge, in business days. */
+  supportReplyBusinessDays: 2,
 } as const;
 
 export { SITE_ORIGIN };
@@ -66,8 +101,14 @@ export const launch = {
   /** Where the product actually operates. Add a market only when it is real. */
   markets: ['Georgetown, Guyana'] as const,
 
-  /** Ordering on the web works today; the native apps do not exist yet. */
-  webOrdering: 'live' as LaunchState,
+  /** [Item 7] THE pre-launch switch: may the PUBLIC site (swiftgy.com and
+   *  www) take orders? Set per deployment at build time —
+   *  NEXT_PUBLIC_WEB_ORDERING=live once ordering has launched there; anything
+   *  else, or nothing, keeps the public site behind the "Launching soon" front
+   *  door (src/middleware.ts). It governs the public hosts only: staging, a
+   *  preview or a local run keeps the full marketplace from the same build
+   *  (src/lib/web-ordering.ts). The native apps do not exist yet. */
+  webOrdering: (process.env.NEXT_PUBLIC_WEB_ORDERING === 'live' ? 'live' : 'soon') as LaunchState,
   iosApp: 'soon' as LaunchState,
   androidApp: 'soon' as LaunchState,
 
@@ -79,6 +120,14 @@ export const launch = {
     courier: 'live' as LaunchState,
     services: 'live' as LaunchState,
   },
+
+  /** [Q36] Visa and Mastercard, through the bank's card gateway, for Swift's
+   *  OWN charges — the weekly partner fee, and advertising a business chooses
+   *  to buy. Orders are never paid by card: the
+   *  API accepts only cash or the store's own MMG for an order. Flip to 'live'
+   *  only when a partner can pay the weekly fee by card end to end; until then
+   *  every card mark on the site says "coming soon". */
+  cardPayments: 'soon' as LaunchState,
 } as const;
 
 /** True only when a real, installable app exists in that store. Gates the

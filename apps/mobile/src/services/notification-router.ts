@@ -1,5 +1,8 @@
 import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
+import { getAuthSessionSnapshot } from '../stores/authStore';
+import { useStoreSwitcher } from '../stores/storeSwitcher';
+import { selectionStillCurrent } from '../lib/storeSelection';
 
 // The push TAP-ROUTER [first-open spec 2.4 / rides R-06 / QR Part 6]. Until
 // now every notification the backend sent opened the app on whatever screen
@@ -20,6 +23,7 @@ type Destination = { screen: string; params?: Record<string, unknown> };
  *  looked like a route and was not one, so its pushes silently went nowhere. */
 export function destinationFor(data: Record<string, unknown> | null | undefined): Destination | null {
   if (!data) return null;
+  if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
   // Server-tagged surface ('customer' | 'earner' | 'business'), merged into
@@ -72,6 +76,13 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // renders. The generic orderId branch below would have dropped them on the
   // CUSTOMER Delivery screen — a dead end with the clock running.
   if (kind === 'dispatch_offer') return { screen: 'Main' };
+  // [Q10] "Order ready for pickup" goes to the RIDER who holds the job, never
+  // to the customer (the API sends it only from the kitchen's Mark-ready to
+  // the assigned rider, tagged audience earner). Its orderId sent it down the
+  // generic branch to Delivery, the CUSTOMER screen MoverStack never mounts,
+  // so the tap opened nothing. ActiveJob is the rider's live job; it takes no
+  // params because it resolves the active job itself.
+  if (kind === 'prep_ready') return { screen: 'ActiveJob' };
   // A store told "a cancelled order may hold an MMG payment" runs a business:
   // their Main is the vendor dashboard, not a customer tracking screen.
   if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };
@@ -90,12 +101,19 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
 
   // An appointment MOVED (booking_rescheduled) is a Booking on a STORE's
   // calendar — it carries bookingId, never jobId — so it takes its own branch
-  // before the service-job family below: the vendor's Schedule agenda is the
-  // screen that shows that slot. The other recipient of the same kind is the
-  // customer whose appointment the store moved, and the app has no
-  // customer-side appointments screen at all — that tap opens the app
-  // normally, exactly as it does today, until one exists [reported].
-  if (kind === 'booking_rescheduled') return { screen: 'Schedule' };
+  // before the service-job family below. It has TWO recipients, told apart
+  // by the audience the API tags [E28]. business = the STORE whose calendar
+  // owns the slot; their Schedule agenda shows it. customer = the person whose
+  // appointment moved. Schedule is mounted ONLY by VendorStack, so a customer
+  // tap aimed there opened nothing. The customer copy returns null (the app
+  // opens normally): the push carries the bookingId, not the orderId a
+  // Delivery deep link needs. (A reschedule now moves Order.appointmentSlot
+  // with the booking [Q12], so the order screen shows the new time once the
+  // customer opens it.) An untagged row cannot say whose it is, so it also
+  // opens the app normally.
+  if (kind === 'booking_rescheduled') {
+    return audience === 'business' ? { screen: 'Schedule' } : null;
+  }
 
   // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
   // booking_* kind is a service JOB event carrying jobId/refId and no orderId
@@ -141,6 +159,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (kind === 'mmg_link_change_staged' || kind === 'mmg_link_change_applied' || kind === 'mmg_link_change_cancelled') {
     return { screen: 'Account' };
   }
+  // [Q8 · DS269 F1] Someone on the team moved the store's map pin. The owner
+  // lands on Account, where the Store location card shows it and moves it back.
+  if (kind === 'store_pin_moved') return { screen: 'Account' };
 
   if (kind === 'liveness_locked') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
@@ -188,28 +209,120 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (audience === 'business' && orderId) return { screen: 'VendorOrderDetail', params: { orderId } };
 
   // Orders: any payload carrying an orderId lands on that order's tracking
-  // screen — covers status updates, prep_ready, substitutions, pickup READY.
+  // screen — covers status updates, substitutions, pickup READY.
   if (orderId) return { screen: 'Delivery', params: { orderId } };
 
   return null; // unknown → the app opens normally
 }
 
-let pending: Destination | null = null;
+type Tap = {
+  dest: Destination; data: Record<string, unknown>; attempt: number;
+  owner: ReturnType<typeof getAuthSessionSnapshot>;
+  selection: { selectedStoreId: string | null; storeGeneration: number };
+};
+let pending: Tap | null = null;
 let installed = false;
+let routing = 0;
 
-function go(dest: Destination | null) {
+function isVendorDestination({ dest, data }: Tap): boolean {
+  return ['VendorOrderDetail', 'VendorCategoryReview', 'VendorTier', 'Schedule'].includes(dest.screen)
+    || (dest.screen === 'Account' && (data['actor'] === 'VENDOR' || data['kind'] === 'store_pin_moved'));
+}
+
+function currentVendorTap(tap: Tap): boolean {
+  const owner = getAuthSessionSnapshot();
+  return tap.attempt === routing && !!tap.owner && owner?.userId === tap.owner.userId
+    && owner.generation === tap.owner.generation && selectionStillCurrent(tap.selection, useStoreSwitcher.getState());
+}
+
+async function resolveVendorDestination(tap: Tap): Promise<boolean> {
+  if (!currentVendorTap(tap)) return false;
+  const { vendorApi } = await import('./api');
+  const { queryClient } = await import('../lib/queryClient');
+  if (!currentVendorTap(tap)) return false;
+  // Join the shell's first profile read rather than consume a route on its
+  // unselected group. The handoff still retires every editor and live layer.
+  const profile = await queryClient.fetchQuery({
+    queryKey: ['vendor', 'profile'], staleTime: 0, retry: false,
+    queryFn: async () => (await vendorApi.profile(tap.owner!, tap.selection.selectedStoreId)).data.data,
+  });
+  if (!currentVendorTap(tap) || !Array.isArray(profile?.vendors)) return false;
+  const stores = profile.vendors as Array<{ id: string }>;
+  let target = typeof tap.data['vendorId'] === 'string' ? tap.data['vendorId'] : undefined;
+  if (target !== undefined && !stores.some(store => store.id === target)) return false;
+  if (tap.dest.screen === 'VendorOrderDetail') {
+    const orderId = tap.dest.params?.['orderId'];
+    if (typeof orderId !== 'string') return false;
+    // This existing endpoint authorizes this account's order access and returns its
+    // actual vendorId. A push without vendorId must not assume the first store.
+    const order = (await vendorApi.order(orderId, tap.owner!, target ?? tap.selection.selectedStoreId ?? stores[0]?.id)).data.data;
+    if (!currentVendorTap(tap) || order?.id !== orderId || typeof order.vendorId !== 'string'
+      || (target !== undefined && target !== order.vendorId)) return false;
+    target = order.vendorId;
+  }
+  target ??= useStoreSwitcher.getState().selectedStoreId ?? stores[0]?.id;
+  if (!target || !stores.some(store => store.id === target) || !currentVendorTap(tap)) return false;
+  useStoreSwitcher.getState().setSelectedStore(target);
+  const selected = useStoreSwitcher.getState();
+  // Let React traverse the keyed-group handoff BEFORE dispatching the route.
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+  const owner = getAuthSessionSnapshot();
+  const now = useStoreSwitcher.getState();
+  return tap.attempt === routing && owner?.userId === tap.owner!.userId
+    && owner.generation === tap.owner!.generation && now.selectedStoreId === target
+    && now.storeGeneration === selected.storeGeneration;
+}
+
+async function go(tap: Tap) {
+  if (tap.attempt !== routing) return;
+  if (!navigationRef.isReady()) { pending = tap; return; }
+  let dest = tap.dest;
+  if (isVendorDestination(tap)) {
+    if (!await resolveVendorDestination(tap)) return;
+    if (dest.screen === 'Account' || dest.screen === 'Schedule') {
+      dest = { screen: 'VendorRoot', params: { screen: dest.screen, params: dest.params } };
+    }
+  } else if (dest.screen === 'WeeklyFee' && typeof dest.params?.['vendorId'] === 'string') {
+    const { resolveFeeNotification } = await import('./weekly-fee-notification');
+    if (!currentVendorTap(tap)) return;
+    // The tap's exact authority fences every fee effect, not only the final
+    // route: a newer tap, account or explicit choice retires the lookup before
+    // it can publish a store, cycle the socket, recover or navigate. The fee
+    // lookup's own authorized handoff becomes the tap's new selection.
+    const authority = {
+      current: () => currentVendorTap(tap),
+      adopt: () => {
+        const { selectedStoreId, storeGeneration } = useStoreSwitcher.getState();
+        tap.selection = { selectedStoreId, storeGeneration };
+      },
+    };
+    const params = await resolveFeeNotification(dest.params, (resolved) => { safeNavigate('WeeklyFee', { ...resolved, feeFamily: 'vendor' }); }, authority);
+    if (!params || !authority.current() || useStoreSwitcher.getState().selectedStoreId !== params['vendorId']) return;
+    dest = { ...dest, params: { ...params, feeFamily: 'vendor' } };
+  } else if (dest.screen === 'WeeklyFee') {
+    dest = { ...dest, params: { ...dest.params, feeFamily: 'mover' } };
+  }
+  if (tap.attempt !== routing) return;
+  if (!safeNavigate(dest.screen, dest.params)) pending = { ...tap, dest };
+}
+
+function routeTap(data: Record<string, unknown>) {
+  const dest = destinationFor(data);
+  const attempt = ++routing;
+  pending = null;
   if (!dest) return;
-  if (!safeNavigate(dest.screen, dest.params)) pending = dest;
+  const { selectedStoreId, storeGeneration } = useStoreSwitcher.getState();
+  void go({ dest, data, attempt, owner: getAuthSessionSnapshot(), selection: { selectedStoreId, storeGeneration } }).catch(() => undefined);
 }
 
 /** RootNavigator calls this from onReady — delivers a cold-start tap that
  *  arrived before the container mounted. */
 export function flushPendingNavigation() {
   if (!pending) return;
-  const dest = pending;
+  const tap = pending;
   pending = null;
   // One frame of grace so the initial route settles before we move.
-  setTimeout(() => { if (!safeNavigate(dest.screen, dest.params)) pending = dest; }, 250);
+  setTimeout(() => { void go(tap).catch(() => undefined); }, 250);
 }
 
 /** Install once at app start: warm taps via the listener, cold starts via the
@@ -221,20 +334,22 @@ export function installNotificationTapRouter(): () => void {
 
   const sub = Notifications.addNotificationResponseReceivedListener((response) => {
     try {
-      go(destinationFor(response?.notification?.request?.content?.data as Record<string, unknown>));
+      routeTap(response?.notification?.request?.content?.data as Record<string, unknown>);
     } catch { /* never let a tap crash the app */ }
   });
 
   // Cold start: the tap that LAUNCHED us.
+  const installedAt = routing;
   Notifications.getLastNotificationResponseAsync()
     .then((response) => {
-      if (!response) return;
-      go(destinationFor(response.notification?.request?.content?.data as Record<string, unknown>));
+      if (!response || !installed || routing !== installedAt) return;
+      routeTap(response.notification?.request?.content?.data as Record<string, unknown>);
     })
     .catch(() => undefined);
 
   return () => {
     installed = false;
+    routing++; pending = null;
     sub.remove();
   };
 }

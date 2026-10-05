@@ -116,7 +116,7 @@ describe('§7.3 expiry release', () => {
 });
 
 describe('§7.2 availability', () => {
-  it('lazily materialises inventory rows and reports available = capacity − booked', async () => {
+  it('reports available = capacity − booked, computed on read (a GET writes nothing)', async () => {
     const a = await makeAdvertiser();
     const p = await makePlacement(6);
     const c = await makeCampaign(a.id, p.id, MON, MON);
@@ -126,6 +126,38 @@ describe('§7.2 availability', () => {
     expect(avail).toHaveLength(2);
     expect(avail[0]).toMatchObject({ weekStart: '2026-08-03', capacity: 6, booked: 1, available: 5, price: 5000 });
     expect(avail[1]).toMatchObject({ weekStart: '2026-08-10', capacity: 6, booked: 0, available: 6 });
+    // Only the week `reserve` touched exists — the read materialised nothing
+    // (on main it creates a second row for 08-10, so this assertion fails).
+    expect(await prisma.adInventoryWeek.count({ where: { placementId: p.id } })).toBe(1);
+  });
+
+  it('refuses an over-104-week range even when called directly, writing nothing', async () => {
+    const p = await makePlacement(6);
+    await expect(
+      svc.availability(p.id, '*', new Date('2026-01-05T00:00:00Z'), new Date('2031-01-06T00:00:00Z')),
+    ).rejects.toMatchObject({ code: 'BAD_RANGE' });
+    expect(await prisma.adInventoryWeek.count({ where: { placementId: p.id } })).toBe(0);
+  });
+
+  it('refuses to reserve a campaign whose stored span exceeds the limit, writing nothing', async () => {
+    // A campaign created before the creation-time bound (or by any other
+    // caller) can still hold a hostile span in the DB — the reservation
+    // engine must refuse it defensively instead of looping one
+    // ensureWeek/booking per week × city.
+    const a = await makeAdvertiser();
+    const p = await makePlacement(6);
+    const c = await prisma.adCampaign.create({
+      data: {
+        advertiserId: a.id, placementId: p.id, name: 'Legacy span', cities: ['*'],
+        startWeek: new Date('2026-01-05T00:00:00Z'), endWeek: new Date('2031-01-06T00:00:00Z'), // 262 Mondays
+        status: 'DRAFT',
+      },
+    });
+    campaignIds.push(c.id);
+
+    await expect(svc.reserve(c.id)).rejects.toMatchObject({ code: 'BAD_RANGE' });
+    expect(await prisma.adInventoryWeek.count({ where: { placementId: p.id } })).toBe(0);
+    expect(await prisma.adBooking.count({ where: { campaignId: c.id } })).toBe(0);
   });
 });
 

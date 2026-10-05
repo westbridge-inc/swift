@@ -24,7 +24,6 @@ import { placesRoutes } from '../modules/places/places.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
-import { aiRoutes } from '../modules/ai/ai.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
 import { loginWithOtp } from './helpers/otp';
 
@@ -78,7 +77,6 @@ async function buildTestApp() {
   await server.register(courierRoutes, { prefix: '/api/v1/courier' });
   await server.register(servicesRoutes, { prefix: '/api/v1/services' });
   await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
-  await server.register(aiRoutes, { prefix: '/api/v1/ai' });
   await server.register(statementRoutes, { prefix: '/api/v1/statements' });
   await server.ready();
   return server;
@@ -153,7 +151,6 @@ const MATRIX: PrefixSpec[] = [
   { prefix: '/api/v1/courier/', wrongRoles: [] },
   { prefix: '/api/v1/services/', wrongRoles: [] },
   { prefix: '/api/v1/partner/', wrongRoles: [] },
-  { prefix: '/api/v1/ai/', wrongRoles: [] },
   { prefix: '/api/v1/statements/', wrongRoles: [] },
 ];
 
@@ -162,6 +159,12 @@ const MATRIX: PrefixSpec[] = [
  *  document/statement render-token model. Anything added here needs the same
  *  written justification. */
 const PUBLIC_BY_DESIGN = new Set([
+  // Guest catalogue reads use the public browse tenant/visibility authority.
+  // The sync operation stays in the authenticated sweep below.
+  'GET /api/v1/search',
+  'GET /api/v1/search/suggestions',
+  'GET /api/v1/search/trending',
+  'GET /api/v1/search/nearby',
   // Service-provider browse is customer discovery (guest-browse doctrine):
   // optionalAuth by design; unauthenticated requests hit schema validation
   // (400 on missing query), never a data leak — the handler serves a public
@@ -294,7 +297,13 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // and `isAvailable`, so it can only surface goods an anonymous visitor could
   // already see on a store page. Requiring a session here would mean asking
   // someone to sign up before they can see what is for sale.
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
+  // /billing/mmg-checkout is MMG's reply path [mmg checkout 3/6]: the web
+  // return page (no session survives MMG's cross-site redirect) and MMG's own
+  // servers post an encrypted reply token there. The token is opened with the
+  // merchant key and only prompts the server's own MMG lookup; the answer is
+  // one of four states with no amount, name or reference. Rate-limited,
+  // body-capped, inert with the flag off — proven in mmg-checkout-routes.test.ts.
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/billing/mmg-checkout', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.

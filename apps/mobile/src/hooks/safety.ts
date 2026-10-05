@@ -122,6 +122,9 @@ export interface EmergencyContact {
   relationship?: string | null;
   priority: number;
   verifiedAt: string | null;
+  /** [Q9] The account's own number (a row saved before the API refused it):
+   *  listed, never alerted. Absent from a server older than the flag. */
+  isOwnNumber?: boolean;
 }
 
 export function useEmergencyContacts() {

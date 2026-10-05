@@ -25,6 +25,11 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
 
 # ---- build: compile TS + generate the Prisma client -----------------------
 FROM deps AS build
+# The API's tsc build needs more heap than Node's default on an 8 GB host (the
+# staging droplet's build died with a V8 heap OOM, exit 134). CI runners pass
+# only because their larger memory raises Node's default. Build stage only:
+# the runtime stage below starts from `base` and does not inherit this.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 COPY apps/api apps/api
 COPY tsconfig*.json ./
 # @swift/ui ships TS source for dev/metro but the compiled (CJS) API `require`s
@@ -52,6 +57,7 @@ COPY --from=build /app/packages ./packages
 
 WORKDIR /app/apps/api
 # Drop to an unprivileged user (node ships in the base image).
+RUN mkdir -p /srv/swift/uploads && chown node:node /srv/swift/uploads
 USER node
 EXPOSE 3000
 # [R048-006] READINESS is the container probe: GET /ready answers 503 for any

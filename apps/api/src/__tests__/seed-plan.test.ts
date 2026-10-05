@@ -1,14 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
-  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, promoteBootstrapAdmin, seedPlanDigest, signPromotionApproval, signSeedApproval,
+  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, promoteBootstrapAdmin, seedPlanDigest, signPromotionApproval, signPromotionForTarget, signSeedApproval,
   type DesiredConfig, type SeedPlan,
 } from '../modules/ops/seed-plan';
 import { desiredPlatformConfig, seedPlatformSpine } from '../modules/ops/platform-config';
+import { targetFingerprint } from '../modules/ops/purge-plan';
 import { assertSafeToSeedDemo } from '../utils/seed-guard';
 import { seedPlanCounter } from '../plugins/observability';
 
@@ -180,6 +182,37 @@ describe('[R048-005] a production target is a ceremony', () => {
       await setIdentity('test');
     }
   });
+
+  it('[DS110 #17] the printed plan digest is STABLE — the re-run rebuilds the same digest, so the two signatures verify', async () => {
+    await setIdentity('production');
+    try {
+      const desired = desiredFor(10);
+      // The same plan built at two different moments: the ceremony prints the
+      // first digest, the operators sign it, and the re-run (a fresh `now`)
+      // rebuilds the plan. Before the fix the fresh `createdAt` changed the
+      // digest and every signature failed APPROVAL_INVALID — forever.
+      const printed = await buildSeedPlan(prisma, URL_, desired, new Date('2026-09-23T10:00:00.000Z'));
+      const rebuilt = await buildSeedPlan(prisma, URL_, desired, new Date('2026-09-23T15:45:00.000Z'));
+      expect(rebuilt.createdAt).not.toBe(printed.createdAt);
+      expect(rebuilt.changes).toEqual(printed.changes);
+      expect(rebuilt.digest).toBe(printed.digest);
+      // …and the digest still binds the content: other desired data is another plan.
+      const other = await buildSeedPlan(prisma, URL_, desiredFor(11), new Date('2026-09-23T10:00:00.000Z'));
+      expect(other.digest).not.toBe(printed.digest);
+
+      // The signatures captured over the PRINTED digest must apply the
+      // REBUILT plan — this is the exact boot-deadlock step that used to fail.
+      const res = await applySeedPlan(prisma, URL_, desired, rebuilt, {
+        secret: SECRET,
+        approvals: [signSeedApproval(SECRET, 'alice', printed.digest), signSeedApproval(SECRET, 'bob', printed.digest)],
+        actor: 'alice',
+      });
+      expect(res).toMatchObject({ applied: 1, configVersion: 'test-10' });
+      expect(await auditEvents(rebuilt.digest)).toEqual(['APPLIED']);
+    } finally {
+      await setIdentity('test');
+    }
+  });
 });
 
 describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-glass', () => {
@@ -206,6 +239,81 @@ describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-
     const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: promoted.userId } } });
     expect((audit!.detail as { mode: string; approvers: string[] })).toMatchObject({ mode: 'break-glass', approvers: ['alice', 'bob'] });
   });
+});
+
+describe('[ops] the break-glass ceremony: each approver signs their own half', () => {
+  it('signPromotionForTarget is read-only; two halves for THIS target and phone promote; a half for another phone does not', async () => {
+    // A SUPER_ADMIN must exist, or a promotion is bootstrap and needs no ceremony.
+    if ((await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) === 0) {
+      const first = await promoteBootstrapAdmin(prisma, URL_, `+59260096${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`, { actor: 'test' });
+      userIds.push(first.userId);
+    }
+    const phone = `+59260097${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+    const otherPhone = `+59260095${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+    const usersBefore = await prisma.user.count();
+    const auditsBefore = await prisma.privilegedChangeAudit.count();
+
+    const owner = await signPromotionForTarget(prisma, URL_, SECRET, 'owner', phone);
+    const coordinator = await signPromotionForTarget(prisma, URL_, SECRET, 'coordinator', phone);
+    expect(owner).toEqual({ approver: 'owner', signature: expect.stringMatching(/^[0-9a-f]{16,}$/) });
+    // Signing wrote nothing: no account, no audit row.
+    expect(await prisma.user.count()).toBe(usersBefore);
+    expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
+
+    // [DS250 F3] Each half is exactly the signature over THIS database's fingerprint and the phone.
+    const target = await targetFingerprint(prisma, URL_);
+    expect(owner).toEqual(signPromotionApproval(SECRET, 'owner', target.digest, phone));
+
+    // Refused before any read of the target: no key, a malformed name, a malformed phone.
+    await expect(signPromotionForTarget(prisma, URL_, undefined, 'owner', phone)).rejects.toMatchObject({ code: 'SECRET_REQUIRED' });
+    await expect(signPromotionForTarget(prisma, URL_, SECRET, 'Owner Name', phone)).rejects.toMatchObject({ code: 'APPROVER_INVALID' });
+    await expect(signPromotionForTarget(prisma, URL_, SECRET, 'owner', '5920400001')).rejects.toMatchObject({ code: 'PHONE_INVALID' });
+
+    // A half signed for another phone is refused, and nothing is promoted.
+    const forOther = await signPromotionForTarget(prisma, URL_, SECRET, 'coordinator', otherPhone);
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, forOther] })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    expect(await prisma.user.count({ where: { phone } })).toBe(0);
+
+    // [DS250 F3] A half signed against another database (same key, same phone) is
+    // refused: a signature cannot be replayed from one target onto another.
+    const elsewhere = new URL(URL_);
+    elsewhere.hostname = 'another-database.internal';
+    const forElsewhere = await signPromotionForTarget(prisma, elsewhere.toString(), SECRET, 'coordinator', phone);
+    expect(forElsewhere.signature).not.toBe(coordinator.signature);
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, forElsewhere] })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    expect(await prisma.user.count({ where: { phone } })).toBe(0);
+
+    // The two halves promote, as break-glass, and the audit names both people.
+    const promoted = await promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, coordinator], actor: 'coordinator' });
+    userIds.push(promoted.userId);
+    expect(promoted.mode).toBe('break-glass');
+    const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: promoted.userId } } });
+    expect((audit!.detail as { approvers: string[] }).approvers).toEqual(['owner', 'coordinator']);
+  });
+});
+
+describe('[DS250 F3] sign mode through the real seed entry point', () => {
+  it('prints exactly one approval line on stdout, seeds nothing, and never prints the key', async () => {
+    const phone = `+59260094${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+    const usersBefore = await prisma.user.count();
+    const auditsBefore = await prisma.privilegedChangeAudit.count();
+
+    const res = spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), ['prisma/seed-production.ts'], {
+      encoding: 'utf8',
+      timeout: 90_000,
+      env: { PATH: process.env['PATH'] ?? '', DATABASE_URL: URL_, SEED_PLAN_SECRET: SECRET, SEED_SIGN_APPROVER: 'owner', SEED_ADMIN_PHONE: phone },
+    });
+    expect(res.status, res.stderr).toBe(0);
+    const lines = res.stdout.trim().split('\n');
+    expect(lines).toHaveLength(1);
+    // The one line IS the approval for this database and phone: the operator pastes it as-is.
+    const target = await targetFingerprint(prisma, URL_);
+    expect(JSON.parse(lines[0]!)).toEqual(signPromotionApproval(SECRET, 'owner', target.digest, phone));
+    expect(res.stdout + res.stderr).not.toContain(SECRET);
+    // Read-only: no account, no audit row.
+    expect(await prisma.user.count()).toBe(usersBefore);
+    expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
+  }, 120_000);
 });
 
 describe('[R048-005] the demo seed needs an ephemeral database', () => {

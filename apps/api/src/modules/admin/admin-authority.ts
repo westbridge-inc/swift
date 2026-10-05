@@ -80,7 +80,7 @@ export const ADMIN_ACTION_CLASSES: Record<AdminActionClass, AdminActionMeaning> 
  * [C-01] The model columns a snapshot may select on. A CLOSED set: adding one
  * is a deliberate edit here, never a string inferred from a route.
  */
-export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code'] as const;
+export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code', 'userId'] as const;
 export type SnapshotUniqueField = (typeof SNAPSHOT_UNIQUE_FIELDS)[number];
 
 export interface AdminRouteEntity {
@@ -109,6 +109,14 @@ export interface AdminRouteEntity {
    *  regardless, so this is what a reader sees first, not the limit of what is
    *  detected. */
   readonly fields: readonly string[];
+  /**
+   * [ZONE-FARES] For a model with no tenant column of its own, walled only
+   * through its parents: the relations whose `tenantId` must be the caller's
+   * tenant. The snapshot puts them IN its query, so another operator's row is
+   * never read — not read and then refused. With no tenant bound it reads
+   * nothing at all.
+   */
+  readonly tenantVia?: readonly string[];
 }
 
 export interface AdminRouteAuthority {
@@ -137,17 +145,24 @@ const E = {
   // refund actually moves; the reference and the amount are the only proof
   // that a refund happened, and they belong in the trail as a diff.
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
-  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt'] },
+  // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
+  order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
+  moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
-  zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
+  // [ZONE-FARES] taxiPerKm is a price: a change to it is named in the diff.
+  zone: { model: 'zone', fields: ['isActive', 'name', 'priority', 'taxiPerKm'] },
+  // [ZONE-FARES] A fixed zone-to-zone fare: the price and the pair it joins.
+  // A fare has no tenant column: both of its zones must be the caller's.
+  zoneFare: { model: 'zoneFare', fields: ['fare', 'fromZoneId', 'toZoneId', 'updatedBy'], tenantVia: ['fromZone', 'toZone'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
   adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
+  paymentConfirmation: { model: 'paymentConfirmationHold', fields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionEvidence'] },
   agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
@@ -161,7 +176,6 @@ const E = {
   rating: { model: 'rating', fields: ['isPublic', 'state', 'stateReason', 'flagged'] },
   ratingReport: { model: 'ratingReport', fields: ['status'] },
   approval: { model: 'privilegedApproval', fields: ['status', 'approvedBy', 'decidedAt'] },
-  agentRequest: { model: 'agentActionRequest', fields: ['status', 'decidedBy', 'decidedAt'] },
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
@@ -187,6 +201,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
+  'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),
@@ -204,6 +219,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /drivers/:id': c('C1', 'mover.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
+  // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
+  // vehicle subject's documents — a person's access to live work, so C3 (reason owed).
+  'POST /drivers/:id/vehicle-assignment/approve': c('C3', 'driver.assignment.approve', E.driver),
 
   // ── Orders and live ops ─────────────────────────────────────────────────
   'GET /orders': c('C1', 'order.read'),
@@ -216,6 +234,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /orders/:id/food-age-hold/release': c('C2', 'order.hold.release'),
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),
+  'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
@@ -254,6 +273,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /zones': c('C5', 'platform.zone.write'),
   'PUT /zones/:id': c('C5', 'platform.zone.write', E.zone),
   'DELETE /zones/:id': c('C5', 'platform.zone.write', E.zone),
+  // [ZONE-FARES] Fixed zone-to-zone fares are pricing: C5, its own capability
+  // (drawing a zone and pricing a pair are different powers).
+  'GET /zone-fares': c('C0', 'platform.zonefare.read'),
+  'POST /zone-fares': c('C5', 'platform.zonefare.write'),
+  'PUT /zone-fares/:id': c('C5', 'platform.zonefare.write', E.zoneFare),
+  'DELETE /zone-fares/:id': c('C5', 'platform.zonefare.write', E.zoneFare),
   'POST /notifications/broadcast': c('C5', 'platform.broadcast'),
 
   // ── Subscriptions ───────────────────────────────────────────────────────
@@ -295,6 +320,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /integrity/appeals/:id/resolve': c('C3', 'integrity.appeal.decide'),
   'POST /integrity/exceptions': c('C3', 'integrity.exception.write'),
   'POST /integrity/backfill': c('C5', 'integrity.backfill'),
+  // [SAFE-B] Ambiguous historical identity links: stage bounded review cases, and
+  // record the reviewed KEEP_REVIEW disposition. Neither grants, splits or clears.
+  'POST /integrity/reviews/scan': c('C3', 'integrity.review.scan'),
+  'POST /integrity/reviews/:id/retain': c('C3', 'integrity.review.decide'),
 
   // ── Billing, cash and settlement ────────────────────────────────────────
   'GET /billing/fx-rates': c('C0', 'billing.read'),
@@ -305,7 +334,15 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/agent-payments': c('C0', 'billing.read'),
   'GET /billing/agent-payments/unmatched': c('C0', 'billing.read'),
   'GET /billing/agent-cash-config': c('C0', 'billing.read'),
+  'GET /billing/confirmations': c('C0', 'billing.read'),
+  // [MMG support lookup] A partner's payment, found by any of its ids or the partner's phone: identity, so C1.
+  'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),
+  'GET /billing/mmg-checkouts/:id': c('C1', 'billing.mmg.read'),
+  'POST /billing/confirmations/:id/resolve': c('C4', 'billing.payment.attach', E.paymentConfirmation),
   'GET /billing/collections': c('C0', 'billing.read'),
+  'GET /billing/mover-fees': c('C0', 'billing.read'),
+  'GET /billing/mover-fees/:userId': c('C0', 'billing.read'),
+  'POST /billing/mover-fees/:userId/resolve': c('C4', 'billing.payment.attach', E.moverFee),
   'GET /billing/cash-journal': c('C0', 'billing.read'),
   'GET /billing/settlement-batches': c('C0', 'billing.read'),
   'GET /billing/cash-kpis': c('C0', 'billing.read'),
@@ -379,15 +416,16 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // authorises is still gated on its own class when the requester re-issues it.
   'GET /approvals': c('C0', 'approvals.read'),
   'POST /approvals/:id/decide': c('C3', 'approvals.decide', E.approval),
+  // [DS110-14] Executing a decision is not itself a decision: the approval
+  // already carries the two-person authorisation, and the replayed request
+  // passes through its own C4/C5 gate again. C2 — no new reason, no new
+  // approval — so "apply" can never need a second approval of its own.
+  'POST /approvals/:id/apply': c('C2', 'approvals.apply', E.approval),
 
-  // ── Support, audit and the agent ────────────────────────────────────────
+  // ── Support and audit ───────────────────────────────────────────────────
   'GET /audit-logs': c('C1', 'audit.read'),
   'GET /support': c('C1', 'support.read'),
   'PUT /support/:id/resolve': c('C2', 'support.resolve'),
-  'GET /agent/approvals': c('C0', 'agent.read'),
-  'GET /agent/audit': c('C1', 'agent.read'),
-  'POST /agent/approvals/:id/approve': c('C3', 'agent.approval.decide', E.agentRequest),
-  'POST /agent/approvals/:id/reject': c('C3', 'agent.approval.decide', E.agentRequest),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),
@@ -664,6 +702,7 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',
+  'POST /zone-fares': 'creates the row; there is no before state to digest — the audit facts carry the pair and the fare',
   'POST /notifications/broadcast': 'addresses every user; the subject is the audience, not a row',
   'PUT /countries/:code/pricing/:kind': 'writes a versioned price book, which keeps its own before/after by version',
   'POST /countries/:code/pricing/:kind/rollback': 'pins an earlier price-book version; the version register is the record',
@@ -683,6 +722,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'POST /integrity/exceptions': 'creates the grant; there is no before state to digest',
   'POST /verification/legal-holds': 'creates the hold; there is no before state to digest',
   'POST /integrity/appeals/:id/resolve': 'the appeal is founder-scoped and read through the integrity graph, not a tenant row',
+  'POST /integrity/reviews/scan': 'stages bounded review cases across many clusters; each case is its own immutable snapshot',
+  'POST /integrity/reviews/:id/retain': 'the case is founder-scoped and immutable except its disposition; the snapshot digest the decision names is the record',
   'PUT /rides/drivers/:id/vehicle-identity': 'writes vehicle identity across driver and ride rows; no single subject',
   'DELETE /dlq/:queue/:id': 'a queue job, not a database row',
 };

@@ -27,11 +27,19 @@ export type PricingKind = 'TAXI_RATES' | 'TAXI_CLASS_RATES' | 'DELIVERY_RATES' |
 export const PRICING_KINDS: readonly PricingKind[] = ['TAXI_RATES', 'TAXI_CLASS_RATES', 'DELIVERY_RATES', 'COURIER_RATES'];
 export const PRICING_MONEY_MAX = 100_000_000;
 
-export interface TaxiRates { base: number; perKm: number; perMin: number; minimum: number }
+/** `includedKm` is the distance the base fare covers: perKm is charged only
+ *  beyond it, once per trip. A payload that does not name it includes none
+ *  (see NOT_INHERITED), so a config written before it existed prices as it did. */
+export interface TaxiRates { base: number; includedKm?: number; perKm: number; perMin: number; minimum: number }
 export type ClassRates = { ECONOMY: number; COMFORT: number; XL: number; GROUP: number };
 
-/** The declared defaults — themselves valid full payloads. */
-export const DEFAULT_TAXI_RATES: TaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
+/** The declared defaults — themselves valid full payloads.
+ *  Taxi is the owner's Georgetown fare (1 Oct 2026): 800 covers the first
+ *  3 km, then 175 a kilometre; no per-minute charge, and no minimum above the
+ *  base. formulaFare rounds the trip to the nearest 100, so 7 km is 1,500 and
+ *  10 km (2,025) quotes 2,000. The Guyana seed reads this constant
+ *  (ops/platform-config). */
+export const DEFAULT_TAXI_RATES: TaxiRates = { base: 800, includedKm: 3, perKm: 175, perMin: 0, minimum: 800 };
 export const DEFAULT_CLASS_RATES: ClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
 
 /** Whole local-currency units (GYD today) — never fractional, never negative. */
@@ -40,7 +48,8 @@ const multiplier = z.number().finite().min(0.5).max(10);
 const km = z.number().finite().min(0).max(10_000);
 
 const SCHEMAS: Record<PricingKind, z.ZodTypeAny> = {
-  TAXI_RATES: z.object({ base: money, perKm: money, perMin: money, minimum: money }).strict(),
+  // includedKm last: the parsed payload keeps the key order the shadow merge builds.
+  TAXI_RATES: z.object({ base: money, perKm: money, perMin: money, minimum: money, includedKm: km.optional() }).strict(),
   TAXI_CLASS_RATES: z.object({ ECONOMY: z.literal(1), COMFORT: multiplier, XL: multiplier, GROUP: multiplier }).strict(),
   DELIVERY_RATES: z.object({ baseFee: money, perKmRate: money, includedKm: km, surgeMultiplier: multiplier }).strict(),
   COURIER_RATES: z.object({
@@ -53,7 +62,7 @@ const SCHEMAS: Record<PricingKind, z.ZodTypeAny> = {
 
 /** The units each kind's payload is declared in. */
 export const PRICING_UNITS: Record<PricingKind, string> = {
-  TAXI_RATES: 'GYD_WHOLE',
+  TAXI_RATES: 'GYD_WHOLE+KM',
   TAXI_CLASS_RATES: 'MULTIPLIER',
   DELIVERY_RATES: 'GYD_WHOLE+KM+MULTIPLIER',
   COURIER_RATES: 'GYD_WHOLE+MULTIPLIER',
@@ -72,9 +81,22 @@ export function pricingDefaults(kind: PricingKind): Record<string, unknown> {
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 
+/** Keys a payload never takes from the defaults. A TAXI_RATES payload that
+ *  does not name includedKm includes no kilometres, so every taxi config
+ *  written before includedKm existed prices exactly as it did; only a market
+ *  with no config at all (ABSENT) gets the default's included kilometres. */
+const NOT_INHERITED: Partial<Record<PricingKind, readonly string[]>> = { TAXI_RATES: ['includedKm'] };
+
+/** The defaults a payload is merged over. */
+function inheritedDefaults(kind: PricingKind): Record<string, unknown> {
+  const out = pricingDefaults(kind);
+  for (const key of NOT_INHERITED[kind] ?? []) delete out[key];
+  return out;
+}
+
 /** A partial payload over the defaults, one level of nesting deep. */
 function mergeOverDefaults(kind: PricingKind, raw: Record<string, unknown>): Record<string, unknown> {
-  const out = pricingDefaults(kind);
+  const out = inheritedDefaults(kind);
   for (const [key, value] of Object.entries(raw)) {
     const current = out[key];
     out[key] = isPlainObject(current) && isPlainObject(value) ? { ...current, ...value } : value;
@@ -88,7 +110,7 @@ export type PricingValidation =
   | { status: 'INVALID'; payload: null; problems: string[] };
 
 /** The law: null means "the defaults"; a plain object is merged over the
- *  defaults and the WHOLE result must satisfy the strict schema; anything else
+ *  defaults (less NOT_INHERITED) and the WHOLE result must satisfy the strict schema; anything else
  *  — a scalar, an array, a bad key, a bad value — is INVALID with every
  *  problem named. */
 export function validatePricingConfig(kind: PricingKind, raw: unknown): PricingValidation {
@@ -112,7 +134,7 @@ function legacyMerge(kind: PricingKind, raw: unknown): Record<string, unknown> {
   switch (kind) {
     case 'DELIVERY_RATES': return mergeDeliveryRates(raw) as unknown as Record<string, unknown>;
     case 'COURIER_RATES': return mergeCourierRates(raw) as unknown as Record<string, unknown>;
-    case 'TAXI_RATES': return { ...DEFAULT_TAXI_RATES, ...((isPlainObject(raw) ? raw : {}) as Partial<TaxiRates>) };
+    case 'TAXI_RATES': return { ...inheritedDefaults('TAXI_RATES'), ...((isPlainObject(raw) ? raw : {}) as Partial<TaxiRates>) };
     case 'TAXI_CLASS_RATES': return { ...DEFAULT_CLASS_RATES, ...((isPlainObject(raw) ? raw : {}) as Partial<ClassRates>) };
   }
 }

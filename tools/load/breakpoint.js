@@ -3,7 +3,7 @@
 // engagement: a sustained swarm proves a target holds; this finds where it
 // STOPS holding, so capacity planning is a measured number, not a guess.
 //
-//   BASE_URL=https://staging-api.swift.gy k6 run tools/load/breakpoint.js
+//   BASE_URL=https://api-staging.swiftgy.com k6 run tools/load/breakpoint.js
 //
 // Read-only (public browse) so it can push high without seeded auth. k6 ABORTS
 // the run the moment a threshold breaks (abortOnFail) — the arrival rate on the

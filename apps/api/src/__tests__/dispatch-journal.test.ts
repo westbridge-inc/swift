@@ -1,3 +1,4 @@
+import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -95,6 +96,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  recordDispatchQueue(app);
   const { registerEmptyJsonBodyParser } = await import('../plugins/empty-json');
   registerEmptyJsonBodyParser(app);
   const { customerRoutes } = await import('../modules/user/customer.routes');

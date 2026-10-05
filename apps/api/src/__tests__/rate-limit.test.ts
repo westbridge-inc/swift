@@ -7,6 +7,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { guyanaDayKey } from '../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // SEC-4 regression — auth endpoints are rate limited.
@@ -16,6 +17,9 @@ import { registerErrorHandler } from '../middleware/error-handler';
 
 let app: FastifyInstance;
 const phones = Array.from({ length: 6 }, (_, i) => `+59288800${10 + i}`);
+// A TEST-NET-3 address reserved for this suite: keeps the fake-token bucket
+// isolated from the loopback bucket the first test exhausts.
+const ROTATOR_IP = '203.0.113.45';
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -24,7 +28,9 @@ beforeAll(async () => {
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);
-  await app.register(rateLimit, { keyGenerator: rateLimitKey, max: 200, timeWindow: '1 minute' });
+  // app.jwt is decorated by authPlugin (registered next); the closure reads it
+  // lazily at request time, exactly like the real server composition.
+  await app.register(rateLimit, { keyGenerator: rateLimitKey((token) => app.jwt.verify(token)), max: 200, timeWindow: '1 minute' });
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
@@ -34,8 +40,14 @@ beforeAll(async () => {
   // Reset the day-scoped SMS budget counters too (same hygiene as
   // helpers/otp.ts) — repeated local runs otherwise exhaust the global daily
   // cap and every send-otp 429s before the route limiter is even exercised.
-  const day = new Date().toISOString().slice(0, 10);
-  await app.redis.del(`sms_global_day:${day}`, ...phones.map((p) => `otp_phone_day:${day}:${p}`));
+  const day = guyanaDayKey(new Date());
+  await app.redis.del(
+    `sms_global_day:${day}`,
+    `sms_known_day:${day}`,
+    `otp_ip_day:${day}:127.0.0.1`,
+    `otp_ip_day:${day}:${ROTATOR_IP}`,
+    ...phones.map((p) => `otp_phone_day:${day}:${p}`),
+  );
 });
 
 afterAll(async () => {
@@ -60,6 +72,28 @@ describe('SEC-4 regression — auth endpoint rate limiting', () => {
         url: '/api/v1/auth/send-otp',
         payload: { phone },
         headers: { 'content-type': 'application/json' },
+      });
+      statuses.push(res.statusCode);
+    }
+    expect(statuses.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
+    expect(statuses[5]).toBe(429);
+  });
+
+  it('rotating fake bearer tokens share one IP bucket and are still limited', async () => {
+    // Audit High #1 exploit: six DIFFERENT made-up bearer tokens. Today each
+    // mints its own bucket and all six pass; verified-identity keying must
+    // land them all on the client-IP bucket so the 6th request 429s. A fresh
+    // remoteAddress keeps this bucket isolated from the first test's.
+    const statuses: number[] = [];
+    for (let i = 0; i < phones.length; i++) {
+      const phone = phones[i];
+      await app.redis.del(`otp_rate:${phone}`, `otp_hr:${phone}`);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/auth/send-otp',
+        payload: { phone },
+        remoteAddress: ROTATOR_IP,
+        headers: { 'content-type': 'application/json', authorization: `Bearer fake-token-${i}-abcdefgh` },
       });
       statuses.push(res.statusCode);
     }

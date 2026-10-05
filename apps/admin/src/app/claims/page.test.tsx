@@ -93,7 +93,8 @@ describe('claim payout mutation', () => {
       .mockReturnValueOnce('  PAY-REF-TARGET  ')    // click 2: reference
       .mockReturnValueOnce('  3400  ')              // click 2: amount
       .mockReturnValueOnce('  PAY-REF-TARGET  ')    // click 3: reference
-      .mockReturnValueOnce('  3400  ');             // click 3: amount
+      .mockReturnValueOnce('  3400  ')              // click 3: amount
+      .mockReturnValueOnce('  Payout matches the claim evidence  '); // click 3: reason
     const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
     vi.stubGlobal('prompt', prompt);
     vi.stubGlobal('confirm', confirm);
@@ -228,4 +229,3 @@ describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
     expect(bundle.textContent).toContain('bundle incomplete');
   });
 });
-

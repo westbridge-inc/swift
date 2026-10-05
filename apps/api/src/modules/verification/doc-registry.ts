@@ -13,7 +13,6 @@
  */
 import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind, DocImagePolicy } from '@prisma/client';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
-import { AUTO_APPROVE_EXPIRY_DAYS } from './verification.service';
 
 export const REGISTRY_TIER = 'STANDARD';
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
@@ -64,6 +63,33 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
   self_declaration_unregistered: 'BUSINESS',
 };
+
+/** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
+ *  A human reviewer keys the real printed expiry; the automatic path applies a
+ *  conservative default so the daily sweep + reminders always have a date.
+ *  Days by docType; absent = non-expiring (e.g. business registration).
+ *
+ *  This is registry policy, so it lives with the registry instead of importing
+ *  the verification service back into this module. Keeping the dependency one
+ *  way prevents registry consumers from initializing through a service cycle.
+ */
+export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
+  police_clearance: 365,   // Certificate of Character — commonly re-issued yearly
+  fitness_cert: 365,       // annual fitness
+  vehicle_insurance: 365,  // annual policy
+  hire_car_permit: 365,    // annual occupational permit
+  road_service_licence: 365, // annual commercial road-service licence
+  food_handler_cert: 365,  // annual health cert
+  gra_restaurant_licence: 365,
+  // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
+  liquor_licence: 365,
+  sanitary_certificate: 365,
+  trade_licence: 365,
+  drivers_licence: 3 * 365,
+  vehicle_registration: 3 * 365,
+  // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
+  self_declaration_unregistered: 365,
+};
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
  * [DOC-1 §6.9 · FD-DOC-6] Types in the always-review set by registry FACT (not by bucket rule):
@@ -92,7 +118,7 @@ export interface ValidatorRow {
  * [DOC-1 §7.2–7.5] The 24 validators as the spec lists them — data. Blocking per the
  * spec's tables (WARN and routing rows are non-blocking). Only rows with an implRef
  * judge anything today; the rest wait for their implementation and no ACTIVE type may
- * depend on them (DOC-INV-2).
+ * depend on them (DOC-INV-2). One row is retired by ruling, not waiting: V_VEHICLE_COLOUR.
  */
 export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   // §7.2 field-level
@@ -106,7 +132,10 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   { code: 'V_TIN_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE', docTypeLegacy: 'tin_certificate' },
   { code: 'V_PLATE_FORMAT', scope: 'FIELD', isBlocking: true, detailCode: 'UNREADABLE_CAPTURE' },
   { code: 'V_PLATE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'WRONG_PLATE_CLASS' , implRef: 'validators#V_PLATE_CLASS' },
-  { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: true, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' , implRef: 'validators#V_VEHICLE_COLOUR' },
+  // RETIRED by the owner's ruling of 2026-10-01: a taxi may be any colour (overrides §3.7 "hire cars are
+  // Corporate Yellow"; the H plate stays — V_PLATE_CLASS). Declared, never blocking, never implemented:
+  // the row stays only so validation results written before the ruling still name a known rule.
+  { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: false, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' },
   { code: 'V_LICENCE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'LICENCE_CLASS_MISMATCH', docTypeLegacy: 'drivers_licence' , implRef: 'validators#V_LICENCE_CLASS' },
   { code: 'V_INSURANCE_SCOPE', scope: 'FIELD', isBlocking: true, detailCode: 'INSURANCE_SCOPE_INSUFFICIENT', docTypeLegacy: 'vehicle_insurance', implRef: 'validators#V_INSURANCE_SCOPE' },
   { code: 'V_FIELD_CONFIDENCE', scope: 'FIELD', isBlocking: false, detailCode: 'UNREADABLE_CAPTURE' },
@@ -415,7 +444,7 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
     { fieldCode: 'make', dataType: 'text' },
     { fieldCode: 'model', dataType: 'text' },
     { fieldCode: 'year', dataType: 'number' },
-    { fieldCode: 'colour', dataType: 'text', validatorRef: 'V_VEHICLE_COLOUR' },
+    { fieldCode: 'colour', dataType: 'text' }, // recorded, never judged (owner ruling 2026-10-01: any colour)
     { fieldCode: 'owner_name', dataType: 'text', isPii: true },
   ],
   road_service_licence: [
@@ -537,5 +566,7 @@ export const IDENTITY_DOC_TYPES: readonly string[] = ['owner_national_id', 'nati
 /** [DOC-1 §3.6 · P3-2] The registration records that promote an UNREGISTERED store, and the declaration that puts it there. */
 export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration'];
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
+/** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
+export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];

@@ -64,7 +64,17 @@ export default defineConfig({
       DELIVERY_BLOCK_ON_NONE: '',
       CONSENT_REQUIRED: '',
       ALERTS_LOUD: '',
+      // A kill switch rather than a dormant flag: pinned empty (offers are
+      // pushed, as in CI) so a dev .env that engaged it cannot silence the
+      // suites that assert the offer push.
+      OFFER_PUSH: '',
       PREVIEW_MODE: '',
+      // [PT-1] Card rail v2 is dormant unless a test turns it on per case, and
+      // its provider is never inherited from a dev .env.
+      CARD_RAIL_V2: '',
+      CARD_RAIL_PROVIDER: '',
+      // [TAXI multi-stop] Off unless a test switches it on per case.
+      TAXI_MAX_STOPS: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)
@@ -73,6 +83,8 @@ export default defineConfig({
     // [R048-001] The target lock: no worker is spawned until Postgres and Redis
     // are proven loopback and disposable, read-only probes agree, and the run
     // id is minted. Rollback means stopping the suite, never relaxing this.
-    globalSetup: ['./src/__tests__/setup/target-lock.ts'],
+    // The target lock runs first; the billing cutover step runs only on the
+    // database that lock has proven disposable (and re-checks it itself).
+    globalSetup: ['./src/__tests__/setup/target-lock.ts', './src/__tests__/setup/billing-cutover.ts'],
   },
 });

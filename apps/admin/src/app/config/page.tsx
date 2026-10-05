@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchConfig, updateConfig } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 
 // EVERY FIELD ON THIS PAGE MUST BE READ BY PRODUCTION CODE.
 //
@@ -66,8 +67,8 @@ export default function ConfigPage() {
   const values = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 
   const save = useMutation({
-    mutationFn: async () => {
-      await Promise.all(Object.entries(edits).map(([key, v]) => updateConfig(key, Number(v))));
+    mutationFn: async (reason: string) => {
+      await Promise.all(Object.entries(edits).map(([key, v]) => updateConfig(key, Number(v), reason)));
     },
     onSuccess: () => {
       setStatus('Saved.');
@@ -134,7 +135,13 @@ export default function ConfigPage() {
           <div className="flex items-center justify-end gap-4">
             {status && <span className="text-sm text-[var(--muted)]">{status}</span>}
             <button
-              onClick={() => save.mutate()}
+              onClick={() => {
+                const reason = askReason({
+                  action: `change ${Object.keys(edits).length === 1 ? 'this configuration' : 'these configurations'}`,
+                  subject: Object.keys(edits).join(', '),
+                });
+                if (reason) save.mutate(reason);
+              }}
               disabled={!dirty || save.isPending}
               className="px-6 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
             >

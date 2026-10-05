@@ -1,8 +1,10 @@
-import { createHash } from 'node:crypto';
-import { Prisma, type PrismaClient } from '@prisma/client';
+import { createHash, randomUUID } from 'node:crypto';
+import { Prisma, type PrismaClient, type FulfillmentType } from '@prisma/client';
 import type { Queue } from 'bullmq';
 import type { FastifyBaseLogger } from 'fastify';
-import { vendorResponseSlaMinutes } from './response-sla';
+import type Redis from 'ioredis';
+import { AppError } from '../../utils/errors';
+import { appointmentAutoCancelDelayMs, vendorResponseSlaMinutes } from './response-sla';
 
 /**
  * [M-11] The checkout command's durable tail and result.
@@ -38,11 +40,21 @@ const DEFAULT_RETRY_MAX_MS = 5 * 60_000;
 export type CheckoutOutboxKind = 'vendor-alert-escalate' | 'auto-cancel';
 export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
 
+/** [ORDER-SPINE S1-6 · R2] Outbox kinds this publisher must never claim. A
+ *  published row is consumed the moment its queue accepts the job, so a kind
+ *  whose delivery must be CONFIRMED before the row may close (a direct-MMG
+ *  claim notice stays owed until its recipients hold inbox rows) is drained in
+ *  process by the same sweep instead — see `drainMmgClaimNotices`. */
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice'];
+
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */
   alertDelayMs: number;
   /** Hold window (LIFECYCLE_V2) plus the vendor response SLA. */
   autoCancelDelayMs: number;
+  /** The vendor response SLA in minutes — the floor a booking's slot-relative
+   *  auto-cancel delay must never cut through [E20]. */
+  vendorResponseSlaMinutes: number;
 }
 
 export interface CheckoutOutboxRuntime {
@@ -94,6 +106,13 @@ export function checkoutRequestHash(body: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonical(body ?? {}))).digest('hex');
 }
 
+/** The vendor alert ladder's first re-alert after the store's first alert
+ *  (§A1: 30 s when loud, else 60 s) — one number for the ladder checkout arms
+ *  and the one a hold release arms [Q12 · AX289 F5]. */
+export function vendorAlertLadderDelayMs(): number {
+  return process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000;
+}
+
 /** The delays the two effects carry — computed BEFORE the transaction so the
  *  rows inside it are complete. Same arithmetic the route used to do after
  *  the commit; the preview and the writer must never disagree [F036-03b]. */
@@ -101,8 +120,51 @@ export async function checkoutQueueTiming(prisma: PrismaClient): Promise<Checkou
   const holdMin = process.env['LIFECYCLE_V2'] === '1' ? Number(process.env['ORDER_HOLD_MINUTES'] ?? 5) : 0;
   const slaMin = await vendorResponseSlaMinutes(prisma);
   return {
-    alertDelayMs: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
+    alertDelayMs: vendorAlertLadderDelayMs(),
     autoCancelDelayMs: (holdMin + slaMin) * 60_000,
+    vendorResponseSlaMinutes: slaMin,
+  };
+}
+
+/** The order facts the auto-cancel delay is computed from — passed by the
+ *  checkout caller, never re-read inside the transaction [E20]. */
+export interface CheckoutOutboxOrder {
+  id: string;
+  tenantId: string;
+  fulfillment: FulfillmentType;
+  appointmentSlot: Date | null;
+  placedAt: Date;
+  /** Set when the order is born held (LIFECYCLE_V2) — the store is not told
+   *  until the release, so there is no alert yet to escalate [Q12]. */
+  holdExpiresAt: Date | null;
+}
+
+interface CheckoutOutboxEffect {
+  kind: CheckoutOutboxKind;
+  queue: CheckoutOutboxQueue;
+  payload: Prisma.InputJsonValue;
+  delayMs: number;
+}
+
+/** The vendor alert ladder's first rung as an outbox effect — the one shape
+ *  both checkout and a hold release write [Q12 · AX289 F5]. */
+function vendorAlertLadderEffect(orderId: string, alertDelayMs: number): CheckoutOutboxEffect {
+  return { kind: 'vendor-alert-escalate', queue: 'notification', payload: { orderId, level: 0 }, delayMs: alertDelayMs };
+}
+
+/** One effect's row: the deterministic id and dedupe key per (order, kind). */
+function checkoutOutboxRow(order: { id: string; tenantId: string }, effect: CheckoutOutboxEffect, now: Date): Prisma.OrderOutboxCreateManyInput {
+  const dedupeKey = checkoutOutboxDedupeKey(order.id, effect.kind);
+  return {
+    id: checkoutOutboxId(dedupeKey),
+    tenantId: order.tenantId,
+    dedupeKey,
+    orderId: order.id,
+    kind: effect.kind,
+    queue: effect.queue,
+    payload: { version: CHECKOUT_OUTBOX_VERSION, ...(effect.payload as Record<string, unknown>) } as Prisma.InputJsonValue,
+    delayMs: effect.delayMs,
+    availableAt: now,
   };
 }
 
@@ -114,32 +176,51 @@ export async function checkoutQueueTiming(prisma: PrismaClient): Promise<Checkou
  */
 export async function persistCheckoutOutboxInTransaction(
   tx: Prisma.TransactionClient,
-  input: { orders: Array<{ id: string; tenantId: string }>; timing: CheckoutQueueTiming; now?: Date },
+  input: { orders: CheckoutOutboxOrder[]; timing: CheckoutQueueTiming; now?: Date },
 ): Promise<string[]> {
   const now = input.now ?? new Date();
   const rows: Prisma.OrderOutboxCreateManyInput[] = [];
   for (const order of input.orders) {
-    const effects: Array<{ kind: CheckoutOutboxKind; queue: CheckoutOutboxQueue; payload: Prisma.InputJsonValue; delayMs: number }> = [
-      { kind: 'vendor-alert-escalate', queue: 'notification', payload: { orderId: order.id, level: 0 }, delayMs: input.timing.alertDelayMs },
-      { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: input.timing.autoCancelDelayMs },
+    // [E20] A booking's no-response clock is slot-relative (earlier of 24h and
+    // slot − 60min, floored at the SLA); every other fulfillment keeps the
+    // hold + SLA delay it always had.
+    const autoCancelDelayMs = order.fulfillment === 'APPOINTMENT'
+      ? appointmentAutoCancelDelayMs(order.placedAt, order.appointmentSlot, input.timing.vendorResponseSlaMinutes)
+      : input.timing.autoCancelDelayMs;
+    const effects: CheckoutOutboxEffect[] = [
+      // [Q12] A HELD order gets no ladder here: the store hears nothing until
+      // the release, and the release writes this same row at that moment
+      // (persistReleaseAlertLadderInTransaction). Armed here too, its first
+      // rung could only stop (the five-minute hold outlives it) or, under a
+      // shorter hold, run a second ladder beside the release's one — two
+      // "still waiting" SMS for one order.
+      ...(order.holdExpiresAt == null ? [vendorAlertLadderEffect(order.id, input.timing.alertDelayMs)] : []),
+      { kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: autoCancelDelayMs },
     ];
-    for (const e of effects) {
-      const dedupeKey = checkoutOutboxDedupeKey(order.id, e.kind);
-      rows.push({
-        id: checkoutOutboxId(dedupeKey),
-        tenantId: order.tenantId,
-        dedupeKey,
-        orderId: order.id,
-        kind: e.kind,
-        queue: e.queue,
-        payload: { version: CHECKOUT_OUTBOX_VERSION, ...(e.payload as Record<string, unknown>) } as Prisma.InputJsonValue,
-        delayMs: e.delayMs,
-        availableAt: now,
-      });
-    }
+    for (const e of effects) rows.push(checkoutOutboxRow(order, e, now));
   }
   if (rows.length) await tx.orderOutbox.createMany({ data: rows, skipDuplicates: true });
   return rows.map((r) => r.id);
+}
+
+/**
+ * [Q12 · AX289 F5] A HELD order's vendor alert ladder, armed by its release.
+ * Checkout writes no ladder for a held order; the release writes it here —
+ * the same durable row checkout writes for an order the store sees at once
+ * (same kind, same deterministic dedupe key, rung 0, the ladder's first
+ * delay) — INSIDE the release transaction, so the ladder commits with the
+ * release or not at all. A crash or a failed publish after that commit can no
+ * longer lose it (the drainer publishes it, and the worker sweep retries),
+ * and a replayed release adds nothing (skipDuplicates on the key). Nothing is
+ * published here.
+ */
+export async function persistReleaseAlertLadderInTransaction(
+  tx: Prisma.TransactionClient,
+  input: { orderId: string; tenantId: string; alertDelayMs: number; now?: Date },
+): Promise<string> {
+  const row = checkoutOutboxRow({ id: input.orderId, tenantId: input.tenantId }, vendorAlertLadderEffect(input.orderId, input.alertDelayMs), input.now ?? new Date());
+  await tx.orderOutbox.createMany({ data: [row], skipDuplicates: true });
+  return row.id;
 }
 
 /** [S-13] A durable dispatch command, inside the caller's transaction: the
@@ -162,12 +243,14 @@ export async function persistDispatchCommandInTransaction(
   return { id, dedupeKey };
 }
 
-/** Write the command's one immutable result, inside the caller's transaction. */
+/** Write the command's one immutable result, inside the caller's transaction.
+ *  Returns the receipt row id: once that transaction resolves, the row is the
+ *  command's commit point [CHECKOUT-IDEM]. */
 export async function persistCheckoutReceiptInTransaction(
   tx: Prisma.TransactionClient,
   input: { userId: string; tenantId: string; idempotencyKey: string; requestHash: string; orderIds: string[]; result: unknown },
-): Promise<void> {
-  await tx.checkoutReceipt.create({
+): Promise<string> {
+  const row = await tx.checkoutReceipt.create({
     data: {
       tenantId: input.tenantId,
       userId: input.userId,
@@ -178,7 +261,9 @@ export async function persistCheckoutReceiptInTransaction(
       // exactly as they do in the response, so a replay is byte-equivalent.
       result: JSON.parse(JSON.stringify(input.result)) as Prisma.InputJsonValue,
     },
+    select: { id: true },
   });
+  return row.id;
 }
 
 export async function findCheckoutReceipt(
@@ -190,6 +275,91 @@ export async function findCheckoutReceipt(
     where: { userId_idempotencyKey: { userId, idempotencyKey } },
     select: { requestHash: true, orderIds: true, result: true },
   });
+}
+
+/**
+ * [CHECKOUT-IDEM · AX366 F1] The in-flight claim on a checkout command key
+ * carries a token of the request that holds it, so a release can prove
+ * ownership: an older request that fails must never delete a newer request's
+ * claim on the same key (after the older claim expired or was evicted). A
+ * bare 'IN_FLIGHT' is the value claims held before tokens.
+ */
+const CHECKOUT_CLAIM_PREFIX = 'IN_FLIGHT';
+
+export function newCheckoutClaim(): string {
+  return `${CHECKOUT_CLAIM_PREFIX}:${randomUUID()}`;
+}
+
+/** An in-flight claim, as opposed to the cached answer a finished command leaves under the key. */
+export function isCheckoutClaim(value: string): boolean {
+  return value === CHECKOUT_CLAIM_PREFIX || value.startsWith(`${CHECKOUT_CLAIM_PREFIX}:`);
+}
+
+const RELEASE_CHECKOUT_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('DEL', KEYS[1])
+return 1
+`;
+
+/** Release the claim only while it is still this request's own (atomic compare-and-delete). */
+export async function releaseCheckoutClaim(redis: Redis, key: string, claim: string): Promise<boolean> {
+  return Number(await redis.eval(RELEASE_CHECKOUT_CLAIM_SCRIPT, 1, key, claim)) === 1;
+}
+
+/** How long a checkout claim holds its key: a day. */
+export const CHECKOUT_CLAIM_TTL_S = 86_400;
+const DEFAULT_CHECKOUT_UNKNOWN_SETTLE_S = 120;
+const MIN_CHECKOUT_UNKNOWN_SETTLE_S = 60;
+
+/**
+ * [CHECKOUT-IDEM · AX372 F1b] How long a claim whose commit outcome is
+ * UNKNOWN keeps holding its key: CHECKOUT_UNKNOWN_SETTLE_S seconds, 120 by
+ * default, never under 60 (and never longer than the claim's own day).
+ *
+ * Why a short window is safe: the receipt is written inside the order's own
+ * transaction, and checkout_receipts is unique on (userId, idempotencyKey)
+ * (CheckoutReceipt @@unique([userId, idempotencyKey]) in schema.prisma), so
+ * at most one commit can ever exist per key. Once the transaction has
+ * settled, a missing receipt is conclusive: nothing was placed. When the
+ * window lapses, the probe answers "none" and a same-key retry places exactly
+ * one order; with the receipt present it answers "placed" and a retry
+ * replays it. Should the first transaction still commit after the window, a
+ * retry's own receipt insert collides with that unique constraint and rolls
+ * the retry back: never a second order under one key.
+ */
+export function checkoutUnknownSettleSeconds(): number {
+  const v = Number(process.env['CHECKOUT_UNKNOWN_SETTLE_S']);
+  if (!Number.isFinite(v) || v <= 0) return DEFAULT_CHECKOUT_UNKNOWN_SETTLE_S;
+  return Math.min(CHECKOUT_CLAIM_TTL_S, Math.max(MIN_CHECKOUT_UNKNOWN_SETTLE_S, Math.floor(v)));
+}
+
+const SETTLE_CHECKOUT_CLAIM_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+return 1
+`;
+
+/**
+ * [AX372 F1b] Re-set this request's OWN claim to hold its key for `seconds`
+ * (atomic compare-and-set): a newer request's claim, a cached answer or a
+ * claim that already lapsed is never touched or re-created.
+ */
+export async function settleCheckoutClaim(redis: Redis, key: string, claim: string, seconds: number): Promise<boolean> {
+  return Number(await redis.eval(SETTLE_CHECKOUT_CLAIM_SCRIPT, 1, key, claim, String(seconds))) === 1;
+}
+
+/**
+ * [CHECKOUT-IDEM · AX366 F1] A checkout whose commit outcome cannot be
+ * established yet: its transaction rejected after the body had finished (a
+ * commit error, or a lost acknowledgement), and no durable receipt proves the
+ * order. Not a refusal: the order may exist. The caller keeps the command's
+ * claim, and the customer asks what became of it (the receipt probe) instead
+ * of placing it again.
+ */
+export class CheckoutOutcomeUnknownError extends AppError {
+  constructor(public readonly receiptId: string | null) {
+    super(503, 'CHECKOUT_OUTCOME_UNKNOWN', 'We could not confirm this order yet. Check your orders before you try again.');
+  }
 }
 
 function claimLeaseMs(): number {
@@ -205,7 +375,8 @@ function retryDelayMs(attempts: number): number {
 
 /** Claim one due row with a lease: a crashed drainer's row becomes
  *  claimable again when its lease lapses; two drainers never hold one row
- *  (FOR UPDATE SKIP LOCKED). Same shape as the mover-revocation outbox. */
+ *  (FOR UPDATE SKIP LOCKED). Same shape as the mover-revocation outbox. Rows
+ *  of an in-process kind are never this publisher's to claim. */
 async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]; leaseMs: number }): Promise<ClaimedRow | null> {
   const orderFilter = options.orderIds?.length ? Prisma.sql`AND "orderId" = ANY(${options.orderIds})` : Prisma.empty;
   const rows = await prisma.$queryRaw<ClaimedRow[]>(Prisma.sql`
@@ -218,6 +389,7 @@ async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]
           "claimedAt" IS NULL
           OR "claimedAt" < CURRENT_TIMESTAMP - (${options.leaseMs} * INTERVAL '1 millisecond')
         )
+        AND NOT ("kind" = ANY(${[...IN_PROCESS_OUTBOX_KINDS]}))
         ${orderFilter}
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED

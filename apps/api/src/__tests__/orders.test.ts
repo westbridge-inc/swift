@@ -10,8 +10,10 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { OrderService, ORDER_TRANSITIONS } from '../modules/order/order.service';
+import { OrderService, ORDER_TRANSITIONS, holdWindowMs } from '../modules/order/order.service';
 import { BookingService } from '../modules/booking/booking.service';
+import { vendorResponseSlaMinutes } from '../modules/order/response-sla';
+import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { RatingService } from '../modules/rating/rating.service';
 
 // ---------------------------------------------------------------------------
@@ -129,13 +131,16 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
 }
 
 /** Next occurrence of a UTC weekday at hh:mm, at least a day out. */
-function nextUtc(dayOfWeek: number, hours: number, minutes: number): Date {
-  const d = new Date(Date.now() + DAY);
-  d.setUTCHours(hours, minutes, 0, 0);
-  while (d.getUTCDay() !== dayOfWeek || d.getTime() <= Date.now()) {
-    d.setUTCDate(d.getUTCDate() + 1);
+/** The next given weekday (from tomorrow) at a Guyana wall-clock time, as the
+ *  TRUE instant the slot happens — what the picker sends and the row stores. */
+function nextGuyana(dayOfWeek: number, hours: number, minutes: number): Date {
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  for (let i = 1; i <= 7; i++) {
+    const day = new Date(Date.UTC(y!, m! - 1, d! + i));
+    if (day.getUTCDay() !== dayOfWeek) continue;
+    return instantOfGuyanaWallClock(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hours, minutes)));
   }
-  return d;
+  throw new Error('unreachable: every weekday occurs within seven days');
 }
 
 let customer: { userId: string; token: string };
@@ -177,6 +182,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
+  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: createdOrderIds } } });
   if (createdUserIds.length) {
     // A mid-test failure can strand a cart; it blocks user deletion (FK) and
     // poisons the next run with phone collisions. Sweep owned carts first.
@@ -656,7 +662,7 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
 describe('Appointments — booked at acceptance, never double-held', () => {
   let service: Awaited<ReturnType<typeof makeVendor>>;
   let haircutId: string;
-  const slot = nextUtc(4, 11, 0); // next Thursday 11:00 UTC
+  const slot = nextGuyana(4, 11, 0); // next Thursday 11:00 in Guyana (15:00Z)
 
   beforeAll(async () => {
     service = await makeVendor({ type: 'SERVICE' });
@@ -706,11 +712,26 @@ describe('Appointments — booked at acceptance, never double-held', () => {
   });
 
   it('a second order on the same slot fails at acceptance and stays PENDING', async () => {
+    // [Q12] The slot above is CONFIRMED: a rival asking for it now is refused
+    // at checkout (it used to be accepted, then wait up to a day for a
+    // decline the provider could never avoid).
     const rival = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const res = await checkoutAppointment(rival, slot);
+    const refused = await checkoutAppointment(rival, slot);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe('SLOT_TAKEN');
+    await app.prisma.cart.deleteMany({ where: { customerId: rival.userId } });
+
+    // Acceptance stays the judge between OPEN requests: two customers asked
+    // for the same free slot before either was confirmed.
+    const open = new Date(slot.getTime() + 5 * 60 * 60_000); // 16:00 — inside 09:00–17:00
+    const first = await checkoutAppointment(await makeUserWithSession(['CUSTOMER'], 'CUSTOMER'), open);
+    const res = await checkoutAppointment(rival, open);
+    expect(first.statusCode).toBe(200);
     expect(res.statusCode).toBe(200);
+    createdOrderIds.push(first.json().data.order.id);
     const order = res.json().data.order;
     createdOrderIds.push(order.id);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${first.json().data.order.id}/accept`, {}, service.token)).statusCode).toBe(200);
 
     const accept = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, {}, service.token);
     expect(accept.statusCode).toBe(409);
@@ -827,12 +848,144 @@ describe('Appointments — booked at acceptance, never double-held', () => {
 
     const res = await inject('POST', '/api/v1/customer/checkout', {
       paymentMethod: 'CASH',
-      appointments: [{ itemId: haircutId, slotStart: nextUtc(4, 14, 0).toISOString() }],
+      appointments: [{ itemId: haircutId, slotStart: nextGuyana(4, 14, 0).toISOString() }],
     }, customer.token);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('MIXED_FULFILLMENT');
 
     await app.prisma.cart.deleteMany({ where: { customerId: customer.userId } });
+  });
+});
+
+describe('E20 — a booking takes neither of the two food clocks', () => {
+  /** A SERVICE listing bookable every minute of every day, so the test can
+   *  place slots at exact offsets (3 days, 5 hours, 30 minutes) from now. */
+  async function makeAllWeekService() {
+    const svc = await makeVendor({ type: 'SERVICE' });
+    const item = await makeItem(svc.vendorId, svc.categoryId, 'E20 Slots', 1500, {
+      fulfillment: 'APPOINTMENT',
+      bookingConfig: {
+        durationMinutes: 1,
+        slots: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, start: '00:00', end: '24:00' })),
+      },
+    });
+    return { vendorId: svc.vendorId, itemId: item.id };
+  }
+
+  async function checkoutBooking(token: string, vendorId: string, itemId: string, slotStart: Date) {
+    await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId, quantity: 1 }, token);
+    return inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH',
+      appointments: [{ itemId, slotStart: slotStart.toISOString() }],
+    }, token);
+  }
+
+  const autoCancelDelay = async (orderId: string) => {
+    const row = await app.prisma.orderOutbox.findFirst({ where: { orderId, kind: 'auto-cancel' } });
+    return row?.delayMs;
+  };
+
+  it('with LIFECYCLE_V2 on, a booking is born unheld while a food order placed the same way is held', async () => {
+    process.env['LIFECYCLE_V2'] = '1';
+    try {
+      const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      // The booking needs no address (AT_BUSINESS); the food checkout does.
+      await app.prisma.address.create({
+        data: {
+          userId: cust.userId, label: 'Home',
+          addressLine1: '1 E20 Lane', city: 'Georgetown', region: 'Demerara-Mahaica',
+          latitude: 6.8, longitude: -58.15, isDefault: true,
+        },
+      });
+      const svc = await makeAllWeekService();
+      const res = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, new Date(Date.now() + 3 * DAY));
+      expect(res.statusCode, res.body).toBe(200);
+      const bookingId = res.json().data.order.id;
+      createdOrderIds.push(bookingId);
+      const booking = await app.prisma.order.findUniqueOrThrow({
+        where: { id: bookingId },
+        select: { fulfillment: true, holdExpiresAt: true },
+      });
+      expect(booking.fulfillment).toBe('APPOINTMENT');
+      expect(booking.holdExpiresAt).toBeNull();
+
+      // The same flag, the same checkout — food is still born held.
+      const diner = await makeVendor({ type: 'RESTAURANT' });
+      const plate = await makeItem(diner.vendorId, diner.categoryId, 'E20 Plate', 1000);
+      await inject('POST', '/api/v1/customer/cart/items', { vendorId: diner.vendorId, itemId: plate.id, quantity: 1 }, cust.token);
+      const food = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, cust.token);
+      expect(food.statusCode, food.body).toBe(200);
+      const foodId = food.json().data.order.id;
+      createdOrderIds.push(foodId);
+      const foodRow = await app.prisma.order.findUniqueOrThrow({
+        where: { id: foodId },
+        select: { holdExpiresAt: true, placedAt: true },
+      });
+      expect(foodRow.holdExpiresAt).not.toBeNull();
+      expect(foodRow.holdExpiresAt!.getTime()).toBeGreaterThan(foodRow.placedAt.getTime());
+    } finally {
+      delete process.env['LIFECYCLE_V2'];
+    }
+  });
+
+  it('writes the booking auto-cancel on the slot-relative clock, and food on hold + SLA exactly', async () => {
+    process.env['LIFECYCLE_V2'] = '1';
+    try {
+      const cust = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      await app.prisma.address.create({
+        data: {
+          userId: cust.userId, label: 'Home',
+          addressLine1: '1 E20 Lane', city: 'Georgetown', region: 'Demerara-Mahaica',
+          latitude: 6.8, longitude: -58.15, isDefault: true,
+        },
+      });
+      const svc = await makeAllWeekService();
+      const slaMs = (await vendorResponseSlaMinutes(app.prisma)) * 60_000;
+
+      // Slot 3 days out → the 24-hour cap (slot − 60min would be ~2.96 days).
+      const far = new Date(Date.now() + 3 * DAY);
+      const farRes = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, far);
+      expect(farRes.statusCode, farRes.body).toBe(200);
+      const farId = farRes.json().data.order.id;
+      createdOrderIds.push(farId);
+      expect(await autoCancelDelay(farId)).toBe(24 * 60 * 60_000);
+
+      // Slot 5 hours out → slot − 60 minutes − placement, above the SLA floor.
+      const mid = new Date(Date.now() + 5 * 60 * 60_000);
+      const midRes = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, mid);
+      expect(midRes.statusCode, midRes.body).toBe(200);
+      const midId = midRes.json().data.order.id;
+      createdOrderIds.push(midId);
+      const midRow = await app.prisma.order.findUniqueOrThrow({
+        where: { id: midId },
+        select: { placedAt: true, appointmentSlot: true },
+      });
+      const midExpected = Math.max(
+        slaMs,
+        midRow.appointmentSlot!.getTime() - 60 * 60_000 - midRow.placedAt.getTime(),
+      );
+      expect(await autoCancelDelay(midId)).toBe(midExpected);
+
+      // Slot 30 minutes out → floored at the ordinary vendor response SLA.
+      const soon = new Date(Date.now() + 30 * 60_000);
+      const soonRes = await checkoutBooking(cust.token, svc.vendorId, svc.itemId, soon);
+      expect(soonRes.statusCode, soonRes.body).toBe(200);
+      const soonId = soonRes.json().data.order.id;
+      createdOrderIds.push(soonId);
+      expect(await autoCancelDelay(soonId)).toBe(slaMs);
+
+      // Food keeps today's delay: hold window + SLA, byte for byte.
+      const diner = await makeVendor({ type: 'RESTAURANT' });
+      const plate = await makeItem(diner.vendorId, diner.categoryId, 'E20 Food Clock', 1000);
+      await inject('POST', '/api/v1/customer/cart/items', { vendorId: diner.vendorId, itemId: plate.id, quantity: 1 }, cust.token);
+      const food = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, cust.token);
+      expect(food.statusCode, food.body).toBe(200);
+      const foodId = food.json().data.order.id;
+      createdOrderIds.push(foodId);
+      expect(await autoCancelDelay(foodId)).toBe(holdWindowMs()! + slaMs);
+    } finally {
+      delete process.env['LIFECYCLE_V2'];
+    }
   });
 });
 

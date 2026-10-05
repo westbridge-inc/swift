@@ -271,11 +271,15 @@ export function VendorMyQrScreen({ navigation }: any) {
   const runLifecycleAction = async (action: 'regenerate' | 'deactivate') => {
     if (lifecyclePending || !currentStoreId || qrStoreId !== currentStoreId) return;
     const storeId = currentStoreId;
+    const storeGeneration = useStoreSwitcher.getState().storeGeneration;
     const previousCode = qr.shortCode;
     setLifecyclePending(action);
     setLifecycleError(null);
     try {
       const currentResponse = await api.get('/vendor/qr', { headers: { 'x-vendor-id': storeId } });
+      // The preflight can outlive this editor, including an A → B → A handoff.
+      const selection = useStoreSwitcher.getState();
+      if (selection.selectedStoreId !== storeId || selection.storeGeneration !== storeGeneration) return;
       const currentQr = currentResponse.data?.data as VendorQrPayload | undefined;
       if (!currentQr?.shortCode || currentQr.shortCode !== previousCode) {
         if (currentStoreRef.current === storeId) {
@@ -414,7 +418,7 @@ export function VendorMyQrScreen({ navigation }: any) {
             <TonePill label="Not assigned" tone="neutral" />
           </View>
           <T variant="caption" tone="muted">
-            Swift does not yet issue a call-in order number for this store. Your subscription Swift Number pays weekly fees and is not a phone line. Online orders still land in Orders with every other live order.
+            Swift does not yet issue a call-in order number for this store. Online orders still land in Orders with every other live order.
           </T>
         </Card>
 

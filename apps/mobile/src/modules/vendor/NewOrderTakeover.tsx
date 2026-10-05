@@ -7,6 +7,8 @@ import { color, motion, radius, space } from '@swift/ui';
 import { T, Money, PillButton } from '../../kit';
 import { haptic } from '../../lib/haptics';
 import { useVendorOrder, useOrderAction } from '../../hooks/vendorops';
+import { rejectReasonsFor } from './rejectReasons';
+import { acceptClockLabel, takeoverSettled } from './acceptClock';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1 + design-100× Part 5 moment 2):
@@ -81,9 +83,19 @@ export function NewOrderTakeover({
     return () => clearInterval(t);
   }, [clockActive]);
 
+  // [Q12] The buzz is for a decision that is still open. An order that
+  // stopped waiting — cancelled by the customer, answered on another device,
+  // reaped by the no-response timer — leaves the queue by itself; the order
+  // query refetches on the board socket's order:status_changed.
+  const settled = takeoverSettled(o);
+  useEffect(() => {
+    if (orderId && settled) onDismiss(orderId);
+  }, [orderId, settled, onDismiss]);
+
   if (!current) return null;
   const remainSecs = clockActive ? Math.max(0, Math.ceil((respondByMs - nowTs) / 1000)) : 0;
-  const clockMmss = `${Math.floor(remainSecs / 60)}:${String(remainSecs % 60).padStart(2, '0')}`;
+  // [E20] A booking's deadline can be a day away: past an hour the clock reads hours and minutes.
+  const clockLabel = acceptClockLabel(remainSecs);
   const clockFrac = clockActive && Number.isFinite(createdMs) && respondByMs > createdMs
     ? Math.max(0, Math.min(1, (respondByMs - nowTs) / (respondByMs - createdMs)))
     : null;
@@ -118,7 +130,7 @@ export function NewOrderTakeover({
             accessible
             accessibilityRole="progressbar"
             accessibilityLabel="Time left to accept this order"
-            accessibilityValue={{ min: 0, max: 100, now: Math.round(clockFrac * 100), text: `${clockMmss} left to accept` }}
+            accessibilityValue={{ min: 0, max: 100, now: Math.round(clockFrac * 100), text: `${clockLabel} left to accept` }}
             style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, backgroundColor: color.brand[50] }}
           >
             <View style={{ height: 4, width: `${clockFrac * 100}%`, backgroundColor: color.brand[500] }} />
@@ -197,7 +209,7 @@ export function NewOrderTakeover({
             number matters. Server clock, rendered verbatim. */}
         {clockActive ? (
           <T variant="caption" tone="muted" center style={{ marginBottom: space.md }}>
-            Accept within <T variant="caption" weight="bold">{clockMmss}</T> — the customer is watching this clock too.
+            Accept within <T variant="caption" weight="bold">{clockLabel}</T> — the customer is watching this clock too.
           </T>
         ) : null}
         <View style={{ gap: space.md }}>
@@ -218,7 +230,7 @@ export function NewOrderTakeover({
               in a rush. */}
           {rejecting ? (
             <>
-              {(['Out of stock', 'Kitchen is too busy', 'Closing soon'] as const).map((why) => (
+              {rejectReasonsFor(o?.fulfillment).map((why) => (
                 <PillButton
                   key={why}
                   label={why}

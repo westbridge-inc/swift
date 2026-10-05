@@ -4,6 +4,7 @@
 // endpoints — account, earnings, history and documents. Live dispatch stays on
 // the phone by design (GPS + push belong in the field).
 import { ApiRequestError, apiFetch } from './auth';
+import { parseAmount } from './money';
 
 // [W-10] This used to be `soft()`: `.catch(() => null)` on every read, so a
 // 500, an offline phone or a schema change was indistinguishable from "you
@@ -47,7 +48,7 @@ export const getDriverEarnings = (page = 1) =>
   apiFetch(`/api/v1/driver/earnings?page=${page}&limit=25`).then((r) => ({
     rows: r.data as Array<{ id: string; type: string; amount: number | string; status: string; createdAt: string }>,
     meta: r.meta,
-    totalEarnings: Number(r.totalEarnings ?? 0),
+    totalEarnings: parseAmount(r.totalEarnings),
   }));
 
 // ── History ─────────────────────────────────────────────────────────────────

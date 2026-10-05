@@ -48,9 +48,81 @@ const PUBLISHED: Record<
     driver_agreement: 'da8d8ef8e1bbc7afc0dbf6c4b37da9255ef6447de0b1fca93572a68aed423753',
     vendor_agreement: '9d6454a303b4246dc928909752c2941c3c4f249fec7548c8c3c92cdd84eb16b3',
   },
+  // [NO-AI] The owner removed every AI runtime from Swift, so the Privacy
+  // Policy's "AI processing" paragraph — which told people their search terms
+  // and menu text went to a model provider — became untrue. A policy that
+  // describes processing which no longer happens is as wrong as one that hides
+  // processing which does. It now says plainly that Swift sends nothing you
+  // write to an AI service — AND names the one place a model does run (the
+  // identity check), because the first draft of this paragraph claimed no model
+  // existed anywhere while the KYC face-match was live. That claim is graded
+  // against the processor register now; see legal-ai-claim.test.ts.
+  //
+  // All four documents re-pin, not only the Privacy Policy: the published
+  // "Last updated" date is part of every served text, so changing it changes
+  // each document's words. The 2026-08-30 entry above is untouched — those are
+  // the words people actually consented to.
+  //
+  // Superseded by 2026-09-23 on the same unmerged branch (F-1218-02), before
+  // it reached main. Its hashes stay exactly as pinned — any environment that
+  // ran the branch holds them in its ledger, and the law above is the law.
+  '2026-09-07': {
+    terms: '585d5b6e5f147e945602fd3dce05a27509952563a9be2b6c2127524be6811c32',
+    privacy: 'edad85c0a55cd9520d8e45ed0e0f504481b4d94030068bf0d25df63445a6d6f9',
+    driver_agreement: '923d398238ff81c5b554673871eab012999b77a27742a2812afa965e5ffc7ead',
+    vendor_agreement: '5023bc04a37935f4de6e873f400c8e8b35443164d46e7a951c0f72bbb93946d1',
+  },
+  // [F-1218-02] The 2026-09-07 "AI processing" paragraph said the identity
+  // check's automated results "produce a flag for a person to review, never a
+  // decision on their own". The document state machine licenses VALIDATED →
+  // REJECTED on `auto_reject` and the verification service records a
+  // provider's decline as REJECTED under `reviewedBy: 'kyc:auto'` — a machine
+  // decision the sentence denied. The sentence now says what the check can do
+  // (accept, reject, or refer to a person) and what follows a rejection (you
+  // are told; you can resubmit or raise it through Help & Support): nothing
+  // the code does not already do. Graded in legal-human-review-claim.test.ts.
+  // The date moves with the words, so all four documents re-pin.
+  '2026-09-23': {
+    terms: '198ffa340ffddf7c13c4cbb304bd174779eca63bfd2dd87fcf435582f5f7a229',
+    privacy: '92c78089c42557c575df043f47c315c3f6ff67dad75760a5e9e2e6b1b7d23091',
+    driver_agreement: 'aea903e63b7620322010187556e385a501e6e0c82d3e25b1e4809a6cd94bc1a5',
+    vendor_agreement: 'af8e9d090a0c2d5323c4b6e1433aacd9cd8e2d0a9cd04a57a536f1331d0dd9a8',
+  },
+  // [DOMAIN-1 · owner 2026-09-24] The contact addresses named swift.gy, a domain
+  // Swift does not own: privacy@ and childsafety@ now read @swiftgy.com (Terms §22,
+  // the Privacy Policy's controller, emergency-contact and rights paragraphs, the
+  // Child Safety Standards). Nothing else in the words moved; this was checked
+  // mechanically: the 2026-09-23 source with the domain, version and date swapped
+  // equals this source apart from its comment. The date moves with the words, so all
+  // four documents re-pin; the 2026-09-23 entry stays exactly as consented.
+  '2026-09-24': {
+    terms: '961a3916b1002dd5eb8d5725654baee1813830f362d4d06dc7877cf49f2a92df',
+    privacy: '04bb7a2408b822ab897d49d4ea1ba5a58f97472786881054a0cd9177fa409048',
+    driver_agreement: 'b82cc69dafaf15e5a61dcb58e5bf925ca2ee483ab5b804b3775b9c34d3fdf2f1',
+    vendor_agreement: '3672c61f804747d8977981bcee4c75ff4b9935808c00cd0fcd21800bf67f21e2',
+  },
+  // [LEGAL-FEE · owner 2026-09-29] Partner weekly fees use MMG's checkout
+  // in the Swift app, or card where offered — no agent or Swift Number.
+  // Only those two payment clauses change; the shared last-updated date
+  // changes all four hashes. Every previously published pin stays intact.
+  '2026-09-30': {
+    terms: 'aaaeb7f005377df71401298b1b5f6ac289d8930d8d5dd7ac29455843eaca3940',
+    privacy: '3607dc2de84b9e22e6931cfcd297f842fdddcf452496e0789a84a70adedfcf59',
+    driver_agreement: '7e560184f2106df06f56b95888d6dc4e2c5e3db3aeeae193396a75bc4e3b11f7',
+    vendor_agreement: '28757aca7ff1309b7c7bb6914b782c1950fb4d353c71ceb5961231f81e33b693',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
+  it.each([
+    ['Mover Agreement', DRIVER_AGREEMENT],
+    ['Business Agreement', VENDOR_AGREEMENT],
+  ])('%s directs weekly-fee payment to checkout in the Swift app', (_name, agreement) => {
+    expect(agreement).not.toMatch(/MMG\s+agent|Swift\s+Number|account\s+number/i);
+    const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
+    expect(feeParagraph).toContain("payable in the Swift app through MMG's checkout, or by card where the app offers it.");
+  });
+
   it('the served version is a version this file has pinned', () => {
     expect(
       Object.keys(PUBLISHED),

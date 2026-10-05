@@ -6,11 +6,13 @@ import type { FastifyBaseLogger } from 'fastify';
 import { captureError, opsPageCounter, osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
+import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { runWithTenant } from '../plugins/tenant-context';
 import {
   requireActiveDiscoveryTenant,
   runForActiveDiscoveryTenants,
 } from '../modules/discovery/tenant-boundary';
+import { scheduleVendorSearchSync } from '../modules/search/search-sync';
 
 export interface JobContext {
   prisma: PrismaClient;
@@ -286,12 +288,15 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   // the copy below must never claim "you were not charged" for MMG.
   const paymentPreview = await ctx.prisma.order.findUnique({
     where: { id: orderId },
-    select: { paymentMethod: true, paymentStatus: true },
+    select: { paymentMethod: true, paymentStatus: true, fulfillment: true },
   });
   const mmgAmbiguous = paymentPreview?.paymentMethod === 'MOBILE_MONEY';
+  // [E20] A booking was declined by its PROVIDER, never "the store" — the same
+  // voice the vendor decline copy uses. Food keeps its wording word for word.
+  const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
-    ({ order } = await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'CANCELLED',
       allowedFrom: ['PENDING'],
@@ -324,10 +329,14 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   await notifications.send({
     userId: order.customerId,
     type: 'ORDER_UPDATE',
-    title: 'Order cancelled — no response',
-    body: mmgAmbiguous
-      ? `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the store refunds you directly; please try another store.`
-      : `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`,
+    title: booking ? 'Booking cancelled — no response' : 'Order cancelled — no response',
+    body: booking
+      ? (mmgAmbiguous
+        ? `We're sorry — the provider didn't confirm your booking ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the provider refunds you directly; please try another time or provider.`
+        : `We're sorry — the provider didn't confirm your booking ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another time or provider.`)
+      : (mmgAmbiguous
+        ? `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. If you already sent the MMG payment, the store refunds you directly; please try another store.`
+        : `We're sorry — the store didn't respond to order ${order.orderNumber} in time, so it was cancelled. You were not charged; please try another store.`),
     data: { orderId, status: 'CANCELLED' },
   });
   // [REPORT-007-v4 F-02 → REPORT-012 F-012-04] The store holds the only rail
@@ -346,6 +355,36 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   return true;
 }
 
+/**
+ * LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed become
+ * visible to the vendor + dispatchable. No-op while every order is unheld
+ * (flag off ⇒ nothing ever matches). Exported so tests drive the worker's own
+ * job — the release AND the ladder it arms — never a copy of it [Q12].
+ */
+export async function releaseHeldOrdersJob(
+  ctx: JobContext,
+  queues: Pick<SwiftQueues, 'dispatchQueue' | 'notificationQueue' | 'orderQueue'>,
+): Promise<string[]> {
+  const { OrderService } = await import('../modules/order/order.service');
+  const orders = new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis);
+  const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
+    await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
+  });
+  if (released.length > 0) {
+    // A RELEASED order is the vendor's first sight of it — it deserves the
+    // same escalation ladder a fresh checkout gets (re-alert, then SMS). The
+    // release wrote that ladder as the checkout's own outbox row, inside the
+    // release transaction [Q12 · AX289 F5]; publish those rows now for
+    // latency, exactly as checkout drains its own. A failure here is logged,
+    // never lost: the checkout-outbox sweep publishes whatever this could not.
+    const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
+    await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { orderIds: released })
+      .catch((err: unknown) => ctx.log.error({ err }, '[Q12] release ladder drain failed — the outbox sweep will publish'));
+    ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
+  }
+  return released;
+}
+
 /** Delivery-window auto-completion. COMPLETED and its immutable status log
  * share the canonical row-lock transaction; retries after a committed attempt
  * are a clean no-op, while an injected pre-commit failure leaves DELIVERED for
@@ -353,7 +392,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
 export async function autoCompleteDeliveredOrder(ctx: JobContext, orderId: string): Promise<boolean> {
   const { OrderService } = await import('../modules/order/order.service');
   try {
-    await new OrderService(ctx.prisma, ctx.io).transitionOrderAtomically({
+    await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
       target: 'COMPLETED',
       allowedFrom: ['DELIVERED'],
@@ -468,33 +507,48 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       const { SubscriptionService } = await import('../modules/subscription/subscription.service');
       const { NotificationService } = await import('../modules/notification/notification.service');
       const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+      const { cardRailWorkerSource, sweepCardSessions } = await import('../modules/billing/card-rail-worker');
 
+      // [PT-1 · AX297 F5] Card rail v2: nothing at all unless CARD_RAIL_V2=1
+      // (or CARD_RAIL_V2_DRAIN=1 to drain what exists). When wired, the
+      // provider is resolved lazily on this worker's own Redis, where the
+      // simulator keeps its state.
+      const cardRail = cardRailWorkerSource({ redis: ctx.redis });
       const billing = new BillingService(
         ctx.prisma,
         new NotificationService(ctx.prisma, ctx.io),
         getPaymentProvider(),
+        undefined,
+        cardRail,
       );
       const subscriptions = new SubscriptionService(ctx.prisma);
 
       switch (job.name) {
         case 'process-billing': {
+          const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
+          // [E12] A stopped subscription stays ACTIVE until its paid period
+          // ends, then turns PAUSED (not operable, owing nothing); resuming
+          // restarts it with this week's fee billed like any renewal.
+          const lapse = await billing.lapseStoppedSubscriptions();
           const reminders = await billing.sendUpcomingReminders();
           // §11 stages 6..N: daily reinstatement nudges for the suspended
           // (idempotent per day via the REMINDER event key) + CHURNED terminal
           // past SUSPENSION_MAX_DAYS so dunning — and the daily MMG
           // re-request — never runs forever against a dead account.
           const swept = await billing.sweepSuspended();
+          const billingNotices = await billing.drainPendingNotices();
           // Trial first-payment funnel [san spec 21.4]: day-10 how-to-pay +
           // day-13 exact-amount education, each stage once per trial
           // (BillingEvent unique-key gate) — preloaded wallets make trial→
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, reminders, ...swept, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, confirmationReviews, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
-          const troubled = result.failed + result.errors + result.suspended;
+          // [DS213 F1-1] A stopped plan that fails to pause counts too.
+          const troubled = result.failed + result.errors + result.suspended + lapse.failed;
           const threshold = Number(process.env['BILLING_FAILURE_ALERT_THRESHOLD'] ?? '3');
           if (troubled >= threshold) {
             const { notifyAdmins } = await import('../modules/notification/notification.service');
@@ -505,7 +559,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 tenantId: null,
                 title: 'Billing failures spiking',
                 body: `${troubled} subscriptions failed, errored, or suspended this cycle (threshold ${threshold}). Check the billing dashboard before partners start calling.`,
-                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended },
+                data: { kind: 'ops_billing_failures', failed: result.failed, errors: result.errors, suspended: result.suspended, lapseFailed: lapse.failed },
               }),
             );
           }
@@ -528,6 +582,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // §13 MMG rail: settle in-flight merchant-initiated weekly-fee
           // requests (approved → period advances; declined/expired → dunning).
           const polled = await billing.pollPendingMmgCharges();
+          // The committed mismatch event survives a process crash between its
+          // authority transaction and its admin page. Polling also retries
+          // final churn/nudge notices after the source row leaves SUSPENDED.
+          const billingNotices = await billing.drainPendingNotices();
+          if (billingNotices.attempted > 0) ctx.log.info(billingNotices, 'Billing notices retried from committed events');
           if (polled.settled + polled.failed > 0) {
             ctx.log.info(polled, 'MMG billing poll settled pending charges');
           }
@@ -537,6 +596,17 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (repaired.repaired > 0 || repaired.stillOpen > 0) {
             ctx.log.warn(repaired, '[M-04] terminal MMG payments without a recorded outcome — reconciled');
           }
+          {
+            // [MMG-RECV] Agent-cash payments stranded RECEIVED (the delivery
+            // that saved them died before its verdict) are finished here,
+            // fairly and each exactly once; one that keeps failing goes to
+            // the suspense queue for a person.
+            const { AgentCashService } = await import('../modules/billing/agent-cash.service');
+            const stranded = await new AgentCashService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).finishStrandedPayments();
+            if (stranded.finished.length + stranded.failed.length + stranded.suspensed.length > 0) {
+              ctx.log.warn(stranded, '[MMG-RECV] agent-cash payments stranded RECEIVED — finished');
+            }
+          }
           // [M-08] Top-up commands whose notice / re-bill tail is still owed
           // are drained here; historical unkeyed top-ups that look doubled are
           // reported for a person. Nothing is reversed automatically.
@@ -544,18 +614,38 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (tails.retried > 0 || tails.pending > 0) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
           }
+          // [MMG checkout 2/6] Hosted checkouts: expire the ones no reply ever
+          // came for (I8, no dunning) and look again at every one that is due.
+          // Isolated: a checkout failure never stops the rest of this poll.
+          try {
+            const { MmgCheckoutService } = await import('../modules/billing/mmg-checkout.service');
+            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).pollIntents();
+            if (checkouts.expired + checkouts.checked > 0) ctx.log.info(checkouts, 'MMG checkouts polled');
+          } catch (err) {
+            ctx.log.error({ err }, '[MMG checkout] poll failed; the next poll retries');
+          }
           await billing.scanUnkeyedTopUpDuplicates();
-          // [M-20] Settlement imports a person must see: unbalanced publications
-          // and rejected files with a credited row. Reported, never reversed.
-          const { scanSettlementImports } = await import('../modules/billing/settlement-import');
+          // [G5-F6] A settlement publication that stopped part-way (interrupted,
+          // or its publisher silent past the lease) is finished here, one winner
+          // per import; every row goes back through the same ingest, so none
+          // credits twice. The hold stops it.
+          const { resumeInterruptedSettlementImports, scanSettlementImports } = await import('../modules/billing/settlement-import');
+          const { AgentCashService } = await import('../modules/billing/agent-cash.service');
+          const resumedImports = await resumeInterruptedSettlementImports(ctx.prisma, new AgentCashService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)));
+          if (resumedImports.resumed.length + resumedImports.failed.length > 0) {
+            ctx.log.warn(resumedImports, '[G5-F6] settlement publications that stopped part-way — resumed');
+          }
+          // [M-20] Settlement imports a person must see: unbalanced publications,
+          // rejected files with a credited row, and publications the pass above
+          // could not finish. Reported, never reversed.
           const imports = await scanSettlementImports(ctx.prisma);
-          if (imports.unbalanced.length + imports.rejectedButCredited.length > 0) {
+          if (imports.unbalanced.length + imports.rejectedButCredited.length + imports.stuck.length > 0) {
             const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
                 title: '📄 Settlement imports need a person',
-                body: `${imports.unbalanced.length} published import(s) do not balance and ${imports.rejectedButCredited.length} rejected file(s) have a credited row. Reconcile against the MMG statement; nothing is reversed automatically.`,
+                body: `${imports.unbalanced.length} published import(s) do not balance, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
             ).catch(() => {});
@@ -564,9 +654,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // settled, declined, re-sent under the same key, or expired — the
           // kill switch stops new instructions, never this.
           const cards = await billing.reconcileUnknownCardCharges();
-          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown > 0) {
+          if (cards.settled + cards.declined + cards.reissued + cards.expired + cards.stillUnknown + cards.actionRequired > 0) {
             ctx.log.warn(cards, '[M-01] unknown card charge intents reconciled');
           }
+          // [PT-1] Card rail v2 sessions: an unused page past its window closes,
+          // and a Pay now that may have moved money is asked again. The kill
+          // switch never stops this [C7]; with CARD_RAIL_V2 off it runs only
+          // under the explicit CARD_RAIL_V2_DRAIN=1 [AX297 F5].
+          const cardSessions = await sweepCardSessions({ prisma: ctx.prisma, notifications: new NotificationService(ctx.prisma, ctx.io), billing, cardRail });
+          if (cardSessions && cardSessions.checked > 0) ctx.log.info(cardSessions, '[PT-1] card sessions swept');
           // [M-18] The historical double credits: one provider transaction
           // credited by more than one channel before the identity existed.
           // Reported and paged for human reconciliation, never reversed here.
@@ -813,7 +909,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const results = await runRetentionSweep(ctx.prisma);
         const enforced = results.filter((r) => !r.skipped);
         ctx.log.info(
-          { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).length },
+          { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
         return;
@@ -875,7 +971,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       if (job.name === 'expiry-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
-        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
         const { getKycProvider } = await import('../providers/kyc/kyc-provider');
 
         const verification = new VerificationService(
@@ -883,6 +979,31 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           new NotificationService(ctx.prisma, ctx.io),
           getKycProvider(),
         );
+        // [F-026-02] Avatar/object obligations are an independent erasure
+        // census. Run this stage first and contain its failure so neither a
+        // quarantined document nor an orphan-store outage can starve the other
+        // retention work forever.
+        let storageOrphansPurged = 0;
+        try {
+          const { retryStorageOrphans } = await import('../lib/storage-orphans');
+          const { getStorageProvider } = await import('../providers/storage/storage-provider');
+          storageOrphansPurged = await retryStorageOrphans(
+            ctx.prisma,
+            getStorageProvider(),
+            ctx.log,
+            100,
+          );
+        } catch (err) {
+          ctx.log.error({ err }, 'storage-orphan erasure sweep failed');
+          await opsPageOnce(ctx, 'storage-orphan-reaper-failure', 6 * 3600, () =>
+            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+              tenantId: null,
+              title: 'Storage erasure retry failed',
+              body: 'The storage-erasure census could not be drained. Open obligations remain pending and will be retried; treat repeated failures as an incident.',
+              data: { kind: 'ops_reaper_failed', error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) },
+            }),
+          );
+        }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
@@ -890,7 +1011,6 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         try {
           purged = await verification.purgeExpiredDocuments();
         } catch (err) {
-          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'reaper-failure', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
               tenantId: null,
@@ -913,7 +1033,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const audit = new ComplianceAuditService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), verification);
         const run = await audit.runAudit('SCHEDULED');
         ctx.log.info(
-          `Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} purged; compliance audit: ${run.moversChecked} online movers checked, ${run.violations} violations`,
+          `Verification sweep: ${expired} expired, ${reminded} reminders sent, ${purged} documents and ${storageOrphansPurged} storage orphans purged; compliance audit: ${run.moversChecked} online movers checked, ${run.violations} violations`,
         );
       }
 
@@ -940,7 +1060,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const released = await svc.releaseDoubleBlind();
         // [R048-008] every command a persisted rating still owes — safety intake, release, stats — is finished here
         // when the process that wrote the rating did not get to it (one row per rating and command: exactly once).
-        const outbox = await new RatingService(ctx.prisma, ctx.io).processRatingOutbox();
+        // [E26] a vendor rating finished here still re-syncs the vendor's search document.
+        const outbox = await new RatingService(
+          ctx.prisma,
+          ctx.io,
+          (vendorId) => scheduleVendorSearchSync({ queues, log: ctx.log }, vendorId),
+        ).processRatingOutbox();
         ctx.log.info(`Rating sweep: ${flagged} flagged, ${released} double-blind released, outbox ${outbox.processed} processed / ${outbox.failed} retried`);
       }
 
@@ -1102,6 +1227,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { drainCheckoutOutbox } = await import('../modules/order/checkout-outbox');
         const result = await drainCheckoutOutbox({ prisma: ctx.prisma, queues, log: ctx.log }, { limit: 200 });
         if (result.processed + result.failed > 0) ctx.log.info(result, '[M-11] checkout outbox sweep');
+        // [ORDER-SPINE S1-6] Direct-MMG claim notices the request could not
+        // finish. Never handed to a queue (a published row is consumed on
+        // acceptance): delivered here, deduplicated per (order, generation,
+        // role), and kept owed — backed off — until every recipient holds it.
+        const { drainMmgClaimNotices } = await import('../modules/order/mmg-claim.service');
+        const { NotificationService: ClaimNoticeNS } = await import('../modules/notification/notification.service');
+        const notices = await drainMmgClaimNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) }, { limit: 50 });
+        if (notices.owed + notices.failed > 0) ctx.log.warn(notices, '[S1-6] direct-MMG claim notices still owed — retrying with backoff');
+        else if (notices.delivered > 0) ctx.log.info(notices, '[S1-6] direct-MMG claim notices delivered');
         return;
       }
       if (job.name === 'mover-revocation-outbox') {
@@ -1117,8 +1251,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               removeOnFail: 50,
             });
           },
-          async (orderId, delayMs) => {
+          async (orderId, delayMs, replayJobId) => {
             await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+              // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+              ...(replayJobId ? { jobId: replayJobId } : {}),
               delay: delayMs,
               removeOnComplete: 100,
               removeOnFail: 50,
@@ -1430,7 +1566,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // Movement R nightly (RAT-H's second leg): the full recompute must
         // land IDENTICAL to the incremental path — reconciliation is the law.
         const { RatingStatsService } = await import('../modules/rating/rating-stats.service');
-        const n = await new RatingStatsService(ctx.prisma).recomputeAll();
+        // [E26] The sweep also HEALS drifted vendor stars, so every vendor it
+        // touches must re-sync its search document. scheduleVendorSearchSync is
+        // the bounded, tenant-correct seam: it enqueues ONE debounced job per
+        // swept vendor (the doc id carries the tenant) and is best-effort by
+        // contract — SearchService.syncAllVendors would reindex + reconcile the
+        // whole shared index and could throw into this recompute job.
+        const n = await new RatingStatsService(
+          ctx.prisma,
+          (vendorId) => scheduleVendorSearchSync({ queues, log: ctx.log }, vendorId),
+        ).recomputeAll();
         ctx.log.info({ subjects: n }, 'ratings: stats recomputed');
         return;
       }
@@ -1458,14 +1603,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // The backfill movement (#17 CAT-I): admin-triggered, once per tenant.
         // Idempotent — a re-run writes nothing new and never re-notifies.
         const { runCategoryBackfill } = await import('../modules/discovery/backfill');
-        const { AiService } = await import('../modules/ai/ai.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
         const notifications = new NotificationService(ctx.prisma, ctx.io);
         const tenantId = await requireActiveDiscoveryTenant(ctx.prisma, job.data);
         const report = await runWithTenant(tenantId, () =>
-          runCategoryBackfill(ctx.prisma, new AiService(), {
+          runCategoryBackfill(ctx.prisma, {
             tenantId,
-            notify: (userId) => notifications.send({
+            notify: (userId: string) => notifications.send({
               userId,
               type: 'SYSTEM_ANNOUNCEMENT',
               title: 'Your menu just got easier to find',
@@ -1475,20 +1619,6 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           }),
         );
         ctx.log.info({ tenantId, ...report }, 'discovery: backfill movement complete');
-        return;
-      }
-
-      if (job.name === 'discovery-ai-classify') {
-        // Stage-B (category spec Part 4): budgeted AI pass over items Stage A
-        // couldn't place. Budget exhausted or model down = silent wait.
-        const { runAiClassifierBatch } = await import('../modules/discovery/ai-classifier');
-        const { AiService } = await import('../modules/ai/ai.service');
-        const results = await runForActiveDiscoveryTenants(ctx.prisma, (tenantId) =>
-          runAiClassifierBatch(ctx.prisma, new AiService(), { tenantId }),
-        );
-        for (const { tenantId, result } of results) {
-          if (result.scanned > 0) ctx.log.info({ tenantId, ...result }, 'discovery: AI classifier batch');
-        }
         return;
       }
 
@@ -1524,6 +1654,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const report = await runBillingInvariants(ctx.prisma);
         const broken =
           report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+          report.unjudgedSubscriptions.length +
           report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
@@ -1533,7 +1664,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );
@@ -1816,7 +1947,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { OrderService, reconcileMissingEarnings } = await import('../modules/order/order.service');
         const { scanned, healed, taxiUnpaidDelivered, courierUnpaidDelivered } = await reconcileMissingEarnings(
           ctx.prisma,
-          new OrderService(ctx.prisma, ctx.io),
+          new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         );
         // [M-29] A cash ride delivered with no captured fare after the fare
         // outcome became mandatory means a completion bypassed the terminal
@@ -1849,45 +1980,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
-      if (job.name === 'agent-ops-scan') {
-        // Ops agent (spec Part B): deterministic detection → model classifies
-        // a PII-free snapshot → gated execution. Runs whenever a key is present
-        // (AGENT_ENABLED=0 disables); sensitive actions wait for a human in assist mode.
-        const { AgentService, agentEnabled } = await import('../modules/agent/agent.service');
-        if (!agentEnabled()) return;
-        const agent = new AgentService(ctx.prisma, ctx.io, async (orderId) => {
-          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-        });
-        const result = await agent.runOpsScan();
-        if (result.scanned > 0) {
-          ctx.log.info(result, 'Agent ops scan complete');
-        }
-        return;
-      }
-
       if (job.name === 'release-held-orders') {
-        // LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed
-        // become visible to the vendor + dispatchable. No-op while every order
-        // is unheld (flag off ⇒ nothing ever matches).
-        const { OrderService } = await import('../modules/order/order.service');
-        const orders = new OrderService(ctx.prisma, ctx.io);
-        const { released } = await orders.releaseDueHeldOrders(async (orderId) => {
-          await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 });
-        });
-        if (released.length > 0) {
-          // A RELEASED order is the vendor's first sight of it — it deserves
-          // the same escalation ladder a fresh checkout gets (re-alert, then
-          // SMS). Previously only checkout enqueued this; a held order the
-          // vendor slept through escalated nowhere.
-          for (const orderId of released) {
-            await queues.notificationQueue.add('vendor-alert-escalate', { orderId, level: 0 }, {
-              delay: process.env['ALERTS_LOUD'] === '1' ? 30_000 : 60_000,
-              removeOnComplete: 100,
-              removeOnFail: 50,
-            });
-          }
-          ctx.log.info({ count: released.length }, 'Held orders released to vendors/dispatch (+escalation ladders armed)');
-        }
+        await releaseHeldOrdersJob(ctx, queues);
         return;
       }
 
@@ -1903,8 +1997,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             removeOnFail: 50,
           });
         },
-        async (orderId, delayMs) => {
+        async (orderId, delayMs, replayJobId) => {
           await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+            // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+            ...(replayJobId ? { jobId: replayJobId } : {}),
             delay: delayMs,
             removeOnComplete: 100,
             removeOnFail: 50,
@@ -1914,7 +2010,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       );
 
       if (job.name === 'dispatch-order') {
-        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId);
+        // [E36] The job is the replay identity: a redelivery of THIS job
+        // reuses what it already committed instead of repeating it. The id
+        // alone is not enough — a deterministic command id (the not-my-driver
+        // redispatch) can be re-added for a NEW episode once the old job left
+        // BullMQ retention — so the job's creation time is part of it: a
+        // redelivery keeps both, a re-created job does not (DS215 F1).
+        await dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined);
       } else if (job.name === 'offer-timeout') {
         await dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId);
       } else if (job.name === 'supply-watch-scan') {
@@ -2297,14 +2399,6 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 7,
   });
 
-  // Stage-B AI classifier: hourly nibble at the un-placed backlog under the
-  // daily budget (waits silently when spent — spec: nobody sees degradation).
-  await queues.dispatchQueue.add('discovery-ai-classify', {}, {
-    repeat: { pattern: '20 * * * *' },
-    removeOnComplete: 24,
-    removeOnFail: 24,
-  });
-
   // Movement R: nightly full stats recompute (RAT-H reconciliation leg).
   await queues.dispatchQueue.add('rating-stats-recompute', {}, {
     repeat: { pattern: '30 4 * * *' },
@@ -2335,8 +2429,9 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // Vendor↔rider collusion affinity scan (SWIFT-164): weekly, Monday 06:00 —
-  // after tier-recalc (05:00), before the human's week starts.
+  // Vendor↔rider collusion affinity scan (SWIFT-164): weekly, Monday 06:00
+  // UTC (02:00 in Guyana) — before the human's week starts. It does not
+  // depend on tier-recalc, which runs at 05:00 Guyana time (09:00 UTC).
   await queues.verificationQueue.add('collusion-affinity-scan', {}, {
     repeat: { pattern: '0 6 * * 1' },
     removeOnComplete: 10,
@@ -2351,9 +2446,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // Vendor tier recalculation from catalogue size: weekly, Monday 05:00
+  // Partner tier recalculation (vendors by catalogue size, movers by vehicle):
+  // weekly, Monday 05:00 IN GUYANA. The zone is pinned to the platform's
+  // timezone authority: a bare cron rule reads the worker's clock, and on a
+  // UTC host that is 01:00 Georgetown — a different week boundary for a
+  // weekly fee. Changing the rule's options registers a new repeatable in
+  // Redis; an old zone-less registration must be removed at rollout.
   await queues.subscriptionQueue.add('tier-recalc', {}, {
-    repeat: { pattern: '0 5 * * 1' },
+    repeat: { pattern: '0 5 * * 1', tz: GUYANA_TZ },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
@@ -2404,16 +2504,6 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // minutes — dead phones must not keep swallowing dispatch offers.
   await queues.dispatchQueue.add('stale-movers', {}, {
     repeat: { pattern: '*/5 * * * *' },
-    removeOnComplete: 20,
-    removeOnFail: 20,
-  });
-
-  // Ops agent problem scan (spec Part B): every 60s; runs whenever
-  // ANTHROPIC_API_KEY is set (AGENT_ENABLED=0 disables). Detection is
-  // deterministic SQL — the model only classifies; money actions wait in the
-  // approval queue.
-  await queues.dispatchQueue.add('agent-ops-scan', {}, {
-    repeat: { every: Number(process.env['AGENT_SCAN_INTERVAL_SECONDS'] ?? 60) * 1000 },
     removeOnComplete: 20,
     removeOnFail: 20,
   });

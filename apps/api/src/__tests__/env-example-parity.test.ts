@@ -44,13 +44,29 @@ function declared(file: string, name: string): string | undefined {
  * omitted from the other is only a finding when the two EFFECTIVELY differ.
  */
 const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> = [
-  { name: 'LIFECYCLE_V2', whenUnset: '1', what: 'orders are born HELD — the five-minute free-cancel window' },
+  // [DS214 D3] Unset reads as OFF in the code (holdWindowMs, checkoutQueueTiming),
+  // and production now refuses to boot without an explicit value (E08).
+  { name: 'LIFECYCLE_V2', whenUnset: '0', what: 'orders are born HELD — the five-minute free-cancel window' },
   { name: 'ORDER_HOLD_MINUTES', whenUnset: '5', what: 'how long that window lasts' },
   { name: 'DELIVERY_BLOCK_ON_NONE', whenUnset: '1', what: 'whether a no-rider delivery checkout is blocked' },
   { name: 'TAXI_ALLOW_REQUEST_ON_NONE', whenUnset: '1', what: 'whether a passenger may request with no drivers near' },
   { name: 'DISPATCH_EXHAUSTION', whenUnset: '0', what: 'the terminal exhausted state and pickup conversion' },
   { name: 'PREVIEW_MODE', whenUnset: '0', what: 'whether never-live vendors may draft listings' },
-  { name: 'ALERTS_LOUD', whenUnset: '0', what: 'whether ops paging is push+in-app or log-only' },
+  // [Q10] ALERTS_LOUD was described as ops paging; the code only ever used it
+  // for the store alert ladder timing and, until loud alerts 1/4, to gate the
+  // mover offer push. The offer push now has its own kill switch.
+  { name: 'ALERTS_LOUD', whenUnset: '0', what: 'how soon the store new-order ladder re-alerts and falls back to SMS' },
+  { name: 'OFFER_PUSH', whenUnset: '1', what: 'whether every mover offer is also pushed (0 = kill switch)' },
+  // Only exactly '1' turns it on (providers/mmg/mmg-checkout.ts); the boot
+  // guard refuses any other non-zero spelling.
+  { name: 'MMG_CHECKOUT_ENABLED', whenUnset: '0', what: 'whether partners may pay the weekly fee on the MMG hosted checkout page' },
+  // [DS632 · owner, 4 Oct] Unset holds every MMG payment for a person (mmgCreationZone); staging and
+  // production read MMG's creationDate as Guyana time, so a developer sees the same confirmation.
+  { name: 'MMG_CHECKOUT_CREATION_ZONE', whenUnset: '', what: 'how MMG payment times are read (unset: every MMG payment is held for a person)' },
+  // [PT-1] Unset reads as OFF (utils/card-rail.ts cardRailV2Enabled), and production refuses 1 until a real v2 provider exists.
+  { name: 'CARD_RAIL_V2', whenUnset: '0', what: 'whether partners can add a card and pay the weekly fee by card (card rail v2)' },
+  // [AX297 F5] Unset reads as OFF (utils/card-rail.ts cardRailV2DrainEnabled); production refuses 1.
+  { name: 'CARD_RAIL_V2_DRAIN', whenUnset: '0', what: 'whether the worker still settles card rail v2 work already in flight after v2 is switched off' },
 ];
 
 /**
@@ -132,4 +148,30 @@ describe('the two env examples agree on how the product behaves', () => {
       expect(exemptNames.has(flag.name), `${flag.name} cannot be both compared and exempt`).toBe(false);
     }
   });
+});
+
+/**
+ * [PT-1 · AX297 F6] Card rail v2 is configured by six settings, and an operator
+ * finds them in the templates or nowhere. The comparison above reads an ABSENT
+ * flag as its code default, so it could not notice a missing entry: this
+ * requires each one to be written, in both files, with a safe value.
+ */
+describe('[AX297 F6] every card rail v2 setting is in both templates, with a safe value', () => {
+  const CARD_RAIL_SETTINGS = ['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_PROVIDER', 'CARD_RAIL_ENVIRONMENT', 'CARD_RAIL_ACCOUNT', 'API_PUBLIC_URL'];
+
+  for (const [label, file] of [['apps/api/.env.example', api], ['deploy/.env.deploy.example', deploy]] as const) {
+    it(`${label} declares each of them`, () => {
+      for (const name of CARD_RAIL_SETTINGS) {
+        expect(declared(file, name), `${label} does not declare ${name}`).not.toBeUndefined();
+      }
+    });
+
+    it(`${label}: both switches OFF, no provider chosen for anyone, tokens bound to sandbox, and an account LABEL rather than a number`, () => {
+      expect(declared(file, 'CARD_RAIL_V2')).toBe('0');
+      expect(declared(file, 'CARD_RAIL_V2_DRAIN')).toBe('0');
+      expect(declared(file, 'CARD_RAIL_PROVIDER')).toBe('');
+      expect(declared(file, 'CARD_RAIL_ENVIRONMENT')).toBe('sandbox');
+      expect(declared(file, 'CARD_RAIL_ACCOUNT')).toBe('');
+    });
+  }
 });

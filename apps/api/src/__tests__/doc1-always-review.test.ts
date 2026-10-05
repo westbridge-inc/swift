@@ -11,6 +11,7 @@
  * in doc1-extraction-ledger), so activation is the one switch.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import crypto from 'node:crypto';
@@ -61,10 +62,11 @@ async function owner(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 const submit = (userId: string, docType: string) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const setActive = (code: string, on: boolean) => system(() => app.prisma.docType.update({ where: { code }, data: { isActive: on, legalFactsVerifiedAt: on ? new Date() : null } }));
 const openCases = (docId: string) => system(() => app.prisma.reviewCase.findMany({ where: { submissionId: docId, closedAt: null } }));
 const readOnly = () => { kyc.verdict = 'approved'; kyc.extracted = { documentNumber: `TIN-${RUN}-${nanoid(4)}` }; };

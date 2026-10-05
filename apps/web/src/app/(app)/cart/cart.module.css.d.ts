@@ -35,6 +35,9 @@ declare const styles: {
   readonly tipSelected: string;
   readonly cashPanel: string;
   readonly cashTitle: string;
+  readonly payOptions: string;
+  readonly payOption: string;
+  readonly payOptionCopy: string;
   readonly cashCopy: string;
   readonly breakdown: string;
   readonly moneyLine: string;

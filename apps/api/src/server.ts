@@ -2,6 +2,9 @@
  * The boot script: build the app (src/app.ts), assert the boot posture, listen.
  * Importing this file starts the server — import ./app to build without booting.
  */
+// FIRST: secrets delivered as files (NAME_FILE) become NAME in this process
+// before any module below can read process.env. Keep this import on top.
+import './boot/secret-files';
 import { buildApp } from './app';
 import { assertSafeBootConfig, assertProductionData } from './utils/boot-config';
 import { attestationOf, attestationLine, readRlsFacts, assertTenantWall } from './lib/rls-attestation';

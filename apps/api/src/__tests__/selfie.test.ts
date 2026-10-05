@@ -18,10 +18,11 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
 
 // ---------------------------------------------------------------------------
-// Mandatory signup selfie (master plan §3). Failure paths first: every
-// transact surface (orders, rides, go-online) refuses a selfie-less account
-// with SELFIE_REQUIRED; the upload only accepts real camera images; the
-// stored avatar is publicly served; profile PUT can no longer write avatar.
+// Profile selfie (master plan §3). Failure paths first: booking a ride and
+// going online refuse a selfie-less account with SELFIE_REQUIRED; ordinary
+// checkout does NOT (E27, owner rule: no selfie merely to browse/order); the
+// upload only accepts real camera images; the stored avatar is publicly
+// served; profile PUT can no longer write avatar.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -205,7 +206,7 @@ describe('Transact gates refuse a selfie-less account', () => {
     expect(allowed.statusCode).toBe(201);
   });
 
-  it('checkout → 403 SELFIE_REQUIRED with a full cart; passes once the selfie exists', async () => {
+  it('checkout needs no selfie (E27): a selfie-less customer places an ordinary order', async () => {
     const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await app.prisma.address.create({
       data: {
@@ -238,13 +239,16 @@ describe('Transact gates refuse a selfie-less account', () => {
       { vendorId: vendor.id, itemId: item.id, quantity: 1 }, u.token);
     expect([200, 201]).toContain(added.statusCode);
 
-    const blocked = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, u.token);
-    expect(blocked.statusCode).toBe(403);
-    expect(blocked.json().error.code).toBe('SELFIE_REQUIRED');
-
-    await postSelfie(u.token);
-    const allowed = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, u.token);
-    expect(allowed.statusCode).toBe(200);
+    const profile = await inject('GET', '/api/v1/customer/profile', undefined, u.token);
+    expect(profile.json().data.selfieCapturedAt).toBeNull();
+    const placed = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH' }, u.token);
+    expect(placed.statusCode, placed.body).toBe(200);
+    const orders = placed.json().data.orders as Array<{ id: string }>;
+    expect(orders).toHaveLength(1);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: orders[0]!.id } });
+    expect(order.customerId).toBe(u.userId);
+    // …and the account still has no selfie: nothing was captured on the way
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } })).selfieCapturedAt).toBeNull();
   });
 
   it('rider go-online → 403 SELFIE_REQUIRED even with documents verified', async () => {

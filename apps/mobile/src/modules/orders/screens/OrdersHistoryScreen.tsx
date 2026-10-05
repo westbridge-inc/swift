@@ -6,11 +6,14 @@ import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
 import { color, radius, space } from '@swift/ui';
 import { useLiveOrders, useOrdersInfinite, useReorder } from '../../../hooks/customer';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 // The single authority for what a status is CALLED — type-aware, so a ride is
 // never described with a store's words. This screen owns tone, never wording.
-import { orderStatusLabel } from '../../../lib/orderStatus';
+import { orderStatusLabel, presentedVertical } from '../../../lib/orderStatus';
+import type { OrderVerticalFacts } from '@swift/types';
 import {
   Photo,
   EmptyState, ErrorState, LoadingBlock, Money,
@@ -80,9 +83,11 @@ const STATUS_TONE: Record<string, PillTone> = {
 
 /** The pill: never the raw enum. An unknown status keeps a neutral tone and
  *  gets the authority's honest "In progress" rather than its own name. */
-function statusPill(o: { status: string; orderType?: string | null }): { label: string; tone: PillTone } {
+function statusPill(o: OrderVerticalFacts & { status: string }): { label: string; tone: PillTone } {
   return {
-    label: orderStatusLabel(o.status, o.orderType),
+    // The server's declared vertical (SERVICE for a booking), else the
+    // persisted type — one helper, shared with Home's live card.
+    label: orderStatusLabel(o.status, presentedVertical(o)),
     tone: STATUS_TONE[o.status] ?? 'neutral',
   };
 }
@@ -169,6 +174,11 @@ export function OrdersHistoryScreen() {
   const orders = useOrdersInfinite();
   const liveOrders = useLiveOrders();
   const reorder = useReorder();
+  // The pull spinner is the person's own gesture (lib/pullToRefresh). The
+  // focus refetch below runs on EVERY switch to this tab, and a spinner bound
+  // to isRefetching made iOS pull the list down behind a spinner each time —
+  // a reload nobody asked for. A pull refreshes BOTH lists, as before.
+  const pull = usePullToRefresh(() => Promise.all([orders.refetch(), liveOrders.refetch()]));
 
   // Tab screens stay mounted, so without this the list NEVER updates after
   // first load (found live: a delivered order stuck on "Pending" forever).
@@ -313,6 +323,9 @@ export function OrdersHistoryScreen() {
                 {sub}
               </T>
             ) : null}
+            {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+              <T variant="body" tone="muted">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</T>
+            ) : null}
           </View>
           {amountText(o, isRide)}
         </View>
@@ -375,6 +388,9 @@ export function OrdersHistoryScreen() {
                 <T variant="body" tone="muted" numberOfLines={1}>
                   {sub}
                 </T>
+              ) : null}
+              {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+                <T variant="body" tone="muted">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</T>
               ) : null}
             </View>
             {amountText(o, isRide)}
@@ -496,11 +512,8 @@ export function OrdersHistoryScreen() {
           }
           refreshControl={
             <RefreshControl
-              refreshing={orders.isRefetching || liveOrders.isRefetching}
-              onRefresh={() => {
-                orders.refetch();
-                liveOrders.refetch();
-              }}
+              refreshing={pull.refreshing}
+              onRefresh={() => { void pull.onRefresh(); }}
               tintColor={color.brand[500]}
             />
           }

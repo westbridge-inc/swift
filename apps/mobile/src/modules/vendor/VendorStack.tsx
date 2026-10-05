@@ -1,6 +1,5 @@
 /** @jsxImportSource react */
 import { useState, useEffect } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
@@ -12,7 +11,7 @@ import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { VendorTierScreen } from './screens/VendorTierScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
-import { disconnectSocket } from '../../services/socket';
+import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { useVendorProfile, useVendorOrdersLive } from '../../hooks/vendorops';
 import { track } from '../../lib/analytics';
@@ -20,10 +19,10 @@ import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
 import { VendorBulkImportScreen } from './screens/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
-import { catalogueMeta, safeVendorRole } from './shared';
+import { catalogueMeta, safeVendorRole, TabHeader } from './shared';
 import { billingBlocked } from '../../lib/vendorProfile';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
-import { VendorSwiftNumberScreen } from './screens/VendorSwiftNumberScreen';
+import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { VendorOps } from './screens/VendorOps';
 import { VendorBillingSuspended } from './screens/VendorBillingSuspended';
 import { VendorMenuScreen } from './screens/VendorMenuScreen';
@@ -47,11 +46,11 @@ function VendorWentLiveLayer({ status }: { status: string }) {
 
 function VendorRoot() {
   const { owner, store, stores, isLoading, state: profileState, failure, refetch } = useVendorProfile();
-  const qc = useQueryClient();
   const myRole = safeVendorRole(owner?.myRole);
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
-  const [repairingSelection, setRepairingSelection] = useState(false);
+  const initializeSelectedStore = useStoreSwitcher((s) => s.initializeSelectedStore);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const { preview, previewType, enterPreview, exitPreview } = useVendorPreview();
   // Preview is a per-store choice: switching stores lands on that store's
   // real state (checklist for pending, board for live) — never a stale peek.
@@ -68,27 +67,15 @@ function VendorRoot() {
   useEffect(() => {
     if (stores.length === 0 || validSelection) return;
     const nextStoreId = stores[0].id;
-    if (!selectedStoreId) {
-      setSelectedStore(nextStoreId);
-      return;
-    }
-    // A selected membership disappeared (or belongs to an earlier account).
-    // Treat this like an explicit store handoff: leave the socket room and
-    // discard every store-bound cache before mounting the fallback business.
-    setRepairingSelection(true);
-    disconnectSocket();
-    setSelectedStore(nextStoreId);
-    void Promise.all([
-      qc.resetQueries({ queryKey: ['vendor'] }),
-      qc.resetQueries({ queryKey: ['verification'] }),
-    ]).finally(() => setRepairingSelection(false));
-  }, [stores, validSelection, selectedStoreId, setSelectedStore, qc]);
+    if (selectedStoreId === null) initializeSelectedStore(nextStoreId);
+    else setSelectedStore(nextStoreId);
+  }, [stores, validSelection, selectedStoreId, setSelectedStore, initializeSelectedStore]);
 
   useEffect(() => {
     if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
   }, [store?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (isLoading || repairingSelection || (stores.length > 0 && !validSelection)) {
+  if (isLoading || (stores.length > 0 && !validSelection)) {
     return (
       <Screen>
         <LoadingBlock />
@@ -98,14 +85,23 @@ function VendorRoot() {
   // [MOB-038] An outage is not "you have no business". A failed profile read
   // used to arrive as null and land here as the setup wizard — offered to a
   // working restaurant while its orders were live. Absence is a verified 404
-  // (or a well-formed owner with no stores); everything else says so, and
-  // offers the one thing that helps: try again.
+  // (or a well-formed owner with no stores) — or the server's 403 to an
+  // account that holds no vendor role at all, which is its way of saying the
+  // same thing to a customer who tapped "Swift Business" to list a first
+  // store (hooks/vendorops, lib/vendorProfile); that account lands on
+  // BusinessSetup below, the JOIN flow, never on this error. Everything else
+  // says so, and offers the one thing that helps: try again. It must not be a
+  // one-way door: `intent` persists, so a cold start reopens this same screen
+  // — the header's Switch app and Log out are the ways back to Swift and the
+  // welcome.
   if (profileState === 'error') {
     return (
       <Screen>
+        <TabHeader title="Your business" onSwitch={() => setSwitcherOpen(true)} />
+        <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
         <ErrorState
           message={
-            failure === 'unauthorized' ? 'Your session ended. Sign in again to open your store.'
+            failure === 'unauthorized' ? 'You were signed out. Sign in again to open your store.'
               : failure === 'forbidden' ? 'This account cannot open that store. Ask the owner to add you again.'
                 : failure === 'malformed' ? "Swift could not read your store's details. This is our problem, not yours — try again."
                   : "Swift can't reach your store right now. Your orders are safe; try again in a moment."
@@ -127,7 +123,7 @@ function VendorRoot() {
       {billingSuspended ? (
         <VendorBillingSuspended store={store} stores={stores} myRole={myRole} />
       ) : store.status !== 'ACTIVE' && !preview ? (
-        <VendorOnboarding store={store} onPreview={enterPreview} />
+        <VendorOnboarding store={store} onPreview={() => enterPreview()} />
       ) : (
         <VendorTabs />
       )}
@@ -231,18 +227,25 @@ function VendorTabs() {
 }
 
 export function VendorStack() {
+  const storeId = useStoreSwitcher((s) => s.selectedStoreId);
+  const storeGeneration = useStoreSwitcher((s) => s.storeGeneration);
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="VendorRoot" component={VendorRoot} />
-      <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
-      <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
-      <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
-      {/* [MKT G3] Where the backfill's "review your categories" push lands.
-          Accepting a suggestion is what writes the tag the Market feed reads. */}
-      <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
-      <Stack.Screen name="VendorMySwiftNumber" component={VendorSwiftNumberScreen} />
-      {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
-      <Stack.Screen name="VendorTier" component={VendorTierScreen} />
+      {/* A batched A → B → A must also retire editors and reconnect live orders. */}
+      <Stack.Group navigationKey={`${storeId ?? 'unselected'}:${storeGeneration}`}>
+        <Stack.Screen name="VendorRoot" component={VendorRoot} />
+        <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
+        <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
+        <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
+        {/* [MKT G3] Where the backfill's "review your categories" push lands.
+            Accepting a suggestion is what writes the tag the Market feed reads. */}
+        <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
+        {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
+        <Stack.Screen name="VendorTier" component={VendorTierScreen} />
+      </Stack.Group>
+      {/* Keep the notification destination registered across the handoff. Its
+          vendor fee editor already remounts with key={storeId}. */}
+      <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO
           route to a human. Registration, not a rewrite. */}
       <Stack.Screen name="GetHelp" component={GetHelpScreen} />

@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { authApi, verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
+import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
 import { PREVIEW_VERIFICATION, previewQuery } from '../lib/moverPreviewData';
 import {
   AuthSessionBoundaryError,
@@ -11,6 +12,8 @@ import {
 } from '../stores/authStore';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import type { AuthSessionSnapshot } from '../lib/authSession';
+import { verificationRefetchInterval } from './verificationPolling';
+import type { MutationGuard } from './useStepUp';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -30,26 +33,14 @@ export function useVerificationStatus<T = any>(role: string, vehicleType?: strin
     // Onboarding screens poll so an approval flips the app to "live" within
     // seconds, not on the next cold refetch. Stops itself once verified.
     refetchInterval: opts?.poll
-      ? (query) => ((query.state.data as any)?.roleVerified ? false : 15000)
+      ? (query) => verificationRefetchInterval(query.state.data as { roleVerified?: boolean; categoryUnavailable?: boolean } | undefined)
       : undefined,
   });
   return previewMover ? previewQuery(PREVIEW_VERIFICATION) : q;
 }
 
 /** Public weekly price list for the partner pitch ("N days free, then X/week"). */
-export function usePartnerPricing(countryCode?: string) {
-  return useQuery({
-    queryKey: ['pricing', countryCode ?? 'GY'],
-    queryFn: () => unwrap<{
-      countryCode: string;
-      currencyCode: string;
-      currencySymbol: string;
-      trialDays: number;
-      weekly: { mover: number | null; moverHeavy: number | null; serviceVendor: number | null; smallVendor: number | null; largeVendor: number | null; departmentVendor: number | null };
-    }>(authApi.pricing(countryCode)),
-    staleTime: 60 * 60 * 1000,
-  });
-}
+export { usePartnerPricing } from './partnerPricing';
 
 export function useBecomePartner() {
   const qc = useQueryClient();
@@ -98,6 +89,10 @@ export function useBecomePartner() {
         }
       }
       requireAuthSessionForPrincipal(owner);
+      // The store exists: its List-your-business draft is done. Cleared here,
+      // not by the screen — a per-call observer callback never runs once the
+      // screen has unmounted — and only for the account that submitted it.
+      if (data.role === 'VENDOR') useBusinessSetupDraft.getState().clearIfOwner(owner);
       void qc.invalidateQueries({ queryKey: ['verification'] });
       void qc.invalidateQueries({ queryKey: ['vendor'] });
       void qc.invalidateQueries({ queryKey: ['mover'] });
@@ -107,6 +102,52 @@ export function useBecomePartner() {
       return result;
     },
   });
+}
+
+/**
+ * [VEHICLES] Change the vehicle a mover works with (PUT /partner/vehicle). The server
+ * takes the mover offline, retires the papers about the old vehicle and may move them
+ * between delivery and taxi work, so the session's roles and mover pointer are
+ * re-read from its answer exactly as "Save vehicle" does. `guard` is the step-up
+ * wrapper (hooks/useStepUp): a verified mover confirms it is them first.
+ */
+export function useChangeVehicle(guard?: MutationGuard) {
+  const qc = useQueryClient();
+  const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  const run = async (data: {
+    vehicleType: VehicleKind;
+    vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+  }) => {
+    const owner = requireAuthSessionSnapshot();
+    const user = useAuthStore.getState().user as (Parameters<
+      typeof setUserIfCurrent
+    >[1] & { lastMoverRole?: string | null; roles?: string[] }) | null;
+    if (!user || user.id !== owner.userId) throw new AuthSessionBoundaryError();
+    const result = await unwrap<{
+      kind: 'RIDER' | 'DRIVER';
+      vehicleType: VehicleKind;
+      changed: boolean;
+      activeRole?: string | null;
+      lastMoverRole?: 'DRIVER' | 'RIDER' | null;
+    }>(partnerApi.changeVehicle(data, owner));
+    requireAuthSessionForPrincipal(owner);
+    if (result.changed && result.activeRole) {
+      // A move between delivery and taxi work adds that role; the pointer follows the server.
+      const roles = Array.from(new Set([...(user.roles ?? []), 'MOVER', result.kind]));
+      const canonical = canonicalMoverAuthority(
+        { roles, activeRole: result.activeRole, lastMoverRole: result.lastMoverRole ?? null },
+        result.activeRole,
+        user.lastMoverRole,
+      );
+      if (!setUserIfCurrent(owner, { ...user, roles, ...canonical } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
+        throw new AuthSessionBoundaryError();
+      }
+    }
+    void qc.invalidateQueries({ queryKey: ['verification'] });
+    void qc.invalidateQueries({ queryKey: ['mover'] });
+    return result;
+  };
+  return useMutation({ mutationFn: guard ? guard(run) : run });
 }
 
 /** Upload a single picked file to storage; resolves to its fileUrl. */

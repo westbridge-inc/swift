@@ -8,6 +8,7 @@
  * the exportable PDF.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import crypto from 'node:crypto';
@@ -64,6 +65,7 @@ beforeAll(async () => {
   });
   const o = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+59273${NUM}1`, firstName: 'Cust', lastName: `Ody${RUN}`, activeRole: 'VENDOR_OWNER', roles: ['VENDOR_OWNER'], countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, avatar: `avatars/${RUN}/o.jpg`, selfieCapturedAt: new Date() } as never }));
   ownerId = o.id; users.push(o.id);
+  await signupSelfieFixture(app.prisma, ownerId);
   const a = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+59273${NUM}2`, firstName: 'Cust', lastName: `Admin${RUN}`, roles: ['ADMIN', 'CUSTOMER'], activeRole: 'ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } } as never }));
   adminId = a.id; users.push(a.id);
   adminToken = app.jwt.sign({ userId: adminId, role: 'ADMIN', jti: nanoid(8) });
@@ -90,7 +92,7 @@ afterAll(async () => {
 
 describe('[DOC-1 P20-2] the custody narrative', () => {
   it('a submission, its extraction, its verdicts, the decision under a reason code, the durable record and the destruction receipt — one ordered narrative; never a value, never the note', async () => {
-    const doc = await runWithTenant('swift-default', () => service.submitDocument(ownerId, 'RESTAURANT', TYPE, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+    const doc = await runWithTenant('swift-default', async () => service.submitDocument(ownerId, 'RESTAURANT', TYPE, await ownedVerificationFixture(app.prisma, ownerId), 'v1'));
     docId = doc.id;
     expect(doc.status).toBe('PENDING');
     await runWithTenant('swift-default', () => service.approveDocument(doc.id, adminId, new Date(Date.now() + 200 * 86_400_000)));

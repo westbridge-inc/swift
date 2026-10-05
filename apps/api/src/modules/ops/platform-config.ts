@@ -1,6 +1,8 @@
 import type { PrismaClient } from '@prisma/client';
 import { applySeedPlan, buildSeedPlan, type ApplyOptions, type DesiredConfig, type SeedPlan } from './seed-plan';
 import { isProduction } from '../../utils/runtime-mode';
+import { DEFAULT_DELIVERY_RATES } from '../../utils/markup';
+import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
 
 /**
  * The platform SPINE — the rows a Swift database cannot function without,
@@ -25,30 +27,73 @@ import { isProduction } from '../../utils/runtime-mode';
  * migration ledger (20260612/20260706/20260826), where reviewed schema belongs.
  */
 
-/** Bump when any value below changes; recorded with every apply. */
-export const PLATFORM_CONFIG_VERSION = '2026-09-02.1';
+/** Bump when any value below changes; recorded with every apply.
+ *  2026-10-01.1 (main): the owner's Georgetown fares — Guyana's taxiRates, and
+ *  the delivery columns a fresh Georgetown Central zone is created with.
+ *  2026-10-01.2 (main) [ZONE-FARES]: the CJIA and Ogle airport zones with their
+ *  own taxi per-km rate, and no fixed zone-to-zone fares at all (the
+ *  Georgetown Central ↔ South 2,000 pair is gone).
+ *  2026-09-30.1 (#1393): the owner's taxi weekly fee of GY$8,000.
+ *  2026-10-04.2: all of these together, as merged; no earlier version
+ *  (including 2026-10-04.1, the previous merge of this lane) describes these
+ *  values, so none may be reused. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-04.2';
+
+/**
+ * The declaration a tier map carries to say it is the COMPLETE partner card:
+ * every rate, both catalogue boundaries and the franchise rule are present
+ * and valid, and no fallback applies. The resolver
+ * (country/country-config.service) refuses a declared card that is missing
+ * any key, rather than quietly pricing it as a smaller card; a market that
+ * declares nothing keeps the documented legacy fallbacks.
+ */
+export const COMPLETE_CARD = 'complete';
 
 // Weekly SaaS tiers (GYD) — single source for the GY CountryConfig AND any
 // seeded subscription rows, so a tier change never leaves accounts on a stale
 // rate. Exported so the dev seed's demo drivers bill at the same rate.
-// `mover` is the STANDARD fee band (bicycle, motorbike, car, wagon car);
-// `moverHeavy` is the HEAVY band (buses, canters, box trucks). Which band a
-// vehicle falls in is config/vehicle-classes.ts — this file only prices them.
+// The owner rate card (2026-09-22): flat weekly fees, independent of sales,
+// moved automatically by the weekly re-tier. A delivery/courier Rider pays by
+// vehicle band — `mover` for the STANDARD band (bicycle, motorbike), and
+// `moverHeavy` for heavy delivery (canters, box trucks) — while every taxi
+// Driver pays `taxiDriver`, car or bus. Which band a vehicle falls in and
+// which role it provisions is config/vehicle-classes.ts — this file only
+// prices them. Every rate is a whole number of dollars.
+// The owner, 2026-09-29: delivery riders (the STANDARD band) pay 6,000 a week,
+// down from 8,000. The owner, 2026-09-30: taxi drivers pay 8,000 a week,
+// including taxi drivers who also deliver. Heavy delivery stays 9,000.
+// Existing subscriptions move at the next weekly re-tier.
 export const guyanaTiers = {
+  card: COMPLETE_CARD,
+  mover: 6000,
+  moverHeavy: 9000,
+  taxiDriver: 8000,
+  // Services carry no catalogue — a solo tradesman is not a restaurant.
+  serviceVendor: 8000,
+  smallVendor: 15000,
+  largeVendor: 20000,
+  departmentVendor: 60000,
+  largeCatalogueThreshold: 1000,
+  departmentCatalogueThreshold: 10000,
+  // From the 5th store, every location takes 50% off its OWN rate.
+  franchiseMinLocations: 5,
+  franchiseDiscountPct: 50,
+};
+
+// The Guyana rate card every USD-pegged market was launched from. The pegs
+// stay on it: re-pricing Guyana re-prices Guyana alone, and moving another
+// market's fees is that market's own decision, never a side effect.
+const peggedMarketAnchor = {
   mover: 10000,
   moverHeavy: 12000,
-  // Services carry no catalogue — a solo tradesman is not a restaurant.
   serviceVendor: 12000,
   smallVendor: 20000,
   largeVendor: 30000,
   departmentVendor: 50000,
-  largeCatalogueThreshold: 1000,
-  departmentCatalogueThreshold: 10000,
-  // From the 5th store, every location takes 50% off its OWN rate. At the
-  // standard shop rate that is exactly 50,000/week for five locations.
-  franchiseMinLocations: 5,
-  franchiseDiscountPct: 50,
 };
+// The same for taxi: the pegged markets keep the launch taxi card (GYD) they
+// were derived from. Guyana's own fare is DEFAULT_TAXI_RATES (below).
+const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
 
 /**
  * The LAUNCH document checklists, as code. The CountryConfig row carries a copy the
@@ -100,6 +145,12 @@ export function seedFxRate(env: Record<string, string | undefined> = process.env
   return 209; // DOC-INV-43 fallback: the April-2026 observation, dev/test only (the census test allowlists this line)
 }
 
+/** [ZONE-FARES] The airport taxi rate, whole GYD a kilometre (owner, 1 Oct
+ *  2026): what a trip that starts or ends at CJIA or Ogle pays for each
+ *  kilometre beyond the included ones, in place of Guyana's own per-km.
+ *  Georgetown → CJIA, 41 km: 800 + 295 × 38 = 12,010 → 12,000. */
+export const AIRPORT_TAXI_PER_KM = 295;
+
 /** The desired platform spine, as data. */
 export function desiredPlatformConfig(): DesiredConfig {
   const gydPerUsd = seedFxRate();
@@ -107,7 +158,9 @@ export function desiredPlatformConfig(): DesiredConfig {
   // entry is the one trade-specific requirement; every other trade falls back
   // to the SERVICE_PROVIDER checklist.
   const guyanaChecklists = DEFAULT_DOCUMENT_CHECKLISTS;
-  const guyanaTaxiRates = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
+  // Guyana's taxi fare IS the code default (one place, country/pricing-config):
+  // a fresh database starts on it, and its first quote records it as version 1.
+  const guyanaTaxiRates = { ...DEFAULT_TAXI_RATES };
   const taxiClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL: 1.8, GROUP: 2.5 };
   const guyanaCashRules = {
     maxClaimsPerRiderPerMonth: 3,
@@ -148,17 +201,23 @@ export function desiredPlatformConfig(): DesiredConfig {
     ...guyanaRegion,
   };
 
-  // Every other Caribbean market is USD-pegged off the Guyana numbers until a
-  // local business/legal pass refines it — and says so in its notes.
+  // Future Caribbean market policy is retained so expansion can be planned,
+  // reviewed and activated without a data-model rewrite. V1 is Guyana-only:
+  // these rows remain explicitly inactive until their own launch gate passes.
   const USD = {
-    mover: guyanaTiers.mover / gydPerUsd,
-    moverHeavy: guyanaTiers.moverHeavy / gydPerUsd,
-    serviceVendor: guyanaTiers.serviceVendor / gydPerUsd,
-    smallVendor: guyanaTiers.smallVendor / gydPerUsd,
-    largeVendor: guyanaTiers.largeVendor / gydPerUsd,
-    departmentVendor: guyanaTiers.departmentVendor / gydPerUsd,
+    mover: peggedMarketAnchor.mover / gydPerUsd,
+    moverHeavy: peggedMarketAnchor.moverHeavy / gydPerUsd,
+    serviceVendor: peggedMarketAnchor.serviceVendor / gydPerUsd,
+    smallVendor: peggedMarketAnchor.smallVendor / gydPerUsd,
+    largeVendor: peggedMarketAnchor.largeVendor / gydPerUsd,
+    departmentVendor: peggedMarketAnchor.departmentVendor / gydPerUsd,
   };
-  const USD_TAXI = { base: 1000 / gydPerUsd, perKm: 300 / gydPerUsd, perMin: 25 / gydPerUsd, minimum: 1500 / gydPerUsd };
+  const USD_TAXI = {
+    base: peggedTaxiAnchor.base / gydPerUsd,
+    perKm: peggedTaxiAnchor.perKm / gydPerUsd,
+    perMin: peggedTaxiAnchor.perMin / gydPerUsd,
+    minimum: peggedTaxiAnchor.minimum / gydPerUsd,
+  };
   const USD_FLOAT = { l1: 8000 / gydPerUsd, l2: 20000 / gydPerUsd, l3: 40000 / gydPerUsd };
   const niceRound = (n: number) => {
     if (n >= 1000) return Math.round(n / 100) * 100;
@@ -215,7 +274,7 @@ export function desiredPlatformConfig(): DesiredConfig {
       regulatoryNotes:
         'Tiers and taxi rates are USD-pegged defaults; document checklist mirrors Guyana. Refine with local business/legal input before launch.',
       locale: c.locale,
-      isActive: true,
+      isActive: false,
     };
     return { code: c.code, create: { ...policy }, policy };
   });
@@ -241,8 +300,11 @@ export function desiredPlatformConfig(): DesiredConfig {
           name: 'Georgetown Central',
           description: 'Central Georgetown delivery zone',
           boundary: { type: 'Polygon', coordinates: [[[-58.18, 6.78], [-58.13, 6.78], [-58.13, 6.83], [-58.18, 6.83], [-58.18, 6.78]]] },
-          deliveryBaseFee: 500,
-          deliveryPerKm: 200,
+          // No price reads these two zone columns (delivery prices from
+          // CountryConfig.deliveryRates, else DEFAULT_DELIVERY_RATES); a fresh
+          // zone still shows the same schedule, read from that one place.
+          deliveryBaseFee: DEFAULT_DELIVERY_RATES.baseFee,
+          deliveryPerKm: DEFAULT_DELIVERY_RATES.perKmRate,
         },
       },
       {
@@ -253,16 +315,51 @@ export function desiredPlatformConfig(): DesiredConfig {
           boundary: { type: 'Polygon', coordinates: [[[-58.18, 6.73], [-58.13, 6.73], [-58.13, 6.78], [-58.18, 6.78], [-58.18, 6.73]]] },
         },
       },
+      // [ZONE-FARES] The owner, 1 Oct 2026: an airport prices PER KILOMETRE,
+      // never as a fixed zone-to-zone fare — a fixed fare is unfair to people
+      // who live near the airport. A trip that starts or ends in an airport
+      // zone pays its per-km rate beyond the included kilometres (the base and
+      // the included kilometres stay Guyana's). Neither polygon touches a
+      // Georgetown zone or the other: Georgetown's boxes span lat 6.73–6.83,
+      // lng -58.18 to -58.13.
+      {
+        // Cheddi Jagan International Airport (Timehri): terminal, apron and
+        // the approach roads; 25 km south of Georgetown South's edge.
+        id: 'cjia-airport',
+        create: {
+          name: 'CJIA Airport',
+          description: 'Cheddi Jagan International Airport, Timehri: terminal, apron and approach roads. Taxi trips to or from here pay the airport rate per kilometre.',
+          boundary: { type: 'Polygon', coordinates: [[[-58.268, 6.488], [-58.238, 6.488], [-58.238, 6.512], [-58.268, 6.512], [-58.268, 6.488]]] },
+          taxiPerKm: AIRPORT_TAXI_PER_KM,
+        },
+      },
+      {
+        // Eugene F. Correia International Airport, Ogle: terminal and apron;
+        // east of Georgetown Central's east edge (-58.13) by 1.6 km.
+        id: 'ogle-airport',
+        create: {
+          name: 'Ogle Airport',
+          description: 'Eugene F. Correia International Airport, Ogle: terminal and apron. Taxi trips to or from here pay the airport rate per kilometre.',
+          boundary: { type: 'Polygon', coordinates: [[[-58.114, 6.799], [-58.096, 6.799], [-58.096, 6.814], [-58.114, 6.814], [-58.114, 6.799]]] },
+          taxiPerKm: AIRPORT_TAXI_PER_KM,
+        },
+      },
     ],
-    // [B5] Rider stacking capacity, founder-gated at 2 (2026-08-29): created
-    // once; a later change is an admin decision, never a re-seed.
+    // [B5] Rider stacking capacity, founder-gated: 2 (2026-08-29), raised to 3
+    // by the owner on 2026-09-24 ("the riders can take plenty orders", then
+    // "2 b"). 3 is the ceiling concurrency-policy.ts clamps to. Created once on
+    // a fresh install; an existing install changes by a higher-version row,
+    // never a re-seed.
     algoConfig: [
-      { tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 2, founderGated: true, updatedBy: 'seed:founder-directive-2026-08-29' },
+      { tenantId: 'swift-default', key: 'stacking.riderCapacity', value: 3, founderGated: true, updatedBy: 'seed:founder-directive-2026-09-24' },
     ],
-    zoneFares: [
-      { fromZoneId: 'georgetown-central', toZoneId: 'georgetown-south', fare: 2000 },
-      { fromZoneId: 'georgetown-south', toZoneId: 'georgetown-central', fare: 2000 },
-    ],
+    // [ZONE-FARES] No fixed zone-to-zone fare is seeded. The Georgetown
+    // Central ↔ South 2,000 pair contradicted the owner's formula and is gone;
+    // airports price per kilometre (above), never as a pair. A fixed fare is an
+    // admin decision now: /api/v1/admin/zone-fares (deploy/PILOT-RUNBOOK.md
+    // "Taxi zone pricing"). An install seeded before keeps its rows until an
+    // admin deletes them — this plan creates, it never deletes.
+    zoneFares: [],
   };
 }
 

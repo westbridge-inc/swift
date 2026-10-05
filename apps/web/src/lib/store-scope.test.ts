@@ -174,7 +174,7 @@ describe('[W-04] the dashboard actually uses it', () => {
   const pages = ['page.tsx', 'orders/page.tsx', 'inventory/page.tsx', 'settings/page.tsx'];
 
   it('no dashboard query key is storeless — only the store LIST is', () => {
-    for (const p of [...pages, 'layout.tsx']) {
+    for (const p of [...pages, 'dashboard-shell.tsx']) {
       const body = src(p);
       const bare = [...body.matchAll(/queryKey: \['([^']+)'/g)].map((m) => m[1]);
       expect(bare.filter((k) => k !== 'stores'), `${p} has storeless query keys`).toEqual([]);
@@ -189,17 +189,19 @@ describe('[W-04] the dashboard actually uses it', () => {
     // local component state — a half-typed form — belongs to the store it was
     // typed in. The remount is what stops the hours editor carrying A's rows
     // into B, where Save would have written them.
-    expect(src('layout.tsx')).toMatch(/<main key=\{storeId \?\? 'no-store'\}/);
+    expect(src('dashboard-shell.tsx')).toMatch(/contentKey=\{storeId \?\? 'no-store'\}/);
+    const consoleShell = readFileSync(join(process.cwd(), 'src', 'components', 'console-shell.tsx'), 'utf8');
+    expect(consoleShell).toMatch(/<main key=\{contentKey\}/);
   });
 
   it('the switch clears rather than invalidates', () => {
-    const layout = src('layout.tsx');
+    const layout = src('dashboard-shell.tsx');
     expect(layout).toMatch(/switchStore\(queryClient, \{/);
     expect(layout).not.toMatch(/queryClient\.invalidateQueries\(\);/);
   });
 
   it('[W-05] no store is ever merely DISPLAYED — the selection is persisted', () => {
-    const layout = src('layout.tsx');
+    const layout = src('dashboard-shell.tsx');
     // the old shape: fall back to the first store without persisting it, so the
     // header named one store while x-vendor-id named another
     expect(layout).not.toMatch(/\?\? list\[0\]/);

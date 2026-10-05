@@ -46,7 +46,7 @@ const serviceCode = service
   })
   .join('\n');
 
-const VISIBLE = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true } };
+const VISIBLE = { status: 'ACTIVE', isVerified: true, tenant: { isActive: true }, subscription: null };
 
 describe('isVendorVisible — what "visible" means, in one place', () => {
   it('admits a store that is active, verified, and whose operator is live', () => {
@@ -67,6 +67,10 @@ describe('isVendorVisible — what "visible" means, in one place', () => {
     // tenant context, so the Prisma extension leaves it unscoped and this
     // relational check is the only wall.
     expect(isVendorVisible({ ...VISIBLE, tenant: { isActive: false } })).toBe(false);
+  });
+
+  it('fails closed when subscription eligibility was not selected', () => {
+    expect(isVendorVisible({ ...VISIBLE, subscription: undefined })).toBe(false);
   });
 
   it('FAILS CLOSED when the tenant was not selected at all', () => {

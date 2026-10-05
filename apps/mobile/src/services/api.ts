@@ -1,6 +1,6 @@
 import axios, { type AxiosRequestConfig } from 'axios';
 import Constants from 'expo-constants';
-import { TurboModuleRegistry } from 'react-native';
+import { Platform, TurboModuleRegistry } from 'react-native';
 import {
   getAuthSessionSnapshot,
   isAuthSessionSnapshotCurrent,
@@ -36,7 +36,7 @@ export const API_URL = resolveApiOrigin({
  *  is typeof-guarded: unlike API_URL's, this line actually evaluates in the
  *  node test env, where the RN global does not exist.) */
 // eslint-disable-next-line no-undef
-export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swift.gy');
+export const WEB_URL = process.env['EXPO_PUBLIC_WEB_URL'] ?? (typeof __DEV__ !== 'undefined' && __DEV__ ? 'http://localhost:3001' : 'https://swiftgy.com');
 
 export const api = axios.create({
   baseURL: `${API_URL}/api/v1`,
@@ -117,6 +117,7 @@ function capturedVendorAuthConfig(
 
 // Request interceptor to attach auth token
 api.interceptors.request.use((config) => {
+  if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
   const authorization = config.headers.get('Authorization');
@@ -192,8 +193,13 @@ api.interceptors.response.use(
       error.response?.status === 401
       && originalRequest
       && captured
-      && !authRefreshRetries.has(originalRequest)
     ) {
+      if (authRefreshRetries.has(originalRequest)) {
+        // A refreshed credential was authoritatively rejected. End only the
+        // exact replay session; a newer login/rotation must remain untouched.
+        useAuthStore.getState().logoutIfCurrent(captured);
+        return Promise.reject(error);
+      }
       const outcome = await refreshCoordinator.resolve(captured);
       // Re-check after awaiting: logout or account B may have won while the
       // refresh POST was in flight. A stale request is rejected, never retried.
@@ -237,13 +243,14 @@ export const authApi = {
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   // [ALG-34] Step-up for an existing session — a money surface answers 403
   // STEP_UP_REQUIRED until verify succeeds on THIS session.
-  stepUp: () => api.post('/auth/step-up'),
-  verifyStepUp: (code: string) => api.post('/auth/step-up/verify', { code }),
+  stepUp: (session?: AuthSessionSnapshot) => api.post('/auth/step-up', undefined, capturedAuthConfig(session)),
+  verifyStepUp: (code: string, session?: AuthSessionSnapshot) => api.post('/auth/step-up/verify', { code }, capturedAuthConfig(session)),
   countries: () => api.get('/auth/countries'),
   // Public weekly price list — the pitch partners see BEFORE committing.
   pricing: (country?: string) => api.get('/auth/pricing', { params: country ? { country } : undefined }),
   register: (data: {
     phone: string;
+    registrationProof: string;
     firstName: string;
     lastName: string;
     email?: string;
@@ -303,6 +310,40 @@ export const marketApi = {
   depth: () => api.get('/market/depth'),
 };
 
+/**
+ * [E01] The checkout choices a cart quote is priced for — the same meaning as
+ * the checkout body's fields of these names. The cart screen requests the quote
+ * with ONE of these and submits the same one, so the total shown is the total
+ * charged. Absent = checkout's default (standard speed, every store delivered,
+ * the cart's persisted tip).
+ */
+export interface CartQuoteChoices {
+  express?: true;
+  fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+  tipAmount?: number;
+  /**
+   * [E01-B] The applied promo code. Carried on the ONE choices object so the
+   * order body submits exactly what the customer applied; the quote prices the
+   * cart's STORED promo (cart.promoCodeId), so `cartQuoteParams` deliberately
+   * does not serialize this field into the GET /cart query.
+   */
+  promoCode?: string;
+}
+
+/** [E01] GET /cart query params for a quote's choices. `express` travels only
+ *  as "true" (the API refuses anything but "true"/"false"); the store-by-store
+ *  selection travels as checkout's own record in JSON, because the API's query
+ *  parser has no bracket syntax for nested objects. */
+export function cartQuoteParams(choices?: CartQuoteChoices): Record<string, string | number> {
+  const params: Record<string, string | number> = {};
+  if (choices?.express) params['express'] = 'true';
+  if (choices?.fulfillmentSelections && Object.keys(choices.fulfillmentSelections).length > 0) {
+    params['fulfillmentSelections'] = JSON.stringify(choices.fulfillmentSelections);
+  }
+  if (choices?.tipAmount != null) params['tipAmount'] = choices.tipAmount;
+  return params;
+}
+
 export const customerApi = {
   getProfile: () => api.get('/customer/profile'),
   myRating: () => api.get('/customer/rating'),
@@ -332,6 +373,13 @@ export const customerApi = {
   // Live verdict on an out-of-stock substitution the store proposed (§5.3).
   decideSubstitution: (orderId: string, lineId: string, approve: boolean) =>
     api.post(`/customer/orders/${orderId}/items/${lineId}/substitution`, { approve }),
+  // [ORDER-SPINE S1-6] The customer's own words about a direct-MMG payment:
+  // "I paid" (optionally with the wallet's reference) or "I didn't pay". The
+  // server records them beside the store's claim and holds the order when the
+  // two disagree. Unwrapped at the seam; a reference travels only with "I paid".
+  claimOrderPayment: (id: string, claim: { paid: boolean; reference?: string }) =>
+    api.post(`/customer/orders/${id}/payment-claim`, claim.paid && claim.reference ? { paid: true, reference: claim.reference } : { paid: claim.paid })
+      .then((res) => (res.data?.data ?? {}) as { orderId?: string; paymentStatus?: string; mismatch?: boolean; replayed?: boolean; mmgClaim?: unknown }),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
   redeemReferral: (code: string, token?: string) =>
@@ -343,7 +391,7 @@ export const customerApi = {
   updateAddress: (id: string, data: Partial<AddressInput>) => api.put(`/customer/addresses/${id}`, data),
   deleteAddress: (id: string) => api.delete(`/customer/addresses/${id}`),
   setDefaultAddress: (id: string) => api.put(`/customer/addresses/${id}/default`),
-  getHome: (lat?: number, lng?: number) => api.get('/customer/home', { params: { lat, lng } }),
+  getHome: (lat?: number, lng?: number, signal?: AbortSignal) => api.get('/customer/home', { params: { lat, lng }, signal }),
   getVendors: (params?: Record<string, string>) => api.get('/customer/vendors', { params }),
   // [B15] Flag a public review for the moderation queue (R7). One report per
   // (rating, reporter) — the server answers calm idempotence, never an error.
@@ -357,7 +405,11 @@ export const customerApi = {
   searchTrending: () => api.get('/search/trending'),
   getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
-  getItemSlots: (itemId: string, date: string) => api.get(`/customer/items/${itemId}/slots`, { params: { date } }),
+  getItemSlots: (itemId: string, date: string, config?: AxiosRequestConfig) =>
+    api.get(`/customer/items/${itemId}/slots`, {
+      ...config,
+      params: { ...config?.params, date },
+    }),
   getFavorites: () => api.get('/customer/favorites'),
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),
@@ -371,6 +423,10 @@ export const customerApi = {
     return api.get('/customer/orders', Object.keys(params).length > 0 ? { params } : undefined);
   },
   validatePromo: (code: string) => api.post('/customer/promo/validate', { code }),
+  // [E01-B] Remove the applied promo from the cart: the quote re-prices
+  // without it and checkout stops sending it. (The web cart cannot remove a
+  // promotion yet; the phone can.)
+  removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   getOrder: (id: string) => api.get(`/customer/orders/${id}`),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message, cancellationFee } } inside the axios
@@ -390,22 +446,22 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
-  }, idempotencyKey: string) =>
+  }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
-    // only when the order is placed or the cart changes. The server refuses
+    // only when the order is placed or an unsent cart intent changes. The server refuses
     // a concurrent twin and replays a finished one — so a double tap, a
     // timed-out response and a reopened app all resolve to ONE order.
-    api.post('/customer/checkout', data, {
+    api.post('/customer/checkout', data, capturedAuthConfig(session, {
       headers: { 'Idempotency-Key': idempotencyKey },
-    }),
+    })),
   /** [MOB-020] What became of a checkout attempt whose answer never arrived:
    *  placed (the receipt), in flight (the key is claimed), or nothing. Asked
    *  BEFORE a different order is placed over an unresolved one. */
-  checkoutReceipt: (idempotencyKey: string) =>
-    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`),
+  checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
-  reorder: (id: string) => api.post(`/customer/orders/${id}/reorder`, {}),
+  reorder: (id: string, session?: AuthSessionSnapshot) => api.post(`/customer/orders/${id}/reorder`, {}, capturedAuthConfig(session)),
   ratingTags: () => api.get('/customer/rating-tags'),
   itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>
     api.post(`/customer/orders/${id}/item-feedback`, body),
@@ -422,22 +478,24 @@ export const customerApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/customer/orders/${id}/rate`, body, capturedAuthConfig(session)),
   // Cart
-  getCart: (lat?: number, lng?: number) => api.get('/customer/cart', { params: { lat, lng } }),
+  getCart: (lat?: number, lng?: number, choices?: CartQuoteChoices) =>
+    api.get('/customer/cart', { params: { lat, lng, ...cartQuoteParams(choices) } }),
   addToCart: (data: {
     vendorId: string;
     itemId: string;
     quantity?: number;
     selectedOptions?: Record<string, unknown>;
     specialInstructions?: string;
-  }) => api.post('/customer/cart/items', data),
+  }, session?: AuthSessionSnapshot) => api.post('/customer/cart/items', data, capturedAuthConfig(session)),
   updateCartItem: (
     id: string,
     data: { quantity: number; selectedOptions?: Record<string, unknown>; specialInstructions?: string },
-  ) => api.put(`/customer/cart/items/${id}`, data),
-  removeCartItem: (id: string) => api.delete(`/customer/cart/items/${id}`),
-  clearCart: () => api.delete('/customer/cart'),
-  setCartAddress: (addressId: string) => api.put('/customer/cart/address', { addressId }),
-  setCartTip: (amount: number) => api.put('/customer/cart/tip', { amount }),
+    session?: AuthSessionSnapshot,
+  ) => api.put(`/customer/cart/items/${id}`, data, capturedAuthConfig(session)),
+  removeCartItem: (id: string, session?: AuthSessionSnapshot) => api.delete(`/customer/cart/items/${id}`, capturedAuthConfig(session)),
+  clearCart: (session?: AuthSessionSnapshot) => api.delete('/customer/cart', capturedAuthConfig(session)),
+  setCartAddress: (addressId: string, session?: AuthSessionSnapshot) => api.put('/customer/cart/address', { addressId }, capturedAuthConfig(session)),
+  setCartTip: (amount: number, session?: AuthSessionSnapshot) => api.put('/customer/cart/tip', { amount }, capturedAuthConfig(session)),
 };
 
 // Taxi / rides (mounted at /api/v1/rides)
@@ -450,11 +508,45 @@ export interface TierEstimate {
   capacity: number;
   source: 'zone_table' | 'formula';
 }
+/** [TAXI multi-stop] One intermediate stop as /rides/estimate and
+ *  /rides/request take it — no sequence: the server numbers them in order. */
+export interface TaxiStopInput {
+  lat: number;
+  lng: number;
+  address: string;
+}
+/** [TAXI multi-stop] One leg of a quoted route, in route order (PICKUP,
+ *  STOP_1..STOP_3, DESTINATION). `seconds` is null when routing gave none. */
+export interface EstimateLeg {
+  from: string;
+  to: string;
+  meters: number;
+  seconds: number | null;
+}
 export interface TieredEstimate {
   tiers: TierEstimate[];
   currencyCode: string;
   distanceKm: number;
   durationMin: number;
+  /** Present on a quote WITH stops only (the multi-stop contract). */
+  legs?: EstimateLeg[];
+  maxStops?: number;
+  stopCount?: number;
+  /** [TAXI waiting charge] The terms shown beside the fare, when the server sends them. */
+  waiting?: unknown;
+}
+/** The ride request body. `stops` and `expectedFare` travel only on a ride
+ *  WITH stops; a ride without them sends exactly today's body. */
+export interface RideRequestBody {
+  pickup: Point;
+  dropoff: Point;
+  pickupAddress: string;
+  dropoffAddress: string;
+  passengerCount?: number;
+  rideClass?: RideClass;
+  stops?: TaxiStopInput[];
+  /** The fare of the chosen class from the latest quote of exactly this itinerary. */
+  expectedFare?: number;
 }
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */
@@ -575,7 +667,13 @@ export const moderationApi = {
 };
 
 export const rideApi = {
-  estimate: (pickup: Point, dropoff: Point) => api.post('/rides/estimate', { pickup, dropoff }),
+  // [TAXI multi-stop] With stops, the whole route is quoted as one trip; with
+  // none (absent or empty) the body is exactly today's — no `stops` key at all.
+  estimate: (pickup: Point, dropoff: Point, stops?: readonly TaxiStopInput[]) =>
+    api.post('/rides/estimate', stops && stops.length > 0 ? { pickup, dropoff, stops } : { pickup, dropoff }),
+  /** [TAXI multi-stop] How many stops this server takes ({ maxStops }). An
+   *  older server has no such read; the app treats that as 0 (no stops). */
+  capabilities: (session?: AuthSessionSnapshot) => api.get('/rides/capabilities', capturedAuthConfig(session)),
   // Availability spec §1/§2.1: buckets only (GOOD/LOW/NONE), never counts.
   availability: (p: Point) => api.get(`/rides/availability?lat=${p.lat}&lng=${p.lng}`),
   watchAvailability: (p: Point) => api.post('/rides/availability/watch', p),
@@ -594,17 +692,18 @@ export const rideApi = {
   }) => api.post('/rides/queue/join', data),
   queueLeave: () => api.post('/rides/queue/leave', {}),
   queueStatus: () => api.get('/rides/queue'),
-  request: (data: {
-    pickup: Point;
-    dropoff: Point;
-    pickupAddress: string;
-    dropoffAddress: string;
-    passengerCount?: number;
-    rideClass?: RideClass;
-  }) => api.post('/rides/request', data),
+  // [TAXI multi-stop] The key is the booking INTENT's (lib/rideRequestAttempt):
+  // the same on every retry of this trip, so a lost answer is replayed by the
+  // server instead of becoming a second booking.
+  // Pinned to the account that tapped Request (`session`), never to whoever is
+  // signed in by the time the request leaves.
+  request: (data: RideRequestBody, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.post('/rides/request', data, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
+  /** [E19] The passenger's own eyes override the driver-arrival GPS gate. */
+  confirmDriverArrival: (id: string) => api.post(`/rides/${id}/confirm-driver-arrival`, {}),
   sos: (id: string, coords?: { lat: number; lng: number }) =>
     api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}),
 };
@@ -670,6 +769,28 @@ export const courierApi = {
     body: { outcome: 'paid' | 'refused'; gps: { lat: number; lng: number } },
     session?: AuthSessionSnapshot,
   ) => api.post(`/courier/order/${id}/collect`, body, capturedAuthConfig(session)),
+  // [E17] The mover can't deliver: start a return with a reason + GPS, then
+  // close it with the return photo (lat/lng ride the multipart form fields).
+  return: (
+    id: string,
+    body: { reason: string; gps?: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/return`, body, capturedAuthConfig(session)),
+  returnProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/courier/order/${id}/return-proof`, form, capturedAuthConfig(session, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })),
+  // E16: pickup custody proof — upload the captured pickup photo, then confirm
+  // pickup with the returned URL + GPS. The server refuses the bare pickup tap.
+  uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })),
+  pickupProof: (
+    id: string,
+    body: { proofPhotoUrl: string; gps: { lat: number; lng: number } },
+    session?: AuthSessionSnapshot,
+  ) => api.post(`/courier/order/${id}/pickup-proof`, body, capturedAuthConfig(session)),
 };
 
 // Services (mounted at /api/v1/services)
@@ -766,6 +887,12 @@ export const partnerApi = {
     };
   }, session?: AuthSessionSnapshot) =>
     api.post('/partner/become', data, capturedAuthConfig(session)),
+  /** [VEHICLES] Change the vehicle a mover works with: offline until its documents are approved. */
+  changeVehicle: (data: {
+    vehicleType: VehicleKind;
+    vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
+  }, session?: AuthSessionSnapshot) =>
+    api.put('/partner/vehicle', data, capturedAuthConfig(session)),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
@@ -792,9 +919,11 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (
     id: string,
-    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
+    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
+  uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/orders/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
   // Intermediate delivery-leg transitions. The state machine walks
   // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
   // en-route-delivery → arrived → handover/delivered. Without these the rider
@@ -805,7 +934,7 @@ export const riderApi = {
   enRouteDelivery: (id: string) => api.put(`/rider/orders/${id}/en-route-delivery`),
   arrivedAtCustomer: (id: string) => api.put(`/rider/orders/${id}/arrived`),
   /** [MOB-023] Echoes the handover authority version the screen rendered; the server refuses a stale one. */
-  delivered: (id: string, body?: { handoverVersion?: string }) => api.put(`/rider/orders/${id}/delivered`, body ?? {}),
+  delivered: (id: string, body?: { handoverVersion?: string; ridePin?: string }) => api.put(`/rider/orders/${id}/delivered`, body ?? {}),
   // G14: pre-pickup only — the server refuses with CUSTODY after pickup.
   handback: (id: string, reason: string) => api.post(`/rider/orders/${id}/handback`, { reason }),
   earningsToday: () => api.get('/rider/earnings/today'),
@@ -819,10 +948,14 @@ export const riderApi = {
   demand: (p: Point) => api.get(`/rider/demand?lat=${p.lat}&lng=${p.lng}`),
   // MMG cash ledger — delivery fees stores owe me (customer paid the store)
   cashSettlements: () => api.get('/rider/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/rider/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (id: string, amount: number, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/cash-settlements/${id}/confirm`, { amount }, capturedAuthConfig(session)),
   history: (params?: { page?: number; limit?: number }) => api.get('/rider/orders', { params }),
   stats: () => api.get('/rider/stats'),
   subscription: () => api.get('/rider/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
+    api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -838,8 +971,13 @@ export const driverApi = {
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/driver/profile/mmg-pay-url/pending'),
-  goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
-    api.post('/driver/go-online', { latitude, longitude }, capturedAuthConfig(session)),
+  // [TAXI multi-stop] `capabilities` is sent ONLY when the caller passes it —
+  // that is, only when the server has advertised rides with stops (CONTRACT
+  // §6.4). Without it the body is exactly today's { latitude, longitude }.
+  goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot, capabilities?: readonly string[]) =>
+    api.post('/driver/go-online', capabilities && capabilities.length > 0
+      ? { latitude, longitude, capabilities: [...capabilities] }
+      : { latitude, longitude }, capturedAuthConfig(session)),
   goOffline: () => api.post('/driver/go-offline'),
   location: (latitude: number, longitude: number, session?: AuthSessionSnapshot, fix?: { accuracy?: number | null; mocked?: boolean | null }) =>
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
@@ -856,6 +994,12 @@ export const driverApi = {
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
   verifyPin: (id: string, pin: string) => api.put(`/driver/rides/${id}/verify-pin`, { pin }),
   start: (id: string) => api.put(`/driver/rides/${id}/start`),
+  // [TAXI multi-stop · part 4] The stop actions, each on the NEXT open stop
+  // only (else 409 STOP_OUT_OF_ORDER); a repeat tap is safe server-side. The
+  // screen offers them only when the server shows it has them (stopWait).
+  stopArrived: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/arrived`),
+  stopDepart: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/depart`),
+  stopSkip: (id: string, sequence: number, reason: string) => api.post(`/driver/rides/${id}/stops/${sequence}/skip`, { reason }),
   // [M-29] The fare outcome at the destination — a cash ride's completion.
   // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
   // captures the fare and completes the ride in one commit; 'refused' /
@@ -867,6 +1011,8 @@ export const driverApi = {
     body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string },
     session?: AuthSessionSnapshot,
   ) => api.post(`/driver/rides/${id}/handover`, body, capturedAuthConfig(session)),
+  uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
+    api.post(`/driver/rides/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
@@ -879,6 +1025,9 @@ export const driverApi = {
   rateCustomer: (id: string, score: number, comment?: string) =>
     api.post(`/driver/rides/${id}/rate-customer`, { score, ...(comment ? { comment } : {}) }),
   subscription: () => api.get('/driver/subscription'),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
+    api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
     api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -903,14 +1052,14 @@ export interface VendorItemInput {
 }
 
 export const vendorApi = {
-  profile: () => api.get('/vendor/profile'),
+  profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
   toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
   toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
-  order: (id: string) => api.get(`/vendor/orders/${id}`),
+  order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
   acceptOrder: (id: string) => api.put(`/vendor/orders/${id}/accept`),
   // [W-25] a store's attestation carries the provider reference from its own wallet message
   confirmPayment: (id: string, reference: string) => api.post(`/vendor/orders/${id}/confirm-payment`, { reference }),
@@ -926,15 +1075,31 @@ export const vendorApi = {
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
-  confirmCashSettlement: (id: string) => api.post(`/vendor/cash-settlements/${id}/confirm`, {}),
+  confirmCashSettlement: (
+    id: string,
+    amount: number,
+    session?: AuthSessionSnapshot,
+    storeId?: string | null,
+  ) => api.post(
+    `/vendor/cash-settlements/${id}/confirm`,
+    { amount },
+    capturedVendorAuthConfig(session, storeId),
+  ),
   preparing: (id: string) => api.put(`/vendor/orders/${id}/preparing`),
   ready: (id: string) => api.put(`/vendor/orders/${id}/ready`),
+  delivered: (id: string) => api.put(`/vendor/orders/${id}/delivered`),
+  setFulfillmentMode: (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
+    api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
-  reject: (id: string, reason?: string) => api.put(`/vendor/orders/${id}/reject`, reason ? { reason } : {}),
+  // [E10] The API refuses a rejection without a reason; every caller passes one.
+  reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
   items: () => api.get('/vendor/items'),
-  subscription: () => api.get('/vendor/subscription'),
+  subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
+  /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
+  setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedVendorAuthConfig(session, storeId)),
   // Menu management
   categories: () => api.get('/vendor/categories'),
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
@@ -999,7 +1164,8 @@ export const vendorApi = {
   deleteBookingException: (id: string) => api.delete(`/vendor/bookings/exceptions/${id}`),
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean }) =>
+  // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
@@ -1103,3 +1269,27 @@ export const adsApi = {
   cancel: (campaignId: string, session?: AuthSessionSnapshot) =>
     api.post(`/ads/campaigns/${campaignId}/cancel`, {}, capturedAuthConfig(session)),
 };
+
+/** Checkout calls capture the paying principal and selected store across retries. */
+export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = `/${family}/subscription/mmg-checkout`;
+  if (!session) return { start: async () => { throw new Error('Sign in to pay.'); }, read: async () => { throw new Error('Sign in to view payment.'); } };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => family === 'vendor'
+    ? capturedVendorAuthConfig(current(), storeId, { headers })
+    : capturedAuthConfig(current(), { headers });
+  return {
+    start: async (key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
+      const response = await api.post(base, {}, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
+      const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}

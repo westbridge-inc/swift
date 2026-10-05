@@ -14,10 +14,14 @@
  * Redis adapter (production), exactly like the in-process topology; the local
  * io instance here is a broadcast-only handle with no HTTP listener.
  */
+// FIRST: secrets delivered as files (NAME_FILE) become NAME in this process
+// before any module below can read process.env. Keep this import on top.
+import './boot/secret-files';
 import Redis from 'ioredis';
 import { PrismaClient } from '@prisma/client';
 import { Server } from 'socket.io';
 import { pino } from 'pino';
+import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { assertSafeBootConfig } from './utils/boot-config';
 import { initSentry } from './plugins/observability';
@@ -34,7 +38,7 @@ async function main() {
   // loads that plugin, so it inits here.
   initSentry();
 
-  const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+  const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info', redact: loggerRedactConfig, serializers: loggerSerializers });
   const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6379', {
     maxRetriesPerRequest: null,
   });

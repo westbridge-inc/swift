@@ -1,11 +1,25 @@
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { admittedCourierPhoto } from '../cash/handover-evidence';
+import { lockIdentityAuthority } from '../integrity/identity-review';
 import { Prisma } from '@prisma/client';
-import type { PrismaClient, OrderStatus, FulfillmentType, DiscountType, PromoFunder } from '@prisma/client';
+import type {
+  PrismaClient,
+  Order,
+  OrderStatus,
+  FulfillmentType,
+  FulfillmentMode,
+  DiscountType,
+  PromoFunder,
+} from '@prisma/client';
 import type { Server } from 'socket.io';
-import { clampDriverFare, deliveryFeeFromRates, expressDeliveryFee, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
+import type Redis from 'ioredis';
+import { clampDriverFare, generateOrderNumber, type DeliveryRates } from '../../utils/markup';
 import { getMapsProvider, type MapsProvider, type RouteSource } from '../../providers/maps/maps-provider';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { lineTotal, orderTotal, promoDiscount, promoCapacity, allocatePromo, allocateAcrossLines, type PromoAllocation } from '../../utils/order-total';
+import { allocateAcrossLines } from '../../utils/order-total';
+import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
+import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
 import {
@@ -15,6 +29,8 @@ import {
   MOVER_HOLDING_STATUSES,
   ORDER_TRANSITIONS,
   RECOVERY_TRANSITIONS,
+  isAppointmentStatus,
+  TAXI_STOP_OPEN_STATUSES,
 } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -23,14 +39,19 @@ import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, C
 import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
-import { checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction } from './checkout-outbox';
+import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
+import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
+import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
+import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
+import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { shadowPredictAtAccept } from '../prep/prep-time';
-import { promiseAtCheckout, promiseView } from '../eta/promise';
+import { promiseAtCheckout } from '../eta/promise';
 import { AppError, ConflictError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { dispatchSearchesCounter, earningsMissingTuplesGauge, earningsRepairsCounter, taxiDeliveredUnpaidGauge, courierDeliveredUnpaidGauge } from '../../plugins/observability';
 import { randomInt } from 'node:crypto';
+import { newRidePin } from '../rides/ride-pin';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   hasTaxiPassengerCustody,
@@ -38,7 +59,9 @@ import {
 } from '../rides/passenger-custody';
 import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { subscriptionOperability } from '../subscription/operate-gate';
+import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
+import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 
 interface CheckoutInput {
   userId: string;
@@ -78,6 +101,29 @@ interface CheckoutInput {
    *  interleaving proof can attempt a concurrent child mutation and observe it
    *  block against the held lock. Never set in routes. */
   afterCartLock?: () => Promise<void>;
+  /** [CHECKOUT-IDEM · AX354 S1] The commit point, made explicit: called once,
+   *  the moment the order transaction has COMMITTED (never after a rollback),
+   *  with the receipt row it wrote and the committed answer. From then on the
+   *  order exists, and a caller holding the command's claim must keep it. */
+  onCommitted?: (commit: CheckoutCommit) => void;
+}
+
+/** What a committed checkout reports at its commit point. */
+export interface CheckoutCommit {
+  /** The receipt row written inside the order transaction; null for a checkout without an idempotency key. */
+  receiptId: string | null;
+  /** The committed answer: the value the receipt holds. */
+  answer: CheckoutAnswer;
+}
+
+/** An order as the checkout transaction creates it (the post-commit notices read these fields). */
+type CheckoutCreatedOrder = Prisma.OrderGetPayload<{ include: { items: true; vendor: { select: { id: true; name: true; ownerId: true } } } }>;
+
+/** What the checkout transaction's body hands to COMMIT. */
+interface CheckoutStaged {
+  orders: CheckoutCreatedOrder[];
+  answer: CheckoutAnswer;
+  receiptId: string | null;
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -277,6 +323,29 @@ function isCancellationTerminalization(sourceStatus: OrderStatus, target: OrderS
     || (target === 'REFUNDED' && !ORDER_TRANSITIONS.REFUNDED.includes(sourceStatus));
 }
 
+/** [E16-B] The door photo the server issued, recorded, to the rider who holds the job. */
+function courierDeliveryProofBound(order: Pick<Order,
+  'riderId' | 'courierProofIssuedUrl' | 'courierProofIssuedRiderId' | 'courierProofPhotoUrl'>): boolean {
+  return order.courierProofPhotoUrl !== null
+    && order.courierProofPhotoUrl === order.courierProofIssuedUrl
+    && order.riderId !== null
+    && order.courierProofIssuedRiderId === order.riderId;
+}
+
+/** [E16] A courier pickup's custody proof is bound on the row: the photo is
+ *  exactly the URL the server issued, it was issued to the rider who holds the
+ *  job, and the rider's location at pickup is recorded. */
+function courierPickupProofBound(order: Pick<Order,
+  'riderId' | 'courierPickupProofIssuedUrl' | 'courierPickupProofIssuedRiderId'
+  | 'courierPickupProofPhotoUrl' | 'courierPickupProofLat' | 'courierPickupProofLng'>): boolean {
+  return order.courierPickupProofPhotoUrl !== null
+    && order.courierPickupProofPhotoUrl === order.courierPickupProofIssuedUrl
+    && order.riderId !== null
+    && order.courierPickupProofIssuedRiderId === order.riderId
+    && order.courierPickupProofLat !== null
+    && order.courierPickupProofLng !== null;
+}
+
 // ---------------------------------------------------------------------------
 // LIFECYCLE_V2 hold (spec Part A). While holdExpiresAt is in the FUTURE the
 // order is hidden from the vendor and undispatched — the customer's free-cancel
@@ -297,14 +366,77 @@ export function holdWindowMs(): number | null {
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
 
-/** Prisma WHERE fragment: only orders a vendor/mover is allowed to see. */
-export function notHeldFilter() {
-  return { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] };
-}
+// The store-visibility rule lives in a leaf the socket door can import too
+// [Q12]; re-exported so every existing importer is untouched.
+export { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter };
+
+/** [Q12] Optional observation seam for deterministic race certification of
+ *  the hold release (the mmgClaimLockObserver pattern). `beforeRelease` runs
+ *  once the sweep holds the order as due, before its release CAS;
+ *  `afterRelease` runs after that CAS committed, before the store is alerted.
+ *  Production never sets it and it never changes a decision. */
+export const holdReleaseObserver: {
+  beforeRelease?: (ctx: { orderId: string }) => Promise<void>;
+  afterRelease?: (ctx: { orderId: string }) => Promise<void>;
+} = {};
 
 /** A held order = pre-release: hidden, undispatched, freely cancellable. */
 export function isHeld(order: { holdExpiresAt: Date | null }, now = new Date()): boolean {
   return order.holdExpiresAt != null && order.holdExpiresAt > now;
+}
+
+/** [Q12] The store's own counters (vendor.totalOrders, item.totalOrdered)
+ *  count an order the moment the store can see it — at checkout for an order
+ *  that is never held, inside the release CAS for a held one — so each order
+ *  counts exactly once, and one cancelled inside its hold never counts. */
+async function countOrderForStore(tx: Prisma.TransactionClient, vendorId: string, itemIds: string[]): Promise<void> {
+  await tx.vendor.updateMany({ where: { id: vendorId }, data: { totalOrders: { increment: 1 } } });
+  await tx.item.updateMany({ where: { id: { in: itemIds } }, data: { totalOrdered: { increment: 1 } } });
+}
+
+/** [Q12 · AX289 F1] THE release of a held order to its store, inside the
+ *  caller's transaction: the hold is cleared, releasedToVendorAt stamped and
+ *  the store's counters count the order. One compare-and-set on
+ *  releasedToVendorAt IS NULL over an expired hold, shared by the release
+ *  sweep and by the store's first action on an order whose hold lapsed before
+ *  the sweep reached it — whichever commits second matches nothing, so the
+ *  order counts exactly once whoever wins. `statusIn` is the sweep's own
+ *  guard (a cancel that landed first leaves nothing to release). Returns the
+ *  released order's store facts, or null when there was nothing to release. */
+async function releaseHoldInTransaction(
+  tx: Prisma.TransactionClient,
+  orderId: string,
+  opts: { now?: Date; statusIn?: OrderStatus[] } = {},
+): Promise<{ vendorId: string | null; tenantId: string } | null> {
+  const now = opts.now ?? new Date();
+  const res = await tx.order.updateMany({
+    where: {
+      id: orderId,
+      releasedToVendorAt: null,
+      holdExpiresAt: { not: null, lte: now },
+      ...(opts.statusIn ? { status: { in: opts.statusIn } } : {}),
+    },
+    data: { holdExpiresAt: null, releasedToVendorAt: now },
+  });
+  if (res.count === 0) return null;
+  const released = await tx.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { vendorId: true, tenantId: true, items: { select: { itemId: true } } },
+  });
+  if (released.vendorId) await countOrderForStore(tx, released.vendorId, released.items.map((i) => i.itemId));
+  return { vendorId: released.vendorId, tenantId: released.tenantId };
+}
+
+/** [Q12 · AX289 F1] The store's first action (accept, reject) on an order
+ *  whose hold lapsed before the release sweep reached it: the board shows the
+ *  order from its holdExpiresAt on, and the action moves it out of PENDING —
+ *  out of the sweep's reach — so the action releases it itself, in its own
+ *  transaction, exactly as the sweep would have (hold cleared, release
+ *  stamped, the store's counters counted). A no-op for an order that was
+ *  never held or is already released. The store is acting on the order, so
+ *  no alert and no ladder. */
+export async function releaseLapsedHoldInTransaction(tx: Prisma.TransactionClient, orderId: string): Promise<boolean> {
+  return (await releaseHoldInTransaction(tx, orderId)) !== null;
 }
 
 const RIDER_ASSIGNMENT_SNAPSHOT_SELECT = {
@@ -322,6 +454,10 @@ const RIDER_ASSIGNMENT_SNAPSHOT_SELECT = {
   // matches what picking/refunds may have changed before the lock was taken.
   paymentMethod: true,
   subtotalBase: true,
+  // Dispatch cleanup must retire only the assignment generation that this
+  // locked snapshot actually claimed. Returning the authority version keeps
+  // the post-commit Redis cleanup from guessing against a later mode switch.
+  fulfillmentModeVersion: true,
   rider: { select: { user: { select: { firstName: true } } } },
 } as const satisfies Prisma.OrderSelect;
 
@@ -353,6 +489,7 @@ type EarningNotice = {
 };
 
 export interface CanonicalOrderTransitionInput {
+  serializeIdentity?: boolean;
   orderId: string;
   target: OrderStatus;
   allowedFrom: readonly OrderStatus[];
@@ -384,7 +521,13 @@ export interface CanonicalOrderTransitionInput {
    * commits only while this rider still owns the order. A route-level
    * ownership pre-read cannot survive a watchdog release or reassignment
    * committing before the lock — this can. */
-  expectedRiderId?: string;
+  expectedRiderId?: string | null;
+  /** Optional locked-row custody predicates for role-specific commands. A
+   * route pre-read is authorization UX only; physical ownership is proved
+   * again here, in the same transaction as the state transition. */
+  expectedDriverId?: string | null;
+  expectedFulfillment?: FulfillmentType;
+  expectedFulfillmentMode?: FulfillmentMode;
   /** Legacy cancel routes historically healed null/dangling mover pointers.
    * Strict state-machine completions leave every different pointer untouched. */
   releaseStaleMoverPointer?: boolean;
@@ -392,7 +535,7 @@ export interface CanonicalOrderTransitionInput {
    * Order-lock commit (e.g. the appointment slot reservation at vendor
    * acceptance). Runs AFTER the status write and cleanup on the same locked
    * row; a throw rolls the whole transition back. Must not publish. */
-  withinTransaction?: (tx: Prisma.TransactionClient) => Promise<void>;
+  withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
   /** Admin's explicit action evidence belongs in the same commit as the order
    * state. The generic after-response route audit remains defence in depth. */
   operatorAudit?: {
@@ -432,6 +575,11 @@ export class OrderService {
      *  floatRequired mirrors dispatch's cash-float gate so the probe counts only
      *  riders that could actually take THIS order. */
     private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number) => Promise<{ level: string }>,
+    /** [DISPATCH 1/3 · B4] Where live offer cards are kept. A cancellation
+     *  withdraws the card of the order it closes (withdrawLiveOffer). Every
+     *  production construction passes it, which offer-withdrawal-census.test.ts
+     *  enforces; without it (unit tests, scripts) the withdrawal is skipped. */
+    private offerStore?: Redis,
   ) {
     this.notifications = new NotificationService(prisma, io);
     this.countryConfig = new CountryConfigService(prisma);
@@ -458,7 +606,7 @@ export class OrderService {
       requestedFee?: number;
       moverUserId: string;
     },
-  ): Promise<RiderAssignmentSnapshot> {
+  ): Promise<RiderAssignmentSnapshot & { dispatchAssignmentSequence: number }> {
     // [SPS-F-0016] Direct claims (boards / dispatch accept) don't pass the
     // canonical transition seam, so the MMG payment-first gate is re-checked
     // here — inside the same transaction, before the CAS — covering legacy
@@ -472,10 +620,12 @@ export class OrderService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const paymentGate = await tx.order.findUnique({
       where: { id: input.orderId },
-      select: { paymentMethod: true, paymentStatus: true, orderType: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
+      select: { paymentMethod: true, paymentStatus: true, orderType: true, status: true, holdExpiresAt: true, deliveryFee: true, fulfillment: true, mmgClaimMismatchAt: true },
     });
     if (paymentGate) {
       assertMmgFulfilmentAllowed(paymentGate, 'RIDER_ASSIGNED');
+      if (withheldAwaitingReadiness(paymentGate)) throw new AppError(409, 'ORDER_NOT_READY', 'The store has not marked this order ready');
+      if (!dispatchHoldExpired(paymentGate)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
       if (paymentGate.fulfillment !== 'DELIVERY') {
         throw new ConflictError('This order no longer needs a rider — the customer switched it to pickup');
       }
@@ -507,13 +657,17 @@ export class OrderService {
         id: input.orderId,
         customerId: { not: input.moverUserId },
         riderId: null,
-        status: { in: ORDER_TRANSITIONS.RIDER_ASSIGNED },
+        status: { in: riderDispatchableStatusesFor(paymentGate?.orderType) },
         // [REPORT-006 F-006-03] Riders are assigned to DELIVERY work only —
         // a converted (PICKUP) or appointment order matches nothing here.
         fulfillment: 'DELIVERY',
         // [TA-S0-001 hold] An order held for a person (too old, already paid
         // by MMG) is not claimable by anyone but an operator's decision.
         foodAgeHeldAt: null,
+        // Delivery authority is part of the claim CAS. A board card or stale
+        // request may outlive the vendor choosing its own courier; that stale
+        // request must never create split custody by attaching a Swift rider.
+        AND: [notSelfDeliveredFilter(), dispatchHoldExpiredFilter()],
       },
       data: {
         riderId: input.riderId,
@@ -532,7 +686,7 @@ export class OrderService {
     // a refusal names its rule and rolls the whole claim back.
     const stackCapacity = await riderStackingCapacity(this.prisma);
     if (stackCapacity > 1) {
-      const verdict = await stackVerdict(tx, input.riderId, input.orderId);
+      const verdict = await stackVerdict(tx, input.riderId, input.orderId, stackCapacity);
       if (!verdict.eligible && verdict.legs > 0) {
         throw new ConflictError(
           `This job can't be stacked with your current delivery (${verdict.rule}: ${verdict.detail})`,
@@ -555,10 +709,14 @@ export class OrderService {
       },
     });
 
-    return tx.order.findUniqueOrThrow({
+    const assigned = await tx.order.findUniqueOrThrow({
       where: { id: input.orderId },
       select: RIDER_ASSIGNMENT_SNAPSHOT_SELECT,
     });
+    const dispatchAssignmentSequence = await tx.orderStatusLog.count({
+      where: { orderId: input.orderId, status: 'RIDER_ASSIGNED' },
+    });
+    return { ...assigned, dispatchAssignmentSequence };
   }
 
   /** Publish live/customer hints only after the assignment transaction commits.
@@ -609,8 +767,14 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, selfieCapturedAt: true },
+      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, tenant: { select: { kind: true } } },
     });
+
+    // [STA-1 DL-5] The store-review fiction places no order: its stores and
+    // menus are fictional and it has no money rail. Refused here, before any
+    // write, outbox row (the vendor alert ladder ends in an SMS), MMG hand-off
+    // or dispatch — the reviewer reads the reason under the Place-order button.
+    if (user.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError();
 
     // Strike consequences: repeated failed cash handovers
     // restrict ordering to verified accounts, then ban outright
@@ -622,21 +786,19 @@ export class OrderService {
       throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering requires ID verification. Verify your identity to continue.');
     }
 
-    // Universal signup selfie (master plan §3): every account carries a live
-    // profile photo before transacting — the vendor/mover sees who is ordering.
-    if (!user.selfieCapturedAt) {
-      throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before placing orders — it takes a few seconds in the app.');
-    }
+    // [E27] No profile selfie to place an ordinary order (food, grocery,
+    // retail, services). Owner rule: "Do not require an ordinary customer
+    // profile selfie merely to browse/order." The selfie stays where Swift
+    // puts a stranger in front of the account: booking a taxi (rides.service)
+    // and a mover going online. The strike restriction above and the
+    // high-value checks below are unchanged.
 
-    // Group the cart by vendor — a multi-vendor cart splits into one order each
-    const groups = new Map<string, typeof cart.items>();
-    for (const ci of cart.items) {
-      const list = groups.get(ci.item.vendorId) ?? [];
-      list.push(ci);
-      groups.set(ci.item.vendorId, list);
-    }
+    // Group the cart by vendor — a multi-vendor cart splits into one order each.
+    // [E01] The cart quote groups through the same function, in the same order,
+    // so each quoted vendor row is the order written here.
+    const groups = groupLinesByVendor(cart.items);
 
-    if (input.paymentMethod === 'MOBILE_MONEY' && groups.size !== 1) {
+    if (input.paymentMethod === 'MOBILE_MONEY' && groups.length !== 1) {
       throw new AppError(
         400,
         'MMG_MULTI_VENDOR_UNSUPPORTED',
@@ -680,7 +842,7 @@ export class OrderService {
       }>;
     }> = [];
 
-    for (const [vendorId, items] of groups) {
+    for (const { vendorId, lines: items } of groups) {
       const vendor = items[0]!.item.vendor;
       if (!vendor.isCurrentlyOpen || !vendor.acceptingOrders || vendor.status !== 'ACTIVE') {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
@@ -694,7 +856,7 @@ export class OrderService {
       const vendorSub = await this.prisma.subscription.findFirst({
         where: { vendorId: vendor.id },
         orderBy: { createdAt: 'desc' },
-        select: { status: true, gracePeriodEnd: true },
+        select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
       });
       const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
       if (!vendorOperability.operable) {
@@ -765,11 +927,14 @@ export class OrderService {
         }
       }
 
+      // [E01] The group's mode comes from the rule the cart quote prices with: a
+      // booking line makes it an APPOINTMENT, anything else takes the customer's
+      // selection (DELIVERY when none).
+      const fulfillment: FulfillmentType = planFulfillment(items, input.fulfillmentSelections?.[vendorId]);
       const appointmentItems = items.filter((ci) => ci.item.fulfillment === 'APPOINTMENT');
-      let fulfillment: FulfillmentType;
       let appointmentSlot: Date | undefined;
 
-      if (appointmentItems.length > 0) {
+      if (fulfillment === 'APPOINTMENT') {
         if (appointmentItems.length !== items.length || items.length !== 1) {
           throw new AppError(400, 'MIXED_FULFILLMENT', 'Book appointments separately from goods');
         }
@@ -779,17 +944,13 @@ export class OrderService {
           throw new AppError(400, 'SLOT_REQUIRED', `Pick a time slot for ${only.item.name}`);
         }
         // Validates config, day window, alignment, and that it's in the future.
-        // The slot is RESERVED at vendor acceptance, not here.
+        // The slot is RESERVED at vendor acceptance, not here — but one another
+        // customer already holds is refused now, never left pending [Q12].
         await this.booking.validateSlot(only.itemId, slot);
-        fulfillment = 'APPOINTMENT';
+        await this.booking.assertSlotFree(only.itemId, slot);
         appointmentSlot = slot;
-      } else {
-        fulfillment = input.fulfillmentSelections?.[vendorId] ?? 'DELIVERY';
       }
 
-      let distanceKm = 0;
-      let distanceSource: RouteSource | null = null;
-      let deliveryFee = 0;
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
         // §2 checkout gate (availability spec, flag-gated): zero riders online
@@ -815,23 +976,29 @@ export class OrderService {
             );
           }
         }
-        // Real road km when OSRM is configured; deterministic estimate otherwise.
-        const route = await this.maps.routeKm(
-          { lat: vendor.latitude, lng: vendor.longitude },
-          { lat: address.latitude, lng: address.longitude },
-        );
-        // [ALG-18] Canonical BEFORE pricing: the fee and the frozen number are one number.
-        distanceKm = canonicalBillableKm(route.km);
-        distanceSource = route.source;
-        if (distanceKm > vendor.deliveryRadius) {
-          throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
-        }
-        deliveryFee = deliveryFeeFromRates(distanceKm, deliveryRates);
-        // Express mirrors the courier EXPRESS multiplier. The premium is part of
-        // the fee the rider collects in cash — it is THEIR upside. Same helper
-        // the cart quote uses, so the preview and the charge never disagree.
-        if (input.express) deliveryFee = expressDeliveryFee(deliveryFee);
-      } else if (fulfillment === 'APPOINTMENT') {
+      }
+
+      // [E01 · ALG-24] Price the group through the ONE planner the cart quote
+      // uses — the same line prices, the same canonical road km (real road km
+      // when OSRM is configured, a deterministic estimate otherwise), the same
+      // fee schedule and the same express premium (the rider's cash upside).
+      // Eligibility stays here; the planner only prices.
+      const plan = await planVendorGroup({
+        vendor,
+        lines: items,
+        fulfillment,
+        // A DELIVERY group always has an address by now (NO_ADDRESS above).
+        destination: address ? { lat: address.latitude, lng: address.longitude } : null,
+        deliveryRates,
+        express: input.express === true,
+        routeKm: (from, to) => this.maps.routeKm(from, to),
+      });
+      let distanceKm = plan.distanceKm;
+      let distanceSource: RouteSource | null = plan.distanceSource;
+      if (fulfillment === 'DELIVERY' && distanceKm > vendor.deliveryRadius) {
+        throw new AppError(400, 'OUT_OF_RANGE', `${vendor.name} only delivers within ${vendor.deliveryRadius} km. You are ${distanceKm.toFixed(1)} km away.`);
+      }
+      if (fulfillment === 'APPOINTMENT') {
         // MOBILE / BOTH services travel to the customer — require their address and
         // enforce the provider's service radius (mirrors the DELIVERY gate above).
         const bcfg = (appointmentItems[0]!.item.bookingConfig ?? {}) as { serviceMode?: string; serviceRadiusKm?: number };
@@ -863,91 +1030,74 @@ export class OrderService {
         }
       }
 
-      // Zero-commission model: the customer pays exactly the vendor's price
+      // Zero-commission model: the customer pays exactly the vendor's price.
+      // Each line is priced by the same function as the plan's subtotal.
       const orderItems = items.map((ci) => {
-        const basePrice = Number(ci.item.basePrice);
-        const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
-        const unitPrice = basePrice + optionsUnitPrice(options);
+        const line = priceCartLine(ci);
         return {
           itemId: ci.item.id,
           name: ci.item.name,
           quantity: ci.quantity,
-          basePrice,
-          unitPrice,
-          totalBase: lineTotal(unitPrice, ci.quantity),
+          basePrice: line.basePrice,
+          unitPrice: line.unitPrice,
+          totalBase: line.lineTotal,
           specialInstructions: ci.specialInstructions,
-          options,
+          options: line.options,
           tracksStock: ci.item.stockQuantity !== null,
           bulkUnits: ci.item.bulkUnits ?? null,
         };
       });
-      const subtotal = orderItems.reduce((s, i) => s + i.totalBase, 0);
 
-      if (subtotal < Number(vendor.minOrderAmount)) {
+      // [E09] THIS vendor's subtotal against ITS minimum — the verdict the cart
+      // quote shows per vendor. One short vendor refuses the whole checkout.
+      if (!plan.meetsMinimum) {
         throw new AppError(400, 'MIN_ORDER', `Minimum order at ${vendor.name} is $${Number(vendor.minOrderAmount).toLocaleString()} GYD`);
       }
 
-      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee, subtotal, orderItems });
+      plans.push({ vendor, fulfillment, appointmentSlot, distanceKm, distanceSource, deliveryFee: plan.deliveryFee, subtotal: plan.subtotal, orderItems });
     }
 
     // [REPORT-012 F-012-01] Presence, not truthiness: an explicit
-    // `tipAmount: 0` from checkout means "NO tip", and must NOT fall through
-    // (`||`) to a positive tip persisted on the cart by another surface/
-    // session — that silently charged a tip the customer just zeroed. Only an
-    // ABSENT client tip inherits the cart's stored value.
-    const tip = input.tipAmount != null ? input.tipAmount : (Number(cart.tipAmount) || 0);
-    // [REPORT-012 F-012-01] "Tip your rider" is delivery money. A basket with
-    // no DELIVERY plan (pickup / appointment-only) has no rider, so no order
-    // carries the tip — and it must not inflate grandTotal either: that figure
-    // feeds the ID gate and customer.totalSpent, and a phantom tip there
-    // corrupts threshold and accounting evidence.
-    const tipPlanIndex = plans.findIndex((p) => p.fulfillment === 'DELIVERY');
-    const effectiveTip = tipPlanIndex >= 0 ? tip : 0;
+    // `tipAmount: 0` from checkout means "NO tip"; only an ABSENT client tip
+    // inherits the cart's stored value (resolveTip — the quote's rule too).
+    const tip = resolveTip(input.tipAmount, cart.tipAmount);
 
-    let discount = 0;
     let promoCodeId: string | null = null;
     let promoVendorId: string | null = null;
     // [M-32] The terms the order is priced under, snapshotted on its redemption.
     let promoTerms: RedeemedPromoTerms | null = null;
     if (input.promoCode) {
+      // Eligibility only (exists, active, window, caps, per-user, store, the
+      // code's own minimum). The discount is priced by priceBasket below.
       const promo = await this.validatePromoCode(
         input.promoCode,
         input.userId,
-        plans.map((p) => ({ vendorId: p.vendor.id, subtotal: p.subtotal, deliveryFee: p.deliveryFee })),
+        plans.map((p) => ({ vendorId: p.vendor.id, subtotal: p.subtotal })),
       );
-      discount = promo.discount;
       promoCodeId = promo.id;
       promoVendorId = promo.vendorId;
       promoTerms = promo.terms;
     }
-    const promoFunder = promoTerms?.funder ?? null;
 
-    // [REPORT-034 S1] A discount can never exceed what the basket it targets is
-    // able to absorb. A FIXED_AMOUNT promo takes its value verbatim (see
-    // validatePromoCode), so a $5,000 code on a $1,200 basket used to subtract
-    // the whole $5,000 here — while each stored order clamped its own total at
-    // zero further down. The result was a response `grandTotal` that disagreed
-    // with the rows it summarised, and a lifetime `totalSpent` that could be
-    // DECREMENTED by placing an order. Swift never owes a customer money: the
-    // floor is zero, and it belongs at the point the discount is decided so
-    // that every consumer below — the per-plan allocation, the stored totals,
-    // the receipt and the spend ledger — reads the same number.
-    //
-    // The capacity mirrors the allocation rule used later: a vendor promo can
-    // only be absorbed by ITS vendor's plan; a platform code by the whole
-    // basket. Tip rides whichever plan carries it.
-    const promoPlanIdxForCap = promoVendorId ? plans.findIndex((p) => p.vendor.id === promoVendorId) : -1;
-    // [M-32] The capacity is what the promo's FUNDER may discount: the goods,
-    // plus the delivery fee only for a platform code (a store's promotion is
-    // not the rider's fee to give away). The tip is never in it — a promised
-    // tip is the mover's, and no sponsor rail exists to fund it. Before, the
-    // tip sat inside the capacity, so a code larger than goods + fee ate the
-    // rider's tip while the tip earning was still minted in full.
-    const discountCapacity = (promoPlanIdxForCap >= 0 ? [promoPlanIdxForCap] : plans.map((_, i) => i)).reduce(
-      (sum, i) => sum + promoCapacity(promoFunder, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null),
-      0,
-    );
-    discount = Math.min(discount, Math.max(0, discountCapacity));
+    // [E01 · ALG-24] The basket is priced by the ONE function the cart quote
+    // calls (cart-plans priceBasket), so the total shown is the total charged:
+    //   - [REPORT-034 S1 · M-32] the discount is clamped to what its funder may
+    //     absorb — the goods, plus the delivery fee only for a platform code,
+    //     never the tip; a store's code is absorbed by its own plan only. Swift
+    //     never owes a customer money, and every consumer below (allocation,
+    //     stored totals, receipt, spend ledger) reads this one number;
+    //   - [REPORT-012 F-012-01] "tip your rider" is delivery money: it rides
+    //     the first DELIVERY plan, and a basket with none (pickup/appointment
+    //     only) carries no tip — nor does grandTotal, which feeds the ID gate
+    //     and customer.totalSpent;
+    //   - each plan's discount share, tip and total (orderTotal) are the
+    //     numbers the orders below are written with.
+    const priced = priceBasket({
+      plans: plans.map((p) => ({ vendorId: p.vendor.id, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: p.deliveryFee })),
+      promo: promoTerms ? { ...promoTerms, vendorId: promoVendorId } : null,
+      tip,
+    });
+    const discount = priced.discount;
 
     assertCashDiscountSponsored({
       paymentMethod: input.paymentMethod,
@@ -955,7 +1105,7 @@ export class OrderService {
       fulfillments: plans.map((p) => p.fulfillment),
     });
 
-    const grandTotal = plans.reduce((s, p) => s + p.subtotal + p.deliveryFee, 0) + effectiveTip - discount;
+    const grandTotal = priced.grandTotal;
 
     // The ID-gate (locked model): at or above the country's USD-equivalent
     // threshold, an L1 account must verify identity first. L2/L3 flow through.
@@ -1011,8 +1161,13 @@ export class OrderService {
     // [M-11] The two effects every order owes after it commits carry their
     // delays; computed before the transaction so the rows inside it are whole.
     const queueTiming = await checkoutQueueTiming(this.prisma);
+    // [CHECKOUT-IDEM · AX366 F1] Set as the body's last act, when it hands its
+    // work to COMMIT: how a rejected transaction is told apart (see
+    // settleCheckoutCommit).
+    let staged = null as CheckoutStaged | null;
     // Atomic: all orders, stock movements, stats, and the cart deletion commit together
     const checkoutCommit = await this.prisma.$transaction(async (tx) => {
+      if (promoCodeId) await lockIdentityAuthority(tx);
       // Global creation lock order starts with User. Account deletion takes the
       // same row lock before counting live orders, closing the authenticate →
       // delete → insert race for every order produced by this checkout.
@@ -1083,7 +1238,7 @@ export class OrderService {
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },
           orderBy: { createdAt: 'desc' },
-          select: { status: true, gracePeriodEnd: true },
+          select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
         });
         const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
         if (!lockedOperability.operable) {
@@ -1137,7 +1292,7 @@ export class OrderService {
         // any account in the identity cluster counts (promo-farming across
         // fresh accounts dies here). Unclustered → [userId] exactly.
         const { clusterMemberIds } = await import('../integrity/identity.service');
-        const promoMemberIds = await clusterMemberIds(this.prisma, input.userId);
+        const promoMemberIds = await clusterMemberIds(tx as PrismaClient, input.userId);
         const userUses = await tx.order.count({
           where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
         });
@@ -1166,38 +1321,24 @@ export class OrderService {
         ? plans.findIndex((p) => p.vendor.id === promoVendorId)
         : -1;
 
-      // "Tip your rider" is delivery money: it rides the first DELIVERY plan.
-      // A pickup or appointment has no rider — a lingering cart tip must never
-      // be charged there (founder screenshot 2026-07-15: haircut w/ rider tip).
-      const planTipFor = (i: number) => (i === tipPlanIndex ? effectiveTip : 0);
-
-      // Spread the discount across orders so it's never swallowed by a per-order
-      // Math.max(0,…) clamp. A platform code larger than the first vendor's order
-      // used to overcharge — grandTotal disagreed with the cash actually collected.
-      // A vendor code hits only its plan; a platform code fills each plan up to its
-      // own total until the discount is exhausted.
-      const discountAlloc = new Array<number>(plans.length).fill(0);
-      // [M-32] Per component, by funder: goods first, then (platform code
-      // only) the delivery fee; never the tip. The parts are snapshotted on
-      // the order's redemption below, so every discounted dollar names who
-      // funds it.
-      const discountParts = new Array<PromoAllocation | null>(plans.length).fill(null);
-      let remainingDiscount = discount;
-      const discountTargets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
-      for (const i of discountTargets) {
-        if (remainingDiscount <= 0) break;
-        const parts = allocatePromo(promoFunder, remainingDiscount, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null);
-        discountAlloc[i] = parts.total;
-        discountParts[i] = parts;
-        remainingDiscount -= parts.total;
-      }
-
+      // [E01 · ALG-24] Each order is written with ITS plan's numbers from the
+      // basket pricer above — the per-vendor rows the cart quote showed:
+      //   - "tip your rider" rides the first DELIVERY plan; a pickup or
+      //     appointment has no rider, so a lingering cart tip is never charged
+      //     there (founder screenshot 2026-07-15: haircut w/ rider tip);
+      //   - the discount is spread across orders so no per-order zero floor
+      //     swallows it (a platform code larger than the first vendor's order
+      //     used to overcharge); a vendor code hits only its plan;
+      //   - [M-32] per component, by funder: goods first, then (platform code
+      //     only) the delivery fee, never the tip — snapshotted on the order's
+      //     redemption below, so every discounted dollar names who funds it.
       for (const [index, plan] of plans.entries()) {
         const sequence = await nextSequence();
-        const planTip = planTipFor(index);
-        const planDiscount = discountAlloc[index]!;
-        // [ALG-24] The one total — the cart quote computes its total through the same function.
-        const totalAmount = orderTotal({ subtotal: plan.subtotal, deliveryFee: plan.deliveryFee, tip: planTip, discount: planDiscount });
+        const pricedPlan = priced.perPlan[index]!;
+        const planTip = pricedPlan.tip;
+        const planDiscount = pricedPlan.discount;
+        // [ALG-24] The one total (orderTotal inside priceBasket).
+        const totalAmount = pricedPlan.total;
         // DELIVERY and MOBILE appointments go to the customer's address; PICKUP and
         // AT_BUSINESS appointments use the store (distanceKm>0 marks a mobile service).
         const toCustomer = plan.fulfillment === 'DELIVERY' || (plan.fulfillment === 'APPOINTMENT' && plan.distanceKm > 0);
@@ -1248,8 +1389,12 @@ export class OrderService {
             // LIFECYCLE_V2: born held (hidden from the vendor, free-cancel
             // window open). Express skips the hold — the customer paid 1.5x
             // for priority; making them wait would break the product promise.
+            // A booking skips it too [E20]: its free-cancel window is already
+            // slot-relative, so a hold would only delay the provider.
             holdExpiresAt:
-              holdWindowMs() != null && !(input.express === true && plan.fulfillment === 'DELIVERY')
+              holdWindowMs() != null
+              && plan.fulfillment !== 'APPOINTMENT'
+              && !(input.express === true && plan.fulfillment === 'DELIVERY')
                 ? new Date(now.getTime() + holdWindowMs()!)
                 : null,
             tipAmount: planTip,
@@ -1270,6 +1415,11 @@ export class OrderService {
             // Takeaway: a collection code the customer shows the vendor at pickup.
             // 6-digit, CSPRNG (not Math.random); handover is vendor-mediated in person.
             pickupCode: plan.fulfillment === 'PICKUP' ? String(randomInt(100000, 1000000)) : null,
+            // [MKT-F057] A customer-held door PIN for every DELIVERY-fulfillment
+            // goods/service order, minted at checkout (taxi parity: the customer
+            // holds, the rider verifies at the door). PICKUP and APPOINTMENT rows
+            // stay null; COURIER orders are created elsewhere and never mint one.
+            ridePin: plan.fulfillment === 'DELIVERY' ? newRidePin() : null,
             // Stamp the redemption on exactly one order (the vendor's plan, or
             // order 0 for a platform code) so per-user usage counting stays correct.
             promoCodeId: index === (promoPlanIndex >= 0 ? promoPlanIndex : 0) ? promoCodeId : null,
@@ -1312,14 +1462,10 @@ export class OrderService {
           include: { items: true, vendor: { select: { id: true, name: true, ownerId: true } } },
         });
 
-        await tx.vendor.update({
-          where: { id: plan.vendor.id },
-          data: { totalOrders: { increment: 1 } },
-        });
-        await tx.item.updateMany({
-          where: { id: { in: plan.orderItems.map((oi) => oi.itemId) } },
-          data: { totalOrdered: { increment: 1 } },
-        });
+        // A held order is counted at its release, never here [Q12].
+        if (order.holdExpiresAt == null) {
+          await countOrderForStore(tx, plan.vendor.id, plan.orderItems.map((oi) => oi.itemId));
+        }
 
         // Inventory (§4.2): conditional decrement — the WHERE guard makes
         // overselling impossible under concurrency; the losing checkout's
@@ -1369,7 +1515,7 @@ export class OrderService {
         // priced under, the funder, and the discount per component. Written
         // on the order that carries the code (a zero-dollar redemption is
         // still a redemption) and on any other order the discount reached.
-        const parts = discountParts[index];
+        const parts = pricedPlan.allocation;
         if (promoCodeId && promoTerms && (parts || index === (promoPlanIndex >= 0 ? promoPlanIndex : 0))) {
           await tx.promoRedemption.create({
             data: {
@@ -1417,53 +1563,111 @@ export class OrderService {
           }
         : null;
 
+      // [G3-F2] ONE place shapes the customer's answer: the value stored in
+      // the receipt and the value the fresh caller receives are the same
+      // answer, so a same-key replay is the first answer field for field and
+      // never leaks the order's internal columns. Shaped from the created
+      // rows' wire form — the representation the receipt column holds — so
+      // every field (vendor name, items, promise, estimated times,
+      // scheduledFor, message wording) is computable from what the
+      // transaction has, nothing is deferred past the commit.
+      const answer = shapeCheckoutAnswer({
+        orders: JSON.parse(JSON.stringify(created)),
+        paymentAction,
+        grandTotal,
+        scheduledFor: input.scheduledFor,
+      });
+
       // [M-11] The command's durable tail and result commit WITH the orders:
       // the vendor alert ladder and the auto-cancel as outbox rows, and the
       // one immutable answer for this idempotency key as a receipt. A crash
       // or a queue outage after this point can delay the tail; it can no
       // longer lose it, and a same-key retry can no longer place twice.
-      await persistCheckoutOutboxInTransaction(tx, { orders: created.map((o) => ({ id: o.id, tenantId: o.tenantId })), timing: queueTiming, now });
-      if (input.idempotency) {
-        await persistCheckoutReceiptInTransaction(tx, {
+      await persistCheckoutOutboxInTransaction(tx, {
+        orders: created.map((o) => ({
+          id: o.id,
+          tenantId: o.tenantId,
+          fulfillment: o.fulfillment,
+          appointmentSlot: o.appointmentSlot,
+          placedAt: o.placedAt,
+          holdExpiresAt: o.holdExpiresAt,
+        })),
+        timing: queueTiming,
+        now,
+      });
+      const receiptId = input.idempotency
+        ? await persistCheckoutReceiptInTransaction(tx, {
           userId: input.userId, tenantId: user.tenantId, idempotencyKey: input.idempotency.key, requestHash: input.idempotency.requestHash,
-          orderIds: created.map((o) => o.id), result: { orders: created, paymentAction },
-        });
-      }
+          orderIds: created.map((o) => o.id), result: answer,
+        })
+        : null;
       await input.afterDurableTail?.();
-      return { orders: created, paymentAction };
-    });
-    const { orders, paymentAction } = checkoutCommit;
+      staged = { orders: created, answer, receiptId };
+      return staged;
+    }).catch((err: unknown) => this.settleCheckoutCommit(staged, err));
+    const { orders, answer, receiptId } = checkoutCommit;
+
+    // ── [CHECKOUT-IDEM · AX354 S1] THE COMMIT POINT ──────────────────────────
+    // The transaction resolved (or its lost acknowledgement was settled by the
+    // durable receipt): the orders, their outbox tail and the receipt are
+    // durable. Nothing below may throw to the caller: the order exists, the
+    // answer is the committed receipt, and every step from here is best-effort,
+    // logged when it fails. (A post-commit throw used to reach the route, which
+    // released the command's claim and answered 500 for a placed order, so the
+    // receipt probe could answer "none" and invite the same order twice.)
+    try {
+      input.onCommitted?.({ receiptId, answer });
+    } catch (err) {
+      log().error({ err, receiptId }, '[CHECKOUT-IDEM] a commit listener threw; ignored, the order is committed');
+    }
 
     // Post-transaction: emit and notify per vendor (best-effort). The socket
     // event goes to that vendor's room only — a global emit would fan out to
     // every connected client and leak order metadata platform-wide.
     // A HELD order tells the vendor NOTHING here — the release worker does
-    // that when the customer's cancel window closes. Low-stock alerts still
-    // go out now: inventory already moved regardless of the hold.
+    // that when the customer's cancel window closes. That includes its
+    // low-stock notices [Q12]: the stock moved now, but a "down to 2" push is
+    // the store learning of an order it cannot see; the release publishes them,
+    // and an in-window cancel (which restocks) never does.
     for (const order of orders) {
-      const held = isHeld(order);
-      if (!held) {
-        this.io
-          .to(`vendor:${order.vendorId}`)
-          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
-      }
-      const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
-      if (vendorOwner) {
+      // [CHECKOUT-IDEM] One store's failed notice is logged, never thrown, and
+      // never skips the next store's. The store is still alerted: by the alert
+      // ladder, an outbox row committed with the order [M-11], or, for a held
+      // order, by its release [Q12].
+      try {
+        const held = isHeld(order);
         if (!held) {
-          await this.notifications.newOrderForVendor(
-            vendorOwner.userId,
-            order.orderNumber,
-            order.items.length,
-            Number(order.totalAmount),
-            order.id,
-          );
+          this.io
+            .to(`vendor:${order.vendorId}`)
+            .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
         }
-        if (order.vendorId) {
-          for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
-            await this.notifications.lowStock(vendorOwner.userId, ev);
+        const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
+        if (vendorOwner) {
+          if (!held) {
+            await this.notifications.newOrderForVendor(
+              vendorOwner.userId,
+              order.orderNumber,
+              order.items.length,
+              Number(order.totalAmount),
+              order.id,
+              // [Q10] The same cut-off the auto-cancel row above was armed with.
+              vendorRespondBy(order, { slaMinutes: queueTiming.vendorResponseSlaMinutes, holdMs: holdWindowMs() ?? 0 }),
+            );
           }
-          stockEventsByVendor.delete(order.vendorId);
+          if (order.vendorId) {
+            if (!held) {
+              for (const ev of stockEventsByVendor.get(order.vendorId) ?? []) {
+                await this.notifications.lowStock(vendorOwner.userId, ev);
+              }
+            }
+            stockEventsByVendor.delete(order.vendorId);
+          }
         }
+      } catch (err) {
+        log().error(
+          { err, orderId: order.id, vendorId: order.vendorId, receiptId },
+          '[CHECKOUT-IDEM] post-commit store notice failed; the order stands, and its alert ladder (or its release) still alerts the store',
+        );
       }
     }
 
@@ -1471,45 +1675,36 @@ export class OrderService {
       log().info({ orderId: order.id, orderNumber: order.orderNumber, vendorId: order.vendorId, orderType: order.orderType, fulfillment: order.fulfillment, total: Number(order.totalAmount), customerId: input.userId }, 'order: placed');
     }
 
-    const summaries = orders.map((order) => ({
-      id: order.id,
-      orderNumber: order.orderNumber,
-      status: order.status,
-      // The confirmation screen shows the free-cancel countdown off this.
-      holdExpiresAt: order.holdExpiresAt,
-      fulfillment: order.fulfillment,
-      appointmentSlot: order.appointmentSlot,
-      pickupCode: order.pickupCode,
-      riskFlagged: order.riskFlagged,
-      vendorName: order.vendor?.name,
-      items: order.items.map((i) => ({ name: i.name, quantity: i.quantity, price: Number(i.totalCustomer) })),
-      subtotal: Number(order.subtotalCustomer),
-      deliveryFee: Number(order.deliveryFee),
-      isExpress: order.isExpress,
-      tip: Number(order.tipAmount),
-      discount: Number(order.discount),
-      total: Number(order.totalAmount),
-      paymentMethod: order.paymentMethod,
-      estimatedPrepTime: order.estimatedPrepTime,
-      estimatedDeliveryTime: order.estimatedDeliveryTime,
-      promise: promiseView(order),
-      deliveryAddress: order.deliveryAddress,
-      placedAt: order.placedAt,
-      scheduledFor: order.scheduledFor,
-    }));
+    return answer;
+  }
 
-    return {
-      // Single-vendor callers keep their shape; multi-vendor callers get all
-      order: summaries[0]!,
-      orders: summaries,
-      grandTotal,
-      paymentAction,
-      message: orders.length > 1
-        ? `${orders.length} orders placed — each vendor will confirm shortly.`
-        : input.scheduledFor
-          ? `Order scheduled! ${orders[0]!.vendor?.name} will prepare it at the right time.`
-          : `Order placed! ${orders[0]!.vendor?.name} will confirm shortly.`,
-    };
+  /**
+   * [CHECKOUT-IDEM · AX366 F1] Settle a rejected checkout transaction.
+   * - The body never finished (nothing staged): COMMIT was never sent, so the
+   *   transaction rolled back. A CONFIRMED rollback, rethrown as it is.
+   * - The body finished: the rejection came from the commit itself (a commit
+   *   error, or an acknowledgement lost after the database committed). The
+   *   outcome is UNKNOWN, and only the durable rows can settle it. This
+   *   transaction's receipt (or, without a key, its first order) present: the
+   *   order committed, so carry on as committed. Absent or unreadable:
+   *   CheckoutOutcomeUnknownError, and the caller keeps its claim.
+   */
+  private async settleCheckoutCommit(staged: CheckoutStaged | null, err: unknown): Promise<CheckoutStaged> {
+    if (!staged) throw err;
+    let landed = false;
+    try {
+      landed = staged.receiptId
+        ? (await this.prisma.checkoutReceipt.count({ where: { id: staged.receiptId } })) === 1
+        : (await this.prisma.order.count({ where: { id: staged.orders[0]!.id } })) === 1;
+    } catch (readErr) {
+      log().error({ err: readErr, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] the durable receipt could not be read to settle an unknown commit');
+    }
+    if (landed) {
+      log().warn({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit acknowledgement lost; the durable receipt proves the order committed');
+      return staged;
+    }
+    log().error({ err, receiptId: staged.receiptId }, '[CHECKOUT-IDEM] commit outcome unknown and no durable receipt yet; the claim is kept');
+    throw new CheckoutOutcomeUnknownError(staged.receiptId);
   }
 
   /**
@@ -1689,12 +1884,22 @@ export class OrderService {
     tx: Prisma.TransactionClient,
     input: CanonicalOrderTransitionInput,
   ): Promise<CanonicalOrderTransitionResult> {
+    await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const source = await tx.order.findUnique({ where: { id: input.orderId } });
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
     if (!input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
+    }
+    // A BOOKING is confirmed, completed or cancelled — never prepared, marked
+    // ready, handed to a rider or delivered [order-status.ts BOOKING_LAW]. The
+    // kitchen routes refuse it first, but this is the locked seam every caller
+    // passes (ops, agent, admin, an older client), so the same law is enforced
+    // on the fresh row here: a booking that reached PREPARING got "Food Ready!"
+    // and could no longer be completed (complete-appointment requires ACCEPTED).
+    if (source.fulfillment === 'APPOINTMENT' && !isAppointmentStatus(input.target)) {
+      throw new AppError(409, 'NOT_A_KITCHEN_ORDER', `A booking is confirmed and completed, never moved to ${input.target}`);
     }
     // [REPORT-014 F-014-02] The acting rider must own the LOCKED row — a
     // release/reassignment that committed after the route's ownership
@@ -1703,10 +1908,39 @@ export class OrderService {
       throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
         'This job is no longer assigned to you — it was released or reassigned.');
     }
+    if (input.expectedDriverId !== undefined && source.driverId !== input.expectedDriverId) {
+      throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
+    if (input.expectedFulfillment !== undefined && source.fulfillment !== input.expectedFulfillment) {
+      throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'This order no longer uses the expected fulfillment path.');
+    }
+    if (input.expectedFulfillmentMode !== undefined && source.fulfillmentMode !== input.expectedFulfillmentMode) {
+      throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
     // MMG payment-first gate lives here, on the freshly locked row.
     assertMmgFulfilmentAllowed(source, input.target);
+    // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
+    // asked for is done: arrived at and left, or skipped with a reason the
+    // passenger is told. Every way to DELIVERED passes this seam (the fare
+    // outcome, the completion tap, ops and agent callers), so the rule lives
+    // here, on the locked row, read from the stop rows themselves (never the
+    // header count). A stop still PENDING or ARRIVED refuses the close before
+    // anything is written. FAILED is not refused: a passenger who did not come
+    // back to the car is the no-show rail's to close.
+    if (input.target === 'DELIVERED' && source.orderType === 'TAXI') {
+      const open = await tx.taxiTripStop.findFirst({
+        where: { orderId: input.orderId, status: { in: TAXI_STOP_OPEN_STATUSES } },
+        orderBy: { sequence: 'asc' },
+        select: { sequence: true },
+      });
+      if (open) {
+        throw new AppError(409, 'STOPS_REMAINING',
+          'This ride still has a stop to finish. Arrive at it and continue, or skip it, before you end the trip.',
+          { nextStopSequence: open.sequence });
+      }
+    }
     // Defense in depth for every generic/ops caller (including the approved
     // agent, admin-refund, and courier-sender actions): neither a physical
     // delivery handoff nor a verified taxi handoff can be terminalized through
@@ -1804,6 +2038,10 @@ export class OrderService {
     const releasesMover = input.target === 'DELIVERED'
       || input.target === 'CANCELLED'
       || input.target === 'FAILED'
+      // [E17] A completed return frees the rider and their committed float —
+      // the parcel is back with the sender and custody is over. No earnings
+      // are minted (earnings are DELIVERED-only below), no delivery count.
+      || input.target === 'RETURNED'
       || (input.target === 'REFUNDED' && operationalCancellation);
     if (releasesMover && source.riderId) {
       await new FloatService(tx).release(tx, source.riderId, riderFloatForOrder(source));
@@ -1866,7 +2104,7 @@ export class OrderService {
       });
     }
 
-    if (input.withinTransaction) await input.withinTransaction(tx);
+    if (input.withinTransaction) await input.withinTransaction(tx, source);
 
     const order = await tx.order.findUniqueOrThrow({
       where: { id: input.orderId },
@@ -1883,7 +2121,48 @@ export class OrderService {
         ? 'Record the cash outcome first — a cash courier job completes when the fee is recorded as collected, refused or unpaid; a proof photo never implies money.'
         : 'Record the fare outcome first — a cash ride completes when the fare is recorded as paid, refused or unpaid.');
     }
+    // [E16] The custody authority's own guard, on the row as it will commit: a
+    // courier parcel enters PICKED_UP only with its pickup proof bound (the
+    // photo the server issued to the rider who holds the job, and that rider's
+    // location). Evaluated after the caller's hook, which is where the courier
+    // pickup-proof step binds it — so the check runs on the locked row, and
+    // every other caller (the generic rider leg, an ops tool, anything added
+    // later) rolls back with nothing written.
+    if (input.target === 'PICKED_UP' && order.orderType === 'COURIER' && !courierPickupProofBound(order)) {
+      throw new AppError(409, 'PICKUP_PROOF_REQUIRED',
+        'Photograph the parcel to confirm pickup — this job needs a pickup photo and your location.');
+    }
+    // [E16-B · S2] THE COURIER DELIVERY-PROOF GATE. A parcel reaches DELIVERED
+    // only with the door photo recorded: either set by THIS transition (the
+    // courier /proof path passes terminalMetadata.courierProofPhotoUrl after
+    // exact-matching it to the URL the server issued at /proof-photo) or
+    // already durably on the row and equal to that issued URL. The bare rider
+    // /delivered and /handover routes pass no proof metadata, so a sender-pays
+    // job whose fee was already collected at pickup — and an MMG-paid job —
+    // rolls back here instead of closing without the proof: no deliveredAt, no
+    // earnings, no released rider. COURIER-only: food/grocery/pharmacy, taxi
+    // and service transitions never enter this branch.
+    // [DS145 D3] Bound to the rider who holds the job, like E16's pickup
+    // proof: a door photo issued to a rider who has since been replaced does
+    // not deliver the parcel for the new one.
+    if (input.target === 'DELIVERED' && order.orderType === 'COURIER') {
+      if (!courierDeliveryProofBound(order) || !(await admittedCourierPhoto(tx, source, order.courierProofPhotoUrl))) {
+        throw new AppError(
+          409,
+          'DELIVERY_PROOF_REQUIRED',
+          'This courier job closes only through the photo proof step — capture the door photo first, then confirm the handoff.',
+        );
+      }
+    }
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
+  }
+
+  /** [DISPATCH 1/3 · B4] After a commit that closed this order, withdraw its
+   * live offer card through THE one withdrawal point (offer-withdrawal.ts).
+   * Never throws: the order is already closed. */
+  private async withdrawLiveOffer(orderId: string): Promise<void> {
+    if (!this.offerStore) return;
+    await withdrawOfferOfClosedOrder({ prisma: this.prisma, redis: this.offerStore, io: this.io }, orderId);
   }
 
   /** Serialize a transition on the canonical Order lock, then publish only
@@ -1897,7 +2176,10 @@ export class OrderService {
     let committed: CanonicalOrderTransitionResult | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        committed = await this.prisma.$transaction((tx) => this.stageCanonicalOrderTransition(tx, input));
+        committed = await this.prisma.$transaction(async (tx) => {
+          if (input.serializeIdentity) await lockIdentityAuthority(tx);
+          return this.stageCanonicalOrderTransition(tx, input);
+        });
         break;
       } catch (error) {
         const retryable = typeof error === 'object'
@@ -1908,6 +2190,13 @@ export class OrderService {
       }
     }
     if (!committed) throw new Error('Order transition transaction did not produce a result');
+
+    // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
+    // reject, courier sender cancel, admin cancel, the no-response
+    // auto-cancel, a cash refusal): the committed close withdraws the card.
+    if (isCancellationTerminalization(committed.sourceStatus, input.target)) {
+      await this.withdrawLiveOffer(input.orderId);
+    }
 
     if (committed.cancelledSearches > 0) {
       dispatchSearchesCounter.inc({ status: 'cancelled' }, committed.cancelledSearches);
@@ -2088,6 +2377,9 @@ export class OrderService {
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
     const { order, heldNow, freeCancellation, cancellationFee, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
+    // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
+    // too, so the pinged mover cannot keep accepting it and is free at once.
+    await this.withdrawLiveOffer(orderId);
 
     // The socket room only reaches a foregrounded app that subscribed to this
     // ride. A driver already en route with the app backgrounded would keep
@@ -2128,13 +2420,20 @@ export class OrderService {
     // is absence of the store's attestation, not proof the customer's external
     // transfer didn't happen. The platform cannot know, so it says what is
     // true and points at the party who holds the money.
+    // The result is the banner the customer reads first (the tracking screen
+    // shows the server's message before its own fallback). A booking is a
+    // booking and its money is with the PROVIDER — the noun and the party
+    // follow the committed row's fulfillment; the fee and the MMG uncertainty
+    // above are the server's and are unchanged. Food keeps its exact words.
+    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : 'Order';
+    const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     if (order.paymentMethod === 'MOBILE_MONEY') {
       return {
-        message: 'Order cancelled. If you already sent the MMG payment, the store refunds you directly.',
+        message: `${noun} cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`,
         cancellationFee,
       };
     }
-    return { message: freeCancellation ? 'Order cancelled — no charge' : 'Order cancelled', cancellationFee };
+    return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
   }
 
   async updateStatus(
@@ -2142,10 +2441,18 @@ export class OrderService {
     status: string,
     changedBy: string,
     note?: string,
-    opts?: { withinTransaction?: (tx: Prisma.TransactionClient) => Promise<void> },
+    opts?: {
+      serializeIdentity?: boolean;
+      withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
+      allowedFrom?: readonly OrderStatus[];
+      expectedRiderId?: string | null;
+      expectedDriverId?: string | null;
+      expectedFulfillment?: FulfillmentType;
+      expectedFulfillmentMode?: FulfillmentMode;
+    },
   ) {
     const target = status as OrderStatus;
-    const allowedFrom = ORDER_TRANSITIONS[target];
+    const allowedFrom = opts?.allowedFrom ?? ORDER_TRANSITIONS[target];
     if (!allowedFrom || allowedFrom.length === 0) {
       throw new AppError(409, 'INVALID_TRANSITION', `No order may transition into ${status}`);
     }
@@ -2158,7 +2465,12 @@ export class OrderService {
       allowedFrom,
       changedBy,
       note,
+      serializeIdentity: opts?.serializeIdentity,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
+      ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
+      ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
+      ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
+      ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
       invalidStatus: (current) => new AppError(
         409,
         'INVALID_TRANSITION',
@@ -2182,7 +2494,15 @@ export class OrderService {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
-        await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        // A booking is CONFIRMED, not "being prepared": the provider reserved
+        // the customer's slot inside this transition. Kitchen words on a
+        // haircut were the phone's first sign that a SERVICE booking was riding
+        // the food order spine.
+        if (order.fulfillment === 'APPOINTMENT') {
+          await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        } else {
+          await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        }
         break;
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
@@ -2226,7 +2546,9 @@ export class OrderService {
    * is the race protection — a customer cancel that landed a millisecond
    * earlier flips the status, the CAS matches nothing, and we skip. Clearing
    * holdExpiresAt IS the release; a crash after the CAS is recovered by the
-   * vendor board (order now visible) and the dispatch reconcile job.
+   * vendor board (order now visible), the dispatch reconcile job and the
+   * vendor alert ladder, which the release wrote as an outbox row in its own
+   * transaction [Q12 · AX289 F5].
    *
    * Courier orders (born READY_FOR_PICKUP, no vendor) start their offer
    * cascade here instead of at creation.
@@ -2239,14 +2561,26 @@ export class OrderService {
     });
 
     const released: string[] = [];
+    // [Q10] Read once per sweep: the response SLA the released orders' alert
+    // pushes ring until (vendorRespondBy, the auto-cancel cut-off).
+    const slaMinutes = due.length > 0 ? await vendorResponseSlaMinutes(this.prisma) : 0;
+    const alertDelayMs = vendorAlertLadderDelayMs();
     for (const { id } of due) {
-      const res = await this.prisma.order.updateMany({
-        where: { id, status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
-        data: { holdExpiresAt: null, releasedToVendorAt: new Date() },
+      await holdReleaseObserver.beforeRelease?.({ orderId: id });
+      // The release CAS, the store's counters and the store's alert ladder
+      // commit together [Q12]: the order counts the moment the store can see
+      // it, exactly once — and its ladder is a durable outbox row from that
+      // same moment [AX289 F5], published after the commit by the drainer,
+      // never an enqueue a crash between here and the queue could lose.
+      const releasedNow = await this.prisma.$transaction(async (tx) => {
+        const store = await releaseHoldInTransaction(tx, id, { statusIn: ['PENDING', 'READY_FOR_PICKUP'] });
+        if (!store) return false; // cancelled or raced — idempotent skip
+        if (store.vendorId) await persistReleaseAlertLadderInTransaction(tx, { orderId: id, tenantId: store.tenantId, alertDelayMs });
+        return true;
       });
-      if (res.count === 0) continue; // cancelled or raced — idempotent skip
+      if (!releasedNow) continue;
+      await holdReleaseObserver.afterRelease?.({ orderId: id });
 
-      released.push(id);
       const order = await this.prisma.order.findUnique({
         where: { id },
         include: {
@@ -2255,6 +2589,13 @@ export class OrderService {
         },
       });
       if (!order) continue;
+      // [Q12] The release committed, then a cancel landed before this read:
+      // the order is dead. Alerting now would announce an order that is
+      // already cancelled — "New Order!" and a ringing takeover AFTER the
+      // store was told it died. The cancel took the ordinary post-window
+      // rules; the store gets no alert, no ladder and no dispatch.
+      if (order.status !== (order.orderType === 'COURIER' ? 'READY_FOR_PICKUP' : 'PENDING')) continue;
+      released.push(id);
 
       // No vendor to notify on a courier job — release = start the cascade.
       if (order.orderType === 'COURIER') {
@@ -2279,7 +2620,12 @@ export class OrderService {
               order.items.length,
               Number(order.totalAmount),
               order.id,
+              vendorRespondBy(order, { slaMinutes, holdMs: holdWindowMs() ?? 0 }),
             );
+            // [Q12] The low-stock notices checkout held back for this order.
+            for (const ev of await this.lowStockEarnedBy(id)) {
+              await this.notifications.lowStock(vendorOwner.userId, ev);
+            }
           }
         } catch (err) {
           log().error({ err, orderId: id }, 'hold-release: vendor notification failed — board still shows the order');
@@ -2288,6 +2634,41 @@ export class OrderService {
     }
 
     return { released };
+  }
+
+  /**
+   * [Q12] The low-stock notices a HELD order's sale earned, for its release.
+   * Checkout computes the crossing in memory and publishes it only for an
+   * order the store can already see; for a held one it is re-read here from
+   * the stock ledger (the SALE rows record each sale's delta and the balance
+   * it left) with checkout's own crossing rule — and sent only while it is
+   * still true of the shelf, so a restock in the meantime sends nothing.
+   */
+  private async lowStockEarnedBy(orderId: string): Promise<Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }>> {
+    const sales = await this.prisma.stockMovement.findMany({
+      where: { orderId, reason: 'SALE' },
+      select: { itemId: true, delta: true, balanceAfter: true },
+      orderBy: { occurredAt: 'asc' },
+    });
+    const events: Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }> = [];
+    for (const sale of sales) {
+      const item = await this.prisma.item.findUnique({
+        where: { id: sale.itemId },
+        select: { name: true, stockQuantity: true, lowStockThreshold: true },
+      });
+      if (!item || item.stockQuantity == null) continue;
+      if (sale.balanceAfter <= 0) {
+        if (item.stockQuantity <= 0) events.push({ itemId: sale.itemId, name: item.name, remaining: 0, kind: 'out' });
+      } else if (
+        item.lowStockThreshold !== null
+        && sale.balanceAfter <= item.lowStockThreshold
+        && sale.balanceAfter - sale.delta > item.lowStockThreshold
+        && item.stockQuantity <= item.lowStockThreshold
+      ) {
+        events.push({ itemId: sale.itemId, name: item.name, remaining: item.stockQuantity, kind: 'low' });
+      }
+    }
+    return events;
   }
 
   async createEarnings(
@@ -2518,11 +2899,15 @@ export class OrderService {
    * codes (vendorId null) discount the whole basket; a VENDOR's code
    * (master plan §4.2) is valid only when that vendor is in the cart and
    * discounts only their subtotal.
+   *
+   * [E01] Eligibility only. The discount itself is priced by cart-plans
+   * `priceBasket` — the function the cart quote uses — from the terms this
+   * returns, so the quote's discount and the charge's are one computation.
    */
   private async validatePromoCode(
     code: string,
     userId: string,
-    plans: Array<{ vendorId: string; subtotal: number; deliveryFee: number }>,
+    plans: Array<{ vendorId: string; subtotal: number }>,
   ) {
     const promo = await this.prisma.promoCode.findUnique({ where: { code: code.toUpperCase() } });
     if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
@@ -2548,32 +2933,25 @@ export class OrderService {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
     }
 
-    // The discount basis: the promo vendor's plan, or the whole basket.
+    // The code's own minimum judges its basis: the promo vendor's plan, or the
+    // whole basket.
     let subtotal: number;
-    let deliveryFeeBasis: number;
     if (promo.vendorId) {
       const plan = plans.find((p) => p.vendorId === promo.vendorId);
       if (!plan) {
         throw new AppError(400, 'PROMO_WRONG_VENDOR', 'This code belongs to a different store — add their items to use it');
       }
       subtotal = plan.subtotal;
-      deliveryFeeBasis = plan.deliveryFee;
     } else {
       subtotal = plans.reduce((s, p) => s + p.subtotal, 0);
-      deliveryFeeBasis = plans.reduce((s, p) => s + p.deliveryFee, 0);
     }
 
     if (promo.minOrderAmount && subtotal < Number(promo.minOrderAmount)) {
       throw new AppError(400, 'MIN_ORDER_PROMO', `Minimum order of $${Number(promo.minOrderAmount).toLocaleString()} GYD required for this promo`);
     }
 
-    // [ALG-24] The one promo switch — the cart quote applies the same function.
-    const discount = promoDiscount(promo, { subtotal, deliveryFee: deliveryFeeBasis });
-
     return {
       id: promo.id,
-      discount,
-      discountType: promo.discountType,
       vendorId: promo.vendorId,
       // [M-32] What the order will be priced under — snapshotted at redemption.
       terms: { termsVersion: promo.termsVersion, discountType: promo.discountType, discountValue: promo.discountValue, maxDiscount: promo.maxDiscount, funder: promo.funder },

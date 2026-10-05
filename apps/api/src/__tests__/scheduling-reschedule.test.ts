@@ -10,6 +10,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
+import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
@@ -82,9 +83,10 @@ async function makeServiceVendor() {
   return { owner, vendor, item };
 }
 
+/** Tomorrow at a Guyana wall-clock hour, as the TRUE instant the slot happens. */
 function tomorrowAt(hour: number): Date {
-  const d = new Date(Date.now() + DAY);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hour, 0, 0, 0));
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  return instantOfGuyanaWallClock(new Date(Date.UTC(y!, m! - 1, d! + 1, hour)));
 }
 
 beforeAll(async () => {
@@ -147,6 +149,10 @@ describe('reschedule — both directions, notified', () => {
     });
     expect(note?.title).toBe('Appointment moved');
     expect(note?.body).toContain('moved from');
+    // [E28] the vendor-owner recipient is tagged as the business surface, so
+    // a tap opens their Schedule agenda — the customer-side copy is tagged
+    // separately and must never aim at that vendor-only screen.
+    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'business' });
   });
 
   it('vendor moves it too — same law, customer notified; foreign vendor probes 404', async () => {
@@ -168,12 +174,26 @@ describe('reschedule — both directions, notified', () => {
       payload: { newSlotStart: tomorrowAt(15).toISOString() },
     });
     expect(res.statusCode).toBe(200);
+    const moved = res.json().data;
 
     const note = await app.prisma.notification.findFirst({
       where: { userId: customer.userId },
       orderBy: { createdAt: 'desc' },
     });
     expect(note?.title).toBe('Your appointment moved');
+    // [E28] the customer recipient is tagged as the customer surface; the
+    // router opens the app normally for it instead of a dead Schedule tap.
+    expect(note?.data).toMatchObject({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'customer' });
+
+    // [E28] The inbox row routes on exactly what GET /customer/notifications
+    // serves, so the endpoint must hand back the payload, audience included.
+    const inbox = await app.inject({
+      method: 'GET', url: '/api/v1/customer/notifications',
+      headers: { authorization: `Bearer ${customer.token}` },
+    });
+    expect(inbox.statusCode).toBe(200);
+    const listed = (inbox.json().data as Array<{ id: string; data: unknown }>).find((n) => n.id === note?.id);
+    expect(listed?.data).toEqual({ kind: 'booking_rescheduled', bookingId: moved.id, audience: 'customer' });
   });
 
   it('same-slot reschedule is a calm no-op; dead bookings refuse to move', async () => {

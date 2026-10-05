@@ -6,11 +6,11 @@ import * as ImagePicker from 'expo-image-picker';
 import { Image } from 'expo-image';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
-import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill } from '../../../kit';
+import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
 import { StandingCard } from '../../../components/StandingCard';
 import {
   AuthSessionBoundaryError,
@@ -24,25 +24,33 @@ import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
-import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
+import { BillingStatusBlock, BillingStopControl } from '../../../components/billing/BillingSurfaces';
+import { resumeBillingMethod } from '../../../lib/billing';
 import { useMoverPreview } from '../../../stores/moverPreview';
 
 export function MoverAccountScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
-  const { user, logout } = useAuthStore();
+  const { user } = useAuthStore();
+  // What the server does when a mover logs out (mover-authority.ts): the mover
+  // goes offline, and a job not yet picked up is released back to dispatch. A
+  // job already in their hands stays theirs; operations are paged.
+  const { requestLogout, logoutDialog } = useLogoutConfirm({
+    body: 'You’ll go offline, and a job you haven’t picked up yet goes back to dispatch. Your earnings, vehicle and documents stay with your account.',
+  });
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
   const { kind, profile } = useMoverKind();
   const standingQ = useMoverStanding<any>(kind);
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
   const subQ = useMoverSubscription(kind);
+  const stepUp = useStepUp();
+  const setBilling = useSetMoverBillingMethod(kind, stepUp.withStepUp);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
   const qc = useQueryClient();
   // [ALG-34] The MMG pay link is where the money goes: the server asks this
   // session to confirm it holds the phone (the code sheet), then STAGES the
   // change behind a cool-off with the old link live.
-  const stepUp = useStepUp();
   const [mmgError, setMmgError] = React.useState<string | null>(null);
   const saveMmgLink = useMutation({
     mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => driverApi.updateProfile({ mmgPayUrl })),
@@ -202,6 +210,7 @@ export function MoverAccountScreen({ navigation }: any) {
           <SettingsRow icon="shield" label="Guarantee claims" sub="Cash orders where the customer didn't pay" onPress={() => navigation?.navigate?.('Claims')} />
           <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
           <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
+          <SettingsRow icon="truck" label="Change vehicle" sub="A new vehicle is checked before you go online" onPress={() => navigation?.navigate?.('MoverVehicle')} />
           <SettingsRow
             icon="credit-card"
             label="Weekly fee"
@@ -214,9 +223,9 @@ export function MoverAccountScreen({ navigation }: any) {
           />
           <SettingsRow
             icon="hash"
-            label="My Swift Number"
-            sub="Pay the weekly fee at any MMG agent"
-            onPress={() => navigation?.navigate?.('MySwiftNumber')}
+            label="Weekly fee"
+            sub="View your fee and recent payments"
+            onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
@@ -225,7 +234,21 @@ export function MoverAccountScreen({ navigation }: any) {
         {/* Honest billing status — wallet balance, grace deadline, or the
             paused block. Silent on a healthy account (the row above is the way
             in). */}
-        <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('MySwiftNumber')} compact />
+        <BillingStatusBlock sub={sub} onPay={() => navigation?.navigate?.('WeeklyFee')} compact />
+        <BillingStopControl
+          sub={sub}
+          who={kind === 'DRIVER' ? 'driver' : 'rider'}
+          pending={setBilling.isPending}
+          onStop={() => setBilling.mutate({ method: 'NONE' })}
+          onResume={() =>
+            setBilling.mutate({
+              method: resumeBillingMethod(sub),
+              ...(sub?.billingMethod === 'MOBILE_MONEY' && sub?.mmgPayerMsisdn
+                ? { mmgPayerMsisdn: sub.mmgPayerMsisdn }
+                : {}),
+            })
+          }
+        />
 
         {/* The model */}
         <Card style={{ marginTop: space.md }}>
@@ -240,11 +263,12 @@ export function MoverAccountScreen({ navigation }: any) {
           </T>
         </Card>
 
-        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={logout} />
+        <PillButton label="Log out" variant="outline" style={{ marginTop: space.xl }} onPress={requestLogout} />
       </ScrollView>
 
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
       {stepUp.sheet}
+      {logoutDialog}
     </Screen>
   );
 }

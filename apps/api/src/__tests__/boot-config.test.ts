@@ -1,17 +1,35 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
+import { spawnSync } from 'node:child_process';
+import { generateKeyPair, type KeyObject } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
+import { testControlIdentity } from '../modules/ops/test-control';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
 // secrets that keep KYC documents private (envelope KEK + render HMAC), and
 // without the OTP-bypass guard. Non-production is unaffected.
 
 const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
+const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
+  // [ledger E08] The settled production posture ships the hold ON in both env
+  // examples, so the valid production base carries it explicitly.
+  LIFECYCLE_V2: '1',
+  ORDER_HOLD_MINUTES: '5',
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
+  AWS_S3_BUCKET: 'synthetic-boot-bucket',
   NOTIFICATION_PROVIDER: 'twilio',
+  TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
+  TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
+  TWILIO_API_KEY_SECRET: 'test-key-secret',
+  TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
   KYC_PROVIDER: 'didit',
@@ -25,9 +43,83 @@ const good: Record<string, string | undefined> = {
   MMG_PASSWORD: 'mmg-password',
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
+  MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
 };
 
+const cardOff = {
+  ...good,
+  PAYMENT_PROVIDER: 'disabled',
+  CARD_RAIL_KILL: '1',
+  STRIPE_SECRET_KEY: undefined,
+  PAYMENT_GATEWAY_KEY: undefined,
+  PAYMENT_GATEWAY_SECRET: undefined,
+  POWERTRANZ_API_URL: undefined,
+};
+
+const paddedTwilioIdentities = ([
+  ['TWILIO_ACCOUNT_SID', good['TWILIO_ACCOUNT_SID']],
+  ['TWILIO_API_KEY_SID', good['TWILIO_API_KEY_SID']],
+  ['TWILIO_FROM', good['TWILIO_FROM']],
+  ['TWILIO_MESSAGING_SERVICE_SID', messagingServiceSid],
+] as const).flatMap(([name, valid]) => [' ', '\t', '\r', '\n'].flatMap((whitespace) => [
+  { name, value: `${whitespace}${valid}`, position: 'leading', whitespace: JSON.stringify(whitespace) },
+  { name, value: `${valid}${whitespace}`, position: 'trailing', whitespace: JSON.stringify(whitespace) },
+]));
+
+function runPreflight(candidate: Record<string, string | undefined>) {
+  const directory = mkdtempSync(join(tmpdir(), 'swift-twilio-preflight-'));
+  try {
+    const candidatePath = join(directory, 'candidate.env');
+    writeFileSync(candidatePath, Object.entries(candidate)
+      .filter((entry): entry is [string, string] => entry[1] !== undefined)
+      .map(([name, value]) => `${name}=${value}`).join('\n'));
+    const tsx = join(process.cwd(), 'node_modules/.bin/tsx');
+    const script = join(process.cwd(), '../../deploy/preflight.ts');
+    return spawnSync(tsx, [script, candidatePath], {
+      encoding: 'utf8',
+      env: { PATH: process.env['PATH'] ?? '' },
+    });
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+}
+
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it('boots with the card rail explicitly disabled and no card credentials', () => {
+    expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
+  });
+
+  it.each([undefined, '', '0', 'true', '01'])('refuses disabled cards with an ineffective kill switch (%s)', (kill) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, CARD_RAIL_KILL: kill })).toThrow(/CARD_RAIL_KILL/);
+  });
+
+  it.each([undefined, '', 'disable', 'DISABLED', 'disabled ', 'sandbox'])('does not infer card OFF from provider %s', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PAYMENT_PROVIDER: provider })).toThrow(/PAYMENT_PROVIDER/);
+  });
+
+  it.each(['stripe', 'powertranz'])('still requires credentials for %s even with the kill switch on', (provider) => {
+    expect(() => assertSafeBootConfig({ ...cardOff, PAYMENT_PROVIDER: provider })).toThrow(/STRIPE_SECRET_KEY|PAYMENT_GATEWAY_KEY/);
+  });
+
+  it.each(['MMG_DRIVER', 'MMG_API_URL', 'MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'])(
+    'still requires %s with cards OFF', (name) => {
+      expect(() => assertSafeBootConfig({ ...cardOff, [name]: undefined })).toThrow(/MMG/);
+    },
+  );
+
+  it('still rejects sandbox and UAT MMG with cards OFF', () => {
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_API_URL: 'https://mwallet.mmgtest.net' })).toThrow(/non-UAT/);
+  });
+
+  it('preflight accepts explicit card OFF and rejects a reachable card charge rail', () => {
+    const off = runPreflight(cardOff);
+    expect(off.status, off.stdout + off.stderr).toBe(0);
+    const reachable = runPreflight({ ...cardOff, CARD_RAIL_KILL: '0' });
+    expect(reachable.status, reachable.stdout + reachable.stderr).toBe(1);
+    expect(reachable.stdout).toContain('CARD_RAIL_KILL');
+  });
+
   it('boots when every required secret is present', () => {
     expect(() => assertSafeBootConfig(good)).not.toThrow();
   });
@@ -84,6 +176,8 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: undefined })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_MSECRET: undefined })).toThrow(/MMG_MSECRET/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: 'yes' })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
     expect(() => assertSafeBootConfig({ ...good, MMG_API_URL: 'https://mwallet.mmgtest.net/olive/publisher/v1' })).toThrow(/non-UAT/);
   });
 
@@ -94,6 +188,128 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
 
   it('SWIFT-012: accepts a real notification provider (twilio)', () => {
     expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: 'twilio' })).not.toThrow();
+  });
+
+  it('refuses incomplete Twilio API-key configuration at production boot', () => {
+    for (const name of ['TWILIO_ACCOUNT_SID', 'TWILIO_API_KEY_SID', 'TWILIO_API_KEY_SECRET', 'TWILIO_FROM'] as const) {
+      expect(() => assertSafeBootConfig({ ...good, [name]: undefined }), name).toThrow(name);
+      expect(() => assertSafeBootConfig({ ...good, [name]: '   ' }), name).toThrow(name);
+    }
+    expect(() => assertSafeBootConfig({ ...good, TWILIO_API_KEY_SECRET: undefined, TWILIO_AUTH_TOKEN: 'legacy-token' }))
+      .toThrow(/TWILIO_API_KEY_SECRET/);
+  });
+
+  it('refuses nonempty malformed Twilio identifiers at production boot', () => {
+    for (const [name, value] of [
+      ['TWILIO_ACCOUNT_SID', 'not-an-account-sid'],
+      ['TWILIO_ACCOUNT_SID', `AC${'g'.repeat(32)}`],
+      ['TWILIO_API_KEY_SID', 'not-an-api-key-sid'],
+      ['TWILIO_API_KEY_SID', `SK${'g'.repeat(32)}`],
+      ['TWILIO_FROM', 'not-a-phone-number'],
+    ] as const) {
+      expect(() => assertSafeBootConfig({ ...good, [name]: value }), name).toThrow(name);
+    }
+  });
+
+  it.each(paddedTwilioIdentities)('refuses literal $position $whitespace in $name at boot and preflight guard', ({ name, value }) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: value })).toThrow(name);
+  });
+
+  it('accepts exact Twilio values in the value-free preflight CLI', () => {
+    const result = runPreflight(good);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('PASS — this configuration will not be refused at boot');
+  });
+
+  it('accepts TWILIO_MESSAGING_SERVICE_SID alone as the production sender', () => {
+    expect(() => assertSafeBootConfig({
+      ...good,
+      TWILIO_FROM: undefined,
+      TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid,
+    })).not.toThrow();
+  });
+
+  it('the value-free preflight accepts the Messaging Service SID alone', () => {
+    const result = runPreflight({ ...good, TWILIO_FROM: undefined, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('PASS — this configuration will not be refused at boot');
+  });
+
+  it('refuses production boot when both Twilio senders are set', () => {
+    expect(() => assertSafeBootConfig({ ...good, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid }))
+      .toThrow(/TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID/);
+  });
+
+  it('refuses production boot when neither Twilio sender is set', () => {
+    expect(() => assertSafeBootConfig({ ...good, TWILIO_FROM: undefined }))
+      .toThrow(/TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID/);
+  });
+
+  it('refuses a malformed TWILIO_MESSAGING_SERVICE_SID at production boot', () => {
+    // The owner-specified format is exactly ^MG[0-9a-f]{32}$: lowercase hex, 32 digits.
+    for (const value of ['not-a-messaging-service-sid', `MG${'g'.repeat(32)}`, `MG${'C'.repeat(32)}`, `MG${'c'.repeat(31)}`, `MG${'c'.repeat(33)}`]) {
+      expect(
+        () => assertSafeBootConfig({ ...good, TWILIO_FROM: undefined, TWILIO_MESSAGING_SERVICE_SID: value }),
+        value,
+      ).toThrow(/TWILIO_MESSAGING_SERVICE_SID/);
+    }
+  });
+
+  it('the sender refusals name the variables and never echo a configured Twilio value', () => {
+    const malformedSid = `MG${'g'.repeat(32)}`;
+    const cases: Array<[string, Record<string, string | undefined>]> = [
+      ['both senders', { ...good, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid }],
+      ['neither sender', { ...good, TWILIO_FROM: undefined }],
+      ['malformed SID', { ...good, TWILIO_FROM: undefined, TWILIO_MESSAGING_SERVICE_SID: malformedSid }],
+    ];
+    const configuredValues = [good['TWILIO_ACCOUNT_SID'], good['TWILIO_API_KEY_SID'], good['TWILIO_API_KEY_SECRET'], good['TWILIO_FROM'], messagingServiceSid, malformedSid] as string[];
+    for (const [label, env] of cases) {
+      let message = '';
+      try { assertSafeBootConfig(env); } catch (error) { message = (error as Error).message; }
+      expect(message, label).toMatch(/^FATAL: TWILIO_/);
+      for (const value of configuredValues) expect(message, `${label} echoes ${value}`).not.toContain(value);
+    }
+  });
+
+  it('the value-free preflight refuses both senders once, lists the SID by name, and never prints its value', () => {
+    const result = runPreflight({ ...good, TWILIO_MESSAGING_SERVICE_SID: messagingServiceSid });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('REFUSED');
+    expect(result.stdout).toContain('TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID are both set');
+    // A stub can only ADD a value, so the walkthrough cannot see past a
+    // both-set refusal: it prints the problem once and says so, never 40 times.
+    expect(result.stdout.match(/✗ FATAL: TWILIO_FROM and TWILIO_MESSAGING_SERVICE_SID/g)).toHaveLength(1);
+    expect(result.stdout).toContain('the walkthrough stops here');
+    expect(result.stdout).toContain('PRESENT  TWILIO_MESSAGING_SERVICE_SID');
+    expect(result.stdout).not.toContain(messagingServiceSid);
+  });
+
+  it('the value-free preflight refuses neither sender and still walks on to the next problem', () => {
+    const result = runPreflight({ ...good, TWILIO_FROM: undefined, PUSH_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID is required');
+    expect(result.stdout).toContain('✗ FATAL: PUSH_PROVIDER is dev');
+    expect(result.stdout).toContain('MISSING  TWILIO_MESSAGING_SERVICE_SID');
+  });
+
+  it.each(paddedTwilioIdentities.filter(({ whitespace }) => whitespace === '" "' || whitespace === '"\\t"'))(
+    'preflight CLI refuses unquoted $position $whitespace in $name', ({ name, value }) => {
+      const result = runPreflight({ ...good, [name]: value });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stdout).toContain(`FATAL: ${name} is missing or malformed`);
+    },
+  );
+
+  it.each(paddedTwilioIdentities.filter(({ whitespace }) => whitespace === '"\\r"' || whitespace === '"\\n"'))(
+    'preflight CLI refuses quoted $position $whitespace in $name', ({ name, value }) => {
+      const result = runPreflight({ ...good, [name]: `"${value}"` });
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stdout).toContain(`FATAL: ${name} is missing or malformed`);
+    },
+  );
+
+  it('refuses an unknown notification adapter at production boot', () => {
+    expect(() => assertSafeBootConfig({ ...good, NOTIFICATION_PROVIDER: 'unknown' })).toThrow(/NOTIFICATION_PROVIDER/);
   });
 
   it('[NOC-A F1] refuses to boot production on the in-memory push provider', () => {
@@ -118,8 +334,9 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local' })).toThrow(/STORAGE_PROVIDER/);
   });
 
-  it('allows local storage in production only with STORAGE_ALLOW_LOCAL=1 (deliberate pilot)', () => {
-    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).not.toThrow();
+  it('allows deliberate local storage only with an explicit root and separate backup obligation', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).toThrow(/UPLOAD_DIR/);
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1', UPLOAD_DIR: '/srv/swift/uploads', STORAGE_LOCAL_BACKUP_ACK: '1' })).not.toThrow();
   });
 
   it('accepts the real object-storage providers', () => {
@@ -139,6 +356,106 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'test', DEV_OTP_BYPASS: '1' })).not.toThrow();
+  });
+});
+
+// [AX352] SETTLEMENT_PUBLICATION_LEASE_MS shortens the settlement publication
+// lease so it can lapse inside a test or a drill. In production a short lease
+// could lapse while a slow row replays, before any progress is written, and
+// strand the unpaid tail of a settlement file: production refuses to boot with
+// any override below the 5-minute default.
+describe('[AX352] the settlement publication lease override is test and drill only', () => {
+  it('refuses to boot production with the lease shortened: 1000 ms, anything under 5 minutes, or unreadable', () => {
+    expect(PUBLICATION_LEASE_MS).toBe(5 * 60_000);
+    expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }))
+      .toThrow(/FATAL: SETTLEMENT_PUBLICATION_LEASE_MS .*Refusing to start/);
+    for (const value of ['299999', '0', '-1', 'abc', ' ']) {
+      expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: value }), value)
+        .toThrow(/SETTLEMENT_PUBLICATION_LEASE_MS/);
+    }
+  });
+
+  it('boots production with the override unset, or no shorter than the default', () => {
+    for (const value of [undefined, '', '300000', '600000']) {
+      expect(() => assertSafeBootConfig({ ...good, SETTLEMENT_PUBLICATION_LEASE_MS: value }), String(value)).not.toThrow();
+    }
+  });
+
+  it('allows the short lease in the test, drill and development postures', () => {
+    for (const mode of ['test', 'loadtest', 'development']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }), mode).not.toThrow();
+      expect(publicationLeaseMs({ NODE_ENV: mode, SETTLEMENT_PUBLICATION_LEASE_MS: '1000' }), mode).toBe(1000);
+    }
+  });
+
+  it('[AX355] in production the lease read at call time ignores the override: an environment changed after boot never shortens it', () => {
+    const env: Record<string, string | undefined> = { ...good };
+    expect(() => assertSafeBootConfig(env)).not.toThrow(); // booted clean
+    env['SETTLEMENT_PUBLICATION_LEASE_MS'] = '1000'; // changed after boot
+    expect(publicationLeaseMs(env)).toBe(PUBLICATION_LEASE_MS);
+    expect(publicationHeartbeatMs(env)).toBe(15_000);
+    env['SETTLEMENT_PUBLICATION_LEASE_MS'] = '600000'; // even a longer one: production runs the default
+    expect(publicationLeaseMs(env)).toBe(PUBLICATION_LEASE_MS);
+  });
+});
+
+// [ledger E08] The order hold is the customer's free-cancel window: while it
+// runs, the order is hidden from the vendor. holdWindowMs()/
+// checkoutQueueTiming() treat a MISSING LIFECYCLE_V2 as hold OFF, so a deploy
+// that omits the variable silently sends new orders straight to the vendor
+// while the app still promises a free-cancel window. Production must choose
+// explicitly — off is a choice, omission is not.
+describe('[ledger E08] production must be explicit about the order hold', () => {
+  it('refuses production when LIFECYCLE_V2 is missing — the hold would be silently OFF', () => {
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: undefined }))
+      .toThrow(/FATAL: LIFECYCLE_V2/);
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: undefined }))
+      .toThrow(/Refusing to start/);
+  });
+
+  it('refuses every LIFECYCLE_V2 value other than an explicit 1 or 0', () => {
+    for (const value of [undefined, '', 'true', '01', 'on', '1 ']) {
+      expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: value }), String(value))
+        .toThrow(/LIFECYCLE_V2/);
+    }
+  });
+
+  it('accepts an explicit hold-off choice (LIFECYCLE_V2=0)', () => {
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '0' })).not.toThrow();
+  });
+
+  it('accepts the settled hold-on posture (LIFECYCLE_V2=1)', () => {
+    expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1' })).not.toThrow();
+  });
+
+  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '2', '4.99'])(
+    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the free-cancel window',
+    (minutes) => {
+      expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }))
+        .toThrow(/ORDER_HOLD_MINUTES/);
+    },
+  );
+
+  it('accepts the unset default and any hold at least as long as the free-cancel window (DS214 D1)', () => {
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(5);
+    for (const minutes of [undefined, '5', '7', '10']) {
+      expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }), String(minutes))
+        .not.toThrow();
+    }
+  });
+
+  it('does not enforce the hold posture outside production', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', LIFECYCLE_V2: undefined, ORDER_HOLD_MINUTES: 'abc' }))
+      .not.toThrow();
+  });
+
+  it('the value-free preflight inherits the refusal and the explicit-off acceptance', () => {
+    const refused = runPreflight({ ...good, LIFECYCLE_V2: undefined });
+    expect(refused.status, refused.stdout + refused.stderr).toBe(1);
+    expect(refused.stdout).toContain('LIFECYCLE_V2');
+    const off = runPreflight({ ...good, LIFECYCLE_V2: '0' });
+    expect(off.status, off.stdout + off.stderr).toBe(0);
   });
 });
 
@@ -226,6 +543,49 @@ describe('[F-027-15] getPushProvider refuses the in-memory provider in productio
   });
 });
 
+// [R2 C2] The load-test control plane signs its leases with
+// TEST_CONTROL_SECRET. Its fallback, 'test-control-dev-secret', is printed in
+// this PUBLIC repository, so an internet-facing loadtest deployment with the
+// secret unset would hand anyone a forgeable lease. Boot refuses that; the
+// fallback survives only for the isolated `test` mode the suites run in.
+describe('test-control lease secret [C2]', () => {
+  const loadtest: Record<string, string | undefined> = { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1' };
+  const prismaDouble = { deploymentIdentity: { findUnique: async () => null } } as unknown as Parameters<typeof testControlIdentity>[0];
+
+  it('refuses loadtest with test control enabled and no TEST_CONTROL_SECRET', () => {
+    expect(() => assertSafeBootConfig(loadtest)).toThrow(/TEST_CONTROL_SECRET/);
+  });
+
+  it.each(['', 'short', 'x'.repeat(31), 'test-control-dev-secret'])('refuses a weak secret (%j)', (secret) => {
+    expect(() => assertSafeBootConfig({ ...loadtest, TEST_CONTROL_SECRET: secret })).toThrow(/TEST_CONTROL_SECRET/);
+  });
+
+  it('accepts a 32+ character secret', () => {
+    expect(() => assertSafeBootConfig({ ...loadtest, TEST_CONTROL_SECRET: 'x'.repeat(32) })).not.toThrow();
+  });
+
+  it('does not require the secret when test control is off', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '0' })).not.toThrow();
+  });
+
+  it('production never registers test control, so the guard adds nothing there', () => {
+    expect(() => assertSafeBootConfig({ ...good, TEST_CONTROL_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('test mode keeps the repository fallback — suites run isolated', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' })).not.toThrow();
+  });
+
+  it('the identity endpoint itself refuses to sign with the fallback outside test mode', async () => {
+    await expect(testControlIdentity(prismaDouble, { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1' })).rejects.toThrow(/TEST_CONTROL_SECRET/);
+    const signed = await testControlIdentity(prismaDouble, { NODE_ENV: 'loadtest', TEST_CONTROL_ENABLED: '1', TEST_CONTROL_SECRET: 'y'.repeat(32) });
+    expect(signed.lease.signature).toMatch(/^[0-9a-f]{64}$/);
+    const inTest = await testControlIdentity(prismaDouble, { NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' });
+    expect(inTest.lease.signature).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
 // [V8] CONSENT_IP_PEPPER degrades silently (hashIp → null, attribution just
 // stops). Boot must at least be LOUD about it — a warning, not a refusal,
 // because the ledger's core evidence still writes without it.
@@ -252,5 +612,162 @@ describe('CONSENT_IP_PEPPER visibility [V8]', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [R13 on current main] Two production boot rules meet here. #1272 lets a
+// cash-only launch start with the card rail declared OFF; R13 keeps live MMG
+// collection off until sandbox UAT proves the merchant reference round-trips
+// (MMG_REFERENCE_ROUNDTRIP_VERIFIED=1). The merged configuration must keep
+// both: cards OFF is not a way past the MMG gate, and the MMG gate does not
+// stop a cash-only launch. Checked everywhere a booting server consults it:
+// the boot guard, the value-free preflight, and the two provider factories
+// the billing workers construct.
+// ---------------------------------------------------------------------------
+describe('[R13 on current main] cash-only production boot keeps the MMG reference gate', () => {
+  const cashOnly: Record<string, string | undefined> = { ...cardOff, MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' };
+  const unverified = [undefined, '', '0', 'true', 'yes', '1 '];
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('boots with cards OFF once the MMG reference round-trip is verified', () => {
+    expect(() => assertSafeBootConfig(cashOnly)).not.toThrow();
+  });
+
+  it.each(unverified)('refuses cards OFF while the MMG reference round-trip is unverified (%s)', (verified) => {
+    expect(() => assertSafeBootConfig({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified }))
+      .toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+  });
+
+  it('the value-free preflight gives the same two verdicts', () => {
+    const pass = runPreflight(cashOnly);
+    expect(pass.status, pass.stdout + pass.stderr).toBe(0);
+    const held = runPreflight({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined });
+    expect(held.status, held.stdout + held.stderr).toBe(1);
+    expect(held.stdout).toContain('MMG_REFERENCE_ROUNDTRIP_VERIFIED');
+  });
+
+  it('the workers get a card rail that refuses locally and live MMG only once verified', async () => {
+    const { getPaymentProvider } = await import('../providers/payment/payment-provider');
+    const { getMmgProvider, LiveMmgProvider } = await import('../providers/mmg/mmg-provider');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a boot check never contacts a provider'));
+    try {
+      for (const [name, value] of Object.entries(cashOnly)) vi.stubEnv(name, value);
+      const cards = getPaymentProvider();
+      await expect(cards.chargeToken({ token: 'synthetic', amount: 1, currencyCode: 'GYD', idempotencyKey: 'boot-check', description: 'boot check' }))
+        .resolves.toMatchObject({ status: 'failed', code: 'CARD_RAIL_DISABLED' });
+      expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
+      for (const verified of unverified) {
+        vi.stubEnv('MMG_REFERENCE_ROUNDTRIP_VERIFIED', verified);
+        expect(() => getMmgProvider(), String(verified)).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MMG hosted checkout (providers/mmg/mmg-checkout.ts). The guard runs in EVERY
+// mode — staging runs development mode against MMG UAT — so a half-configured
+// checkout never starts anywhere, and production never runs the sandbox or a
+// UAT page. Off (unset, or exactly 0) changes nothing.
+// ---------------------------------------------------------------------------
+describe('MMG hosted checkout — the boot guard, in every mode', () => {
+  let pair: { publicKey: KeyObject; privateKey: KeyObject };
+  beforeAll(async () => {
+    pair = await new Promise((resolve, reject) => {
+      generateKeyPair('rsa', { modulusLength: 4096 }, (err, publicKey, privateKey) => (err ? reject(err) : resolve({ publicKey, privateKey })));
+    });
+  }, 60_000);
+  const checkoutOn = (): Record<string, string> => ({
+    MMG_CHECKOUT_ENABLED: '1',
+    MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
+    MMG_CHECKOUT_MERCHANT_ID: '0000001',
+    MMG_CHECKOUT_CLIENT_ID: 'client-test',
+    MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
+    MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
+    MMG_CHECKOUT_SECRET_KEY: 'not-a-secret',
+    MMG_CHECKOUT_PUBLIC_KEY: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    MMG_CHECKOUT_PRIVATE_KEY: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+  });
+
+  it('off — unset or exactly 0 — changes nothing', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
+  });
+
+  it('a misspelled switch refuses to start, in production and outside it', () => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: 'true' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_ENABLED: 'yes' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
+  });
+
+  it('enabled on the live driver without its configuration refuses to start — development (staging) included', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '1' }))
+      .toThrow(/MMG_CHECKOUT_MERCHANT_ID is required/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
+  });
+
+  it('[DS632] MMG_CHECKOUT_CREATION_ZONE is exactly GUYANA_WALL_CLOCK or UTC, or unset: anything else refuses to start, in production and outside it, the checkout on or off', () => {
+    for (const zone of ['guyana', 'utc', 'UTC ', 'America/Guyana']) {
+      expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly GUYANA_WALL_CLOCK or UTC/);
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+    }
+    for (const zone of [undefined, '', 'GUYANA_WALL_CLOCK', 'UTC']) {
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+    }
+  });
+
+  it('production boots with a complete checkout configuration, and never with the UAT page', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))
+      .toThrow(/non-UAT MMG_CHECKOUT_URL/);
+  });
+});
+
+// [PT-1 · C10] Card rail v2 in production. The card simulator is a test page
+// with no real money, and this build has no production-capable v2 provider:
+// production refuses both, loudly, at boot — never at a partner's first tap.
+describe('[PT-1] card rail v2 cannot be switched on in production yet, and the simulator never', () => {
+  it('refuses the card simulator in production, whatever the flag says', () => {
+    for (const flag of [undefined, '0', '1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_V2: flag }), String(flag))
+        .toThrow(/CARD_RAIL_PROVIDER=simulator/);
+    }
+  });
+
+  it('refuses CARD_RAIL_V2=1 in production: no production v2 provider exists in this build', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '1' })).toThrow(/FATAL: CARD_RAIL_V2=1/);
+  });
+
+  it('the flag is 1 or 0 (or unset), never a guess', () => {
+    for (const value of ['true', 'on', 'yes', '01', ' 1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: value }), value).toThrow(/CARD_RAIL_V2 must be 1 or 0/);
+    }
+  });
+
+  it('OFF — 0 or unset — boots exactly as before', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: undefined })).not.toThrow();
+  });
+
+  it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
+  });
+
+  // [AX297 F5] Draining v2 after a switch-off is its own switch, held to the same rules.
+  it('CARD_RAIL_V2_DRAIN is 1 or 0 (or unset), and never 1 in production: there is nothing there to drain', () => {
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '1' })).toThrow(/FATAL: CARD_RAIL_V2_DRAIN=1/);
+    for (const value of ['true', 'yes', '2', ' 1']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: value }), value).toThrow(/CARD_RAIL_V2_DRAIN must be 1 or 0/);
+    }
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2_DRAIN: undefined })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });
 });

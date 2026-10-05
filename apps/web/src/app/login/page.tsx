@@ -1,24 +1,39 @@
 'use client';
 
-import { Suspense, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
+import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
+import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { SwiftLogo } from '@/components/swift-logo';
 import styles from '../auth-flow.module.css';
 
-const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie'];
+const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market'];
+
+/** [Q7b] The customer app's Home is `/` itself — the one customer address a
+ *  prefix cannot name, since every path starts with a slash. */
+function isCustomerReturn(next: string): boolean {
+  const path = next.split(/[?#]/)[0] ?? '';
+  return path === '/' || CUSTOMER_ROUTES.some((route) => path.startsWith(route));
+}
 
 function LoginInner() {
   const router = useRouter();
+  const continueJourney = useStorefrontAuthJourney();
   const params = useSearchParams();
   // Only ever honour a clean in-app path as the post-login redirect. Reject
   // absolute/protocol-relative URLs and any '..' traversal so ?next= can't be an
   // open redirect to a phishing site.
-  const rawNext = params.get('next') ?? '';
-  const next = /^\/(?!\/)/.test(rawNext) && !rawNext.includes('..') && !rawNext.includes('\\') ? rawNext : '';
-  const isCustomer = CUSTOMER_ROUTES.some((r) => next.startsWith(r));
+  const [pendingReturn, setPendingReturn] = useState('');
+  const [next, setNext] = useState('');
+  const requestedNext = params.get('next');
+  useEffect(() => {
+    setNext(storefrontAuthReturn(requestedNext));
+    setPendingReturn(readStorefrontContinuation()?.returnPath ?? '');
+  }, [requestedNext]);
+  const isCustomer = isCustomerReturn(next);
 
   const [step, setStep] = useState<'phone' | 'code'>('phone');
   const [phone, setPhone] = useState('+592');
@@ -43,10 +58,11 @@ function LoginInner() {
     try {
       if (isCustomer) {
         await verifyCustomerLogin(phone.trim(), code.trim());
-        router.replace(next || '/order');
+        continueJourney();
+        router.replace(next || '/');
       } else {
         const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
-        router.replace(home);
+        router.replace(next === '/weekly-fee' ? next : home);
       }
     } catch (e) { setError((e as Error).message); }
     finally { busyNow.current = false; setBusy(false); }
@@ -55,7 +71,7 @@ function LoginInner() {
   return (
     <main className={styles.page}>
       <section className={`${styles.card} ${styles.cardNarrow}`} aria-labelledby="login-title">
-        <Link href="/" aria-label="Swift home" className={styles.brandLink}><SwiftLogo /></Link>
+        <Link href="/" aria-label="Swift home" onClick={clearStorefrontContinuation} className={styles.brandLink}><SwiftLogo /></Link>
         <h1 id="login-title" className={styles.heading}>Sign in to Swift</h1>
         <p className={styles.bodyCopy}>
           {step === 'code' ? `Enter the code sent to ${phone}.`
@@ -92,10 +108,15 @@ function LoginInner() {
 
         {error ? <p className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
 
+        {pendingReturn ? (
+          <Link href={pendingReturn} onClick={clearStorefrontContinuation} className={styles.textButton}>Cancel and return to menu</Link>
+        ) : null}
+
         <p className={styles.dividerCopy}>
           New to Swift?{' '}
           <Link
             href={next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'}
+            onClick={continueJourney}
             className={styles.inlineLink}
           >
             Create an account

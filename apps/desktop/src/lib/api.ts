@@ -438,10 +438,13 @@ export const documentViewUrl = (id: string) =>
     return resolved;
   });
 
-/** Mirrors the server's RejectionReasonCode enum (verification.service). */
+/** Mirrors the server's REJECTION_REASON_CODES (verification.service): the codes a reviewer may
+ *  choose for a new decision. A census test keeps the two identical. NOT_YELLOW is retired (owner
+ *  ruling 2026-10-01: a taxi may be any colour) and is never offered; the H plate keeps WRONG_PLATE_CLASS. */
 export const REASON_CODES = [
   'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
-  'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'INSURANCE_NOT_HIRE', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'WRONG_PLATE_CLASS',
 ] as const;
 
 // ── Live Ops ─────────────────────────────────────────────────────────────────
@@ -469,25 +472,6 @@ export const fetchOpsLive = () =>
   });
 export const retryDispatch = (orderId: string) =>
   apiFetch(`/api/v1/admin/orders/${orderId}/retry-dispatch`, { method: 'POST', body: '{}' });
-
-// ── Agent ────────────────────────────────────────────────────────────────────
-export const fetchAgentApprovals = () =>
-  apiFetch('/api/v1/admin/agent/approvals?status=PENDING').then((r) => r.data);
-export const decideAgentApproval = (id: string, approve: boolean) =>
-  apiFetch(`/api/v1/admin/agent/approvals/${id}/${approve ? 'approve' : 'reject'}`, { method: 'POST', body: '{}' });
-
-export interface AgentAuditEvent {
-  id: string;
-  at: string;
-  job: string;
-  subjectId: string | null;
-  action: string;
-  /** suggested | executed | pending_approval | auto_executed | rejected | error */
-  outcome: string;
-  reasoning: string | null;
-}
-export const fetchAgentAudit = () =>
-  apiFetch('/api/v1/admin/agent/audit?limit=50').then((r) => r.data as AgentAuditEvent[]);
 
 // ── Support tickets ──────────────────────────────────────────────────────────
 export interface SupportTicket {

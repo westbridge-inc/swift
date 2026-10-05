@@ -11,6 +11,7 @@
  * provenance and touches no record; the SLA watchdog leaves that case open.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -64,6 +65,7 @@ async function person(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   const token = app.jwt.sign({ userId: u.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
   await app.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `dsar-${RUN}-${n}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
   tokens.set(u.id, token);
@@ -71,7 +73,7 @@ async function person(n: number) {
 }
 const submit = (userId: string, docType: string, documentNumber?: string) => {
   kyc.extracted = documentNumber ? { documentNumber } : undefined;
-  return runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  return runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 };
 const get = (userId: string) => app.inject({ method: 'GET', url: '/api/v1/verification/dsar/documents', headers: { authorization: `Bearer ${tokens.get(userId)}` } });
 const erase = (userId: string, documentIds?: string[]) => app.inject({ method: 'POST', url: '/api/v1/verification/dsar/documents/erase', payload: documentIds ? { documentIds } : {}, headers: { authorization: `Bearer ${tokens.get(userId)}`, 'content-type': 'application/json' } });

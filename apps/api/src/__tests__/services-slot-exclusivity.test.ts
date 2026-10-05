@@ -11,6 +11,7 @@ import { providerChecklist } from '../modules/services/services.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { formatGuyanaTime } from '../utils/guyana-day';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -357,8 +358,9 @@ describe('Services — closing a job is never silent', () => {
     expect(told).not.toBeNull();
     expect(told!.body).toContain('free again');
     // The hour the provider had blocked is named, in the same spelling the
-    // booking notification used.
-    expect(told!.body).toContain(slot.toLocaleString('en-GY', { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short' }));
+    // booking notification used: the market zone through the one shared
+    // formatter (services.routes.ts slotLabel), never the host zone.
+    expect(told!.body).toContain(formatGuyanaTime(slot, { weekday: 'short', hour: 'numeric', minute: '2-digit', day: 'numeric', month: 'short', hour12: true }, 'en-US'));
     // The canceller is not notified about their own action.
     expect(await notificationFor(customer.userId, 'booking_cancelled', jobId)).toBeNull();
   });

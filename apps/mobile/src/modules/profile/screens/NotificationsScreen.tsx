@@ -1,9 +1,12 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { FlatList, View } from 'react-native';
+import { useNavigation, type NavigationProp, type ParamListBase } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useNotifications } from '../../../hooks/customer';
-import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, Screen, T } from '../../../kit';
+import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PressableScale, Screen, T } from '../../../kit';
+import { destinationFor } from '../../../services/notification-router';
+import { safeNavigate } from '../../../navigation/navigationRef';
 
 // Kit Notification (56): stacked rows with icon chips; unread carries a dot.
 const ICON_FOR: Record<string, React.ComponentProps<typeof IconChip>['icon']> = {
@@ -25,7 +28,23 @@ const EARNER_KINDS = new Set([
   'verification_forced_offline',
 ]);
 
+/** Can a navigate from this screen land on `screen`? Only when this navigator,
+ *  or one it sits inside, registers it right now. Untagged legacy rows still
+ *  reach this list (the deny-list above covers only verification kinds), and
+ *  several of them resolve to a screen only another role's stack mounts: a
+ *  store's order alert opens VendorOrderDetail, a driver's check opens
+ *  GuardianDriverConfirm. From the shopping app that navigate goes nowhere,
+ *  silently. [TST-001]: a screen existing somewhere does not make it
+ *  reachable by the person tapping. */
+function canReach(navigation: NavigationProp<ParamListBase> | undefined, screen: string): boolean {
+  for (let nav = navigation; nav; nav = nav.getParent()) {
+    if (nav.getState()?.routeNames.includes(screen)) return true;
+  }
+  return false;
+}
+
 export function NotificationsScreen() {
+  const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const notifications = useNotifications<any>();
   const all: any[] = Array.isArray(notifications.data)
     ? notifications.data
@@ -51,23 +70,38 @@ export function NotificationsScreen() {
           data={rows}
           keyExtractor={(n, i) => n.id ?? String(i)}
           contentContainerStyle={{ padding: space['2xl'], gap: space.md }}
-          renderItem={({ item: n }) => (
-            <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md }}>
-              <IconChip icon={ICON_FOR[n.type] ?? 'bell'} />
-              <View style={{ flex: 1, gap: 2 }}>
-                <T variant="body" weight={n.isRead ? 'regular' : 'semibold'} numberOfLines={1}>
-                  {n.title ?? 'Update'}
-                </T>
-                <T variant="caption" tone="muted" numberOfLines={2}>
-                  {n.body ?? n.message ?? ''}
-                </T>
-                <T variant="caption" tone="faint">
-                  {n.createdAt ? new Date(n.createdAt).toLocaleString() : ''}
-                </T>
-              </View>
-              {!n.isRead ? <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: color.brand[500] }} /> : null}
-            </Card>
-          )}
+          renderItem={({ item: n }) => {
+            const card = (
+              <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, padding: space.md }}>
+                <IconChip icon={ICON_FOR[n.type] ?? 'bell'} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <T variant="body" weight={n.isRead ? 'regular' : 'semibold'} numberOfLines={1}>
+                    {n.title ?? 'Update'}
+                  </T>
+                  <T variant="caption" tone="muted" numberOfLines={2}>
+                    {n.body ?? n.message ?? ''}
+                  </T>
+                  <T variant="caption" tone="faint">
+                    {n.createdAt ? new Date(n.createdAt).toLocaleString() : ''}
+                  </T>
+                </View>
+                {!n.isRead ? <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: color.brand[500] }} /> : null}
+              </Card>
+            );
+            // [E28] A row tap IS a push tap: the same destinationFor table the
+            // tap-router uses, so the two surfaces cannot drift into two
+            // mappings. A row is a button only when it has somewhere to go
+            // that this screen can reach. A row with no destination, or one
+            // that lives in another role's stack, stays a plain card, because
+            // a button that goes nowhere is the defect this fixes.
+            const dest = destinationFor(n?.data);
+            if (!dest || !canReach(navigation, dest.screen)) return card;
+            return (
+              <PressableScale accessibilityRole="button" onPress={() => safeNavigate(dest.screen, dest.params)}>
+                {card}
+              </PressableScale>
+            );
+          }}
         />
       )}
     </Screen>

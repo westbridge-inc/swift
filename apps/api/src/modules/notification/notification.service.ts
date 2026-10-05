@@ -1,6 +1,9 @@
-import type { Notification, PrismaClient } from '@prisma/client';
+import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
+import { createHash } from 'node:crypto';
+import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
+import { pushOptionsFor } from '../../providers/notifications/alert-class';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter } from '../../plugins/observability';
@@ -42,7 +45,10 @@ type NotificationType =
  *  kind deny-list for those. */
 export type NotificationAudience = 'customer' | 'earner' | 'business';
 
-interface NotificationPayload {
+export interface NotificationPayload {
+  /** Durable weekly-fee stage and optional SMS, never used by other notices. */
+  feeStageKey?: string;
+  feeSms?: string;
   userId: string;
   type: NotificationType;
   title: string;
@@ -60,10 +66,17 @@ interface NotificationPayload {
 }
 
 /**
- * Vendor-alert escalation step. The unread alert row is the state:
- * read = acknowledged = stop. Level 0 re-alerts (socket + push); level 1
+ * Vendor-alert escalation step. Level 0 re-alerts (socket + push); level 1
  * falls back to SMS so the phone makes noise even with the app dead.
  * Exported standalone so the queue worker and tests drive the same code.
+ *
+ * [Q10] Two things stop it, each read at the moment of sending:
+ *  - the ORDER is no longer waiting for the store. Anyone on the team
+ *    accepting or declining it, the customer cancelling, or the auto-cancel
+ *    all end the wait, and only the order row knows. The owner inbox row used
+ *    to be the only signal, so a staff accept or a customer cancel still
+ *    sent "still waiting" pushes and then an SMS to the owner;
+ *  - the alert was acknowledged (its unread row is the banner state).
  */
 export async function escalateVendorAlert(
   prisma: PrismaClient,
@@ -72,6 +85,9 @@ export async function escalateVendorAlert(
   orderId: string,
   level: number,
 ): Promise<'stopped' | 'realerted' | 'sms_sent'> {
+  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
+  if (order?.status !== 'PENDING') return 'stopped'; // handled, cancelled or gone: nobody is waiting
+
   const alert = await prisma.notification.findFirst({
     where: {
       isRead: false,
@@ -84,13 +100,14 @@ export async function escalateVendorAlert(
   });
   if (!alert) return 'stopped'; // acknowledged (or never existed) — done
 
-  const data = alert.data as { orderNumber?: string } | null;
+  const data = alert.data as { orderNumber?: unknown; respondBy?: unknown } | null;
+  const orderNumber = typeof data?.orderNumber === 'string' ? data.orderNumber : undefined;
 
   if (level === 0) {
     io.to(`user:${alert.userId}`).emit('vendor:order_alert', {
       notificationId: alert.id,
       orderId,
-      orderNumber: data?.orderNumber,
+      orderNumber,
       persistent: true,
       reAlert: true,
     });
@@ -99,8 +116,20 @@ export async function escalateVendorAlert(
       select: { token: true },
     });
     if (tokens.length > 0) {
+      // [Q10] The payload the tap-router needs to open THIS order on the
+      // store order desk (VendorOrderDetail). It used to carry only the
+      // orderId, which the router sends to the customer Delivery screen that
+      // the vendor app never mounts. respondBy rides along so the push dies
+      // with the response window, like the first alert.
+      const payload: Record<string, unknown> = {
+        kind: 'vendor_order_alert',
+        orderId,
+        ...(orderNumber ? { orderNumber } : {}),
+        audience: 'business',
+        ...(typeof data?.respondBy === 'string' ? { respondBy: data.respondBy } : {}),
+      };
       await channels.push
-        .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, { orderId })
+        .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, payload, pushOptionsFor(payload))
         .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
         .catch(() => {});
     }
@@ -108,7 +137,7 @@ export async function escalateVendorAlert(
   }
 
   await channels.sms
-    .sendSms(alert.user.phone, `Swift: order ${data?.orderNumber ?? ''} is still waiting for your response. Open your dashboard now.`)
+    .sendSms(alert.user.phone, `Swift: order ${orderNumber ?? ''} is still waiting for your response. Open your dashboard now.`)
     .catch((err) => {
       // SWIFT-100: the last rung of the escalation ladder. A silent failure here
       // means the vendor was never reached and no one knows — log + count it.
@@ -123,15 +152,26 @@ export async function escalateVendorAlert(
  *  not a dashboard someone remembers to open. Fans one notification (row +
  *  live socket) to every active ADMIN/SUPER_ADMIN account. */
 /** Stamp acknowledgment on an alert delivery — the recipient ACTED. Idempotent,
- *  fire-and-caught at call sites (tracking never blocks the action). */
-export async function acknowledgeAlert(
-  prisma: PrismaClient,
-  kind: 'VENDOR_ORDER' | 'MOVER_OFFER',
-  subjectId: string,
-  recipientId?: string,
-): Promise<void> {
+ *  fire-and-caught at call sites (tracking never blocks the action).
+ *
+ *  [AX323 RR2-1] A mover-offer acknowledgment is evidence about ONE offer
+ *  attempt, and the offer timeout reads it as proof that the card reached the
+ *  mover. Stamped across the whole (order, mover) pair, a delayed decline or
+ *  accept of an expired attempt marked an unseen successor as seen, and that
+ *  successor's lapse then cost the mover acceptance rate. So a MOVER_OFFER
+ *  acknowledgment always names its attempt (the type requires it): `null` is
+ *  the legacy pre-attempt row, never "every attempt". */
+type AlertAcknowledgment =
+  | [kind: 'VENDOR_ORDER', subjectId: string, recipientId?: string]
+  | [kind: 'MOVER_OFFER', subjectId: string, recipientId: string, offerAttemptId: string | null];
+
+export async function acknowledgeAlert(prisma: PrismaClient, ...ack: AlertAcknowledgment): Promise<void> {
+  const [kind, subjectId, recipientId] = ack;
   await prisma.alertDelivery.updateMany({
-    where: { kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null },
+    where: {
+      kind, subjectId, ...(recipientId ? { recipientId } : {}), acknowledgedAt: null,
+      ...(ack[0] === 'MOVER_OFFER' ? { offerAttemptId: ack[3] ?? null } : {}),
+    },
     data: { acknowledgedAt: new Date() },
   });
 }
@@ -147,27 +187,46 @@ export async function acknowledgeAlert(
  *  must not do is fail closed SILENTLY: a lookup that throws is an outage, and
  *  an outage that quietly redirects a tenant's pages away from that tenant's
  *  own responders is exactly the kind of thing nobody notices for months. */
-export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined): Promise<string | null> {
-  if (!userId) return null;
+export async function tenantOfUser(prisma: PrismaClient, userId: string | null | undefined, requireResolved = false): Promise<string | null> {
+  if (!userId) {
+    if (requireResolved) throw new Error('admin page subject unavailable');
+    return null;
+  }
   const u = await prisma.user
     .findUnique({ where: { id: userId }, select: { tenantId: true } })
     .catch((err) => {
+      if (requireResolved) throw err;
       log().error({ err, userId }, '[F-027-20] could not resolve a tenant for an admin page — it will reach PLATFORM OPERATORS ONLY, not this subject’s own admins');
       return null;
     });
+  if (!u && requireResolved) throw new Error('admin page subject unavailable');
   return u?.tenantId ?? null;
 }
 
 /** Same idea for billing: a Subscription carries no tenantId of its own — it
  *  inherits one from the actor it belongs to (rider, driver, or vendor owner).
  *  [NOC-A F45] */
-export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId: string | null | undefined): Promise<string | null> {
-  if (!subscriptionId) return null;
+export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId: string | null | undefined, requireResolved = false): Promise<string | null> {
+  if (!subscriptionId) {
+    if (requireResolved) throw new Error('admin page subscription unavailable');
+    return null;
+  }
   const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
     select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
-  }).catch(() => null);
-  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null);
+  }).catch(err => {
+    if (requireResolved) throw err;
+    return null;
+  });
+  // Durable callers cannot acknowledge a platform-only fallback after a failed
+  // lookup. Only a successfully resolved user with tenantId=null is platform scoped.
+  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null, requireResolved);
+}
+
+/** The tracking row of one deduped ops page to one admin — derived from the
+ *  notice and the recipient, so the same page sent again maps onto it. */
+function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
+  return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 
 export async function notifyAdmins(
@@ -175,7 +234,18 @@ export async function notifyAdmins(
   notifications: NotificationService,
   /** `tenantId` is REQUIRED — pass the subject's tenant, or an explicit
    *  `null` for a genuinely platform-wide notice. See the note below. */
-  input: { title: string; body: string; data?: Record<string, unknown>; tenantId: string | null },
+  input: {
+    title: string; body: string; data?: Record<string, unknown>; tenantId: string | null;
+    /** [ORDER-SPINE S1-6] Per-recipient idempotency key for a page that a
+     *  retried obligation may send again: the retry collapses into the first
+     *  delivery, and its tracking row, for every admin who already has it.
+     *  Omit it everywhere else. [R13] Durable billing callers pass the
+     *  committed event's key; existing callers are unchanged. */
+    dedupeKey?: string;
+    /** [R13] A durable caller's page must reach every admin; otherwise this
+     *  throws so the committed obligation stays retryable. */
+    requireAll?: boolean;
+  },
 ): Promise<number> {
   // [REPORT-014 F-014-03] Background workers carry no tenant ALS, so a
   // tenant-A event used to page tenant-B admins with A's order evidence.
@@ -244,6 +314,7 @@ export async function notifyAdmins(
       title: input.title,
       body: input.body,
       data: input.data,
+      ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
     });
     if (id) reached += 1;
   }
@@ -251,9 +322,20 @@ export async function notifyAdmins(
   // alerts, so /alerts/health can show whether anyone actually SAW them.
   if (admins.length > 0) {
     const subjectId = String((input.data?.['kind'] as string | undefined) ?? 'ops');
-    await prisma.alertDelivery
-      .createMany({ data: admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id })) })
-      .catch(() => {});
+    const rows = admins.map((a) => ({ kind: 'ADMIN_OPS', subjectId, recipientId: a.id }));
+    // [F-R2-ASTRA-01] A deduped page stays ONE notice per admin however often
+    // a retried obligation re-sends it — send() hands back the first delivery
+    // and does not fan out again — so it keeps one tracking row per admin
+    // too: the row id is derived from (notice, admin) and a retry's insert is
+    // skipped. Without a key every call is a new notice, tracked as before.
+    const { dedupeKey } = input;
+    const tracking: Prisma.AlertDeliveryCreateManyArgs = dedupeKey
+      ? { data: rows.map((r) => ({ ...r, id: dedupedOpsAlertId(dedupeKey, r.recipientId) })), skipDuplicates: true }
+      : { data: rows };
+    await prisma.alertDelivery.createMany(tracking).catch(() => {});
+  }
+  if (input.requireAll && (admins.length === 0 || reached !== admins.length)) {
+    throw new Error('admin notice incomplete');
   }
   return reached;
 }
@@ -266,6 +348,21 @@ export class NotificationService {
   ) {}
 
   async send(payload: NotificationPayload): Promise<string> {
+    if (isFeeDemand(payload)) {
+      // A fee demand that cannot be recorded for THIS recipient is logged and
+      // counted, never thrown into the caller: an admin fan-out must still
+      // reach the next admin. A recorded demand's delivery outcome (an
+      // UNKNOWN handoff included) still reaches the caller unchanged.
+      let notice: Awaited<ReturnType<typeof enqueueFeeDemand>>;
+      try {
+        notice = await enqueueFeeDemand(this.prisma, payload);
+      } catch (err) {
+        log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
+        notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
+        return '';
+      }
+      return this.deliverFeeDemand(notice.id);
+    }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
     // A notification is best-effort: a persistence/fan-out hiccup must NEVER
@@ -314,6 +411,41 @@ export class NotificationService {
     return notification.id;
   }
 
+  async deliverFeeDemand(noticeId: string): Promise<string> {
+    const notice = await this.prisma.billingFeeNotice.findUnique({ where: { id: noticeId } });
+    if (!notice || notice.status === 'OBSOLETE') return '';
+    const inboxId = await persistFeeDemandInbox(this.prisma, noticeId);
+    if (!inboxId) return '';
+    await this.publishPersisted(inboxId);
+    const payload = notice.payload as unknown as NotificationPayload;
+    if (payload.feeSms) {
+      const user = await this.prisma.user.findUnique({ where: { id: notice.userId }, select: { phone: true } });
+      if (!user?.phone) return inboxId;
+      const handoff = <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, noticeId, 'sms', part, effect);
+      if (this.channels.sms.supportsHandoff) await this.channels.sms.sendSms(user.phone, payload.feeSms, { handoff });
+      else await handoff('message', () => this.channels.sms.sendSms(user.phone, payload.feeSms!));
+    }
+    if (!await feeDemandOutstanding(this.prisma, noticeId)) {
+      await this.prisma.billingFeeNotice.updateMany({ where: { id: noticeId, status: 'PENDING' }, data: { status: 'DELIVERED' } });
+    }
+    return inboxId;
+  }
+
+  async drainFeeDemands(): Promise<{ attempted: number; delivered: number }> {
+    const rows = await this.prisma.billingFeeNotice.findMany({ where: { status: 'PENDING' }, orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }], take: 200 });
+    let delivered = 0;
+    for (const row of rows) {
+      try { if (await this.deliverFeeDemand(row.id)) delivered += 1; }
+      catch (err) { log().warn({ err, noticeId: row.id }, 'Fee demand remains pending or needs handoff review'); }
+      finally {
+        // Held or UNKNOWN handoffs retain their evidence without starving
+        // later subscriptions on every capped drain.
+        await this.prisma.billingFeeNotice.updateMany({ where: { id: row.id, status: 'PENDING' }, data: { updatedAt: new Date() } });
+      }
+    }
+    return { attempted: rows.length, delivered };
+  }
+
   /** Fan out an inbox row that another atomic domain transaction already
    * persisted. This is the post-commit half for liability-sensitive workflows:
    * socket/push failures cannot roll back the domain fact, and retrying this
@@ -333,8 +465,9 @@ export class NotificationService {
       : undefined;
 
     try {
-      // Live socket delivery
-      this.io.to(`user:${notification.userId}`).emit('notification', {
+      const feeDemandId = typeof data?.['feeDemandId'] === 'string' ? data['feeDemandId'] : null;
+      // Actual socket submission shares the same payer lock as pause creation.
+      const socketEffect = async () => this.io.to(`user:${notification.userId}`).emit('notification', {
         id: notification.id,
         type: notification.type,
         title: notification.title,
@@ -342,6 +475,8 @@ export class NotificationService {
         data,
         createdAt: notification.createdAt,
       });
+      if (feeDemandId) await handOffFeeDemand(this.prisma, feeDemandId, 'socket', 'notification', socketEffect);
+      else await socketEffect();
 
       // Channel fan-out through the swappable interface, honouring prefs.
       const user = await this.prisma.user.findUnique({
@@ -353,15 +488,19 @@ export class NotificationService {
       if (prefs.push) {
         const tokens = await this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
-          select: { token: true },
+          select: { token: true }, orderBy: { token: 'asc' },
         });
         if (tokens.length > 0) {
           // Channel failures must never break the request path — but after the
           // provider-level retries (withPushRetry) a final failure is LOGGED,
-          // never swallowed silently [SWIFT-UG-NOTIF-01].
-          await this.channels.push
-            .sendPush(tokens.map((t) => t.token), notification.title, notification.body, data)
-            .then((r) => deactivateDeadTokens(this.prisma, r.invalidTokens))
+          // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
+          // kind picks how urgently it travels (alert-class.ts).
+          const options = pushOptionsFor(data);
+          const handoff = feeDemandId ? <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, feeDemandId, 'push', part, effect) : undefined;
+          const effect = () => this.channels.push.sendPush(tokens.map((t) => t.token), notification!.title, notification!.body, data,
+            { ...options, ...(this.channels.push.supportsHandoff ? { handoff } : {}) });
+          await (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
+            .then((r) => deactivateDeadTokens(this.prisma, r?.invalidTokens))
             .catch((err) => {
               log().warn(
                 { err, userId: notification.userId, type: notification.type },
@@ -428,6 +567,20 @@ export class NotificationService {
     });
   }
 
+  /** A SERVICE business confirmed a booking: the customer's slot is reserved.
+   *  No kitchen words — a booking is not prepared. Same data shape as
+   *  orderAccepted, so the app's notification router lands on the same order
+   *  screen it always did. */
+  async bookingConfirmed(customerId: string, orderNumber: string, vendorName: string, orderId: string): Promise<void> {
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Booking confirmed',
+      body: `${vendorName} confirmed your booking ${orderNumber}.`,
+      data: { orderId, orderNumber, status: 'ACCEPTED' },
+    });
+  }
+
   async orderPreparing(customerId: string, orderNumber: string, vendorName: string, orderId: string): Promise<void> {
     await this.send({
       userId: customerId,
@@ -462,12 +615,21 @@ export class NotificationService {
     // Template guard [SWIFT-UG-NOTIF-02]: a missing/NaN ETA must never render
     // "Arriving in ~undefined min" to a customer.
     const etaPart = typeof eta === 'number' && Number.isFinite(eta) ? ` Arriving in ~${Math.max(1, Math.round(eta))} min.` : '';
+    // [MKT-F057] The delivery PIN belongs in this push: it is the moment of
+    // need, and the customer is its holder. Fetched holder-side because the
+    // caller's order row is already stripped by HANDOVER_SECRETS_OMIT; a fetch
+    // hiccup must never fail the PICKED_UP transition, so it degrades to no PIN.
+    const pin = (await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { ridePin: true },
+    }).catch(() => null))?.ridePin ?? null;
+    const pinPart = pin ? ` Your delivery PIN is ${pin} — give it to your rider at the door.` : '';
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
       title: 'On Its Way!',
-      body: `${riderName} picked up your order ${orderNumber}.${etaPart}`,
-      data: { orderId, orderNumber, status: 'PICKED_UP', eta },
+      body: `${riderName} picked up your order ${orderNumber}.${etaPart}${pinPart}`,
+      data: { orderId, orderNumber, status: 'PICKED_UP', eta, ...(pin ? { deliveryPin: pin } : {}) },
     });
   }
 
@@ -503,8 +665,12 @@ export class NotificationService {
    * full-screen banner until it is acknowledged (accept/reject/ack), and the
    * escalation job re-alerts then falls back to SMS while it stays unread.
    * NOT optional for vendors — prefs are ignored on this path by design.
+   *
+   * [Q10] `respondBy` is the moment the order auto-cancels (vendorRespondBy):
+   * it rides in the payload so the push rings until then and never after,
+   * and the store copy is tagged audience business, like the re-alert.
    */
-  async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string): Promise<string> {
+  async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string, respondBy?: Date | null): Promise<string> {
     // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
     // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
     // must never fail the alert itself.
@@ -516,7 +682,11 @@ export class NotificationService {
       type: 'ORDER_UPDATE',
       title: 'New Order!',
       body: `Order ${orderNumber} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
-      data: { orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert' },
+      audience: 'business',
+      data: {
+        orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert',
+        ...(respondBy ? { respondBy: respondBy.toISOString() } : {}),
+      },
     });
 
     // Dedicated persistent-alert event for the vendor dashboard banner + ring
@@ -561,13 +731,13 @@ export class NotificationService {
     });
   }
 
-  async subscriptionReminder(userId: string, dueDate: string, amount: number): Promise<void> {
+  async subscriptionReminder(userId: string, dueDate: string, amount: number, subscriptionId: string): Promise<void> {
     await this.send({
       userId,
       type: 'SUBSCRIPTION_REMINDER',
       title: 'Subscription Due Soon',
       body: `Your weekly subscription of $${amount.toLocaleString()} GYD is due on ${dueDate}.`,
-      data: { dueDate, amount },
+      data: { kind: 'billing_reminder', subscriptionId, dueDate, amount },
     });
   }
 

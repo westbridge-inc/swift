@@ -12,6 +12,7 @@ import { socketPlugin } from '../plugins/socket';
 import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D8-02 — the assigned rider can capture a proof-of-delivery photo.
@@ -26,13 +27,15 @@ const UPLOAD_DIR = path.join(os.tmpdir(), `swift-courier-proof-${nanoid(6)}`);
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_820_000_000 + Math.floor(Math.random() * 100_000_000);
+// [SAFE-B · retained history] A job with an issued drop-off proof is kept with the people it names, so the
+// phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('22');
 
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Prf',
       lastName: `U${seq}`,
       roles,
@@ -99,12 +102,23 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-  await app.close();
+  // [SAFE-B · retained history] A job with an issued drop-off proof is kept with the people it names; the rest
+  // goes as before, in one transaction, and what stays is taken out of service.
+  try {
+    const orderIds = (await app.prisma.order.findMany({ where: { customerId: { in: createdUserIds } }, select: { id: true } })).map((o) => o.id);
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { orderIds });
+      const goneUserIds = without(createdUserIds, kept.userIds);
+      await tx.order.deleteMany({ where: { id: { in: without(orderIds, kept.orderIds) } } });
+      await tx.rider.deleteMany({ where: { userId: { in: goneUserIds } } });
+      await tx.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+      await tx.session.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await tx.user.deleteMany({ where: { id: { in: goneUserIds } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
 
 describe('D8-02 — courier proof-of-delivery photo upload', () => {
@@ -117,7 +131,8 @@ describe('D8-02 — courier proof-of-delivery photo upload', () => {
     const res = await postPhoto(`/api/v1/courier/order/${order.id}/proof-photo`, moverUser.token);
     expect(res.statusCode).toBe(200);
     const url = res.json().data.url as string;
-    expect(url).toContain('courier-proof/');
+    // [SAFE-B] The drop-off proof is minted by the shared handover issuer, under its own folder.
+    expect(url).toContain('handover-proof/');
   });
 
   it('rejects a spoofed Content-Type whose bytes are not an image (magic-byte sniff)', async () => {

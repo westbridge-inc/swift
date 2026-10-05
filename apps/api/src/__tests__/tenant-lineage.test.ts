@@ -55,6 +55,19 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   AdCreative: ['AdCampaign'],
   AdBooking: ['AdCampaign'],
   RunStop: ['DeliveryRun'],
+  // [SAFE-B] A claim staged from a filing holds a RESTRICT foreign key to it (claim_handover_evidence_fk), and the
+  // filing carries tenantId. A legacy claim (handoverEvidenceId null) still reaches its tenant only through the
+  // FK-less rider/order references it always had: that EXPAND follow-up stands, it just cannot be listed in
+  // PENDING_EXPAND once the model has a tenant-bearing parent.
+  ReimbursementClaim: ['CashHandoverEvidence'],
+};
+
+/** These foreign keys preserve global reservations, not tenant ownership.
+ * A parent can be hidden by RLS while its reservation must still block reuse.
+ * Each entry also needs an explicit PLATFORM_WIDE reason; parent equality is
+ * checked by the same census as the ordinary tenant wall. */
+const GLOBAL_RESERVATION_PARENTS: Record<string, readonly string[]> = {
+  ProviderPaymentAlias: ['ProviderPayment'],
 };
 
 /** Walled through a parent that is itself only walled by lineage — two or more hops from the tenant. */
@@ -71,6 +84,7 @@ export const GRANDCHILD_OF: Record<string, string> = {
 
 /** Platform-wide by design — the reason a reviewer can check. */
 export const PLATFORM_WIDE: Record<string, string> = {
+  ProviderPaymentAlias: 'immutable provider-reference reservations must remain visible when RLS hides the historical identity, so another tenant cannot create a second credit; the RESTRICT parent FK preserves the reservation, and no public API exposes it',
   DocType: 'the document registry (DOC-1 §4.2) — data keyed by country, like CountryConfig',
   DocField: 'fields of a registry document class',
   CategoryDocumentGate: 'the category document gate (DOC-1 §18.3) — country-keyed registry data like doc_type',
@@ -103,8 +117,6 @@ export const PLATFORM_WIDE: Record<string, string> = {
   AlertDelivery: 'ops alert deliveries',
   DispatchSearch: 'dispatch search telemetry',
   MoverRevocationOutbox: 'revocation outbox keyed by mover id',
-  AgentActionRequest: 'agent (AI) action requests — platform ops',
-  AgentAuditEvent: 'agent audit trail — platform ops',
   PrivilegedChangeAudit: 'privileged-change audit trail',
   AuditLog: 'the admin audit trail — actor-scoped, not operator-scoped (ADM-002 rows name their entity)',
   AdEventDedupe: 'dedupe keys',
@@ -126,7 +138,6 @@ export const PLATFORM_WIDE: Record<string, string> = {
  *  Each is an EXPAND candidate under the child-table contract; none may be added
  *  here without a named follow-up. */
 export const PENDING_EXPAND: Record<string, string> = {
-  ReimbursementClaim: 'FK-less rider/order references',
   ReturnRequest: 'FK-less order reference',
   CollectionContact: 'FK-less subscription/vendor reference',
   ContentReport: 'FK-less reporter/subject references',
@@ -139,6 +150,13 @@ const fkParents = (m: (typeof models)[number]) =>
 const without = models.filter((m) => !carriesTenant.has(m.name));
 const registered = (name: string) =>
   [WALLED_BY_PARENT, GRANDCHILD_OF, PLATFORM_WIDE, PENDING_EXPAND].filter((r) => name in r).length;
+const parentRegistrationError = (m: (typeof models)[number]): string | undefined => {
+  const parents = fkParents(m).filter((p) => carriesTenant.has(p)).sort();
+  const claimed = WALLED_BY_PARENT[m.name] ?? GLOBAL_RESERVATION_PARENTS[m.name];
+  if (parents.length > 0 && (!claimed || [...claimed].sort().join(',') !== parents.join(','))) return `${m.name}: parents=${parents.join(',')} claimed=${claimed?.join(',') ?? 'none'}`;
+  if (parents.length === 0 && claimed) return `${m.name}: claimed parents but has no tenant-bearing FK parent`;
+  return undefined;
+};
 
 describe('[STA-1 §4] tenant lineage — every model without tenantId is accounted for, exactly once', () => {
   it('the census is not vacuous', () => {
@@ -153,15 +171,29 @@ describe('[STA-1 §4] tenant lineage — every model without tenantId is account
     expect(doubled).toEqual([]);
   });
 
-  it('a model registered as walled-by-parent names exactly its tenant-bearing FK parents', () => {
+  it('every tenant-bearing FK is registered as a parent wall or explicit global reservation', () => {
     const wrong: string[] = [];
     for (const m of without) {
-      const parents = fkParents(m).filter((p) => carriesTenant.has(p)).sort();
-      const claimed = WALLED_BY_PARENT[m.name];
-      if (parents.length > 0 && (!claimed || [...claimed].sort().join(',') !== parents.join(','))) wrong.push(`${m.name}: parents=${parents.join(',')} claimed=${claimed?.join(',') ?? 'none'}`);
-      if (parents.length === 0 && claimed) wrong.push(`${m.name}: claimed parents but has no tenant-bearing FK parent`);
+      const error = parentRegistrationError(m);
+      if (error) wrong.push(error);
     }
     expect(wrong).toEqual([]);
+  });
+
+  it('every global reservation names an existing model with a platform-wide reason', () => {
+    for (const name of Object.keys(GLOBAL_RESERVATION_PARENTS)) {
+      expect(without.some((m) => m.name === name)).toBe(true);
+      expect(PLATFORM_WIDE[name]?.length ?? 0).toBeGreaterThan(60);
+      expect(WALLED_BY_PARENT[name]).toBeUndefined();
+    }
+  });
+
+  it('the global reservation exception cannot be inherited by another model or foreign key', () => {
+    const alias = models.find((m) => m.name === 'ProviderPaymentAlias');
+    expect(alias).toBeDefined();
+    expect(parentRegistrationError({ ...alias!, name: 'UnregisteredPaymentAlias' })).toBeDefined();
+    expect(parentRegistrationError({ ...alias!, fields: alias!.fields.map((f) =>
+      f.kind === 'object' && (f.relationFromFields ?? []).length > 0 ? { ...f, type: 'User' } : f) })).toBeDefined();
   });
 
   it('a grandchild names a parent that exists and whose own lineage is accounted for', () => {

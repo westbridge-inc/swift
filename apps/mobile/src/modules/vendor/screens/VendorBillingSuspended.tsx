@@ -7,48 +7,41 @@ import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card, Chip, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { GUTTER } from '../shared';
-import { disconnectSocket } from '../../../services/socket';
 import { useVendorSubscription } from '../../../hooks/vendorops';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
+import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { type VendorMemberRole, TabHeader, VendorBillingNotice } from '../shared';
 
 export function VendorBillingSuspended({ store, stores, myRole }: { store: any; stores: any[]; myRole?: VendorMemberRole }) {
   const navigation = useNavigation<any>();
   const qc = useQueryClient();
   const setSelectedStore = useStoreSwitcher((state) => state.setSelectedStore);
-  const [switchingStore, setSwitchingStore] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const isOwner = myRole === 'OWNER';
   const subQ = useVendorSubscription(isOwner);
+  // Spinner on the owner's own pull or store switch, never on a background
+  // refetch (lib/pullToRefresh).
+  const pull = usePullToRefresh(() => Promise.all([
+    isOwner ? subQ.refetch() : undefined,
+    qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+  ]));
   const sub = subQ.data ?? (isOwner ? store?.subscription : null);
   const blockedSub = ['SUSPENDED', 'CHURNED'].includes(String(sub?.status ?? '').toUpperCase());
-  const switchStore = async (id: string) => {
-    if (id === store.id || switchingStore) return;
-    setSwitchingStore(true);
-    disconnectSocket();
-    setSelectedStore(id);
-    try {
-      await Promise.all([
-        qc.resetQueries({ queryKey: ['vendor'] }),
-        qc.resetQueries({ queryKey: ['verification'] }),
-      ]);
-    } finally {
-      setSwitchingStore(false);
-    }
-  };
+  const switchStore = (id: string) => setSelectedStore(id);
 
   return (
     <Screen>
-      <TabHeader title={store.name} eyebrow="ACCOUNT PAUSED · ORDERS OFF" statusTone="warning" />
+      {/* A paused store pauses selling, not the person: Swift stays one tap away. */}
+      <TabHeader title={store.name} eyebrow="ACCOUNT PAUSED · ORDERS OFF" statusTone="warning" onSwitch={() => setSwitcherOpen(true)} />
+      <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView
         contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={switchingStore || subQ.isRefetching}
-            onRefresh={() => {
-              if (isOwner) subQ.refetch();
-              void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
-            }}
+            refreshing={pull.refreshing}
+            onRefresh={() => { void pull.onRefresh(); }}
             tintColor={color.brand[500]}
           />
         }
@@ -84,12 +77,12 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
           </T>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             {isOwner
-              ? 'The weekly fee needs attention. Pay with the store’s Swift Number; confirmation clears the billing hold. Any separate verification hold still needs its own fix.'
-              : 'The store’s weekly fee needs attention. Ask the owner to pay with the store’s Swift Number; only the owner can access billing.'}
+              ? 'The weekly fee needs attention. Open Weekly fee to view your checkout; a credited payment clears the billing hold. Any separate verification hold still needs its own fix.'
+              : 'The store’s weekly fee needs attention. Ask the owner to open Weekly fee; only the owner can access billing.'}
           </T>
         </View>
 
-        {switchingStore || (isOwner && subQ.isLoading && !sub) ? (
+        {isOwner && subQ.isLoading && !sub ? (
           <LoadingBlock />
         ) : isOwner && blockedSub ? (
           <>
@@ -98,7 +91,7 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
                 Showing the last loaded billing status — pull to retry.
               </T>
             ) : null}
-            <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('VendorMySwiftNumber')} />
+            <VendorBillingNotice sub={sub} onPay={() => navigation.navigate('WeeklyFee')} />
           </>
         ) : isOwner ? (
           <Card style={{ marginBottom: space.lg }}>
@@ -106,14 +99,14 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
               Billing details are unavailable
             </T>
             <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-              The store is still paused. Use your Swift Number to check the cash/MMG payment steps; pull down to retry this status.
+              The store is still paused. Open Weekly fee to check your payment; pull down to retry this status.
             </T>
             <PillButton
-              label="How to pay"
+              label="Weekly fee"
               icon="hash"
               size="md"
               style={{ marginTop: space.md }}
-              onPress={() => navigation.navigate('VendorMySwiftNumber')}
+              onPress={() => navigation.navigate('WeeklyFee')}
             />
           </Card>
         ) : (

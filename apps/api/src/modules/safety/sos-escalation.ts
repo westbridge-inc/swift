@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
 import { openOpsAlert } from './ops-alert';
 import { warRoomsFor } from './war-room';
+import { isOwnNumber } from './emergency-contact.service';
 import { log } from '../../utils/logger';
 import { sosEscalationCounter, sosEscalationGauge } from '../../plugins/observability';
 
@@ -56,7 +57,13 @@ export async function stageEscalations(tx: Prisma.TransactionClient, alert: Aler
     // unless the tenant opted in. The policy records the skip as a row, so
     // "no SMS" is a decision with a receipt, never a silence.
     const skipContactSms = alert.triggerSource === 'CHECKIN_TIMEOUT' && process.env['GUARDIAN_AUTONOTIFY_CONTACTS'] !== '1';
-    const contacts = await tx.emergencyContact.findMany({ where: { userId: alert.actorUserId, verifiedAt: { not: null } }, orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }], take: 10, select: { id: true } });
+    // [Q9] A verified row holding the person's OWN number (saved before the
+    // own-number rule, or matched by a phone changed since) is not a contact:
+    // it would text the phone in their hand. Compared with the phone the
+    // account holds now.
+    const actor = await tx.user.findUnique({ where: { id: alert.actorUserId }, select: { phone: true } });
+    const contacts = (await tx.emergencyContact.findMany({ where: { userId: alert.actorUserId, verifiedAt: { not: null } }, orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }], take: 10, select: { id: true, phoneE164: true } }))
+      .filter((c) => !isOwnNumber(c.phoneE164, actor?.phone));
     for (const c of contacts) rows.push({ channel: 'CONTACT_SMS', targetKey: c.id, ...(skipContactSms ? { status: 'SKIPPED' as const, receipt: { skipped: 'guardian-default' } } : {}) });
     rows.push({ channel: 'EVIDENCE', targetKey: 'evidence' });
   }
@@ -97,6 +104,11 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
       // [F-026-15] The alert's own tenant decides who is paged; NULL = platform
       // operators only. [F-035-07] No coordinates in a push payload.
+      // [PRIV2-S2] And no note either: this body is pushed through Expo/APNs/
+      // FCM to the admins' phones (lock screens, third-party relays) and is
+      // repeated verbatim in the on-call SMS when nobody acknowledges. The
+      // words the person typed are read on the war-room board (the ops SOS
+      // reads and the war-room socket), which only ops can reach.
       // [S-19] The page is an OpsAlert: per-recipient delivery and
       // acknowledgement with a deadline; unacknowledged, it escalates.
       const page = await openOpsAlert(prisma, notifications, {
@@ -110,7 +122,13 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
     case 'WAR_ROOM': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
       const rooms = warRoomsFor(alert.tenantId);
-      io.to(rooms).emit('sos:active', { sosAlertId: alert.id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, serviceJobId: alert.serviceJobId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt });
+      // [PRIV2-S2] The war room is the one live surface that may carry the
+      // words the person typed: only ADMIN / SUPER_ADMIN sockets join these
+      // rooms (war-room.ts), in-process, no relay, no lock screen. The other
+      // person on the ride is never in them. A repeat press's own words ride
+      // on sos:retrigger (sos.service.ts); this carries the note the alert
+      // was raised with.
+      io.to(rooms).emit('sos:active', { sosAlertId: alert.id, tenantId: alert.tenantId, actorRole: alert.actorRole, orderId: alert.orderId, serviceJobId: alert.serviceJobId, lat: alert.triggerLat, lng: alert.triggerLng, triggeredAt: alert.triggeredAt, note: alert.triggerNote });
       // [F-027-16] Count the sockets actually in the room — a silence receipt has to be able to say zero.
       let listeners = 0;
       try { listeners = (await io.in(rooms).fetchSockets()).length; } catch { listeners = 0; }
@@ -130,7 +148,8 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       const { responseAuthorityFor } = await import('./deletion-hold');
       const authority = await responseAuthorityFor(prisma, alert.actorUserId);
       const contact = authority.contacts.find((c) => c.id === row.targetKey) ?? null;
-      if (!contact) return { status: 'SKIPPED', receipt: { skipped: 'contact-unverified-or-gone' } };
+      // [Q9] Staged before its number became the person's own: skipped, and the receipt says why.
+      if (!contact) return { status: 'SKIPPED', receipt: { skipped: authority.ownNumberContactIds.includes(row.targetKey) ? 'contact-is-own-number' : 'contact-unverified-or-gone' } };
       const { getChannels } = await import('../../providers/notifications/channels');
       const who = authority.who || 'Someone you know';
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';

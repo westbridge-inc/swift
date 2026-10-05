@@ -5,7 +5,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
-import { AgentCashService, PROVIDER, providerTxnKey, scanDuplicateCredits, type InboundFeePayment } from '../modules/billing/agent-cash.service';
+import { AgentCashService, PROVIDER, providerTxnRaw, scanDuplicateCredits, type InboundFeePayment } from '../modules/billing/agent-cash.service';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
@@ -65,7 +65,7 @@ async function makeVendorSub() {
 function txn(): string {
   const id = `ID-${nanoid(8)}`;
   externalIds.push(id, `MANUAL:${id}`);
-  txnKeys.push(providerTxnKey({ mmgTxnId: id, externalId: id, channel: 'MMG_AGENT_WEBHOOK' }));
+  txnKeys.push(id);
   return id;
 }
 const webhook = (id: string, san: string, amount = 2100): InboundFeePayment => ({ externalId: id, channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: id, sanRaw: san, amount, currencyCode: 'GYD', paidAt: new Date(), raw: { via: 'webhook' } });
@@ -82,7 +82,8 @@ async function money(subscriptionId: string) {
     balance: Number((await prisma.prepaidBalance.findUnique({ where: { subscriptionId } }))?.balance ?? 0),
   };
 }
-const identityOf = (id: string) => prisma.providerPayment.findUniqueOrThrow({ where: { provider_providerTxnId: { provider: PROVIDER, providerTxnId: providerTxnKey({ mmgTxnId: id, externalId: id, channel: 'MMG_AGENT_WEBHOOK' }) } } });
+const canonical = async (raw: string) => (await prisma.$queryRaw<Array<{ key: string }>>`SELECT mmg_txn_canon(${raw}) AS key`)[0]!.key;
+const identityOf = async (id: string) => prisma.providerPayment.findFirstOrThrow({ where: { provider: PROVIDER, providerTxnId: await canonical(id), status: { not: 'HELD_DUPLICATE' } } });
 const counter = async (c: { get: () => Promise<{ values: Array<{ labels: Record<string, string | number>; value: number }> }> }, labels: Record<string, string>) =>
   (await c.get()).values.find((v) => Object.entries(labels).every(([k, val]) => v.labels[k] === val))?.value ?? 0;
 
@@ -102,7 +103,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.mmgAgentPayment.deleteMany({ where: { externalId: { in: externalIds } } });
-  await prisma.providerPayment.deleteMany({ where: { providerTxnId: { in: txnKeys } } });
+  await prisma.providerPayment.deleteMany({ where: { providerTxnId: { in: await Promise.all(txnKeys.map(canonical)) } } });
   await prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -119,9 +120,9 @@ afterAll(async () => {
 });
 
 describe('[M-18] one provider transaction, one credit', () => {
-  it('the identity key is the provider transaction id, normalized — a manual receipt reference is the same id', () => {
-    expect(providerTxnKey({ mmgTxnId: ' xc-abc ', externalId: 'ignored', channel: 'MMG_AGENT_WEBHOOK' })).toBe('XC-ABC');
-    expect(providerTxnKey({ mmgTxnId: null, externalId: 'MANUAL:xc-abc', channel: 'MANUAL_ADMIN' })).toBe('XC-ABC');
+  it('the identity key is the provider transaction id, normalized — a manual receipt reference is the same id', async () => {
+    expect(await canonical(providerTxnRaw({ mmgTxnId: ' xc-abc ', externalId: 'ignored', channel: 'MMG_AGENT_WEBHOOK' }))).toBe('XC-ABC');
+    expect(await canonical(providerTxnRaw({ mmgTxnId: null, externalId: 'MANUAL:xc-abc', channel: 'MANUAL_ADMIN' }))).toBe('XC-ABC');
   });
 
   it('the race the register names: webhook and settlement file observe one transaction at the same moment — one credit, one receipt, one posting', async () => {
@@ -207,11 +208,55 @@ describe('[M-18 · operations] the historical double credits', () => {
       data: { channel: 'MMG_SETTLEMENT_FILE', externalId: id, mmgTxnId: id, sanRaw: san, amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'MATCHED', subscriptionId: sub.id, raw: {}, providerPaymentId: (await identityOf(id)).id },
     });
     const found = await scanDuplicateCredits(prisma);
-    const mine = found.find((f) => f.providerTxnId === providerTxnKey({ mmgTxnId: id, externalId: id, channel: 'MMG_AGENT_WEBHOOK' }));
+    const key = await canonical(id);
+    const mine = found.find((f) => f.providerTxnId === key);
     expect(mine).toMatchObject({ observations: 2, amount: 2100 });
     expect(mine?.subscriptionIds).toContain(sub.id);
     expect((await agentCashDuplicateCreditsGauge.get()).values[0]?.value).toBeGreaterThanOrEqual(1);
     // Nothing was reversed: both observations stand until a person reconciles them.
     expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: legacy.id } })).status).toBe('MATCHED');
+  });
+});
+
+describe('[MMG checkout F2 · F7] agent cash claims the one identity inside its credit, under its own tenant', () => {
+  const keyOf = (id: string) => providerTxnRaw({ mmgTxnId: id, externalId: id, channel: 'MMG_AGENT_WEBHOOK' });
+  /** What a pre-M-18 observation left behind: unmatched, and no provider identity. */
+  const legacyUnmatched = (id: string, san: string) => prisma.mmgAgentPayment.create({
+    data: { channel: 'MMG_AGENT_WEBHOOK', externalId: id, mmgTxnId: id, sanRaw: san, amount: 2100, currencyCode: 'GYD', paidAt: new Date(), status: 'UNMATCHED', raw: {} },
+  });
+
+  it('a payment observed before identities existed claims one inside its credit when it is attached', async () => {
+    const { sub, san } = await makeVendorSub();
+    const id = txn();
+    const legacy = await legacyUnmatched(id, san);
+    expect(legacy.providerPaymentId).toBeNull();
+    expect(await svc.attach(legacy.id, sub.id, 'admin_1')).toMatchObject({ status: 'accepted', paymentId: legacy.id, subscriptionId: sub.id });
+    const identity = await identityOf(id);
+    expect(identity).toMatchObject({ status: 'CREDITED', creditedPaymentId: legacy.id, subscriptionId: sub.id, tenantId: 'swift-default' });
+    expect((await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: legacy.id } })).providerPaymentId).toBe(identity.id);
+    expect(await money(sub.id)).toEqual({ credits: 1, receipts: 1, postings: 1, balance: 2100 });
+  });
+
+  it('and one another channel already credited is reconciled against that credit, never credited again', async () => {
+    const { sub, san } = await makeVendorSub();
+    const id = txn();
+    await prisma.providerPayment.create({
+      data: { provider: PROVIDER, providerTxnId: keyOf(id), status: 'CREDITED', creditedPaymentId: 'mco:checkout-f2', subscriptionId: sub.id, amount: 2100, currencyCode: 'GYD', creditedAt: new Date() },
+    });
+    const legacy = await legacyUnmatched(id, san);
+    expect(await svc.attach(legacy.id, sub.id, 'admin_1')).toEqual({ status: 'reconciled', paymentId: legacy.id, originalPaymentId: 'mco:checkout-f2' });
+    expect(await money(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, balance: 0 });
+  });
+
+  it('[F7] an identity on record for another tenant is a conflict: suspensed, never credited', async () => {
+    const { sub, san } = await makeVendorSub();
+    const id = txn();
+    // Filed exactly as a claim files an identity: under its canonical key.
+    await prisma.providerPayment.create({
+      data: { tenantId: 'another-tenant-f7', provider: PROVIDER, providerTxnId: await canonical(keyOf(id)), status: 'OPEN', amount: 2100, currencyCode: 'GYD' },
+    });
+    expect(await svc.ingest(webhook(id, san))).toMatchObject({ status: 'received_unmatched', failureCode: 'PROVIDER_ID_CONFLICT' });
+    expect(await money(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, balance: 0 });
+    expect(await identityOf(id)).toMatchObject({ status: 'OPEN', tenantId: 'another-tenant-f7' });
   });
 });

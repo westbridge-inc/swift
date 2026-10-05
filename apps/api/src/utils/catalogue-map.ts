@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
 // Retail catalogue import (spec §4.5): map a store's messy CSV headers onto
 // Swift's import fields. Deterministic synonym matching is the baseline (and
-// keeps it testable without the AI); AiService.mapCatalogueColumns fills gaps.
+// keeps it testable). Columns the synonym table cannot place are left for the
+// vendor to map in the preview step — nothing guesses them.
 // We only RELABEL columns — values (prices, stock) are copied verbatim, never
 // invented.
 // ---------------------------------------------------------------------------

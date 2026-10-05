@@ -1,5 +1,57 @@
 import { describe, it, expect } from 'vitest';
-import { landingIntent, moverKindOrder, roleSwitchAuthorityPayload, switchRolePayload } from './roleLanding';
+import { accountHoldsRole, landingIntent, moverKindOrder, roleSwitchAuthorityPayload, switchRolePayload } from './roleLanding';
+
+// ---------------------------------------------------------------------------
+// [phone feedback P2] ONE "holds" predicate. The switcher decided "switch vs.
+// Join" with an inline copy of this rule, and the earner shells decided
+// "dashboard vs. onboarding" with none at all — so a customer who tapped
+// "Swift Business" to list a first store read "Join" on one screen and
+// "This account cannot open that store" on the next. Every reader now asks
+// the same question of the same function.
+// ---------------------------------------------------------------------------
+describe('accountHoldsRole', () => {
+  it('the owner’s fresh account — a customer with no partner entity — holds neither earner surface', () => {
+    const fresh = { roles: ['CUSTOMER'], driver: null, rider: null, vendorOwner: null };
+    expect(accountHoldsRole(fresh, 'vendor')).toBe(false);
+    expect(accountHoldsRole(fresh, 'mover')).toBe(false);
+    expect(accountHoldsRole(fresh, 'advertiser')).toBe(false);
+  });
+
+  it('customer is the open surface — always held, even by no account at all', () => {
+    expect(accountHoldsRole({ roles: ['CUSTOMER'] }, 'customer')).toBe(true);
+    expect(accountHoldsRole(null, 'customer')).toBe(true);
+    expect(accountHoldsRole(undefined, 'customer')).toBe(true);
+  });
+
+  it('vendor: the VENDOR_OWNER role or a vendorOwner entity', () => {
+    expect(accountHoldsRole({ roles: ['CUSTOMER', 'VENDOR_OWNER'] }, 'vendor')).toBe(true);
+    expect(accountHoldsRole({ roles: ['CUSTOMER'], vendorOwner: { id: 'vo1' } }, 'vendor')).toBe(true);
+    expect(accountHoldsRole({ roles: ['CUSTOMER', 'MOVER'] }, 'vendor')).toBe(false);
+  });
+
+  it('mover: the unified MOVER role, a legacy DRIVER / RIDER role, or a driver / rider entity', () => {
+    expect(accountHoldsRole({ roles: ['CUSTOMER', 'MOVER'] }, 'mover')).toBe(true);
+    expect(accountHoldsRole({ roles: ['CUSTOMER', 'DRIVER'] }, 'mover')).toBe(true);
+    expect(accountHoldsRole({ roles: ['CUSTOMER', 'RIDER'] }, 'mover')).toBe(true);
+    expect(accountHoldsRole({ roles: ['CUSTOMER'], driver: { id: 'd1' } }, 'mover')).toBe(true);
+    expect(accountHoldsRole({ roles: ['CUSTOMER'], rider: { id: 'r1' } }, 'mover')).toBe(true);
+    expect(accountHoldsRole({ roles: ['CUSTOMER', 'VENDOR_OWNER'] }, 'mover')).toBe(false);
+  });
+
+  it('a store STAFF member holds nothing here — the server’s own 200 with memberships seats them', () => {
+    // No UserRole exists for staff; the vendor shell still probes the profile
+    // and follows a 200. This predicate only ever says what the account HOLDS.
+    expect(accountHoldsRole({ roles: ['CUSTOMER'] }, 'vendor')).toBe(false);
+  });
+
+  it('no account, or an account with no roles list, holds only the open surface', () => {
+    for (const intent of ['vendor', 'mover', 'advertiser'] as const) {
+      expect(accountHoldsRole(null, intent)).toBe(false);
+      expect(accountHoldsRole({}, intent)).toBe(false);
+      expect(accountHoldsRole({ roles: null }, intent)).toBe(false);
+    }
+  });
+});
 
 // FO-04/FO-05 in miniature: reinstall/sign-in lands by the account's memory,
 // never a question; a living valid choice survives; role-less intents clamp.

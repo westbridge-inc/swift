@@ -10,6 +10,7 @@
  * Without a KEK no value is stored at all.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Writable } from 'node:stream';
 import { nanoid } from 'nanoid';
@@ -63,10 +64,11 @@ async function owner(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 const submit = (userId: string, docType: string) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const ledger = (docId: string) => system(async () => ({
   run: await app.prisma.extractionRun.findFirst({ where: { submissionId: docId }, include: { fields: { orderBy: { fieldCode: 'asc' } } } }),
   validations: await app.prisma.validationResult.findMany({ where: { submissionId: docId }, orderBy: { validatorCode: 'asc' } }),

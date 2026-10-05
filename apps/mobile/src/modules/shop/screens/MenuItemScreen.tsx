@@ -6,10 +6,12 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, radius, space } from '@swift/ui';
 import { useAddToCart, useItemSlots, useVendor } from '../../../hooks/customer';
+import { requestAuthContinuation, type MenuItemAddDraft } from '../../../navigation/authContinuation';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
 import { itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppointmentClock } from '../../../lib/appointmentTime';
 import {
   Photo,
   Chip,
@@ -54,42 +56,47 @@ export function MenuItemScreen() {
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
   const { vendorId, itemId } = route.params ?? {};
-  const { isAuthenticated, promptLogin } = useAuthStore();
+  const { isAuthenticated, wantsAuth, promptLogin } = useAuthStore();
 
+  const addDraft: MenuItemAddDraft | undefined = route.params?.addDraft;
   const vendor = useVendor<any>(vendorId);
   const addToCart = useAddToCart();
-  const [qty, setQty] = useState(1);
+  const [qty, setQty] = useState(addDraft?.quantity ?? 1);
   const [added, setAdded] = useState(false);
 
   // Appointment listings book a moment, not a quantity (kit chips reused as
-  // day + time pickers). Dates run on the UTC calendar to mirror the API.
-  const [dayOffset, setDayOffset] = useState(0);
-  const [slot, setSlot] = useState<string | null>(null);
-  const [visitMode, setVisitMode] = useState<ServiceVisitMode>('AT_BUSINESS');
+  // day + time pickers). Dates follow the market calendar used by the API.
+  const [dayOffset, setDayOffset] = useState(addDraft?.dayOffset ?? 0);
+  const [slot, setSlot] = useState<string | null>(addDraft?.slot ?? null);
+  const [visitMode, setVisitMode] = useState<ServiceVisitMode>(addDraft?.visitMode ?? 'AT_BUSINESS');
   const setAppointment = useBookingStore((st) => st.setAppointment);
 
   const item = useMemo(
     () => vendor.data?.categories?.flatMap((c: any) => c.items ?? []).find((i: any) => i.id === itemId),
     [vendor.data, itemId],
   );
-  const groups: any[] = item?.optionGroups ?? [];
-  const [selected, setSelected] = useState<Selected>(() => defaultSelections(groups));
+  const groups: any[] = useMemo(() => item?.optionGroups ?? [], [item]);
+  const [selected, setSelected] = useState<Selected>(() => addDraft?.selectedOptions ?? defaultSelections(groups));
 
   const isBooking = item?.fulfillment === 'APPOINTMENT';
-  // Dates run on the UTC calendar to mirror the API's slot math exactly.
   const selectedDate = useMemo(() => {
-    const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + dayOffset))
-      .toISOString()
-      .slice(0, 10);
+    return addAppointmentDays(appointmentDayKey(new Date()), dayOffset);
   }, [dayOffset]);
   const slotsQ = useItemSlots<any>(isBooking ? itemId : '', selectedDate);
   const serviceMode: 'AT_BUSINESS' | 'MOBILE' | 'BOTH' = slotsQ.data?.serviceMode ?? 'AT_BUSINESS';
   const bookableWeekdays: number[] | undefined = slotsQ.data?.bookableWeekdays;
-  const daySlots: string[] = slotsQ.data?.slots ?? [];
+  const daySlots: string[] = useMemo(() => slotsQ.data?.slots ?? [], [slotsQ.data]);
+
+  // A slot can disappear during the 20-second freshness poll because another
+  // customer won it. Never leave a now-unavailable selection armed in the
+  // sticky booking button; checkout remains the final server-side judge.
+  React.useEffect(() => {
+    const available = slotsQ.data?.slots as string[] | undefined;
+    if (slot && available && !available.includes(slot)) setSlot(null);
+  }, [slot, slotsQ.data]);
 
   // Re-seed defaults when the item arrives after a cold load.
-  const seededFor = React.useRef<string | null>(item ? itemId : null);
+  const seededFor = React.useRef<string | null>(item || addDraft ? itemId : null);
   React.useEffect(() => {
     if (item && seededFor.current !== itemId) {
       seededFor.current = itemId;
@@ -97,20 +104,8 @@ export function MenuItemScreen() {
     }
   }, [item, itemId]);
 
-  if (vendor.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
-  if (vendor.isError || !item) {
-    return (
-      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
-        <ErrorState
-          onRetry={() => vendor.refetch()}
-          message={!item && !vendor.isError ? 'This item is no longer on the menu.' : undefined}
-        />
-      </View>
-    );
-  }
-
-  const outOfStock = item.stockQuantity === 0;
-  const basePrice = Number(item.customerPrice ?? item.basePrice) || 0;
+  const outOfStock = item?.stockQuantity === 0;
+  const basePrice = Number(item?.customerPrice ?? item?.basePrice) || 0;
 
   const optionsPrice = groups.reduce((sum, g) => {
     const sel = selected[g.id];
@@ -144,11 +139,20 @@ export function MenuItemScreen() {
     });
   };
 
-  const onAdd = () => {
+  const resumedAdd = React.useRef(false);
+  const onAdd = React.useCallback(() => {
     if (!isAuthenticated) {
-      promptLogin();
+      requestAuthContinuation({ screen: 'MenuItem', vendorId, itemId,
+        addDraft: { quantity: qty, selectedOptions: selected, dayOffset, slot, visitMode },
+      }, promptLogin);
+      // If Auth already owns the root, promptLogin does not change its key.
+      if (wantsAuth) navigation.getParent()?.navigate('Auth');
       return;
     }
+    // Manual Add also consumes a queued replay (for example, booking from
+    // last-known slots during a failed refresh). Recovery must not add twice.
+    resumedAdd.current = true;
+    if (route.params?.addAfterSignIn) navigation.setParams({ addAfterSignIn: undefined, addDraft: undefined });
     addToCart.mutate(
       { vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined },
       {
@@ -160,7 +164,31 @@ export function MenuItemScreen() {
         },
       },
     );
-  };
+  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, promptLogin, navigation, addToCart, isBooking, serviceMode, setAppointment, route.params?.addAfterSignIn]);
+  React.useEffect(() => {
+    if (!route.params?.addAfterSignIn || resumedAdd.current || !isAuthenticated || !item || vendor.isLoading || vendor.isError) return;
+    if (outOfStock || item.isAvailable === false || requiredUnmet || addToCart.isPending) return;
+    // Revalidate restored options against the current menu before replaying Add.
+    const optionsValid = Object.entries(selected).every(([groupId, value]) => {
+      const group = groups.find((g) => g.id === groupId);
+      const ids = Array.isArray(value) ? value : [value];
+      return group && (!group.maxSelect || ids.length <= group.maxSelect) && ids.every((id) => group.options?.some((option: any) => option.id === id && option.isAvailable !== false));
+    });
+    if (!optionsValid || (isBooking && (!slot || !daySlots.includes(slot) || slotsQ.isError || slotsQ.isPending))) return;
+    onAdd();
+  }, [route.params?.addAfterSignIn, isAuthenticated, item, vendor.isLoading, vendor.isError, outOfStock, requiredUnmet, addToCart.isPending, selected, groups, isBooking, slot, daySlots, slotsQ.isError, slotsQ.isPending, navigation, onAdd]);
+
+  if (vendor.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (vendor.isError || !item) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        <ErrorState
+          onRetry={() => vendor.refetch()}
+          message={!item && !vendor.isError ? 'This item is no longer on the menu.' : undefined}
+        />
+      </View>
+    );
+  }
 
   const addErr = addToCart.isError
     ? ((addToCart.error as any)?.response?.data?.error?.message ?? 'Could not add this. Try again.')
@@ -346,16 +374,15 @@ export function MenuItemScreen() {
               <SectionHeader title="Pick a time" style={{ marginTop: space['2xl']}} />
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.md, flexGrow: 0 }} contentContainerStyle={{ gap: space.md }}>
                 {Array.from({ length: 7 }, (_, i) => {
-                  const now = new Date();
-                  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + i));
-                  const wd = d.getUTCDay();
+                  const key = addAppointmentDays(appointmentDayKey(new Date()), i);
+                  const wd = appointmentWeekday(key);
                   const closed = bookableWeekdays ? !bookableWeekdays.includes(wd) : false;
                   const label =
                     i === 0
                       ? 'Today'
                       : i === 1
                         ? 'Tomorrow'
-                        : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][wd]} ${d.getUTCDate()}`;
+                        : `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][wd]} ${Number(key.slice(-2))}`;
                   return (
                     <Chip
                       key={i}
@@ -371,10 +398,22 @@ export function MenuItemScreen() {
                   );
                 })}
               </ScrollView>
-              {slotsQ.isLoading ? (
+              {slotsQ.isPending ? (
                 <T variant="label" tone="muted" style={{ marginTop: space.md }}>
                   Checking times…
                 </T>
+              ) : slotsQ.isError && !slotsQ.data ? (
+                <View style={{ marginTop: space.md, alignItems: 'flex-start', gap: space.sm }}>
+                  <T variant="label" tone="error">
+                    Couldn’t load available times. Check your connection and try again.
+                  </T>
+                  <Chip
+                    label="Try again"
+                    selected={false}
+                    onPress={() => void slotsQ.refetch()}
+                    style={{ height: 40, paddingHorizontal: space.lg }}
+                  />
+                </View>
               ) : daySlots.length === 0 ? (
                 <T variant="label" tone="muted" style={{ marginTop: space.md }}>
                   No times left this day — try another.
@@ -384,7 +423,7 @@ export function MenuItemScreen() {
                   {daySlots.map((iso) => (
                     <Chip
                       key={iso}
-                      label={new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })}
+                      label={formatAppointmentClock(iso)}
                       selected={slot === iso}
                       onPress={() => setSlot(iso)}
                       style={{ height: 42, paddingHorizontal: space.lg }}
@@ -392,6 +431,19 @@ export function MenuItemScreen() {
                   ))}
                 </View>
               )}
+              {slotsQ.isError && slotsQ.data ? (
+                <View style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <T variant="caption" tone="warning" style={{ flex: 1 }}>
+                    These are the last known times. Refresh before choosing if your connection is back.
+                  </T>
+                  <Chip
+                    label="Refresh"
+                    selected={false}
+                    onPress={() => void slotsQ.refetch()}
+                    style={{ height: 36, paddingHorizontal: space.md }}
+                  />
+                </View>
+              ) : null}
               {slotsQ.data?.durationMinutes ? (
                 <T variant="caption" tone="faint" style={{ marginTop: space.sm }}>
                   Each appointment runs about {slotsQ.data.durationMinutes} minutes.
@@ -442,7 +494,7 @@ export function MenuItemScreen() {
                 ? slot
                   ? requiredUnmet
                     ? 'Choose required options'
-                    : `Book ${new Date(slot).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' })} · ${money(total)}`
+                    : `Book ${formatAppointmentClock(slot)} · ${money(total)}`
                   : 'Pick a time'
                 : requiredUnmet
                   ? 'Choose required options'

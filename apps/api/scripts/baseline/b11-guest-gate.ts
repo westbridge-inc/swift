@@ -86,16 +86,28 @@ async function main() {
   // trust) requests a taxi: the SERVER must refuse with a machine code —
   // proof the gate is not a client hint.
   const PROBE_PHONE = '+5925566009';
-  // Register through the REAL signup flow (idempotent: an existing account
-  // just fails registration and logs in), then OTP login.
-  await http('POST', '/auth/register', {
-    phone: PROBE_PHONE, firstName: 'ELV1', lastName: 'TierProbe', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true,
-  });
+  // Register through the REAL signup flow when this is a new account; an
+  // existing account receives a session directly from OTP verification.
   let probeToken: string | undefined;
   for (let attempt = 1; attempt <= 6 && !probeToken; attempt++) {
     await http('POST', '/auth/send-otp', { phone: PROBE_PHONE });
     const v = await http('POST', '/auth/verify-otp', { phone: PROBE_PHONE, code: '000000' });
     probeToken = v.json?.data?.tokens?.accessToken ?? v.json?.data?.token;
+    if (!probeToken && v.json?.data?.isNewUser && typeof v.json?.data?.registrationProof !== 'string') {
+      throw new Error('FAIL: verify-otp omitted the tier probe signup continuation');
+    }
+    if (!probeToken && v.json?.data?.isNewUser && typeof v.json?.data?.registrationProof === 'string') {
+      const registered = await http('POST', '/auth/register', {
+        phone: PROBE_PHONE,
+        registrationProof: v.json.data.registrationProof,
+        firstName: 'ELV1',
+        lastName: 'TierProbe',
+        role: 'CUSTOMER',
+        countryCode: 'GY',
+        acceptTerms: true,
+      });
+      probeToken = registered.json?.data?.tokens?.accessToken ?? registered.json?.data?.token;
+    }
     if (!probeToken && attempt < 6) await new Promise((r) => setTimeout(r, 8000));
   }
   if (!probeToken) throw new Error('FAIL: could not authenticate the tierless probe account');

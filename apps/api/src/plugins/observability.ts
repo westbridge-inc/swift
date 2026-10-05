@@ -222,7 +222,7 @@ export const adminAuditCounter = new client.Counter({
  */
 export const adminAuditSnapshotCounter = new client.Counter({
   name: 'swift_admin_audit_snapshot_total',
-  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate) and model',
+  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate|no_tenant) and model',
   labelNames: ['outcome', 'model'] as const,
   registers: [registry],
 });
@@ -434,7 +434,7 @@ export const dispatchTimeToAssign = new client.Histogram({
 // the "is OSRM actually up?" signal. Labels: op = eta|route, outcome = ok|fallback.
 export const osrmOutcomeCounter = new client.Counter({
   name: 'swift_osrm_calls_total',
-  help: 'OSRM routing calls by operation and outcome (ok vs haversine fallback)',
+  help: 'OSRM routing calls by operation and outcome (ok, haversine fallback, or refused: an answer with an invalid number)',
   labelNames: ['op', 'outcome'] as const,
   registers: [registry],
 });
@@ -552,7 +552,7 @@ export const settlementImportsRejectedCounter = new client.Counter({
 });
 export const settlementBatchesUnbalancedGauge = new client.Gauge({
   name: 'swift_settlement_batches_unbalanced',
-  help: 'Published settlement imports whose credited total disagrees with the validated file total, or rejected imports with a credited row',
+  help: 'Published settlement imports whose credited total disagrees with the validated file total, rejected imports with a credited row, or publications stopped part-way (kind=stuck_publication)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });
@@ -659,12 +659,41 @@ export const agentCashProviderIdConflictsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [MMG checkout 2/6] Every checkout transition, by event: created, reply,
+ *  reply_unmatched, confirmed, held, not_paid, expired. `held` pages (a person
+ *  must look); `reply_unmatched` is a reply naming no checkout Swift knows. */
+export const mmgCheckoutEventsCounter = new client.Counter({
+  name: 'swift_mmg_checkout_events_total',
+  help: 'MMG hosted-checkout transitions, by event',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
+/** [MMG checkout 2/6] The lookups that verify a checkout, by outcome (found,
+ *  not_found, error). A run of errors means MMG cannot be asked, and nothing
+ *  confirms until it can. */
+export const mmgCheckoutLookupsCounter = new client.Counter({
+  name: 'swift_mmg_checkout_lookups_total',
+  help: 'MMG lookups made to verify a checkout, by outcome',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [M-18] Provider transactions that hold MORE than one credited observation —
  *  the historical double credits the backfill could not resolve. Set by the
  *  billing poll; reversed only after provider / human reconciliation. */
 export const agentCashDuplicateCreditsGauge = new client.Gauge({
   name: 'swift_agent_cash_duplicate_credits',
   help: 'Provider transactions with more than one credited agent-cash observation (legacy double credits awaiting reconciliation)',
+  registers: [registry],
+});
+
+/** [MMG-RECV] Webhook and manual agent-cash observations still stranded
+ *  RECEIVED after the repair pass: money on disk that nothing has credited
+ *  yet. Set by the billing poll. */
+export const agentCashStrandedGauge = new client.Gauge({
+  name: 'swift_agent_cash_stranded_payments',
+  help: 'Agent-cash payments (webhook, manual) saved but still RECEIVED past the stranded age after the repair pass',
   registers: [registry],
 });
 
@@ -735,7 +764,7 @@ export const refundsAwaitingReviewGauge = new client.Gauge({
  *  first-match pick per end, or the table ignored by the kill switch. */
 export const fareZoneCounter = new client.Counter({
   name: 'swift_fare_zone_events_total',
-  help: 'Fare-zone resolution events (ambiguous, shadow_diff_from, shadow_diff_to, killed)',
+  help: 'Fare-zone resolution events (ambiguous, shadow_diff_from, shadow_diff_to, shadow_diff_stop, killed)',
   labelNames: ['event'] as const,
   registers: [registry],
 });
@@ -950,7 +979,7 @@ export const tripShareGauge = new client.Gauge({
  *  A quiet counter is the normal state; a rising one is an access review. */
 export const handoverBreakGlassCounter = new client.Counter({
   name: 'swift_handover_break_glass_total',
-  help: 'Handover secret break-glass events (reveal, reveal_no_code, rotate)',
+  help: 'Handover secret break-glass events (reveal, reveal_no_code, rotate, reset_delivery_pin)',
   labelNames: ['event'] as const,
   registers: [registry],
 });
@@ -993,7 +1022,7 @@ export const mmgAttestationCounter = new client.Counter({
  *  outstanding cash-refund liability, by tender, which the register asks for. */
 export const orderRefundCounter = new client.Counter({
   name: 'swift_order_refund_total',
-  help: 'Cash-order refund lifecycle (owed, settled, refused_not_due, refused_duplicate)',
+  help: 'Cash-order refund lifecycle (owed, settled, refused_not_due, refused_duplicate, refused_mmg)',
   labelNames: ['event'] as const,
   registers: [registry],
 });
@@ -1035,10 +1064,12 @@ export const tenantUnscopedAccessCounter = new client.Counter({
   registers: [registry],
 });
 /** [TEN-03] Transaction-local bindings performed (tenant / system) and the
- *  in-transaction fallbacks that could not be batched. */
+ *  in-transaction fallbacks that could not be batched. [MASTER-019] system_tx:
+ *  a system transaction opened on the system connection; system_refused_in_tx:
+ *  a system query refused rather than moved out of a caller's transaction. */
 export const tenantBindCounter = new client.Counter({
   name: 'swift_tenant_bind_total',
-  help: 'RLS bindings by kind (tenant, system, tenant_fallback_in_tx, system_fallback_in_tx)',
+  help: 'RLS bindings by kind (tenant, tenant_fallback_in_tx, system, system_no_client, system_tx, system_refused_in_tx)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });

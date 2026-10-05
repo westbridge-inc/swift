@@ -55,14 +55,14 @@ describe('the client', () => {
 describe('the driver action', () => {
   const hook = body(HOOKS, 'export function useDriverAction', 'export type RiderAction');
   it("sends the caller's outcome — never a default — with the evidence fix, under the auth principal", () => {
-    expect(hook).toContain('driverApi.handover(id, { outcome: input.outcome, gps }, current)');
+    expect(hook).toContain('driverApi.handover(id, { outcome: input.outcome, gps, ...(input.photoUrl ? { photoUrl: input.photoUrl } : {}) }, current)');
     expect(hook).toContain('evidenceFix(owner)');
     expect(hook).toContain('requireAuthSessionForPrincipal(owner)');
     expect(hook).not.toContain("outcome ?? 'paid'");
     expect(hook).not.toContain('driverApi.complete');
   });
   it('the outcome is a required field of the handover input, not an optional flag', () => {
-    expect(HOOKS).toContain("| { id: string; action: 'handover'; outcome: FareOutcome }");
+    expect(HOOKS).toContain("| { id: string; action: 'handover'; outcome: FareOutcome; photoUrl?: string; authSession?: AuthSessionSnapshot }");
   });
   it('the evidence fix falls back to a fresh position when no last-known fix exists', () => {
     const fix = body(HOOKS, 'async function evidenceFix', 'export function useDriverAction');
@@ -74,7 +74,9 @@ describe('the driver action', () => {
 describe('the rider action', () => {
   const hook = body(HOOKS, 'export function useRiderAction', '\n}\n');
   it('the door handover rides the same seam and accepts the failed outcomes explicitly', () => {
-    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps }, current)");
+    // [MKT-F057] The customer-held door PIN rides the same body; the failed
+    // outcomes still carry no PIN.
+    expect(hook).toContain("riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}) }, current)");
     expect(hook).toContain('evidenceFix(owner)');
   });
 });
@@ -92,8 +94,8 @@ describe('the screen', () => {
     expect(SCREEN).toContain("recordUnpaid('refused')");
     expect(SCREEN).toContain("recordUnpaid('no_show')");
     const record = body(SCREEN, 'const recordUnpaid', 'const closeRating');
-    expect(record).toContain("driverAct.mutate({ id: job.id, action: 'handover', outcome }");
-    expect(record).toContain("riderAct.mutate({ id: job.id, action: 'handover', outcome }");
+    expect(record).toContain("driverAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }");
+    expect(record).toContain("riderAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }");
   });
   it('both rails offer the unpaid sheet next to the paid step', () => {
     expect(SCREEN).toContain('label="Passenger didn\'t pay"');

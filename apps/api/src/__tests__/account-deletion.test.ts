@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -9,6 +10,8 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { lockMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -70,7 +73,11 @@ afterAll(async () => {
   await app.prisma.advertiser.deleteMany({ where: { id: { in: advertiserIds } } });
   await app.prisma.adPlacement.deleteMany({ where: { id: { in: placementIds } } });
   await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await purgeAuditLogs(app.prisma, { userId: { in: createdUserIds } }, 'test-cleanup:account-deletion');
+  const originals = await app.prisma.subscription.findMany({ where: { OR: [
+    { rider: { userId: { in: createdUserIds } } }, { driver: { userId: { in: createdUserIds } } },
+    { vendor: { owner: { userId: { in: createdUserIds } } } },
+  ] }, select: { id: true } });
+  await cleanupPayerBillingClocks(app.prisma, createdUserIds);
   await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: createdUserIds } } });
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
@@ -78,6 +85,8 @@ afterAll(async () => {
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  await app.prisma.subscription.deleteMany({ where: { id: { in: originals.map((s) => s.id) } } });
+  await purgeAuditLogs(app.prisma, { OR: [{ userId: { in: createdUserIds } }, { entityId: { in: createdUserIds } }] }, 'test-cleanup:account-deletion');
   await app.close();
 });
 
@@ -102,10 +111,7 @@ describe('D9-05 — account deletion (erasure)', () => {
     const u = await makeUser(['CUSTOMER']);
     await app.prisma.address.create({ data: { userId: u.userId, label: 'Home', addressLine1: '1 Main St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.1 } });
 
-    const fileKey = `verif/${nanoid(12)}.jpg`;
-    await app.prisma.encryptedObject.create({
-      data: { fileKey, iv: Buffer.from('iv'), authTag: Buffer.from('tag'), wrappedDek: Buffer.from('dek'), mimeType: 'image/jpeg', sizeBytes: 10, sha256: 'abc', createdBy: u.userId },
-    });
+    const fileKey = await ownedVerificationFixture(app.prisma, u.userId);
     const doc = await app.prisma.verificationDocument.create({ data: { userId: u.userId, role: 'CUSTOMER', docType: 'ID_CARD', fileUrl: fileKey } });
 
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);
@@ -188,11 +194,22 @@ describe('D9-05 — account deletion (erasure)', () => {
   // everything else winds down.
   it('a mover with nothing outstanding closes their own account', async () => {
     const u = await makeUser(['CUSTOMER', 'MOVER']);
+    const rider = await app.prisma.rider.create({ data: { userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const due = new Date(Date.now() - 2 * 86_400_000);
+    const sub = await app.prisma.subscription.create({ data: { riderId: rider.id, type: 'DELIVERY_RIDER', status: 'TRIAL',
+      weeklyRate: 6000, currentPeriodStart: new Date(due.getTime() - 7 * 86_400_000), currentPeriodEnd: due,
+      nextBillingDate: due, isTrialActive: true, trialEndDate: due } });
+    await app.prisma.$transaction((tx) => lockMoverFeeAuthority(tx, { userId: u.userId, tenantId: 'swift-default' }));
+    const clock = await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: sub.id } });
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);
     expect(res.statusCode, res.payload).toBe(200);
     const after = await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } });
     expect(after.status).toBe('DEACTIVATED');
     expect(after.phone.startsWith('deleted:')).toBe(true);
+    expect(after.firstName).toBe('Deleted');
+    expect(await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { id: clock.id } })).toEqual(clock);
+    expect(await app.prisma.moverFeeAuthority.count({ where: { userId: u.userId } })).toBe(1);
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).autoRenew).toBe(false);
   });
 
   // [LAUNCH-2] The guard above filters `user.roles`. Advertiser membership and

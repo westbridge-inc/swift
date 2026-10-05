@@ -1,11 +1,15 @@
 /**
  * Sample data for the earner PREVIEW (R3). A prospective driver taps "Preview
  * the driver app" and sees the REAL dashboards fed these canned values — no
- * account, no documents, no network. Everything here is obviously illustrative
+ * account, no documents. Everything here is obviously illustrative
  * (Georgetown, round GYD figures) and the screens render it through their normal
- * paths, so preview can never drift from production. Read-only: the mutation
- * hooks no-op in preview, so none of this is ever written anywhere.
+ * paths, so preview can never drift from production. The one live number is
+ * the weekly fee: it comes from the public price list, never from this file.
+ * Read-only: the mutation hooks no-op in preview, so none of this is ever
+ * written anywhere.
  */
+
+import { moverQuote, type PartnerPricing } from './partnerPricing';
 
 // Guyana-day keys for the 7-day earnings trend (oldest → today).
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -120,14 +124,29 @@ export const PREVIEW_ACTIVE_JOB = {
   customer: { id: 'preview-cust', firstName: 'Ava', phone: null },
 };
 
+/** The sample driver works a Georgetown taxi on a car (the Allion above), so
+ *  the preview reads the Guyana price list's quote for that vehicle. */
+export const PREVIEW_MARKET = 'GY';
+export const PREVIEW_VEHICLE = 'CAR';
+
+/** The sample subscription, deliberately WITHOUT a fee of its own: a frozen
+ *  number here is how the preview came to quote a rate nobody is billed. */
 export const PREVIEW_SUBSCRIPTION = {
   status: 'ACTIVE',
   type: 'TAXI_DRIVER',
-  weeklyRate: 12000,
   currencyCode: 'GYD',
   currentPeriodEnd: '2026-08-04T00:00:00Z',
   nextBillingDate: '2026-08-04T00:00:00Z',
 };
+
+/** The sample subscription billed at the live taxi quote for the sample car —
+ *  what a real driver on that car signs up on — or null while there is no
+ *  valid quote: the fee is absent, never zero. */
+export function previewSubscription(pricing: PartnerPricing | null | undefined) {
+  const quote = moverQuote(pricing, PREVIEW_VEHICLE);
+  if (!quote || quote.role !== 'DRIVER') return null;
+  return { ...PREVIEW_SUBSCRIPTION, weeklyRate: quote.rate };
+}
 
 // ---------------------------------------------------------------------------
 // react-query-shaped stubs so a hook can return sample data / a no-op mutation

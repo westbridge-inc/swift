@@ -15,7 +15,7 @@ import { ErrorState,
 import { useMyAdvertisers, useAdvertiserMembers, useAdvertiserActions } from '../../../hooks/advertiser';
 import { useAuthStore } from '../../../stores/authStore';
 import { errorMessage } from '../../../lib/apiError';
-import { AdvertiserExitDialog } from '../AdvertiserExitDialog';
+import { useAdvertiserExitDialog } from '../AdvertiserExitDialog';
 
 // §14.6 — team. OWNER invites MANAGER (runs campaigns) / ANALYST (reads
 // stats) by phone; the invitee must already hold a Swift account. The server
@@ -32,7 +32,7 @@ export function AdvertiserTeamScreen() {
   const [phone, setPhone] = useState('+592');
   const [role, setRole] = useState<'MANAGER' | 'ANALYST'>('MANAGER');
   const [error, setError] = useState<string | null>(null);
-  const [confirmSwitch, setConfirmSwitch] = useState(false);
+  const exitDialog = useAdvertiserExitDialog();
 
   const rows = members.data ?? [];
   const myRole = rows.find((m: any) => m.userId === (user as any)?.id)?.role;
@@ -115,12 +115,12 @@ export function AdvertiserTeamScreen() {
             icon="log-out"
             label="Log out and switch experience"
             sub="Return to Customer, Driver, Vendor, and other Swift options"
-            onPress={() => setConfirmSwitch(true)}
+            onPress={exitDialog.requestLogout}
           />
         </Card>
       </ScrollView>
 
-      <AdvertiserExitDialog visible={confirmSwitch} onClose={() => setConfirmSwitch(false)} />
+      {exitDialog.logoutDialog}
     </View>
   );
 }

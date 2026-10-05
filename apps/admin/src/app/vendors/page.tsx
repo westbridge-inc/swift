@@ -3,12 +3,13 @@
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchVendors, approveVendor } from '@/lib/api';
+import { askReason } from '@/lib/ask-reason';
 
 export default function VendorsPage() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['vendors'], queryFn: () => fetchVendors() });
   const approveMutation = useMutation({
-    mutationFn: approveVendor,
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => approveVendor(id, reason),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['vendors'] }),
   });
 
@@ -47,7 +48,7 @@ export default function VendorsPage() {
                   <td className="p-4 text-right">
                     {vendor.status === 'PENDING_APPROVAL' && (
                       <button
-                        onClick={() => approveMutation.mutate(vendor.id)}
+                        onClick={() => { const reason = askReason({ action: 'approve this business', subject: vendor.name }); if (reason) approveMutation.mutate({ id: vendor.id, reason }); }}
                         className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80"
                       >
                         Approve

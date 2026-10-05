@@ -8,7 +8,7 @@ import { openExternal } from '../../../lib/openExternal';
 
 // Kit Contact Us (55). Channels below are the launch support set —
 // TODO(SWIFT-117): confirm the final support phone/handles before release.
-const SUPPORT_EMAIL = 'support@swift.gy';
+const SUPPORT_EMAIL = 'support@swiftgy.com';
 
 export function ContactUsScreen() {
   const navigation = useNavigation<any>();

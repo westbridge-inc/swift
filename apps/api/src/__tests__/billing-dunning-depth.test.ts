@@ -11,6 +11,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // Lifecycle/billing spec §11 — dunning DEPTH (G-BILL-02). The retry engine and
 // auto-suspend already exist and are tested in billing.test.ts; this suite
@@ -93,6 +94,7 @@ beforeAll(async () => {
 beforeEach(() => resetDevChannelLog());
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
@@ -162,9 +164,13 @@ describe('§11 stages 6..N — suspended nudges and the CHURNED terminal', () =>
     // Every assertion here is scoped to THIS subscription.)
     const nudges = () => app.prisma.billingEvent.count({ where: { subscriptionId: v.subId, type: 'REMINDER', idempotencyKey: { startsWith: 'nudge:' } } });
 
-    // Day 3: first nudge fires push + SMS.
+    // Day 3: first nudge fires push + SMS. [#1393] The nudges run on the shared
+    // clock's unpaused time: the first comes one full day after the suspension
+    // notice (t0 + 74 h here), never in the same breath as it.
     resetDevChannelLog();
-    const day3 = new Date(t0.getTime() + 3 * DAY);
+    await billing.sweepSuspended(new Date(suspendedAt.getTime() + DAY - 60_000));
+    expect(await nudges()).toBe(0);
+    const day3 = new Date(suspendedAt.getTime() + DAY);
     await billing.sweepSuspended(day3);
     expect(await nudges()).toBe(1);
     expect(devChannelLog.find((e) => e.channel === 'sms' && e.to === v.phone)?.body).toContain('suspended');
@@ -214,5 +220,174 @@ describe('§11 stages 6..N — suspended nudges and the CHURNED terminal', () =>
     expect(s.failedAttempts).toBe(0);
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: v.vendorId } })).status).toBe('ACTIVE');
     expect(await app.prisma.billingEvent.findFirst({ where: { subscriptionId: v.subId, type: 'REINSTATED' } })).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The notices say only what is TRUE about paying (owner, 2026-09-29): partners
+// pay on the MMG checkout in the Swift app. No notice offers an MMG agent,
+// cash, a Swift Number, an account number, the merchant-initiated request or
+// "coming soon", and none promises an instant restore. The paying sentence is
+// "Pay GY$X with MMG in the Swift app." only while the checkout is live;
+// otherwise the amount and when it is due (fee-notice-copy.ts). [DS287 S3] The
+// final-warning push carries it too.
+// ---------------------------------------------------------------------------
+
+/** Every way to pay a fee notice may NOT name. */
+const FORBIDDEN = [
+  /tap pay/i, /open the app to pay/i, /pay (?:your weekly fee )?in the app/i, /balance in the app/i, /update your card/i,
+  /MMG agent|any agent|Swift Number|account number|pay cash|coming soon/i, /MMG request/i,
+  // The doors the owner closed for partners (29 Sep), by word (#1389).
+  /\bagents?\b/i, /swift number/i, /\bcash\b/i,
+];
+const INSTANT = /instantly|the moment you pay/i;
+/** The makeBrokeVendorSub week: GY$20,000, nothing in the wallet. */
+const DUE_NOW = 'The weekly fee of GY$20,000 is due now.';
+const PAY_MMG = 'Pay GY$20,000 with MMG in the Swift app.';
+/** [AX349 · #1389] The suspended nudge states what is owed (amountDueNow), not the weekly fee. */
+const NUDGE_OWED = 'You owe $20,000 GYD.';
+
+function expectTruthful(text: string | null | undefined, label: string, mode: 'off' | 'live', due: string = DUE_NOW) {
+  expect(text, label).toBeTruthy();
+  for (const door of FORBIDDEN) expect(text, `${label} names a way to pay that does not exist: ${door}`).not.toMatch(door);
+  expect(text, `${label} promises an instant restore`).not.toMatch(INSTANT);
+  if (mode === 'live') {
+    expect(text, label).toContain(PAY_MMG);
+  } else {
+    expect(text, label).toContain(due);
+    expect(text, `${label} points to a checkout that is off`).not.toMatch(/with MMG in the Swift app/);
+  }
+}
+
+/** The MMG checkout on (sandbox driver) for one test. */
+async function withCheckoutLive<T>(fn: () => Promise<T>): Promise<T> {
+  const before = process.env['MMG_CHECKOUT_ENABLED'];
+  process.env['MMG_CHECKOUT_ENABLED'] = '1';
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
+    else process.env['MMG_CHECKOUT_ENABLED'] = before;
+  }
+}
+
+const pushBody = async (userId: string, title: string) =>
+  (await app.prisma.notification.findFirst({ where: { userId, title }, orderBy: { createdAt: 'desc' } }))?.body;
+const smsTo = (phone: string) => devChannelLog.filter((e) => e.channel === 'sms' && e.to === phone).map((e) => e.body);
+
+/** The committed notice of a nudge or a churn: the audit record of what was
+ *  decided. The delivery worker sends it rendered as billing HISTORY
+ *  (billing-notice-delivery.ts), so the record itself must be true too. */
+async function committedNotice(subscriptionId: string, keyPrefix: 'nudge:' | 'churned:') {
+  const event = await app.prisma.billingEvent.findFirst({
+    where: { subscriptionId, idempotencyKey: { startsWith: keyPrefix } },
+    orderBy: { createdAt: 'desc' },
+  });
+  expect(event?.note, `${keyPrefix} notice committed`).toBeTruthy();
+  return JSON.parse(event!.note!) as { body: string; sms?: string };
+}
+
+/** What the partner actually receives for a committed notice: never a way
+ *  to pay that does not exist. */
+function expectDeliveredHonestly(phone: string, label: string) {
+  const delivered = smsTo(phone);
+  expect(delivered.length, `${label} delivered`).toBeGreaterThan(0);
+  for (const text of delivered) for (const door of FORBIDDEN) expect(text, label).not.toMatch(door);
+}
+
+/** A vendor already SUSPENDED on the given rail. The sweep reads it directly:
+ *  replaying the cycle would not work for MOBILE_MONEY, whose sandbox rail
+ *  simply approves. */
+async function makeSuspendedVendorSub(rail: { billingMethod: 'MOBILE_MONEY' | 'CARD'; payer?: boolean }, suspendedAt: Date) {
+  const v = await makeBrokeVendorSub(suspendedAt);
+  await app.prisma.subscription.update({
+    where: { id: v.subId },
+    data: {
+      status: 'SUSPENDED', suspendedAt, failedAttempts: 3, nextRetryAt: new Date(suspendedAt.getTime() + DAY),
+      billingMethod: rail.billingMethod, mmgPayerMsisdn: rail.payer ? v.phone : null,
+    },
+  });
+  return v;
+}
+
+/** The dunning ladder to suspension, checking every notice on the way. */
+async function ladderNotices(mode: 'off' | 'live') {
+  const t0 = new Date('2026-07-01T12:00:00Z');
+  const v = await makeBrokeVendorSub(t0);
+
+  await billing.runBillingCycle(t0); // attempt 1: the retry notice (push)
+  expectTruthful(await pushBody(v.userId, 'Subscription payment failed'), 'retry notice', mode);
+
+  resetDevChannelLog();
+  await billing.runBillingCycle(new Date(t0.getTime() + 25 * HOUR)); // attempt 2: final warning
+  const [finalSms] = smsTo(v.phone);
+  expectTruthful(finalSms, 'final-warning SMS', mode);
+  expect(finalSms).toContain('suspended at');
+  expectTruthful(await pushBody(v.userId, 'Final warning — payment needed'), 'final-warning push', mode);
+
+  resetDevChannelLog();
+  await billing.runBillingCycle(new Date(t0.getTime() + 50 * HOUR)); // attempt 3: suspended
+  expect((await sub(v.subId)).status).toBe('SUSPENDED');
+  expectTruthful(await pushBody(v.userId, 'Subscription suspended'), 'suspension push', mode);
+  expectTruthful(smsTo(v.phone)[0], 'suspension SMS', mode);
+}
+
+describe('fee notices name only the way to pay that exists', () => {
+  it('with the MMG checkout off, every ladder notice states the amount due and promises no way to pay', async () => {
+    await ladderNotices('off');
+  });
+
+  it('with the MMG checkout live, every ladder notice points to it for exactly what it would charge', async () => {
+    await withCheckoutLive(() => ladderNotices('live'));
+  });
+
+  it('the daily nudge names neither the merchant-initiated request nor an agent, on any rail', async () => {
+    const now = new Date();
+    const suspendedAt = new Date(now.getTime() - 2 * DAY);
+    const mmg = await makeSuspendedVendorSub({ billingMethod: 'MOBILE_MONEY', payer: true }, suspendedAt);
+    const mmgNoPayer = await makeSuspendedVendorSub({ billingMethod: 'MOBILE_MONEY', payer: false }, suspendedAt);
+    const card = await makeSuspendedVendorSub({ billingMethod: 'CARD' }, suspendedAt);
+
+    resetDevChannelLog();
+    await billing.sweepSuspended(now);
+
+    for (const [label, v] of [['MOBILE_MONEY', mmg], ['MOBILE_MONEY without a payer number', mmgNoPayer], ['CARD', card]] as const) {
+      const notice = await committedNotice(v.subId, 'nudge:');
+      for (const [channel, text] of [['push', notice.body], ['SMS', notice.sms]] as const) {
+        expectTruthful(text, `${label} nudge ${channel}`, 'off', NUDGE_OWED);
+      }
+      expectDeliveredHonestly(v.phone, `${label} nudge as delivered`);
+    }
+  });
+
+  it('with the MMG checkout live, the nudge names what is owed and the checkout for exactly that', async () => {
+    await withCheckoutLive(async () => {
+      const now = new Date();
+      const v = await makeSuspendedVendorSub({ billingMethod: 'CARD' }, new Date(now.getTime() - 2 * DAY));
+      resetDevChannelLog();
+      await billing.sweepSuspended(now);
+      const notice = await committedNotice(v.subId, 'nudge:');
+      for (const [channel, text] of [['push', notice.body], ['SMS', notice.sms]] as const) {
+        expectTruthful(text, `nudge ${channel} (checkout live)`, 'live');
+        expect(text, `nudge ${channel} (checkout live)`).toContain(NUDGE_OWED);
+      }
+      expectDeliveredHonestly(v.phone, 'nudge as delivered (checkout live)');
+    });
+  });
+
+  it('the churn notice: the amount due while the checkout is off, the checkout to rejoin while it is live', async () => {
+    const now = new Date();
+    const off = await makeSuspendedVendorSub({ billingMethod: 'MOBILE_MONEY', payer: true }, new Date(now.getTime() - 31 * DAY));
+    resetDevChannelLog();
+    await billing.sweepSuspended(now);
+    expect((await sub(off.subId)).status).toBe('CHURNED');
+    const closed = await committedNotice(off.subId, 'churned:');
+    expectTruthful(closed.sms, 'churn SMS', 'off');
+    expect(closed.sms).toContain('closed');
+    expectDeliveredHonestly(off.phone, 'churn SMS as delivered');
+
+    const live = await makeSuspendedVendorSub({ billingMethod: 'CARD' }, new Date(now.getTime() - 31 * DAY));
+    await withCheckoutLive(() => billing.sweepSuspended(now));
+    expectTruthful((await committedNotice(live.subId, 'churned:')).sms, 'churn SMS (checkout live)', 'live');
   });
 });

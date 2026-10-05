@@ -1,0 +1,82 @@
+{
+    # Runtime proxy failures log requests even when access logging is off.
+    # Neither path credentials nor signed queries/headers belong in logs.
+    log {
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers delete
+            }
+        }
+    }
+}
+
+# API_HOST is a single staging DNS name set in deploy/.env. A hostname site
+# address enables Caddy's automatic certificate issuance and renewal.
+#
+# [Q11] WEB_HOST (optional, deploy/.env) is the website's DNS name, and it
+# shares this site on purpose. Caddy substitutes {$NAME} before it parses, and
+# an unset or empty WEB_HOST expands to nothing: here that leaves API_HOST as
+# the only address. A separate `{$WEB_HOST} { ... }` block would lose its only
+# address instead, be read as a misplaced global-options block, and fail the
+# WHOLE file, the API site included. Requests are split on the API host, which
+# is always set; every other host on this site is the website, and with
+# WEB_HOST unset there is no other host. The website sends its own security
+# headers (apps/web/next.config.ts); none are added or overridden here.
+#
+# [STORE-1] API_ALIAS_HOST (optional, deploy/.env) is a SECOND DNS name for the
+# same API. The store build of the app is fixed to the production API name; until
+# a production stack exists, that name points at this stack. It gets its own
+# certificate like any site address, and it MUST be in the @api matcher: any
+# host missing from the matcher is served the website. Unset or empty, it
+# expands to nothing and this file is exactly what it was without it.
+#
+# [Item 8] WEB_ALIAS_HOSTS (optional, deploy/.env) is a space-separated list of
+# extra DNS names for the WEBSITE — the public swiftgy.com and www.swiftgy.com
+# while no production stack exists. Each gets its own certificate and, being
+# absent from the @api matcher, reaches the website. www is redirected to the
+# apex by the website itself (apps/web/next.config.ts), which keeps the app-link
+# files on www unredirected; no redirect belongs here. Unset or empty, it
+# expands to nothing and this file is exactly what it was without it.
+#
+# [ADMIN-CONSOLE] ADMIN_HOST (optional, deploy/.env) is the admin console's DNS
+# name (apps/admin, the `admin` service). It joins this site for the reason
+# WEB_HOST does, gets its own certificate, and its route comes FIRST, keyed on
+# its own matcher. That matcher always carries `admin.invalid` as well: a host
+# matcher left with no argument parses, then stops Caddy loading the WHOLE
+# configuration, the API included. .invalid is reserved (RFC 2606) and is never
+# one of this site's addresses, so with ADMIN_HOST empty no request reaches the
+# console, and the API and the website are routed exactly as before.
+#
+# The console's own sign-in (a staff phone and a one-time code; the API admits
+# ADMIN and SUPER_ADMIN only) can sit behind an OPTIONAL second gate: HTTP
+# basic authentication on every path of the console's host, on when
+# deploy/.env sets ADMIN_BASIC_AUTH_HASH (a bcrypt hash; the password never
+# reaches this host). Compose derives the gate's user from that one setting
+# (`admin` when the hash is set, empty when not) and the gate keys on the
+# user: both empty is no gate, and one without the other cannot be parsed, so
+# a half-configured gate stops Caddy instead of serving the console ungated.
+# The gate's credential ends here: it is stripped before the console.
+{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {$ADMIN_HOST} {
+    encode zstd gzip
+    @admin host {$ADMIN_HOST} admin.invalid
+    handle @admin {
+        @admin_gate expression `"{$ADMIN_BASIC_AUTH_USER}" != ""`
+        basic_auth @admin_gate {
+            {$ADMIN_BASIC_AUTH_USER} {$ADMIN_BASIC_AUTH_HASH}
+        }
+        reverse_proxy admin:3000 {
+            header_up -Authorization
+        }
+    }
+    @api host {$API_HOST} {$API_ALIAS_HOST}
+    handle @api {
+        @metrics path /metrics
+        respond @metrics 403
+        reverse_proxy api:3000
+    }
+    handle {
+        reverse_proxy web:3000
+    }
+}

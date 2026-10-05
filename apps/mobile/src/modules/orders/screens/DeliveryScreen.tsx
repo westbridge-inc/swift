@@ -14,10 +14,11 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useOrder, useDecideSubstitution } from '../../../hooks/customer';
+import { useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
@@ -27,6 +28,8 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
+import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
 const GUTTER = space['2xl'];
@@ -44,6 +47,9 @@ const LIVE_TRACKING_STATUSES = new Set([
   'DRIVER_EN_ROUTE',
   'DRIVER_ARRIVED',
   'RIDE_IN_PROGRESS',
+  // [E17 · DS231 F2] The return leg is live-trackable on the server
+  // (counterparty.ts); the sender sees where their parcel is on its way back.
+  'RETURNING',
 ]);
 const LIVE_ETA_STATUSES = new Set([
   'RIDER_ASSIGNED',
@@ -59,7 +65,7 @@ const validMapCoordinate = coordinateOf;
 
 function isTerminalOrderSnapshot(order: any): boolean {
   const status = String(order?.status ?? '').toUpperCase();
-  return ['CANCELLED', 'REFUNDED', 'FAILED', 'DELIVERED', 'COMPLETED'].includes(status)
+  return ['CANCELLED', 'REFUNDED', 'FAILED', 'DELIVERED', 'COMPLETED', 'RETURNED'].includes(status)
     || (order?.fulfillment === 'PICKUP' && status === 'PICKED_UP');
 }
 
@@ -82,6 +88,10 @@ function timelineIndex(order: any, holdActive: boolean, releasePending: boolean)
   const status = String(order.status ?? '').toUpperCase();
   const pickup = order.fulfillment === 'PICKUP';
   const courier = order.orderType === 'COURIER';
+  // [E17 · DS231 F3] On its way back: the travel step, relabelled below. A
+  // RETURNED parcel has no step — the forward timeline would promise a
+  // delivery — so it falls to the plain status line.
+  if (courier && status === 'RETURNING') return 3;
   if (['DELIVERED', 'COMPLETED'].includes(status) || (pickup && status === 'PICKED_UP')) return 4;
   if (pickup && status === 'READY_FOR_PICKUP') return 3;
   if (['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'].includes(status)) return 3;
@@ -127,7 +137,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     transitDescription = 'This step begins when the assigned rider sets off.';
   } else if (['RIDER_ASSIGNED', 'DRIVER_ASSIGNED'].includes(status)) {
     transitLabel = 'Rider assigned';
-    transitDescription = 'The rider is assigned. The next server update will show when they set off.';
+    transitDescription = 'A rider is assigned. We’ll show when they set off.';
   } else if (['RIDER_EN_ROUTE_PICKUP', 'DRIVER_EN_ROUTE'].includes(status)) {
     transitLabel = 'Rider heading to pickup';
     transitDescription = 'The rider is heading to the pickup.';
@@ -136,17 +146,20 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     transitDescription = 'The rider reached the pickup.';
   } else if (status === 'PICKED_UP') {
     transitLabel = 'Picked up';
-    transitDescription = 'The rider has the order. Waiting for the server to confirm the delivery leg.';
+    transitDescription = 'The rider has your order. We’ll show when they head to you.';
   } else if (status === 'ARRIVED') {
     transitLabel = 'Rider arrived';
     transitDescription = 'The rider reached the delivery address.';
+  } else if (courier && status === 'RETURNING') {
+    transitLabel = 'Coming back to you';
+    transitDescription = `${order.rider?.firstName ?? 'The rider'} couldn’t deliver the parcel and is bringing it back to you.`;
   }
   const steps: TimelineStep[] = [
     {
       key: 'placed',
       label: courier ? 'Requested' : appointment ? 'Booked' : 'Placed',
-      description: 'The server received your request.',
-      upcomingDescription: 'The server will record the request here.',
+      description: 'We received your request.',
+      upcomingDescription: 'Your request will appear here.',
       icon: 'clipboard',
       timestamp: order.placedAt,
     },
@@ -158,15 +171,15 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
           ? 'The rider search starts only when the ring closes.'
           : `Until the ring closes, ${appointment ? 'the provider' : vendorName} hasn’t been told.`
         : releasePending
-          ? 'The timer ended. Waiting for the server to confirm release.'
+          ? 'The timer ended. Checking whether your request was sent.'
           : courier
             ? 'The request is visible to eligible riders.'
             : `${appointment ? 'The provider' : vendorName} can see the request now.`,
       doneDescription: courier
-        ? 'The server released the request to eligible riders.'
+        ? 'The request was sent to riders who can take it.'
         : `${appointment ? 'The provider' : vendorName} received the request.`,
       upcomingDescription: courier
-        ? 'The server will release the request to eligible riders.'
+        ? 'The request will be sent to riders who can take it.'
         : `${appointment ? 'The provider' : vendorName} will receive the request after the hold.`,
       icon: 'send',
     },
@@ -182,7 +195,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
               ? 'Preparing'
               : acceptedRecorded || status === 'ACCEPTED' ? 'Accepted' : 'Preparing',
       description: courier
-        ? 'The assigned rider appears here when the server confirms them.'
+        ? 'Your rider will appear here once assigned.'
         : appointment
           ? 'The provider has confirmed the booking.'
           : status === 'READY_FOR_PICKUP'
@@ -193,12 +206,12 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
               ? `${vendorName} is working on your order.`
               : `${vendorName} accepted the order; preparation is next.`,
       doneDescription: courier
-        ? 'The server assigned a rider.'
+        ? 'A rider was assigned.'
         : appointment
           ? 'The provider confirmed the booking.'
           : `${vendorName} finished this step.`,
       upcomingDescription: courier
-        ? 'The assigned rider will appear after the server confirms them.'
+        ? 'Your rider will appear here once assigned.'
         : appointment
           ? 'The provider will confirm the booking here.'
           : `${vendorName} will accept and prepare the order here.`,
@@ -228,8 +241,8 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
       key: 'complete',
       label: pickup ? 'Picked up' : appointment ? 'Completed' : 'Delivered',
       description: pickup ? 'The store confirms collection.' : appointment ? 'The booking is complete.' : 'The delivery is complete.',
-      doneDescription: pickup ? 'The store confirmed collection.' : appointment ? 'The server marked the booking complete.' : 'The server marked the delivery complete.',
-      upcomingDescription: pickup ? 'The store will confirm collection here.' : appointment ? 'The server will mark the booking complete here.' : 'The server will mark the delivery complete here.',
+      doneDescription: pickup ? 'The store confirmed collection.' : appointment ? 'The booking is complete.' : 'The delivery is complete.',
+      upcomingDescription: pickup ? 'The store will confirm collection here.' : appointment ? 'You’ll see here when the booking is complete.' : 'You’ll see here when delivery is complete.',
       icon: 'check',
       timestamp: pickup ? order.pickedUpAt : order.deliveredAt,
     },
@@ -244,7 +257,7 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
         <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
           <Feather name="info" size={18} color={color.info} />
           <T variant="label" tone="info" style={{ flex: 1 }}>
-            Current server status: {humanStatus(String(order.status ?? 'unknown'))}.
+            Current status: {humanStatus(String(order.status ?? 'unknown'))}.
           </T>
         </View>
       ) : null}
@@ -373,7 +386,7 @@ export function DeliveryScreen() {
         setConfirmCancel(false);
         toast.show(
           'Checking cancellation status',
-          'We couldn’t confirm the outcome. The latest server status is being refreshed before you try again.',
+          'We couldn’t confirm whether the order was cancelled. Check its latest status before trying again.',
         );
       }
       // The outcome is unknown (a timeout can mean the cancel DID land), so
@@ -383,6 +396,21 @@ export function DeliveryScreen() {
     },
   });
   const decideSub = useDecideSubstitution(orderId);
+  // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
+  // their only first-party door to "I didn't pay". That statement can pause
+  // the order, so it is confirmed first; the order refetches either way.
+  const claimPayment = useClaimMmgPayment();
+  // [R4 · F-PR1262-SOL-01] The confirmation carries the order it was opened
+  // on. It is shown only while this screen still shows that order, and it is
+  // sent to that order — never to whichever order a reused screen shows now.
+  const [pendingMmgClaim, setPendingMmgClaim] = useState<PendingMmgClaim | null>(null);
+  const confirmingMmgClaim = boundMmgClaim(pendingMmgClaim, orderId);
+  const mmgClaimSending = claimPayment.isPending && claimPayment.variables?.orderId === orderId;
+  const mmgClaimFailed = (error: any, claim: { orderId: string }) => {
+    if (claim.orderId !== activeOrderIdRef.current) return;
+    const serverMessage = error?.response?.data?.error?.message;
+    toast.error('That didn’t go through', typeof serverMessage === 'string' ? serverMessage : 'Check your connection and try again.');
+  };
 
   const o = order.data;
   const orderStatus = String(o?.status ?? '').toUpperCase();
@@ -406,7 +434,7 @@ export function DeliveryScreen() {
         return;
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
-        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
         return;
       }
       if (latest.orderType !== 'COURIER') {
@@ -442,7 +470,7 @@ export function DeliveryScreen() {
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
         setConfirmCancel(false);
-        toast.show('This order can no longer be cancelled', 'The latest server status is shown on the timeline.');
+        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
         return;
       }
       if (latest.orderType !== 'COURIER') {
@@ -454,7 +482,7 @@ export function DeliveryScreen() {
         if (cancelPreviewFee !== latestFee) {
           setCancelPreviewFee(latestFee);
           setCancelPreviewFresh(true);
-          toast.show('Cancellation cost updated', 'Review the new server preview, then confirm again.');
+          toast.show('Cancellation fee changed', 'Check the new amount, then confirm again.');
           return;
         }
       }
@@ -598,6 +626,7 @@ export function DeliveryScreen() {
     setCancelPreviewOrderId(null);
     setCancelMessage(null);
     setCancelFee(null);
+    setPendingMmgClaim(null);
     lastCourierServerFixAt.current = null;
     prevStatus.current = null;
     prevStatusRef.current = undefined;
@@ -669,7 +698,11 @@ export function DeliveryScreen() {
   const failed = o.status === 'FAILED';
   const complete = ['DELIVERED', 'COMPLETED'].includes(o.status)
     || (o.fulfillment === 'PICKUP' && o.status === 'PICKED_UP');
-  const terminal = cancelled || failed || complete;
+  // [E17 · DS231 F3] A parcel returned to its sender is over: no live-rider
+  // controls, tracking link or cancel once the return is complete. The rider's
+  // identity card stays, exactly as it does on a delivered order.
+  const returned = o.status === 'RETURNED';
+  const terminal = cancelled || failed || complete || returned;
   const verticalTint = o.orderType === 'COURIER'
     ? SEND_TINT
     : o.fulfillment === 'APPOINTMENT' ? SERVICES_TINT : ORDER_TINT;
@@ -681,6 +714,7 @@ export function DeliveryScreen() {
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
+  const mmgClaim = parseMmgClaimView(o.mmgClaim);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
   const ringHidden = terminal || mmgCaptured || !o.canCancel;
   // Hold lifecycle and cancel eligibility are separate server facts. A paid or
@@ -706,7 +740,7 @@ export function DeliveryScreen() {
   const mapAnchor = courierPos ?? pickupPos ?? dropPos;
   const initialRegion = mapAnchor ? { ...mapAnchor, latitudeDelta: 0.05, longitudeDelta: 0.05 } : null;
   const mapNotice = holdTimingUnavailable
-    ? 'Checking the cancellation window with the server.'
+    ? 'Checking whether you can still cancel.'
     : holdActive || releasePending
     ? o.orderType === 'COURIER'
       ? 'Live tracking starts after the request is released to riders.'
@@ -767,10 +801,21 @@ export function DeliveryScreen() {
     : o.fulfillment === 'APPOINTMENT' ? 'provider' : 'seller or rider';
   const mmgPayee = mmgPaymentAction?.recipientName
     ?? (o.orderType === 'COURIER' ? 'the named payee' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+  // The last two food sentences a booking could reach on this screen were both
+  // cancellation copy on the MMG rail — the one rail where the money may have
+  // already moved. They name the party who holds it from the fulfillment, the
+  // discriminator every other booking word on this screen keys on, and call a
+  // booking a booking. Food, pickup and courier keep their exact words.
+  const refundParty = o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+  const cancelledNoun = o.fulfillment === 'APPOINTMENT' ? 'booking' : 'order';
   let etaCopy = pendingSummary;
   if (cancelled) etaCopy = 'Cancelled';
   else if (failed) etaCopy = 'Couldn’t complete this order';
   else if (complete) etaCopy = 'Completed';
+  // [E17 · DS236 F3-R2] The creation-time estimate is the forward leg's; a
+  // parcel on its way back (or back) must not show a countdown to the door.
+  else if (returned) etaCopy = 'Returned to you';
+  else if (orderStatus === 'RETURNING') etaCopy = 'Coming back to you';
   else if (arrivalReached) {
     etaCopy = orderStatus === 'RIDER_ARRIVED_PICKUP' ? 'Rider reached the pickup' : 'Your rider has arrived';
   } else if (o.fulfillment === 'APPOINTMENT' && orderStatus === 'ACCEPTED') {
@@ -786,14 +831,15 @@ export function DeliveryScreen() {
     etaCopy = 'Ready for pickup';
   } else if (o.fulfillment === 'PICKUP' && serverPrepMinutes != null) {
     etaCopy = `Estimated ready time · ~${serverPrepMinutes} min`;
-  } else if (serverEstimateMinutes != null) etaCopy = `Server estimate · ~${serverEstimateMinutes} min total`;
+  } else if (serverEstimateMinutes != null) etaCopy = `Estimated time · ~${serverEstimateMinutes} min total`;
 
   // [ALG-12] The promise the customer was given at checkout — a RANGE on
   // five-minute marks from the server, recomputed against this screen's
   // ticking clock so a passed window is never shown as still coming
   // (R-12.2.4). The live line above is labelled live; this is the commitment
   // (L7). Delivery orders only, and only while the order is still coming.
-  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete ? promiseLine(o.promise, nowTs) : null;
+  // A returning parcel is not coming to the door: the forward promise is over too.
+  const promise = o.fulfillment === 'DELIVERY' && !cancelled && !failed && !complete && !returned && orderStatus !== 'RETURNING' ? promiseLine(o.promise, nowTs) : null;
   const promiseUpdate = promiseNote(o.promise);
 
   return (
@@ -947,11 +993,17 @@ export function DeliveryScreen() {
             }}
             hidden={ringHidden || !isFocused}
           />
+          {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? (
+            <View style={{ marginTop: space.md }}>
+              <T variant="label" tone="muted">Appointment</T>
+              <T variant="body" weight="semibold">{formatAppointmentSlot(o.appointmentSlot)}</T>
+            </View>
+          ) : null}
           {holdTimingUnavailable ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />
               <T variant="label" tone="info" style={{ flex: 1 }}>
-                Checking the hold timing with the server. No progress ring is shown without both server timestamps.
+                Checking when this order will be sent. Try again in a moment.
               </T>
             </View>
           ) : null}
@@ -959,7 +1011,7 @@ export function DeliveryScreen() {
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="send" size={18} color={color.info} />
               <T variant="label" tone="info" style={{ flex: 1 }}>
-                Timer closed. Checking with the server before marking this order sent.
+                The wait is over. Checking whether your order was sent.
               </T>
             </View>
           ) : null}
@@ -1156,8 +1208,8 @@ export function DeliveryScreen() {
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
                       ?? (mmgCancellationAmbiguous
-                        ? 'This order was cancelled. If you already sent the MMG payment, the store refunds you directly.'
-                        : 'This order was cancelled.')}
+                        ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
+                        : `This ${cancelledNoun} was cancelled.`)}
                 </T>
                 {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
                     rendered from the committed result, never a preview. */}
@@ -1278,6 +1330,32 @@ export function DeliveryScreen() {
             )
           ) : null}
 
+          {/* [MKT-F057] Delivery handover gate — the RIDER asks for THIS code at
+              the door. Quiet until the goods leave the store; from pickup to the
+              door the customer holds it and shows it to their rider. The rider
+              never sees it — they enter it. */}
+          {o.fulfillment === 'DELIVERY' && o.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(o.status) ? (
+            <View
+              style={{
+                alignItems: 'center',
+                borderRadius: radius.lg,
+                backgroundColor: color.brand[50],
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: color.brand[500],
+                paddingVertical: space.xl,
+                paddingHorizontal: space.lg,
+                marginTop: space.xl,
+              }}
+            >
+              <T variant="micro" tone="muted">
+                Show this code to your rider at the door
+              </T>
+              <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
+                {o.ridePin}
+              </T>
+            </View>
+          ) : null}
+
           {/* Order lines */}
           <T variant="heading" accessibilityRole="header" style={{ marginTop: space['2xl'], color: verticalTint.ink }}>
             Your {referenceNoun} · #{o.orderNumber}
@@ -1338,6 +1416,20 @@ export function DeliveryScreen() {
             </View>
           ) : null}
 
+          {mmgClaim && !cancelled && !failed ? (
+            <MmgPaymentClaimCard
+              view={mmgClaim}
+              pending={mmgClaimSending}
+              onClaim={(action) => {
+                if (action.confirm) {
+                  setPendingMmgClaim({ orderId, action });
+                  return;
+                }
+                claimPayment.mutate({ orderId, paid: action.paid }, { onError: mmgClaimFailed });
+              }}
+            />
+          ) : null}
+
           {/* [SPS-F-0023] The post-delivery tip prompt is GONE, not disabled:
               the API fails closed (TIP_COLLECTION_UNAVAILABLE — no rail
               collects money after the job), and a button that always errors is
@@ -1395,11 +1487,11 @@ export function DeliveryScreen() {
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {o.orderType === 'COURIER'
             ? rider
-              ? 'This cancels the pickup and puts the assigned rider back in the dispatch pool. It can’t be undone.'
+              ? 'This cancels the pickup. The rider can take other jobs. It can’t be undone.'
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
-              ? 'Cancelling stops fulfilment. If you already sent the MMG payment, the store refunds you directly.'
-              : 'Cancelling stops fulfilment. The server preview is shown below; the final outcome is confirmed when cancellation completes.'}
+              ? `Cancelling stops this ${cancelledNoun}. If you already sent the MMG payment, ${refundParty} refunds you directly.`
+              : `Cancelling stops this ${cancelledNoun}. Check the possible fee below. We’ll show the final result when cancellation is confirmed.`}
         </T>
         {cancelPreviewFresh && o.orderType === 'COURIER' ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
@@ -1407,7 +1499,7 @@ export function DeliveryScreen() {
               <Feather name="info" size={18} color={color.info} />
             </DecorativeIcon>
             <T variant="label" tone="info" style={{ flex: 1 }}>
-              Fresh server check: cancellation is still available. This courier flow does not quote an in-app cancellation fee, and Swift does not collect courier payment.
+              You can still cancel. Swift cannot show a cancellation fee for this courier request in the app. Swift does not collect courier payment.
             </T>
           </View>
         ) : cancelPreviewFresh && cancelPreviewFee != null ? (
@@ -1417,8 +1509,8 @@ export function DeliveryScreen() {
             </DecorativeIcon>
             <T variant="label" tone={cancelPreviewFee > 0 ? 'warning' : 'info'} style={{ flex: 1 }}>
               {cancelPreviewFee > 0
-                ? `Server preview: ${money(cancelPreviewFee)} would be recorded if you cancel now. Swift does not collect it.`
-                : 'Server preview: no cancellation fee.'}
+                ? `If you cancel now, a ${money(cancelPreviewFee)} fee may be recorded. Swift does not collect it. We’ll check again when you confirm.`
+                : 'The last check showed no cancellation fee. We’ll check again when you confirm.'}
             </T>
           </View>
         ) : null}
@@ -1437,6 +1529,42 @@ export function DeliveryScreen() {
             size="md"
             disabled={cancelChecking || cancelOrder.isPending}
             onPress={() => setConfirmCancel(false)}
+          />
+        </View>
+      </PopupCard>
+
+      {/* [ORDER-SPINE S1-6] "I didn't pay" can pause the order for a person to
+          check, so it is a deliberate second tap — never a single stray one. */}
+      <PopupCard
+        visible={confirmingMmgClaim !== null}
+        onClose={() => { if (!mmgClaimSending) setPendingMmgClaim(null); }}
+      >
+        <IconChip icon="alert-circle" size={56} />
+        <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
+          {confirmingMmgClaim?.action.confirm?.title ?? ''}
+        </PopupTitle>
+        <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
+          {confirmingMmgClaim?.action.confirm?.body ?? ''}
+        </T>
+        <View style={{ alignSelf: 'stretch', gap: space.md, marginTop: space.xl }}>
+          <PillButton
+            label={confirmingMmgClaim?.action.confirm?.confirmLabel ?? 'Confirm'}
+            size="md"
+            loading={mmgClaimSending}
+            onPress={() => {
+              const sent = sendBoundMmgClaim(pendingMmgClaim, orderId, (claim) => claimPayment.mutate(claim, {
+                onSettled: () => setPendingMmgClaim((current) => (current?.orderId === claim.orderId ? null : current)),
+                onError: mmgClaimFailed,
+              }));
+              if (!sent) setPendingMmgClaim(null);
+            }}
+          />
+          <PillButton
+            label="Go back"
+            variant="soft"
+            size="md"
+            disabled={mmgClaimSending}
+            onPress={() => setPendingMmgClaim(null)}
           />
         </View>
       </PopupCard>

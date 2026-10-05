@@ -37,7 +37,11 @@ describe('the top-up key belongs to the attempt', () => {
   it('sends an Idempotency-Key, reuses it when the same attempt is retried after an error, and mints a new one for the next attempt', async () => {
     // [A-12] A top-up now names the transfer it is evidence of, and confirms the
     // target and the delta before it credits anything.
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('reference') ? 'BANK-9001' : '5000')));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => {
+      if (String(msg).includes('reference')) return 'BANK-9001';
+      if (String(msg).includes('Why are you about to')) return 'Amount and reference match the deposit slip';
+      return '5000';
+    }));
     vi.stubGlobal('confirm', vi.fn(() => true));
     const fetchMock = mockApi(handler((_r, n) => (n === 1
       ? { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'lost' } } }

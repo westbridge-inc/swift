@@ -20,7 +20,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
   // [ADM-006] The reason was the constant 'Suspended by admin'. It is the
   // operator's own words now, and a cancelled prompt cancels the action.
   const suspend = useMutation({ mutationFn: (reason: string) => suspendUser(id, reason), onSuccess: invalidate });
-  const unsuspend = useMutation({ mutationFn: () => unsuspendUser(id), onSuccess: invalidate });
+  const unsuspend = useMutation({ mutationFn: (reason: string) => unsuspendUser(id, reason), onSuccess: invalidate });
   const ban = useMutation({ mutationFn: (reason: string) => banUser(id, reason), onSuccess: invalidate });
 
   const u: any = data?.data;
@@ -62,7 +62,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
         ) : null}
         <div className="ml-auto flex gap-2">
           {u.status === 'SUSPENDED' ? (
-            <ActionButton label="Unsuspend" confirm={`Unsuspend ${name}?`} onClick={() => unsuspend.mutate()} disabled={busy} />
+            <ActionButton label="Unsuspend" confirm={`Unsuspend ${name}?`} onClick={() => { const reason = askReason({ action: 'unsuspend this account', subject: name }); if (reason) unsuspend.mutate(reason); }} disabled={busy} />
           ) : u.status !== 'BANNED' ? (
             <ActionButton label="Suspend" confirm={`Suspend ${name}? They can't transact until unsuspended.`} onClick={() => { const reason = askReason({ action: 'suspend this account', subject: name }); if (reason) suspend.mutate(reason); }} disabled={busy} />
           ) : null}

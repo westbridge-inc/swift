@@ -26,6 +26,7 @@
  */
 
 export const TENANT_TABLES = [
+  'handover_photo_proofs', 'cash_handover_evidence', 'mmg_payer_evidence', 'identity_review_cases',
   'EmergencyContact', 'EvidenceBundle', 'IncidentCase', 'LivenessCheck',
   'SafetyAccessLog', 'SosAlert', 'TripSafetySession', 'actor_rating_stats',
   // [S-01] The SOS escalation outbox belongs to the alert's tenant.
@@ -34,6 +35,9 @@ export const TENANT_TABLES = [
   'stock_movements',
   // [R048-007] money-surface commands: one operator's decided money changes.
   'money_surface_commands',
+  // [E02] MMG refund obligations and the sends that answer them, walled like their order.
+  'mmg_refund_obligations',
+  'mmg_refund_sends',
   'rating_outbox',
   'privileged_approvals',
   'sensitive_read_logs',
@@ -101,11 +105,20 @@ export const TENANT_TABLES = [
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',
-  'mmg_agent_payments', 'order_outbox', 'orders', 'pending_attributions',
+  'mmg_agent_payments',
+  // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
+  // walled like the provider payment that credits it.
+  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
+  // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
+  'billing_obligation_transitions',
+  'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
   'ride_queue_entries', 'safety_deletion_holds', 'san_tombstones',
+  // [TAXI multi-stop] The intermediate stops of one ride, walled like the ride itself.
+  'taxi_trip_stops',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -113,8 +126,11 @@ export const TENANT_TABLES = [
   // [M-20] A settlement file as one staged, validated import.
   'settlement_imports', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency',
+  'mover_fee_authorities', 'mover_fee_subscriptions',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
+  // [PT-1] Card rail v2: enrolled cards, hosted sessions and their evidence.
+  'payment_instruments', 'card_sessions', 'card_observations',
   // [M-34] Fare zones are one operator's, in one market.
   'zones',
   // [STORE-002] Who a person refuses contact with.
@@ -224,6 +240,9 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'payout_schedules', trigger: 'payout_schedules_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [E02] an MMG refund obligation and a refund send belong to the tenant of their order
+  { table: 'mmg_refund_obligations', trigger: 'mmg_refund_obligations_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  { table: 'mmg_refund_sends', trigger: 'mmg_refund_sends_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [money] two hops: an earning belongs to its mover (rider OR driver), who belongs to a user, who belongs to a tenant
   // [DOC-1 P4-5] a review case inherits through the document to the person; a decision inherits its case
   { table: 'review_case', trigger: 'review_case_tenant_matches_subject', parent: 'users', fk: 'submissionId',
@@ -252,6 +271,17 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
     parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
+  // [TAXI multi-stop] one hop: a stop inherits the tenant of its ride (the delivery_cash_settlements shape)
+  { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
+  // card and a hosted session belong to the person who pays the fee
+  { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },
+  { table: 'card_sessions', trigger: 'card_sessions_tenant_matches_user', parent: 'users', fk: 'userId' },
+  // [PT-1] an observation inherits its session; an off-session charge has no session, so it
+  // inherits the instrument it charged. An observation with neither is refused.
+  { table: 'card_observations', trigger: 'card_observations_tenant_matches_owner', parent: 'card_sessions', fk: 'sessionId',
+    watch: ['sessionId', 'instrumentId'],
+    parentTenantSql: `SELECT COALESCE((SELECT s."tenantId" FROM card_sessions s WHERE s.id = NEW."sessionId"), (SELECT i."tenantId" FROM payment_instruments i WHERE i.id = NEW."instrumentId"))` },
 ];
 export function tenantLineageDdl(): string[] {
   return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch }) => [
@@ -342,7 +372,22 @@ export function appRoleDdl(): string[] {
     `GRANT USAGE ON SCHEMA public TO swift_app`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_app`,
     `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_app`,
-    `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO swift_app`,
+    // Purge functions are operator-only. Never re-grant them when healing an
+    // app-role environment, even if creation defaults previously granted them.
+    `DO $app_functions$
+      DECLARE fn record;
+      BEGIN
+        FOR fn IN SELECT p.oid::regprocedure AS signature, p.proname
+          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'public' AND p.prokind IN ('f', 'w')
+        LOOP
+          IF fn.proname IN ('swift_purge_audit_logs', 'swift_purge_sensitive_read_logs') THEN
+            EXECUTE format('REVOKE ALL ON FUNCTION %s FROM swift_app', fn.signature);
+          ELSE
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO swift_app', fn.signature);
+          END IF;
+        END LOOP;
+      END $app_functions$`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO swift_app`,

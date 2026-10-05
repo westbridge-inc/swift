@@ -12,12 +12,15 @@ export interface SensitiveRoute {
   file: string;
   /** The route's registration line prefix, e.g. `app.put('/profile'`. */
   route: string;
-  surface: 'mmg-link';
+  surface: 'mmg-link' | 'billing-method';
   /** Source text each control must appear as, inside the route's handler. */
   controls: string[];
 }
 
 export const SENSITIVE_MONEY_ROUTES: SensitiveRoute[] = [
+  ...['vendor', 'rider', 'driver'].map((role): SensitiveRoute => ({
+    file: `modules/${role}/${role}.routes.ts`, route: "app.put('/subscription/billing-method'", surface: 'billing-method', controls: ['requireStepUp(app, request)'],
+  })),
   { file: 'modules/vendor/vendor.routes.ts', route: "app.put('/profile'", surface: 'mmg-link', controls: ['requireStepUp(app, request)', "assertVelocity(app, request, 'money.mmg-link')", 'stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },
   { file: 'modules/vendor/vendor.routes.ts', route: "app.delete('/profile/mmg-pay-url/pending'", surface: 'mmg-link', controls: ["assertVelocity(app, request, 'money.mmg-link.cancel')", 'cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },
   { file: 'modules/driver/driver.routes.ts', route: "app.put('/profile'", surface: 'mmg-link', controls: ['requireStepUp(app, request)', "assertVelocity(app, request, 'money.mmg-link')", 'stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },

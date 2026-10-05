@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -128,7 +129,7 @@ describe('scenario H — device velocity (Part 5)', () => {
     const verification = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
     // The sandbox marker would auto-approve a clean account; the hold forces
     // pending_manual — rung 2's whole meaning.
-    const doc = await verification.submitIdentity(u.id, 'https://x/id-auto-approve.jpg', 'https://x/selfie-auto-approve.jpg', 'v1');
+    const doc = await verification.submitIdentity(u.id, await ownedVerificationFixture(app.prisma, u.id, 'auto-approve'), await ownedVerificationFixture(app.prisma, u.id, 'auto-approve'), 'v1');
     expect(doc.status).toBe('PENDING');
   });
 });

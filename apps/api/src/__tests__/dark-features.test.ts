@@ -41,6 +41,20 @@ describe('[dark features] every silent switch is registered', () => {
     expect(darkFeaturesOff(darkFeatureStatus({}, {})).map((r) => r.key)).toContain('android_app_links');
   });
 
+  it('an exact-value switch is ON only at its value, never on mere presence', () => {
+    // LIFECYCLE_V2='0' is a real, deliberate OFF — a register that reported it
+    // ON because the variable is present would be the mirror-image lie this
+    // file exists to prevent.
+    const byKey = (env: Record<string, string | undefined>) => ({
+      off: darkFeaturesOff(darkFeatureStatus(env, {})).map((r) => r.key),
+    });
+    expect(darkFeatureStatus({ LIFECYCLE_V2: '1' }, {}).find((r) => r.key === 'order_hold')?.on).toBe(true);
+    expect(darkFeatureStatus({ LIFECYCLE_V2: '0' }, {}).find((r) => r.key === 'order_hold')?.on).toBe(false);
+    expect(darkFeatureStatus({}, {}).find((r) => r.key === 'order_hold')?.on).toBe(false);
+    expect(byKey({ LIFECYCLE_V2: '0' }).off).toContain('order_hold');
+    expect(byKey({ LIFECYCLE_V2: '1' }).off).not.toContain('order_hold');
+  });
+
   it('whitespace is not a fingerprint', () => {
     expect(darkFeatureStatus({ ANDROID_CERT_SHA256: '   ' }).find((r) => r.key === 'android_app_links')!.on).toBe(false);
   });
@@ -87,6 +101,7 @@ describe('[dark features] the registry matches the code that reads the switch', 
       read('apps/web/src/app/well-known/assetlinks.json/route.ts'),
       read('apps/api/src/modules/safety/sos-escalation.ts'),
       read('apps/api/src/modules/discovery/discovery.routes.ts'),
+      read('apps/api/src/modules/order/order.service.ts'),
     ].join('\n');
     expect(sources.length, 'could not read the sources — the check cannot run').toBeGreaterThan(500);
     for (const f of DARK_FEATURES) {

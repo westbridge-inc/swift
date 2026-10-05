@@ -13,7 +13,11 @@ import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue } from '../../../hooks';
+import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideSos, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
+import { useWaitingClock } from '../../../hooks/useWaitingClock';
+import { addStop, canAddStop, maxStopsFrom, moveStop, removeStop, replaceStop, rideStops, sameWireStops, stopRefusalCopy, wireStops } from '../../../lib/taxiItinerary';
+import { fareBreakdownOf, liveWaiting, waitingDisclosure } from '../../../lib/taxiWaiting';
+import { AddStopRow, RideItinerary, RouteLegs, StopNumber, StopRows, WaitingCard, oneFareLine } from '../TaxiStops';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -24,15 +28,18 @@ import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
 import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../kit/toast';
-import { safetyApi, type RideClass, type TierEstimate } from '../../../services/api';
+import { safetyApi, type RideClass, type RideRequestBody, type TierEstimate } from '../../../services/api';
 import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { openExternal } from '../../../lib/openExternal';
 import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
-import { useAuthStore } from '../../../stores/authStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { telUrl } from '../../../lib/emergencyPolicy';
 import { orderStatusLabel } from '../../../lib/orderStatus';
+import { taxiDoorFor } from '../../../lib/taxiDoors';
+import { TaxiSignedOut } from '../TaxiSignedOut';
+import { signInForTaxi } from '../taxiEntry';
 
 /**
  * The ride's status, in words — from `lib/orderStatus.ts`, the one authority.
@@ -136,7 +143,10 @@ function PresenceCar() {
   );
 }
 
-/** Route card: pickup dot → destination pin, two pressable rows. */
+/** Route card: pickup dot → destination pin, two pressable rows.
+ *  [TAXI multi-stop] Stops sit between the two, each with its own controls;
+ *  "Add a stop" shows only while the server takes stops (`maxStops > 0`). With
+ *  no stops and `maxStops` 0 the card is exactly today's. */
 export function RouteCard({
   pickupLabel,
   dropoffLabel,
@@ -144,6 +154,12 @@ export function RouteCard({
   onDropoff,
   pickupTitle = 'Pickup',
   dropoffTitle = 'Where to?',
+  stops = [],
+  maxStops = 0,
+  onAddStop,
+  onEditStop,
+  onMoveStop,
+  onRemoveStop,
 }: {
   pickupLabel?: string;
   dropoffLabel?: string;
@@ -151,6 +167,12 @@ export function RouteCard({
   onDropoff: () => void;
   pickupTitle?: string;
   dropoffTitle?: string;
+  stops?: readonly PickedPlace[];
+  maxStops?: number;
+  onAddStop?: () => void;
+  onEditStop?: (index: number) => void;
+  onMoveStop?: (index: number, by: -1 | 1) => void;
+  onRemoveStop?: (index: number) => void;
 }) {
   return (
     <Card>
@@ -183,6 +205,9 @@ export function RouteCard({
         )}
       </Pressable>
       <View style={{ marginLeft: space.md, height: space.lg, width: space.xs / 2, backgroundColor: color.border.subtle, marginVertical: space.xs }} />
+      {stops.length > 0 && onEditStop && onMoveStop && onRemoveStop ? (
+        <StopRows stops={stops} onEdit={onEditStop} onMove={onMoveStop} onRemove={onRemoveStop} />
+      ) : null}
       <Pressable
         onPress={onDropoff}
         accessibilityRole="button"
@@ -207,6 +232,9 @@ export function RouteCard({
           </View>
         )}
       </Pressable>
+      {maxStops > 0 && onAddStop ? (
+        <AddStopRow canAdd={canAddStop(stops, maxStops)} maxStops={maxStops} onAdd={onAddStop} />
+      ) : null}
     </Card>
   );
 }
@@ -237,7 +265,22 @@ function SearchingCard() {
   );
 }
 
-export function TaxiScreen({ navigation }: any) {
+/**
+ * [Q4] Taxi needs an account. Every ride read behind this door (active ride,
+ * supply, availability, presence, queue) is authenticated, so a visitor with
+ * no session — a guest, or someone whose session just ended — used to sit on
+ * a booking screen polling five endpoints into 401s: "loading forever". The
+ * door is checked BEFORE any ride hook mounts, so a signed-out visitor fires
+ * no ride request at all and is shown the one way in.
+ */
+export function TaxiScreen(props: any) {
+  const isAuthenticated = useAuthStore((st) => st.isAuthenticated);
+  const promptLogin = useAuthStore((st) => st.promptLogin);
+  if (!isAuthenticated) return <TaxiSignedOut navigation={props.navigation} onSignIn={() => signInForTaxi(promptLogin)} />;
+  return <TaxiBooking {...props} />;
+}
+
+function TaxiBooking({ navigation }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const insets = useSafeAreaInsets();
@@ -247,6 +290,8 @@ export function TaxiScreen({ navigation }: any) {
   const { data: activeRide, isLoading: loadingActive } = useActiveRide<any>(true);
   const requestRide = useRequestRide();
   const cancelRide = useCancelRide();
+  // [E19] The passenger's own eyes override the driver-arrival GPS gate.
+  const confirmDriverArrival = useConfirmDriverArrival();
   const qc = useQueryClient();
 
   // Post-trip closure: the ride that just completed, held so we can show the
@@ -269,7 +314,10 @@ export function TaxiScreen({ navigation }: any) {
     const onStatus = (p: any) => {
       if (p?.orderId !== id) return;
       if (p?.status === 'DELIVERED' || p?.status === 'COMPLETED') {
-        if (activeRef.current) setCompletedRide(activeRef.current);
+        // [TAXI waiting charge §8.4] The finished fare's breakdown rides on this
+        // event; the receipt itemises it. No breakdown = today's receipt.
+        const breakdown = fareBreakdownOf(p);
+        if (activeRef.current) setCompletedRide(breakdown ? { ...activeRef.current, fareBreakdown: breakdown } : activeRef.current);
       }
       // T18 continuity [rides spec 5.6/S-55]: a driver cancel keeps the SAME
       // trip and re-dispatches — the screen says so instead of pretending the
@@ -310,7 +358,39 @@ export function TaxiScreen({ navigation }: any) {
   const pickupPoint = pickupCoordinate ? { lat: pickupCoordinate.latitude, lng: pickupCoordinate.longitude } : undefined;
   const dropoffPoint = dropoffCoordinate ? { lat: dropoffCoordinate.latitude, lng: dropoffCoordinate.longitude } : undefined;
 
-  const { data: estimate, isFetching: estimating } = useRideEstimate(pickupPoint, dropoffPoint);
+  // [TAXI multi-stop] The server says how many stops it takes; 0 (or an older
+  // server without the read) keeps this screen exactly as it was. The stops
+  // live here in the passenger's order and are re-quoted on every change.
+  const capabilities = useRideCapabilities();
+  const maxStops = maxStopsFrom(capabilities.data);
+  const maxStopsRef = useRef(maxStops);
+  maxStopsRef.current = maxStops;
+  const [pickedStops, setStops] = useState<readonly PickedPlace[]>([]);
+  // What the CURRENT capability allows is all that is ever shown, quoted or
+  // booked: with the switch at 0 (or lowered) the extra stops are gone from the
+  // estimate and the request at once, not only from the "Add" control.
+  const stops = useMemo(() => pickedStops.slice(0, maxStops), [pickedStops, maxStops]);
+  const stopsWire = useMemo(() => wireStops(stops), [stops]);
+  const [stopsDropped, setStopsDropped] = useState<string | null>(null);
+  // The server took stops away (or lowered the max) after the rider chose
+  // some: drop the extra ones from the trip and say so.
+  useEffect(() => {
+    if (pickedStops.length <= maxStops) return;
+    const dropped = pickedStops.length - maxStops;
+    setStops((s) => s.slice(0, maxStops));
+    setStopsDropped(maxStops === 0
+      ? 'Stops aren’t available right now, so we removed them from this trip. Check your trip before you book.'
+      : `You can add up to ${maxStops} ${maxStops === 1 ? 'stop' : 'stops'} now, so we removed the last ${dropped === 1 ? 'one' : dropped}. Check your trip before you book.`);
+  }, [pickedStops.length, maxStops]);
+
+  const { data: estimate, isFetching: estimating, error: estimateError } = useRideEstimate(pickupPoint, dropoffPoint, stopsWire);
+  const estimateErrorBody = (estimateError as any)?.response?.data?.error;
+  const estimateErrorCode: string | undefined = estimateErrorBody?.code;
+  // The switch moved under a quote: re-read how many stops this server takes.
+  useEffect(() => {
+    if (estimateErrorCode === 'MULTI_STOP_UNAVAILABLE' || estimateErrorCode === 'TOO_MANY_STOPS') void capabilities.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estimateErrorCode]);
 
   // Availability spec §2.1 (hooks live ABOVE the early returns — the active-ride
   // and loading branches must never change the hook order).
@@ -344,6 +424,7 @@ export function TaxiScreen({ navigation }: any) {
         navigation={navigation}
         ride={activeRide}
         cancelRide={cancelRide}
+        confirmDriverArrival={confirmDriverArrival}
         insets={insets}
         rematching={rematching}
       />
@@ -360,7 +441,10 @@ export function TaxiScreen({ navigation }: any) {
     latitudeDelta: 0.02,
     longitudeDelta: 0.02,
   };
-  const routeRegion = !queued && pickupLL && dropoffLL ? regionFor([pickupLL, dropoffLL]) : mapCenter;
+  // [TAXI multi-stop] Each stop's point, in order (none on a ride without stops).
+  const stopPoints = stops.map((s) => validLatLng(s.lat, s.lng));
+  const stopLLs = stopPoints.filter((p): p is LatLng => p != null);
+  const routeRegion = !queued && pickupLL && dropoffLL ? regionFor([pickupLL, ...stopLLs, dropoffLL]) : mapCenter;
 
   const selectedTier = estimate?.tiers.find((t) => t.rideClass === selectedClass);
   const canRequest = !!pickupPoint && !!dropoffPoint && !!selectedTier;
@@ -370,11 +454,26 @@ export function TaxiScreen({ navigation }: any) {
     && requestVariables.pickup.lng === pickupPoint?.lng
     && requestVariables.dropoff.lat === dropoffPoint?.lat
     && requestVariables.dropoff.lng === dropoffPoint?.lng
-    && requestVariables.rideClass === selectedClass;
+    && requestVariables.rideClass === selectedClass
+    && sameWireStops(requestVariables.stops, stopsWire);
   const errBody = errorMatchesCurrentTrip ? (requestRide.error as any)?.response?.data : undefined;
-  const errMsg = errBody?.error?.message ?? errBody?.message;
+  // A refusal about stops is said in the app's own short words; every other
+  // refusal keeps the server's message, as before.
+  const errMsg = stopRefusalCopy(errBody?.error?.code, errBody?.error?.details) ?? errBody?.error?.message ?? errBody?.message;
+  const estimateStopCopy = stops.length > 0 ? stopRefusalCopy(estimateErrorCode, estimateErrorBody?.details) : null;
+  // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
+  const waitingTerms = waitingDisclosure(estimate);
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  const needsL2 = (errBody?.error?.code ?? errBody?.code) === 'ID_VERIFICATION_REQUIRED';
+  // [E27] The profile photo is asked for here, not at sign-in: the same door.
+  const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
+  const needsL2 = door === 'identity';
+  const needsSelfie = door === 'selfie';
+  // Joining the queue passes the same account gates as a request (the route
+  // and the queue share one authority boundary), so its refusal must show,
+  // with the same doors — never a silent tap.
+  const queueErrBody = (joinQueue.error as any)?.response?.data;
+  const queueErrMsg = queueErrBody?.error?.message ?? queueErrBody?.message;
+  const queueDoor = taxiDoorFor(queueErrBody?.error?.code ?? queueErrBody?.code);
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -399,10 +498,28 @@ export function TaxiScreen({ navigation }: any) {
         }
       : null;
 
-  const onRequest = () => {
-    const payload = tripPayload();
-    if (payload) requestRide.mutate(payload);
+  // [TAXI multi-stop] The request body: today's exactly when there are no
+  // stops; with stops, the stops in the passenger's order and the fare of the
+  // chosen class from the quote of exactly this itinerary (the server checks it).
+  const requestPayload = (): RideRequestBody | null => {
+    const base = tripPayload();
+    if (!base) return null;
+    if (stops.length === 0) return base;
+    if (!selectedTier) return null;
+    return { ...base, stops: stopsWire, expectedFare: selectedTier.fare };
   };
+
+  const onRequest = () => {
+    const payload = requestPayload();
+    // The booking belongs to the account that tapped, captured now: if the
+    // account changes before it leaves, nothing is sent.
+    if (payload) requestRide.mutate({ ...payload, authSession: getAuthSessionSnapshot() ?? undefined });
+  };
+
+  const onAddStop = () => openSearch((p) => { setStopsDropped(null); setStops((s) => addStop(s.slice(0, maxStopsRef.current), p, maxStopsRef.current)); }, 'Add a stop');
+  const onEditStop = (index: number) => openSearch((p) => setStops((s) => replaceStop(s, index, p)), `Stop ${index + 1}`);
+  const onMoveStop = (index: number, by: -1 | 1) => setStops((s) => moveStop(s, index, by));
+  const onRemoveStop = (index: number) => setStops((s) => removeStop(s, index));
 
   // The supply chip [5.1/S-02..04]: one line answering "can I get a ride"
   // before any destination is typed. Real numbers only — never a guess.
@@ -449,6 +566,14 @@ export function TaxiScreen({ navigation }: any) {
             <DropPin />
           </Marker>
         ) : null}
+        {/* [TAXI multi-stop] Each stop, numbered in the passenger's order. */}
+        {!queued
+          ? stopPoints.map((point, i) => (point ? (
+              <Marker key={`stop-${i + 1}`} coordinate={point} title={`Stop ${i + 1}`} anchor={{ x: 0.5, y: 0.5 }}>
+                <StopNumber n={i + 1} />
+              </Marker>
+            ) : null))
+          : null}
         {/* [rides 5.1/6.2] Up to 12 server-jittered free cars — the honest
             "map is alive" read. An empty answer draws NOTHING: absence is
             never dressed as supply, and the jitter is the server's privacy
@@ -499,8 +624,19 @@ export function TaxiScreen({ navigation }: any) {
               dropoffLabel={dropoff?.label}
               onPickup={() => openSearch((p) => setPickupOverride(p), 'Pickup')}
               onDropoff={() => openSearch((p) => setDropoff(p), 'Where to?')}
+              stops={stops}
+              maxStops={maxStops}
+              onAddStop={onAddStop}
+              onEditStop={onEditStop}
+              onMoveStop={onMoveStop}
+              onRemoveStop={onRemoveStop}
             />
           )}
+          {stopsDropped && !queued ? (
+            <T variant="label" tone="warning" testID="taxi-stops-dropped" accessibilityLiveRegion="polite" style={{ marginTop: space.sm, paddingHorizontal: space.xs }}>
+              {stopsDropped}
+            </T>
+          ) : null}
 
           {supplyChip && !queued ? (
             <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: space.md }}>
@@ -554,10 +690,28 @@ export function TaxiScreen({ navigation }: any) {
                       onPress={() => setSelectedClass(tier.rideClass)}
                     />
                   ))}
-                  <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                    Fare estimate · cash to the driver{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
-                  </T>
+                  {stops.length > 0 ? (
+                    <T variant="caption" tone="muted" center testID="taxi-one-fare" style={{ marginTop: space.sm }}>
+                      {oneFareLine(stops.length)}
+                    </T>
+                  ) : (
+                    <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+                      Fare estimate · cash to the driver{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
+                    </T>
+                  )}
+                  {waitingTerms ? (
+                    <T variant="caption" tone="muted" center testID="taxi-waiting-terms" style={{ marginTop: space.xs }}>
+                      {waitingTerms}
+                    </T>
+                  ) : null}
+                  {stops.length > 0 ? <RouteLegs legs={estimate.legs} /> : null}
                 </>
+              ) : estimateStopCopy ? (
+                <Card testID="taxi-estimate-refused">
+                  <T variant="body" tone="muted">
+                    {estimateStopCopy}
+                  </T>
+                </Card>
               ) : (
                 <Card>
                   <T variant="body" tone="muted">
@@ -583,6 +737,14 @@ export function TaxiScreen({ navigation }: any) {
               variant="outline"
               style={{ marginTop: space.md }}
               onPress={() => navigation?.navigate?.('IdentityVerification')}
+            />
+          ) : null}
+          {needsSelfie ? (
+            <PillButton
+              label="Add your photo — your driver sees it"
+              variant="outline"
+              style={{ marginTop: space.md }}
+              onPress={() => navigation?.navigate?.('Selfie')}
             />
           ) : null}
 
@@ -629,10 +791,12 @@ export function TaxiScreen({ navigation }: any) {
                 label="Join the queue"
                 style={{ marginTop: space.md }}
                 loading={joinQueue.isPending}
-                disabled={!tripPayload()}
+                disabled={!tripPayload() || stops.length > 0}
                 onPress={() => {
                   const payload = tripPayload();
-                  if (payload) {
+                  // [TAXI multi-stop] The queue never holds stops (v1): a trip
+                  // with stops is not silently queued without them.
+                  if (payload && stops.length === 0) {
                     if (!pickupOverride && pickup) setPickupOverride(pickup);
                     joinQueue.mutate(payload);
                   }
@@ -642,6 +806,32 @@ export function TaxiScreen({ navigation }: any) {
                 <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                   Set your destination first — we hold your whole trip in line.
                 </T>
+              ) : null}
+              {stops.length > 0 ? (
+                <T variant="caption" tone="muted" center testID="taxi-queue-no-stops" style={{ marginTop: space.sm }}>
+                  {stopRefusalCopy('MULTI_STOP_QUEUE_UNSUPPORTED', null)}
+                </T>
+              ) : null}
+              {queueErrMsg ? (
+                <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
+                  {queueErrMsg}
+                </T>
+              ) : null}
+              {queueDoor === 'selfie' ? (
+                <PillButton
+                  label="Add your photo — your driver sees it"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('Selfie')}
+                />
+              ) : null}
+              {queueDoor === 'identity' ? (
+                <PillButton
+                  label="Verify your ID — takes a minute"
+                  variant="outline"
+                  style={{ marginTop: space.sm }}
+                  onPress={() => navigation?.navigate?.('IdentityVerification')}
+                />
               ) : null}
               <PillButton
                 label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}
@@ -928,7 +1118,7 @@ function AssignedRideCard({
   );
 }
 
-function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
+function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets, rematching }: any) {
   const { height: winH } = useWindowDimensions();
   const scheme = useColorScheme();
   const sheetRef = useRef<BottomSheet>(null);
@@ -1099,17 +1289,39 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   const pickup = validLatLng(ride.pickupLat, ride.pickupLng);
   const drop = validLatLng(ride.deliveryLat, ride.deliveryLng);
   const interp = useInterpolatedDriver(driverPing);
+  // [TAXI multi-stop] The ride's stops, in order — none on a ride without them.
+  const itinerary = rideStops(ride);
+  const itineraryPoints = itinerary.map((s) => ({ sequence: s.sequence, point: validLatLng(s.lat, s.lng) }));
+  const itineraryLLs = itineraryPoints.map((s) => s.point).filter((p): p is LatLng => p != null);
+  const itineraryKey = itineraryLLs.map((p) => `${p.latitude},${p.longitude}`).join(';');
+  // [TAXI waiting charge §8.3] The live wait, from the driver's arrival on.
+  const waitingClock = useWaitingClock(ride);
+
+  // [TAXI multi-stop · part 4] Each stop change is announced on the ride's
+  // room; re-read the ride so its stops and their statuses are current.
+  const hasItinerary = itinerary.length > 0;
+  useEffect(() => {
+    if (!ride?.id || !hasItinerary) return;
+    const s = getSocket();
+    const onStopChanged = (p: any) => {
+      if (p?.orderId === ride.id) void queryClient.invalidateQueries({ queryKey: ['rides', 'active'] });
+    };
+    s.on('ride:stop_changed', onStopChanged);
+    return () => {
+      s.off('ride:stop_changed', onStopChanged);
+    };
+  }, [hasItinerary, queryClient, ride?.id]);
 
   // REST exposes an undated profile coordinate, so it can never be presented
   // as live. Only timestamped socket fixes earn a marker on this screen.
   const driverLoc = liveDriver;
   const fixStale = liveDriver != null && lastFixAt != null && nowTs - lastFixAt > STALE_AFTER_MS;
-  const pts = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
+  const pts = [pickup, ...itineraryLLs, drop, driverLoc].filter(Boolean) as LatLng[];
   const hasMapContext = pts.length > 0;
   const region = useMemo(
     () => (pts.length ? regionFor(pts) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pickup?.latitude, pickup?.longitude, drop?.latitude, drop?.longitude, driverLoc?.latitude, driverLoc?.longitude],
+    [pickup?.latitude, pickup?.longitude, itineraryKey, drop?.latitude, drop?.longitude, driverLoc?.latitude, driverLoc?.longitude],
   );
 
   const recenter = () => {
@@ -1122,7 +1334,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
   useEffect(() => {
     if (!driverLoc || centeredFirstFix.current || !mapRef.current) return;
     centeredFirstFix.current = true;
-    const coordinates = [pickup, drop, driverLoc].filter(Boolean) as LatLng[];
+    const coordinates = [pickup, ...itineraryLLs, drop, driverLoc].filter(Boolean) as LatLng[];
     if (coordinates.length === 1) {
       mapRef.current.animateToRegion({ ...driverLoc, latitudeDelta: 0.02, longitudeDelta: 0.02 }, motion.duration.gentle);
       return;
@@ -1247,6 +1459,11 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
             <DropPin />
           </Marker>
         ) : null}
+        {itineraryPoints.map(({ sequence, point }) => (point ? (
+          <Marker key={`stop-${sequence}`} coordinate={point} title={`Stop ${sequence}`} anchor={{ x: 0.5, y: 0.5 }}>
+            <StopNumber n={sequence} />
+          </Marker>
+        ) : null))}
         {interp.hasFix && driverLoc ? (
           // The 6.3 driving marker: position + bearing sweep between pings on
           // the UI thread (no teleporting); flat = rotates in the map plane.
@@ -1344,6 +1561,29 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                 showStartCode={showStartCode}
                 onWrongDriver={() => setConfirmNotMyDriver(true)}
               />
+              {/* [E19] The passenger can see the car: one tap overrides the
+                  driver-arrival GPS gate, so a driver with a stale or missing
+                  fix is never stranded at the door. */}
+              {status === 'DRIVER_EN_ROUTE' ? (
+                <PillButton
+                  label="My driver is here"
+                  variant="soft"
+                  icon="map-pin"
+                  style={{ marginTop: space.md, alignSelf: 'stretch' }}
+                  loading={confirmDriverArrival.isPending}
+                  onPress={() => confirmDriverArrival.mutate(
+                    { id: ride.id },
+                    {
+                      onError: (error: any) => {
+                        toast.show(error?.response?.data?.error?.message ?? "Couldn't confirm your driver's arrival — try again.");
+                      },
+                    },
+                  )}
+                />
+              ) : null}
+              {waitingClock ? (
+                <WaitingCard view={waitingClock} pickupWaitMinutes={liveWaiting(ride)?.pickupWaitMinutes ?? null} />
+              ) : null}
             </>
           ) : (
             <>
@@ -1381,6 +1621,10 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
               <SearchingCard />
             </>
           )}
+
+          {/* [TAXI multi-stop] The trip's stops in order, each with its status.
+              Absent on a ride without stops. */}
+          <RideItinerary ride={ride} />
 
           {/* SOS — an active ride's most important control. Only while a driver
               is engaged (assigned → in progress); records the incident + pages
@@ -1479,10 +1723,10 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                   toast.show(
                     message,
                     fee == null
-                      ? 'The server confirmed the cancellation.'
+                      ? 'Cancellation confirmed.'
                       : fee > 0
-                        ? `The server recorded ${money(fee)}. Swift does not collect ride money.`
-                        : 'The server confirmed no cancellation fee.',
+                        ? `A ${money(fee)} cancellation fee was recorded. Swift does not collect ride money.`
+                        : 'No cancellation fee was recorded.',
                   );
                   setConfirmCancel(false);
                 },
@@ -1495,7 +1739,7 @@ function ActiveRide({ navigation, ride, cancelRide, insets, rematching }: any) {
                     setConfirmCancel(false);
                     toast.show(
                       'Checking ride status',
-                      'We couldn’t confirm the cancellation outcome. The active-ride poll is checking the server before you try again.',
+                      'We couldn’t confirm whether the ride was cancelled. Check your ride before trying again.',
                     );
                     void queryClient.invalidateQueries({ queryKey: ['rides', 'active'] });
                   }

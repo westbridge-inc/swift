@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { runBillingMutation } from '../lib/billingMutation';
+import type { MutationGuard } from './useStepUp';
+import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { customerApi, riderApi, driverApi } from '../services/api';
+import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
+import { TAXI_STOPS_CAPABILITY, maxStopsFrom } from '../lib/taxiItinerary';
 import { track } from '../lib/analytics';
-import { connectSocket, getSocket } from '../services/socket';
 import {
   publishMoverLocation,
   startMoverLocation,
@@ -33,7 +35,10 @@ import {
   resolveMoverProfile,
   unwrapOptionalMoverProfile,
 } from '../lib/moverProfile';
+import { accountHoldsRole } from '../lib/roleLanding';
 import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
+import { confirmRiderCashSettlement } from './cashSettlement';
+import { usePartnerPricing } from './partnerPricing';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -48,6 +53,16 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
 }
 
 export type { MoverKind } from '../lib/moverLocation';
+
+/** [TAXI multi-stop] Has THIS server advertised rides with stops
+ *  (GET /rides/capabilities, maxStops > 0)? Every failure is "no". */
+async function serverOffersTaxiStops(session: AuthSessionSnapshot): Promise<boolean> {
+  try {
+    return maxStopsFrom(await unwrap(rideApi.capabilities(session))) > 0;
+  } catch {
+    return false;
+  }
+}
 function svc(kind: MoverKind) {
   return kind === 'DRIVER' ? driverApi : riderApi;
 }
@@ -73,17 +88,23 @@ export function useMoverKind() {
     lastMoverRole?: string | null;
   }) | null;
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
+  // An account with no mover role (a customer opening "Swift Driver" to
+  // apply) gets 403 on both probes by the server's authz rule. For that
+  // account 403 IS "no profile": one answer each, no retries, no error carried
+  // into the application screen (lib/moverProfile). The switcher's "Join"
+  // uses the same predicate.
+  const outsider = !accountHoldsRole(authority, 'mover');
   const retryDelay = (attempt: number) => Math.min(500 * (2 ** attempt), 2_000);
   const driver = useQuery<any | null>({
     queryKey: ['mover', 'driverProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(driverApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,
   });
   const rider = useQuery<any | null>({
     queryKey: ['mover', 'riderProfile'],
-    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile()),
+    queryFn: () => unwrapOptionalMoverProfile(riderApi.profile(), { outsider }),
     retry: 2,
     retryDelay,
     enabled: !pv,
@@ -341,7 +362,14 @@ export function useGoOnline(kind: MoverKind) {
       } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
         throw new AuthSessionBoundaryError();
       }
-      const result = await unwrap(svc(kind).goOnline(latitude, longitude, current));
+      // [TAXI multi-stop] A driver declares the stop capability only to a
+      // server that has advertised rides with stops; any other answer (an older
+      // server's 404, 0, an error) sends exactly today's go-online body.
+      const capabilities = kind === 'DRIVER' && await serverOffersTaxiStops(current) ? [TAXI_STOPS_CAPABILITY] : null;
+      if (capabilities) current = requireAuthSessionForPrincipal(owner);
+      const result = await unwrap(capabilities
+        ? driverApi.goOnline(latitude, longitude, current, capabilities)
+        : svc(kind).goOnline(latitude, longitude, current));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['mover'] });
       track('go_online', { kind });
@@ -440,7 +468,7 @@ export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'ha
 export type DriverActionInput =
   | { id: string; action: Exclude<DriverAction, 'handover' | 'handback'>; pin?: string }
   /** [M-29] The fare outcome is explicit — never defaulted — because it moves money. */
-  | { id: string; action: 'handover'; outcome: FareOutcome }
+  | { id: string; action: 'handover'; outcome: FareOutcome; photoUrl?: string; authSession?: AuthSessionSnapshot }
   /** A driver handback always carries the human reason the server requires. */
   | { id: string; action: 'handback'; reason: string };
 
@@ -458,6 +486,17 @@ export async function evidenceFix(owner: AuthSessionSnapshot) {
   return { gps: { lat: pos.coords.latitude, lng: pos.coords.longitude }, current };
 }
 
+/** Server-issued artifact only. The returned URL is never a local camera URI. */
+export async function uploadHandoverPhoto(kind: MoverKind, orderId: string, uri: string, owner: AuthSessionSnapshot): Promise<string> {
+  const session = requireAuthSessionForPrincipal(owner);
+  const form = new FormData();
+  form.append('file', { uri, name: 'handover.jpg', type: 'image/jpeg' } as any);
+  const result = await unwrap<{ url: string }>(svc(kind).uploadHandoverPhoto(orderId, form, session));
+  requireAuthSessionForPrincipal(owner);
+  if (!result?.url) throw new Error('Photo upload did not return an issued artifact.');
+  return result.url;
+}
+
 export function useDriverAction() {
   const pv = usePreview();
   const qc = useQueryClient();
@@ -470,9 +509,10 @@ export function useDriverAction() {
         // 'paid' captures and completes in one commit; 'refused' / 'no_show'
         // fail it with this GPS as evidence, strike the passenger and open the
         // driver's guarantee claim. No bare "complete" exists any more.
-        const owner = requireAuthSessionSnapshot();
+        const owner = input.authSession ?? requireAuthSessionSnapshot();
+        requireAuthSessionForPrincipal(owner);
         const { gps, current } = await evidenceFix(owner);
-        const result = await unwrap(driverApi.handover(id, { outcome: input.outcome, gps }, current));
+        const result = await unwrap(driverApi.handover(id, { outcome: input.outcome, gps, ...(input.photoUrl ? { photoUrl: input.photoUrl } : {}) }, current));
         requireAuthSessionForPrincipal(owner);
         return result;
       }
@@ -502,23 +542,39 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome, handoverVersion }: { id: string; action: RiderAction; reason?: string; outcome?: FareOutcome; handoverVersion?: string }) => {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin, photoUrl, authSession }: {
+      id: string;
+      action: RiderAction;
+      reason?: string;
+      outcome?: FareOutcome;
+      photoUrl?: string;
+      authSession?: AuthSessionSnapshot;
+      handoverVersion?: string;
+      /** [MKT-F057] The customer-held delivery PIN the rider enters at the door.
+       *  Omitted when empty so the server answers MISSING_PIN rather than a
+       *  schema refusal; never sent for the failed outcomes (no_show/refused). */
+      pin?: string;
+    }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
         case 'arrived-pickup': return unwrap(riderApi.arrivedPickup(id));
         case 'picked-up': return unwrap(riderApi.pickedUp(id));
         case 'en-route-delivery': return unwrap(riderApi.enRouteDelivery(id));
         case 'arrived': return unwrap(riderApi.arrivedAtCustomer(id));
-        case 'delivered': return unwrap(riderApi.delivered(id, handoverVersion ? { handoverVersion } : undefined));
+        case 'delivered': return unwrap(riderApi.delivered(id, {
+          ...(handoverVersion ? { handoverVersion } : {}),
+          ...(pin ? { ridePin: pin } : {}),
+        }));
         case 'handback': return unwrap(riderApi.handback(id, reason ?? 'unable to continue'));
         case 'handover': {
-          const owner = requireAuthSessionSnapshot();
+          const owner = authSession ?? requireAuthSessionSnapshot();
+          requireAuthSessionForPrincipal(owner);
           // The golden-rule handover NEEDS the rider's GPS (server-side mandatory —
           // it's the evidence a guarantee claim stands on). 'paid' is the door's
           // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
           // unpaid sheet sends explicitly.
           const { gps, current } = await evidenceFix(owner);
-          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps }, current));
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}) }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }
@@ -545,7 +601,7 @@ export function useConfirmCashSettlement() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: (id: string) => unwrap(riderApi.confirmCashSettlement(id)),
+    mutationFn: confirmRiderCashSettlement,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['mover', 'cash-settlements'] }),
   });
   return pv ? PV.previewMutation() : m;
@@ -590,7 +646,37 @@ export function useMoverSubscription(kind: MoverKind | null) {
     queryFn: () => tryUnwrap<any>(svc(kind as MoverKind).subscription()),
     enabled: !!kind && !pv,
   });
-  return pv ? PV.previewQuery(PV.PREVIEW_SUBSCRIPTION) : q;
+  // Preview bills the sample driver the live quote for the sample car — the
+  // public price list, read only in preview — never a number frozen in the app.
+  const pricing = usePartnerPricing(PV.PREVIEW_MARKET, pv);
+  const sample = useMemo(() => (pv ? PV.previewSubscription(pricing.data) : null), [pv, pricing.data]);
+  if (!pv) return q;
+  // [H7] While the price list is still loading or has failed, the preview
+  // query says so and the screen shows its own loading or error state — never
+  // a sample subscription with no fee.
+  return {
+    ...PV.previewQuery(sample),
+    isLoading: sample == null && pricing.isPending === true,
+    isError: sample == null && pricing.isError === true,
+    refetch: pricing.refetch,
+  };
+}
+
+/** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the mover's weekly fee,
+ *  then re-read the subscription so the screen's autoRenew state is server
+ *  truth. Preview is read-only: the mutation is a no-op there. */
+export function useSetMoverBillingMethod(kind: MoverKind | null, guard: MutationGuard) {
+  const pv = usePreview();
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) => {
+      const family = kind;
+      if (!family) throw new AuthSessionBoundaryError();
+      return runBillingMutation(guard, (session) => unwrap<any>(svc(family).setBillingMethod(method, mmgPayerMsisdn, session)));
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['mover', 'subscription', kind] }),
+  });
+  return pv ? PV.previewMutation() : m;
 }
 
 /** Post-trip DRIVER_TO_CUSTOMER rating (409 when already rated — treat as done). */
@@ -770,142 +856,40 @@ export interface BoardJob {
   deliveryFee?: number | string | null;
   // Load-bearing for the MMG fare lock: movers must never submit an MMG fare.
   paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {}) | null;
+  // [TAXI multi-stop] A ride WITH stops; `dropoffAddress` stays the final stop.
+  stopCount?: number;
+  stops?: { sequence: number; address: string; lat: number; lng: number }[];
 }
 
-export interface DispatchOffer {
-  orderId: string;
-  offerAttemptId?: string;
-  orderNumber?: string;
-  vendorName?: string;
-  expiresInSeconds?: number;
-  etaMinutes?: number;
-  isExpress?: boolean;
-  // [ALG-06] A rescue bonus from Swift's OWN money on a re-offered job —
-  // server-set, absent on a normal offer. Never the customer's or the store's
-  // money and never cash in hand at the door: Swift settles it.
-  rescueIncentiveGyd?: number | null;
-  // Load-bearing for the MMG fare lock: movers must never submit an MMG fare.
-  paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {});
-  customerTrust?: { trustLevel: string; completedOrders: number; strikes: number } | null;
-  itemCount?: number;
-  estLoad?: string | null;
-  // [REPORT-010 F-07] Authoritative money/route facts carried by the RECOVERY
-  // payload so a rebuilt card never prices itself from a missing board row.
-  deliveryFee?: number;
-  tipAmount?: number;
-  taxiFareTotal?: number | null;
-  pickupAddress?: string | null;
-  deliveryAddress?: string | null;
-  // [WS-6.0] The cash-math triple, SERVER-COMPUTED. Absent on MMG (the customer
-  // already paid the store) and absent whenever the server could not reconcile
-  // the split — the card must render nothing rather than a breakdown that does
-  // not add up. Never compute these client-side.
-  cashMath?: { collectFromCustomer: number; payToVendor: number; youKeep: number } | null;
-}
-
-type RecoveredDispatchOffer = Omit<DispatchOffer, 'offerAttemptId'> & {
-  offerAttemptId: string | null;
-};
+export type TaxiStopActionInput =
+  | { id: string; sequence: number; action: 'arrived' | 'depart' }
+  /** A skip always carries the driver's reason: the passenger is told it. */
+  | { id: string; sequence: number; action: 'skip'; reason: string };
 
 /**
- * Real-time dispatch offers. The backend emits `dispatch:offer` to the mover's
- * user room the moment they're the top candidate; we surface it instantly and
- * refresh the available list. Polling (useAvailableJobs) stays as a fallback,
- * so a missed socket event still resolves within the poll interval.
+ * [TAXI multi-stop · part 4] The driver's stop actions on the next open stop:
+ * arrived, done (depart) and skip with a reason. The server holds the order
+ * (409 STOP_OUT_OF_ORDER) and repeat taps are safe; the screen offers these
+ * only when the active ride shows the server has them. Read-only in preview.
  */
-export function useDispatchOffers(kind: MoverKind | null, online: boolean) {
+export function useTaxiStopAction() {
   const pv = usePreview();
   const qc = useQueryClient();
-  // Stacking: offers QUEUE (FIFO, deduped by orderId) instead of overwriting —
-  // with capacity 2 the server may legitimately offer a second job while one
-  // card is showing. The visible card is queue[0]; the rest wait their turn,
-  // exactly the vendor takeover's shape. Each entry carries an ABSOLUTE
-  // deadline stamped at arrival, so backgrounding cannot freeze a countdown
-  // into a lie (master audit G11).
-  const [offerQueue, setOfferQueue] = useState<(DispatchOffer & { deadlineAt?: number })[]>([]);
-  const offer = offerQueue[0] ?? null;
-  const queuedBehind = Math.max(0, offerQueue.length - 1);
-  const pushOffer = (data: DispatchOffer) =>
-    setOfferQueue((q) => (q.some((o) => o.orderId === data.orderId)
-      ? q.map((o) => (o.orderId === data.orderId ? { ...o, ...data, deadlineAt: o.deadlineAt } : o))
-      : [...q, { ...data, deadlineAt: data.expiresInSeconds ? Date.now() + data.expiresInSeconds * 1000 : undefined }]));
-  const dropOffer = (orderId: string) => setOfferQueue((q) => q.filter((o) => o.orderId !== orderId));
-  const setOffer = (data: DispatchOffer | null) => {
-    if (data === null) setOfferQueue((q) => q.slice(1));
-    else pushOffer(data);
-  };
-
-  useEffect(() => {
-    // No live offers in preview (read-only, no socket/auth).
-    if (!kind || !online || pv) {
-      setOfferQueue([]);
-      return;
-    }
-    connectSocket();
-    const s = getSocket();
-    const api = kind === 'DRIVER' ? driverApi : riderApi;
-    // [danger #21] Render proof: the moment the card exists on this device,
-    // tell the server — a timeout WITHOUT this stamp is UNDELIVERABLE and
-    // never decays the acceptance rate. Fire-and-forget garnish.
-    const markSeen = (orderId: string, offerAttemptId?: string) => { void api.offerSeen(orderId, offerAttemptId).catch(() => {}); };
-    const onOffer = (data: DispatchOffer) => {
-      setOffer(data);
-      markSeen(data.orderId, data.offerAttemptId);
-      qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
-    };
-    s.on('dispatch:offer', onOffer);
-
-    // [E27 / danger #37] Offer RECOVERY: a socket that dropped while the ping
-    // was in flight used to lose the card forever (and the silent timeout
-    // still counted against acceptance). On mount and every reconnect, ask
-    // the server for the live exclusive offer and rebuild the card with its
-    // REAL remaining seconds. Failures are garnish — the poll fallback and
-    // the next socket ping still stand.
-    let gone = false;
-    const recover = async () => {
-      try {
-        const data = await unwrap<{ offer: RecoveredDispatchOffer | null }>(api.currentOffer());
-        if (!gone && data?.offer?.orderId) {
-          const recoveredOffer: DispatchOffer = {
-            ...data.offer,
-            offerAttemptId: data.offer.offerAttemptId ?? undefined,
-          };
-          setOffer(recoveredOffer);
-          markSeen(recoveredOffer.orderId, recoveredOffer.offerAttemptId);
-          qc.invalidateQueries({ queryKey: ['mover', 'available', kind] });
-        }
-      } catch { /* recovery only — never surface */ }
-    };
-    void recover();
-    s.on('connect', recover);
-    return () => {
-      gone = true;
-      s.off('dispatch:offer', onOffer);
-      s.off('connect', recover);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, online, qc, pv]);
-
-  // Auto-dismiss once the offer window lapses (the backend reassigns it).
-  // Keyed to the ABSOLUTE deadline stamped at arrival, and it drops THAT
-  // order, not whatever sits at the head by then — with a queue the two can
-  // differ. A timer that fires late after backgrounding still computes a
-  // non-negative remainder, so a lapsed card cannot linger (G11).
-  useEffect(() => {
-    if (!offer) return;
-    const deadline = offer.deadlineAt ?? (offer.expiresInSeconds ? Date.now() + offer.expiresInSeconds * 1000 : null);
-    if (!deadline) return;
-    const { orderId } = offer;
-    const t = setTimeout(() => dropOffer(orderId), Math.max(0, deadline - Date.now()));
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offer?.orderId]);
-
-  return {
-    offer,
-    // Stacking: how many more offers wait behind the visible card — the UI
-    // states queue depth honestly, like the vendor takeover does.
-    queuedBehind,
-    dismiss: () => { if (offer) dropOffer(offer.orderId); },
-  };
+  const m = useMutation({
+    mutationFn: (input: TaxiStopActionInput) => {
+      if (input.action === 'skip') return unwrap(driverApi.stopSkip(input.id, input.sequence, input.reason));
+      return unwrap(input.action === 'arrived'
+        ? driverApi.stopArrived(input.id, input.sequence)
+        : driverApi.stopDepart(input.id, input.sequence));
+    },
+    // The screen says what went wrong in its own words; no second toast.
+    meta: { silent: true },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+  });
+  return pv ? PV.previewMutation() : m;
 }
+
+// The live offer cards (the dispatch:offer stream, the queue, recovery, render
+// proof) live in their own module so their tests can drive the real hook.
+export { useDispatchOffers } from './dispatchOffers';
+export type { DispatchOffer } from './dispatchOffers';

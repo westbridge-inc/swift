@@ -17,7 +17,7 @@ import type { VehicleType, PackageSize, RideClass } from '@prisma/client';
 export type MoverService = 'RIDE' | 'COURIER' | 'DELIVERY';
 
 /**
- * Which weekly-fee band a mover bills on.
+ * Which weekly-fee band a mover's vehicle falls in.
  *
  * STANDARD is the everyday fleet — bicycle, motorbike, car, wagon car — the
  * riders, delivery drivers and taxi drivers who make up most of the platform.
@@ -26,7 +26,9 @@ export type MoverService = 'RIDE' | 'COURIER' | 'DELIVERY';
  *
  * This is a CLASSIFICATION, not a price. The rate each band pays lives in
  * `CountryConfig.subscriptionTiers` (`mover` / `moverHeavy`) so it stays
- * config per market, exactly like every other number in this system.
+ * config per market, exactly like every other number in this system. A market
+ * that sets `taxiDriver` prices every taxi Driver by role instead; the band
+ * then decides only what a Rider pays.
  */
 export type MoverFeeBand = 'STANDARD' | 'HEAVY';
 
@@ -119,6 +121,28 @@ export const VEHICLE_TYPES_IN_ORDER: VehicleType[] = Object.values(VEHICLE_CLASS
   .map((v) => v.type);
 
 /**
+ * [Owner decision 2026-09-24 · the launch vehicle list] The heavy freight classes
+ * (canters and box trucks) are NOT offered at launch. They stay in the taxonomy and
+ * the enum, so switching them on later is this one set, but no one can register,
+ * switch to, or go online with one until they are offered. Everything else is
+ * offered: bicycle and motorbike for delivery riders; car, wagon (estate) car and
+ * both buses for drivers. The mobile picker mirrors this set
+ * (apps/mobile/src/lib/vehicleOffer.ts; a test keeps the two equal) and follows
+ * each quote's `offered` flag once the price list has loaded.
+ */
+export const LAUNCH_HIDDEN_VEHICLE_TYPES: ReadonlySet<VehicleType> = new Set<VehicleType>([
+  'CANTER_SHORT', 'CANTER_LONG', 'BOX_TRUCK_SHORT', 'BOX_TRUCK_LONG',
+]);
+
+/** Error code for a vehicle Swift does not take on yet (registration, change, GO). */
+export const VEHICLE_NOT_OFFERED = 'VEHICLE_NOT_OFFERED';
+
+/** Can a mover register, switch to, or operate this vehicle today? */
+export function isVehicleOffered(vehicleType: VehicleType): boolean {
+  return vehicleType in VEHICLE_CLASSES && !LAUNCH_HIDDEN_VEHICLE_TYPES.has(vehicleType);
+}
+
+/**
  * Vehicle types that can carry a parcel of the given size — every vehicle whose
  * max capacity is at least the parcel's size. An unknown/absent size (non-courier
  * orders such as food or rides) is carriable by any vehicle.
@@ -151,6 +175,19 @@ export function feeBandFor(vehicleType: VehicleType): MoverFeeBand {
  *  as opposed to cargo-only movers (bicycle, motorbike, canter, box truck). */
 export function isPassengerVehicle(vehicleType: VehicleType): boolean {
   return VEHICLE_CLASSES[vehicleType]?.rideClass != null;
+}
+
+/** Which operational entity a mover is: a taxi Driver or a delivery/courier Rider. */
+export type MoverRole = 'DRIVER' | 'RIDER';
+
+/**
+ * The role onboarding provisions for a vehicle — the same passenger-vehicle
+ * rule PartnerService applies: a vehicle with a ride class becomes a taxi
+ * Driver, every other vehicle a delivery/courier Rider. The public price list
+ * quotes each vehicle at the rate of the role it will actually be billed as.
+ */
+export function moverRoleFor(vehicleType: VehicleType): MoverRole {
+  return isPassengerVehicle(vehicleType) ? 'DRIVER' : 'RIDER';
 }
 
 /**

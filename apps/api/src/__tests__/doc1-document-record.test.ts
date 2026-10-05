@@ -9,6 +9,7 @@
  * generator verbatim and carries the §10.3 grandfather (recheck 90 days out).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
@@ -55,10 +56,11 @@ async function owner(n: number) {
     avatar: `avatars/${RUN}/${n}.jpg`, selfieCapturedAt: new Date(),
   } }));
   users.push(u.id);
+  await signupSelfieFixture(app.prisma, u.id);
   return u.id;
 }
 const submit = (userId: string, docType: string) =>
-  runWithTenant('swift-default', () => service.submitDocument(userId, 'RESTAURANT', docType, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+  runWithTenant('swift-default', async () => service.submitDocument(userId, 'RESTAURANT', docType, await ownedVerificationFixture(app.prisma, userId), 'v1'));
 const admin = (method: 'PUT' | 'POST', url: string, payload: Record<string, unknown> = {}) => adminApp.inject({
   method, url: `/api/v1/admin${url}`, payload, headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
 });
@@ -187,7 +189,7 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     expect(checklist.length).toBeGreaterThan(0);
     const ids: string[] = [];
     for (const t of checklist) {
-      const d = await runWithTenant('swift-default', () => service.submitDocument(u, 'SERVICE_PROVIDER', t, `/uploads/verification/${RUN}/${nanoid(5)}.enc`, 'v1'));
+      const d = await runWithTenant('swift-default', async () => service.submitDocument(u, 'SERVICE_PROVIDER', t, await ownedVerificationFixture(app.prisma, u), 'v1'));
       expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString() })).statusCode).toBe(200);
       ids.push(d.id);
     }

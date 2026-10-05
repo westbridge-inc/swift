@@ -3,6 +3,7 @@
 // real market resolves from device location; it's never left empty.
 export const DEFAULT_COUNTRY = {
   code: 'GY',
+  name: 'Guyana',
   dialCode: '+592',
   currencyCode: 'GYD',
   currencySymbol: '$',

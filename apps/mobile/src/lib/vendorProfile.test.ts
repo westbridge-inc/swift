@@ -44,6 +44,44 @@ describe('[MOB-038] absence is a 404, and nothing else', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// [phone feedback P2] The account that has never been a vendor.
+//
+// The server answers the self-profile read of an unheld role with 403 — on
+// purpose, pinned by its authz matrix ("authz answers, not existence"), so a
+// wrong-role token never gets a route oracle. For the owner's fresh customer
+// account that 403 arrived as "This account cannot open that store. Ask the
+// owner to add you again." He has no store to be added to; he wanted to list
+// one. When the account itself holds no vendor role, the 403 is the server
+// confirming "no business" — the one answer that means the setup wizard.
+// ---------------------------------------------------------------------------
+describe('[P2] an outsider’s own 403 is "no business yet"', () => {
+  it('for an account that holds no vendor role, the self-profile 403 is absence → the setup wizard', async () => {
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(403)), { outsider: true })).resolves.toBeNull();
+    expect(classifyVendorProfile({ isLoading: false, error: null, owner: null, fetched: true }))
+      .toMatchObject({ state: 'absent' });
+  });
+
+  it('for an account that HOLDS the vendor role a 403 stays the failure it is — nothing is papered over', async () => {
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(403)), { outsider: false })).rejects.toBeTruthy();
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(403)))).rejects.toBeTruthy();
+    expect(classifyVendorProfile({ isLoading: false, error: err(403), owner: undefined, fetched: true }))
+      .toEqual({ state: 'error', failure: 'forbidden', myRole: undefined });
+  });
+
+  it('only a 403 reads that way: an outage is still an outage for an outsider', async () => {
+    for (const status of [401, 409, 500, 502, 503]) {
+      await expect(unwrapOptionalVendorProfile(Promise.reject(err(status)), { outsider: true })).rejects.toBeTruthy();
+    }
+    await expect(unwrapOptionalVendorProfile(Promise.reject(err(undefined)), { outsider: true })).rejects.toBeTruthy();
+  });
+
+  it('a good answer is unwrapped whatever the local roles say — the server seats staff and stale-role owners', async () => {
+    await expect(unwrapOptionalVendorProfile(Promise.resolve({ data: { data: { myRole: 'STAFF', vendors: [{ id: 'v1' }] } } }), { outsider: true }))
+      .resolves.toEqual({ myRole: 'STAFF', vendors: [{ id: 'v1' }] });
+  });
+});
+
 describe('[MOB-038] the shell is told which of the four states it is in', () => {
   const ready = { myRole: 'MANAGER', vendors: [{ id: 'v1' }] };
 

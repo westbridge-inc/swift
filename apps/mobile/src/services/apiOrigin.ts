@@ -1,4 +1,4 @@
-const PRODUCTION_API_ORIGIN = 'https://api.swift.gy';
+const PRODUCTION_API_ORIGIN = 'https://api.swiftgy.com';
 const DEVELOPMENT_API_PORT = 3000;
 const EXPO_HOST_PROTOCOLS = new Set(['exp', 'exps', 'http', 'https']);
 

@@ -224,14 +224,18 @@ describe('§7.3 "this isn\'t my driver"', () => {
     await expect(svc().reportNotMyDriver(passenger.userId, aboard.id)).rejects.toThrow(/SOS/i);
     await expect(svc().reportNotMyDriver(stranger.userId, aboard.id)).rejects.toThrow(/not found/i);
 
-    const verified = await makeRide(d.driver.id, passenger.userId, 'DRIVER_ARRIVED');
+    // A second live ride is its own driver and passenger: one driver holds one
+    // live ride, one customer one live taxi (the single-winner indexes).
+    const passenger2 = await makeUser(['CUSTOMER']);
+    const d2 = await makeDriver();
+    const verified = await makeRide(d2.driver.id, passenger2.userId, 'DRIVER_ARRIVED');
     await app.prisma.order.update({
       where: { id: verified.id },
       data: { ridePinVerified: true, ridePinVerifiedAt: new Date() },
     });
-    await expect(svc().reportNotMyDriver(passenger.userId, verified.id)).rejects.toThrow(/SOS/i);
+    await expect(svc().reportNotMyDriver(passenger2.userId, verified.id)).rejects.toThrow(/SOS/i);
     const untouched = await app.prisma.order.findUniqueOrThrow({ where: { id: verified.id } });
     expect({ status: untouched.status, driverId: untouched.driverId })
-      .toEqual({ status: 'DRIVER_ARRIVED', driverId: d.driver.id });
+      .toEqual({ status: 'DRIVER_ARRIVED', driverId: d2.driver.id });
   });
 });

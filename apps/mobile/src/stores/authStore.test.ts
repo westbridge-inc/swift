@@ -46,6 +46,7 @@ import { hydrationCounters, resetHydrationCountersForTests } from '../lib/authHy
 import { readFileSync } from 'node:fs';
 import { logoutAndSwitchExperience } from '../modules/advertiser/advertiserExit';
 import { useBookingStore } from './bookingStore';
+import { useVendorPreview } from './vendorPreview';
 
 const priorIntents = ['customer', 'mover', 'vendor', 'advertiser'] as const;
 
@@ -87,6 +88,7 @@ function currentRootEntryGate() {
     countryCode: state.countryCode,
     anyPreview: false,
     needsSelfie: state.isAuthenticated && !!state.user && !(state.user as any).selfieCapturedAt,
+    hasUser: !!state.user,
   });
 }
 
@@ -131,6 +133,13 @@ beforeEach(() => {
 });
 
 describe('authStore session boundaries', () => {
+  it('clears a fresh guest Home cache before interactive login', () => {
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    expect(clearQueryClient).toHaveBeenCalledOnce();
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+  });
+
   it.each(priorIntents)(
     'returns a signed-out %s session to the experience picker while retaining country',
     (intent) => {
@@ -482,7 +491,7 @@ describe('[MOB-007 / TST-008] corrupt persisted auth normalizes SIGNED OUT befor
       expect(setSelectedStore).toHaveBeenCalledWith(null);
       expect(hydrationCounters()).toEqual({ [reason]: 1 });
       // the root gate for this state can never be the main stack
-      expect(rootEntryGate({ isAuthenticated: s.isAuthenticated, wantsAuth: false, intent: s.intent, countryCode: s.countryCode, anyPreview: false, needsSelfie: false })).toBe('role-picker');
+      expect(rootEntryGate({ isAuthenticated: s.isAuthenticated, wantsAuth: false, intent: s.intent, countryCode: s.countryCode, anyPreview: false, needsSelfie: false, hasUser: !!s.user })).toBe('role-picker');
       // durable: storage now holds the normalized tuple, so the next boot is a plain signed-out hydration
       expect(JSON.parse(storageData.get('swift-auth')!)).toMatchObject({ version: 2, state: { isAuthenticated: false, user: null, accessToken: null, refreshToken: null } });
       clearQueryClient.mockClear();
@@ -515,6 +524,128 @@ describe('[MOB-007 / TST-008] corrupt persisted auth normalizes SIGNED OUT befor
     expect(src).toContain('const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;');
     expect(src).not.toContain('isAuthenticated && !!user && !user.selfieCapturedAt');
     // an authenticated state with no user can only reach 'selfie', never 'main'
-    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true })).toBe('selfie');
+    // ([E27] customers skip the selfie only when a user is actually present)
+    expect(src).toContain('hasUser: !!user');
+    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).toBe('selfie');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Business-entry state is principal-scoped, like the store selection above.
+//
+// A non-null vendor `previewType` switches EVERY vendor hook to canned sample
+// data, disables the real profile query and turns every mutation into a no-op.
+// It lived in a process-global store that no session boundary cleared, so a
+// guest who walked the sample dashboard and then signed in to a real business
+// saw "Georgetown Grill" instead of their own store — real orders hidden, every
+// action answered "Preview is read-only". A half-typed List-your-business form
+// is the same kind of state: it belongs to exactly one signed-in account.
+// ---------------------------------------------------------------------------
+describe('business-entry state never crosses a principal boundary', () => {
+  const draftStore = async () => (await import('./businessSetupDraft')).useBusinessSetupDraft;
+  const typedForm = { name: 'Kitty Bakes', phone: '6001234', addr: '12 Regent Street', agree: true };
+
+  beforeEach(() => {
+    useVendorPreview.getState().exitPreview();
+  });
+
+  it('a guest who walked the sample dashboard signs in to their real account, not the sample', () => {
+    useVendorPreview.getState().enterPreview('SUPERMARKET');
+
+    useAuthStore.getState().setAuth(user('vendor-a'), 'access-a', 'refresh-a');
+
+    expect(useVendorPreview.getState()).toMatchObject({ preview: false, previewType: null });
+  });
+
+  it.each([
+    ['the sample dashboard', () => useVendorPreview.getState().enterPreview('RESTAURANT')],
+    ['the pending-vendor peek', () => useVendorPreview.getState().enterPreview()],
+  ])('logout ends %s', (_label, enter) => {
+    authenticatedIntent('vendor');
+    enter();
+
+    useAuthStore.getState().logout();
+
+    expect(useVendorPreview.getState()).toMatchObject({ preview: false, previewType: null });
+    expectLoggedOutAtExperiencePicker();
+  });
+
+  it('an authoritative session expiry ends the preview', () => {
+    const captured = authenticatedIntent('vendor');
+    useVendorPreview.getState().enterPreview();
+
+    expect(useAuthStore.getState().logoutIfCurrent(captured)).toBe(true);
+
+    expect(useVendorPreview.getState()).toMatchObject({ preview: false, previewType: null });
+  });
+
+  it('a direct A → B replacement ends A’s preview', () => {
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    useVendorPreview.getState().enterPreview('STORE');
+
+    useAuthStore.getState().setAuth(user('b'), 'access-b', 'refresh-b');
+
+    expect(useVendorPreview.getState()).toMatchObject({ preview: false, previewType: null });
+  });
+
+  it('a guest leaving the sample dashboard by its header sign-out lands at the welcome with nothing left behind', () => {
+    useAuthStore.setState({ intent: 'vendor', countryCode: 'GY' });
+    useVendorPreview.getState().enterPreview('SERVICE');
+
+    useAuthStore.getState().logout();
+
+    expect(useVendorPreview.getState()).toMatchObject({ preview: false, previewType: null });
+    expect(useAuthStore.getState().intent).toBeNull();
+    expect(currentRootEntryGate()).toBe('role-picker');
+  });
+
+  it('logout discards the signed-in account’s half-typed business form', async () => {
+    const drafts = await draftStore();
+    const owner = authenticatedIntent('vendor');
+    drafts.getState().update(owner, typedForm);
+
+    useAuthStore.getState().logout();
+
+    expect(drafts.getState().owner).toBeNull();
+    expect(drafts.getState().draft).toMatchObject({ name: '', phone: '', addr: '', agree: false });
+  });
+
+  it('an authoritative session expiry discards the business form', async () => {
+    const drafts = await draftStore();
+    const owner = authenticatedIntent('vendor');
+    drafts.getState().update(owner, typedForm);
+
+    expect(useAuthStore.getState().logoutIfCurrent(owner)).toBe(true);
+
+    expect(drafts.getState().owner).toBeNull();
+    expect(drafts.getState().draft.name).toBe('');
+  });
+
+  it('a direct A → B replacement never hands A’s business form to B', async () => {
+    const drafts = await draftStore();
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    const accountA = getAuthSessionSnapshot()!;
+    drafts.getState().update(accountA, typedForm);
+
+    useAuthStore.getState().setAuth(user('b'), 'access-b', 'refresh-b');
+
+    expect(drafts.getState().owner).toBeNull();
+    expect(drafts.getState().draft).toMatchObject({ name: '', phone: '', addr: '', agree: false });
+  });
+
+  it('a token refresh keeps the same account’s form and preview', async () => {
+    const drafts = await draftStore();
+    useAuthStore.getState().setAuth(user('a'), 'access-a-1', 'refresh-a-1');
+    const owner = getAuthSessionSnapshot()!;
+    drafts.getState().update(owner, typedForm);
+    useVendorPreview.getState().enterPreview();
+
+    useAuthStore.getState().rotateTokensIfCurrent(owner, {
+      accessToken: 'access-a-2',
+      refreshToken: 'refresh-a-2',
+    });
+
+    expect(drafts.getState().draft).toMatchObject(typedForm);
+    expect(useVendorPreview.getState()).toMatchObject({ preview: true, previewType: null });
   });
 });

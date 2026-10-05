@@ -40,6 +40,13 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'BillingEvent', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'BillingEvent', field: 'amountUsd', unit: 'USD_MAJOR' },
   { model: 'BillingEvent', field: 'fxRateUsed', unit: 'FX_RATE' },
+  // [#1393] The settled weekly fee a paid obligation transition consumed, in
+  // the unit of the SubscriptionPayment and BillingEvent it is bound to.
+  { model: 'BillingObligationTransition', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [PT-1] A hosted Pay-now session's server-priced amount: the weekly fee it
+  // pays, in the same unit as the BillingEvent / SubscriptionPayment it becomes.
+  // It reaches a provider only through toProviderMinor, at the seam.
+  { model: 'CardSession', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Cart', field: 'tipAmount', unit: 'MAJOR_WHOLE' },
   { model: 'CountryConfig', field: 'floatL1', unit: 'MAJOR_WHOLE' },
   { model: 'CountryConfig', field: 'floatL2', unit: 'MAJOR_WHOLE' },
@@ -57,6 +64,13 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   // handed back. Same unit as the order total the obligation is taken from.
   { model: 'Order', field: 'refundOwedAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'refundPaidAmount', unit: 'MAJOR_WHOLE' },
+  // [E02] The MMG refund rail: what the store attested it received (the cap),
+  // what it owes back, what it says it sent, and the MMG fee Swift pays back.
+  // Same unit as the order total every one of them is taken from.
+  { model: 'Order', field: 'mmgAttestedAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'MmgRefundObligation', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'MmgRefundSend', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'MmgRefundSend', field: 'feeBorneBySwift', unit: 'MAJOR_WHOLE' },
   // [W-26] What each side ATTESTED changed hands. Same unit as the amount
   // above by construction: the ledger refuses any figure that is not it.
   { model: 'DeliveryCashSettlement', field: 'riderAttestedAmount', unit: 'MAJOR_WHOLE' },
@@ -71,6 +85,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'LedgerEntry', field: 'credit', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'debit', unit: 'MAJOR_WHOLE' },
   { model: 'MmgAgentPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
+  // [MMG checkout 2/6] What a partner was asked to pay on the MMG page: whole GYD.
+  { model: 'MmgCheckoutIntent', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Option', field: 'additionalPrice', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'deliveryFee', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'discount', unit: 'MAJOR_WHOLE' },
@@ -150,6 +166,10 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'Vendor', field: 'minOrderAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryBaseFee', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryPerKm', unit: 'MAJOR_WHOLE' },
+  // [ZONE-FARES] A zone's own taxi per-km rate: whole units of the market's
+  // currency (CHECKed whole and positive), read by the fare engine as the
+  // per-km of the market's formula for a trip that starts or ends there.
+  { model: 'Zone', field: 'taxiPerKm', unit: 'MAJOR_WHOLE' },
   { model: 'ZoneFare', field: 'fare', unit: 'MAJOR_WHOLE' },
 ];
 

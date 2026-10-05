@@ -53,7 +53,7 @@ const userIds: string[] = [];
 const orderIds: string[] = [];
 let vendorOwnerId: string;
 let seq = 0;
-const phoneBase = 592_615_000_000 + Math.floor(Math.random() * 800_000_000);
+const phoneBase = 592_615_000_000 + Math.floor(Math.random() * 300_000_000) /* stays below +593: send-otp refuses non-Guyana numbers (AVAIL-1) */;
 
 async function makeUser(roles: string[], activeRole: string) {
   seq += 1;
@@ -189,7 +189,15 @@ describe('[W-25] the authority is the LOCKED row, not the preview', () => {
     // second check is PRESENT rather than proving it fires. Deleting it (which
     // is how this regresses) turns this red.
     const route = readFileSync(join(process.cwd(), 'src/modules/vendor/vendor.routes.ts'), 'utf8');
-    const capture = route.slice(route.indexOf("confirm-payment'"), route.indexOf('complete-appointment'));
+    // The capture runs from the confirm-payment handler to the NEXT route
+    // declaration; a comment elsewhere in the file may mention the word
+    // complete-appointment, so the end anchor is the declaration string,
+    // searched after the start.
+    const start = route.indexOf("confirm-payment'");
+    const end = route.indexOf("'/orders/:id/complete-appointment'", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const capture = route.slice(start, end);
     expect(capture).toMatch(/assertMmgAttestable\(order\)/); // the preview
     expect(capture).toMatch(/assertMmgAttestable\(locked\)/); // the authority
     expect(capture.indexOf('assertMmgAttestable(locked)')).toBeGreaterThan(capture.indexOf('FOR UPDATE'));
@@ -229,6 +237,23 @@ describe('[W-25] the attestation carries evidence', () => {
     expect(String(changes['amount'])).toContain('2300');
     expect(changes['recipient']).toBe('Attest Diner');
     expect(changes['basis']).toBe('VENDOR_ATTESTED');
+  });
+
+  it('[E02] stores the attested amount on the order: the cap every MMG refund obligation is held to', async () => {
+    const order = await makeOrder('PENDING');
+    const reference = `CAP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`;
+    expect((await attest(order.id, reference)).statusCode).toBe(200);
+
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    expect(after.mmgAttestedAmount?.toFixed(2)).toBe('2300.00');
+    // The same figure the audit row names — one attestation, one amount.
+    const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entityId: order.id, action: 'ATTEST_MMG_PAYMENT' } });
+    expect((audit.changes as Record<string, unknown>)['amount']).toBe(after.totalAmount.toString());
+
+    // A refused attestation writes no amount.
+    const refused = await makeOrder('FAILED');
+    expect((await attest(refused.id, `NOP${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`)).statusCode).toBe(409);
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: refused.id } })).mmgAttestedAmount).toBeNull();
   });
 
   it('one payment settles ONE order: the same reference cannot mark a second order paid', async () => {

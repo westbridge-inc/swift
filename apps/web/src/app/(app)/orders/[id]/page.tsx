@@ -1,9 +1,11 @@
 'use client';
 
-import Link from 'next/link';
+import OrderDetailSkeleton from './loading';
+
+import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
+import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  ArrowLeft,
   Banknote,
   CircleX,
   Clock3,
@@ -16,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { activeRide, cancelOrder, getOrder, getRide, money } from '@/lib/customer';
+import { lineDisplayAmount } from '@/lib/money';
 import styles from './tracking.module.css';
 
 const POLL_INTERVAL_MS = 8_000;
@@ -61,6 +64,8 @@ type OrderDetail = {
     url: string;
   } | null;
   pickupCode?: string | null;
+  /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
+  ridePin?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
@@ -78,6 +83,7 @@ type OrderDetail = {
   timeline?: TimelineEvent[];
   holdExpiresAt?: string | null;
   freeCancellationExpiresAt?: string | null;
+  appointmentSlot?: string | null;
   canCancel?: boolean;
   cancellationFee?: number;
   cancellationReason?: string | null;
@@ -106,6 +112,14 @@ const appointmentStages: Stage[] = [
   { label: 'Completed', statuses: ['COMPLETED', 'DELIVERED'] },
 ];
 
+/** [E17 · DS202 D6] A courier parcel sent back to its sender. */
+const returnStages: Stage[] = [
+  { label: 'Placed', statuses: ['PENDING', 'ACCEPTED'] },
+  { label: 'Picked up', statuses: ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'] },
+  { label: 'Coming back to you', statuses: ['RETURNING'] },
+  { label: 'Returned', statuses: ['RETURNED'] },
+];
+
 const taxiStages: Stage[] = [
   { label: 'Requested', statuses: ['PENDING'] },
   { label: 'Driver assigned', statuses: ['ACCEPTED', 'DRIVER_ASSIGNED'] },
@@ -116,6 +130,7 @@ const taxiStages: Stage[] = [
 
 function stagesFor(order: OrderDetail): Stage[] {
   if (order.orderType === 'TAXI') return taxiStages;
+  if (order.status === 'RETURNING' || order.status === 'RETURNED') return returnStages;
   if (order.fulfillment === 'PICKUP') return pickupStages;
   if (order.fulfillment === 'APPOINTMENT') return appointmentStages;
   return deliveryStages;
@@ -130,6 +145,10 @@ function statusHeading(order: OrderDetail): string {
   if (order.status === 'CANCELLED') return order.orderType === 'TAXI' ? 'Ride cancelled' : 'Order cancelled';
   if (order.status === 'REFUNDED') return order.orderType === 'TAXI' ? 'Ride refunded' : 'Order refunded';
   if (order.status === 'FAILED') return order.orderType === 'TAXI' ? 'Ride could not be completed' : 'Order could not be completed';
+  // [E17 · DS231 F4] A courier parcel on its way back, and back: the heading
+  // agrees with the stage rail below instead of falling to "Order placed".
+  if (order.status === 'RETURNING') return 'Your parcel is coming back to you';
+  if (order.status === 'RETURNED') return 'Parcel returned to you';
   if (['DELIVERED', 'COMPLETED'].includes(order.status)) {
     if (order.orderType === 'TAXI') return 'Ride completed';
     if (order.fulfillment === 'APPOINTMENT') return 'Appointment completed';
@@ -314,7 +333,7 @@ export default function OrderDetailPage() {
     );
   }
 
-  if (!order) return <div className={styles.loading} aria-label="Loading order tracking" />;
+  if (!order) return <OrderDetailSkeleton />;
 
   const cancelled = order.status === 'CANCELLED';
   const refunded = order.status === 'REFUNDED';
@@ -422,7 +441,7 @@ export default function OrderDetailPage() {
       }
       if (latestFee !== effectiveCancelFee) {
         setCancelFee(latestFee);
-        setError(`The server’s cancellation quote changed to ${money(latestFee)}. Review the updated cash-only marker, then confirm again if you still want to cancel.`);
+        setError(`The possible cancellation fee changed to ${money(latestFee)}. Check the new amount, then confirm again if you still want to cancel.`);
         window.requestAnimationFrame(() => cancelConfirmButton.current?.focus());
         return;
       }
@@ -446,11 +465,7 @@ export default function OrderDetailPage() {
 
   return (
     <div className={styles.page}>
-      <Link href="/orders" className={styles.backLink}>
-        <ArrowLeft size={18} aria-hidden="true" />
-        All orders
-      </Link>
-
+      {/* [Q7b] The way back is the app's own back button, in the top bar. */}
       <section className={styles.hero} aria-labelledby="order-status-heading">
         <div className={styles.heroIcon} aria-hidden="true">
           {stopped ? <CircleX size={28} /> : completed ? <PackageCheck size={28} /> : order.rider ? <Truck size={28} /> : <Clock3 size={28} />}
@@ -467,10 +482,18 @@ export default function OrderDetailPage() {
         </span>
       </section>
 
+      {isTaxi ? (
+        <section className={styles.moneyNotice} aria-labelledby="taxi-app-title">
+          <h2 id="taxi-app-title" className={styles.cardTitle}>Open the Swift app for your safety PIN and SOS</h2>
+          <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
+          <OpenSwiftApp />
+        </section>
+      ) : null}
+
       {trackingError ? (
         <div className={styles.trackingNotice} role="alert">
           <span>
-            The last update failed; Swift keeps retrying. {lastUpdatedAt ? `Showing the last server result from ${lastUpdatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}. ` : ''}
+            Updates are taking longer than usual. Swift keeps trying. {lastUpdatedAt ? `Last checked at ${lastUpdatedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}. ` : ''}
             {trackingError}
           </span>
           <button type="button" className={styles.secondaryButton} onClick={() => void load()}>Try updates again</button>
@@ -481,7 +504,7 @@ export default function OrderDetailPage() {
         <div className={`${styles.cancelOutcome} ${Number(cancelFee ?? 0) > 0 ? styles.cancelWarning : ''}`} role="status">
           <strong>{cancelResult}</strong>
           {typeof cancelFee === 'number' ? (
-            <span>{cancelFee > 0 ? `${money(cancelFee)} cash-only late-cancellation marker recorded; Swift does not collect it.` : 'No cancellation fee recorded by the server.'}</span>
+            <span>{cancelFee > 0 ? `A ${money(cancelFee)} late-cancellation fee was recorded. Swift does not collect it.` : 'No cancellation fee was recorded.'}</span>
           ) : null}
         </div>
       ) : null}
@@ -495,7 +518,7 @@ export default function OrderDetailPage() {
       {holdActive ? (
         <section className={styles.holdCard} aria-labelledby="hold-title">
           <div>
-            <p className={styles.eyebrow}>Server-set order hold</p>
+            <p className={styles.eyebrow}>A short hold on your order</p>
             <h2 id="hold-title" className={styles.cardTitle}>A short window before the store sees it</h2>
             <p className={styles.mutedCopy}>
               {mmgAmbiguous
@@ -503,7 +526,7 @@ export default function OrderDetailPage() {
                 : 'You can cancel without a fee while this hold is active. Swift is holding the order, not your money.'}
             </p>
           </div>
-          <div className={styles.timer} role="timer" aria-label={`${formatRemaining(holdExpiryMs - now)} remains in the server order hold`}>
+          <div className={styles.timer} role="timer" aria-label={`${formatRemaining(holdExpiryMs - now)} remains in the order hold`}>
             <span>{formatRemaining(holdExpiryMs - now)}</span>
             <small>remaining</small>
           </div>
@@ -586,12 +609,18 @@ export default function OrderDetailPage() {
                   <strong>{order.pickupCode}</strong>
                 </div>
               ) : null}
+              {order.ridePin && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status) ? (
+                <div className={styles.pickupCode}>
+                  <span>Show this delivery code to your rider at the door</span>
+                  <strong>{order.ridePin}</strong>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
           {(order.timeline?.length ?? 0) > 0 ? (
             <section className={styles.card} aria-labelledby="timeline-title">
-              <p className={styles.eyebrow}>Server history</p>
+              <p className={styles.eyebrow}>Order updates</p>
               <h2 id="timeline-title" className={styles.cardTitle}>{isTaxi ? 'Ride timeline' : 'Order timeline'}</h2>
               <ol className={styles.timeline}>
                 {order.timeline?.map((event, index) => (
@@ -616,16 +645,17 @@ export default function OrderDetailPage() {
             {(order.items ?? []).map((item, index) => (
               <div key={item.id ?? `${item.name}-${index}`} className={styles.line}>
                 <span>{item.quantity}× {item.name}</span>
-                <strong>{money(item.lineTotal ?? Number(item.customerPrice ?? 0) * item.quantity)}</strong>
+                <strong>{money(lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
               </div>
             ))}
           </div>
           <div className={styles.breakdown}>
+            {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? <div className={styles.line}><span>Appointment</span><strong>{formatAppointmentSlot(order.appointmentSlot)}</strong></div> : null}
             {typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
             {!isTaxi && typeof order.deliveryFee === 'number' ? <div className={styles.line}><span>Delivery fee</span><strong>{money(order.deliveryFee)}</strong></div> : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
             {Number(order.tipAmount ?? 0) > 0 ? <div className={styles.line}><span>{isTaxi ? 'Driver tip' : 'Rider tip'}</span><strong>{money(Number(order.tipAmount))}</strong></div> : null}
-            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total ?? 0)}</strong></div>
+            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total)}</strong></div>
           </div>
           {showPaymentTruth ? (
             <div className={styles.cashTruth}>
@@ -679,7 +709,7 @@ export default function OrderDetailPage() {
                           : completed
                             ? `${isTaxi ? 'The ride' : order.fulfillment === 'APPOINTMENT' ? 'The appointment' : order.fulfillment === 'PICKUP' ? 'The collection' : 'The handover'} is complete, but this order does not yet show confirmed cash receipt.`
                             : `Pay ${isTaxi ? 'the driver' : order.fulfillment === 'DELIVERY' ? 'the rider' : 'the business'} directly. Swift does not hold your money.`
-                        : `The server reports ${order.paymentStatus?.toLowerCase() ?? 'an unknown payment state'} for this order.`}
+                        : 'Swift can’t show this order’s payment status. Check again shortly.'}
                 </p>
                 {payableMmgAction ? (
                   <button type="button" className={`${styles.secondaryButton} ${styles.paymentAction}`} disabled={openingPayment} onClick={() => void openVerifiedMmgPayment(payableMmgAction)}>
@@ -711,8 +741,8 @@ export default function OrderDetailPage() {
             <div className={`${styles.cancelConfirm} ${effectiveCancelFee > 0 ? styles.cancelWarning : ''}`}>
               <p id="cancellation-quote">
                 {effectiveCancelFee > 0
-                  ? `Swift’s last server quote shows a ${money(effectiveCancelFee)} cash-only late-cancellation marker. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect the marker; the server confirms it when you cancel.`
-                  : `Swift’s last server quote showed no fee${order.freeCancellationExpiresAt ? ` through ${formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift rechecks the fee before cancelling and never collects a late marker.`}
+                  ? `The last check showed a possible ${money(effectiveCancelFee)} late-cancellation fee. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift does not collect it. We check the amount again when you confirm.`
+                  : `The last check showed no cancellation fee${order.freeCancellationExpiresAt ? ` through ${order.fulfillment === 'APPOINTMENT' ? formatAppointmentSlot(order.freeCancellationExpiresAt) : formatEventTime(order.freeCancellationExpiresAt)}` : ''}. ${mmgAmbiguous ? 'If you already sent MMG, the business refunds you directly. ' : ''}Swift checks again before cancelling and does not collect the fee.`}
               </p>
               <div className={styles.confirmActions}>
                 <button ref={cancelConfirmButton} type="button" className={styles.primaryButton} aria-describedby="cancellation-quote" disabled={cancelling} onClick={() => void confirmCancellation()}>

@@ -87,10 +87,10 @@ describe('[W-42] script injection', () => {
 
   it('DOM clobbering handles are refused — id, name and form attributes cannot be smuggled in', () => {
     expect(reject('<p id="body">x</p>')).toContain('id');
-    expect(reject('<p><a name="attributes" href="mailto:privacy@swift.gy">x</a></p>')).toContain('name');
+    expect(reject('<p><a name="attributes" href="mailto:privacy@swiftgy.com">x</a></p>')).toContain('name');
     expect(reject('<p class="legal-prose">x</p>')).toContain('class');
     expect(reject('<p data-x="1">x</p>')).toContain('data-x');
-    expect(reject('<p><a href="mailto:privacy@swift.gy" target="_blank">x</a></p>')).toContain('target');
+    expect(reject('<p><a href="mailto:privacy@swiftgy.com" target="_blank">x</a></p>')).toContain('target');
   });
 });
 
@@ -102,31 +102,31 @@ describe('[W-42] link schemes and hosts', () => {
     'data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==',
     'vbscript:msgbox(1)',
     'file:///etc/passwd',
-    'http://swift.gy/insecure',
+    'http://swiftgy.com/insecure',
     '//evil.test/protocol-relative',
     '/relative/path',
     'https://evil.test/',
-    'https://swift.gy.evil.test/',
-    'https://evil.test/?x=swift.gy',
-    'https://swift.gy@evil.test/',
-    'https://user:pass@swift.gy/',
-    'https://swift.gy:8443/',
+    'https://swiftgy.com.evil.test/',
+    'https://evil.test/?x=swiftgy.com',
+    'https://swiftgy.com@evil.test/',
+    'https://user:pass@swiftgy.com/',
+    'https://swiftgy.com:8443/',
     'https://ѕwift.gy/',
     'https://xn--wift-y1a.gy/',
     'mailto:attacker@evil.test',
-    'mailto:privacy@swift.gy.evil.test',
-    'mailto:privacy@swift.gy?subject=x&body=y',
-    'mailto:privacy@swift.gy,attacker@evil.test',
+    'mailto:privacy@swiftgy.com.evil.test',
+    'mailto:privacy@swiftgy.com?subject=x&body=y',
+    'mailto:privacy@swiftgy.com,attacker@evil.test',
   ])('refuses href %s', (href) => {
     expect(canonicalLegalLink(href)).toBeNull();
     expect(reject(`<p><a href="${href.replace(/"/g, '&quot;')}">x</a></p>`)).toBeTruthy();
   });
 
   it.each([
-    ['mailto:privacy@swift.gy', 'mailto:privacy@swift.gy'],
-    ['mailto:childsafety@swift.gy', 'mailto:childsafety@swift.gy'],
-    ['mailto:PRIVACY@SWIFT.GY', 'mailto:PRIVACY@swift.gy'],
-    ['https://swift.gy/legal/terms', 'https://swift.gy/legal/terms'],
+    ['mailto:privacy@swiftgy.com', 'mailto:privacy@swiftgy.com'],
+    ['mailto:childsafety@swiftgy.com', 'mailto:childsafety@swiftgy.com'],
+    ['mailto:PRIVACY@SWIFTGY.COM', 'mailto:PRIVACY@swiftgy.com'],
+    ['https://swiftgy.com/legal/terms', 'https://swiftgy.com/legal/terms'],
     ['https://www.swiftgy.com/', 'https://www.swiftgy.com/'],
   ])('admits %s', (href, canonical) => {
     expect(canonicalLegalLink(href)).toBe(canonical);
@@ -142,25 +142,25 @@ describe('[W-42] link schemes and hosts', () => {
   it('an href is decoded exactly once — an entity-encoded ampersand survives as one ampersand, not two', () => {
     // decode: &amp; → &  ·  re-escape on output: & → &amp;. A link that skipped the
     // decode would emit &amp;amp; and send the reader to a different query.
-    expect(accept('<p><a href="https://swift.gy/legal?a=1&amp;b=2">x</a></p>')).toBe(
-      '<p><a href="https://swift.gy/legal?a=1&amp;b=2">x</a></p>',
+    expect(accept('<p><a href="https://swiftgy.com/legal?a=1&amp;b=2">x</a></p>')).toBe(
+      '<p><a href="https://swiftgy.com/legal?a=1&amp;b=2">x</a></p>',
     );
-    expect(canonicalLegalLink('https://swift.gy/legal?a=1&b=2')).toBe('https://swift.gy/legal?a=1&b=2');
+    expect(canonicalLegalLink('https://swiftgy.com/legal?a=1&b=2')).toBe('https://swiftgy.com/legal?a=1&b=2');
   });
 
   it('a link is emitted from the parsed URL, not copied from the input', () => {
     // the input spells the host in mixed case with a default port stripped by the URL parser
-    expect(accept('<p><a href="https://SWIFT.gy/legal">x</a></p>')).toBe('<p><a href="https://swift.gy/legal">x</a></p>');
+    expect(accept('<p><a href="https://SWIFTGY.com/legal">x</a></p>')).toBe('<p><a href="https://swiftgy.com/legal">x</a></p>');
   });
 
   it('an <a> may not nest inside another <a>', () => {
-    expect(reject('<p><a href="mailto:privacy@swift.gy"><a href="mailto:privacy@swift.gy">x</a></a></p>')).toContain('<a>');
+    expect(reject('<p><a href="mailto:privacy@swiftgy.com"><a href="mailto:privacy@swiftgy.com">x</a></a></p>')).toContain('<a>');
   });
 
   it('an <a> needs exactly one href', () => {
     expect(reject('<p><a>x</a></p>')).toContain('href');
     expect(reject('<p><a href>x</a></p>')).toBeTruthy();
-    expect(reject('<p><a href="mailto:privacy@swift.gy" href="mailto:x@swift.gy">x</a></p>')).toBeTruthy();
+    expect(reject('<p><a href="mailto:privacy@swiftgy.com" href="mailto:x@swiftgy.com">x</a></p>')).toBeTruthy();
   });
 });
 
@@ -189,7 +189,7 @@ describe('[W-42] malformed markup is a reject, never a guess', () => {
   it('rejects control characters, including a NUL inside an attribute', () => {
     expect(reject('<p>a\u0000b</p>')).toContain('control');
     expect(reject('<p>a\u0008b</p>')).toContain('control');
-    expect(reject('<p><a href="mailto:privacy@swift.gy\u0000">x</a></p>')).toBeTruthy();
+    expect(reject('<p><a href="mailto:privacy@swiftgy.com\u0000">x</a></p>')).toBeTruthy();
     // a newline and a tab are ordinary whitespace, not control characters
     expect(accept('<p>a\n\tb</p>')).toBe('<p>a\n\tb</p>');
   });

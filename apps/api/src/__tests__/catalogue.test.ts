@@ -13,6 +13,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
+import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 
 // ---------------------------------------------------------------------------
 // catalogue: CSV import with row-level errors, instant availability
@@ -109,13 +110,16 @@ function multipartBody(filename: string, mime: string, content: Buffer) {
 }
 
 /** Next occurrence of a UTC weekday at hh:mm, at least one day out. */
-function nextUtc(dayOfWeek: number, hours: number, minutes: number): Date {
-  const d = new Date(Date.now() + DAY);
-  d.setUTCHours(hours, minutes, 0, 0);
-  while (d.getUTCDay() !== dayOfWeek || d.getTime() <= Date.now()) {
-    d.setUTCDate(d.getUTCDate() + 1);
+/** The next given weekday (from tomorrow) at a Guyana wall-clock time, as the
+ *  TRUE instant the slot happens — what the picker sends and the row stores. */
+function nextGuyana(dayOfWeek: number, hours: number, minutes: number): Date {
+  const [y, m, d] = guyanaDayKey(new Date()).split('-').map(Number);
+  for (let i = 1; i <= 7; i++) {
+    const day = new Date(Date.UTC(y!, m! - 1, d! + i));
+    if (day.getUTCDay() !== dayOfWeek) continue;
+    return instantOfGuyanaWallClock(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), hours, minutes)));
   }
-  return d;
+  throw new Error('unreachable: every weekday occurs within seven days');
 }
 
 beforeAll(async () => {
@@ -209,6 +213,20 @@ describe('CSV import', () => {
     expect(res.json().error.code).toBe('TOO_MANY_ROWS');
   });
 
+  it.each(['/items/import', '/items/import/automap'])('bounds CSV before expansion on %s', async (route) => {
+    const before = await app.prisma.item.count({ where: { vendorId } });
+    for (const [csv, code] of [
+      ['category,name,basePrice\n' + 'Mains,Bounded,100\n'.repeat(5001), 'TOO_MANY_ROWS'],
+      [Array(101).fill('name').join(',') + '\nx', 'CSV_TOO_WIDE'],
+      ['name\n"' + 'x'.repeat(2049) + '"', 'CSV_CELL_TOO_LONG'],
+    ]) {
+      const response = await inject('POST', '/api/v1/vendor' + route, { csv }, vendorToken);
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe(code);
+    }
+    expect(await app.prisma.item.count({ where: { vendorId } })).toBe(before);
+  });
+
   it('the listing gate applies to imports too', async () => {
     const unverifiedUser = await makeUserWithSession(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
     await makeVendor(unverifiedUser, { verified: false });
@@ -253,7 +271,7 @@ describe('Availability toggle — instant customer-facing effect', () => {
 
 describe('Bookings — double-booking is impossible at the data layer', () => {
   let serviceItemId: string;
-  const slot = nextUtc(5, 10, 0); // next Friday 10:00 UTC
+  const slot = nextGuyana(5, 10, 0); // next Friday 10:00 in Guyana (14:00Z)
 
   beforeAll(async () => {
     const category = await app.prisma.category.create({
@@ -312,10 +330,10 @@ describe('Bookings — double-booking is impossible at the data layer', () => {
   });
 
   it('rejects slots outside configured hours, misaligned starts, past times, and non-bookable listings', async () => {
-    const sunday = nextUtc(0, 10, 0);
+    const sunday = nextGuyana(0, 10, 0);
     await expect(booking.reserveSlot(serviceItemId, customerId, sunday)).rejects.toMatchObject({ code: 'SLOT_OUTSIDE_HOURS' });
 
-    const misaligned = nextUtc(6, 10, 7);
+    const misaligned = nextGuyana(6, 10, 7);
     await expect(booking.reserveSlot(serviceItemId, customerId, misaligned)).rejects.toMatchObject({ code: 'SLOT_OUTSIDE_HOURS' });
 
     await expect(
@@ -324,7 +342,7 @@ describe('Bookings — double-booking is impossible at the data layer', () => {
 
     const burger = await app.prisma.item.findFirstOrThrow({ where: { vendorId, name: 'CSV Burger' } });
     await expect(
-      booking.reserveSlot(burger.id, customerId, nextUtc(6, 11, 0)),
+      booking.reserveSlot(burger.id, customerId, nextGuyana(6, 11, 0)),
     ).rejects.toMatchObject({ code: 'NOT_BOOKABLE' });
   });
 });

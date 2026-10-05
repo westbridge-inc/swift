@@ -1,47 +1,39 @@
 import Link from 'next/link';
 import { SwiftLogo } from './swift-logo';
-import { site, showAppStoreBadges } from '@/site.config';
+import { BrowserOrderingNote } from './browser-ordering-note';
+import { site, launch, showAppStoreBadges } from '@/site.config';
+export { SiteNav } from './site-nav';
 
 /** Shared marketing chrome: nav + footer, Swift red on a light canvas. */
 
-const NAV = [
-  { href: '/how-it-works', label: 'How it works' },
-  { href: '/vendors', label: 'For businesses' },
-  { href: '/drivers', label: 'For drivers' },
-  { href: '/pricing', label: 'Pricing' },
-  { href: '/faq', label: 'Questions' },
-];
-
-export function SiteNav() {
+/**
+ * [Q36] How money moves, in one honest line. Orders are paid to the business —
+ * cash, or the store's own MMG — and the API refuses any other order payment.
+ * Visa and Mastercard are for Swift's own charges (the weekly partner fee, and
+ * advertising a business chooses to buy). They are listed only once
+ * launch.cardPayments says the card rail is live: a method that does not work
+ * yet is never shown or teased (the partner checkout census enforces it).
+ */
+export function PaymentMethods() {
+  const cardsLive = launch.cardPayments === 'live';
+  const methods = ['Cash', 'MMG', ...(cardsLive ? ['Visa', 'Mastercard'] : [])];
   return (
-    <header className="sticky top-0 z-50 border-b border-black/5 bg-white/85 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5">
-        <Link href="/" aria-label="Swift home">
-          <SwiftLogo />
-        </Link>
-        <nav aria-label="Main" className="hidden gap-7 text-sm font-medium text-[var(--swift-muted)] md:flex">
-          {NAV.map((n) => (
-            <Link key={n.href} href={n.href} className="transition-colors hover:text-[var(--swift-ink)]">
-              {n.label}
-            </Link>
+    <section aria-label="Payment methods" className="mx-auto max-w-6xl px-5 py-5 text-xs text-[var(--swift-muted)]">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-5">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--swift-ink)]">Payment methods</h2>
+        <ul className="flex flex-wrap gap-2">
+          {methods.map((name) => (
+            <li key={name} className="inline-flex items-center rounded-full border border-[var(--swift-border)] bg-white px-3 py-1 text-sm font-semibold text-[var(--swift-ink)]">
+              {name}
+            </li>
           ))}
-        </nav>
-        <div className="flex items-center gap-4">
-          <Link
-            href="/login?next=/order"
-            className="text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)]"
-          >
-            Sign in
-          </Link>
-          <Link
-            href="/signup"
-            className="rounded-full bg-[var(--swift-red)] px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
-          >
-            Join Swift
-          </Link>
-        </div>
+        </ul>
       </div>
-    </header>
+      <p className="mt-3 max-w-3xl leading-relaxed">
+        Orders are paid to the business itself, in cash or by MMG.
+        {cardsLive ? " Visa and Mastercard are for Swift's own charges, the weekly partner fee and advertising." : null}
+      </p>
+    </section>
   );
 }
 
@@ -60,7 +52,7 @@ export function SiteFooter() {
               only switch, and it is driven by the launch config. */}
           {showAppStoreBadges ? null : (
             <p className="mt-4 text-xs text-[var(--swift-muted)]">
-              Swift runs in your browser today. Apps are on the way.
+              <BrowserOrderingNote /> Taxi rides require the Swift mobile app.
             </p>
           )}
         </div>
@@ -83,8 +75,11 @@ export function SiteFooter() {
             Legal
           </h2>
           <ul className="mt-4 space-y-2.5 text-[var(--swift-muted)]">
-            <li><Link href="/legal/privacy" className="hover:text-[var(--swift-ink)]">Privacy policy</Link></li>
+            {/* [Q36] Every policy the card bank asks for is one tap from every footer. */}
             <li><Link href="/legal/terms" className="hover:text-[var(--swift-ink)]">Terms of service</Link></li>
+            <li><Link href="/legal/privacy" className="hover:text-[var(--swift-ink)]">Privacy policy</Link></li>
+            <li><Link href="/legal/refunds" className="hover:text-[var(--swift-ink)]">Refunds and cancellations</Link></li>
+            <li><Link href="/legal/delivery" className="hover:text-[var(--swift-ink)]">Delivery policy</Link></li>
             {/* [STORE-003] Play wants the child-safety standard reachable from a
                 public page, not only from inside the app. */}
             <li><Link href="/legal/child-safety" className="hover:text-[var(--swift-ink)]">Child safety</Link></li>
@@ -101,16 +96,24 @@ export function SiteFooter() {
         </nav>
       </div>
 
+      <div className="border-t border-black/5">
+        <PaymentMethods />
+      </div>
+
       {/* AC-3: the legal entity name appears in EVERY footer, on every page.
-          Read from site.config so it cannot drift between routes. */}
+          [Q36] With it: the trade name, where the company is registered, and
+          the transaction currency. All read from site.config. */}
       <div className="border-t border-black/5">
         <div className="mx-auto flex max-w-6xl flex-col gap-1 px-5 py-5 text-xs text-[var(--swift-muted)] md:flex-row md:items-center md:justify-between">
           <p>
-            Swift is operated by{' '}
-            <span className="font-semibold text-[var(--swift-ink)]">{site.legalEntityName}</span>.
+            {site.tradeName} is a trade name of{' '}
+            <span className="font-semibold text-[var(--swift-ink)]">{site.legalEntityName}</span>, {site.registeredCity},{' '}
+            {site.country}. Prices in {site.currencyCode}.
           </p>
           <p>
-            © {new Date().getFullYear()} {site.legalEntityName}. All rights reserved.
+            © {new Date().getFullYear()} {site.legalEntityName}
+            {/* "Inc." already ends the sentence; never print a second full stop. */}
+            {site.legalEntityName.endsWith('.') ? '' : '.'} All rights reserved.
           </p>
         </div>
       </div>

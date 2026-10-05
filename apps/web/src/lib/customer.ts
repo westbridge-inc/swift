@@ -4,7 +4,7 @@
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
 import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
-import { formatAmount } from './money';
+import { formatMoney } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
@@ -133,13 +133,40 @@ export interface Cart {
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
   paymentCapabilities?: {
+    /** Changes when the vendor set or the validated MMG destination changes. */
+    scope?: string;
     cash?: { available: boolean; fundsFlow: 'DIRECT_AT_HANDOVER' };
     mmg?: { available: boolean; provider?: 'MMG'; fundsFlow?: 'DIRECT_TO_VENDOR'; unavailableReason?: string | null };
   };
 }
 
 // ── Browse ────────────────────────────────────────────────────────────────
-export async function getHome() { return (await apiFetch('/api/v1/customer/home')).data; }
+/** One card on Home's "Popular on Swift" rail — an item, opened at its store. */
+export interface PopularItem {
+  id: string; name: string; imageUrl: string | null; price: number;
+  vendorId: string; vendorName: string; vendorType: string | null; etaMin: number | null;
+}
+/** The live order Home shows at the top (guests have none). */
+export interface HomeActiveOrder {
+  id: string; orderNumber: string; status: string; orderType?: string;
+  vendor?: { id: string; name: string } | null;
+}
+export interface HomeFeed {
+  activeOrder: HomeActiveOrder | null;
+  popularItems: PopularItem[];
+  featured: Vendor[];
+  nearby: Vendor[];
+  orderAgain: Vendor[];
+  categories: Array<{ id: string; name: string; imageUrl: string | null }>;
+  openVendors: Vendor[];
+  closedVendors: Vendor[];
+}
+/** The same feed the phone app's Home reads. A position (the delivery address,
+ *  or where the browser is) sorts stores by distance and fills "Near you". */
+export async function getHome(near?: { lat: number; lng: number }): Promise<HomeFeed> {
+  const qs = near ? `?lat=${near.lat}&lng=${near.lng}` : '';
+  return (await apiFetch(`/api/v1/customer/home${qs}`, undefined, { redirectOnExpired: false })).data as HomeFeed;
+}
 export async function getVendors(type?: string): Promise<Vendor[]> {
   const qs = type ? `?type=${encodeURIComponent(type)}` : '';
   return (await apiFetch(`/api/v1/customer/vendors${qs}`)).data as Vendor[];
@@ -171,6 +198,44 @@ export async function searchVendors(q: string): Promise<Vendor[]> {
   return (await apiFetch(`/api/v1/customer/vendors?search=${encodeURIComponent(q)}`)).data as Vendor[];
 }
 
+// ── Market (goods across stores — the phone app's Market tab) ──────────────
+/** The server's launch-depth verdict; the tab shows only when it says so. */
+export interface MarketDepth { visible: boolean; items: number; vendors: number }
+/** An item listed outside its store (the API's one ItemHit shape). */
+export interface MarketItem {
+  id: string; name: string; basePrice: number; imageUrl: string | null;
+  vendorId: string; vendorName: string; categoryName: string | null; isNew: boolean;
+}
+export interface MarketCategory { slug: string; name: string; vertical: string }
+
+/** Public reads with no session attached: nothing on them is personal, and a
+ *  stale cookie must never turn browsing into a sign-in redirect. */
+async function publicGet<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, { cache: 'no-store' });
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok || json?.success === false) {
+    throw new Error(json?.error?.message || (response.status >= 500
+      ? 'Something went wrong on our side. Please try again.'
+      : 'We couldn’t complete that. Please try again.'));
+  }
+  return json.data as T;
+}
+
+export function getMarketDepth(): Promise<MarketDepth> {
+  return publicGet<MarketDepth>('/api/v1/market/depth');
+}
+export function getMarketItems(params: { category?: string; cursor?: string }): Promise<{ items: MarketItem[]; nextCursor: string | null }> {
+  const qs = new URLSearchParams({ sort: 'popular' });
+  if (params.category) qs.set('category', params.category);
+  if (params.cursor) qs.set('cursor', params.cursor);
+  return publicGet(`/api/v1/market/items?${qs}`);
+}
+/** The goods categories the Market chips offer — only ones with a live store. */
+export async function getMarketCategories(): Promise<MarketCategory[]> {
+  const rail = await publicGet<{ enabled?: boolean; categories?: MarketCategory[] }>('/api/v1/discovery/categories?vertical=RETAIL');
+  return (rail.categories ?? []).filter((category) => category.vertical === 'RETAIL');
+}
+
 // ── Cart ──────────────────────────────────────────────────────────────────
 export async function getCart(options?: { redirectOnExpired?: boolean }): Promise<Cart> {
   const data = (await apiFetch('/api/v1/customer/cart', undefined, options)).data as Cart | null;
@@ -194,7 +259,7 @@ export async function setCartAddress(addressId: string): Promise<Cart> {
     body: JSON.stringify({ addressId }),
   })).data as { cart?: Cart };
   if (!payload?.cart || !Array.isArray(payload.cart.items)) {
-    throw new Error('Swift did not return an updated delivery quote. Checkout stays locked.');
+    throw new Error('Swift couldn’t update your delivery total. Checkout is paused. Check your cart and try again.');
   }
   return payload.cart;
 }
@@ -327,9 +392,6 @@ export async function rideAvailability(lat: number, lng: number): Promise<{ leve
 export async function rideEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number } }) {
   return (await apiFetch('/api/v1/rides/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
 }
-export async function requestRide(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; passengerCount?: number; rideClass?: string }) {
-  return (await apiFetch('/api/v1/rides/request', { method: 'POST', body: JSON.stringify(body) })).data;
-}
 export async function activeRide(): Promise<any> { return (await apiFetch('/api/v1/rides/active')).data; }
 export async function getRide(id: string): Promise<any> { return (await apiFetch(`/api/v1/rides/${encodeURIComponent(id)}`)).data; }
 export async function watchRide(body: { lat: number; lng: number }) {
@@ -357,4 +419,4 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
 // [W-13] `Math.round(n ?? 0)` printed "GY$0" for a price the server never sent
 // and "GY$NaN" for a broken one. Free and unknown are different facts, and a
 // customer must never be shown either as the other.
-export const money = (n: unknown) => formatAmount(n, 'GY$');
+export const money = (n: unknown) => formatMoney(n);

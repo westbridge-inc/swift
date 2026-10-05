@@ -27,10 +27,13 @@
 // "The comment says idempotent" is NOT evidence — that is the claim being
 // checked, not a proof of it.
 //
-// 8 of 53 classes are certified today. The rest are NOT_CERTIFIED, which is a
-// statement about what has been VERIFIED, not an accusation that they are
-// unsafe. Certifying one is a small piece of work: read the handler, find the
-// property, name it here, and the button turns back on.
+// Which classes are certified today is asserted live by
+// `job-recovery-census.test.ts` (it counts the SAFE_REPLAY policies and keeps
+// the certified set under half the registry) — this file states no fixed
+// number, because a number stated here drifts every time one lands. The rest
+// are NOT_CERTIFIED, which is a statement about what has been VERIFIED, not an
+// accusation that they are unsafe. Certifying one is a small piece of work:
+// read the handler, find the property, name it here, and the button turns on.
 // ---------------------------------------------------------------------------
 
 /** What an operator may do with a dead job of this class. */
@@ -59,7 +62,6 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'ads-stats-rollup': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'ads-weekly-report': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'agent-cash-sla': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'agent-ops-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'algo-decision-retention': { policy: 'SAFE_REPLAY', why: 'Purges decision-log rows past their retention. A second run finds nothing left to purge.' },
   'auto-cancel': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'auto-complete': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -71,15 +73,14 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'billing-fx-notices': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-invariants': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'booking-reminders': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'checkout-outbox': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'checkout-outbox': { policy: 'SAFE_REPLAY', why: 'Lease-claimed outbox drain: claimNextRow takes a due row under FOR UPDATE SKIP LOCKED with a claim lease, publishes under jobId = row id, and stamps processedAt on success. A replay finds only unprocessed rows; a crash between the add and the processedAt mark re-claims after the lease lapses and re-adds the same jobId, which BullMQ collapses while the job still exists.' },
   'collusion-affinity-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'compliance-sample': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'convert-trials': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'cw-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'discovery-ai-classify': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'discovery-backfill': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'discovery-derivation': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'dispatch-order': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'dispatch-order': { policy: 'SAFE_REPLAY', why: 'The offer cascade is exactly-once per attempt (a live offer short-circuits via offeredIfCurrent; installOfferPair is one atomic Lua reservation refusing ORDER_TAKEN/MOVER_BUSY). The exhaustion tail derives a replay tag from the BullMQ job id: a redelivery of the same job passes the same stale-search guards, then reuses the attempt count that run committed instead of INCRing again, and its retry/terminal pushes (dedupeKey) and its delayed re-arm (jobId) are keyed by that run, so each collapses into the first. Keys never use the attempt count, which restarts after a manual retry. Residual: a replay that arrives after its re-arm already ran and left BullMQ retention can add one extra re-sweep.' },
   'eta-pad-weekly': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'evidence-retention': { policy: 'SAFE_REPLAY', why: 'Repairs holds, drains the legal-hold VAULT OUTBOX (idempotent by construction) and deletes only unsealed, case-less bundles past their window; the database triggers refuse anything else.' },
   'expiry-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -95,7 +96,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'liveness-midshift': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'mmg-link-apply': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'mover-revocation-outbox': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'offer-timeout': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'offer-timeout': { policy: 'SAFE_REPLAY', why: 'The first action is removeOfferIfOwned, an atomic compare-consume of the exact offer generation: a redelivery reads removed === false and returns before the acceptance-rate decay, the declined-set add or the trailing dispatchOrder, so each consequence runs at most once.' },
   'poll-mmg-billing': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'prep-shadow-grade': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'prep-stats-nightly': { policy: 'SAFE_REPLAY', why: 'Recomputes every vendor prep-time distribution from a trailing window. The input is the window, not the previous run.' },
@@ -105,9 +106,9 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'rating-actor-fold': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'rating-reminder-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'rating-stats-recompute': { policy: 'SAFE_REPLAY', why: 'A full recompute whose contract is that it lands IDENTICAL to the incremental path. Running it twice produces the same aggregates.' },
-  'reconcile-dispatch': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'reconcile-dispatch': { policy: 'SAFE_REPLAY', why: 'RECOMPUTES from its inputs and writes no business rows: it reads the stranded set (ready, riderless, no live offer, past the stuck window) and its only effect is re-enqueueing dispatch-order — itself SAFE_REPLAY — under a per-order NX cooldown claim (dispatch:reconciled:<id>), so a redelivered sweep over the same window re-drives nothing twice. Its scan cursor advances by compare-and-set, so a late replay cannot rewind a newer sweep. It already runs every two minutes; a replay is one more sweep.' },
   'reconcile-earnings': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'release-held-orders': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'release-held-orders': { policy: 'SAFE_REPLAY', why: 'The release is a DB compare-and-set: updateMany matches status plus an expired hold on a row whose releasedToVendorAt is still null, and clears holdExpiresAt. The findMany of a replay filters on holdExpiresAt <= now, which a released (null) row no longer matches, so the second sweep releases nothing and notifies no vendor twice. The alert ladder is the order outbox row written inside the release transaction under the deterministic key order:<id>:vendor-alert-escalate (skipDuplicates), published by the lease-claimed drainer under jobId = row id, so a replay arms no duplicate ladder.' },
   'retention-sweep': { policy: 'SAFE_REPLAY', why: 'Seeds retention defaults (an upsert) and deletes rows past their window. A second run deletes nothing new.' },
   'route-match': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'scheduler-heartbeat': { policy: 'SAFE_REPLAY', why: 'Writes one Redis key and pages on pool saturation through opsPageOnce, which dedupes. A second run overwrites the same key.' },
@@ -122,7 +123,6 @@ export type JobName =
   | 'ads-stats-rollup'
   | 'ads-weekly-report'
   | 'agent-cash-sla'
-  | 'agent-ops-scan'
   | 'algo-decision-retention'
   | 'auto-cancel'
   | 'auto-complete'
@@ -139,7 +139,6 @@ export type JobName =
   | 'compliance-sample'
   | 'convert-trials'
   | 'cw-scan'
-  | 'discovery-ai-classify'
   | 'discovery-backfill'
   | 'discovery-derivation'
   | 'dispatch-order'

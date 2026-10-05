@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { ORDER_TRANSITIONS } from '../modules/order/order.service';
-import type { OrderStatus } from '@prisma/client';
+import { TaxiStopStatus, type OrderStatus } from '@prisma/client';
+import {
+  MOVER_HOLDING_STATUSES,
+  TAXI_STOP_LAW,
+  TAXI_STOP_PARENT_STATUS,
+  TAXI_STOP_TRANSITIONS,
+  custodyOf,
+  isTaxiStopTransition,
+  isTerminalOrderStatus,
+} from '../modules/order/order-status';
 
 // FUL (fulfillment prompt Part 3): "the table is generated into a test suite
 // that asserts every legal transition works and every illegal one is refused."
@@ -70,5 +79,80 @@ describe('ORDER_TRANSITIONS — state-machine integrity (fulfillment Part 3)', (
 
   it('FAILED is reachable ONLY from the handover states — the door, and [M-29] the ride’s destination (SWIFT-096 — matches the handover guard)', () => {
     expect([...preds('FAILED')].sort()).toEqual(['ARRIVED', 'EN_ROUTE_DELIVERY', 'PICKED_UP', 'RIDE_IN_PROGRESS']); // [M-28] + a courier's parcel in custody
+  });
+});
+
+// [TAXI multi-stop] A stop's own machine, in ORDER_TRANSITIONS' convention
+// (key = target, value = the states it may be entered from). A stop is born
+// PENDING; the driver arrives, then departs; or skips it, before arriving or
+// after waiting. Nothing leaves DEPARTED or SKIPPED: a resolved stop is never
+// re-opened, and the itinerary is frozen at request (the plan's ruling).
+describe('[TAXI multi-stop] TAXI_STOP_TRANSITIONS — the stop machine is well-formed', () => {
+  const STOPS = Object.values(TaxiStopStatus) as TaxiStopStatus[];
+  const stopPreds = (s: TaxiStopStatus): readonly TaxiStopStatus[] => TAXI_STOP_TRANSITIONS[s];
+
+  it('the edges are exactly arrive, depart, and skip (before arriving or after)', () => {
+    expect(TAXI_STOP_TRANSITIONS).toEqual({
+      PENDING: [],
+      ARRIVED: ['PENDING'],
+      DEPARTED: ['ARRIVED'],
+      SKIPPED: ['PENDING', 'ARRIVED'],
+    });
+  });
+
+  it('PENDING is the sole entry; every other stop state has a predecessor', () => {
+    expect(stopPreds('PENDING')).toEqual([]);
+    for (const s of STOPS.filter((x) => x !== 'PENDING')) {
+      expect(stopPreds(s).length, `${s} is unreachable — no predecessors`).toBeGreaterThan(0);
+    }
+  });
+
+  it('every predecessor is a stop state, and none is its own predecessor', () => {
+    for (const s of STOPS) {
+      for (const p of stopPreds(s)) expect(STOPS, `${s} names an unknown predecessor "${p}"`).toContain(p);
+      expect(stopPreds(s), `${s} lists itself as a predecessor`).not.toContain(s);
+    }
+  });
+
+  it('every stop state is reachable from PENDING', () => {
+    const seen = new Set<TaxiStopStatus>(['PENDING']);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const s of STOPS) {
+        if (!seen.has(s) && stopPreds(s).some((p) => seen.has(p))) { seen.add(s); grew = true; }
+      }
+    }
+    expect([...seen].sort()).toEqual([...STOPS].sort());
+  });
+
+  it('a RESOLVED stop is never a predecessor: DEPARTED and SKIPPED are final for the stop', () => {
+    for (const s of STOPS) {
+      for (const p of stopPreds(s)) expect(TAXI_STOP_LAW[p], `${p} → ${s} re-opens a resolved stop`).toBe('OPEN');
+    }
+  });
+
+  it('every OPEN stop can still be resolved: no open state is a dead end', () => {
+    for (const open of STOPS.filter((s) => TAXI_STOP_LAW[s] === 'OPEN')) {
+      const exits = STOPS.filter((t) => stopPreds(t).includes(open));
+      expect(exits.some((t) => TAXI_STOP_LAW[t] === 'RESOLVED'), `${open} has no way to be resolved`).toBe(true);
+    }
+  });
+
+  it('the predicate agrees with the table for every pair', () => {
+    for (const from of STOPS) {
+      for (const to of STOPS) expect(isTaxiStopTransition(from, to)).toBe(stopPreds(to).includes(from));
+    }
+  });
+
+  it('stops live INSIDE the ride: the parent is the taxi state with the passenger aboard, and every way out of it ends the ride', () => {
+    expect(TAXI_STOP_PARENT_STATUS).toBe('RIDE_IN_PROGRESS');
+    expect(custodyOf(TAXI_STOP_PARENT_STATUS)).toBe('MOVER_HOLDING');
+    expect(MOVER_HOLDING_STATUSES).toContain(TAXI_STOP_PARENT_STATUS);
+    // So an open stop cannot outlive its parent status: once the ride leaves
+    // RIDE_IN_PROGRESS it is over, and the stops must be resolved before that.
+    const exits = (Object.keys(ORDER_TRANSITIONS) as OrderStatus[]).filter((t) => ORDER_TRANSITIONS[t].includes(TAXI_STOP_PARENT_STATUS));
+    expect(exits.length).toBeGreaterThan(0);
+    expect(exits.filter((t) => !isTerminalOrderStatus(t))).toEqual([]);
   });
 });

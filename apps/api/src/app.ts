@@ -23,8 +23,8 @@ import { adsRoutes } from './modules/ads/ads.routes';
 import { placesRoutes } from './modules/places/places.routes';
 import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
+import { serviceCatalogRoutes } from './modules/services/service-catalog.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
-import { aiRoutes } from './modules/ai/ai.routes';
 import { setAppLogger } from './utils/logger';
 import { evaluateSchedulerHealth, schedulerStallMs, workerCheckStatus } from './utils/scheduler-health';
 import { prismaPlugin, beginRequestTenantContext } from './plugins/prisma';
@@ -36,7 +36,7 @@ import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegradedCounter, type RuntimeReadinessState } from './plugins/readiness';
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
-import { loggerRedactConfig } from './utils/logger-config';
+import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
@@ -83,6 +83,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       level: process.env['LOG_LEVEL'] || 'info',
       // secrets and credentials never reach log output
       redact: loggerRedactConfig,
+      serializers: loggerSerializers,
       transport:
         isDevelopment()
           ? { target: 'pino-pretty', options: { colorize: true } }
@@ -150,10 +151,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(rateLimit, {
     // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
     // can raise it without a code change (per-route limits on auth/OTP stay tight
-    // regardless). Authenticated callers are bucketed per session token, anonymous
-    // ones per resolved IP (never the spoofable X-Forwarded-For) — see D1-01.
+    // regardless). Callers with a VERIFIED token are bucketed per userId;
+    // anonymous and unverifiable requests share the resolved-IP bucket (never
+    // the spoofable X-Forwarded-For) — see D1-01.
     ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
-    keyGenerator: rateLimitKey,
+    // The key generator verifies the bearer token (captured lazily via the
+    // closure — app.jwt is decorated by authPlugin, registered below) so an
+    // attacker cannot mint a fresh bucket per fake token; unverified and
+    // anonymous requests share the resolved-IP bucket.
+    keyGenerator: rateLimitKey((token) => app.jwt.verify(token)),
     max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
     timeWindow: '1 minute',
   });
@@ -313,8 +319,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(placesRoutes, { prefix: '/api/v1/places' });
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
+  await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
-  await app.register(aiRoutes, { prefix: '/api/v1/ai' });
   // Unauthenticated read-only storefront pages (web SEO) — see module header.
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   // Printed-QR short links: /s/{code} at the ROOT path (the production web
@@ -336,6 +342,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // webhook secret arrives with MMG biller onboarding.
   const { agentCashRoutes } = await import('./modules/billing/agent-cash.routes');
   await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
+  // MMG hosted-checkout replies [mmg checkout 3/6]: the web return page
+  // forwards MMG's reply here and MMG's own servers may call notify. Both are
+  // rate-limited, body-capped and inert while MMG_CHECKOUT_ENABLED is off; a
+  // reply only prompts the server's own MMG lookup, never a credit.
+  const { mmgCheckoutPublicRoutes } = await import('./modules/billing/mmg-checkout.routes');
+  await app.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps

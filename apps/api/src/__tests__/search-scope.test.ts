@@ -32,6 +32,19 @@ describe('document ids carry the tenant', () => {
     expect(() => docId('tenant', 'x y')).toThrow(/cannot build a document id/);
     expect(() => docId('', 'x')).toThrow(/cannot build a document id/);
   });
+
+  it('a part that starts or ends with an underscore cannot become a document id: it would read back split at the wrong place', () => {
+    // Before: docId('t_', 'x') and docId('t', '_x') both wrote "t___x", which
+    // parses as tenant "t". A tenant-bound sync then kept its own stale
+    // document as "another tenant's" (the CI flake behind #1350).
+    expect(() => docId('t_', 'x')).toThrow(/cannot build a document id/);
+    expect(() => docId('t', '_x')).toThrow(/cannot build a document id/);
+    expect(() => docId('_t', 'x')).toThrow(/cannot build a document id/);
+    expect(() => docId('t', 'x_')).toThrow(/cannot build a document id/);
+    for (const [tenantId, entityId] of [['t_1', 'x'], ['a-b_c', 'd_e-f'], ['swift-default', 'clx_9'], ['t-', '-x']] as const) {
+      expect(parseDocId(docId(tenantId, entityId))).toEqual({ tenantId, entityId });
+    }
+  });
 });
 
 describe('the filter builder never concatenates a raw value', () => {

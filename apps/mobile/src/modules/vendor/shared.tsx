@@ -3,9 +3,11 @@ import React from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
-import { T, TonePill, PillButton } from '../../kit';
-import { useAuthStore } from '../../stores/authStore';
+import { T, TonePill, PillButton, useLogoutConfirm } from '../../kit';
 import { money } from '../../lib/money';
+import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '../../lib/appointmentTime';
+import { canVendorConfirmDelivered } from './screens/delivery-owner';
+import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
 
 export const GUTTER = space['2xl'];
 
@@ -17,7 +19,7 @@ export function prettyVendorType(t?: string) {
 
 // ─── Order helpers ───────────────────────────────────────────────────────────
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
 
 /** Statuses where a rider owns the status lane; kitchen progress then rides
  *  the preparingAt/readyAt timestamps (see the vendor prep routes). */
@@ -42,6 +44,15 @@ export function orderActions(order: any): { label: string; action: VendorOrderAc
   }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).
   if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
+  // Store-owned delivery has its own terminal ceremony. Platform-rider orders
+  // remain exclusively completable from the assigned rider's app.
+  if (canVendorConfirmDelivered({
+    fulfillment: order?.fulfillment,
+    fulfillmentMode: order?.fulfillmentMode,
+    status: order?.status,
+    riderId: order?.riderId,
+    riderPresent: Boolean(order?.rider),
+  })) return [{ label: 'Confirm delivered', action: 'delivered' }];
   return [];
 }
 
@@ -83,12 +94,9 @@ export function fmtDate(iso?: string) {
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 }
 
-// Appointment slot → "Mon 14 Jul · 2:30 PM" (manual format; Hermes Intl is limited).
 export function formatSlot(iso?: string) {
   if (!iso) return 'Time to be confirmed';
-  const d = new Date(iso);
-  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  return `${days[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} · ${clock(d)}`;
+  return formatAppointmentSlot(iso);
 }
 
 export function prettyStatus(status?: string) {
@@ -552,22 +560,35 @@ export function HeaderAction({ label, tone = 'brand', onPress }: { label: string
   );
 }
 
+/** What logging out costs a business on this device: its new-order alerts.
+ *  Logout retires the device's push token and closes its socket. */
+const VENDOR_LOGOUT_BODY = 'New-order alerts stop on this device until you log back in. Your store, menu and orders stay with your account.';
+
 /** Tab-root header: the board may replace the product eyebrow with a live store
- *  state; the other tabs retain the quiet Swift Business identity. */
+ *  state; the other tabs retain the quiet Swift Business identity. A business
+ *  sign-up passes `onBack`: "‹ Swift" then sits top-left, above the title. */
 export function TabHeader({
   title,
   onSwitch,
+  onBack,
+  backBusy = false,
   eyebrow = 'SWIFT BUSINESS',
   avatar,
   statusTone = 'brand',
+  logoutBody = VENDOR_LOGOUT_BODY,
 }: {
   title: string;
   onSwitch?: () => void;
+  /** Back to ordering in Swift (components/onboarding/backToSwift). */
+  onBack?: () => void;
+  backBusy?: boolean;
   eyebrow?: string;
   avatar?: string;
   statusTone?: 'brand' | 'success' | 'warning' | 'muted';
+  /** The log-out ask's words, for a screen that loses something else. */
+  logoutBody?: string;
 }) {
-  const { logout } = useAuthStore();
+  const { requestLogout, logoutDialog } = useLogoutConfirm({ body: logoutBody });
   const statusColor =
     statusTone === 'success'
       ? color.success
@@ -576,7 +597,7 @@ export function TabHeader({
         : statusTone === 'muted'
           ? color.text.secondary
           : color.brand[500];
-  return (
+  const header = (
     <View
       style={{
         flexDirection: 'row',
@@ -616,9 +637,19 @@ export function TabHeader({
           </View>
         ) : null}
         {onSwitch ? <HeaderAction label="Switch app" onPress={onSwitch} /> : null}
-        <HeaderAction label="Log out" tone="muted" onPress={logout} />
+        <HeaderAction label="Log out" tone="muted" onPress={requestLogout} />
       </View>
+      {logoutDialog}
     </View>
+  );
+  if (!onBack) return header;
+  return (
+    <>
+      <View style={{ paddingHorizontal: GUTTER, paddingTop: space.xs }}>
+        <BackToSwiftButton onPress={onBack} busy={backBusy} />
+      </View>
+      {header}
+    </>
   );
 }
 
@@ -629,23 +660,18 @@ export type RevenueDay = {
   isToday?: boolean;
 };
 
-export const DAY_MILLISECONDS = 24 * 60 * 60 * 1000;
-
-export const GUYANA_OFFSET_MILLISECONDS = 4 * 60 * 60 * 1000;
-
 export function numericFact(value: unknown): number | null {
   const n = Number(value);
   return value !== null && value !== undefined && Number.isFinite(n) ? n : null;
 }
 
-/** Guyana has no daylight-saving transition; shift once and read the UTC face. */
+/** A calendar-only UTC Date for existing weekday arithmetic. */
 export function guyanaDate(offsetDays = 0) {
-  return new Date(Date.now() - GUYANA_OFFSET_MILLISECONDS + offsetDays * DAY_MILLISECONDS);
+  return new Date(`${guyanaDayKey(offsetDays)}T00:00:00.000Z`);
 }
 
 export function guyanaDayKey(offsetDays = 0) {
-  const d = guyanaDate(offsetDays);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  return addAppointmentDays(appointmentDayKey(new Date()), offsetDays);
 }
 
 export function hasTrailingGuyanaDays(daily: RevenueDay[], take: number) {
@@ -728,15 +754,15 @@ export function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => voi
       </View>
       <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
         {blocked
-          ? 'Pay using your Swift Number. Confirmation clears the billing hold; any separate verification hold remains.'
-          : 'Pay using your Swift Number to keep the weekly fee current.'}
+          ? 'A credited payment clears the billing hold; any separate verification hold remains.'
+          : 'View your weekly fee and payment status.'}
       </T>
       {due != null && due > 0 ? (
         <T variant="label" weight="semibold" style={{ marginTop: space.sm }}>
           Due now: {money(due)}
         </T>
       ) : null}
-      <PillButton label="How to pay" icon="hash" size="md" style={{ marginTop: space.md }} onPress={onPay} />
+      <PillButton label="Weekly fee" icon="hash" size="md" style={{ marginTop: space.md }} onPress={onPay} />
     </View>
   );
 }

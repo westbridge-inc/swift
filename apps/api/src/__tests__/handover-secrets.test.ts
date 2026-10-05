@@ -104,8 +104,21 @@ async function makeRider() {
   return { ...owned, riderId: rider.id };
 }
 
+/** A passenger of their own for each ride: one customer can hold only one live
+ *  taxi (orders_one_live_taxi_per_customer_key), and every ride here is live. */
+async function newPassenger() {
+  return makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+}
+
 /** A taxi ride in a given state, always carrying a REAL PIN. */
-async function makeRide(driverId: string, customerId: string, status: 'DRIVER_ASSIGNED' | 'DRIVER_EN_ROUTE' | 'DRIVER_ARRIVED' | 'RIDE_IN_PROGRESS', pin: string, ridePinVerified = false) {
+async function makeRide(
+  driverId: string,
+  customerId: string,
+  status: 'DRIVER_ASSIGNED' | 'DRIVER_EN_ROUTE' | 'DRIVER_ARRIVED' | 'RIDE_IN_PROGRESS',
+  pin: string,
+  ridePinVerified = false,
+  pickup: { lat: number; lng: number } | null = null,
+) {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `SEC-${nanoid(10)}`,
@@ -113,6 +126,8 @@ async function makeRide(driverId: string, customerId: string, status: 'DRIVER_AS
       customerId,
       driverId,
       status,
+      pickupLat: pickup?.lat ?? null,
+      pickupLng: pickup?.lng ?? null,
       deliveryAddress: 'dropoff',
       deliveryLat: 6.8,
       deliveryLng: -58.15,
@@ -176,7 +191,7 @@ afterAll(async () => {
 describe('[F-0011] the taxi driver never receives the ride PIN they verify', () => {
   it('PUT /rides/:id/en-route does not carry the PIN', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_ASSIGNED', '111222');
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'DRIVER_ASSIGNED', '111222');
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/en-route`, {}, driver.token);
     expect(res.statusCode).toBe(200);
@@ -188,7 +203,14 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
 
   it('PUT /rides/:id/arrived does not carry the PIN', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_EN_ROUTE', '222333');
+    // [E19] The arrival gate reads the driver's server-side fix against the
+    // ride's pickup point; give this fixture a truthful fresh fix so the
+    // assertion below keeps exercising the response, not the gate.
+    await app.prisma.driver.update({
+      where: { id: driver.driverId },
+      data: { currentLat: 6.8013, currentLng: -58.1551, lastLocationUpdate: new Date() },
+    });
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'DRIVER_EN_ROUTE', '222333', false, { lat: 6.8013, lng: -58.1551 });
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/arrived`, {}, driver.token);
     expect(res.statusCode).toBe(200);
@@ -197,7 +219,7 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
 
   it('PUT /rides/:id/verify-pin does not echo the PIN back on success', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_ARRIVED', '333444');
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'DRIVER_ARRIVED', '333444');
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/verify-pin`, { pin: '333444' }, driver.token);
     expect(res.statusCode).toBe(200);
@@ -206,7 +228,7 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
 
   it('PUT /rides/:id/start does not carry the PIN', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_ARRIVED', '444555', true);
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'DRIVER_ARRIVED', '444555', true);
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/start`, {}, driver.token);
     expect(res.statusCode).toBe(200);
@@ -215,7 +237,7 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
 
   it('PUT /rides/:id/complete does not carry the PIN', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'RIDE_IN_PROGRESS', '555666', true);
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'RIDE_IN_PROGRESS', '555666', true);
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: ride.id } });
 
     // [M-29] The bare tap is refused for a cash ride (the fare outcome
@@ -227,7 +249,7 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
 
   it('POST /rides/:id/handover — the fare outcome that completes the ride — does not carry the PIN', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'RIDE_IN_PROGRESS', '555777', true);
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'RIDE_IN_PROGRESS', '555777', true);
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: ride.id } });
 
     const res = await app.inject({
@@ -243,7 +265,7 @@ describe('[F-0011] the taxi driver never receives the ride PIN they verify', () 
 
   it('GET /rides/active — the polled endpoint — does not carry the PIN', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_ARRIVED', '666777');
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'DRIVER_ARRIVED', '666777');
     await app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: ride.id } });
 
     const res = await get('/api/v1/driver/rides/active', driver.token);
@@ -284,12 +306,50 @@ describe('[F-0011] the delivery rider never receives the delivery PIN they verif
     assertNoHandoverSecrets(res.payload, 'GET /rider/orders/active');
     expect(res.json().data?.id).toBe(order.id);
   });
+
+  it('[MKT-F057] a goods order with a real door PIN never leaks it on the delivered path', async () => {
+    const rider = await makeRider();
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SECG-${nanoid(10)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: customer.userId,
+        riderId: rider.riderId,
+        status: 'ARRIVED',
+        deliveryAddress: 'somewhere',
+        deliveryLat: 6.81,
+        deliveryLng: -58.16,
+        subtotalBase: 2000,
+        subtotalMarkup: 0,
+        subtotalCustomer: 2000,
+        deliveryFee: 700,
+        totalAmount: 2700,
+        paymentMethod: 'MOBILE_MONEY',
+        paymentStatus: 'CAPTURED',
+        ridePin: '135790',
+      },
+    });
+    createdOrderIds.push(order.id);
+    await app.prisma.rider.update({ where: { id: rider.riderId }, data: { currentOrderId: order.id } });
+
+    // The refusal answers WITHOUT echoing the secret it compared against.
+    const wrong = await put(`/api/v1/rider/orders/${order.id}/delivered`, { ridePin: '000001' }, rider.token);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('INVALID_PIN');
+    assertNoHandoverSecrets(wrong.payload, 'PUT /rider/orders/:id/delivered (refusal)');
+
+    // The completion answers without echoing it either.
+    const done = await put(`/api/v1/rider/orders/${order.id}/delivered`, { ridePin: '135790' }, rider.token);
+    expect(done.statusCode).toBe(200);
+    expect(done.json().data?.status).toBe('DELIVERED');
+    assertNoHandoverSecrets(done.payload, 'PUT /rider/orders/:id/delivered (success)');
+  });
 });
 
 describe('[F-0011] withholding the code did not break verification (positive controls)', () => {
   it('the correct PIN still verifies the ride', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_ARRIVED', '888999');
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'DRIVER_ARRIVED', '888999');
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/verify-pin`, { pin: '888999' }, driver.token);
     expect(res.statusCode).toBe(200);
@@ -301,7 +361,7 @@ describe('[F-0011] withholding the code did not break verification (positive con
 
   it('a wrong PIN is still rejected and still burns an attempt', async () => {
     const driver = await makeDriver();
-    const ride = await makeRide(driver.driverId, customer.userId, 'DRIVER_ARRIVED', '909090');
+    const ride = await makeRide(driver.driverId, (await newPassenger()).userId, 'DRIVER_ARRIVED', '909090');
 
     const res = await put(`/api/v1/driver/rides/${ride.id}/verify-pin`, { pin: '010101' }, driver.token);
     expect(res.statusCode).toBe(400);

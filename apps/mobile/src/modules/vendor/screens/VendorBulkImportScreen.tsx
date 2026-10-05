@@ -210,7 +210,12 @@ export function VendorBulkImportScreen({ navigation }: any) {
                 Check the names and prices below — nothing imports until you confirm.
               </T>
             )}
-            {(mapped.preview ?? []).slice(0, 5).map((r: any, i: number) => (
+            {/* [F-1218-01] Every row the import will create is on this card.
+                A wrongly read row past a five-row cap was importable unseen;
+                the API sends every row a menu produced, and a server that sent
+                fewer rows than it found is said so below, never passed off as
+                the whole. */}
+            {(mapped.preview ?? []).map((r: any, i: number) => (
               <View key={i} style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: color.border.subtle, paddingTop: space.sm }}>
                 <T variant="label" numberOfLines={1} style={{ flex: 1, paddingRight: space.md }}>
                   {r.name ?? '—'}
@@ -221,6 +226,11 @@ export function VendorBulkImportScreen({ navigation }: any) {
                 </T>
               </View>
             ))}
+            {(mapped.preview?.length ?? 0) < (mapped.rowCount ?? 0) ? (
+              <T variant="micro" tone="muted" style={{ marginTop: space.sm }}>
+                Showing the first {mapped.preview?.length ?? 0} of {mapped.rowCount} rows.
+              </T>
+            ) : null}
             <PillButton
               label={`Import ${mapped.rowCount} items`}
               style={{ marginTop: space.md }}

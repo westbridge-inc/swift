@@ -79,7 +79,7 @@ describe('[D-12] the payload is summarised, never printed', () => {
   });
 
   it('a sensitive VALUE under an innocent key is caught by shape, not by name', () => {
-    const summary = payloadSummary(JSON.stringify({ x: '+5926001234', y: 'ops@swift.gy', z: 'A'.repeat(30) }));
+    const summary = payloadSummary(JSON.stringify({ x: '+5926001234', y: 'ops@swiftgy.com', z: 'A'.repeat(30) }));
     expect(summary).toContain('x: «phone»');
     expect(summary).toContain('y: «email»');
     expect(summary).toContain('z: «token»');
@@ -107,9 +107,9 @@ describe('[D-12] the payload is summarised, never printed', () => {
 
 describe('[D-12] the failure text is scrubbed too', () => {
   it('an error message quoting the data it choked on does not leak it', () => {
-    const scrubbed = failureSummary('Invalid phone +592 600 1234 for ops@swift.gy');
+    const scrubbed = failureSummary('Invalid phone +592 600 1234 for ops@swiftgy.com');
     expect(scrubbed).not.toContain('592');
-    expect(scrubbed).not.toContain('ops@swift.gy');
+    expect(scrubbed).not.toContain('ops@swiftgy.com');
     expect(scrubbed).toContain('«phone»');
     expect(scrubbed).toContain('«email»');
   });

@@ -8,7 +8,7 @@ import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { vendorPhoto } from '../../../lib/images';
-import { EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
+import { CartBar, useCartBarClearance, EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -16,6 +16,8 @@ const CARD_W = (SCREEN_W - GUTTER * 2 - space.lg) / 2;
 
 // Kit frame 12 — the full "Recommended Restaurant" grid.
 export function RecommendedScreen() {
+  // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
+  const cartClearance = useCartBarClearance();
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
   const { latitude, longitude, status } = useLocationStore();
@@ -43,7 +45,7 @@ export function RecommendedScreen() {
           keyExtractor={(v) => v.id}
           numColumns={2}
           columnWrapperStyle={{ gap: space.lg, paddingHorizontal: GUTTER }}
-          contentContainerStyle={{ gap: space.lg, paddingTop: space.md, paddingBottom: space['3xl'] }}
+          contentContainerStyle={{ gap: space.lg, paddingTop: space.md, paddingBottom: space['3xl'] + cartClearance }}
           renderItem={({ item: v }) => (
             <FoodCard
               width={CARD_W}
@@ -62,6 +64,8 @@ export function RecommendedScreen() {
           )}
         />
       )}
+      {/* [E09] A shopper who has added items can always reach the Cart tab. */}
+      <CartBar />
     </Screen>
   );
 }

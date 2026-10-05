@@ -1,23 +1,26 @@
+import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
-import { lineTotal, orderTotal, promoDiscount, promoCapacity } from '../../utils/order-total';
-import { canonicalBillableKm } from '../../utils/billable-distance';
+import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
-import { deliveryFeeFromRates, expressDeliveryFee, type DeliveryRates } from '../../utils/markup';
+import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
+import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
-import { getMapsProvider } from '../../providers/maps/maps-provider';
+import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
 import { LATE_CANCEL_FEE, isFreeCancellation, freeCancellationExpiresAt } from '../order/cancel-policy';
+import { orderVertical } from '../order/order-vertical';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
-import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache } from './home-cache';
+import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
+import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
@@ -25,12 +28,14 @@ import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { visibleVendorRelForCaller, visibleVendorForCaller } from '../vendor/vendor-visibility';
 import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
-import { OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
-import { resolveSelectedOptions, optionsUnitPrice } from '../order/options';
+import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { RatingService } from '../rating/rating.service';
-import { NotificationService, tenantOfUser } from '../notification/notification.service';
+import { scheduleVendorSearchSync } from '../search/search-sync';
+import { NotificationService } from '../notification/notification.service';
+import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
 import { AccountService } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
@@ -41,9 +46,11 @@ import {
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
+import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
-import { checkoutRequestHash, drainCheckoutOutbox, findCheckoutReceipt } from '../order/checkout-outbox';
+import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
+import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 
 /** [F-021-21] Consent surface from the client's own attestation header,
  *  constrained to the known set — never a hardcoded guess. */
@@ -126,14 +133,18 @@ const cartTipSchema = z.object({
 // 99,999,999 storage ceiling — the same value the cart rejected.
 const MAX_TIP_GYD = 50_000;
 
+// Per-vendor DELIVERY|PICKUP choice for multi-vendor carts. [E01] ONE schema
+// for the checkout body and the cart quote, so the preview accepts exactly the
+// choices checkout does.
+const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
+
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
   deliveryInstructions: z.string().max(500).optional(),
   tipAmount: zMoneyWhole.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
-  // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts
-  fulfillmentSelections: z.record(z.enum(['DELIVERY', 'PICKUP'])).optional(),
+  fulfillmentSelections: fulfillmentSelectionsSchema.optional(),
   // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
   express: z.boolean().optional(),
   // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
@@ -148,6 +159,44 @@ const checkoutSchema = z.object({
       }),
     )
     .max(10)
+    .optional(),
+});
+
+/**
+ * [E01] GET /cart prices the basket for the choices checkout will be sent.
+ * `express`, `fulfillmentSelections` and `tipAmount` mean exactly what they
+ * mean in the checkout body (same rules), carried in a query string:
+ *   - express: "true" | "false" — never z.coerce.boolean(), which reads the
+ *     string "false" as true and would quote every delivery as express;
+ *   - fulfillmentSelections: checkout's record as JSON — Fastify's querystring
+ *     parser has no bracket syntax for nested objects;
+ *   - tipAmount: whole money under the checkout cap; absent = the cart's tip.
+ * A malformed value is a 400: a quote silently priced for a different choice
+ * than the one on screen is the defect this exists to remove.
+ */
+const cartQuerySchema = latLngQuerySchema.extend({
+  express: z.enum(['true', 'false']).optional().transform((v) => v === 'true'),
+  fulfillmentSelections: z
+    .string()
+    .max(4000)
+    .optional()
+    .transform((raw, ctx) => {
+      if (raw === undefined) return undefined;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = undefined;
+      }
+      const selections = fulfillmentSelectionsSchema.safeParse(parsed);
+      if (!selections.success) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'fulfillmentSelections must be a JSON object of vendor id to DELIVERY or PICKUP' });
+        return z.NEVER;
+      }
+      return selections.data;
+    }),
+  tipAmount: z
+    .preprocess((v) => (typeof v === 'string' && /^\d{1,9}$/.test(v) ? Number(v) : v), zMoneyWhole.max(MAX_TIP_GYD))
     .optional(),
 });
 
@@ -248,12 +297,22 @@ async function resolveCustomer(app: FastifyInstance, userId: string) {
   return customer;
 }
 
+/** [E01] The checkout choices a quote is priced for — the same meaning as the
+ *  checkout body's fields of these names. Absent = checkout's own default
+ *  (standard speed, DELIVERY for every vendor, the cart's persisted tip). */
+interface CartQuoteChoices {
+  express?: boolean;
+  fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
+  tipAmount?: number;
+}
+
 /** Build a typed "cart with computed totals" response from a raw cart. */
 async function buildCartResponse(
   app: FastifyInstance,
   userId: string,
   lat?: number,
   lng?: number,
+  choices: CartQuoteChoices = {},
 ) {
   const cart = await app.prisma.cart.findUnique({
     where: { customerId: userId },
@@ -275,6 +334,9 @@ async function buildCartResponse(
               optionGroups: {
                 select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
               },
+              // [E01] Each line prices against ITS OWN vendor — the tracked
+              // `cart.vendor` is only the most recently added store.
+              vendor: { select: { id: true, name: true, latitude: true, longitude: true, minOrderAmount: true } },
             },
           },
         },
@@ -345,30 +407,39 @@ async function buildCartResponse(
   // set). Same routing source as checkout, so the quote equals the final fee.
   const addrLat = deliveryAddr?.latitude ?? lat;
   const addrLng = deliveryAddr?.longitude ?? lng;
+  const destination: LatLng | null = addrLat != null && addrLng != null ? { lat: addrLat, lng: addrLng } : null;
 
-  let distanceKm = 3; // sensible default
-  if (addrLat && addrLng && cart.vendor) {
-    // [ALG-18] Canonical BEFORE pricing — the same number checkout will freeze
-    // and price from, so the quote and the charge cannot differ by a rounding.
-    distanceKm = canonicalBillableKm((await getMapsProvider().routeKm(
-      { lat: cart.vendor.latitude, lng: cart.vendor.longitude },
-      { lat: addrLat, lng: addrLng },
-    )).km);
-  }
+  // FUL-003b: resolve the same country delivery-fee schedule checkout uses, so
+  // the fee previewed here equals the fee charged (null config → code default).
+  const buyer = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  const deliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(buyer?.countryCode ?? '');
+
+  // [E01 · ALG-24] One plan PER VENDOR, through the planner checkout prices
+  // with, in checkout's plan order: a multi-vendor cart is several orders, each
+  // with its own distance, fee and minimum. Services booked as appointments
+  // carry no delivery fee (you go to them / they come to you) — decided per
+  // line exactly as checkout decides it, not from `cart.vendor.vendorType`.
+  // The routing engine is only resolved when a delivery is actually routed.
+  let maps: ReturnType<typeof getMapsProvider> | null = null;
+  const selections = choices.fulfillmentSelections ?? {};
+  const plans = await Promise.all(groupLinesByVendor(cart.items).map(({ vendorId, lines }) => planVendorGroup({
+    vendor: lines[0]!.item.vendor,
+    lines,
+    fulfillment: planFulfillment(lines, selections[vendorId]),
+    destination,
+    deliveryRates,
+    express: choices.express === true,
+    routeKm: (from, to) => (maps ??= getMapsProvider()).routeKm(from, to),
+  })));
 
   // Line items — zero markup: customers pay the vendor base price; platform
   // revenue is weekly subscriptions only. Field names are kept for client
   // compatibility, but markup is always 0 and customerPrice === basePrice.
-  let subtotalBase = 0;
   const subtotalMarkup = 0;
   const unavailableItemIds: string[] = [];
 
   const itemDetails = cart.items.map((ci) => {
-    const base = Number(ci.item.basePrice);
-    const options = resolveSelectedOptions(ci.item, ci.selectedOptions);
-    const unitPrice = base + optionsUnitPrice(options);
-    const lineBase = lineTotal(unitPrice, ci.quantity);
-    subtotalBase += lineBase;
+    const line = priceCartLine(ci);
 
     if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
 
@@ -377,70 +448,89 @@ async function buildCartResponse(
       itemId: ci.itemId,
       name: ci.item.name,
       imageUrl: ci.item.imageUrl,
-      basePrice: base,
-      customerPrice: unitPrice,
+      basePrice: line.basePrice,
+      customerPrice: line.unitPrice,
       quantity: ci.quantity,
       selectedOptions: ci.selectedOptions,
-      selectedOptionNames: options.map((o) => o.optionName),
+      selectedOptionNames: line.options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
-      lineTotal: lineBase,
+      lineTotal: line.lineTotal,
       isAvailable: ci.item.isAvailable,
       fulfillment: ci.item.fulfillment,
+      // [E01] Which store's order this line joins at checkout.
+      vendorId: ci.item.vendorId,
     };
   });
 
+  // [E01] The flat fields are the per-vendor sums (owner decision): a
+  // multi-vendor basket is several orders, so its aggregates are too. For a
+  // single-vendor cart they are that vendor's plan exactly.
+  const sumOf = (values: number[]) => values.reduce((s, v) => s + v, 0);
+  const subtotalBase = sumOf(plans.map((p) => p.subtotal));
   const subtotalCustomer = subtotalBase;
+  const deliveryFee = sumOf(plans.map((p) => p.deliveryFee));
+  const standardDeliveryFee = sumOf(plans.map((p) => p.standardDeliveryFee));
 
-  // Delivery fee — services are appointments (you go to them / they come to you),
-  // not deliveries, so they never carry a delivery fee.
-  // FUL-003b: resolve the same country delivery-fee schedule checkout uses, so
-  // the fee previewed here equals the fee charged (null config → code default).
-  const isService = cart.vendor?.vendorType === 'SERVICE';
-  const buyer = await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-  const deliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(buyer?.countryCode ?? '');
-  const deliveryFee = isService ? 0 : deliveryFeeFromRates(distanceKm, deliveryRates);
-
-  // Promo discount
-  let discount = 0;
+  // [E01 · ALG-24 · M-32] The ONE basket pricer checkout uses: the promo basis
+  // (a store's code → its own plan; a platform code → the whole basket), the
+  // funder's capacity clamp (goods, plus the fee only for a platform code,
+  // never the tip), the tip on the first DELIVERY plan only, and every plan's
+  // total. Promo REFUSALS stay at checkout (owner decision for E01): a code
+  // for a store with nothing in the basket discounts nothing here.
+  const promo = promoCodeRecord
+    ? {
+        discountType: promoCodeRecord.discountType,
+        discountValue: promoCodeRecord.discountValue,
+        maxDiscount: promoCodeRecord.maxDiscount,
+        funder: promoCodeRecord.funder,
+        vendorId: promoCodeRecord.vendorId,
+      }
+    : null;
+  // [REPORT-012 F-012-01] The tip the quote is priced with follows checkout's
+  // rule: an explicit tip (0 included) wins; only an absent one inherits the
+  // cart's persisted tip.
+  const tip = resolveTip(choices.tipAmount, cart.tipAmount);
+  const priceWith = (feeOf: (p: VendorPlan) => number) => priceBasket({
+    plans: plans.map((p) => ({ vendorId: p.vendorId, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: feeOf(p) })),
+    promo,
+    tip,
+  });
+  const priced = priceWith((p) => p.deliveryFee);
+  const discount = priced.discount;
+  const totalAmount = sumOf(priced.perPlan.map((p) => p.total));
   let promoInfo: { code: string; discountType: string; description: string } | null = null;
   if (promoCodeRecord) {
-    const promo = promoCodeRecord as {
-      code: string; discountType: string; discountValue: unknown;
-      maxDiscount: unknown; funder?: string | null; description?: string;
-    };
-    // [ALG-24] The one promo switch — the same function checkout's
-    // validatePromoCode applies, so the quote's discount is the charge's.
-    discount = promoDiscount(promo, { subtotal: subtotalCustomer, deliveryFee });
-    // [M-32] The quote absorbs exactly what checkout will: the goods, plus the
-    // delivery fee for a platform code — never the tip. A code larger than the
-    // basket used to be quoted in full and charged clamped.
-    discount = Math.min(discount, promoCapacity(promo.funder, { subtotal: subtotalCustomer, deliveryFee }, promo.discountType));
     promoInfo = {
-      code: promo.code,
-      discountType: promo.discountType,
-      description: promo.description || `${promo.code} applied`,
+      code: promoCodeRecord.code,
+      discountType: promoCodeRecord.discountType,
+      description: promoCodeRecord.description || `${promoCodeRecord.code} applied`,
     };
   }
 
-  const tip = Number(cart.tipAmount) || 0;
-  // [ALG-24] The one total — checkout computes each order's total through the same function.
-  const totalAmount = orderTotal({ subtotal: subtotalCustomer, deliveryFee, tip, discount });
-
   // SWIFT-070: the express premium is computed on the SERVER (same helper as
   // checkout) and handed to the client to RENDER — never re-derived on the
-  // client, so the displayed total can't drift from the charged total. Zero for
-  // services / free delivery.
-  const expressSurcharge = deliveryFee > 0 ? expressDeliveryFee(deliveryFee) - deliveryFee : 0;
-  const expressTotal = totalAmount + expressSurcharge;
+  // client. [E01] `expressTotal` is the same basket priced by the same pricer
+  // with every delivery at its express fee — exact even when a promo's basis
+  // depends on the fee — and IS `totalAmount` when the quote asked for express.
+  // Zero surcharge for services / pickup / free delivery.
+  const expressSurcharge = sumOf(plans.map((p) => p.expressSurcharge));
+  const expressTotal = choices.express === true
+    ? totalAmount
+    : sumOf(priceWith((p) => p.standardDeliveryFee + p.expressSurcharge).perPlan.map((p) => p.total));
 
-  // ETA
+  // ETA — from the tracked store's plan (its delivery leg), as before.
+  const etaPlan = plans.find((p) => p.vendorId === cart.vendor?.id) ?? plans[0];
+  const distanceKm = etaPlan?.distanceKm ?? 0;
   const prepMin = cart.vendor?.estimatedPrepTime || 30;
   const deliveryMin = estimateDeliveryMinutes(distanceKm);
   const etaMin = prepMin + deliveryMin;
 
-  // Min order check
+  // [E09] Min order: every vendor against ITS OWN minimum — checkout refuses
+  // the whole basket on the first short vendor, so the conjunction is the
+  // honest verdict. `minimumOrderAmount` stays the tracked store's for older
+  // clients; `vendors[]` carries each store's own figure.
   const minOrder = cart.vendor ? Number(cart.vendor.minOrderAmount) : 0;
-  const meetsMinimum = subtotalCustomer >= minOrder;
+  const meetsMinimum = plans.every((p) => p.meetsMinimum);
 
   return {
     id: cart.id,
@@ -451,15 +541,38 @@ async function buildCartResponse(
     items: itemDetails,
     itemCount: cart.items.reduce((sum, ci) => sum + ci.quantity, 0),
     unavailableItemIds,
+    // [E01 · E09] One row per future order, in checkout's order: each row is
+    // what checkout writes for that store (subtotal, fee, discount share, tip,
+    // total) plus ITS minimum verdict and how much more it needs.
+    vendors: plans.map((p, i) => ({
+      vendorId: p.vendorId,
+      name: p.vendorName,
+      fulfillment: p.fulfillment,
+      subtotal: p.subtotal,
+      deliveryFee: p.deliveryFee,
+      standardDeliveryFee: p.standardDeliveryFee,
+      expressSurcharge: p.expressSurcharge,
+      discount: priced.perPlan[i]!.discount,
+      tipAmount: priced.perPlan[i]!.tip,
+      totalAmount: priced.perPlan[i]!.total,
+      minOrderAmount: p.minOrderAmount,
+      meetsMinimum: p.meetsMinimum,
+      amountToMinimum: p.amountToMinimum,
+    })),
     subtotalBase,
     subtotalMarkup,
     subtotalCustomer,
     deliveryFee,
+    // The fee without the express premium — the fee rows sit beside the
+    // separate Express row, whichever speed the quote was priced at.
+    standardDeliveryFee,
     deliveryDistanceKm: Math.round(distanceKm * 10) / 10,
     discount,
     promoCode: promoInfo,
     tipAmount: tip,
     totalAmount,
+    // [E01] Whether `totalAmount` includes the express premium.
+    express: choices.express === true,
     expressSurcharge,
     expressTotal,
     deliveryAddress: deliveryAddr ? {
@@ -540,9 +653,10 @@ export async function customerRoutes(app: FastifyInstance) {
     // §2 checkout gate reads the SAME supply dispatch would search — including
     // the cash-float requirement, so the probe and the real dispatch agree.
     (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
+    app.redis,
   );
   const picking = new PickingService(app.prisma, app.io);
-  const ratingService = new RatingService(app.prisma, app.io);
+  const ratingService = new RatingService(app.prisma, app.io, (vendorId) => scheduleVendorSearchSync(app, vendorId));
   const notificationService = new NotificationService(app.prisma, app.io);
   const bookingService = new BookingService(app.prisma, app.io);
 
@@ -635,9 +749,18 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
     }
 
-    await app.prisma.customer.update({
-      where: { id: customer.id },
-      data: { referredBy: referrer.id },
+    await app.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      const resolved = await requireIdentityAuthority(tx, userId);
+      await requireIdentityAuthority(tx, referrer.userId);
+      if (resolved.memberIds.includes(referrer.userId)) throw new AppError(400, 'SELF_REFERRAL', 'You can’t use your own referral code');
+      if (await tx.customer.findFirst({ where: { userId: { in: resolved.memberIds }, referredBy: { not: null } }, select: { id: true } })) {
+        throw new AppError(409, 'ALREADY_REFERRED', 'You’ve already used a referral code');
+      }
+      const updated = await tx.customer.updateMany({
+        where: { id: customer.id, referredBy: null }, data: { referredBy: referrer.id },
+      });
+      if (updated.count !== 1) throw new AppError(409, 'ALREADY_REFERRED', 'A referral is already recorded.');
     });
 
     return { success: true, data: { referrerName: referrer.user?.firstName ?? null } };
@@ -748,18 +871,26 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
-  app.delete('/account', async (request: AuthRequest) => {
+  app.delete('/account', async (request: AuthRequest, reply) => {
     const result = await account.deleteAccount(request.user.userId);
+    if (!result.deleted) reply.code(202);
     // Leave an audit trail (the de-identified row is retained, so its id stays a
-    // valid FK). Best-effort — the erasure itself has already committed.
+    // valid FK). Best-effort; a pending document obligation is not completion.
     await app.prisma.auditLog
       .create({
         data: {
           userId: request.user.userId,
-          action: 'ACCOUNT_SELF_DELETED',
+          action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
           entity: 'User',
           entityId: request.user.userId,
-          changes: { reason: 'DPA right to erasure (self-serve)' },
+          changes: {
+            reason: 'DPA right to erasure (self-serve)',
+            ...(result.status === 'PENDING_DOCUMENT_ERASURE' && {
+              status: result.status,
+              pendingDocuments: result.pendingDocuments,
+              pendingAvatarObjects: result.pendingAvatarObjects,
+            }),
+          },
         },
       })
       .catch(() => {});
@@ -899,54 +1030,126 @@ export async function customerRoutes(app: FastifyInstance) {
     // Browsing is open to guests; personalization (favourites, active order,
     // order-again) only applies when signed in.
     const userId = request.user?.userId;
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const { lat, lng } = customerPoint(latLngQuerySchema.parse(request.query));
 
-    // Try Redis cache
     const cacheKey = homeCacheKey(userId, lat, lng);
-    const cached = await app.redis.get(cacheKey).catch(() => null);
-    if (cached) {
-      return { success: true, data: JSON.parse(cached) };
-    }
 
-    if (userId) await resolveCustomer(app, userId);
+    // Only discovery is cacheable. Start both loaders together: neither a slow
+    // Redis read nor a cold discovery fill can substitute for order authority.
+    const loadDiscovery = async () => {
+      const cached = parseHomeDiscovery(await app.redis.get(cacheKey).catch(() => null));
+      if (cached) return cached;
 
-    // Parallel fetches
-    const [
-      allVendors,
-      favoriteIds,
-      activeOrder,
-      recentOrders,
-      popularItemRows,
-    ] = await Promise.all([
-      // All active, document-verified vendors with at least one orderable item
-      // (unverified stores AND empty stores stay out of discovery — a vendor
-      // with nothing available dead-ends when tapped; favorites and direct
-      // links still resolve their storefront)
-      app.prisma.vendor.findMany({
-        // [F-028-07] `tenant: { isActive: true }` is load-bearing: a guest has
-        // no tenant context, which the Prisma extension defines as an UNSCOPED
-        // query — so without the relational predicate a deactivated operator's
-        // whole catalog kept serving here after the platform shut them off.
-        where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
-        include: {
-          // imageUrl was NOT selected, so Home had nothing to draw a category
-          // chip with and every chip fell back to the same stock photograph —
-          // "Popular", "Produce" and "Rice & Grains" were one identical image.
-          // The column has been on Category the whole time.
-          categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
-        },
-        orderBy: { averageRating: 'desc' },
-        take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
-      }),
+      if (userId) await resolveCustomer(app, userId);
+      const [allVendors, favoriteIds, popularItemRows] = await Promise.all([
+        // All active, document-verified vendors with at least one orderable item
+        // (unverified stores AND empty stores stay out of discovery — a vendor
+        // with nothing available dead-ends when tapped; favorites and direct
+        // links still resolve their storefront)
+        app.prisma.vendor.findMany({
+          // [F-028-07] `tenant: { isActive: true }` is load-bearing: a guest has
+          // no tenant context, which the Prisma extension defines as an UNSCOPED
+          // query — so without the relational predicate a deactivated operator's
+          // whole catalog kept serving here after the platform shut them off.
+          where: { ...visibleVendorForCaller(), items: { some: { isAvailable: true } } },
+          include: {
+            // imageUrl was NOT selected, so Home had nothing to draw a category
+            // chip with and every chip fell back to the same stock photograph —
+            // "Popular", "Produce" and "Rice & Grains" were one identical image.
+            // The column has been on Category the whole time.
+            categories: { select: { id: true, name: true, imageUrl: true }, take: 5 },
+          },
+          orderBy: { averageRating: 'desc' },
+          take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
+        }),
+        // Customer's favorite vendor IDs (guests have none)
+        userId
+          ? app.prisma.vendor.findMany({
+              where: { favoritedBy: { some: { userId } } },
+              select: { id: true },
+            }).then((vs) => new Set(vs.map((v) => v.id)))
+          : Promise.resolve(new Set<string>()),
+        // Popular dishes — top items by lifetime orders (Home "Popular right now" rail)
+        app.prisma.item.findMany({
+          // The FULL vendor-visibility predicate from the vendors query above —
+          // isVerified and tenant.isActive included. Without them a platform-
+          // deactivated or unverified operator's STORE was hidden while their
+          // DISH sat above the fold ([F-028-07] applies here identically: a
+          // guest request is unscoped, so the relational predicate is the only
+          // thing standing between a shut-off operator and the Home rail).
+          where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
+          orderBy: { totalOrdered: 'desc' },
+          take: 10,
+          select: {
+            id: true,
+            name: true,
+            imageUrl: true,
+            basePrice: true,
+            vendorId: true,
+            vendor: { select: { id: true, name: true, vendorType: true, latitude: true, longitude: true, estimatedPrepTime: true } },
+          },
+        }),
+      ]);
 
-      // Customer's favorite vendor IDs (guests have none)
-      userId
-        ? app.prisma.vendor.findMany({
-            where: { favoritedBy: { some: { userId } } },
-            select: { id: true },
-          }).then((vs) => new Set(vs.map((v) => v.id)))
-        : Promise.resolve(new Set<string>()),
+      // Enrich vendors. R8/RAT-I: the home feed feeds EVERY Home rail
+      // (featured/nearby/order-again/open/closed), so the star surface rides
+      // here too — the sim certification caught these rails showing "New"
+      // while browse showed the real display (the fields were missing HERE).
+      const homeSurfaces = await ratingSurfaces(app.prisma, 'VENDOR', allVendors.map((v) => v.id));
+      // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this
+      // request, exactly as the cart preview and checkout already do, so the fee
+      // on a vendor card is the fee the checkout will charge. A guest has no
+      // country of their own; 'GY' is the launch market and the same fallback
+      // courier.routes.ts uses.
+      const homeDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
+        (userId ? (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
+      );
+      // [S1 response-shaping · High #6] the card is the ONE public projection —
+      // `phone`/`email` and the staged MMG fields never leave the API.
+      const enriched = allVendors.map((v) => {
+        const card = vendorCardView(v);
+        return {
+          ...enrichVendor(card, lat, lng, homeDeliveryRates),
+          categories: (v.categories ?? []).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          isFavorite: favoriteIds.has(v.id),
+          ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+        };
+      });
 
+      // Sort by distance if location provided, otherwise by rating
+      if (lat != null && lng != null) {
+        enriched.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
+      }
+
+      // Categories (distinct)
+      const categorySet = new Map<string, { id: string; name: string; imageUrl: string | null }>();
+      for (const v of allVendors) {
+        for (const c of (v.categories ?? [])) {
+          if (!categorySet.has(c.id)) categorySet.set(c.id, c);
+        }
+      }
+
+      const popularItems = popularItemRows.map((it) => ({
+        id: it.id,
+        name: it.name,
+        imageUrl: it.imageUrl,
+        price: Number(it.basePrice),
+        vendorId: it.vendorId,
+        vendorName: it.vendor?.name ?? '',
+        vendorType: it.vendor?.vendorType ?? null,
+        // "Vendor · N min" on the card — the vendor card's own number (prep +
+        // travel from the buyer's position), null without a position. Computed
+        // here, never on the client.
+        etaMin: it.vendor ? enrichVendor(it.vendor, lat, lng, homeDeliveryRates).etaMin : null,
+      }));
+
+      // Keep the full bounded candidate pool, not just the first visible cards:
+      // fresh order history can name a vendor outside the 30-open/10-closed rails.
+      const discovery = { vendors: enriched, popularItems, categories: Array.from(categorySet.values()) };
+      await app.redis.setex(cacheKey, HOME_CACHE_TTL, JSON.stringify(discovery)).catch(() => {});
+      return discovery;
+    };
+    const loadOrders = () => Promise.all([
       // Active order (guests have none)
       userId
         ? app.prisma.order.findFirst({
@@ -970,18 +1173,24 @@ export async function customerRoutes(app: FastifyInstance) {
               // store" on Home. That client fix was already correct; it was
               // defeated here, at the select, where nothing failed.
               orderType: true,
-              vendor: { select: { id: true, name: true, logoUrl: true } },
+              // `orderType` alone cannot say what KIND of vendor order this is:
+              // a SERVICE business's appointment is persisted on the FOOD_DELIVERY
+              // spine. The fulfillment is the fact `orderVertical` declares the
+              // card's words from — sent here, at the select, where its absence
+              // never failed anything. The business type rides beside it for the
+              // card; it is not the discriminator (a service business's goods
+              // are deliveries).
+              fulfillment: true,
+              appointmentSlot: true,
+              vendor: { select: { id: true, name: true, logoUrl: true, vendorType: true } },
               // The hold — the window in which the store has not been told yet.
               // `holdExpiresAt` and `placedAt` are its two ends, and the client's
               // `holdRingWindow` refuses to draw anything unless BOTH came from
               // the server rather than being synthesized from an assumed length.
               //
               // It goes over the wire as an ABSOLUTE instant, never a
-              // remaining-seconds count: this response is cached for
-              // HOME_CACHE_TTL (60s) against a five-minute window, so a
-              // server-baked countdown would arrive up to 20% wrong on the one
-              // number the cancellation policy is built around. An absolute
-              // timestamp is still exactly true when it comes out of the cache.
+              // remaining-seconds count: the client renders the window from
+              // server instants, even between Home refreshes.
               holdExpiresAt: true,
               // [ALG-07] A scheduled order is held until its release: the card
               // says the slot and the release, not a thirty-hour countdown.
@@ -1003,52 +1212,12 @@ export async function customerRoutes(app: FastifyInstance) {
             distinct: ['vendorId'],
           })
         : Promise.resolve([] as { vendorId: string }[]),
-
-      // Popular dishes — top items by lifetime orders (Home "Popular right now" rail)
-      app.prisma.item.findMany({
-        // The FULL vendor-visibility predicate from the vendors query above —
-        // isVerified and tenant.isActive included. Without them a platform-
-        // deactivated or unverified operator's STORE was hidden while their
-        // DISH sat above the fold ([F-028-07] applies here identically: a
-        // guest request is unscoped, so the relational predicate is the only
-        // thing standing between a shut-off operator and the Home rail).
-        where: { isAvailable: true, vendor: visibleVendorRelForCaller() },
-        orderBy: { totalOrdered: 'desc' },
-        take: 10,
-        select: {
-          id: true,
-          name: true,
-          imageUrl: true,
-          basePrice: true,
-          vendorId: true,
-          vendor: { select: { id: true, name: true, vendorType: true, latitude: true, longitude: true, estimatedPrepTime: true } },
-        },
-      }),
     ]);
 
-    // Enrich vendors. R8/RAT-I: the home feed feeds EVERY Home rail
-    // (featured/nearby/order-again/open/closed), so the star surface rides
-    // here too — the sim certification caught these rails showing "New"
-    // while browse showed the real display (the fields were missing HERE).
-    const homeSurfaces = await ratingSurfaces(app.prisma, 'VENDOR', allVendors.map((v) => v.id));
-    // [FUL-003b completion] Resolve the buyer's delivery schedule ONCE for this
-    // request, exactly as the cart preview and checkout already do, so the fee
-    // on a vendor card is the fee the checkout will charge. A guest has no
-    // country of their own; 'GY' is the launch market and the same fallback
-    // courier.routes.ts uses.
-    const homeDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
-      (userId ? (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
-    );
-    const enriched = allVendors.map((v) => ({
-      ...enrichVendor(v, lat, lng, homeDeliveryRates),
-      isFavorite: favoriteIds.has(v.id),
-      ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
-    }));
-
-    // Sort by distance if location provided, otherwise by rating
-    if (lat != null && lng != null) {
-      enriched.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
-    }
+    // A failed order read rejects the request. Never return cached order state
+    // or turn a read failure into an empty active/recent-order projection.
+    const [discovery, [activeOrder, recentOrders]] = await Promise.all([loadDiscovery(), loadOrders()]);
+    const enriched = discovery.vendors;
 
     // Sections. "Orderable" must match the checkout gate exactly
     // (order.service.ts: isCurrentlyOpen && acceptingOrders && status ACTIVE —
@@ -1059,10 +1228,13 @@ export async function customerRoutes(app: FastifyInstance) {
     const openVendors = enriched.filter(isOrderable);
     const closedVendors = enriched.filter((v) => !isOrderable(v));
 
-    // Featured: top-rated open vendors
-    const featured = openVendors
-      .filter((v) => (v.averageRating as number) >= 4.0 && (v.totalOrders as number) >= 10)
-      .slice(0, 8);
+    // Featured: top-rated open vendors. [REVIEW-READY] When no open store has
+    // earned the bar yet (every store at launch, and the App Review demo),
+    // the open stores themselves fill the rail, so Home never says "Nothing's
+    // open right now" while stores are open. Once one store qualifies, only
+    // qualifying stores show; ratings and order counts are never invented.
+    const qualifying = openVendors.filter((v) => (v.averageRating as number) >= 4.0 && (v.totalOrders as number) >= 10);
+    const featured = (qualifying.length > 0 ? qualifying : openVendors).slice(0, 8);
 
     // Nearby: within 5 km, open
     const nearby = lat != null && lng != null
@@ -1073,41 +1245,18 @@ export async function customerRoutes(app: FastifyInstance) {
     const recentVendorIds = new Set(recentOrders.map((o) => o.vendorId).filter(Boolean));
     const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id)).slice(0, 6);
 
-    // Categories (distinct)
-    const categorySet = new Map<string, { id: string; name: string; imageUrl: string | null }>();
-    for (const v of allVendors) {
-      for (const c of (v.categories ?? [])) {
-        if (!categorySet.has(c.id)) categorySet.set(c.id, c);
-      }
-    }
-
-    const popularItems = popularItemRows.map((it) => ({
-      id: it.id,
-      name: it.name,
-      imageUrl: it.imageUrl,
-      price: Number(it.basePrice),
-      vendorId: it.vendorId,
-      vendorName: it.vendor?.name ?? '',
-      vendorType: it.vendor?.vendorType ?? null,
-      // "Vendor · N min" on the card — the vendor card's own number (prep +
-      // travel from the buyer's position), null without a position. Computed
-      // here, never on the client.
-      etaMin: it.vendor ? enrichVendor(it.vendor, lat, lng, homeDeliveryRates).etaMin : null,
-    }));
-
     const feed = {
-      activeOrder: activeOrder ? { ...activeOrder, promise: promiseView(activeOrder) } : activeOrder,
-      popularItems,
+      // The declared vertical rides with the card: SERVICE for a service
+      // business's booking, otherwise the persisted type — never a client guess.
+      activeOrder: activeOrder ? { ...activeOrder, vertical: orderVertical(activeOrder), promise: promiseView(activeOrder) } : activeOrder,
+      popularItems: discovery.popularItems,
       featured,
       nearby,
       orderAgain,
-      categories: Array.from(categorySet.values()),
+      categories: discovery.categories,
       openVendors: openVendors.slice(0, 30),
       closedVendors: closedVendors.slice(0, 10),
     };
-
-    // Cache
-    await app.redis.setex(cacheKey, HOME_CACHE_TTL, JSON.stringify(feed)).catch(() => {});
 
     return { success: true, data: feed };
   });
@@ -1119,7 +1268,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/vendors', async (request: AuthRequest) => {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
-    const { type, cuisine, search, lat, lng, open, sort, minRating, category } = vendorsBrowseQuerySchema.parse(request.query);
+    const { type, cuisine, search, lat, lng, open, sort, minRating, category } = customerPoint(vendorsBrowseQuerySchema.parse(request.query));
 
     // Require ≥1 orderable item so empty stores don't clutter browse / dead-end on tap.
     // [F-028-07] tenant.isActive rides every public browse — see /home.
@@ -1258,12 +1407,16 @@ export async function customerRoutes(app: FastifyInstance) {
     const browseDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
       (browserId ? (await app.prisma.user.findUnique({ where: { id: browserId }, select: { countryCode: true } }))?.countryCode : null) ?? 'GY',
     );
-    let enriched = vendors.map((v) => ({
-      ...enrichVendor(v, userLat, userLng, browseDeliveryRates),
-      isFavorite: favoriteIds.has(v.id),
-      ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
-      ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
-    }));
+    // [S1 response-shaping · High #6] same ONE public projection as Home.
+    let enriched = vendors.map((v) => {
+      const card = vendorCardView(v);
+      return {
+        ...enrichVendor(card, userLat, userLng, browseDeliveryRates),
+        isFavorite: favoriteIds.has(v.id),
+        ...(surfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+        ...(categoryRow ? { itemsInCategory: itemCounts.get(v.id) ?? null } : {}),
+      };
+    });
 
     // Re-sort by distance if location provided and no explicit sort
     if (userLat != null && userLng != null && sort === 'distance') {
@@ -1278,7 +1431,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get('/vendors/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const { lat, lng } = customerPoint(latLngQuerySchema.parse(request.query));
 
     // [F-028-07] findFirst with a RELATIONAL tenant predicate, not
     // findUnique(id): a guest who knew an id could retrieve a store whose
@@ -1472,7 +1625,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.get('/favorites', async (request: AuthRequest) => {
     const { userId } = request.user;
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    const { lat, lng } = customerPoint(latLngQuerySchema.parse(request.query));
 
     const customer = await app.prisma.customer.findUnique({
       where: { userId },
@@ -1492,8 +1645,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const favDeliveryRates = await new CountryConfigService(app.prisma).getDeliveryRates(
       (await app.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } }))?.countryCode ?? 'GY',
     );
+    // [S1 response-shaping · High #6] favourites are the same card as browse.
     const vendors = (customer?.favoriteVendors ?? []).map((v) => ({
-      ...enrichVendor(v, lat, lng, favDeliveryRates),
+      ...enrichVendor(vendorCardView(v), lat, lng, favDeliveryRates),
       isFavorite: true,
     }));
 
@@ -1561,8 +1715,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // THE availability computation (scheduling law: no double-source):
     // windows MINUS the vendor's exceptions MINUS non-cancelled bookings,
     // honoring buffers + lead time — the same math reservation validates.
-    const dayStart = new Date(Date.UTC(y!, m! - 1, d!));
-    const dayEnd = new Date(Date.UTC(y!, m! - 1, d!, 23, 59, 59, 999));
+    const dayStart = startOfGuyanaDay(date);
+    const dayEnd = endOfGuyanaDay(date);
     const [exceptions, takenRows] = item.isAvailable
       ? await Promise.all([
           bookingService.exceptionsFor(item.vendorId, dayStart),
@@ -1621,6 +1775,7 @@ export async function customerRoutes(app: FastifyInstance) {
           type: 'ORDER_UPDATE',
           title: 'Appointment moved',
           body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
+          audience: 'business',
           data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
         }).catch(() => undefined);
       }
@@ -1633,9 +1788,11 @@ export async function customerRoutes(app: FastifyInstance) {
   // ========================================================================
 
   app.get('/cart', async (request: AuthRequest) => {
-    const { lat, lng } = latLngQuerySchema.parse(request.query);
+    // [E01] The quote is priced for the choices checkout will be sent — the
+    // speed, each store's DELIVERY/PICKUP and the tip — not for defaults.
+    const { lat, lng, express, fulfillmentSelections, tipAmount } = customerPoint(cartQuerySchema.parse(request.query));
 
-    const cart = await buildCartResponse(app, request.user.userId, lat, lng);
+    const cart = await buildCartResponse(app, request.user.userId, lat, lng, { express, fulfillmentSelections, tipAmount });
     return { success: true, data: cart };
   });
 
@@ -1881,6 +2038,25 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: { cart: updatedCart, message: 'Tip updated' } };
   });
 
+  // [E01-B] Remove the applied promo from the cart. The quote discounts with
+  // the cart's stored promo (cart.promoCodeId), and checkout applies a
+  // discount only for the `promoCode` the request body carries — so a customer
+  // who applied a code on the phone could see a discounted total and be
+  // charged full price, with no way back. This clears the stored pointer: the
+  // quote re-prices without it and checkout stops receiving the code.
+  app.delete('/cart/promo', async (request: AuthRequest) => {
+    const { userId } = request.user;
+
+    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
+    if (!cart) throw new AppError(400, 'NO_CART', 'No active cart');
+
+    await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: null, lastActivityAt: new Date() } });
+    await app.redis.del(`cart:${userId}`).catch(() => {});
+
+    const updatedCart = await buildCartResponse(app, userId);
+    return { success: true, data: { cart: updatedCart, message: 'Promo removed' } };
+  });
+
   // [DCR-1 NR5-01] PUT /cart/instructions REMOVED: the ingress census proved
   // it purpose-free — stored and echoed, but checkout persists only
   // deliveryInstructions, and no client ever called it. Minimisation at
@@ -1943,6 +2119,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // [M-11] The request's fingerprint travels with the key: one key, one
     // request, one immutable answer — over the canonical request.
     const requestHash = checkoutRequestHash({ ...body, ...(scheduledForCanonical ? { scheduledFor: scheduledForCanonical } : {}) });
+    // [AX366 F1] This request's own claim token: only its holder may release it.
+    const claim = newCheckoutClaim();
     if (redisKey) {
       // [M-11] The DATABASE is the truth for a replay. Before touching the
       // in-flight lock, ask whether this command already has a receipt: if
@@ -1955,14 +2133,34 @@ export async function customerRoutes(app: FastifyInstance) {
           throw new AppError(422, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used for a different order request. Use a new key for a new order.');
         }
         checkoutIdempotencyCounter.labels('replayed_receipt').inc();
-        return { success: true, data: receipt.result, replayed: true };
+        // [G3-F2] The replay is the first answer, field for field: a receipt
+        // written by this fix already holds the shaped answer; a pre-fix
+        // receipt (raw rows) is projected through the same shaper so it never
+        // exposes internal order columns.
+        return { success: true, data: shapeStoredCheckoutResult(receipt.result), replayed: true };
       }
-      const claimed = await app.redis.set(redisKey, 'IN_FLIGHT', 'EX', 86_400, 'NX');
+      const claimed = await app.redis.set(redisKey, claim, 'EX', CHECKOUT_CLAIM_TTL_S, 'NX');
       if (!claimed) {
         const existing = await app.redis.get(redisKey);
-        if (existing && existing !== 'IN_FLIGHT') {
-          checkoutIdempotencyCounter.labels('replayed_cache').inc();
-          return { success: true, data: JSON.parse(existing), replayed: true };
+        if (existing && !isCheckoutClaim(existing)) {
+          // [AX372 R2] A cached answer is another request's: it is replayed
+          // only for the request that made it. It can land between this
+          // request's receipt lookup above and its claim (the other request
+          // committed in between), so the durable receipt is read again and
+          // the fingerprint checked: a different body under this key is a
+          // 422, never a 200 replay of another body's order.
+          const committed = await findCheckoutReceipt(app.prisma, userId, idemKey as string);
+          if (committed && committed.requestHash !== requestHash) {
+            checkoutIdempotencyCounter.labels('key_body_conflict').inc();
+            throw new AppError(422, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was already used for a different order request. Use a new key for a new order.');
+          }
+          if (committed) {
+            checkoutIdempotencyCounter.labels('replayed_cache').inc();
+            return { success: true, data: shapeStoredCheckoutResult(committed.result), replayed: true };
+          }
+          // A cached answer without its receipt cannot be checked against
+          // this body, so it is never replayed: the key is busy, as the probe
+          // reports it (in_flight).
         }
         checkoutIdempotencyCounter.labels('duplicate_in_flight').inc();
         throw new AppError(409, 'DUPLICATE_REQUEST', 'This order is already being placed — hold on.');
@@ -1970,6 +2168,14 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     let result;
+    // [CHECKOUT-IDEM · AX354 S1] The service reports the moment its order
+    // transaction commits. Before that point, a CONFIRMED rollback placed
+    // nothing: this request's claim is released so the same key can retry once
+    // the customer fixes the problem (e.g. MIN_ORDER); an UNKNOWN commit
+    // outcome keeps it [AX366 F1]. After it the order EXISTS: the claim is kept
+    // (releasing it is what let the receipt probe answer "none" for a placed
+    // order) and the answer is the committed receipt.
+    let commit = null as CheckoutCommit | null;
     try {
       result = await orderService.checkout({
         userId,
@@ -1982,12 +2188,41 @@ export async function customerRoutes(app: FastifyInstance) {
         express: body.express,
         appointments: body.appointments,
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
+        onCommitted: (committed) => { commit = committed; },
       });
     } catch (err) {
-      // A failed attempt must not hold the key hostage — release so the same
-      // key can retry once the customer fixes the problem (e.g. MIN_ORDER).
-      if (redisKey) await app.redis.del(redisKey).catch(() => {});
-      throw err;
+      if (!commit) {
+        if (err instanceof CheckoutOutcomeUnknownError) {
+          // [AX366 F1] The commit's outcome is UNKNOWN and no durable receipt
+          // proves the order: unknown is not "nothing placed". The claim is
+          // kept (the probe answers in_flight, a same-key retry is refused).
+          // [AX372 F1b] ...but for a short settle window, not the claim's
+          // day: this request's own claim is re-set (atomic, ownership-
+          // checked) to CHECKOUT_UNKNOWN_SETTLE_S. That is safe because the
+          // receipt is written in the order's own transaction and
+          // checkout_receipts is unique on (userId, idempotencyKey): at most
+          // one commit per key, so once the window lapses a missing receipt
+          // is conclusive (the probe says none, a same-key retry places one
+          // order) and a present one is replayed. See checkoutUnknownSettleSeconds.
+          if (redisKey) {
+            await settleCheckoutClaim(app.redis, redisKey, claim, checkoutUnknownSettleSeconds()).catch((settleErr: unknown) => {
+              request.log.warn({ err: settleErr }, '[CHECKOUT-IDEM] could not shorten the claim to its settle window; it holds its full TTL');
+            });
+          }
+          request.log.error({ err, receiptId: err.receiptId }, '[CHECKOUT-IDEM] checkout outcome unknown; claim kept for its settle window');
+          throw err;
+        }
+        // A CONFIRMED rollback: nothing was placed. A failed attempt must not
+        // hold the key hostage — release so the same key can retry once the
+        // customer fixes the problem (e.g. MIN_ORDER). Only this request's own
+        // claim: never a newer request's after this one's claim was lost.
+        if (redisKey) await releaseCheckoutClaim(app.redis, redisKey, claim).catch(() => {});
+        throw err;
+      }
+      // checkout never throws past its commit point; should anything still
+      // escape it, the order stands: keep the claim, answer the receipt.
+      request.log.error({ err, receiptId: commit.receiptId }, '[CHECKOUT-IDEM] checkout threw after its commit; answering the committed receipt, claim kept');
+      result = commit.answer;
     }
 
     // [M-11] The vendor alert ladder and the auto-cancel were written INSIDE
@@ -2031,16 +2266,37 @@ export async function customerRoutes(app: FastifyInstance) {
   app.get('/checkout/receipts/:key', async (request: AuthRequest) => {
     const { key } = z.object({ key: z.string().min(8).max(128) }).parse(request.params ?? {});
     const { userId } = request.user;
+    // [CHECKOUT-IDEM · AX354 S1] The claim FIRST, the receipt SECOND. The
+    // checkout route releases a claim only for a confirmed rollback, never
+    // once a commit is reported or while its outcome is unknown [AX366 F1]
+    // (an unknown outcome holds it for its settle window [AX372 F1b], long
+    // enough for its transaction to settle), so by the time a claim is gone
+    // any receipt its transaction wrote is
+    // visible: a receipt read AFTER the claim read sees every order the claim
+    // read missed. Read the other way round, a probe could miss the receipt
+    // (not committed yet), then miss the claim (gone after the commit), and
+    // answer "none" for a placed order.
+    let claimed: string | null = null;
+    let claimUnknown = false;
+    try {
+      claimed = await app.redis.get(`checkout:idem:${userId}:${key}`);
+    } catch (err) {
+      // An unreadable claim is not an absent one: it never answers "none".
+      claimUnknown = true;
+      request.log.warn({ err }, '[CHECKOUT-IDEM] receipt probe could not read the claim');
+    }
     const receipt = await findCheckoutReceipt(app.prisma, userId, key);
     if (receipt) {
       checkoutIdempotencyCounter.labels('probe_placed').inc();
       return { success: true, data: { status: 'placed', orderIds: receipt.orderIds } };
     }
-    const claimed = await app.redis.get(`checkout:idem:${userId}:${key}`);
     if (claimed) {
       // A cached result without a receipt row cannot happen (the receipt is written in the order's transaction); a claim is in flight.
       checkoutIdempotencyCounter.labels('probe_in_flight').inc();
       return { success: true, data: { status: 'in_flight' } };
+    }
+    if (claimUnknown) {
+      throw new AppError(503, 'CHECKOUT_STATUS_UNAVAILABLE', 'We could not check on this order just now. Try again in a moment.');
     }
     checkoutIdempotencyCounter.labels('probe_none').inc();
     return { success: true, data: { status: 'none' } };
@@ -2099,6 +2355,9 @@ export async function customerRoutes(app: FastifyInstance) {
       id: o.id,
       orderNumber: o.orderNumber,
       orderType: o.orderType,
+      // The declared vertical — SERVICE for a service business's booking; the
+      // persisted type for everything else. The activity list's words read it.
+      vertical: orderVertical(o),
       status: o.status,
       vendor: o.vendor,
       items: o.items.map((i) => ({
@@ -2115,6 +2374,7 @@ export async function customerRoutes(app: FastifyInstance) {
       totalAmount: Number(o.totalAmount),
       paymentMethod: o.paymentMethod,
       fulfillment: o.fulfillment,
+      appointmentSlot: o.appointmentSlot,
       // Takeaway handover gate — the customer PRESENTS this at the counter,
       // so it must survive past the checkout confirmation screen.
       pickupCode: o.pickupCode,
@@ -2167,7 +2427,11 @@ export async function customerRoutes(app: FastifyInstance) {
         vendor: {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
-            vendorType: true, phone: true, latitude: true, longitude: true,
+            // [S1 response-shaping · High #6] never `phone` — that is the
+            // store's account/OTP line, not a number it chose to publish, and
+            // it was handed to every customer on every order, for good. The
+            // storefront offers `publicPhone`; the order detail names the store.
+            vendorType: true, latitude: true, longitude: true,
           },
         },
         items: {
@@ -2208,6 +2472,9 @@ export async function customerRoutes(app: FastifyInstance) {
     const validatedOrderMmgUrl = order.paymentMethod === 'MOBILE_MONEY'
       && order.paymentStatus === 'PENDING'
       && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(order.status)
+      // [S1-6] A store claim an operator rejected cannot be replaced by a new
+      // external payment this order could never reconcile: no pay link.
+      && !isRejectedMmgAttempt(order)
       ? safeMmgPayUrl(order.mmgPayUrlSnapshot)
       : null;
     const paymentAction = validatedOrderMmgUrl && order.mmgRecipientNameSnapshot
@@ -2233,8 +2500,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // [REPORT-006 F-006-01] Captured MMG orders can't cancel in-app (the store
     // holds the money and settles refunds directly) — the button must not
     // offer what the locked cancel path will refuse.
-    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
-      && !(order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'CAPTURED');
+    // [Q12] "Money moved" is the locked path's own set (MMG_MONEY_MOVED): a
+    // store's CLAIM refuses the cancel exactly as a capture does, so a
+    // store-claimed order offered a Cancel (and a late fee) the server then
+    // refused with MMG_CANCEL_UNAVAILABLE.
+    // [E17 · DS202 D3] A parcel on its way back (RETURNING) is in the mover's
+    // custody like the forward leg, and RETURNED is closed: neither offers a
+    // Cancel the locked cancel path would refuse.
+    const canCancel = !['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING', 'RETURNED'].includes(order.status)
+      && !(order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus));
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the fee shown here and the marker recorded there can never drift
@@ -2255,6 +2529,8 @@ export async function customerRoutes(app: FastifyInstance) {
         id: order.id,
         orderNumber: order.orderNumber,
         orderType: order.orderType,
+        // The declared vertical — SERVICE for a service business's booking.
+        vertical: orderVertical(order),
         status: order.status,
         vendor: order.vendor,
         items: order.items.map((i) => ({
@@ -2280,11 +2556,29 @@ export async function customerRoutes(app: FastifyInstance) {
         // the pay/track screen can flip from Awaiting to Paid.
         paymentStatus: order.paymentStatus,
         paymentAction,
+        // [S1-6] What each party said about a direct-MMG payment, whether the
+        // order is held on a disagreement, and whether a claim may be made now.
+        mmgClaim: mmgClaimView(order),
         fulfillment: order.fulfillment,
+        appointmentSlot: order.appointmentSlot,
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.
         pickupCode: order.pickupCode,
+        // [MKT-F057] The delivery door PIN — the customer HOLDS this and gives
+        // it to the rider at the door (taxi parity: holder sees, verifier enters).
+        // Null on pickup/appointment/courier rows and once a store self-delivers
+        // (its own courier, no verifier); TAXI rows keep their own ride-PIN flow
+        // in the rides module. Surfaces only while the goods are between the
+        // store and the door — the same window the tracking screens show it in —
+        // so the confirmation and history surfaces never carry it.
+        ridePin: order.fulfillment === 'DELIVERY'
+          && order.orderType !== 'COURIER'
+          && order.orderType !== 'TAXI'
+          && order.fulfillmentMode !== 'VENDOR_DELIVERY'
+          && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
+          ? order.ridePin
+          : null,
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share
@@ -2305,7 +2599,10 @@ export async function customerRoutes(app: FastifyInstance) {
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
           lastName: order.rider.user?.lastName,
-          phone: order.rider.user?.phone,
+          // [S1 response-shaping] the mover's personal number is a handover
+          // convenience, not a permanent gift: null once the order is closed,
+          // exactly like the live coordinates two lines below.
+          phone: liveLocationVisible(order.status) ? order.rider.user?.phone : null,
           avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
@@ -2521,36 +2818,49 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
-  // [DOC-1 §31.5 · §31.6 · P31-2] The customer's OWN claim, from their device. "I paid" (with
-  // the MMG reference) is a second, independent claim beside the store's; a dispute after the
-  // store claimed receipt is a mismatch that holds dispatch until a person resolves it.
+  // [DOC-1 §31.5 · §31.6 · P31-2 · ORDER-SPINE S1-6] The customer's OWN claim, from their device:
+  // "I paid" (with the MMG reference) or "I did not pay", recorded through the one locked claim
+  // authority (order/mmg-claim.service.ts). A denial is durable whichever party speaks first; two
+  // claims that disagree hold fulfilment until a person decides. The state, its evidence and the
+  // notice obligation commit together; the notices are delivered from that obligation.
   app.post('/orders/:id/payment-claim', async (request: AuthRequest) => {
     if (!request.user?.userId) throw new AppError(401, 'UNAUTHENTICATED', 'Sign in first');
     const { id } = request.params as { id: string };
-    const body = z.object({ paid: z.boolean(), reference: z.string().trim().min(3).max(64).optional() }).parse(request.body ?? {});
-    const order = await app.prisma.order.findFirst({ where: { id, customerId: request.user.userId }, select: { id: true, paymentMethod: true, paymentStatus: true, customerClaimedPaidAt: true, mmgClaimMismatchAt: true } });
-    if (!order) throw new NotFoundError('Order', id);
-    if (order.paymentMethod !== 'MOBILE_MONEY') throw new AppError(409, 'NOT_A_WALLET_ORDER', 'Only an MMG order carries a payment claim');
-    const now = new Date();
-    if (body.paid) {
-      const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: now, customerPaymentRef: body.reference ?? null } });
-      await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: 'CUSTOMER_CLAIMED_PAID', entity: 'Order', entityId: id, changes: { reference: body.reference ?? null, claim: 'customer_claimed_paid' } } });
-      return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, customerClaimedPaidAt: updated.customerClaimedPaidAt, storeClaimed: updated.paymentStatus === 'CLAIMED' } };
-    }
-    // a dispute: the store says received, the customer says not — a mismatch, before dispatch
-    const mismatch = order.paymentStatus === 'CLAIMED' && !order.mmgClaimMismatchAt;
-    const updated = await app.prisma.order.update({ where: { id }, data: { customerClaimedPaidAt: null, customerPaymentRef: null, ...(mismatch ? { mmgClaimMismatchAt: now } : {}) } });
-    await app.prisma.auditLog.create({ data: { userId: request.user.userId, action: mismatch ? 'MMG_CLAIM_MISMATCH' : 'CUSTOMER_CLAIMED_NOT_PAID', entity: 'Order', entityId: id, changes: { claim: 'customer_claimed_not_paid', storeStatus: order.paymentStatus } } });
-    if (mismatch) {
-      const { notifyAdmins } = await import('../notification/notification.service');
-      await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-        tenantId: await tenantOfUser(app.prisma, request.user.userId),
-        title: 'MMG payment claims disagree',
-        body: `Order ${id}: the store reported the MMG payment received; the customer says they did not pay. Dispatch is held until someone resolves it.`,
-        data: { kind: 'mmg_claim_mismatch', orderId: id },
+    const body = z.object({ paid: z.boolean(), reference: z.string().max(80).nullish() }).parse(request.body ?? {});
+    const customerId = request.user.userId;
+    const outcome = await app.prisma.$transaction((tx) => recordCustomerMmgClaim(tx, {
+      orderId: id,
+      customerId,
+      tenantId: getTenantId(),
+      paid: body.paid,
+      reference: body.reference ?? null,
+    }));
+    const facts = outcome.facts;
+    if (!outcome.replayed) {
+      app.io.to(`order:${id}`).emit('order:status_changed', {
+        orderId: id, status: facts.status, paymentStatus: facts.paymentStatus,
+        mmgClaimRevision: facts.mmgClaimRevision, mmgDisputed: facts.mmgClaimMismatchAt != null,
       });
     }
-    return { success: true, data: { orderId: id, paymentStatus: updated.paymentStatus, mismatch: Boolean(updated.mmgClaimMismatchAt) } };
+    if (outcome.notice && outcome.outboxId) {
+      // The obligation is already durable; this only delivers it now rather than on the next sweep.
+      await completeMmgClaimNotice(
+        { prisma: app.prisma, notifications: new NotificationService(app.prisma, app.io) },
+        { outboxId: outcome.outboxId, notice: outcome.notice },
+      ).catch((err: unknown) => request.log.error({ err, orderId: id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        paymentStatus: facts.paymentStatus,
+        customerClaimedPaidAt: facts.customerClaimedPaidAt,
+        storeClaimed: facts.paymentStatus === 'CLAIMED',
+        mismatch: facts.mmgClaimMismatchAt != null,
+        replayed: outcome.replayed,
+        mmgClaim: mmgClaimView(facts),
+      },
+    };
   });
 
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {
@@ -3006,6 +3316,7 @@ export async function customerRoutes(app: FastifyInstance) {
   app.post('/promo/validate', { preHandler: [velocityGuard(app, 'promo.validate')] }, async (request: AuthRequest) => {
     const { userId } = request.user;
     const { code } = promoValidateSchema.parse(request.body);
+    const authority = await requireIdentityAuthority(app.prisma, userId);
 
     const promo = await app.prisma.promoCode.findUnique({
       where: { code: code.toUpperCase().trim() },
@@ -3024,7 +3335,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Check user-specific usage
     const userUsage = await app.prisma.order.count({
-      where: { customerId: userId, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
+      where: { customerId: { in: authority.memberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
     });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'ALREADY_USED', 'You have already used this promo code the maximum number of times');

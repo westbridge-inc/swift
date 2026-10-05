@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SandboxMmgProvider, LiveMmgProvider, getMmgProvider, MMG_UAT_URL, type LiveMmgConfig } from '../providers/mmg/mmg-provider';
+import { SandboxMmgProvider, LiveMmgProvider, getMmgProvider, lookupDetailFrom, MMG_REFERENCE_WIRE_CONTRACT, MMG_UAT_URL, type LiveMmgConfig } from '../providers/mmg/mmg-provider';
 
 // MMG Merchant-Initiated sandbox: exercises the whole loop (initiate → the
 // payer approves on their phone → lookup) deterministically, so billing/agent
@@ -18,6 +18,7 @@ describe('MMG sandbox provider — merchant-initiated loop', () => {
     expect(init.transactionId).toBeTruthy();
     const look = await mmg.transactionLookup({ transactionId: init.transactionId });
     expect(look.status).toBe('approved');
+    expect(look).toMatchObject({ amountMinor: 130000, currencyCode: 'GYD', reference: 'order-123' });
   });
 
   it('a reference marked "pending" stays pending on lookup', async () => {
@@ -72,6 +73,22 @@ describe('MMG sandbox provider — merchant-initiated loop', () => {
     expect(() => getMmgProvider()).toThrow(/missing: merchantMsisdn, password, mkey, msecret/);
     process.env = prev;
   });
+
+  it('the live factory is fail-closed until the exact reference round-trip is UAT-verified', () => {
+    const prev = { ...process.env };
+    Object.assign(process.env, {
+      MMG_DRIVER: 'live', MMG_API_KEY: 'k', MMG_MERCHANT_ID: '9991161', MMG_PASSWORD: 'p',
+      MMG_MKEY: 'mk', MMG_MSECRET: 'ms',
+    });
+    delete process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'];
+    try {
+      expect(() => getMmgProvider()).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] = '1';
+      expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
+    } finally {
+      process.env = prev;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -95,6 +112,15 @@ function jsonRes(status: number, body: unknown) {
 }
 
 describe('MMG live adapter — merchant-initiated wire format', () => {
+  it('exports the exact asymmetric reference contract that sandbox UAT must prove', () => {
+    expect(MMG_REFERENCE_WIRE_CONTRACT).toEqual({
+      outbound: { carrier: 'header', field: 'x-wss-correlationid' },
+      lookup: { carrier: 'json', field: 'metadata[].description' },
+      history: { carrier: 'json', field: 'TransactionList[].external_id' },
+      activationEnv: 'MMG_REFERENCE_ROUNDTRIP_VERIFIED',
+    });
+  });
+
   it('authenticates form-encoded against /e-commerce-login/mer and caches the 120s token', async () => {
     const fetchMock = vi.fn().mockResolvedValue(AUTH_OK);
     const mmg = new LiveMmgProvider(CFG, fetchMock as any);
@@ -148,6 +174,28 @@ describe('MMG live adapter — merchant-initiated wire format', () => {
     });
   });
 
+  it.each([
+    ['missing', { status: 'successful' }],
+    ['empty', { status: 'successful', executionId: '' }],
+    ['whitespace', { status: 'successful', executionId: '   ' }],
+    ['object', { status: 'successful', executionId: { bad: 'shape' } }],
+  ])('R5 approved initiate with %s reference exposes no usable transaction id', async (_label, body) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(200, body));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    const result = await mmg.initiatePayment({ payerId: '6983238', amountMinor: 210000, currencyCode: 'GYD', reference: 'sub-week-29' });
+    expect(result.status).toBe('approved');
+    expect(result.transactionId).toBe('');
+  });
+
+  it('R5 uses a valid objectReference when executionId is unusable', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(200, {
+      status: 'successful', executionId: '', objectReference: '20373216452995',
+    }));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    expect(await mmg.initiatePayment({ payerId: '6983238', amountMinor: 210000, currencyCode: 'GYD', reference: 'sub-week-29' }))
+      .toMatchObject({ status: 'approved', transactionId: '20373216452995' });
+  });
+
   it('initiate maps a 422 business rejection to declined with MMG\'s message', async () => {
     const fetchMock = vi
       .fn()
@@ -171,12 +219,32 @@ describe('MMG live adapter — merchant-initiated wire format', () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(AUTH_OK)
-      .mockResolvedValueOnce(jsonRes(200, { amount: '500', currency: 'GYD', transactionStatus: 'successful', transactionReference: '20373216965979', creationDate: '2025-11-01T22:52:21.253Z' }));
+      .mockResolvedValueOnce(jsonRes(200, {
+        amount: '500', currency: 'GYD', transactionStatus: 'successful', transactionReference: '20373216965979',
+        metadata: [{ key: 'description', value: 'sub-week-29' }], creationDate: '2025-11-01T22:52:21.253Z',
+      }));
     const mmg = new LiveMmgProvider(CFG, fetchMock as any);
     const tx = await mmg.transactionLookup({ transactionId: '20373216965979' });
     expect(tx.status).toBe('approved');
     expect(tx.amountMinor).toBe(50000);
     expect(tx.transactionId).toBe('20373216965979');
+    expect(tx.reference).toBe('sub-week-29');
+  });
+
+  it.each([
+    ['currency', { amount: '500', transactionStatus: 'successful', transactionReference: '20373216965979', metadata: [{ key: 'description', value: 'sub-week-29' }] }, 'currencyCode'],
+    ['transaction reference', { amount: '500', currency: 'GYD', transactionStatus: 'successful', metadata: [{ key: 'description', value: 'sub-week-29' }] }, 'transactionId'],
+  ] as const)('does not manufacture omitted lookup %s as settlement evidence', async (_label, body, field) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(AUTH_OK)
+      .mockResolvedValueOnce(jsonRes(200, body));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+
+    const tx = await mmg.transactionLookup({ transactionId: '20373216965979' });
+
+    expect(tx.status).toBe('approved');
+    expect(tx[field]).toBe('');
   });
 
   it('an unknown lookup status stays pending (a poller must never guess approval)', async () => {
@@ -230,5 +298,63 @@ describe('MMG live adapter — merchant-initiated wire format', () => {
       .mockResolvedValueOnce(jsonRes(200, { accounts: [{ accountcategoryName: 'Normal Wallet', accountBalance: { availableBalance: '4500', currency: 'GYD', status: 'available' } }] }));
     const mmg = new LiveMmgProvider(CFG, fetchMock as any);
     expect(await mmg.accountBalance()).toEqual({ currencyCode: 'GYD', balanceMinor: 450000 });
+  });
+});
+
+// [owner, 1 Oct] The checkout verifier's lookup, read exactly as MMG's UAT
+// answered it (evidence/mmg-uat/ROUNDTRIP-PROOF-20261001.md): the checkout
+// transactionId is looked up; MMG answers with its own ledger number in
+// transactionReference, a status word, a whole-dollar amount string, the
+// currency, a creationDate, the parties as [{ key: "accountid", value }] and
+// metadata whose description is empty.
+describe('MMG live adapter — the checkout lookup as MMG UAT answers it', () => {
+  const UAT_ANSWER = {
+    transactionStatus: 'successful', amount: '500', currency: 'GYD', creationDate: '2026-10-01T15:39:36.526Z',
+    subType: 'subscriber_mpay', transactionReference: '20402048601581',
+    creditParty: [{ key: 'accountid', value: '9991161' }], debitParty: [{ key: 'accountid', value: '6000002' }],
+    metadata: [{ key: 'amount', value: '500' }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }],
+    descriptionText: null,
+  };
+
+  it('reads every field the verifier needs, exactly as sent, from an HTTP 200 answer', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(200, UAT_ANSWER));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    const detail = await mmg.transactionLookupDetail('20402048536279');
+    expect(fetchMock.mock.calls[1]![0]).toBe(`${MMG_UAT_URL}/e-merchant-initiated-transactions/lookup?transactionId=20402048536279`);
+    expect(detail).toEqual({
+      outcome: 'found', transactionId: '20402048601581', status: 'approved', statusText: 'successful',
+      amountMinor: 50000, currencyCode: 'GYD', creditParties: ['9991161'], creditAccounts: ['9991161'],
+      createdAt: '2026-10-01T15:39:36.526Z', ledgerReference: '20402048601581', echoedReferences: [], raw: UAT_ANSWER,
+    });
+    expect(lookupDetailFrom(UAT_ANSWER, '20402048536279')).toEqual(detail);
+  });
+
+  it('only an "accountid" party names the account the money went to', () => {
+    const detail = lookupDetailFrom({ ...UAT_ANSWER, creditParty: [{ key: 'msisdn', value: '9991161' }, { key: 'accountid', value: '6000009' }, 'x', null] }, 'T1');
+    expect(detail.creditParties).toEqual(['9991161', '6000009']);
+    expect(detail.creditAccounts).toEqual(['6000009']);
+    expect(lookupDetailFrom({ ...UAT_ANSWER, creditParty: undefined }, 'T1').creditAccounts).toBeNull();
+    expect(lookupDetailFrom({ ...UAT_ANSWER, transactionReference: 20402048601581 }, 'T1')).toMatchObject({ ledgerReference: null, transactionId: 'T1' });
+    expect(lookupDetailFrom({ ...UAT_ANSWER, transactionStatus: 'completed' }, 'T1')).toMatchObject({ status: 'approved', statusText: 'completed' });
+  });
+
+  it('[DS632] an "accountid" party with an empty or missing value is kept, never dropped: the verifier then holds the payment', () => {
+    for (const blank of [{ key: 'accountid', value: '' }, { key: 'accountid' }, { key: 'accountid', value: null }]) {
+      const detail = lookupDetailFrom({ ...UAT_ANSWER, creditParty: [blank, { key: 'accountid', value: '9991161' }] }, 'T1');
+      expect(detail.creditAccounts, JSON.stringify(blank)).toEqual(['', '9991161']);
+    }
+    expect(lookupDetailFrom({ ...UAT_ANSWER, creditParty: [{ key: 'accountid' }] }, 'T1').creditAccounts).toEqual(['']);
+  });
+
+  it.each([201, 202, 204])('an HTTP %s answer is not an answer: an error to retry, never evidence', async (status) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(status, UAT_ANSWER));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    expect(await mmg.transactionLookupDetail('20402048536279')).toEqual({ outcome: 'error', reason: `MMG lookup HTTP ${status}` });
+  });
+
+  it.each([400, 404, 422])('HTTP %s means MMG does not know the transaction', async (status) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(status, { error: 'x' }));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    expect(await mmg.transactionLookupDetail('20402048536279')).toEqual({ outcome: 'not_found' });
   });
 });
