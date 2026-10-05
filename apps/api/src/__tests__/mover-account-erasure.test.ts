@@ -114,3 +114,37 @@ for (const role of ['rider', 'driver'] as const) describe(`${role} legacy docume
     expect(await storage.getObject(other.urls['nationalIdUrl']!)).toEqual(bytes);
   });
 });
+
+describe('mover object erasure at platform scale', () => {
+  it('purges a mover\'s objects when the platform holds more than 10,000 unrelated object references', async () => {
+    const p = await mover('rider');
+    const tag = nanoid(10).replace(/[^A-Za-z0-9]/g, 'x');
+    // 10,001 other accounts, each with its own avatar pointer: unrelated references the census must not have to read.
+    await app.prisma.$executeRawUnsafe(`
+      INSERT INTO users (id, phone, "firstName", "lastName", "activeRole", "updatedAt", avatar)
+      SELECT 'census-${tag}-' || g, '+5920${tag}' || g, 'Synthetic', 'Census', 'CUSTOMER', now(), 'avatars/census-${tag}-' || g || '/aaaaaaaaaaaaaaaa.jpg'
+      FROM generate_series(1, 10001) AS g`);
+    try {
+      expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: true });
+      const row = await p.read();
+      for (const field of fields) {
+        expect(row[field], field).toBeNull();
+        await expect(storage.getObject(p.urls[field]!)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+    } finally {
+      await app.prisma.$executeRawUnsafe(`DELETE FROM users WHERE id LIKE 'census-${tag}-%'`);
+    }
+  }, 60_000);
+
+  it('names every mover object it leaves pending in the operator log, without the storage key itself', async () => {
+    const p = await mover('driver'); const other = await mover('driver');
+    await app.prisma.driver.update({ where: { id: p.profileId }, data: { nationalIdUrl: other.urls['nationalIdUrl'] } });
+    const log = { ...app.log, warn: vi.fn(), info: vi.fn(), error: vi.fn() };
+    const svc = new AccountService({ prisma: app.prisma, log: log as any, io: { in: () => ({ disconnectSockets: () => undefined }) } as any });
+    expect(await svc.deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
+    const pending = log.warn.mock.calls.filter(([, msg]) => msg === 'mover object erasure pending');
+    expect(pending).toHaveLength(1);
+    expect(pending[0]![0]).toMatchObject({ userId: p.userId, fields: ['driver.nationalIdUrl'], reason: 'Unproven mover object' });
+    expect(JSON.stringify(pending[0]![0])).not.toContain(other.urls['nationalIdUrl']!);
+  });
+});

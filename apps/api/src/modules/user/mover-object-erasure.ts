@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
+import type { FastifyBaseLogger } from 'fastify';
 import { resolveLocalStorageKey, storageProviderKind } from '../../providers/storage/storage-key';
 import { deleteStorageObjectAndConfirmAbsent } from '../../lib/storage-orphans';
 import { writeDeletionReceipt } from '../verification/purge-receipt';
@@ -8,6 +9,7 @@ import { writeDeletionReceipt } from '../verification/purge-receipt';
 const FIELDS = ['nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl', 'profilePhotoUrl', 'vehiclePhotoUrl'] as const;
 type Field = typeof FIELDS[number];
 type Pointer = { role: 'rider' | 'driver'; id: string; field: Field; key: string };
+const AUTHORITY_REASONS = new Set(['Unproven mover object', 'Filtered mover object census', 'Shared or held mover object', 'Unproven mover envelope']);
 
 /** Legacy mover pointers are obligations, not deletion capabilities. Verify the
  * provider's exact subject namespace and a global census before touching bytes.
@@ -32,17 +34,23 @@ async function authority(tx: Prisma.TransactionClient, userId: string, pointers:
     /* mover-erasure-global-visibility */
   `;
   if (visibility.length !== 1 || visibility[0]?.active !== false) throw new Error('Filtered mover object census');
+  // Scope the census to references that could address THIS object. Every
+  // spelling the local adapter resolves to the same file keeps the final path
+  // segment verbatim (normalization only removes "", "." and ".." segments),
+  // and S3/R2 keys are literal, so a reference containing the validated object
+  // name is a complete superset of its aliases. The census is unbounded: a cap
+  // would turn platform growth into permanent, silent erasure failure.
+  const name = parts[2]!;
   const refs = await tx.$queryRaw<Array<{ owner: string; key: string; held: boolean }>>`
     SELECT * FROM (
-      SELECT id AS owner, avatar AS key, false AS held FROM users WHERE avatar IS NOT NULL
-      UNION ALL SELECT "userId", unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]), false FROM riders
-      UNION ALL SELECT "userId", unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]), false FROM drivers
-      UNION ALL SELECT "userId", "fileUrl", "legalHoldId" IS NOT NULL FROM verification_documents
-      UNION ALL SELECT "createdBy", "fileKey", false FROM encrypted_objects
-    ) AS refs WHERE key IS NOT NULL AND key <> '' LIMIT 10001
-    /* mover-erasure-global-references */
+      SELECT id AS owner, avatar AS key, false AS held FROM users WHERE strpos(avatar, ${name}) > 0
+      UNION ALL SELECT "userId", k, false FROM riders, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
+      UNION ALL SELECT "userId", k, false FROM drivers, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
+      UNION ALL SELECT "userId", "fileUrl", "legalHoldId" IS NOT NULL FROM verification_documents WHERE strpos("fileUrl", ${name}) > 0
+      UNION ALL SELECT "createdBy", "fileKey", false FROM encrypted_objects WHERE strpos("fileKey", ${name}) > 0
+    ) AS refs WHERE key IS NOT NULL AND key <> ''
+    /* mover-erasure-object-references */
   `;
-  if (refs.length > 10000) throw new Error('Incomplete mover object census');
   for (const ref of refs) {
     let same = ref.key === key;
     if (local) {
@@ -64,7 +72,7 @@ async function authority(tx: Prisma.TransactionClient, userId: string, pointers:
  * pointer remains until a confirmed-absence receipt commits with pointer clear;
  * the account tombstone's standing retry sweep therefore cannot lose an object.
  */
-export async function eraseMoverObjects(db: PrismaClient, storage: StorageProvider, userId: string) {
+export async function eraseMoverObjects(db: PrismaClient, storage: StorageProvider, userId: string, log?: Pick<FastifyBaseLogger, 'warn'>) {
   return db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE /* mover-erasure-authority */`;
     const [rider, driver] = await Promise.all([
@@ -84,9 +92,24 @@ export async function eraseMoverObjects(db: PrismaClient, storage: StorageProvid
       return { pending: 0, held: new Set(pointers.map((p) => p.key)).size };
     }
     let pending = 0;
+    // Every object left behind is named for operators: which fields still
+    // point at it and why. The key itself is digested; the retry sweep and the
+    // retained pointer carry the obligation.
+    const leavePending = (key: string, reason: string) => {
+      pending += 1;
+      log?.warn({
+        userId, reason,
+        fields: pointers.filter((p) => p.key === key).map((p) => `${p.role}.${p.field}`),
+        keyDigest: createHash('sha256').update(key).digest('hex').slice(0, 16),
+      }, 'mover object erasure pending');
+    };
     for (const key of new Set(pointers.map((p) => p.key))) {
       let meta;
-      try { meta = await authority(tx, userId, pointers, key); } catch { pending += 1; continue; }
+      try { meta = await authority(tx, userId, pointers, key); } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        leavePending(key, AUTHORITY_REASONS.has(message) ? message : 'Object authority census failed');
+        continue;
+      }
       // Capture truthful photo receipt evidence before deleting. A read failure
       // other than confirmed absence keeps the pointer due for retry.
       let contentHash = meta ? Buffer.from(meta.sha256, 'hex') : null;
@@ -98,11 +121,11 @@ export async function eraseMoverObjects(db: PrismaClient, storage: StorageProvid
           bytesDeleted = BigInt(before.length);
         } catch (error) {
           const missing = error as { code?: string; name?: string };
-          if (missing?.code !== 'ENOENT' && missing?.name !== 'NoSuchKey' && missing?.name !== 'NotFound') { pending += 1; continue; }
+          if (missing?.code !== 'ENOENT' && missing?.name !== 'NoSuchKey' && missing?.name !== 'NotFound') { leavePending(key, 'Object read failed'); continue; }
         }
       }
       if (meta) await tx.encryptedObject.updateMany({ where: { fileKey: key, createdBy: userId }, data: { wrappedDek: null, shreddedAt: meta.shreddedAt ?? new Date() } });
-      if (!await deleteStorageObjectAndConfirmAbsent(storage, key)) { pending += 1; continue; }
+      if (!await deleteStorageObjectAndConfirmAbsent(storage, key)) { leavePending(key, 'Object absence not confirmed'); continue; }
       const matching = pointers.filter((p) => p.key === key);
       for (const p of matching) {
         if (p.role === 'rider') await tx.rider.update({ where: { id: p.id }, data: { [p.field]: null } });

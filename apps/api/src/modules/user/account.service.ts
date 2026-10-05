@@ -30,6 +30,10 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
+/** The subject of a closure request confirmed in the app. Support completes
+ *  only these: a typed-in ticket is not a confirmed request. */
+export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
+
 export class AccountService {
   constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
@@ -94,10 +98,10 @@ export class AccountService {
   }
 
   private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
-    const where = { userId, category: 'ACCOUNT' as const, subject: 'Account closure request', status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
+    const where = { userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
     return await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
       ?? await tx.supportTicket.create({ data: {
-        userId, category: 'ACCOUNT', subject: 'Account closure request',
+        userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
         message: 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.',
       } });
   }
@@ -168,7 +172,7 @@ export class AccountService {
         const avatarOrphan = await queueAvatarBeforePointerClear();
         if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
         await revokeAccessBeforeCleanup();
-        return { alreadyComplete: false, resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
+        return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
@@ -180,7 +184,7 @@ export class AccountService {
         || await tx.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
         || await tx.advertiserMember.findFirst({ where: { userId }, select: { advertiserId: true } }))) {
         const ticket = await this.closureTicket(tx, userId);
-        return { closureTicketId: ticket.id, alreadyComplete: false, hold: null, avatarOrphanId: null };
+        return { closureTicketId: ticket.id, hold: null, avatarOrphanId: null };
       }
 
       // Profile ownership, not the active role, defines obligations. Switching
@@ -245,10 +249,9 @@ export class AccountService {
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
-      return { alreadyComplete: false, hold, avatarOrphanId: avatarOrphan?.id ?? null };
+      return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);
-    if (preflight.alreadyComplete) return { deleted: true };
     if ((preflight as { resweep?: boolean }).resweep) {
       this.app.log.info({ userId }, 'account deletion re-sweep: purging any late writes');
     }
@@ -360,7 +363,7 @@ export class AccountService {
       });
     }
 
-    const moverObjects = await eraseMoverObjects(prisma, storage, userId);
+    const moverObjects = await eraseMoverObjects(prisma, storage, userId, this.app.log);
     pendingDocuments += moverObjects.pending;
 
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
