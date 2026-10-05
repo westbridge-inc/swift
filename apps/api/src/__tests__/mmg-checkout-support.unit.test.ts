@@ -85,9 +85,10 @@ const answerAt = (created: unknown) => lookupDetailFrom({
 describe('the window support sees is the window judge() decides with', () => {
   const success = { txnId: '20402048536279' };
   // [#1393 DS632] judge() reads MMG's stamp in the configured zone and bounds it
-  // by the first reply naming the transaction; here that reply came at the
-  // deadline, so only the window (and a stamp hours out) decides.
-  const creation = { zone: 'GUYANA_WALL_CLOCK' as const, firstReplyAt: intent.expiresAt };
+  // by the first reply naming the transaction (two minutes' tolerance); here
+  // that reply came as late as a success answer still counts (the deadline
+  // plus two minutes), so only the window (and a stamp hours out) decides.
+  const creation = { zone: 'GUYANA_WALL_CLOCK' as const, firstReplyAt: new Date(intent.expiresAt.getTime() + 2 * 60_000) };
   /** [name, MMG's creationDate, the window support shows, judge()'s verdict or hold reason] */
   const cases: Array<[string, unknown, 'INSIDE' | 'OUTSIDE' | 'UNREADABLE', string]> = [
     ['three minutes before it opened', gyStamp(new Date(opened.getTime() - 3 * 60_000)), 'OUTSIDE', 'OUTSIDE_CHECKOUT_WINDOW'],
