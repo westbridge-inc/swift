@@ -30,7 +30,9 @@ import { installGlobalErrorHandler } from './lib/crash-reporter';
 import { RootNavigator } from './navigation/RootNavigator';
 import { queryClient } from './lib/queryClient';
 import { bindQueryCacheScope } from './lib/appQueryPolicy';
-import { initSecureStorage } from './lib/storage';
+import { initSecureStorage, encryptedQueryStorage } from './lib/storage';
+import { bindOfflineQueryCache } from './lib/offlineQueryCache';
+import { digestStringAsync, CryptoDigestAlgorithm } from 'expo-crypto';
 import { track } from './lib/analytics';
 import { PermissionPrimeSheet } from './components/PermissionPrimeSheet';
 import { useAuthStore } from './stores/authStore';
@@ -61,6 +63,7 @@ function LocationBootstrap() {
 
 type StorageBootstrapStatus = 'loading' | 'ready' | 'error';
 
+let stopOfflineCache: (() => void) | undefined;
 async function hydratePersistedStores(): Promise<void> {
   await initSecureStorage();
   await Promise.all([
@@ -68,6 +71,9 @@ async function hydratePersistedStores(): Promise<void> {
     useLocationStore.persist.rehydrate(),
     useAppStore.persist.rehydrate(),
   ]);
+  stopOfflineCache?.();
+  stopOfflineCache = await bindOfflineQueryCache(queryClient, useAuthStore, encryptedQueryStorage,
+    (value) => digestStringAsync(CryptoDigestAlgorithm.SHA256, value));
 }
 
 /** A fail-closed recovery surface: no navigator, API queries, permission work,

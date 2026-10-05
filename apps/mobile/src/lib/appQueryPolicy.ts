@@ -95,8 +95,8 @@ interface ScopeSource {
 
 /** Cache-only subscription, installed before hydration/render. The hash closes
  * over an immutable opaque boundary (never tokens or a live auth lookup).
- * Existing raw query keys still support all prefix invalidations. No query
- * payload is persisted; cold starts fetch anew, including after app upgrades. */
+ * Existing raw query keys still support all prefix invalidations. Offline
+ * persistence separately stores only reviewed display projections. */
 export function bindQueryCacheScope(client: QueryClient, source: ScopeSource): () => void {
   let previous: string | undefined;
   const apply = ({ adEventScopeId, sessionGeneration }: CacheScope) => {
