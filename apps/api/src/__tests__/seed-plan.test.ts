@@ -1,16 +1,17 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
-  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, promoteBootstrapAdmin, seedPlanDigest, signPromotionApproval, signPromotionForTarget, signSeedApproval, signSeedPlanForTarget,
+  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, planApprovalRequest, promoteBootstrapAdmin, promotionApprovalRequest, seedPlanDigest,
   type DesiredConfig, type SeedPlan,
 } from '../modules/ops/seed-plan';
+import { approvalRequest, parseApproverKeys, promotionSubject, type SignedApproval } from '../modules/ops/approver-signatures';
 import { desiredPlatformConfig, seedPlatformSpine } from '../modules/ops/platform-config';
-import { targetFingerprint } from '../modules/ops/purge-plan';
 import { assertSafeToSeedDemo } from '../utils/seed-guard';
 import { seedPlanCounter } from '../plugins/observability';
 
@@ -33,7 +34,22 @@ grantSuiteCapability('unscoped-mutation');
 
 const prisma = new PrismaClient();
 const URL_ = process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test';
-const SECRET = `s-${nanoid(12)}`;
+// [PROD-PATH] Approvers are PEOPLE with their own keys: three throwaway
+// ed25519 keys made here exactly as an approver makes theirs, two pinned.
+const KEYDIR = mkdtempSync(join(tmpdir(), 'seed-approvers-'));
+const makeKey = (name: string) => {
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(KEYDIR, name), '-C', name]);
+  return readFileSync(join(KEYDIR, `${name}.pub`), 'utf8').trim().split(/\s+/).slice(0, 2).join(' ');
+};
+const PUB = { alice: makeKey('alice'), bob: makeKey('bob'), mallory: makeKey('mallory') };
+const PINNED = `alice ${PUB.alice}\nbob ${PUB.bob}\n`;
+const APPROVE = join(process.cwd(), '../../deploy/seed-approve.sh');
+/** `name` signs `request` with the private key of `keyOf` through the real deploy/seed-approve.sh. */
+function sign(name: string, keyOf: string, request: string): SignedApproval {
+  const out = execFileSync('bash', [APPROVE, name, join(KEYDIR, keyOf)], { input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', SEED_APPROVE_YES: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  return JSON.parse(out.trim()) as SignedApproval;
+}
+const both = (request: string) => [sign('alice', 'alice', request), sign('bob', 'bob', request)];
 let priorIdentity: { deploymentId: string; environment: string; note: string | null } | null = null;
 const KEY = `r048005_${nanoid(6).toLowerCase()}`;
 const userIds: string[] = [];
@@ -59,6 +75,7 @@ beforeAll(async () => {
   await setIdentity('test');
 });
 afterAll(async () => {
+  rmSync(KEYDIR, { recursive: true, force: true });
   await prisma.platformConfig.deleteMany({ where: { key: KEY } }).catch(() => {});
   await prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
   await prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -162,18 +179,26 @@ describe('[R048-005] a plan is bound: tampering, other data, another target, dri
 });
 
 describe('[R048-005] a production target is a ceremony', () => {
-  it('needs two DISTINCT approvals signed over the plan digest; one, two of the same, or a wrong secret refuse before any write', async () => {
+  it('needs two approvals by two DIFFERENT pinned people; none, one, the same person twice, a name with someone else\'s key, or an unpinned person refuse before any write', async () => {
     await setIdentity('production');
     try {
       const desired = desiredFor(9);
       const plan = await buildSeedPlan(prisma, URL_, desired);
       expect(plan.target.environment).toBe('production');
+      const request = planApprovalRequest(plan);
+      const opts = (approvals: SignedApproval[]) => ({ approvals, approverKeys: PINNED });
       await expect(applySeedPlan(prisma, URL_, desired, plan)).rejects.toMatchObject({ code: 'APPROVALS_REQUIRED' });
-      await expect(applySeedPlan(prisma, URL_, desired, plan, { secret: SECRET, approvals: [signSeedApproval(SECRET, 'alice', plan.digest)] })).rejects.toMatchObject({ code: 'APPROVALS_REQUIRED' });
-      await expect(applySeedPlan(prisma, URL_, desired, plan, { secret: SECRET, approvals: [signSeedApproval(SECRET, 'alice', plan.digest), signSeedApproval(SECRET, 'Alice ', plan.digest)] })).rejects.toMatchObject({ code: 'APPROVERS_NOT_DISTINCT' });
-      await expect(applySeedPlan(prisma, URL_, desired, plan, { secret: SECRET, approvals: [signSeedApproval(SECRET, 'alice', plan.digest), signSeedApproval('other', 'bob', plan.digest)] })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts([sign('alice', 'alice', request)]))).rejects.toMatchObject({ code: 'APPROVALS_REQUIRED' });
+      // One person, one key, twice (even re-signed: a fresh request, same key).
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts([sign('alice', 'alice', request), sign('alice', 'alice', planApprovalRequest(plan))]))).rejects.toMatchObject({ code: 'APPROVERS_NOT_DISTINCT' });
+      // One person cannot be two by choosing a name: bob's line signed with alice's key.
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts([sign('alice', 'alice', request), sign('bob', 'alice', request)]))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts([sign('alice', 'alice', request), sign('mallory', 'mallory', request)]))).rejects.toMatchObject({ code: 'APPROVER_UNKNOWN' });
+      // The same key pinned under two names is refused outright.
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(request), approverKeys: `alice ${PUB.alice}\nbob ${PUB.alice}\n` })).rejects.toMatchObject({ code: 'KEYS_MALFORMED' });
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(request), approverKeys: `alice ${PUB.alice}\n` })).rejects.toMatchObject({ code: 'APPROVERS_NOT_PINNED' });
       expect((await prisma.platformConfig.findUniqueOrThrow({ where: { key: KEY } })).value).toBe(8);
-      const res = await applySeedPlan(prisma, URL_, desired, plan, { secret: SECRET, approvals: [signSeedApproval(SECRET, 'alice', plan.digest), signSeedApproval(SECRET, 'bob', plan.digest)], actor: 'alice' });
+      const res = await applySeedPlan(prisma, URL_, desired, plan, { ...opts(both(request)), actor: 'alice' });
       expect(res.applied).toBe(1);
       const audit = await prisma.privilegedChangeAudit.findFirst({ where: { planDigest: plan.digest, event: 'APPLIED' } });
       expect((audit!.detail as { approvers: string[] }).approvers.sort()).toEqual(['alice', 'bob']);
@@ -188,7 +213,7 @@ describe('[R048-005] a production target is a ceremony', () => {
     try {
       const desired = desiredFor(10);
       // The same plan built at two different moments: the ceremony prints the
-      // first digest, the operators sign it, and the re-run (a fresh `now`)
+      // request, the approvers sign it, and the re-run (a fresh `now`)
       // rebuilds the plan. Before the fix the fresh `createdAt` changed the
       // digest and every signature failed APPROVAL_INVALID — forever.
       const printed = await buildSeedPlan(prisma, URL_, desired, new Date('2026-09-23T10:00:00.000Z'));
@@ -196,27 +221,70 @@ describe('[R048-005] a production target is a ceremony', () => {
       expect(rebuilt.createdAt).not.toBe(printed.createdAt);
       expect(rebuilt.changes).toEqual(printed.changes);
       expect(rebuilt.digest).toBe(printed.digest);
-      // …and the digest still binds the content: other desired data is another plan.
       const other = await buildSeedPlan(prisma, URL_, desiredFor(11), new Date('2026-09-23T10:00:00.000Z'));
       expect(other.digest).not.toBe(printed.digest);
-
-      // The signatures captured over the PRINTED digest must apply the
-      // REBUILT plan — this is the exact boot-deadlock step that used to fail.
-      const res = await applySeedPlan(prisma, URL_, desired, rebuilt, {
-        secret: SECRET,
-        approvals: [signSeedApproval(SECRET, 'alice', printed.digest), signSeedApproval(SECRET, 'bob', printed.digest)],
-        actor: 'alice',
-      });
+      const res = await applySeedPlan(prisma, URL_, desired, rebuilt, { approvals: both(planApprovalRequest(printed)), approverKeys: PINNED, actor: 'alice' });
       expect(res).toMatchObject({ applied: 1, configVersion: 'test-10' });
       expect(await auditEvents(rebuilt.digest)).toEqual(['APPLIED']);
     } finally {
       await setIdentity('test');
     }
   });
+
+  it('[PROD-PATH] approvals are single-use: after a rollback restores the approved precondition, the same lines are refused; fresh ones apply', async () => {
+    await setIdentity('production');
+    try {
+      const desired = desiredFor(30);
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const plan = await buildSeedPlan(prisma, URL_, desired);
+      const lines = both(planApprovalRequest(plan));
+      expect(await applySeedPlan(prisma, URL_, desired, plan, { approvals: lines, approverKeys: PINNED })).toMatchObject({ applied: 1 });
+      // Roll the data back to exactly the approved precondition: same target, same diff, same digest.
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const again = await buildSeedPlan(prisma, URL_, desired);
+      expect(again.digest).toBe(plan.digest);
+      await expect(applySeedPlan(prisma, URL_, desired, again, { approvals: lines, approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_REPLAYED' });
+      expect(await prisma.platformConfig.findUnique({ where: { key: KEY } })).toBeNull();
+      // Two fresh approvals (a new request, a new nonce) apply once more.
+      expect(await applySeedPlan(prisma, URL_, desired, again, { approvals: both(planApprovalRequest(again)), approverKeys: PINNED })).toMatchObject({ applied: 1 });
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('[PROD-PATH] approvals expire, at most 72 hours ahead, and bind the plan and the database', async () => {
+    await setIdentity('production');
+    try {
+      const desired = desiredFor(31);
+      const plan = await buildSeedPlan(prisma, URL_, desired);
+      const now = new Date();
+      const expired = approvalRequest('plan', plan.target.digest, plan.digest, new Date(now.getTime() - 25 * 3600_000));
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(expired), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_EXPIRED' });
+      const tooLong = approvalRequest('plan', plan.target.digest, plan.digest, now, 80 * 3600_000);
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(tooLong), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_TOO_LONG' });
+      const otherPlan = approvalRequest('plan', plan.target.digest, 'f'.repeat(64), now);
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(otherPlan), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      const otherDb = approvalRequest('plan', 'e'.repeat(64), plan.digest, now);
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(otherDb), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      // A promotion approval is not a plan approval.
+      const promoteKind = approvalRequest('promote', plan.target.digest, plan.digest, now);
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(promoteKind), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      expect(await prisma.platformConfig.findUnique({ where: { key: KEY } }).then((r) => r?.value)).not.toBe(31);
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('[PROD-PATH] the pinned-key list refuses one key under two names and malformed lines', () => {
+    expect(() => parseApproverKeys(`alice ${PUB.alice}\nbob ${PUB.alice}`)).toThrow(/KEYS_MALFORMED/);
+    expect(() => parseApproverKeys(`Alice ${PUB.alice}`)).toThrow(/KEYS_MALFORMED/);
+    expect(() => parseApproverKeys(`alice ssh-rsa AAAA`)).toThrow(/KEYS_MALFORMED|KEY_UNSUPPORTED/);
+    expect([...parseApproverKeys(`# pinned\nalice ${PUB.alice} alice@laptop\nbob ${PUB.bob}\n`).keys()]).toEqual(['alice', 'bob']);
+  });
 });
 
 describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-glass', () => {
-  it('bootstraps only while no SUPER_ADMIN exists; afterwards two approvals over this target and phone are required', async () => {
+  it('bootstraps only while no SUPER_ADMIN exists; afterwards two pinned people approve this target and phone, once', async () => {
     const existing = await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } });
     const phone = `+59260099${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
     const phone2 = `+59260098${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
@@ -228,158 +296,82 @@ describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-
     // a SUPER_ADMIN exists now (ours or the seed's): no ceremony, no promotion
     await expect(promoteBootstrapAdmin(prisma, URL_, phone2, { actor: 'test' })).rejects.toMatchObject({ code: 'BREAK_GLASS_REQUIRED' });
     expect(await prisma.user.count({ where: { phone: phone2 } })).toBe(0);
-    const target = (await buildSeedPlan(prisma, URL_, desiredFor(0))).target;
-    await expect(promoteBootstrapAdmin(prisma, URL_, phone2, { secret: SECRET, approvals: [signPromotionApproval(SECRET, 'alice', target.digest, phone2), signPromotionApproval(SECRET, 'alice', target.digest, phone2)] })).rejects.toMatchObject({ code: 'APPROVERS_NOT_DISTINCT' });
-    await expect(promoteBootstrapAdmin(prisma, URL_, phone2, { secret: SECRET, approvals: [signPromotionApproval(SECRET, 'alice', target.digest, phone2), signPromotionApproval(SECRET, 'bob', target.digest, phone)] })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
-    const promoted = await promoteBootstrapAdmin(prisma, URL_, phone2, { secret: SECRET, approvals: [signPromotionApproval(SECRET, 'alice', target.digest, phone2), signPromotionApproval(SECRET, 'bob', target.digest, phone2)], actor: 'alice' });
+    const request = await promotionApprovalRequest(prisma, URL_, phone2);
+    expect(request).not.toContain(phone2);
+    expect(request).toContain(promotionSubject(phone2));
+    const opts = (approvals: SignedApproval[]) => ({ approvals, approverKeys: PINNED, actor: 'alice' });
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone2, opts([sign('alice', 'alice', request), sign('alice', 'alice', await promotionApprovalRequest(prisma, URL_, phone2))]))).rejects.toMatchObject({ code: 'APPROVERS_NOT_DISTINCT' });
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone2, opts([sign('alice', 'alice', request), sign('bob', 'alice', request)]))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    // A half signed for another phone is refused.
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone2, opts([sign('alice', 'alice', request), sign('bob', 'bob', await promotionApprovalRequest(prisma, URL_, phone))]))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    // A half signed against another database (same phone) is refused.
+    const elsewhere = new URL(URL_);
+    elsewhere.hostname = 'another-database.internal';
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone2, opts([sign('alice', 'alice', request), sign('bob', 'bob', await promotionApprovalRequest(prisma, elsewhere.toString(), phone2))]))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+    expect(await prisma.user.count({ where: { phone: phone2 } })).toBe(0);
+    const lines = both(request);
+    const promoted = await promoteBootstrapAdmin(prisma, URL_, phone2, opts(lines));
     userIds.push(promoted.userId);
     expect(promoted.mode).toBe('break-glass');
-    const u = await prisma.user.findUniqueOrThrow({ where: { id: promoted.userId }, select: { roles: true, activeRole: true } });
+    const u = await prisma.user.findUniqueOrThrow({ where: { id: promoted.userId }, select: { roles: true } });
     expect(u.roles).toContain('SUPER_ADMIN');
     const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: promoted.userId } } });
     expect((audit!.detail as { mode: string; approvers: string[] })).toMatchObject({ mode: 'break-glass', approvers: ['alice', 'bob'] });
+    // Single use: the same two lines cannot promote again.
+    await expect(promoteBootstrapAdmin(prisma, URL_, phone2, opts(lines))).rejects.toMatchObject({ code: 'APPROVAL_REPLAYED' });
   });
 });
 
-describe('[ops] the break-glass ceremony: each approver signs their own half', () => {
-  it('signPromotionForTarget is read-only; two halves for THIS target and phone promote; a half for another phone does not', async () => {
-    // A SUPER_ADMIN must exist, or a promotion is bootstrap and needs no ceremony.
-    if ((await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) === 0) {
-      const first = await promoteBootstrapAdmin(prisma, URL_, `+59260096${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`, { actor: 'test' });
-      userIds.push(first.userId);
-    }
-    const phone = `+59260097${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
-    const otherPhone = `+59260095${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
-    const usersBefore = await prisma.user.count();
-    const auditsBefore = await prisma.privilegedChangeAudit.count();
-
-    const owner = await signPromotionForTarget(prisma, URL_, SECRET, 'owner', phone);
-    const coordinator = await signPromotionForTarget(prisma, URL_, SECRET, 'coordinator', phone);
-    expect(owner).toEqual({ approver: 'owner', signature: expect.stringMatching(/^[0-9a-f]{16,}$/) });
-    // Signing wrote nothing: no account, no audit row.
-    expect(await prisma.user.count()).toBe(usersBefore);
-    expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
-
-    // [DS250 F3] Each half is exactly the signature over THIS database's fingerprint and the phone.
-    const target = await targetFingerprint(prisma, URL_);
-    expect(owner).toEqual(signPromotionApproval(SECRET, 'owner', target.digest, phone));
-
-    // Refused before any read of the target: no key, a malformed name, a malformed phone.
-    await expect(signPromotionForTarget(prisma, URL_, undefined, 'owner', phone)).rejects.toMatchObject({ code: 'SECRET_REQUIRED' });
-    await expect(signPromotionForTarget(prisma, URL_, SECRET, 'Owner Name', phone)).rejects.toMatchObject({ code: 'APPROVER_INVALID' });
-    await expect(signPromotionForTarget(prisma, URL_, SECRET, 'owner', '5920400001')).rejects.toMatchObject({ code: 'PHONE_INVALID' });
-
-    // A half signed for another phone is refused, and nothing is promoted.
-    const forOther = await signPromotionForTarget(prisma, URL_, SECRET, 'coordinator', otherPhone);
-    await expect(promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, forOther] })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
-    expect(await prisma.user.count({ where: { phone } })).toBe(0);
-
-    // [DS250 F3] A half signed against another database (same key, same phone) is
-    // refused: a signature cannot be replayed from one target onto another.
-    const elsewhere = new URL(URL_);
-    elsewhere.hostname = 'another-database.internal';
-    const forElsewhere = await signPromotionForTarget(prisma, elsewhere.toString(), SECRET, 'coordinator', phone);
-    expect(forElsewhere.signature).not.toBe(coordinator.signature);
-    await expect(promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, forElsewhere] })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
-    expect(await prisma.user.count({ where: { phone } })).toBe(0);
-
-    // The two halves promote, as break-glass, and the audit names both people.
-    const promoted = await promoteBootstrapAdmin(prisma, URL_, phone, { secret: SECRET, approvals: [owner, coordinator], actor: 'coordinator' });
-    userIds.push(promoted.userId);
-    expect(promoted.mode).toBe('break-glass');
-    const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: promoted.userId } } });
-    expect((audit!.detail as { approvers: string[] }).approvers).toEqual(['owner', 'coordinator']);
-  });
-});
-
-describe('[DS250 F3] sign mode through the real seed entry point', () => {
-  it('prints exactly one approval line on stdout, seeds nothing, and never prints the key', async () => {
-    const phone = `+59260094${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
-    const usersBefore = await prisma.user.count();
-    const auditsBefore = await prisma.privilegedChangeAudit.count();
-
-    const res = spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), ['prisma/seed-production.ts'], {
-      encoding: 'utf8',
-      timeout: 90_000,
-      env: { PATH: process.env['PATH'] ?? '', DATABASE_URL: URL_, SEED_PLAN_SECRET: SECRET, SEED_SIGN_APPROVER: 'owner', SEED_ADMIN_PHONE: phone },
-    });
-    expect(res.status, res.stderr).toBe(0);
-    const lines = res.stdout.trim().split('\n');
-    expect(lines).toHaveLength(1);
-    // The one line IS the approval for this database and phone: the operator pastes it as-is.
-    const target = await targetFingerprint(prisma, URL_);
-    expect(JSON.parse(lines[0]!)).toEqual(signPromotionApproval(SECRET, 'owner', target.digest, phone));
-    expect(res.stdout + res.stderr).not.toContain(SECRET);
-    // Read-only: no account, no audit row.
-    expect(await prisma.user.count()).toBe(usersBefore);
-    expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
-  }, 120_000);
-});
-
-describe('[PROD-PATH] the plan half of the production ceremony: each approver signs what is current', () => {
-  it('two halves signed by signSeedPlanForTarget apply the plan on a production target; signing itself writes nothing', async () => {
+describe('[PROD-PATH] the real seed entry point on a production target', () => {
+  it('prints the request alone on stdout and exits 2; two pinned people sign it; the re-run applies; the lines are spent', async () => {
+    const spineKey = desiredPlatformConfig().platformConfig[0]!.key;
     await setIdentity('production');
     try {
-      const desired = desiredFor(20);
-      const printed = await buildSeedPlan(prisma, URL_, desired);
-      const auditsBefore = await prisma.privilegedChangeAudit.count();
-      const alice = await signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', printed.digest);
-      const bob = await signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'bob', printed.digest);
-      expect(alice).toEqual(signSeedApproval(SECRET, 'alice', printed.digest));
-      expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
-      expect(await prisma.platformConfig.findUnique({ where: { key: KEY } }).then((r) => r?.value)).not.toBe(20);
-      const rebuilt = await buildSeedPlan(prisma, URL_, desired);
-      const res = await applySeedPlan(prisma, URL_, desired, rebuilt, { secret: SECRET, approvals: [alice, bob], actor: 'alice' });
-      expect(res).toMatchObject({ applied: 1, configVersion: 'test-20' });
+      // A real change to approve: one spine key is missing.
+      await prisma.platformConfig.deleteMany({ where: { key: spineKey } });
+      const run = (extra: Record<string, string>) => spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), ['prisma/seed-production.ts'], {
+        encoding: 'utf8',
+        timeout: 90_000,
+        env: { PATH: process.env['PATH'] ?? '', NODE_ENV: 'test', DATABASE_URL: URL_, ...extra },
+      });
+      const first = run({});
+      expect(first.status, first.stderr).toBe(2);
+      const request = first.stdout;
+      expect(request.split('\n')[0]).toBe('swift-seed-approval v1');
+      expect(request).toMatch(/^kind: plan$/m);
+      expect(await prisma.platformConfig.findUnique({ where: { key: spineKey } })).toBeNull();
+      const lines = both(request);
+      const applied = run({ SEED_PLAN_APPROVALS: JSON.stringify(lines), SEED_APPROVER_KEYS: PINNED });
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(await prisma.platformConfig.findUnique({ where: { key: spineKey } })).not.toBeNull();
+      // Roll back to the approved precondition and replay the same two lines: refused.
+      await prisma.platformConfig.deleteMany({ where: { key: spineKey } });
+      const replay = run({ SEED_PLAN_APPROVALS: JSON.stringify(lines), SEED_APPROVER_KEYS: PINNED });
+      expect(replay.status).toBe(1);
+      expect(replay.stderr).toContain('APPROVAL_REPLAYED');
+      expect(await prisma.platformConfig.findUnique({ where: { key: spineKey } })).toBeNull();
     } finally {
       await setIdentity('test');
+      await seedPlatformSpine(prisma, { databaseUrl: URL_, actor: 'test' });
     }
+  }, 300_000);
+
+  it('deploy/seed-approve.sh signs only a well-formed request, only after a yes, and prints one line', () => {
+    const okRequest = approvalRequest('plan', 'a'.repeat(64), 'b'.repeat(64));
+    const runApprove = (input: string, env: Record<string, string>, name = 'alice') => spawnSync('bash', [APPROVE, name, join(KEYDIR, 'alice')], { input, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...env } });
+    const good = runApprove(`\n${okRequest.replace(/\n/g, '\r\n')}\n\n`, { SEED_APPROVE_YES: '1' });
+    expect(good.status, good.stderr).toBe(0);
+    const line = JSON.parse(good.stdout.trim()) as SignedApproval;
+    expect(Buffer.from(line.request, 'base64').toString('utf8')).toBe(okRequest);
+    expect(good.stdout.trim().split('\n')).toHaveLength(1);
+    expect(runApprove('hello\n', { SEED_APPROVE_YES: '1' }).status).not.toBe(0);
+    expect(runApprove(okRequest + 'extra: line\n', { SEED_APPROVE_YES: '1' }).status).not.toBe(0);
+    expect(runApprove(okRequest, { SEED_APPROVE_YES: '1' }, 'Alice Smith').status).not.toBe(0);
+    // No terminal and no explicit yes: nothing is signed.
+    const unconfirmed = runApprove(okRequest, {});
+    expect(unconfirmed.status).not.toBe(0);
+    expect(unconfirmed.stdout).toBe('');
   });
-
-  it('refuses a digest that is not the current plan, a missing key, a bad name, a malformed digest and an unidentified database', async () => {
-    const desired = desiredFor(21);
-    const current = await buildSeedPlan(prisma, URL_, desired);
-    const stale = (await buildSeedPlan(prisma, URL_, desiredFor(22))).digest;
-    const code = (p: Promise<unknown>) => p.then(() => 'SIGNED', (e: unknown) => (e as SeedRefused).code);
-    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', stale))).toBe('PLAN_CHANGED');
-    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, undefined, 'alice', current.digest))).toBe('SECRET_REQUIRED');
-    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'Alice Smith', current.digest))).toBe('APPROVER_INVALID');
-    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', current.digest.slice(0, 12)))).toBe('DIGEST_INVALID');
-    await prisma.deploymentIdentity.deleteMany({ where: { id: 'singleton' } });
-    try {
-      const unknown = await buildSeedPlan(prisma, URL_, desired);
-      expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', unknown.digest))).toBe('TARGET_UNKNOWN');
-    } finally {
-      await setIdentity('test');
-    }
-  });
-
-  it('plan-sign mode through the real seed entry point prints one approval over the current spine plan, seeds nothing, never prints the key', async () => {
-    const auditsBefore = await prisma.privilegedChangeAudit.count();
-    const configBefore = await prisma.platformConfig.count();
-    const digest = (await buildSeedPlan(prisma, URL_, desiredPlatformConfig())).digest;
-    const res = spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), ['prisma/seed-production.ts'], {
-      encoding: 'utf8',
-      timeout: 90_000,
-      env: { PATH: process.env['PATH'] ?? '', NODE_ENV: 'test', DATABASE_URL: URL_, SEED_PLAN_SECRET: SECRET, SEED_SIGN_APPROVER: 'owner', SEED_SIGN_PLAN: digest },
-    });
-    expect(res.status, res.stderr).toBe(0);
-    const lines = res.stdout.trim().split('\n');
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0]!)).toEqual(signSeedApproval(SECRET, 'owner', digest));
-    expect(res.stdout + res.stderr).not.toContain(SECRET);
-    expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
-    expect(await prisma.platformConfig.count()).toBe(configBefore);
-
-    const stale = spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), ['prisma/seed-production.ts'], {
-      encoding: 'utf8',
-      timeout: 90_000,
-      env: { PATH: process.env['PATH'] ?? '', NODE_ENV: 'test', DATABASE_URL: URL_, SEED_PLAN_SECRET: SECRET, SEED_SIGN_APPROVER: 'owner', SEED_SIGN_PLAN: 'f'.repeat(64) },
-    });
-    expect(stale.status).not.toBe(0);
-    expect(stale.stdout).toBe('');
-    expect(stale.stderr).toContain('PLAN_CHANGED');
-  }, 200_000);
 });
 
 describe('[R048-005] the demo seed needs an ephemeral database', () => {

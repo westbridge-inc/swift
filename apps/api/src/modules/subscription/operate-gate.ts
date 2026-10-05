@@ -1,4 +1,5 @@
-import type { Prisma, SubscriptionStatus } from '@prisma/client';
+import type { PaymentMethod, Prisma, SubscriptionStatus } from '@prisma/client';
+import { mmgDisabled, mmgRailPaused } from '../../providers/mmg/mmg-provider';
 
 // THE canOperate predicate (lifecycle/billing spec §14, G-BILL-03) — the ONE
 // place that answers "may this subscription state operate right now?". Before
@@ -25,9 +26,10 @@ export type SubscriptionOperability =
   | { operable: false; why: 'MISSING' | 'STATUS' | 'GRACE_LAPSED' | 'BILLING_STOPPED'; status?: SubscriptionStatus };
 
 export function subscriptionOperability(
-  sub: { status: SubscriptionStatus; gracePeriodEnd: Date | null; autoRenew: boolean; currentPeriodEnd: Date } | null | undefined,
+  sub: { status: SubscriptionStatus; gracePeriodEnd: Date | null; autoRenew: boolean; currentPeriodEnd: Date; billingMethod: PaymentMethod } | null | undefined,
   opts: { missingRow: 'BLOCK' | 'GRANDFATHER' },
   now = new Date(),
+  env: Record<string, string | undefined> = process.env,
 ): SubscriptionOperability {
   if (!sub) {
     return opts.missingRow === 'GRANDFATHER' ? { operable: true } : { operable: false, why: 'MISSING' };
@@ -35,7 +37,9 @@ export function subscriptionOperability(
   if (!OPERABLE_STATUSES.includes(sub.status)) {
     return { operable: false, why: 'STATUS', status: sub.status };
   }
-  if (sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < now) {
+  // [PROD-PATH] While MMG is switched off, an MMG-rail partner cannot pay, so
+  // their grace does not run out: the clock is held (billing/mmg-pause.ts).
+  if (sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < now && !mmgRailPaused(sub, env)) {
     return { operable: false, why: 'GRACE_LAPSED', status: sub.status };
   }
   // [E12] A partner who stopped weekly billing works exactly until the period
@@ -49,11 +53,14 @@ export function subscriptionOperability(
 
 /** DB form of the same refusal rule. A nullable relation may use `isNot` with
  * this filter to preserve the vendor gate's legacy missing-row policy. */
-export function inoperableSubscriptionWhere(now = new Date()): Prisma.SubscriptionWhereInput {
+export function inoperableSubscriptionWhere(now = new Date(), env: Record<string, string | undefined> = process.env): Prisma.SubscriptionWhereInput {
   return {
     OR: [
       { status: { notIn: [...OPERABLE_STATUSES] } },
-      { status: 'PAST_DUE', gracePeriodEnd: { lt: now } },
+      // [PROD-PATH] The same held grace as subscriptionOperability while MMG is off.
+      mmgDisabled(env)
+        ? { status: 'PAST_DUE', gracePeriodEnd: { lt: now }, billingMethod: { not: 'MOBILE_MONEY' } }
+        : { status: 'PAST_DUE', gracePeriodEnd: { lt: now } },
       // [E12] Billing stopped and the paid period (or trial) over — the same
       // refusal subscriptionOperability makes, so a catalogue read never shows
       // a store the gate would refuse.

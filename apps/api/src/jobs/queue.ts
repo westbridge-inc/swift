@@ -578,6 +578,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           break;
         }
         case 'poll-mmg-billing': {
+          // [PROD-PATH] MMG switched off: hold every MMG-rail billing deadline
+          // for the span (grace, retry, churn clock); MMG on: clear the clock.
+          const { syncMmgPauseClock } = await import('../modules/billing/mmg-pause');
+          await syncMmgPauseClock(ctx.prisma);
           // §13 MMG rail: settle in-flight merchant-initiated weekly-fee
           // requests (approved → period advances; declined/expired → dunning).
           const polled = await billing.pollPendingMmgCharges();

@@ -1,7 +1,11 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
-import { targetFingerprint, type Approval, type TargetFingerprint } from './purge-plan';
+import { targetFingerprint, type TargetFingerprint } from './purge-plan';
 import { seedPlanCounter } from '../../plugins/observability';
+import {
+  approvalRequest, consumeApprovals, parseApproverKeys, promotionSubject, verifyApprovals,
+  type SignedApproval, type VerifiedApproval,
+} from './approver-signatures';
 
 // ---------------------------------------------------------------------------
 // [R048-005] PRODUCTION SEEDING IS A VERSIONED, APPROVED CONFIG CHANGE.
@@ -36,8 +40,6 @@ function sortKeys(v: unknown): unknown {
 }
 const canonical = (v: unknown): string => JSON.stringify(sortKeys(v));
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
-const hmac = (secret: string, s: string) => createHmac('sha256', secret).update(s).digest('hex');
-const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 /** The desired state, as data. Every table the seed may write is listed here;
  *  anything else the seed cannot touch. */
@@ -143,41 +145,23 @@ export async function buildSeedPlan(prisma: PrismaClient, databaseUrl: string, d
   return { ...body, digest: seedPlanDigest(body) };
 }
 
-export function signSeedApproval(secret: string, approver: string, planDigest: string): Approval {
-  return { approver, signature: hmac(secret, `seed-approve:${approver}:${planDigest}`) };
-}
-
 /**
- * [PROD-PATH] ONE approver's half of a production spine apply — what each
- * person hands the operator. Read-only: the plan is REBUILT for this target
- * and the configuration this code holds, and the approver signs only if its
- * digest is still the one they were shown. A digest from another database,
- * another configuration or a database that has changed since is refused, so
- * nobody signs a plan they did not see. applySeedPlan verifies each half.
+ * [PROD-PATH] What the approvers sign for a production apply of this plan:
+ * the plan digest on this target, valid 24 hours, with a random nonce. Each
+ * approver signs it with their OWN key on their own computer
+ * (deploy/seed-approve.sh); the server holds only their public keys.
  */
-export async function signSeedPlanForTarget(prisma: PrismaClient, databaseUrl: string, desired: DesiredConfig, secret: string | undefined, approver: string, digest: string): Promise<Approval> {
-  if (!secret) throw new SeedRefused('SECRET_REQUIRED', 'signing an approval needs SEED_PLAN_SECRET');
-  if (!APPROVER_NAME.test(approver)) throw new SeedRefused('APPROVER_INVALID', 'an approver name is 2–32 lowercase letters, digits or hyphens');
-  if (!/^[0-9a-f]{64}$/.test(digest)) throw new SeedRefused('DIGEST_INVALID', 'the plan digest is the 64-character hex the first run printed');
-  const plan = await buildSeedPlan(prisma, databaseUrl, desired);
-  if (plan.target.environment === 'unknown') throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first');
-  if (plan.digest !== digest) throw new SeedRefused('PLAN_CHANGED', `the plan for this database is now ${plan.digest.slice(0, 12)}, not the digest given; print it again and sign what is current`);
-  return signSeedApproval(secret, approver, plan.digest);
-}
-function verifySeedApprovals(secret: string, digest: string, approvals: Approval[]): string[] {
-  if (approvals.length < 2) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
-  const names = new Set(approvals.map((a) => a.approver.trim().toLowerCase()));
-  if (names.size < 2) throw new SeedRefused('APPROVERS_NOT_DISTINCT', 'the approvers must be two different people');
-  for (const a of approvals) {
-    if (!a.approver.trim() || !same(a.signature, hmac(secret, `seed-approve:${a.approver}:${digest}`))) throw new SeedRefused('APPROVAL_INVALID', `approval by ${a.approver || '?'} does not sign this plan`);
-  }
-  return approvals.map((a) => a.approver);
+export function planApprovalRequest(plan: SeedPlan, now = new Date()): string {
+  return approvalRequest('plan', plan.target.digest, plan.digest, now);
 }
 
 export interface ApplyOptions {
-  /** Required on a production target: two distinct approvals over the plan digest, and the secret they were signed with. */
-  approvals?: Approval[];
-  secret?: string;
+  /** Required on a production target: two approvals by two different pinned
+   *  people over this plan (approver-signatures.ts), and the pinned keys. */
+  approvals?: SignedApproval[];
+  approverKeys?: string;
+  /** The clock approvals are checked against (expiry). */
+  now?: Date;
   actor?: string;
   /** Test seam: a pause at a named boundary inside the transaction (the race proof holds both seeders here). */
   failpoint?: (boundary: string) => Promise<void>;
@@ -202,11 +186,12 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   const target = await targetFingerprint(prisma, databaseUrl);
   if (target.digest !== plan.target.digest) { seedPlanCounter.labels('refused_target').inc(); throw new SeedRefused('TARGET_MISMATCH', `this database (${target.database} on ${target.host}, ${target.deploymentId}/${target.environment}) is not the plan's target`); }
   if (target.environment === 'unknown') { seedPlanCounter.labels('refused_target').inc(); throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first'); }
-  let approvers: string[] = [];
+  let verified: VerifiedApproval[] = [];
   if (target.environment === 'production') {
-    if (!opts.secret) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
-    approvers = verifySeedApprovals(opts.secret, plan.digest, opts.approvals ?? []);
+    if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
+    verified = verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), { kind: 'plan', target: plan.target.digest, subject: plan.digest }, opts.now);
   }
+  const approvers = verified.map((v) => v.approver);
   if (plan.changes.length === 0) {
     await audit(prisma, plan, 'NOOP', { configVersion: plan.configVersion, approvers }, opts.actor);
     seedPlanCounter.labels('noop').inc();
@@ -214,7 +199,7 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   }
   let applied: number;
   try {
-    applied = await runPlanTransaction(prisma, desired, plan, approvers, opts);
+    applied = await runPlanTransaction(prisma, desired, plan, verified, opts);
   } catch (err) {
     if (err instanceof SeedRefused && err.code === 'PLAN_DRIFT') {
       const drift = err as SeedRefused & { planned?: number; current?: number };
@@ -227,7 +212,8 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   return { applied, noop: false, configVersion: plan.configVersion, digest: plan.digest };
 }
 
-async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, plan: SeedPlan, approvers: string[], opts: ApplyOptions): Promise<number> {
+async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, plan: SeedPlan, verified: VerifiedApproval[], opts: ApplyOptions): Promise<number> {
+  const approvers = verified.map((v) => v.approver);
   return prisma.$transaction(async (tx) => {
     // two seeders serialise here; the loser then sees the winner's writes as drift and is refused
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
@@ -237,6 +223,9 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
       throw Object.assign(new SeedRefused('PLAN_DRIFT', 'the database changed since the plan was built; plan again'), { planned: plan.changes.length, current: fresh.length });
     }
     await opts.failpoint?.('after-drift-check');
+    // [PROD-PATH] Single use, under the same lock as the change: an approval
+    // already consumed is refused, even after a rollback of the data.
+    if (verified.length) await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor });
     for (const ch of plan.changes) {
       if (ch.table === 'platformConfig') {
         const want = desired.platformConfig.find((c) => c.key === ch.key)!;
@@ -267,29 +256,18 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
 // The first SUPER_ADMIN: bootstrap-only, else break-glass with two people
 // ---------------------------------------------------------------------------
 
-export interface PromoteOptions { secret?: string; approvals?: Approval[]; actor?: string }
-
-/** An approver's name as it is signed and verified: short, lowercase, no spaces. */
-export const APPROVER_NAME = /^[a-z][a-z0-9-]{1,31}$/;
+export interface PromoteOptions { approvals?: SignedApproval[]; approverKeys?: string; actor?: string; now?: Date }
 
 /**
- * ONE approver's half of a break-glass promotion of `phone` on THIS target —
- * what each person hands the operator. Read-only: it fingerprints the target
- * and signs; it writes nothing. promoteBootstrapAdmin later re-fingerprints
- * the same target and verifies each signature, so an approval made here for
- * another database or another phone is refused there.
+ * [PROD-PATH] What the two approvers sign for a break-glass promotion of
+ * `phone` on THIS target: the target digest and the phone's hash (the request
+ * never carries the number), valid 24 hours, with a random nonce. Read-only.
  */
-export async function signPromotionForTarget(prisma: PrismaClient, databaseUrl: string, secret: string | undefined, approver: string, phone: string): Promise<Approval> {
-  if (!secret) throw new SeedRefused('SECRET_REQUIRED', 'signing an approval needs SEED_PLAN_SECRET');
-  if (!APPROVER_NAME.test(approver)) throw new SeedRefused('APPROVER_INVALID', 'an approver name is 2–32 lowercase letters, digits or hyphens');
+export async function promotionApprovalRequest(prisma: PrismaClient, databaseUrl: string, phone: string, now = new Date()): Promise<string> {
   if (!/^\+[1-9]\d{6,14}$/.test(phone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
   const target = await targetFingerprint(prisma, databaseUrl);
   if (target.environment === 'unknown') throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first');
-  return signPromotionApproval(secret, approver, target.digest, phone);
-}
-
-export function signPromotionApproval(secret: string, approver: string, targetDigest: string, phone: string): Approval {
-  return { approver, signature: hmac(secret, `promote-approve:${approver}:${targetDigest}:${phone}`) };
+  return approvalRequest('promote', target.digest, promotionSubject(phone), now);
 }
 
 /**
@@ -304,22 +282,24 @@ export async function promoteBootstrapAdmin(prisma: PrismaClient, databaseUrl: s
   if (target.environment === 'unknown') throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first');
   const existing = await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } });
   let mode: 'bootstrap' | 'break-glass' = 'bootstrap';
-  let approvers: string[] = [];
+  let verified: VerifiedApproval[] = [];
   if (existing > 0) {
     mode = 'break-glass';
     const approvals = opts.approvals ?? [];
-    if (!opts.secret || approvals.length < 2) { seedPlanCounter.labels('promotion_refused').inc(); throw new SeedRefused('BREAK_GLASS_REQUIRED', `a SUPER_ADMIN already exists (${existing}); promoting another is a break-glass change needing two approvals`); }
-    const names = new Set(approvals.map((a) => a.approver.trim().toLowerCase()));
-    if (names.size < 2) { seedPlanCounter.labels('promotion_refused').inc(); throw new SeedRefused('APPROVERS_NOT_DISTINCT', 'the approvers must be two different people'); }
-    for (const a of approvals) {
-      if (!same(a.signature, hmac(opts.secret, `promote-approve:${a.approver}:${target.digest}:${phone}`))) { seedPlanCounter.labels('promotion_refused').inc(); throw new SeedRefused('APPROVAL_INVALID', `approval by ${a.approver || '?'} does not sign this promotion`); }
+    if (approvals.length === 0) { seedPlanCounter.labels('promotion_refused').inc(); throw new SeedRefused('BREAK_GLASS_REQUIRED', `a SUPER_ADMIN already exists (${existing}); promoting another is a break-glass change needing two approvals`); }
+    try {
+      verified = verifyApprovals(approvals, parseApproverKeys(opts.approverKeys), { kind: 'promote', target: target.digest, subject: promotionSubject(phone) }, opts.now);
+    } catch (err) {
+      seedPlanCounter.labels('promotion_refused').inc();
+      throw err;
     }
-    approvers = approvals.map((a) => a.approver);
   }
+  const approvers = verified.map((v) => v.approver);
   const digest = sha256(canonical({ target: target.digest, phone, mode }));
   const user = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
     if (mode === 'bootstrap' && (await tx.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) > 0) throw new SeedRefused('BREAK_GLASS_REQUIRED', 'a SUPER_ADMIN appeared while bootstrapping; this is now a break-glass change');
+    if (verified.length) await consumeApprovals(tx, verified, { action: 'PROMOTE_SUPER_ADMIN', target: target as unknown as Prisma.InputJsonValue, actor: opts.actor });
     const u = await tx.user.upsert({
       where: { phone },
       update: { roles: { set: ['SUPER_ADMIN', 'CUSTOMER'] }, activeRole: 'SUPER_ADMIN', status: 'ACTIVE' },

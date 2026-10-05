@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -64,6 +64,8 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": services}))
     sys.exit(0)
 if argv[:1] == ["compose"] and "ps" in argv and "-q" in argv:
+    if os.environ.get("PS_FAIL") == "1":
+        sys.exit(1)
     service = argv[-1]
     if service in ("api", "worker") and os.environ.get("API_STOPPED") == "1":
         sys.exit(0)
@@ -144,7 +146,23 @@ function runPilot(settings: Record<string, string | undefined>, opts: { args?: s
   });
   return { ...res, calls: calls() };
 }
-const changedNothing = (lines: string[]) => lines.filter((l) => /^docker compose .*( up | stop | build )/.test(` ${l} `) || l.startsWith('systemctl '));
+/** Every call that changes the stack: a compose up, stop or build, or a systemctl. */
+const changedNothing = (lines: string[]) => lines.filter((l) => /^docker compose .* (up|stop|build)( |$)/.test(l) || l.startsWith('systemctl '));
+
+describe('[PROD-PATH] the test helper that finds stack-changing calls', () => {
+  it('finds a compose up, stop or build and a systemctl, and nothing else (positive control)', () => {
+    expect(changedNothing([
+      'docker compose --project-directory /x -f /x/docker-compose.yml build api',
+      'docker compose --project-directory /x -f /x/docker-compose.yml up -d --wait postgres redis meilisearch',
+      'docker compose --project-directory /x -f /x/docker-compose.yml stop api worker',
+      'systemctl restart swift-secrets.service',
+      'docker compose --project-directory /x -f /x/docker-compose.yml config --quiet',
+      'docker compose --project-directory /x -f /x/docker-compose.yml ps -q api',
+      'docker network inspect swift-pilot-private',
+      'git fetch origin main',
+    ])).toHaveLength(4);
+  });
+});
 
 describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
   it('staging deploys exactly as before', () => {
@@ -242,6 +260,45 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
   });
 });
 
+describe('[PROD-PATH] pilot-up.sh checks the configuration Compose will actually use', () => {
+  it.each([
+    ['NODE_ENV', 'development'],
+    ['WEB_HOST', 'staging.example.org'],
+    ['WEB_ALLOW_SITE_TOKENS', '1'],
+    ['STORAGE_PROVIDER', 'local'],
+    ['API_HOST', 'api-staging.example.org'],
+    ['COMPOSE_PROFILES', 'web'],
+    ['COMPOSE_PROJECT_NAME', 'other'],
+  ])('refuses %s exported in the shell (Compose would prefer it to deploy/.env), before anything runs', (name, value) => {
+    const r = runPilot(PRODUCTION, { env: { [name]: value } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(`${name} is set in this shell`);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('refuses it on staging too, and an exported empty value counts', () => {
+    const r = runPilot(STAGING, { env: { NODE_ENV: '' } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('NODE_ENV is set in this shell');
+  });
+
+  it('the names it sets itself (SWIFT_TAG, SWIFT_WEB_CHANNEL) do not count', () => {
+    const r = runPilot(PRODUCTION, { env: { SWIFT_TAG: 'old', SWIFT_WEB_CHANNEL: 'staging' } });
+    expect(r.status, r.stderr).toBe(0);
+  });
+
+  it('every name Compose interpolates in the stack files is covered (the guard reads them from the files)', () => {
+    const names = [...new Set([...COMPOSE_TEXT.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!))].filter((n) => !['SWIFT_TAG', 'SWIFT_WEB_CHANNEL'].includes(n));
+    expect(names).toEqual(expect.arrayContaining(['NODE_ENV', 'API_HOST', 'WEB_HOST', 'WEB_ALLOW_SITE_TOKENS', 'POSTGRES_USER']));
+    for (const name of names) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { env: { [name]: 'x' } });
+      expect(r.status, name).not.toBe(0);
+      expect(r.stderr, name).toContain(`${name} is set in this shell`);
+    }
+  });
+});
+
 describe('[PROD-PATH] pilot-up.sh --data-only: the database without the API', () => {
   it('migrates on production before DNS, and never starts, stops or builds the API, worker, website or Caddy', () => {
     const r = runPilot({ ...PRODUCTION, WEB_HOST: 'example.org' }, { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } });
@@ -264,6 +321,13 @@ describe('[PROD-PATH] pilot-up.sh --data-only: the database without the API', ()
     expect(r.calls.filter((l) => / (pull|build|up) /.test(` ${l} `))).toEqual([]);
   });
 
+  it('fails CLOSED when Docker cannot say whether the API is running: no migration without that answer', () => {
+    const r = runPilot(PRODUCTION, { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1', PS_FAIL: '1' } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('could not ask Docker whether api is running');
+    expect(r.calls.filter((l) => / (pull|build|up) /.test(` ${l} `))).toEqual([]);
+  });
+
   it('keeps every production refusal: a staging posture is refused in the database-only stage too', () => {
     const r = runPilot({ ...PRODUCTION, NODE_ENV: 'development' }, { args: ['--data-only', SHA], env: { API_STOPPED: '1' } });
     expect(r.status).not.toBe(0);
@@ -277,10 +341,11 @@ function runSeed(settings: Record<string, string>, env: Record<string, string> =
   mkdirSync(here, { recursive: true });
   copyFileSync(join(DEPLOY, 'seed-production.sh'), join(here, 'seed-production.sh'));
   copyFileSync(join(DEPLOY, 'docker-compose.seed.yml'), join(here, 'docker-compose.seed.yml'));
+  copyFileSync(join(DEPLOY, 'docker-compose.yml'), join(here, 'docker-compose.yml'));
   writeFileSync(join(here, '.env'), Object.entries(settings).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
   shim('docker', [
     'line="$*"',
-    'echo "docker $line [plan=${SEED_SIGN_PLAN:-}] [approvals=${SEED_PLAN_APPROVALS:-}] [keyfile=${SEED_PLAN_SECRET_FILE:-}]" >> "$CALL_LOG"',
+    'echo "docker $line [approvals=${SEED_PLAN_APPROVALS:-}] [promotion=${SEED_PROMOTION_APPROVALS:-}] [keyfile=${SEED_APPROVER_KEYS_FILE:-}]" >> "$CALL_LOG"',
     'case "$line" in *"exec -T postgres"*) echo "$IDENTITY_ROW"; exit 0;; esac',
     'exit 0',
   ].join('\n'));
@@ -289,7 +354,7 @@ function runSeed(settings: Record<string, string>, env: Record<string, string> =
     timeout: 60_000,
     env: {
       PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`,
-      CALL_LOG: log, GIT_HEAD: SHA, STORE_NAMES: 'POSTGRES_PASSWORD SEED_PLAN_SECRET',
+      CALL_LOG: log, GIT_HEAD: SHA, STORE_NAMES: 'POSTGRES_PASSWORD SEED_APPROVER_KEYS',
       SEED_ADMIN_PHONE: '+5920400000', IDENTITY_ROW: '1:production', SEED_FX_GYD_PER_USD: '209.5',
       ...env,
     },
@@ -317,13 +382,26 @@ describe('[PROD-PATH] seed-production.sh: the host and the database must agree',
     }
   });
 
-  it('a staging host never seeds a production database', () => {
-    const r = runSeed(STG_SEED, { IDENTITY_ROW: '1:production' });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain('a staging host never seeds a production database');
-    expect(seeded(r.calls)).toBe(false);
+  it('a staging host seeds only a database that says exactly staging', () => {
+    for (const row of ['1:production', '1:test', '1: ', '1:Staging', '1:staging ']) {
+      writeFileSync(log, '');
+      const r = runSeed(STG_SEED, { IDENTITY_ROW: row });
+      expect(r.status, row).not.toBe(0);
+      expect(r.stderr, row).toContain('is not staging');
+      expect(seeded(r.calls), row).toBe(false);
+    }
     writeFileSync(log, '');
     const ok = runSeed(STG_SEED, { IDENTITY_ROW: '1:staging' });
+    expect(ok.status, ok.stderr).toBe(0);
+  });
+
+  it('refuses a Compose-interpolated setting exported in the shell, but takes the ceremony inputs from it', () => {
+    const r = runSeed(PROD_SEED, { NODE_ENV: 'development' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('NODE_ENV is set in this shell');
+    expect(r.calls).toEqual([]);
+    writeFileSync(log, '');
+    const ok = runSeed(PROD_SEED, { SEED_ACTOR: 'operator' });
     expect(ok.status, ok.stderr).toBe(0);
   });
 
@@ -347,135 +425,167 @@ describe('[PROD-PATH] seed-production.sh: the host and the database must agree',
     expect(r.calls).toEqual([]);
   });
 
-  it.each(['abc', 'f'.repeat(63), 'F'.repeat(64)])('refuses a malformed plan digest to sign (%j)', (digest) => {
-    const r = runSeed(PROD_SEED, { SEED_SIGN_PLAN: digest, SEED_SIGN_APPROVER: 'owner' });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain('SEED_SIGN_PLAN');
-    expect(seeded(r.calls)).toBe(false);
-  });
-
-  it('refuses a plan digest without the approver who signs it', () => {
-    const r = runSeed(PROD_SEED, { SEED_SIGN_PLAN: 'a'.repeat(64) });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain('SEED_SIGN_APPROVER');
-  });
-
-  it('plan signing and the plan apply reach the seed with the key as a file, never a value', () => {
-    const sign = runSeed(PROD_SEED, { SEED_SIGN_PLAN: 'a'.repeat(64), SEED_SIGN_APPROVER: 'owner' });
-    expect(sign.status, sign.stderr).toBe(0);
-    const run = sign.calls.find((l) => l.includes('run --rm --no-TTY seed'))!;
-    expect(run).toContain(`[plan=${'a'.repeat(64)}]`);
-    expect(run).toContain('[keyfile=/run/secrets/SEED_PLAN_SECRET]');
-    expect(sign.calls).toContain('systemctl restart swift-secrets.service');
-    writeFileSync(log, '');
-    const approvals = '[{"approver":"a","signature":"1"},{"approver":"b","signature":"2"}]';
+  it('approvals reach the seed with the pinned approver keys as a file, never a value', () => {
+    const approvals = '[{"approver":"alice","request":"cg==","signature":"cw=="}]';
     const apply = runSeed(PROD_SEED, { SEED_PLAN_APPROVALS: approvals });
     expect(apply.status, apply.stderr).toBe(0);
     const applied = apply.calls.find((l) => l.includes('run --rm --no-TTY seed'))!;
     expect(applied).toContain(`[approvals=${approvals}]`);
-    expect(applied).toContain('[keyfile=/run/secrets/SEED_PLAN_SECRET]');
+    expect(applied).toContain('[keyfile=/run/secrets/SEED_APPROVER_KEYS]');
+    expect(apply.calls).toContain('systemctl restart swift-secrets.service');
+    writeFileSync(log, '');
+    const promote = runSeed(PROD_SEED, { SEED_PROMOTION_APPROVALS: approvals });
+    expect(promote.status, promote.stderr).toBe(0);
+    expect(promote.calls.find((l) => l.includes('run --rm --no-TTY seed'))).toContain('[keyfile=/run/secrets/SEED_APPROVER_KEYS]');
+    writeFileSync(log, '');
+    const plain = runSeed(PROD_SEED);
+    expect(plain.calls.find((l) => l.includes('run --rm --no-TTY seed'))).toContain('[keyfile=]');
   });
 
-  it('the plan apply refuses without the key in the store', () => {
+  it('approvals refuse without the pinned keys in the store', () => {
     const r = runSeed(PROD_SEED, { SEED_PLAN_APPROVALS: '[]', STORE_NAMES: 'POSTGRES_PASSWORD' });
     expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain('SEED_PLAN_SECRET');
+    expect(r.stderr).toContain('SEED_APPROVER_KEYS');
     expect(seeded(r.calls)).toBe(false);
   });
 
-  it('the seed service carries both plan settings with empty defaults', () => {
+  it('the seed service carries the ceremony settings with empty defaults, and no shared signing key', () => {
     const seed = readFileSync(join(DEPLOY, 'docker-compose.seed.yml'), 'utf8');
-    expect(seed).toContain('SEED_SIGN_PLAN: ${SEED_SIGN_PLAN:-}');
+    expect(seed).toContain('SEED_APPROVER_KEYS_FILE: ${SEED_APPROVER_KEYS_FILE:-}');
     expect(seed).toContain('SEED_PLAN_APPROVALS: ${SEED_PLAN_APPROVALS:-}');
+    expect(seed).toContain('SEED_PROMOTION_APPROVALS: ${SEED_PROMOTION_APPROVALS:-}');
+    expect(seed).not.toMatch(/SEED_PLAN_SECRET|SEED_SIGN_/);
+    expect(readFileSync(join(DEPLOY, 'seed-production.sh'), 'utf8')).not.toMatch(/SEED_PLAN_SECRET|SEED_SIGN_/);
   });
 });
 
-// ── restore.sh --compare-source ─────────────────────────────────────────────
-const SNAPSHOT = [
-  'constraint|orders|orders_pkey|PRIMARY KEY (id)',
-  'index|orders|orders_pkey|CREATE UNIQUE INDEX orders_pkey ON public.orders USING btree (id)',
-  'policy|orders|tenant_isolation|PERMISSIVE|{public}|ALL|("tenantId" = current_setting(\'app.tenant\'::text))|',
-  'rls|orders|enabled=t|forced=t',
-  'rls|users|enabled=t|forced=t',
-  'rows|orders|0',
-  'rows|users|0',
-].join('\n');
+// ── restore.sh --compare-source, against REAL databases ────────────────────
+// The compare SQL runs for real on the test cluster: a source database with
+// RLS, a policy, a trigger, a function, a grant, a sequence and the swift_qr
+// schema is dumped with the real pg_dump; restore.sh restores it with the real
+// pg_restore into a scratch database and compares the two with its own SQL.
+// Only `docker compose exec postgres` is a stand-in: it runs the same command
+// on this host against the same server.
+const PGURL = new URL(process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test');
+const PG = { port: PGURL.port || '5432', user: decodeURIComponent(PGURL.username), password: decodeURIComponent(PGURL.password) };
+const pgEnv = () => ({ PATH: process.env['PATH'] ?? '', PGHOST: '127.0.0.1', PGPORT: PG.port, PGUSER: PG.user, PGPASSWORD: PG.password });
+function psql(db: string, sql: string): string {
+  return execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-qtA', '-d', db, '-c', sql], { env: pgEnv(), encoding: 'utf8' });
+}
+const FIXTURE = String.raw`
+CREATE SCHEMA swift_qr;
+CREATE TABLE public.users (id text PRIMARY KEY, balance numeric(12,2) NOT NULL DEFAULT 0, status text NOT NULL);
+CREATE TABLE public.platform_config (id text PRIMARY KEY, key text UNIQUE NOT NULL, value jsonb, "updatedAt" timestamp(3) NOT NULL);
+CREATE TABLE swift_qr.tokens (token text PRIMARY KEY, vendor text NOT NULL);
+CREATE SEQUENCE public.ticket_seq;
+SELECT nextval('public.ticket_seq');
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.users FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON public.users USING (status <> 'hidden');
+CREATE FUNCTION public.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch();
+GRANT SELECT ON public.users TO PUBLIC;
+INSERT INTO public.users VALUES ('u1', 100.00, 'ACTIVE'), ('u2', 0, 'SUSPENDED');
+INSERT INTO public.platform_config VALUES ('c1', 'fee', '1', '2026-10-05 00:00:00');
+INSERT INTO swift_qr.tokens VALUES ('t1', 'v1');
+`;
+const created: string[] = [];
+afterEach(() => {
+  for (const db of created.splice(0)) {
+    try { psql('postgres', `DROP DATABASE IF EXISTS ${db}`); } catch { /* best effort */ }
+  }
+});
 
-function runRestore(args: string[], env: Record<string, string> = {}) {
+/** Build a source database, dump it for real, change it with `after` (or not),
+ *  then run the real restore.sh against it. */
+function drill(after: string | null, opts: { args?: string[]; fixture?: string } = {}) {
+  const id = Math.random().toString(36).slice(2, 10);
+  const source = `swift_test_rcmp_${id}`;
+  const scratch = `swift_test_rscr_${id}`;
+  created.push(source, scratch);
+  psql('postgres', `CREATE DATABASE ${source}`);
+  psql(source, opts.fixture ?? FIXTURE);
   const here = join(tmp, 'deploy');
   mkdirSync(here, { recursive: true });
   copyFileSync(join(DEPLOY, 'restore.sh'), join(here, 'restore.sh'));
-  writeFileSync(join(here, '.env'), 'POSTGRES_DB=swift\n');
-  writeFileSync(join(tmp, 'live.snap'), env['LIVE'] ?? SNAPSHOT);
-  writeFileSync(join(tmp, 'scratch.snap'), env['SCRATCH'] ?? SNAPSHOT);
-  writeFileSync(join(tmp, 'x.dump'), 'dump');
-  shim('pg_restore', 'exit 0');
-  // db_psql passes: sh -c SCRIPT sh <database> <psql args…>
+  writeFileSync(join(here, '.env'), `POSTGRES_DB=${source}\n`);
+  const dump = join(tmp, `${id}.dump`);
+  execFileSync('pg_dump', ['-Fc', '-d', source, '-f', dump], { env: pgEnv() });
+  if (after) psql(source, after);
+  writeFileSync(join(tmp, 'pgpass'), PG.password);
   shim('docker', [
     'echo "docker $*" >> "$CALL_LOG"',
-    'db=""; prev=""; for a in "$@"; do if [ "$prev" = "sh" ] && [ -z "$db" ] && [ "$a" != "-c" ]; then db="$a"; fi; prev="$a"; done',
-    'case "$*" in',
-    '  *posture-snapshot*) if [ "$db" = swift ]; then cat "$SNAP_DIR/live.snap"; else cat "$SNAP_DIR/scratch.snap"; fi; exit 0;;',
-    '  *"FROM pg_database"*) exit 0;;',
-    '  *"SELECT count(*) FROM"*) echo "${COUNT:-0}"; exit 0;;',
-    '  *pg_restore*) cat >/dev/null; exit 0;;',
-    'esac',
-    '[ -t 0 ] || cat >/dev/null',
-    'exit 0',
+    'while [ $# -gt 0 ] && [ "$1" != postgres ]; do shift; done',
+    '[ $# -gt 0 ] || exit 0',
+    'shift',
+    'export POSTGRES_USER="$PG_USER" POSTGRES_PASSWORD_FILE="$PG_PASSFILE" PGPORT="$PG_PORT"',
+    'exec "$@"',
   ].join('\n'));
-  const res = spawnSync('bash', [join(here, 'restore.sh'), ...args], {
+  const res = spawnSync('bash', [join(here, 'restore.sh'), ...(opts.args ?? ['--compare-source']), dump, scratch], {
     encoding: 'utf8',
-    timeout: 60_000,
-    input: '',
-    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, SNAP_DIR: tmp, ...env },
+    timeout: 120_000,
+    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },
   });
-  return { ...res, calls: calls() };
+  return { ...res, source, scratch };
 }
 
-describe('[PROD-PATH] restore.sh --compare-source: the drill judges the copy against its source', () => {
-  it('passes an exact copy of an EMPTY database (no user yet), with its posture summarised', () => {
-    const r = runRestore(['--compare-source', join(tmp, 'x.dump'), 'swift_restore_drill']);
+describe('[PROD-PATH] restore.sh --compare-source proves contents, on real databases', { timeout: 120_000 }, () => {
+  it('passes an exact copy (no user table needed), summarises both sides and says exactly what it proved', () => {
+    const r = drill(null);
     expect(r.status, r.stderr + r.stdout).toBe(0);
-    expect(r.stdout).toContain('source (swift): 2 tables, 0 rows, RLS enabled on 2, forced on 2, 1 policies, 1 constraints, 1 indexes');
-    expect(r.stdout).toContain('scratch (swift_restore_drill): 2 tables, 0 rows');
-    expect(r.stdout).toContain('matches its source exactly');
+    expect(r.stdout).toMatch(/source \(swift_test_rcmp_\w+\): 3 tables, 4 rows, \d+ columns, RLS enabled on 1, forced on 1, 1 policies, \d+ constraints, \d+ indexes, 1 triggers, 1 functions, \d+ grant entries, 1 sequences/);
+    expect(r.stdout).toContain('in schemas public and swift_qr the scratch restore equals its source in every table\'s row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, grants and sequence positions');
     expect(r.stdout).toContain('RESTORE OK');
-    // The fixed minimums are not consulted in this mode.
-    expect(r.stdout).not.toMatch(/^users: /m);
   });
 
   it.each([
-    ['a row count', SNAPSHOT.replace('rows|users|0', 'rows|users|1'), 'rows|users|0'],
-    ['a forced-RLS switch', SNAPSHOT.replace('rls|orders|enabled=t|forced=t', 'rls|orders|enabled=t|forced=f'), 'forced=t'],
-    ['a missing policy', SNAPSHOT.split('\n').filter((l) => !l.startsWith('policy|')).join('\n'), 'tenant_isolation'],
-  ])('fails on %s that differs, names it, and keeps the scratch database', (_what, scratch, named) => {
-    const r = runRestore(['--compare-source', join(tmp, 'x.dump'), 'swift_restore_drill'], { SCRATCH: scratch });
-    expect(r.status).not.toBe(0);
+    ['a changed value with the same row count', `UPDATE public.users SET balance = 99 WHERE id = 'u1'`, 'rows|public.users|2|'],
+    ['a changed row in swift_qr', `UPDATE swift_qr.tokens SET vendor = 'v2'`, 'rows|swift_qr.tokens|1|'],
+    ['a changed column default', `ALTER TABLE public.users ALTER COLUMN balance SET DEFAULT 5`, 'column|public.users|balance|'],
+    ['a changed function body', `CREATE OR REPLACE FUNCTION public.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.status := upper(NEW.status); RETURN NEW; END $$`, 'function|public.touch()|'],
+    ['a disabled trigger', `ALTER TABLE public.users DISABLE TRIGGER users_touch`, 'users_touch'],
+    ['a revoked grant', `REVOKE SELECT ON public.users FROM PUBLIC`, 'grant|relation|public.users|'],
+    ['an advanced sequence', `SELECT nextval('public.ticket_seq')`, 'sequence|public.ticket_seq|'],
+    ['an RLS switch turned off', `ALTER TABLE public.users NO FORCE ROW LEVEL SECURITY`, 'rls|public.users|'],
+    ['a dropped policy', `DROP POLICY tenant_isolation ON public.users`, 'policy|public.users|tenant_isolation'],
+  ])('fails on %s, names it, and keeps the scratch database', (_what, change, named) => {
+    const r = drill(change);
+    expect(r.status, r.stdout).not.toBe(0);
     expect(r.stdout).toContain('MISMATCH');
     expect(r.stdout).toContain(named);
     expect(r.stderr).toContain('scratch database retained');
     expect(r.stdout).not.toContain('RESTORE OK');
   });
 
-  it('fails when the source has nothing to compare', () => {
-    const r = runRestore(['--compare-source', join(tmp, 'x.dump'), 'swift_restore_drill'], { LIVE: '', SCRATCH: '' });
+  it('a backup heartbeat written after the dump is not a difference', () => {
+    const r = drill(`INSERT INTO public.platform_config VALUES ('hb', 'last_backup_at', '"2026-10-05"', now())`);
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+  });
+
+  it('fails when the source has no tables to compare', () => {
+    const r = drill(null, { fixture: 'SELECT 1' });
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('no tables to compare');
   });
 
-  it('without the flag the fixed minimums still apply: an empty database fails them', () => {
-    const r = runRestore([join(tmp, 'x.dump'), 'swift_restore_drill'], { COUNT: '0' });
+  it('without the flag the fixed minimums still apply: a database without users fails them', () => {
+    const r = drill(null, { args: [], fixture: 'CREATE TABLE country_configs (code text); INSERT INTO country_configs VALUES (\'GY\'); CREATE TABLE users (id text); CREATE TABLE vendors (id text); CREATE TABLE orders (id text);' });
     expect(r.status).not.toBe(0);
     expect(r.stdout).toContain('users: 0 (below 1)');
   });
 
-  it('still refuses the live database as the scratch target, in either mode', () => {
+  it('still refuses the live database as the scratch target, in either mode, before touching Postgres', () => {
+    const here = join(tmp, 'deploy');
+    mkdirSync(here, { recursive: true });
+    copyFileSync(join(DEPLOY, 'restore.sh'), join(here, 'restore.sh'));
+    writeFileSync(join(here, '.env'), 'POSTGRES_DB=swift\n');
+    writeFileSync(join(tmp, 'x.dump'), 'dump');
     for (const args of [['--compare-source', join(tmp, 'x.dump'), 'swift'], [join(tmp, 'x.dump'), 'swift']]) {
       writeFileSync(log, '');
-      const r = runRestore(args);
+      const r = spawnSync('bash', [join(here, 'restore.sh'), ...args], { encoding: 'utf8', env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log } });
       expect(r.status).not.toBe(0);
       expect(r.stderr).toContain('may not be the live database');
-      expect(r.calls).toEqual([]);
+      expect(calls()).toEqual([]);
     }
   });
 });

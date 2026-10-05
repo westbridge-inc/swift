@@ -6,14 +6,15 @@
 #
 # [PROD-PATH] --compare-source judges the restore against the LIVE database it
 # was dumped from, instead of fixed minimums (a new production database has no
-# user yet, so "at least one user" cannot prove anything there). The scratch
-# copy must match the source exactly: the same tables with the same row counts,
-# the same row-level-security switches (enabled and forced) on every table, the
-# same policies, constraints and indexes. Use it on a quiet database, right
-# after the backup: a row written to the live database since the dump is a
-# mismatch, reported by table. The backup and rehearsal heartbeats in
-# platform_config are left out of the count — backup.sh writes them after the
-# dump by design.
+# user yet, so "at least one user" cannot prove anything there). In schemas
+# public and swift_qr the scratch copy must equal the source in every table's
+# row count AND content checksum, column definitions and defaults, the RLS
+# switches, policies, constraints, indexes, triggers, function definitions,
+# grants and sequence positions (POSTURE_SQL below). Use it on a quiet
+# database, right after the backup: any row written to the live database
+# since the dump is a mismatch, reported by table. The backup and rehearsal
+# heartbeats in platform_config are left out — backup.sh writes them after
+# the dump by design.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -125,57 +126,111 @@ check() {
   if [ "$count" -lt "$3" ]; then echo "$1: $count (below $3)"; FAILED=1
   else echo "$1: $count (ok)"; fi
 }
-# [PROD-PATH] One read of a database's shape and contents, the same query on
-# both sides: a line per table with its row count, per table its RLS switches,
-# per policy its full definition, per constraint and per index its name and
-# definition. Sorted, so two equal databases give byte-equal snapshots.
+# [PROD-PATH] One read of a database's contents and shape, the same query on
+# both sides, over the schemas public and swift_qr. A line per:
+#   rows       table: row count and a content checksum (md5 over every row's
+#              text, in md5 order, so physical order does not matter);
+#   column     table column: position (among live columns), type, NOT NULL, default;
+#   rls        table: row-level security enabled, forced;
+#   policy     policy: command, roles, USING and WITH CHECK;
+#   constraint constraint: definition;   index    index: definition;
+#   trigger    user trigger: definition and enabled state;
+#   function   function: kind, language, security definer, settings, volatility,
+#              and a checksum of its body;
+#   grant      table, sequence, function and schema privileges, default privileges;
+#   sequence   sequence: last value;   extension  extension: version.
+# Sorted, so two equal databases give byte-equal snapshots. The session pins
+# its time zone, date and interval style and float digits, so a row's text
+# cannot differ by setting.
 POSTURE_SQL="-- posture-snapshot
+SET TIME ZONE 'UTC'; SET DateStyle TO 'ISO, YMD'; SET IntervalStyle TO 'postgres'; SET extra_float_digits TO 1;
 SELECT line FROM (
-  SELECT format('rows|%s|%s', t.table_name,
-    (xpath('/row/c/text()', query_to_xml(format(
-      CASE WHEN t.table_name = 'platform_config'
-        THEN 'SELECT count(*) AS c FROM %I.%I WHERE key NOT IN (''last_backup_at'', ''last_backup_offsite'', ''last_restore_rehearsal_at'', ''last_restore_rehearsal_seconds'')'
-        ELSE 'SELECT count(*) AS c FROM %I.%I' END,
-      t.table_schema, t.table_name), false, true, '')))[1]::text) AS line
+  SELECT format('rows|%s.%s|%s|%s', t.table_schema, t.table_name,
+    (xpath('/row/c/text()', x))[1]::text, (xpath('/row/h/text()', x))[1]::text) AS line
   FROM information_schema.tables t
-  WHERE t.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+  CROSS JOIN LATERAL query_to_xml(format(
+    'SELECT count(*) AS c, md5(coalesce(string_agg(md5(r::text), '','' ORDER BY md5(r::text) COLLATE \"C\"), '''')) AS h FROM %I.%I r %s',
+    t.table_schema, t.table_name,
+    CASE WHEN t.table_schema = 'public' AND t.table_name = 'platform_config'
+      THEN 'WHERE r.key NOT IN (''last_backup_at'', ''last_backup_offsite'', ''last_restore_rehearsal_at'', ''last_restore_rehearsal_seconds'')'
+      ELSE '' END), false, true, '') AS x
+  WHERE t.table_schema IN ('public', 'swift_qr') AND t.table_type = 'BASE TABLE'
   UNION ALL
-  SELECT format('rls|%s|enabled=%s|forced=%s', c.relname, c.relrowsecurity, c.relforcerowsecurity)
+  SELECT format('column|%s.%s|%s|%s|%s|notnull=%s|default=%s', n.nspname, c.relname, a.attname,
+    row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum),
+    format_type(a.atttypid, a.atttypmod), a.attnotnull, coalesce(pg_get_expr(d.adbin, d.adrelid), ''))
+  FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+  UNION ALL
+  SELECT format('rls|%s.%s|enabled=%s|forced=%s', n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity)
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p')
   UNION ALL
-  SELECT format('policy|%s|%s|%s|%s|%s|%s|%s', p.tablename, p.policyname, p.permissive, p.roles::text, p.cmd, coalesce(p.qual, ''), coalesce(p.with_check, ''))
-  FROM pg_policies p WHERE p.schemaname = 'public'
+  SELECT format('policy|%s.%s|%s|%s|%s|%s|%s|%s', p.schemaname, p.tablename, p.policyname, p.permissive, p.roles::text, p.cmd, coalesce(p.qual, ''), coalesce(p.with_check, ''))
+  FROM pg_policies p WHERE p.schemaname IN ('public', 'swift_qr')
   UNION ALL
   SELECT format('constraint|%s|%s|%s', c.conrelid::regclass::text, c.conname, pg_get_constraintdef(c.oid))
-  FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = 'public'
+  FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname IN ('public', 'swift_qr')
   UNION ALL
-  SELECT format('index|%s|%s|%s', i.tablename, i.indexname, i.indexdef)
-  FROM pg_indexes i WHERE i.schemaname = 'public'
-) s ORDER BY line;"
+  SELECT format('index|%s.%s|%s|%s', i.schemaname, i.tablename, i.indexname, i.indexdef)
+  FROM pg_indexes i WHERE i.schemaname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('trigger|%s|%s|enabled=%s|%s', tg.tgrelid::regclass::text, tg.tgname, tg.tgenabled, pg_get_triggerdef(tg.oid))
+  FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'swift_qr') AND NOT tg.tgisinternal
+  UNION ALL
+  SELECT format('function|%s.%s(%s)|kind=%s|lang=%s|definer=%s|config=%s|volatile=%s|body=%s', n.nspname, p.proname,
+    pg_get_function_identity_arguments(p.oid), p.prokind, l.lanname, p.prosecdef, coalesce(p.proconfig::text, ''), p.provolatile, md5(coalesce(p.prosrc, '')))
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
+  WHERE n.nspname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('grant|relation|%s.%s|%s', n.nspname, c.relname, coalesce(c.relacl::text, ''))
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+  UNION ALL
+  SELECT format('grant|function|%s.%s(%s)|%s', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), coalesce(p.proacl::text, ''))
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('grant|schema|%s|%s', n.nspname, coalesce(n.nspacl::text, ''))
+  FROM pg_namespace n WHERE n.nspname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('grant|default|%s|%s|%s', coalesce(n.nspname, ''), d.defaclobjtype, d.defaclacl::text)
+  FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+  UNION ALL
+  SELECT format('sequence|%s.%s|last=%s', s.schemaname, s.sequencename, coalesce(s.last_value::text, 'unused'))
+  FROM pg_sequences s WHERE s.schemaname IN ('public', 'swift_qr')
+  UNION ALL
+  SELECT format('extension|%s|%s', e.extname, e.extversion) FROM pg_extension e
+) s ORDER BY line COLLATE \"C\";"
 compare_with_source() {
   local live_snapshot scratch_snapshot
-  live_snapshot="$(db_psql "$LIVE_DB" -tAc "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
-  scratch_snapshot="$(db_psql "$SCRATCH" -tAc "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
-  [ -n "$live_snapshot" ] || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
+  live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
+  scratch_snapshot="$(db_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
+  printf '%s\n' "$live_snapshot" | grep -q '^rows|' || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
   summarize() {
     printf '%s\n' "$1" | awk -F'|' -v who="$2" '
       $1 == "rows" { tables++; rows += $3 }
+      $1 == "column" { columns++ }
       $1 == "rls" && $3 == "enabled=t" { rls++ }
       $1 == "rls" && $4 == "forced=t" { forced++ }
       $1 == "policy" { policies++ }
       $1 == "constraint" { constraints++ }
       $1 == "index" { indexes++ }
-      END { printf "%s: %d tables, %d rows, RLS enabled on %d, forced on %d, %d policies, %d constraints, %d indexes\n", who, tables, rows, rls, forced, policies, constraints, indexes }'
+      $1 == "trigger" { triggers++ }
+      $1 == "function" { functions++ }
+      $1 == "grant" { grants++ }
+      $1 == "sequence" { sequences++ }
+      END { printf "%s: %d tables, %d rows, %d columns, RLS enabled on %d, forced on %d, %d policies, %d constraints, %d indexes, %d triggers, %d functions, %d grant entries, %d sequences\n", who, tables, rows, columns, rls, forced, policies, constraints, indexes, triggers, functions, grants, sequences }'
   }
   summarize "$live_snapshot" "source ($LIVE_DB)"
   summarize "$scratch_snapshot" "scratch ($SCRATCH)"
   if [ "$live_snapshot" != "$scratch_snapshot" ]; then
     echo "MISMATCH between the source and the scratch restore (first differences; < source, > scratch):"
-    diff <(printf '%s\n' "$live_snapshot") <(printf '%s\n' "$scratch_snapshot") | grep -E '^[<>]' | cut -c1-200 | head -40 || true
+    diff <(printf '%s\n' "$live_snapshot") <(printf '%s\n' "$scratch_snapshot") | grep -E '^[<>]' | cut -c1-240 | head -40 || true
     die "the restore does not match its source; scratch database retained"
   fi
-  echo "compare-source: the scratch restore matches its source exactly (tables, row counts, RLS, policies, constraints, indexes)"
+  echo "compare-source: in schemas public and swift_qr the scratch restore equals its source in every table's row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, grants and sequence positions"
 }
 if [ "$COMPARE_SOURCE" -eq 1 ]; then
   compare_with_source

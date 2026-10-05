@@ -43,6 +43,18 @@ env_setting() {
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
+# [PROD-PATH] One configuration. Compose fills every ${NAME} in its files
+# from THIS shell before deploy/.env, but every check below reads deploy/.env.
+# A name exported here (NODE_ENV=development, WEB_HOST, …) would make Compose
+# run what no check saw, so it is refused. SWIFT_TAG and SWIFT_WEB_CHANNEL are
+# set by this script itself; the COMPOSE_* switches change what Compose runs.
+compose_names="$(cat "$HERE/docker-compose.yml" "$HERE/docker-compose.routing.yml" |
+  grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | sed 's/^..//' | sort -u)"
+for name in $compose_names COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_FILE COMPOSE_ENV_FILES; do
+  case "$name" in SWIFT_TAG | SWIFT_WEB_CHANNEL) continue ;; esac
+  [ -z "${!name+set}" ] ||
+    die "$name is set in this shell, and Compose would use it instead of deploy/.env (which every check here reads); unset it, or run from a clean shell"
+done
 PILOT_ENV="$(env_value PILOT_ENV)"
 case "$PILOT_ENV" in
   staging | production) ;;
@@ -309,7 +321,10 @@ verify_private_ports
 # the API to avoid. Refused before anything is pulled or built.
 if [ "$DATA_ONLY" -eq 1 ]; then
   for service in api worker; do
-    [ -z "$("${COMPOSE[@]}" ps -q "$service" 2>/dev/null || true)" ] ||
+    # Fail closed: no answer from Docker is not "not running".
+    running="$("${COMPOSE[@]}" ps -q "$service")" ||
+      die "--data-only could not ask Docker whether $service is running; refusing to migrate without that answer"
+    [ -z "$running" ] ||
       die "--data-only refuses a stack whose $service is running; use the full deploy, which stops it before migrating"
   done
 fi

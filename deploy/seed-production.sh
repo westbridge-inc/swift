@@ -24,14 +24,17 @@
 # the same thing: a production host seeds only a database whose
 # deployment_identity names production (NODE_ENV=production, and the
 # operator-recorded SEED_FX_GYD_PER_USD), and a staging host never seeds one
-# that does. On production the spine needs TWO people (seed-plan.ts):
-#   1. a first run prints the plan and its digest and exits 2;
-#   2. each approver signs that digest, read-only, never both halves alone:
-#        SEED_SIGN_PLAN=<digest> SEED_SIGN_APPROVER=<name> ./deploy/seed-production.sh <sha>
-#      (the plan is rebuilt and the digest must still match it);
-#   3. the operator applies with both lines:
+# that does. On production the spine needs TWO different people
+# (approver-signatures.ts), each with their OWN key made on their own computer;
+# the server pins only their public keys (SEED_APPROVER_KEYS in the store):
+#   1. a first run prints the plan and the request to sign, and exits 2;
+#   2. each approver signs that request on their own computer:
+#        ./deploy/seed-approve.sh <their-name> <their-key> < request.txt
+#   3. the operator applies with both printed lines:
 #        SEED_PLAN_APPROVALS='[<first>,<second>]' ./deploy/seed-production.sh <sha>
-# Every ceremony step reads SEED_PLAN_SECRET from the encrypted store as a file.
+# A break-glass promotion works the same way (exit 3, SEED_PROMOTION_APPROVALS).
+# Approvals expire and are single-use. The pinned keys reach the seed container
+# only as a file from the encrypted store.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -45,6 +48,16 @@ env_value() { grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA (the exact revision pilot-up.sh deployed)"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
+# [PROD-PATH] One configuration: Compose fills ${NAME} from this shell before
+# deploy/.env, and the checks here read deploy/.env. Only the ceremony's own
+# inputs (SEED_*) and SWIFT_TAG (set below) may come from the shell.
+compose_names="$(cat "$HERE/docker-compose.yml" "$HERE/docker-compose.seed.yml" |
+  grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | sed 's/^..//' | sort -u)"
+for name in $compose_names COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_FILE COMPOSE_ENV_FILES; do
+  case "$name" in SWIFT_TAG | SEED_*) continue ;; esac
+  [ -z "${!name+set}" ] ||
+    die "$name is set in this shell, and Compose would use it instead of deploy/.env (which every check here reads); unset it, or run from a clean shell"
+done
 PILOT_ENV="$(env_value PILOT_ENV)"
 case "$PILOT_ENV" in
   staging | production) ;;
@@ -66,33 +79,23 @@ SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
   die "SEED_ADMIN_PHONE must not start with +592600 — that range is the demo-seed/purge classification, never a real admin"
 for tool in git docker; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 
-# The two-person break-glass ceremony (runbook §6): SEED_SIGN_APPROVER signs one
-# approver's half and seeds nothing; SEED_PROMOTION_APPROVALS carries both halves
-# to the promotion. Either needs SEED_PLAN_SECRET from the encrypted store, which
-# reaches the container only as a FILE — its value is never read or printed here.
-SEED_SIGN_APPROVER="${SEED_SIGN_APPROVER:-}"
+# The two-person ceremony (runbook §6b and §12): approvals are signatures
+# by pinned approver keys. When approvals are given, the pinned keys must be in
+# the encrypted store; they reach the container only as a file. The approval
+# lines themselves are not secrets.
 SEED_PROMOTION_APPROVALS="${SEED_PROMOTION_APPROVALS:-}"
-# [PROD-PATH] The plan half of the ceremony: SEED_SIGN_PLAN is the digest one
-# approver signs; SEED_PLAN_APPROVALS carries both signed lines to the apply.
-SEED_SIGN_PLAN="${SEED_SIGN_PLAN:-}"
 SEED_PLAN_APPROVALS="${SEED_PLAN_APPROVALS:-}"
-SEED_PLAN_SECRET_FILE=""
-if [ -n "$SEED_SIGN_PLAN" ]; then
-  [[ "$SEED_SIGN_PLAN" =~ ^[0-9a-f]{64}$ ]] || die "SEED_SIGN_PLAN must be the 64-character plan digest the first run printed"
-  [ -n "$SEED_SIGN_APPROVER" ] || die "SEED_SIGN_PLAN needs SEED_SIGN_APPROVER: the approver's own short lowercase name"
-fi
-if [ -n "$SEED_SIGN_APPROVER" ] || [ -n "$SEED_PROMOTION_APPROVALS" ] || [ -n "$SEED_PLAN_APPROVALS" ]; then
-  [ -z "$SEED_SIGN_APPROVER" ] || [[ "$SEED_SIGN_APPROVER" =~ ^[a-z][a-z0-9-]{1,31}$ ]] ||
-    die "SEED_SIGN_APPROVER must be a short lowercase name (a-z, 0-9, -)"
+SEED_APPROVER_KEYS_FILE=""
+if [ -n "$SEED_PROMOTION_APPROVALS" ] || [ -n "$SEED_PLAN_APPROVALS" ]; then
   STORE_BIN="$(command -v swift-secrets || true)"
   [ -n "$STORE_BIN" ] || die "swift-secrets is not installed"
-  sudo -n "$STORE_BIN" list | tr ' ' '\n' | grep -qx SEED_PLAN_SECRET ||
-    die "the break-glass ceremony needs SEED_PLAN_SECRET in the encrypted store (sudo swift-secrets set SEED_PLAN_SECRET)"
+  sudo -n "$STORE_BIN" list | tr ' ' '\n' | grep -qx SEED_APPROVER_KEYS ||
+    die "approvals need the approvers' pinned public keys in the encrypted store: pin them with swift-secrets set SEED_APPROVER_KEYS (runbook 6b)"
   sudo -n systemctl restart swift-secrets.service ||
     die "swift-secrets.service could not materialize the store"
-  SEED_PLAN_SECRET_FILE=/run/secrets/SEED_PLAN_SECRET
+  SEED_APPROVER_KEYS_FILE=/run/secrets/SEED_APPROVER_KEYS
 fi
-export SEED_SIGN_APPROVER SEED_PROMOTION_APPROVALS SEED_PLAN_SECRET_FILE SEED_SIGN_PLAN SEED_PLAN_APPROVALS
+export SEED_PROMOTION_APPROVALS SEED_PLAN_APPROVALS SEED_APPROVER_KEYS_FILE
 
 # The one-off container joins the stack's private network, so the stack's
 # Postgres must be up. This read is also the deployment-identity gate: the
@@ -103,13 +106,11 @@ IDENTITY="$("${COMPOSE[@]}" exec -T postgres sh -c \
   'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) || chr(58) || coalesce(max(environment), chr(32)) FROM deployment_identity;"' 2>/dev/null || true)"
 [ "${IDENTITY%%:*}" = "1" ] || die "could not read the deployment_identity row (is Postgres up and migrated, and was the row written?) — refusing to seed an unidentified database"
 IDENTITY_ENV="${IDENTITY#*:}"
-if [ "$PILOT_ENV" = production ]; then
-  [ "$IDENTITY_ENV" = production ] ||
-    die "PILOT_ENV=production, but this database's deployment_identity is not production — refusing to seed it as production"
-else
-  [ "$IDENTITY_ENV" != production ] ||
-    die "this database's deployment_identity is production, but PILOT_ENV=staging — a staging host never seeds a production database"
-fi
+# Exactly equal, both ways: a production host seeds only a database that says
+# production, a staging host only one that says staging (never test, blank or
+# a misspelling, and never production).
+[ "$IDENTITY_ENV" = "$PILOT_ENV" ] ||
+  die "PILOT_ENV=$PILOT_ENV, but this database's deployment_identity is not $PILOT_ENV — refusing to seed it (a staging host never seeds a production database, nor the reverse)"
 
 cd "$ROOT"
 [ -z "$(git status --porcelain --untracked-files=normal)" ] ||

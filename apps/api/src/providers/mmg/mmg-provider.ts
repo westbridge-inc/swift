@@ -457,6 +457,21 @@ export function mmgDisabled(env: Record<string, string | undefined> = process.en
   return env['MMG_DRIVER'] === 'disabled';
 }
 
+/**
+ * [PROD-PATH] A subscription on the MMG rail while MMG is switched off: its
+ * billing is PAUSED, not deferred and then dunned. Nothing is charged (not
+ * even prepaid balance), nothing fails, nobody is dunned, suspended, nudged
+ * or churned, and the operate gate does not lock the partner out on a grace
+ * deadline that ran out while the partner could not pay (the clock is frozen
+ * for the span: modules/billing/mmg-pause.ts). One predicate for all of them.
+ */
+export function mmgRailPaused(
+  sub: { billingMethod: string },
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return mmgDisabled(env) && sub.billingMethod === 'MOBILE_MONEY';
+}
+
 export class MmgDisabledError extends AppError {
   constructor(operation: string) {
     super(503, 'MMG_DISABLED', `MMG is switched off on this server (MMG_DRIVER=disabled); ${operation} was not sent.`);

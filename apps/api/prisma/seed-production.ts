@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
-import { desiredPlatformConfig, seedPlatformSpine } from './seed-platform';
-import { promoteBootstrapAdmin, signPromotionForTarget, signSeedPlanForTarget, type SeedPlan } from '../src/modules/ops/seed-plan';
-import type { Approval } from '../src/modules/ops/purge-plan';
+import { seedPlatformSpine } from './seed-platform';
+import { planApprovalRequest, promoteBootstrapAdmin, promotionApprovalRequest, type SeedPlan } from '../src/modules/ops/seed-plan';
+import { parseSignedApprovals } from '../src/modules/ops/approver-signatures';
 
 /**
  * The PRODUCTION spine seed — the platform config plan and, optionally, the
@@ -10,34 +10,21 @@ import type { Approval } from '../src/modules/ops/purge-plan';
  * [R048-005] This is a CEREMONY, not a script that overwrites:
  *   1. The plan is built against the database's own deployment identity and
  *      PRINTED as a diff (table, key, field, from → to) before anything runs.
- *   2. On a production target the apply needs TWO distinct approvals signed
- *      over the plan digest with SEED_PLAN_SECRET —
- *      `SEED_PLAN_APPROVALS='[{"approver":"…","signature":"…"}]'`; without
- *      them it prints the plan digest to sign and exits 2. Anywhere else the
- *      plan applies directly (an empty diff applies nothing and says so).
- *      [PROD-PATH] Each approver signs with SEED_SIGN_PLAN=<digest> and
- *      SEED_SIGN_APPROVER=<name> (read-only; the plan is rebuilt and must
- *      still carry that digest).
+ *   2. On a production target the apply needs TWO approvals by two different
+ *      people. [PROD-PATH] Each approver signs the printed request with their
+ *      OWN key on their own computer (deploy/seed-approve.sh); the server holds
+ *      only their pinned public keys (SEED_APPROVER_KEYS, from the encrypted
+ *      store), so it cannot sign for anyone. Without approvals the run prints
+ *      the request to sign (valid 24 hours) and exits 2; the operator re-runs
+ *      with `SEED_PLAN_APPROVALS='[<line>,<line>]'`. Approvals are single-use.
+ *      Anywhere else the plan applies directly (an empty diff applies nothing
+ *      and says so).
  *   3. The first SUPER_ADMIN (SEED_ADMIN_PHONE) is minted only while NONE
- *      exists; afterwards it is a break-glass change needing two approvals
- *      over the target and the phone (`SEED_PROMOTION_APPROVALS`).
- * Every apply and promotion is a durable privileged-change audit row.
+ *      exists; afterwards it is a break-glass change: the run prints the
+ *      promotion request and exits 3, and the operator re-runs with
+ *      `SEED_PROMOTION_APPROVALS`.
+ * Every apply, promotion and consumed approval is a durable audit row.
  */
-
-function parseApprovals(raw: string | undefined, name: string): Approval[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) throw new Error('not an array');
-    return parsed.map((a) => {
-      const o = a as { approver?: unknown; signature?: unknown };
-      if (typeof o.approver !== 'string' || typeof o.signature !== 'string') throw new Error('an approval needs approver and signature');
-      return { approver: o.approver, signature: o.signature };
-    });
-  } catch (err) {
-    throw new Error(`${name} is not a JSON array of {approver, signature}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
 
 function printPlan(plan: SeedPlan): void {
   console.warn(`Plan ${plan.digest.slice(0, 12)} · config ${plan.configVersion} · target ${plan.target.deploymentId}/${plan.target.environment} (${plan.target.database} on ${plan.target.host})`);
@@ -49,57 +36,51 @@ function printPlan(plan: SeedPlan): void {
   }
 }
 
+/** The request goes to stdout alone, so it can be saved to a file and signed as-is. */
+function printRequest(what: string, request: string): void {
+  console.warn(`\n${what} Each approver saves the request below (between the lines) to a file and signs it on their own computer:\n  ./deploy/seed-approve.sh <their-name> <their-key> < request.txt\nThen re-run with both printed lines. The request is valid for 24 hours.\n-----`);
+  process.stdout.write(request);
+  console.warn('-----');
+}
+
 async function main(): Promise<void> {
   const prisma = new PrismaClient();
   const databaseUrl = process.env['DATABASE_URL'] ?? '';
-  const secret = process.env['SEED_PLAN_SECRET'];
-  const approvals = parseApprovals(process.env['SEED_PLAN_APPROVALS'], 'SEED_PLAN_APPROVALS');
+  const approverKeys = process.env['SEED_APPROVER_KEYS'];
+  const approvals = parseSignedApprovals(process.env['SEED_PLAN_APPROVALS'], 'SEED_PLAN_APPROVALS');
   const actor = process.env['SEED_ACTOR'] ?? 'seed-production';
   try {
-    // Sign mode: ONE approver's half of the two-person break-glass promotion of
-    // SEED_ADMIN_PHONE on this database. Read-only — it prints the approval
-    // (a name and a signature, never the key) and seeds nothing.
-    const signer = process.env['SEED_SIGN_APPROVER'];
-    // [PROD-PATH] Plan-sign mode: ONE approver's half of a production spine
-    // apply, over the digest a first run printed. Read-only: the plan is
-    // rebuilt and must still carry that digest; nothing is seeded.
-    const planDigest = process.env['SEED_SIGN_PLAN'];
-    if (planDigest) {
-      if (!signer) throw new Error('SEED_SIGN_PLAN needs SEED_SIGN_APPROVER (the approver\'s own name)');
-      const approval = await signSeedPlanForTarget(prisma, databaseUrl, desiredPlatformConfig(), secret, signer, planDigest);
-      console.warn(`Approval by ${approval.approver} for plan ${planDigest.slice(0, 12)} on this database — hand this line to the operator:`);
-      console.log(JSON.stringify(approval));
-      return;
-    }
-    if (signer) {
-      const approval = await signPromotionForTarget(prisma, databaseUrl, secret, signer, process.env['SEED_ADMIN_PHONE'] ?? '');
-      console.warn(`Approval by ${approval.approver} for this database and phone — hand this line to the operator:`);
-      console.log(JSON.stringify(approval));
-      return;
-    }
     console.warn('Seeding PRODUCTION spine (no demo data)…');
     let previewed: SeedPlan | null = null;
     try {
       await seedPlatformSpine(prisma, {
         databaseUrl,
-        secret,
         approvals,
+        approverKeys,
         actor,
         onPlan: (plan) => { previewed = plan; printPlan(plan); },
       });
     } catch (err) {
       const code = (err as { code?: string }).code;
-      if (code === 'APPROVALS_REQUIRED' && previewed) {
-        console.error(`\nThis target is production. Two people must sign the plan digest above with SEED_PLAN_SECRET and re-run with SEED_PLAN_APPROVALS. Digest: ${(previewed as SeedPlan).digest}`);
+      if (code === 'APPROVALS_REQUIRED' && previewed && approvals.length === 0) {
+        printRequest('This target is production: two different people must approve this plan.', planApprovalRequest(previewed as SeedPlan));
         process.exit(2);
       }
       throw err;
     }
     const adminPhone = process.env['SEED_ADMIN_PHONE'];
     if (adminPhone) {
-      const promotionApprovals = parseApprovals(process.env['SEED_PROMOTION_APPROVALS'], 'SEED_PROMOTION_APPROVALS');
-      const result = await promoteBootstrapAdmin(prisma, databaseUrl, adminPhone, { secret, approvals: promotionApprovals, actor });
-      console.warn(`SUPER_ADMIN ${result.mode === 'bootstrap' ? 'bootstrapped' : 'promoted by break-glass'} for ${adminPhone}.`);
+      const promotionApprovals = parseSignedApprovals(process.env['SEED_PROMOTION_APPROVALS'], 'SEED_PROMOTION_APPROVALS');
+      try {
+        const result = await promoteBootstrapAdmin(prisma, databaseUrl, adminPhone, { approvals: promotionApprovals, approverKeys, actor });
+        console.warn(`SUPER_ADMIN ${result.mode === 'bootstrap' ? 'bootstrapped' : 'promoted by break-glass'} for the given phone.`);
+      } catch (err) {
+        if ((err as { code?: string }).code === 'BREAK_GLASS_REQUIRED') {
+          printRequest('A SUPER_ADMIN already exists: promoting another is a break-glass change two different people must approve.', await promotionApprovalRequest(prisma, databaseUrl, adminPhone));
+          process.exit(3);
+        }
+        throw err;
+      }
     } else {
       console.warn('SEED_ADMIN_PHONE not set — spine seeded WITHOUT a bootstrap admin. Set it to mint the first SUPER_ADMIN.');
     }

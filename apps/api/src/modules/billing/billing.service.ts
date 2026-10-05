@@ -6,7 +6,7 @@ import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription }
 import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
-import { getMmgProvider, mmgDisabled } from '../../providers/mmg/mmg-provider';
+import { getMmgProvider, mmgDisabled, mmgRailPaused } from '../../providers/mmg/mmg-provider';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
@@ -451,6 +451,11 @@ export class BillingService {
     // An unresolved positive observation may concern this or an older attempt.
     // A new retry key, rail choice or wallet top-up is not manual disposition.
     if (await this.subscriptionHasMmgApprovalHold(this.prisma, sub.id)) return 'pending';
+    // [PROD-PATH] MMG switched off: an MMG-rail subscription is PAUSED before
+    // anything is written — no attempt, no prepaid spend, no failure, and the
+    // duplicate-attempt recovery below (which can apply a recorded failure)
+    // is never reached. The week is billed once MMG is on again.
+    if (mmgRailPaused(sub)) return 'pending';
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
@@ -1610,6 +1615,10 @@ export class BillingService {
     now: Date,
   ): Promise<ChargeAttemptResult> {
     if (await this.subscriptionHasMmgApprovalHold(this.prisma, sub.id)) return { ok: false, deferred: true };
+    // [PROD-PATH] MMG switched off: the MMG rail is paused before the prepaid
+    // spend and before the no-payer-number fall-through (which would record
+    // a failure). billSubscription stops earlier; this is its second wall.
+    if (mmgRailPaused(sub)) return { ok: false, deferred: true, rail: 'MOBILE_MONEY' };
     // Prepaid balance is money Swift already holds — spend it before pinging any
     // external rail. This is also what makes an admin top-up reinstate a CARD/MMG
     // sub: the recorded cash settles the fee instead of firing a fresh (and
@@ -1705,11 +1714,6 @@ export class BillingService {
     }
 
     if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {
-      // [PROD-PATH] MMG fully off (MMG_DRIVER=disabled): defer, exactly as a
-      // card does while its rail is off — BEFORE any lookup, intent row or
-      // request. Nothing is charged, nothing fails, nobody is dunned and the
-      // period does not move; the week is billed once MMG is switched on.
-      if (mmgDisabled()) return { ok: false, deferred: true, rail: 'MOBILE_MONEY' };
       const mmg = getMmgProvider();
       // SWIFT-004 — MMG double-charge guard. The poller's synthetic 24h expiry
       // can mark a prior request FAILED while MMG still holds it live on the
@@ -3141,6 +3145,10 @@ export class BillingService {
    * the live states is not re-dunned.
    */
   async reconcileTerminalWithoutOutcome(now = new Date(), windowDays = 30): Promise<{ scanned: number; repaired: number; stillOpen: number; oldestMinutes: number | null }> {
+    // [PROD-PATH] MMG switched off: a terminal MMG payment's outcome is a
+    // dunning step (CHARGE_FAILED, PAST_DUE, SUSPENDED). The pause holds it
+    // until MMG is on again, when this pass applies it as before.
+    if (mmgDisabled()) return { scanned: 0, repaired: 0, stillOpen: 0, oldestMinutes: null };
     const since = new Date(now.getTime() - windowDays * 86_400_000);
     // Exclude every recognized outcome BEFORE the cap. Filtering ordinary
     // CHARGE_FAILED/success rows in the loop let the same 500 oldest handled
@@ -3669,6 +3677,10 @@ export class BillingService {
             },
           });
           if (!sub || sub.status !== 'SUSPENDED' || await this.subscriptionHasMmgApprovalHold(tx, sub.id)) return null;
+          // [PROD-PATH] MMG switched off: an MMG-rail partner cannot pay, so
+          // they are neither nudged to pay nor churned for not paying; the
+          // churn clock is held for the span (mmg-pause.ts).
+          if (mmgRailPaused(sub)) return null;
           const suspendedSince = sub.suspendedAt ?? sub.updatedAt; // pre-migration rows fall back to last touch
           if (now.getTime() - suspendedSince.getTime() >= suspensionMaxDays() * DAY_MS) {
             // Keep the state and its audit fact in one commit. The CAS also
