@@ -669,7 +669,7 @@ export function CartScreen() {
             {promoMsg && !promoMsg.ok ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.lg }}>
                 <Feather name="alert-circle" size={13} color={color.error} />
-                <T variant="caption" tone="error">
+                <T variant="caption" tone="error" style={{ flex: 1 }}>
                   {promoMsg.text}
                 </T>
               </View>
@@ -959,7 +959,7 @@ export function CartScreen() {
                   appointments[i.itemId] ? (
                     <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Feather name="calendar" size={13} color={color.text.muted} />
-                      <T variant="caption" tone="muted">
+                      <T variant="caption" tone="muted" style={{ flex: 1 }}>
                         {i.name} — {formatAppointmentSlot(appointments[i.itemId]!.slotStart)}
                         {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
                       </T>
@@ -997,7 +997,7 @@ export function CartScreen() {
           {!c.meetsMinimum && short.length === 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 This store has a minimum order of {money(c.minimumOrderAmount)}.
               </T>
             </View>
@@ -1005,7 +1005,7 @@ export function CartScreen() {
           {unslotted.length > 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="calendar" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 Pick a time for {unslotted[0].name} before ordering.
               </T>
             </View>
@@ -1013,7 +1013,7 @@ export function CartScreen() {
           {orderErr ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.error} />
-              <T variant="label" tone="error">
+              <T variant="label" tone="error" style={{ flex: 1 }}>
                 {orderErr}
               </T>
             </View>
