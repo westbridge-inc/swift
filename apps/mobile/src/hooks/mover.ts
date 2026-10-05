@@ -1,3 +1,4 @@
+import { adaptivePollInterval } from '../lib/adaptivePolling';
 import { runBillingMutation } from '../lib/billingMutation';
 import type { MutationGuard } from './useStepUp';
 import { useEffect, useMemo, useRef } from 'react';
@@ -269,7 +270,7 @@ export function useDemand<T = any>(kind: MoverKind | null, point?: { lat: number
     queryKey: ['mover', 'demand', kind, point ? `${point.lat.toFixed(3)},${point.lng.toFixed(3)}` : null],
     queryFn: () => unwrap<T>(svc(kind as MoverKind).demand(point as { lat: number; lng: number })),
     enabled: !!kind && !!point && !pv,
-    refetchInterval: 20_000,
+    refetchInterval: () => adaptivePollInterval(20_000, 30000),
   });
   return pv ? PV.previewQuery(PV.PREVIEW_DEMAND) : q;
 }
@@ -280,7 +281,7 @@ export function useAvailableJobs(kind: MoverKind | null, online: boolean) {
     queryKey: ['mover', 'available', kind],
     queryFn: () => unwrap(svc(kind as MoverKind).available()),
     enabled: !!kind && online && !pv,
-    refetchInterval: online ? 10000 : false,
+    refetchInterval: () => online ? adaptivePollInterval(10000, 30000) : false,
   });
   return pv ? PV.previewQuery(PV.PREVIEW_AVAILABLE) : q;
 }
@@ -290,7 +291,7 @@ export function useActiveJob(kind: MoverKind | null) {
     queryKey: ['mover', 'active', kind],
     queryFn: () => unwrap(svc(kind as MoverKind).active()),
     enabled: !!kind && !pv,
-    refetchInterval: 12000,
+    refetchInterval: () => adaptivePollInterval(12000, 30000),
   });
   // A sample in-progress trip in preview: Home shows the active-trip banner (its
   // "tap to manage" is the only path to the nav-grade Active-trip screen, which
@@ -319,7 +320,7 @@ export function useActiveJobs(kind: MoverKind | null) {
     queryKey: ['mover', 'active', kind, 'legs'],
     queryFn: () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs()),
     enabled: stacked,
-    refetchInterval: 12000,
+    refetchInterval: () => adaptivePollInterval(12000, 30000),
   });
   const fromSingle: any[] = single.data ? [single.data] : [];
   if (!stacked) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };

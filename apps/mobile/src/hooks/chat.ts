@@ -1,3 +1,9 @@
+import { useEffect } from 'react';
+import { connectSocket, getSocket } from '../services/socket';
+import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
+import { samePrincipalBoundary } from '../lib/authSession';
+import { bindChatRoom } from '../lib/chatRoomSubscription';
+import { adaptivePollInterval } from '../lib/adaptivePolling';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { chatApi } from '../services/api';
 
@@ -16,13 +22,23 @@ export function useChatRoom(orderId?: string) {
   });
 }
 
-/** Poll the message list (no socket dependency); 4s is plenty for a 1:1 thread. */
+/** Socket messages refresh promptly; polling is the reconnect safety net. */
 export function useChatMessages(roomId?: string) {
+  const qc = useQueryClient();
+  const generation = useAuthStore((state) => state.sessionGeneration);
+  useEffect(() => {
+    const owner = getAuthSessionSnapshot();
+    if (!roomId || !owner) return;
+    connectSocket();
+    return bindChatRoom(getSocket(), roomId,
+      () => samePrincipalBoundary(owner, getAuthSessionSnapshot()),
+      () => qc.invalidateQueries({ queryKey: ['chat', 'messages', roomId] }));
+  }, [roomId, generation, qc]);
   return useQuery({
     queryKey: ['chat', 'messages', roomId],
     queryFn: () => unwrap<any[]>(chatApi.messages(roomId!)),
     enabled: !!roomId,
-    refetchInterval: 4000,
+    refetchInterval: () => adaptivePollInterval(4000, 15000),
   });
 }
 

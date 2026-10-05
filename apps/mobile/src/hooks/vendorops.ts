@@ -1,3 +1,4 @@
+import { adaptivePollInterval } from '../lib/adaptivePolling';
 import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
@@ -83,7 +84,7 @@ export function useVendorProfile() {
     queryKey: ['vendor', 'profile'],
     queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile(), { outsider }),
     retry: false,
-    refetchInterval: 20000,
+    refetchInterval: () => adaptivePollInterval(20000, 30000),
     enabled: !pv,
   });
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
@@ -278,7 +279,7 @@ export function useVendorOrders(enabled: boolean) {
     queryKey: ['vendor', 'orders'],
     queryFn: () => unwrap(vendorApi.orders()),
     enabled: enabled && !pv,
-    refetchInterval: enabled && !pv ? 12000 : false,
+    refetchInterval: () => enabled && !pv ? adaptivePollInterval(12000, 30000) : false,
   });
   return pv ? previewQuery(pv.orders) : q;
 }
@@ -347,7 +348,7 @@ export function useVendorOrder(id: string | undefined) {
     queryKey: ['vendor', 'orders', 'detail', id],
     queryFn: () => unwrap<any>(vendorApi.order(id!)),
     enabled: !!id && !pv,
-    refetchInterval: 15000,
+    refetchInterval: () => adaptivePollInterval(15000, 30000),
   });
   return pv ? previewQuery(pv.orders.find((o) => o.id === id) ?? pv.orders[0]) : q;
 }
