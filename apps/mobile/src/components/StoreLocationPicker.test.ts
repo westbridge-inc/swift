@@ -466,7 +466,7 @@ describe('map routing credits', () => {
     expect(links[0]!.props.style).toMatchObject({ letterSpacing: 0, fontStyle: 'normal' });
   });
 
-  it.each(['haversine', undefined])('does not claim OSRM for source %s', (routeSource) => {
+  it.each<'haversine' | undefined>(['haversine', undefined])('does not claim OSRM for source %s', (routeSource) => {
     fx.platform.OS = 'ios';
     const view = fx.mount(MapCredits, { routeSource });
     expect(texts(view)).toEqual(['Apple Maps']);
