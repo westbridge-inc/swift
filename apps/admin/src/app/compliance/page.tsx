@@ -59,7 +59,11 @@ export default function CompliancePage() {
         An unlicensed or uninsured mover operating here is a lawsuit — this page is where that never happens.
       </p>
 
-      {blind ? (
+      {q.isPending ? (
+        // [ADMIN-TRUTH] An unanswered read (first load, retries, a hung query)
+        // is not a clean audit either: no count and no all-clear until it lands.
+        <p className="text-[var(--muted)] text-sm">Loading compliance…</p>
+      ) : blind ? (
         <DataUnavailable
           what="Compliance data"
           notAnAllClear="This is not an all-clear: no violation, review case or audit run could be read."

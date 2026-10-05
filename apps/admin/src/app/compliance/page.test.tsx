@@ -41,6 +41,22 @@ describe('[ADMIN-TRUTH] a failed compliance read is not an all-clear', () => {
     expect(screen.queryByText(/queue \(0\)/)).toBeNull();
   });
 
+  it('while the read is still in flight the page shows loading, never the all-clear or a zero', async () => {
+    let release: () => void = () => {};
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    mockApi(async () => { await pending; return { body: { success: true, data: { runs: [], openViolations: [], reviewQueue: [] } } }; });
+    renderWithQuery(<CompliancePage />);
+
+    expect(await screen.findByText(/Loading compliance/)).toBeTruthy();
+    expect(screen.queryByText(ALL_CLEAR)).toBeNull();
+    expect(screen.queryByText(NO_CASES)).toBeNull();
+    expect(screen.queryByText(NO_RUNS)).toBeNull();
+    expect(screen.queryByText('(0)')).toBeNull();
+    expect(screen.queryByText(/queue \(0\)/)).toBeNull();
+    release();
+    expect(await screen.findByText(ALL_CLEAR)).toBeTruthy();
+  });
+
   it('a successful read with nothing in it still shows the real all-clear', async () => {
     complianceServer(() => ({ body: { success: true, data: { runs: [], openViolations: [], reviewQueue: [] } } }));
     renderWithQuery(<CompliancePage />);

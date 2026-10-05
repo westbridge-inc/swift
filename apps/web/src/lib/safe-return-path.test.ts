@@ -26,6 +26,7 @@ describe('[WEB-GUARDS] sign-in returns only to a path on this site', () => {
     ['backslash', '/\\evil.example/'],
     ['traversal', '/a/../../evil'],
     ['a NUL byte', '/a\u0000b'],
+    ['javascript:', 'javascript:alert(1)'],
   ])('refuses a %s return', (_name, next) => {
     expect(storefrontAuthReturn(next)).toBe('');
   });
