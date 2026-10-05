@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PRIVACY } from '../modules/legal/legal.routes';
 import { PROCESSOR_REGISTER } from '../modules/legal/processor-register';
@@ -60,10 +62,31 @@ describe('[L13 item 3] the Privacy Policy names only processors production can r
     expect(osrm.transferBasis).toBe('SELF_HOSTED');
     expect(google.note).toMatch(/DORMANT/);
     expect(PRIVACY).not.toMatch(/Google Maps \([^)]*travel estimates/i);
-    expect(PRIVACY).toMatch(/Routes, travel estimates and address search run on Swift's own servers/);
+    expect(PRIVACY).toMatch(/Routes and travel estimates run on Swift's own servers using OpenStreetMap data/);
+    // Address search is Swift's own (saved addresses and zones, or a self-hosted geocoder):
+    // the policy must not claim it depends on OpenStreetMap data in every configuration.
+    expect(PRIVACY).not.toMatch(/address search run[s]? on Swift's own servers using OpenStreetMap/);
+    expect(PRIVACY).toMatch(/address search runs on Swift's own servers/);
   });
 
-  it('the hosting and storage company is named', () => {
-    expect(PRIVACY).toMatch(/DigitalOcean \(hosts Swift's servers and databases, and the encrypted storage/);
+  it.each([
+    ['HOSTING', 'DigitalOcean'], ['OBJECT_STORE', 'DigitalOcean'], ['TWILIO', 'Twilio'], ['EXPO_PUSH', 'Expo'],
+    ['SMTP_EMAIL', 'GoDaddy'], ['MMG', 'Mobile Money Guyana'],
+  ])('launch processor %s is the same company in the register and in the policy (%s)', (ref, brand) => {
+    const entry = PROCESSOR_REGISTER.find((p) => p.ref === ref);
+    expect(entry, `${ref} is missing from the register`).toBeDefined();
+    expect(entry!.party).toContain(brand);
+    expect(PRIVACY).toContain(brand);
+  });
+
+  it('the shared trip page\'s OpenStreetMap frame is disclosed with what it receives', () => {
+    const tracking = readFileSync(join(__dirname, '../../../web/src/lib/live-tracking.ts'), 'utf8');
+    expect(tracking, 'the trip page no longer frames OpenStreetMap: update this test and the policy').toMatch(/openstreetmap\.org/);
+    expect(PRIVACY).toMatch(/shared trip[^.]*OpenStreetMap[^.]*network address[^.]*approximate area/i);
+  });
+
+  it('the automated upload checks are not credited with judging readability', () => {
+    const ai = /<p><b>AI processing:<\/b>[\s\S]*?<\/p>/.exec(PRIVACY)?.[0] ?? '';
+    expect(ai).not.toMatch(/unreadable/i);
   });
 });
