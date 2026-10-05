@@ -46,7 +46,14 @@ export async function moderationRoutes(app: FastifyInstance) {
         where: { id: body.targetId }, select: { chatRoomId: true },
       });
       if (!message) throw new NotFoundError('Chat message');
-      await assertRoomAccess(app.prisma, message.chatRoomId, reporterId, { write: false, tenantId: request.tenantId });
+      try {
+        await assertRoomAccess(app.prisma, message.chatRoomId, reporterId, { write: false, tenantId: request.tenantId });
+      } catch (error) {
+        // A room outside the reporter's tenant answers exactly like a missing
+        // message: no room id, no different wording to probe existence with.
+        if (error instanceof NotFoundError) throw new NotFoundError('Chat message');
+        throw error;
+      }
     }
 
     const existing = await app.prisma.contentReport.findUnique({

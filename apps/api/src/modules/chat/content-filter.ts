@@ -19,10 +19,17 @@ function isSupportLink(candidate: string): boolean {
   }
 }
 
+function isCalendarDate(year: number, month: number, day: number): boolean {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** A real calendar date: ISO year-month-day, or Guyana's day-month-year with - or . */
 function isDate(candidate: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return false;
-  const date = new Date(candidate + 'T00:00:00Z');
-  return Number.isFinite(date.getTime()) && date.toISOString().startsWith(candidate);
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(candidate);
+  if (iso) return isCalendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+  const dmy = /^(\d{1,2})([-.])(\d{1,2})\2(\d{4})$/.exec(candidate);
+  return dmy ? isCalendarDate(Number(dmy[4]), Number(dmy[3]), Number(dmy[1])) : false;
 }
 
 /** Admission only: preserve allowed original text; never log rejected text. */

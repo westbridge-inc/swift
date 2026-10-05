@@ -142,6 +142,14 @@ describe('chat report authority', () => {
     expect(db.contentReport.create).not.toHaveBeenCalled();
   });
 
+  it('answers a cross-tenant reporter exactly as it answers a missing message, naming no room', async () => {
+    const missing = await report('missing');
+    const crossTenant = await report('existing-message', { 'x-tenant': 'other-tenant' });
+    expect(crossTenant.statusCode).toBe(404);
+    expect(crossTenant.json().error).toEqual(missing.json().error);
+    expect(crossTenant.body).not.toContain('room');
+  });
+
   it('rejects a reassigned rider and rechecks authority before duplicate success', async () => {
     db.order.findUnique.mockResolvedValue({ ...order(), rider: { userId: 'replacement' } });
     db.contentReport.findUnique.mockResolvedValue({ id: 'old-report', status: 'PENDING' });
