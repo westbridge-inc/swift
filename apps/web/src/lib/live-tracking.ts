@@ -68,10 +68,13 @@ export function coarsen(point: Point, decimals = COARSE_DECIMALS): Point {
  * The map URLs, built from a COARSENED point. The embed keeps a wide-enough
  * box to stay useful at that precision.
  */
+/** The one site the trip and parcel pages frame; the CSP's frame-src names exactly this. */
+export const MAP_EMBED_ORIGIN = 'https://www.openstreetmap.org';
+
 export function mapEmbedUrl(point: Point): string {
   const { lat, lng } = coarsen(point);
   const box = 0.008;
-  return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - box}%2C${lat - box}%2C${lng + box}%2C${lat + box}&layer=mapnik&marker=${lat}%2C${lng}`;
+  return `${MAP_EMBED_ORIGIN}/export/embed.html?bbox=${lng - box}%2C${lat - box}%2C${lng + box}%2C${lat + box}&layer=mapnik&marker=${lat}%2C${lng}`;
 }
 
 export function mapLinkUrl(point: Point): string {

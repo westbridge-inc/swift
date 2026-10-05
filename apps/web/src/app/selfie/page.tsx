@@ -7,12 +7,13 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
 import { sessionProbe } from '@/lib/auth';
 import { uploadSelfie } from '@/lib/customer';
+import { safeInternalPath } from '@/lib/safe-return-path';
 import styles from './selfie.module.css';
 
 const MAX_CAPTURE_EDGE = 1280;
 
 function safeNext(value: string | null): string {
-  return value && /^\/(?!\/)/.test(value) && !value.includes('..') && !value.includes('\\') ? value : '/';
+  return safeInternalPath(value) ?? '/';
 }
 
 function SelfieSetup() {
