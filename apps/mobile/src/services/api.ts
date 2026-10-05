@@ -8,7 +8,7 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
@@ -962,6 +962,50 @@ export const riderApi = {
     })),
 };
 
+/** Resolve a lost response against the same driver's authority. Offers return
+ * the held assignment on repeat; board acceptance first checks the active ride. */
+async function acceptDriver(path: string, body: object, boardId?: string) {
+  const owner = getAuthSessionSnapshot();
+  const currentSession = () => {
+    const current = owner && authSessionForPrincipal(getAuthSessionSnapshot(), owner);
+    if (owner && !current) throw new Error('Your session changed. Please check your active ride.');
+    return current ?? undefined;
+  };
+  const config = () => capturedAuthConfig(currentSession());
+  const heldRide = async () => {
+    const active = await api.get('/driver/rides/active', config());
+    currentSession();
+    return active.data?.data?.id === boardId ? active : null;
+  };
+  try {
+    const result = await api.post(path, body, config());
+    currentSession();
+    return result;
+  } catch (error) {
+    if (!owner || !axios.isAxiosError(error) || error.response ||
+        !['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code ?? '') ||
+        !authSessionForPrincipal(getAuthSessionSnapshot(), owner)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    if (boardId) {
+      const held = await heldRide();
+      if (held) return held;
+    }
+    try {
+      const result = await api.post(path, body, config());
+      currentSession();
+      return result;
+    } catch (retryError) {
+      // The first accept may finish between the active read and the retry.
+      if (boardId && axios.isAxiosError(retryError) &&
+          retryError.response?.data?.error?.code === 'UNAVAILABLE') {
+        const held = await heldRide();
+        if (held) return held;
+      }
+      throw retryError;
+    }
+  }
+}
+
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
 export const driverApi = {
   profile: () => api.get('/driver/profile'),
@@ -983,12 +1027,12 @@ export const driverApi = {
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
-  accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  accept: (id: string, fare?: number) => acceptDriver(`/driver/rides/${id}/accept`, { fare }, id),
   /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
    * passenger's ride alive, frees this driver, and matches another driver. */
   handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => acceptDriver('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
