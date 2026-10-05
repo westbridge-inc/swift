@@ -13,6 +13,7 @@ import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
 import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
+import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import styles from '../auth-flow.module.css';
 
 type Role = 'CUSTOMER' | 'VENDOR' | 'MOVER';
@@ -43,6 +44,7 @@ export default function SignupPage() {
   const [last, setLast] = useState('');
   const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
   const [storePin, setStorePin] = useState<StorePin | null>(null);
+  const [acceptAgreement, setAcceptAgreement] = useState(false);
   const [placingStore, setPlacingStore] = useState(false);
   const storePinButton = useRef<HTMLButtonElement>(null);
   const restorePinFocus = useRef(false);
@@ -108,9 +110,10 @@ export default function SignupPage() {
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
   const doBusiness = () => wrap(async () => {
+    if (!acceptAgreement) throw new Error('Agree to the Swift Business Agreement to continue.');
     if (!storePin || placingStore) throw new Error('Place your store on the map');
     if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
-    await becomePartner({ role: 'VENDOR', business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } });
+    await becomePartner({ role: 'VENDOR', acceptAgreement: true, business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } });
     router.replace('/dashboard');
   });
   const editBusinessAddress = (patch: Partial<typeof biz>) => {
@@ -227,7 +230,11 @@ export default function SignupPage() {
                 {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed: {storePin.address ?? biz.addressLine1}.</p>}
               </>
             )}
-            <button type="button" onClick={() => void doBusiness()} disabled={busy || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
+            <label className={`${styles.roleButton} ${styles.legal}`}>
+              <input type="checkbox" checked={acceptAgreement} disabled={busy} onChange={(e) => setAcceptAgreement(e.target.checked)} />
+              <span>I agree to the <a href={`${BROWSER_API_ORIGIN}/legal/vendor-agreement`} target="_blank" rel="noreferrer" className={styles.inlineLink}>Swift Business Agreement</a></span>
+            </label>
+            <button type="button" onClick={() => void doBusiness()} disabled={busy || !acceptAgreement || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
             <p className={styles.smallCopy}>You’ll finish verification (documents) in your dashboard before going live.</p>
           </div>
         )}

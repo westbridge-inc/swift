@@ -2,10 +2,10 @@ import type { Prisma } from '@prisma/client';
 import { gpsEvidence } from '../cash/cash-rules.service';
 
 // ---------------------------------------------------------------------------
-// [Q8 · DS269 F1] A moved store pin leaves a trace. PUT /vendor/profile lets a
-// manager (or anyone holding a manager session) move the pin riders and
-// customers are sent to. Without a record, a store could be relocated with no
-// way to tell who moved it, from where, or when. So a move writes an audit row
+// [Q8 · DS269 F1] A moved store pin leaves a trace. PUT /vendor/profile requires
+// the owner to move the pin riders and customers are sent to. Without a record,
+// a store could be relocated with no way to tell who moved it, from where, or
+// when. So a move writes an audit row
 // in the transaction that makes it, and when the mover is not the owner the
 // owner is told, with a notice that commits with the move and is fanned out
 // after it.
