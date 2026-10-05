@@ -2114,6 +2114,9 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     // MMG repeating the credited payment, by either of its numbers, is not new money.
     expect(await codeReply(row, '0', paid, 'NOTIFY')).toBe('CONFIRMED');
     expect(await codeReply(row, '0', ledgerOf(paid), 'NOTIFY')).toBe('CONFIRMED');
+    // ...however MMG spells it: identities are compared canonically (mmg_txn_canon).
+    expect(await codeReply(row, '0', ledgerOf(paid).toLowerCase(), 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', paid.toLowerCase(), 'RETURN')).toBe('CONFIRMED');
     expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(0);
 
     const other = tx('UNAPPLIEDTX');
@@ -2130,11 +2133,21 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: paid });
     expect(await topups(s.subId)).toHaveLength(1);
     expect(await identityOf(other)).toBeNull();
-    // Operators are told once for this checkout, whichever door and however often.
+    // [Sol, DS659 · delta3] Operators are told once PER TRANSACTION, whichever
+    // door and however often: the same payment collapses, a different one pages.
     const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
-    expect(pages).toHaveLength(1);
-    expect(pages[0]!.title).toMatch(/money received and not applied/i);
-    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: other });
+    expect(pages).toHaveLength(2);
+    for (const page of pages) expect(page.title).toMatch(/money received and not applied/i);
+    expect(pages.map((page) => (page.data as Record<string, unknown>)['transactionId']).sort()).toEqual([other, tx('UNAPPLIEDTX2')].sort());
+    // A third different payment pages too; repeats of any of them page no more.
+    expect(await codeReply(row, '0', tx('UNAPPLIEDTX3'), 'RETURN')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', tx('UNAPPLIEDTX3'), 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', other, 'NOTIFY')).toBe('CONFIRMED');
+    // The same MMG transaction spelled in lower case is the same payment (mmg_txn_canon).
+    expect(await codeReply(row, '0', other.toLowerCase(), 'RETURN')).toBe('CONFIRMED');
+    const after = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(after.map((page) => (page.data as Record<string, unknown>)['transactionId']).sort()).toEqual([other, tx('UNAPPLIEDTX2'), tx('UNAPPLIEDTX3')].sort());
+    expect(await topups(s.subId)).toHaveLength(1);
     // The partner hears nothing new.
     expect(await toldOf(s.userId, 'CONFIRMED')).toHaveLength(1);
     expect(await toldOf(s.userId, 'HELD')).toHaveLength(0);
@@ -2298,6 +2311,150 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await codeReply(row, '0', first, 'RETURN')).toBe('CONFIRMED');
     expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(1);
     expect(await topups(s.subId)).toHaveLength(1);
+  });
+
+  it('[Sol delta3] the mirror race when the credit comes from a reply, not the poll: the crediting verifier pages at once', async () => {
+    // Reply A (transaction 1, again) verifies and waits on its lookup, having
+    // read only transaction 1's answers; reply B (transaction 2) merges,
+    // verifies (lookups fail) and answers CONFIRMING; then A credits. No poll
+    // runs: only the verifier that credits can page about B now.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('REPLYFIRST');
+    const second = tx('REPLYSECOND');
+    approved(first, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    let firstCalls = 0;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first && (firstCalls += 1) === 1) { aInLookup.open(); await releaseA.wait; return plainLookup(id); }
+      if (id === first) return { outcome: 'error', reason: 'MMG lookup HTTP 503' };
+      if (id === second) return { outcome: 'not_found' };
+      return plainLookup(id);
+    };
+    const reconcile = vi.spyOn(service, 'reconcileUnappliedPages');
+    try {
+      const a = codeReply(row, '0', first, 'RETURN');
+      await aInLookup.wait;
+      expect(await codeReply(row, '0', second, 'NOTIFY')).toBe('CONFIRMING');
+      releaseA.open();
+      expect(await a).toBe('CONFIRMED');
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      reconcile.mockRestore();
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+  });
+
+  it('[Sol delta3] the crediting verifier sees every transaction the answers name, however many repeat the credited one', async () => {
+    // Sol's schedule: many success answers name transaction 1 (Sol's fifty;
+    // here 250, more than one page of the sweep's reads); the poll reads them
+    // and waits on transaction 1's lookup; reply B (transaction 2) is the next
+    // answer, its lookups fail and it reschedules; the poll then credits
+    // transaction 1. Transaction 2 must still be paged.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('MANYFIRST');
+    const second = tx('MANYSECOND');
+    approved(first, 2100);
+    await confirmingWith(row.id, first);
+    await app.prisma.mmgCheckoutObservation.createMany({ data: Array.from({ length: 249 }, (_, i) => ({
+      tenantId: row.tenantId, intentId: row.id, source: i % 2 ? 'NOTIFY' : 'RETURN', detail: 'MMG_RESULT_0',
+      body: { merchantTransactionId: row.merchantTransactionId, transactionId: first, ResultCode: '0' },
+    })) });
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    let firstCalls = 0;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first && (firstCalls += 1) === 1) { aInLookup.open(); await releaseA.wait; return plainLookup(id); }
+      if (id === first) return { outcome: 'error', reason: 'MMG lookup HTTP 503' };
+      if (id === second) return { outcome: 'not_found' };
+      return plainLookup(id);
+    };
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      expect(await codeReply(row, '0', second, 'NOTIFY')).toBe('CONFIRMING');
+      expect(await app.prisma.mmgCheckoutObservation.count({ where: { intentId: row.id, source: { in: ['RETURN', 'NOTIFY'] } } })).toBe(251);
+      releaseA.open();
+      await a;
+    } finally {
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+  });
+
+  it('[Sol, DS659 · delta3] a page that could not be saved when the payment was credited is sent by a later poll, exactly once', async () => {
+    // The mirror schedule (the reply finishes before the credit), with the
+    // operators' page failing to save at the credit. The checkout is CONFIRMED
+    // and leaves polling; the poll's reconcile still finds the unapplied
+    // payment and pages it, once, however often it runs.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('LOSTFIRST');
+    const second = tx('LOSTSECOND');
+    approved(first, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    let firstCalls = 0;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first && (firstCalls += 1) === 1) { aInLookup.open(); await releaseA.wait; return plainLookup(id); }
+      if (id === first) return { outcome: 'error', reason: 'MMG lookup HTTP 503' };
+      if (id === second) return { outcome: 'not_found' };
+      return plainLookup(id);
+    };
+    const plainSend = notifications.send.bind(notifications);
+    // Saving the operators' page fails (send() then answers '', as on a failed insert).
+    const failing = vi.spyOn(notifications, 'send').mockImplementation(async (payload) =>
+      ((payload.data as Record<string, unknown> | undefined)?.['alert'] === 'mmg-checkout-unapplied' ? '' : plainSend(payload)));
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      expect(await codeReply(row, '0', second, 'NOTIFY')).toBe('CONFIRMING');
+      releaseA.open();
+      await a;
+    } finally {
+      failing.mockRestore();
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(0);
+    // The next poll pages it; a later poll finds the page and sends nothing more.
+    await service.pollIntents(new Date());
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(1);
+    const watching = vi.spyOn(notifications, 'send');
+    try {
+      await service.pollIntents(new Date());
+      expect(watching.mock.calls.filter(([payload]) => (payload.data as Record<string, unknown> | undefined)?.['alert'] === 'mmg-checkout-unapplied')).toHaveLength(0);
+    } finally {
+      watching.mockRestore();
+    }
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
   });
 
   it('the return door and the notify door at once, both carrying MMG’s answer, credit once', async () => {
