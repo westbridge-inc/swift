@@ -24,6 +24,7 @@ const good: Record<string, string | undefined> = {
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
+  AWS_S3_BUCKET: 'synthetic-boot-bucket',
   NOTIFICATION_PROVIDER: 'twilio',
   TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
   TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
@@ -357,8 +358,9 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local' })).toThrow(/STORAGE_PROVIDER/);
   });
 
-  it('allows local storage in production only with STORAGE_ALLOW_LOCAL=1 (deliberate pilot)', () => {
-    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).not.toThrow();
+  it('allows deliberate local storage only with an explicit root and separate backup obligation', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).toThrow(/UPLOAD_DIR/);
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1', UPLOAD_DIR: '/srv/swift/uploads', STORAGE_LOCAL_BACKUP_ACK: '1' })).not.toThrow();
   });
 
   it('accepts the real object-storage providers', () => {

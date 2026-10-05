@@ -227,10 +227,13 @@ describe('retention purge shreds the envelope', () => {
   });
 });
 
-describe('duplicate-document detection [SWIFT-078]', () => {
-  it('flags a document already on another account and alerts admins', async () => {
+describe('duplicate-document detection [SWIFT-078 / MASTER-055]', () => {
+  it('keeps applicant responses opaque and alerts only platform reviewers', async () => {
     const admin = await app.prisma.user.create({
-      data: { phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Adm', lastName: 'In', roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, isPhoneVerified: true },
+      data: { phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Adm', lastName: 'In', roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never, isPhoneVerified: true },
+    });
+    const tenantAdmin = await app.prisma.user.create({
+      data: { phone: `+59266${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Tenant', lastName: 'Admin', roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, isPhoneVerified: true },
     });
     const userB = await app.prisma.user.create({
       data: { phone: `+59269${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Env', lastName: 'B', roles: ['MOVER'] as never[], activeRole: 'MOVER' as never, isPhoneVerified: true },
@@ -243,21 +246,22 @@ describe('duplicate-document detection [SWIFT-078]', () => {
 
     const a = await uploadAs(token, bytes); // applicant A
     expect(a.statusCode).toBe(200);
-    expect(a.json().data.duplicate).toBe(false);
+    expect(Object.keys(a.json().data)).toEqual(['url']);
 
     const b = await uploadAs(tokenB, bytes); // applicant B — same physical document
     expect(b.statusCode).toBe(200);
-    // RED before SWIFT-078: no detection → duplicate false and no admin alert.
-    expect(b.json().data.duplicate).toBe(true);
+    expect(Object.keys(b.json().data)).toEqual(['url']);
 
     const alert = await app.prisma.notification.findFirst({
       where: { userId: admin.id, data: { path: ['kind'], equals: 'dup_doc' } },
     });
     expect(alert).not.toBeNull();
+    expect(alert!.data).toEqual({ kind: 'dup_doc', uploader: userB.id });
+    expect(await app.prisma.notification.count({ where: { userId: tenantAdmin.id, data: { path: ['kind'], equals: 'dup_doc' } } })).toBe(0);
 
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: [userB.id] } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: [admin.id, userB.id] } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: [admin.id, tenantAdmin.id, userB.id] } } });
     await app.prisma.session.deleteMany({ where: { userId: userB.id } });
-    await app.prisma.user.deleteMany({ where: { id: { in: [admin.id, userB.id] } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: [admin.id, tenantAdmin.id, userB.id] } } });
   });
 });
