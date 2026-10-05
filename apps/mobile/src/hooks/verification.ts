@@ -1,3 +1,4 @@
+import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
@@ -163,7 +164,8 @@ export function useUploadFile() {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const up = await unwrap<{ url: string }>(verificationApi.upload(form, current));
       requireAuthSessionForPrincipal(owner);
       return up.url;
@@ -200,7 +202,8 @@ export function useUploadDocument(role: string) {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const uploaded = await unwrap<{ url: string }>(verificationApi.upload(form, initial));
       const current = requireAuthSessionForPrincipal(owner);
       const result = await unwrap(

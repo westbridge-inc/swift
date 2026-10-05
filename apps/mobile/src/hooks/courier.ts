@@ -1,3 +1,4 @@
+import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { courierApi } from '../services/api';
 import { useMoverPreview } from '../stores/moverPreview';
@@ -64,7 +65,8 @@ export function useCourierProof() {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri, name: 'proof.jpg', type: 'image/jpeg' } as unknown as Blob);
+      form.append('file', await prepareUploadImage({ uri, name: 'proof.jpg', type: 'image/jpeg' }) as unknown as Blob);
+      requireAuthSessionForPrincipal(owner);
       const up = await courierApi.uploadProof(orderId, form, initial);
       let current = requireAuthSessionForPrincipal(owner);
       const url = (up as any)?.data?.data?.url as string;
@@ -146,7 +148,8 @@ export function useCourierReturnProof() {
       // multipart reader).
       form.append('lat', String(gps.lat));
       form.append('lng', String(gps.lng));
-      form.append('file', { uri, name: 'return-proof.jpg', type: 'image/jpeg' } as unknown as Blob);
+      form.append('file', await prepareUploadImage({ uri, name: 'return-proof.jpg', type: 'image/jpeg' }) as unknown as Blob);
+      requireAuthSessionForPrincipal(owner);
       const result = await unwrap(courierApi.returnProof(orderId, form, current));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['courier', 'orders'] });
@@ -174,7 +177,8 @@ export function useCourierPickupProof() {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri, name: 'pickup-proof.jpg', type: 'image/jpeg' } as unknown as Blob);
+      form.append('file', await prepareUploadImage({ uri, name: 'pickup-proof.jpg', type: 'image/jpeg' }) as unknown as Blob);
+      requireAuthSessionForPrincipal(owner);
       const up = await courierApi.uploadPickupProof(orderId, form, initial);
       requireAuthSessionForPrincipal(owner);
       const url = (up as any)?.data?.data?.url as string;

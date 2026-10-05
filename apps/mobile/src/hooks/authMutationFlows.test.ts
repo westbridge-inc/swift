@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
 const mocks = vi.hoisted(() => ({
+  prepareImage: vi.fn(async (file: { uri: string; name: string; type: string }) => file),
   BoundaryError: class TestAuthSessionBoundaryError extends Error {},
   current: null as AuthSessionSnapshot | null,
   user: null as any,
@@ -26,6 +27,8 @@ const mocks = vi.hoisted(() => ({
   primeNotifications: vi.fn(),
   track: vi.fn(),
 }));
+
+vi.mock('../lib/uploadImage', () => ({ prepareUploadImage: mocks.prepareImage }));
 
 const accountA: AuthSessionSnapshot = {
   generation: 1,
@@ -299,7 +302,7 @@ describe('multi-step authenticated mutation ownership', () => {
       docType: 'GOVERNMENT_ID',
       file: { uri: 'file://id.jpg', name: 'id.jpg', type: 'image/jpeg' },
     });
-    expect(mocks.uploadVerification).toHaveBeenCalledWith(expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadVerification).toHaveBeenCalledWith(expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/private/a-id.jpg' } } });
 
@@ -349,7 +352,7 @@ describe('multi-step authenticated mutation ownership', () => {
     }>;
 
     const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://proof.jpg' });
-    expect(mocks.uploadCourierProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/private/a-proof.jpg' } } });
 
@@ -382,7 +385,7 @@ describe('multi-step authenticated mutation ownership', () => {
     const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
 
     await expect(mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' })).resolves.toEqual({ status: 'PICKED_UP' });
-    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     expect(mocks.confirmCourierPickupProof).toHaveBeenCalledWith(
       'order-a',
       { proofPhotoUrl: '/uploads/courier-proof/order-a/pickup/a.jpg', gps: { lat: 6.81, lng: -58.155 } },
@@ -396,7 +399,7 @@ describe('multi-step authenticated mutation ownership', () => {
     const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
 
     const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' });
-    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
 
