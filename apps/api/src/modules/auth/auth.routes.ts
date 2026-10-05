@@ -374,6 +374,13 @@ export async function authRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'] || '',
       },
     );
+    reply.header('Cache-Control', 'no-store, max-age=0');
+    // [L04 · MASTER-041] A browser receives its session exactly as SMS-code
+    // sign-in gives it: HttpOnly cookies and no credential in the body.
+    if (browserClientOf(request)) {
+      setSessionCookies(reply, result.tokens);
+      return reply.send({ success: true, data: withoutTokens(result) });
+    }
     return reply.send({ success: true, data: result });
   });
 
