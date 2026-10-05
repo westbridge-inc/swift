@@ -328,6 +328,14 @@ describe('[DS632] condition (5) is read in the configured zone, MMG_CHECKOUT_CRE
     expect(verdictFor(guyanaTime(paid), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW', decisive: true });
   });
 
+  it('[Sol delta3] a payment four hours older than the checkout, written in true UTC but read as Guyana time, lands three minutes after the reply and is HELD: two minutes bind', () => {
+    // MMG writes 15:42:05Z meaning true UTC: four hours before the checkout
+    // opened (19:38:19Z). Read as Guyana time it becomes 19:42:05Z: inside the
+    // checkout's window, and three minutes after the reply (19:39:05Z).
+    expect(verdictFor('2026-10-01T15:42:05.000Z', 'GUYANA_WALL_CLOCK'))
+      .toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_AFTER_REPLY', decisive: true });
+  });
+
   it('CREATION_AFTER_REPLY: MMG’s stamp may be at most two minutes after Swift first saw a reply naming the transaction', () => {
     expect(verdictFor(guyanaTime(new Date(replied.getTime() + 120_000)), 'GUYANA_WALL_CLOCK').verdict).toBe('CONFIRM');
     expect(verdictFor(guyanaTime(new Date(replied.getTime() + 120_001)), 'GUYANA_WALL_CLOCK'))
