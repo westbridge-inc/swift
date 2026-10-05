@@ -36,9 +36,10 @@ const photosPermission =
  *
  * Everything below is `AppFunctionality` and nothing is tracking, which is the
  * honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
- * `src/lib/analytics.ts`, which is a deliberate no-op. If a crash reporter is
- * ever wired up, Diagnostics must be added here in the SAME change that adds
- * it, not afterwards.
+ * `src/lib/analytics.ts`, which is a deliberate no-op. The crash reporter
+ * (L13 item 7, off unless a crash-report address is configured) is declared
+ * below as CrashData, not linked to the person, in the same change that added
+ * it.
  *
  * The accessed-API reasons stay as Expo generates them (FileTimestamp C617.1,
  * UserDefaults CA92.1, SystemBootTime 35F9.1). `DiskSpace` is deliberately NOT
@@ -77,6 +78,14 @@ const privacyManifests = {
     collected('UserID'),
     collected('DeviceID'), // push token
     collected('PurchaseHistory'), // order and trip history
+    // [L13 item 7] Crash reports: diagnostics only, scrubbed on the phone and
+    // carrying no user, so NOT linked to the person (src/lib/crash-scrub.ts).
+    {
+      NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
+      NSPrivacyCollectedDataTypeLinked: false,
+      NSPrivacyCollectedDataTypeTracking: false,
+      NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+    },
   ],
 };
 /** The brand ground. Splash and the Android adaptive-icon background are the
@@ -148,6 +157,22 @@ const config: SwiftExpoConfig = {
   slug: 'swift',
   scheme: 'swift',
   version: '1.0.0',
+  // [L13 item 7 · owner decision 4] Over-the-air updates. The runtime is pinned
+  // explicitly to the app version: an update published for 1.0.0 only reaches
+  // binaries built as 1.0.0, so JavaScript never lands on native code it was
+  // not built against. The channel comes from the EAS build profile
+  // (eas.json: production / staging / preview). Launch never waits on the
+  // network: the embedded or cached bundle starts at once and a downloaded
+  // update applies on the next launch.
+  runtimeVersion: { policy: 'appVersion' },
+  updates: process.env['EAS_PROJECT_ID']
+    ? {
+        enabled: true,
+        url: `https://u.expo.dev/${process.env['EAS_PROJECT_ID']}`,
+        checkAutomatically: 'ON_LOAD',
+        fallbackToCacheTimeout: 0,
+      }
+    : { enabled: false },
   icon: './assets/icon.png',
   orientation: 'portrait',
   userInterfaceStyle: 'light',
