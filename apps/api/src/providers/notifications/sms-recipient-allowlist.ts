@@ -54,11 +54,26 @@ class AllowlistedSmsProvider implements SmsProvider {
   }
 }
 
+let announcedSize: number | null = null;
+/** Say once per process (and again if the list changes) how many numbers may
+ *  be texted — the count only, never a number — and say loudly when it is none. */
+function announce(size: number): void {
+  if (announcedSize === size) return;
+  announcedSize = size;
+  if (size === 0) {
+    log().warn('[sms-allowlist] SMS is OFF: no allowlisted recipients (SMS_RECIPIENT_ALLOWLIST is empty or unset on this non-production deployment) — no code or alert text will be delivered');
+  } else {
+    log().info(`[sms-allowlist] non-production SMS limited to ${size} allowlisted recipient(s)`);
+  }
+}
+
 /** Wrap a real SMS provider for a non-production deployment; production gets it unchanged. */
 export function guardNonProductionSms(
   provider: SmsProvider,
   env: Record<string, string | undefined> = process.env,
 ): SmsProvider {
   if (isProduction(env)) return provider;
-  return new AllowlistedSmsProvider(provider, parseSmsRecipientAllowlist(env[SMS_RECIPIENT_ALLOWLIST]));
+  const allowed = parseSmsRecipientAllowlist(env[SMS_RECIPIENT_ALLOWLIST]);
+  announce(allowed.size);
+  return new AllowlistedSmsProvider(provider, allowed);
 }

@@ -93,6 +93,26 @@ describe('[SMS allowlist] outside production a real provider texts only allowlis
   });
 });
 
+describe('[SMS allowlist] the deployment says what it will do', () => {
+  it('logs the allowlist COUNT (never a number), and warns loudly when SMS is off', async () => {
+    const lines: Array<{ level: string; text: string }> = [];
+    const capture = (level: string) => (...a: unknown[]) => { lines.push({ level, text: a.map(String).join(' ') }); };
+    vi.spyOn(console, 'info').mockImplementation(capture('info'));
+    vi.spyOn(console, 'warn').mockImplementation(capture('warn'));
+
+    setEnv({ ...TWILIO_ENV, NODE_ENV: 'loadtest', SMS_RECIPIENT_ALLOWLIST: `${ALLOWED},+5926000199,+5926000198` });
+    getChannels();
+    expect(lines.some((l) => l.level === 'info' && /3 allowlisted recipient/.test(l.text))).toBe(true);
+
+    setEnv({ SMS_RECIPIENT_ALLOWLIST: undefined });
+    getChannels();
+    expect(lines.some((l) => l.level === 'warn' && /SMS is OFF: no allowlisted recipients/.test(l.text))).toBe(true);
+
+    const all = lines.map((l) => l.text).join('\n');
+    for (const n of [ALLOWED, '+5926000199', '+5926000198']) expect(all).not.toContain(n.slice(-7));
+  });
+});
+
 describe('[SMS allowlist] the boot check', () => {
   it('production refuses to start while the allowlist setting is present', () => {
     const prod = { NODE_ENV: 'production' };
