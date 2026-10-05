@@ -432,7 +432,10 @@ export async function readTenantPolicyContract(db: RawDb): Promise<TenantPolicyC
     const isCanonical = (p: PolicyRow) => p.polname === TENANT_POLICY_NAME && p.permissive === true && p.cmd === '*' && p.to_public === true
       && normalizePolicyExpression(p.qual) === TENANT_POLICY_CONTRACT && normalizePolicyExpression(p.with_check) === TENANT_POLICY_CONTRACT;
     if (!policies.some(isCanonical)) nonCanonicalTables.push(table);
-    if (policies.some((p) => p.polname !== null && p.permissive === true && !isCanonical(p))) extraPermissiveTables.push(table);
+    // Another permissive policy (any name but the tenant policy's): permissive
+    // policies are OR-ed, so it widens the wall. (A rewritten tenant policy is
+    // reported above as not canonical, not again here.)
+    if (policies.some((p) => p.polname !== null && p.polname !== TENANT_POLICY_NAME && p.permissive === true)) extraPermissiveTables.push(table);
   }
   return {
     version: TENANT_POLICY_CONTRACT_VERSION,

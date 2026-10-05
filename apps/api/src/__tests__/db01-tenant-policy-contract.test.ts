@@ -113,6 +113,7 @@ describe('[DB-01] each drift is named, and production refuses to start on it', (
   ])('%s', async (_label, ddl) => {
     const c = await underDrift([ddl], readTenantPolicyContract);
     expect(c.nonCanonicalTables).toEqual([TABLE]);
+    expect(c.extraPermissiveTables).toEqual([]); // named once, as what it is
     expectGap(c, /POLICY_NOT_CANONICAL.*eta_pad_stats/);
   });
 
