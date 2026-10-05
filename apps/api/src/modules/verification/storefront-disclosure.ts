@@ -16,6 +16,7 @@
  * cannot dark every storefront before the registry is live.
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import { getKeyProvider } from '../../providers/storage/envelope';
 import { unpackAndDecrypt } from './extraction-ledger';
 import { BUCKET_OF, IDENTITY_DOC_TYPES, LICENCE_DISCLOSURE_TYPES } from './doc-registry';
@@ -135,13 +136,25 @@ export async function compileActivationDisclosure(
   return compileDisclosure(db, vendor, 'VENDOR_ACTIVATION', now);
 }
 
+/** [row 107] The PUBLIC block holds only published values, so it is cached per
+ *  store: a decrypt (and its one audit row) happens on a cache miss, never on
+ *  every page view. The key is a digest of everything the block is compiled
+ *  from — the store's disclosure fields, its owner's, the VALID records (with
+ *  their last change), the field registry and the platform operator — so any
+ *  change to them is a miss at once; the TTL bounds anything not in the key
+ *  (a re-extraction of an unchanged record). Eligibility is NOT cached: the
+ *  caller's visibility read runs on every request before this. */
+export const PUBLIC_DISCLOSURE_TTL_MS = 10 * 60_000;
+const publicDisclosureCache = new Map<string, { at: number; key: string; block: DisclosureBlock }>();
+export function resetPublicDisclosureCacheForTests(): void { publicDisclosureCache.clear(); }
+
 async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: DisclosurePurpose, now: Date): Promise<DisclosureBlock> {
   const missing: string[] = [];
   const accountId = vendor.owner.userId;
   const records = (await db.documentRecord.findMany({
     where: { tenantId: vendor.tenantId, accountId, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
       submission: { userId: accountId, purgedAt: null } },
-    select: { id: true, tenantId: true, accountId: true, subjectId: true, docType: true, submissionId: true,
+    select: { id: true, tenantId: true, accountId: true, subjectId: true, docType: true, submissionId: true, updatedAt: true,
       submission: { select: { docType: true, subjectId: true } } },
   })).filter(r => r.docType === r.submission.docType && r.subjectId === r.submission.subjectId);
   // The historical map cannot declassify a runtime PERSONAL type. Unknown
@@ -152,6 +165,13 @@ async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: Disc
     select: { legacyCode: true, fields: { where: { isPii: false }, select: { fieldCode: true } } },
   }) : [];
   const publicFields = new Map(registry.map(r => [r.legacyCode, new Set(r.fields.map(f => f.fieldCode))]));
+  const cacheKey = purpose === 'PUBLIC_STOREFRONT'
+    ? createHash('sha256').update(JSON.stringify([vendor, records.map(r => [r.id, r.docType, r.submissionId, r.subjectId, r.updatedAt]), registry, platformOperator()])).digest('hex')
+    : null;
+  if (cacheKey) {
+    const hit = publicDisclosureCache.get(vendor.id);
+    if (hit && hit.key === cacheKey && now.getTime() - hit.at < PUBLIC_DISCLOSURE_TTL_MS) return structuredClone(hit.block);
+  }
   const business = candidates.filter(r => publicFields.has(r.docType));
   const fieldsFor = (r: RecordSource, codes: readonly string[]) => readFields(db, r, codes.filter(c => publicFields.get(r.docType)?.has(c)), purpose);
   const provenance = (r: RecordSource) => ({ docType: r.docType, ...(purpose === 'VENDOR_ACTIVATION' ? { recordId: r.id } : {}) });
@@ -208,5 +228,10 @@ async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: Disc
   const operator = platformOperator();
   if (!operator) missing.push('operator');
 
-  return { complete: missing.length === 0, missing, legalName, address, contact, licences, operator, compiledAt: now.toISOString() };
+  const block: DisclosureBlock = { complete: missing.length === 0, missing, legalName, address, contact, licences, operator, compiledAt: now.toISOString() };
+  if (cacheKey) {
+    publicDisclosureCache.set(vendor.id, { at: now.getTime(), key: cacheKey, block: structuredClone(block) });
+    if (publicDisclosureCache.size > 5000) publicDisclosureCache.delete(publicDisclosureCache.keys().next().value!);
+  }
+  return block;
 }

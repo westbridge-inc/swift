@@ -7,6 +7,7 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { PUBLIC_BROWSE_CAPABILITY, runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { hostRoutes, orderStore, prismaDouble, project, recordingIo, recordingRedis, type Row } from './helpers/service-vertical-doubles';
+import { PUBLIC_DISCLOSURE_TTL_MS, resetPublicDisclosureCacheForTests } from '../modules/verification/storefront-disclosure';
 
 const crypto = vi.hoisted(() => ({ unwrap: vi.fn(), decrypt: vi.fn() }));
 vi.mock('../providers/storage/envelope', () => ({ getKeyProvider: () => ({ unwrapDek: crypto.unwrap }) }));
@@ -32,10 +33,10 @@ async function fixture(status = 'ACTIVE') {
   };
   const records: Row[] = [
     { id: 'private-identity-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-fixture',
-      docType: 'owner_national_id', submissionId: 'identity-submission', status: 'VALID', expiresOn: null,
+      docType: 'owner_national_id', submissionId: 'identity-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
       submission: { purgedAt: null, userId: 'account-fixture', docType: 'owner_national_id', subjectId: 'subject-fixture' } },
     { id: 'private-personal-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-fixture',
-      docType: 'food_handler_cert', submissionId: 'personal-submission', status: 'VALID', expiresOn: null,
+      docType: 'food_handler_cert', submissionId: 'personal-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
       submission: { purgedAt: null, userId: 'account-fixture', docType: 'food_handler_cert', subjectId: 'subject-fixture' } },
   ];
   const audit = vi.fn(async () => ({ id: 'audit-fixture' }));
@@ -88,6 +89,7 @@ async function fixture(status = 'ACTIVE') {
 }
 
 beforeEach(() => {
+  resetPublicDisclosureCacheForTests();
   crypto.unwrap.mockResolvedValue(Buffer.alloc(32));
   crypto.decrypt.mockReturnValue(Buffer.from('TEST_PERSONAL_LICENCE'));
   vi.stubEnv('PLATFORM_LEGAL_NAME', 'Fixture Operator');
@@ -134,7 +136,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
   it('[row 107] each decrypt of a business licence writes exactly one audit row, naming fields but never values', async () => {
     const h = await fixture();
     h.records.push({ id: 'business-licence-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-business',
-      docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null,
+      docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
       submission: { purgedAt: null, userId: 'account-fixture', docType: 'trade_licence', subjectId: 'subject-business' } });
     (h.prisma as unknown as { docType: { findMany: unknown } }).docType.findMany = async () => [{ legacyCode: 'trade_licence', fields: [{ fieldCode: 'permit_number' }] }];
     crypto.decrypt.mockReturnValue(Buffer.from('TL-0042'));
@@ -147,9 +149,34 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
     expect(h.audit).toHaveBeenCalledWith({ data: { userId: null, action: 'DISCLOSURE_FIELDS_DECRYPTED', entity: 'VerificationDocument', entityId: 'licence-submission',
       changes: { purpose: 'PUBLIC_STOREFRONT', docType: 'trade_licence', recordId: 'business-licence-record', fields: ['permit_number'] } } });
     expect(JSON.stringify(h.audit.mock.calls)).not.toContain('TL-0042');
-    // a second read is a second decrypt, and a second row
-    await h.read();
-    expect(h.audit).toHaveBeenCalledTimes(2);
+  });
+
+  it('[row 107] N public views within the cache TTL are ONE decrypt and ONE audit row; a changed record or an expired TTL compiles again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const h = await fixture();
+      h.records.push({ id: 'business-licence-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-business',
+        docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
+        submission: { purgedAt: null, userId: 'account-fixture', docType: 'trade_licence', subjectId: 'subject-business' } });
+      (h.prisma as unknown as { docType: { findMany: unknown } }).docType.findMany = async () => [{ legacyCode: 'trade_licence', fields: [{ fieldCode: 'permit_number' }] }];
+      crypto.decrypt.mockReturnValue(Buffer.from('TL-0042'));
+      h.extracted.mockResolvedValue([{ id: 'run-fixture', wrappedDek: Buffer.from('fixture-wrapped'), fields: [
+        { id: 'field-fixture', runId: 'run-fixture', fieldCode: 'permit_number', valueCt: Buffer.from('fixture-encrypted') },
+      ] }] as never);
+      for (let view = 0; view < 5; view += 1) {
+        expect(((await h.read()).data.disclosure as { licences: unknown[] }).licences).toContainEqual({ value: 'TL-0042', source: 'RECORD', docType: 'trade_licence' });
+      }
+      expect(crypto.decrypt).toHaveBeenCalledTimes(1);
+      expect(h.audit).toHaveBeenCalledTimes(1);
+      // a change to what the block is compiled from is a miss at once
+      (h.records[2] as Row)['updatedAt'] = new Date('2026-10-06T00:00:00Z');
+      await h.read();
+      expect(h.audit).toHaveBeenCalledTimes(2);
+      // and so is an expired TTL
+      vi.setSystemTime(Date.now() + PUBLIC_DISCLOSURE_TTL_MS + 1);
+      await h.read();
+      expect(h.audit).toHaveBeenCalledTimes(3);
+    } finally { vi.useRealTimers(); }
   });
 
   it('a PERSONAL licence discloses its on-file fact, not its decrypted private number', async () => {
