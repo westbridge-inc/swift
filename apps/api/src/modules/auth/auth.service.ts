@@ -40,6 +40,12 @@ import {
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
 import { runWithoutTenant } from '../../plugins/tenant-context';
+import {
+  clearPasswordFailures,
+  isPasswordSourceLocked,
+  recordPasswordFailure,
+  resetPasswordAttemptBudget,
+} from './password-attempts';
 
 interface DeviceInfo {
   deviceId: string;
@@ -51,8 +57,6 @@ interface DeviceInfo {
 /** Public signup roles (locked model) mapped to internal UserRole values. */
 export type SignupRole = 'CUSTOMER' | 'MOVER' | 'VENDOR';
 
-const MAX_FAILED_LOGINS = 5;
-const LOCKOUT_MINUTES = 15;
 /** What a one-time code was texted for. A code works only for its own purpose. */
 export type OtpPurpose = 'sign-in' | 'password-reset';
 /** [L04 · AUTH-2] Account states that may not start a session by any credential. */
@@ -548,6 +552,12 @@ export class AuthService {
     const matches = await bcrypt.compare(password, user?.passwordHash ?? NO_ACCOUNT_PASSWORD_HASH);
     if (!user || !user.passwordHash) throw invalid;
 
+    // [L04 · MASTER-056] The lock is per (account, source): five wrong
+    // passwords from one address lock that address only. The owner elsewhere,
+    // and SMS-code sign-in, are untouched by someone else's guesses.
+    const source = deviceInfo.ipAddress;
+    if (await isPasswordSourceLocked(this.app.redis, user.id, source)) throw invalid;
+
     // Password hashing stays outside the lock so one expensive comparison does
     // not block every security mutation for this user. Once it finishes, both
     // outcomes take the same User lock and revalidate the exact hash compared.
@@ -587,23 +597,23 @@ export class AuthService {
       const now = new Date();
       // A locked account answers exactly like a wrong password (MASTER-054):
       // the lock is enforced, never announced. The OTP sign-in stays open.
+      // [MASTER-056] Sign-in no longer writes an account-wide lock (the lock is
+      // per source, above); a lock stored before that change is honoured until
+      // it expires.
       if (locked.lockedUntil && locked.lockedUntil > now) {
         return { kind: 'invalid' as const };
       }
 
       if (!matches) {
-        const failed = locked.failedLoginAttempts + 1;
-        const shouldLock = failed >= MAX_FAILED_LOGINS;
+        // The account-wide count stays as a linearizable record of failures
+        // (visible to operations; cleared by success and by reset) — it no
+        // longer locks anyone out.
         await tx.user.update({
           where: { id: user.id },
-          data: {
-            failedLoginAttempts: shouldLock ? 0 : failed,
-            ...(shouldLock && {
-              lockedUntil: new Date(now.getTime() + LOCKOUT_MINUTES * 60_000),
-            }),
-          },
+          data: { failedLoginAttempts: locked.failedLoginAttempts + 1 },
         });
-        return { kind: 'invalid' as const };
+        // (Not a new `kind` literal: those strings are the notification census's namespace.)
+        return { kind: 'invalid' as const, countAsFailure: true as const };
       }
 
       if (BLOCKED_STATUSES.has(locked.status)) throw accountSuspended();
@@ -638,7 +648,12 @@ export class AuthService {
         tokens: { accessToken, refreshToken, expiresIn: 900 },
       };
     });
+    if (login.kind === 'invalid' && 'countAsFailure' in login) {
+      await recordPasswordFailure(this.app.redis, user.id, source);
+      throw invalid;
+    }
     if (login.kind === 'invalid') throw invalid;
+    await clearPasswordFailures(this.app.redis, user.id, source).catch(() => {});
     return {
       user: sanitizeUser({ ...user, activeRole: login.activeRole, status: login.status }),
       tokens: login.tokens,
@@ -704,6 +719,10 @@ export class AuthService {
     if (!reset) {
       throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     }
+    // A new credential: every source's wrong-password count and lock is left
+    // behind with the old one [MASTER-056].
+    await resetPasswordAttemptBudget(this.app.redis, reset.userId)
+      .catch((error) => this.app.log.error({ err: error, userId: reset.userId }, 'password-reset attempt budget reset failed'));
 
     // PostgreSQL already committed the complete security decision. Realtime
     // eviction and low-latency outbox processing are best-effort accelerators;
