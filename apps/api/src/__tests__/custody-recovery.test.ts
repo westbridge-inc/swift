@@ -617,6 +617,26 @@ describe('[AF-MOB-006 · DS667] the handoff code contract', () => {
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).riderId).toBe(holder.rider.id);
     const kase = await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test');
     expect(kase.transferAttempts).toBe(0);
+    // The holder is never shown a dead code: the card says it expired.
+    const view = (await as(holder.token, 'GET', `/api/v1/rider/orders/${order.id}/recovery`)).json().data;
+    expect(view).toMatchObject({ state: 'TRANSFER_IN_PROGRESS', transferCode: null, codeExpired: true, floatToCollect: 0 });
+    expect(view.transferCodeExpiresAt).toBeTruthy();
+    expect(view.instruction).toMatch(/handoff code expired/);
+    // And an expired handoff is not on the relay rider's list.
+    const tasks = (await as(relay.token, 'GET', '/api/v1/rider/recovery/relays')).json().data;
+    expect(tasks.find((t: { caseId: string }) => t.caseId === caseId)).toBeUndefined();
+  });
+
+  it('a handoff that is not the rider’s gets a sentence, never an internal id', async () => {
+    const { caseId } = await relayArranged();
+    const stranger = await makeRider();
+    const res = await transfer(stranger.token, caseId, '123456');
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error.code).toBe('HANDOFF_NOT_FOUND');
+    expect(res.json().error.message).not.toMatch(/RecoveryCase|with id/);
+    const dec = await as(stranger.token, 'POST', `/api/v1/rider/recovery/${caseId}/decline`, {});
+    expect(dec.statusCode).toBe(404);
+    expect(dec.json().error.message).not.toMatch(/RecoveryCase|with id/);
   });
 
   it('when the handoff deadline escalates, the code dies, the relay rider is told, and a fresh name mints a fresh code', async () => {

@@ -78,6 +78,12 @@ export function invalidTransferCodeError(remaining: number): AppError {
   return new AppError(400, 'INVALID_TRANSFER_CODE', `That handoff code does not match. ${remaining} attempt(s) remaining.`);
 }
 
+/** A relay rider asking about a handoff that is not (or no longer) theirs gets a
+ *  sentence, never an internal id (Fable S3). Still a 404. */
+function handoffGone(): AppError {
+  return new AppError(404, 'HANDOFF_NOT_FOUND', 'This handoff is no longer yours — it was called off or given to another rider.');
+}
+
 /** [DS667 S4] The named relay rider is told when the handoff they were asked
  *  to make is off, so nobody travels to a meeting that will not happen. */
 async function notifyRelayCalledOff(
@@ -241,6 +247,11 @@ export async function holderView(deps: CustodyDeps, orderId: string, riderId: st
   const kase = await latestCaseFor(deps.prisma, orderId);
   if (!kase || (order.riderId !== riderId && kase.holderRiderId !== riderId)) throw new NotFoundError('RecoveryCase', orderId);
   const isHolder = order.riderId === riderId && kase.holderRiderId === riderId;
+  // [DS667 · Fable S2] The handoff code lives until the handoff deadline. Past
+  // it the code is never shown (the server refuses it), and the holder is told
+  // it expired and that support is arranging the handoff again.
+  const pendingHandoff = isHolder && kase.state === 'TRANSFER_IN_PROGRESS';
+  const codeExpired = pendingHandoff && kase.deadlineAt.getTime() <= Date.now();
   const relay = kase.relayRiderId
     ? await deps.prisma.rider.findUnique({ where: { id: kase.relayRiderId }, select: { user: { select: { firstName: true } }, vehicleType: true } })
     : null;
@@ -259,10 +270,14 @@ export async function holderView(deps: CustodyDeps, orderId: string, riderId: st
       ? { firstName: relay.user.firstName, vehicleType: relay.vehicleType }
       : null,
     // The holder SHOWS this; the relay rider types it. Nobody else reads it.
-    transferCode: isHolder && kase.state === 'TRANSFER_IN_PROGRESS' ? kase.transferCode : null,
+    transferCode: pendingHandoff && !codeExpired ? kase.transferCode : null,
+    transferCodeExpiresAt: pendingHandoff ? kase.deadlineAt : null,
+    codeExpired,
     // On cash the holder fronted the store; the float moves with the goods.
-    floatToCollect: isHolder && kase.state === 'TRANSFER_IN_PROGRESS' && float > 0 ? float : 0,
-    instruction: holderInstruction(kase, float, order.orderType),
+    floatToCollect: pendingHandoff && !codeExpired && float > 0 ? float : 0,
+    instruction: codeExpired
+      ? 'The handoff code expired before the other rider arrived. Keep the order with you — Swift support is arranging the handoff again.'
+      : holderInstruction(kase, float, order.orderType),
   };
 }
 
@@ -291,7 +306,8 @@ function holderInstruction(kase: CustodyRecoveryCase, float: number, orderType: 
  *  bring. No customer identity or address until custody is theirs. */
 export async function relayTasks(deps: CustodyDeps, riderId: string) {
   const cases = await deps.prisma.custodyRecoveryCase.findMany({
-    where: { relayRiderId: riderId, state: 'TRANSFER_IN_PROGRESS' },
+    // An expired handoff is not a task: its code is refused (DS667).
+    where: { relayRiderId: riderId, state: 'TRANSFER_IN_PROGRESS', deadlineAt: { gt: new Date() } },
     orderBy: { updatedAt: 'desc' },
   });
   const out = [];
@@ -314,6 +330,7 @@ export async function relayTasks(deps: CustodyDeps, riderId: string) {
       } : null,
       floatToBring: float,
       deadlineAt: kase.deadlineAt,
+      expiresAt: kase.deadlineAt,
       instruction: float > 0
         ? `Meet ${holder?.user.firstName ?? 'the rider'}, give them the order's cash float (GY$${Math.round(float).toLocaleString('en-US')}), take the order and enter the code they show you.`
         : `Meet ${holder?.user.firstName ?? 'the rider'}, take the order and enter the code they show you.`,
@@ -344,10 +361,10 @@ export async function transferCustody(deps: CustodyDeps, input: TransferInput) {
     assertActiveMoverAccount(authority.status);
     assertMoverRoleAuthority(authority.activeRole, 'RIDER');
     const pre = await tx.custodyRecoveryCase.findUnique({ where: { id: input.caseId }, select: { orderId: true } });
-    if (!pre) throw new NotFoundError('RecoveryCase', input.caseId);
+    if (!pre) throw handoffGone();
     await lockOrderRow(tx, pre.orderId);
     const kase = await lockCase(tx, input.caseId);
-    if (!kase || kase.relayRiderId !== input.relayRiderId) throw new NotFoundError('RecoveryCase', input.caseId);
+    if (!kase || kase.relayRiderId !== input.relayRiderId) throw handoffGone();
     if (kase.state !== 'TRANSFER_IN_PROGRESS' || !kase.transferCode) {
       throw new AppError(409, 'TRANSFER_NOT_PENDING', 'This handoff is no longer pending — it was completed or called off.');
     }
@@ -453,11 +470,11 @@ export async function transferCustody(deps: CustodyDeps, input: TransferInput) {
 export async function declineRelay(deps: CustodyDeps, input: { caseId: string; relayRiderId: string; relayUserId: string; reason?: string }) {
   const result = await deps.prisma.$transaction(async (tx) => {
     const pre = await tx.custodyRecoveryCase.findUnique({ where: { id: input.caseId }, select: { orderId: true } });
-    if (!pre) throw new NotFoundError('RecoveryCase', input.caseId);
+    if (!pre) throw handoffGone();
     await lockOrderRow(tx, pre.orderId);
     const kase = await lockCase(tx, input.caseId);
     if (!kase || kase.relayRiderId !== input.relayRiderId || kase.state !== 'TRANSFER_IN_PROGRESS') {
-      throw new NotFoundError('RecoveryCase', input.caseId);
+      throw handoffGone();
     }
     const moved = await moveCaseInTransaction(tx, kase, 'RELAY_REQUIRED', { userId: input.relayUserId, role: 'RELAY_RIDER' }, {
       details: { declined: true, reason: input.reason ?? null },
