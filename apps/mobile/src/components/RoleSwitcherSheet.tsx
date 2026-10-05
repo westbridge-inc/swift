@@ -53,38 +53,33 @@ const APPS: {
   },
 ];
 
-export function RoleSwitcherSheet({
-  visible,
-  current,
-  onClose,
-}: {
-  visible: boolean;
-  current: Intent;
-  onClose: () => void;
-}) {
+/** The account as the switch reads it: its roles and its remembered mover kind. */
+type SwitchUser = {
+  id?: string;
+  roles?: string[];
+  lastMoverRole?: string | null;
+  driver?: unknown;
+  rider?: unknown;
+  vendorOwner?: unknown;
+};
+
+/**
+ * The ONE move between the apps-within-the-app. The cards below run it, and
+ * so does the partner sign-ups' "‹ Swift" back (components/onboarding/
+ * backToSwift): leaving a sign-up is exactly the switch this sheet makes —
+ * the server's authority first (switch-role, which takes an idle mover
+ * offline and refuses while a job is live), then the app. `onSwitched` runs
+ * where the sheet closes itself.
+ */
+export function useRoleSwitch(current: Intent) {
   const setIntent = useAuthStore((s) => s.setIntent);
   const setIntentIfCurrent = useAuthStore((s) => s.setIntentIfCurrent);
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const queryClient = useQueryClient();
   const [switching, setSwitching] = React.useState(false);
-  const user = useAuthStore((s) => s.user) as (Parameters<typeof setUserIfCurrent>[1] & {
-    lastMoverRole?: string | null;
-    driver?: unknown;
-    rider?: unknown;
-    vendorOwner?: unknown;
-  }) | null;
-  // ONE law for "owned vs. Join" (lib/roleLanding): the earner shells read the
-  // same predicate, so an account that reads "Join" here lands on that
-  // surface's application, never on a dashboard it cannot open.
-  const owns = (intent: Intent): boolean => accountHoldsRole(user, intent);
 
-  const pick = async (intent: Intent) => {
-    if (switching) return;
-    if (intent === current) {
-      onClose();
-      return;
-    }
-    const operationUser = useAuthStore.getState().user as typeof user;
+  const switchTo = async (intent: Intent, onSwitched: () => void = () => {}) => {
+    const operationUser = useAuthStore.getState().user as (Parameters<typeof setUserIfCurrent>[1] & SwitchUser) | null;
     const operationRoles: string[] = operationUser?.roles ?? [];
     const owned = accountHoldsRole(operationUser, intent);
     const payload = roleSwitchAuthorityPayload(
@@ -97,7 +92,7 @@ export function RoleSwitcherSheet({
     if (!payload) {
       const owner = getAuthSessionSnapshot();
       if (intent === 'mover') clearMoverAuthorityCache(queryClient);
-      onClose();
+      onSwitched();
       if (owner) setIntentIfCurrent(owner, intent);
       else setIntent(intent);
       return;
@@ -128,7 +123,7 @@ export function RoleSwitcherSheet({
       }
       if (!setIntentIfCurrent(owner, intent)) throw new AuthSessionBoundaryError();
       requireAuthSessionForPrincipal(owner);
-      onClose();
+      onSwitched();
     } catch (error: any) {
       if (error instanceof AuthSessionBoundaryError) return;
       toast.error(
@@ -138,6 +133,34 @@ export function RoleSwitcherSheet({
     } finally {
       setSwitching(false);
     }
+  };
+
+  return { switchTo, switching };
+}
+
+export function RoleSwitcherSheet({
+  visible,
+  current,
+  onClose,
+}: {
+  visible: boolean;
+  current: Intent;
+  onClose: () => void;
+}) {
+  const { switchTo, switching } = useRoleSwitch(current);
+  const user = useAuthStore((s) => s.user) as SwitchUser | null;
+  // ONE law for "owned vs. Join" (lib/roleLanding): the earner shells read the
+  // same predicate, so an account that reads "Join" here lands on that
+  // surface's application, never on a dashboard it cannot open.
+  const owns = (intent: Intent): boolean => accountHoldsRole(user, intent);
+
+  const pick = async (intent: Intent) => {
+    if (switching) return;
+    if (intent === current) {
+      onClose();
+      return;
+    }
+    await switchTo(intent, onClose);
   };
 
   return (

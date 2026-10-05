@@ -109,6 +109,14 @@ export interface AdminRouteEntity {
    *  regardless, so this is what a reader sees first, not the limit of what is
    *  detected. */
   readonly fields: readonly string[];
+  /**
+   * [ZONE-FARES] For a model with no tenant column of its own, walled only
+   * through its parents: the relations whose `tenantId` must be the caller's
+   * tenant. The snapshot puts them IN its query, so another operator's row is
+   * never read — not read and then refused. With no tenant bound it reads
+   * nothing at all.
+   */
+  readonly tenantVia?: readonly string[];
 }
 
 export interface AdminRouteAuthority {
@@ -145,7 +153,11 @@ const E = {
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
-  zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
+  // [ZONE-FARES] taxiPerKm is a price: a change to it is named in the diff.
+  zone: { model: 'zone', fields: ['isActive', 'name', 'priority', 'taxiPerKm'] },
+  // [ZONE-FARES] A fixed zone-to-zone fare: the price and the pair it joins.
+  // A fare has no tenant column: both of its zones must be the caller's.
+  zoneFare: { model: 'zoneFare', fields: ['fare', 'fromZoneId', 'toZoneId', 'updatedBy'], tenantVia: ['fromZone', 'toZone'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
@@ -261,6 +273,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /zones': c('C5', 'platform.zone.write'),
   'PUT /zones/:id': c('C5', 'platform.zone.write', E.zone),
   'DELETE /zones/:id': c('C5', 'platform.zone.write', E.zone),
+  // [ZONE-FARES] Fixed zone-to-zone fares are pricing: C5, its own capability
+  // (drawing a zone and pricing a pair are different powers).
+  'GET /zone-fares': c('C0', 'platform.zonefare.read'),
+  'POST /zone-fares': c('C5', 'platform.zonefare.write'),
+  'PUT /zone-fares/:id': c('C5', 'platform.zonefare.write', E.zoneFare),
+  'DELETE /zone-fares/:id': c('C5', 'platform.zonefare.write', E.zoneFare),
   'POST /notifications/broadcast': c('C5', 'platform.broadcast'),
 
   // ── Subscriptions ───────────────────────────────────────────────────────
@@ -684,6 +702,7 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',
+  'POST /zone-fares': 'creates the row; there is no before state to digest — the audit facts carry the pair and the fare',
   'POST /notifications/broadcast': 'addresses every user; the subject is the audience, not a row',
   'PUT /countries/:code/pricing/:kind': 'writes a versioned price book, which keeps its own before/after by version',
   'POST /countries/:code/pricing/:kind/rollback': 'pins an earlier price-book version; the version register is the record',

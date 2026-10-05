@@ -58,20 +58,21 @@ Only these root fields have documented meaning:
 | `6` | Transaction Cancelled | Same not-paid rule. |
 | `7` | Request Timed Out | Not paid unless the server record says paid: no transaction is NOT_PAID; a named transaction is decided by MMG's lookup (declined is NOT_PAID; paid is held for a person; pending or unknown keeps the pause). |
 
-Unknown/malformed result fields do not change a checkout. A success requires transactionId. After a success answer for a checkout, a later not-paid answer releases nothing, and the disagreement holds a paid record for a person. A previously confirmed credit is never reversed by a later response.
+Unknown/malformed result fields do not change a checkout. A success requires transactionId. After a success answer for a checkout, a later not-paid answer releases nothing, and the disagreement holds a paid record for a person. A previously confirmed credit is never reversed by a later response. A later success naming a different transaction is written down and alerts operators once per checkout; it is never credited automatically.
 
-`merchantTransactionId` in this browser response is not a lookup field: UAT (1 Oct) showed MMG's lookup carries neither it nor the product description, so `MMG_LOOKUP_REFERENCE_FIELDS` stays empty. The lookup answers HTTP 200 with `transactionStatus`, a whole-dollar `amount` string, `currency`, `creationDate` (Guyana time, even where it ends in `Z`), `transactionReference` (MMG's ledger number, a different number from the reply's `transactionId`), `creditParty`/`debitParty` as `[{key: "accountid", value}]`, and `metadata` whose `description` is empty. Credit requires MMG's success answer for the checkout plus that record: `successful`, exact amount in GYD, our merchant's `accountid`, created inside the checkout's window, and neither number credited before.
+`merchantTransactionId` in this browser response is not a lookup field: UAT (1 Oct) showed MMG's lookup carries neither it nor the product description, so `MMG_LOOKUP_REFERENCE_FIELDS` stays empty. The lookup answers HTTP 200 with `transactionStatus`, a whole-dollar `amount` string, `currency`, `creationDate` (in UAT, Guyana time even where it ends in `Z`; read in the zone `MMG_CHECKOUT_CREATION_ZONE` names), `transactionReference` (MMG's ledger number, a different number from the reply's `transactionId`), `creditParty`/`debitParty` as `[{key: "accountid", value}]`, and `metadata` whose `description` is empty. Credit requires MMG's success answer for the checkout plus that record: `successful`, exact amount in GYD, our merchant's `accountid`, created inside the checkout's window, and neither number credited before.
 
 ## UNCONFIRMED — requires MMG or a sandbox run
 
 - **U1/U2 resolved:** reply field names and codes are documented above.
-- **U3 partially resolved:** MMG posts an encrypted TOKEN to the configured Response URL; merchants also register an Error URL and optionally a Notify URL. Exact transport parameter spelling, Notify authentication and server-to-server behavior remain unconfirmed. Checkout series PR 3 must wire the API return/notify routes and verify those boundaries; PR 2 currently provides the service only.
+- **U3 partially resolved:** MMG posts an encrypted TOKEN to the configured Response URL; merchants also register an Error URL and optionally a Notify URL. Exact transport parameter spelling, Notify authentication and server-to-server behavior remain unconfirmed. Checkout series PR 3 must wire the API return/notify routes and verify those boundaries; PR 2 currently provides the service only. MMG registered Swift's UAT Notify URL (`https://api-staging.swiftgy.com/api/v1/billing/mmg-checkout/notify`) on 5 Oct 2026; a notify only prompts Swift's own lookup and never credits by itself.
 - **U4** Whether the amount digits are MAJOR units (D1). The MMG page displays the amount on the first sandbox run.
 - **U5 resolved (UAT, 1 Oct):** the merchant-initiated lookup finds a checkout payment by the reply's `transactionId` and answers with MMG's own ledger number in `transactionReference`.
 - **U6** Whether MMG refuses a repeated `merchantTransactionId`.
 - **U7** The live page host.
 - **U8** How long a checkout session lives.
 - **U9** Whether one merchant can register separate staging and production return URLs.
+- **U10 resolved (owner ruling, 4 Oct):** MMG production writes the lookup's `creationDate` in Guyana time labelled `Z`, as UAT does (1 Oct). Staging and production set `MMG_CHECKOUT_CREATION_ZONE=GUYANA_WALL_CLOCK`. If a real payment ever reads otherwise, it is held as `CREATION_AFTER_REPLY` and operators are told.
 
 ## Security posture
 
@@ -95,6 +96,7 @@ Unknown/malformed result fields do not change a checkout. A success requires tra
 | `MMG_CHECKOUT_RETURN_ORIGIN` | https web origin of the registered return pages | enabled + live |
 | `MMG_CHECKOUT_PRIVATE_KEY` | secret file, RSA private key, PEM, unencrypted, ≥ 2048 bits | enabled + live |
 | `MMG_CHECKOUT_SECRET_KEY` | secret file | enabled + live |
+| `MMG_CHECKOUT_CREATION_ZONE` | how the lookup's `creationDate` is read: exactly `GUYANA_WALL_CLOCK` (`Z` or no zone is Guyana time) or `UTC` (`Z` is UTC; no zone cannot be read); an explicit offset is read as stated | staging and production: `GUYANA_WALL_CLOCK` (U10). Unset is the safety net: no MMG payment is confirmed automatically (each is held for a person). Any other value refuses to start, in every mode |
 
 At boot, the guard also runs the widest request this configuration can produce and proves it fits the configured public key. A key that is too small therefore fails the deploy, not the first partner.
 

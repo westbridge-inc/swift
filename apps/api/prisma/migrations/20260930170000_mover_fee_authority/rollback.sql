@@ -1,7 +1,12 @@
 -- Schema rollback is safe only before any payer has adopted an authority.
 -- Once populated, hold/member facts must remain available for finance and
 -- collection fencing. Use a forward repair; do not discard those decisions.
+-- [Sol] These tables force row-level security, so a role that sees only some
+-- rows could find them "empty". Row security is off for this transaction: a
+-- role that does not bypass it is refused with an error instead. Run this as
+-- a role that bypasses row-level security (a superuser or BYPASSRLS).
 BEGIN;
+SET LOCAL row_security = off;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM mover_fee_authorities)
     OR EXISTS (SELECT 1 FROM mover_fee_subscriptions) THEN

@@ -13,6 +13,7 @@ import {
   getMmgCheckoutProvider,
   newMerchantTransactionId,
   type MmgCheckoutProvider,
+  type MmgCreationZone,
 } from '../../providers/mmg/mmg-checkout';
 import { getMmgLookupProvider, type MmgLookupClient, type MmgLookupDetail } from '../../providers/mmg/mmg-provider';
 import { mmgCheckoutEventsCounter, mmgCheckoutLookupsCounter } from '../../plugins/observability';
@@ -42,8 +43,10 @@ import { partnerReceiptIds } from './mmg-checkout-receipt';
 // transaction, while the checkout was open; (2) MMG's lookup of that
 // transaction says "successful"; (3) the money went to our merchant's
 // "accountid"; (4) exactly the amount asked, in GYD; (5) MMG created it inside
-// the checkout's window; (6) neither the transaction nor MMG's ledger number
-// for it was ever credited. Anything else is held for a person, with
+// the checkout's window, its stamp read in the configured zone
+// (MMG_CHECKOUT_CREATION_ZONE; unset, nothing confirms) and no later than the
+// first reply naming it [DS632]; (6) neither the transaction nor MMG's ledger
+// number for it was ever credited. Anything else is held for a person, with
 // reminders and suspension paused [F1].
 //
 // The credit is the provider_payments compare-and-set every channel claims
@@ -68,6 +71,11 @@ const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_
 /** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's
  *  creationDate, and for when MMG's success answer reached us. */
 export const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
+/** [DS632] How far MMG's creationDate may run past the first reply naming it.
+ *  That bound only detects stamps in the wrong zone (hours out); the window
+ *  bound above decides whether a payment is this checkout's. On 1 Oct MMG's
+ *  UAT stamp ran 31 s past our reply, so a slower MMG clock gets five minutes. */
+const CREATION_AFTER_REPLY_TOLERANCE_MS = 5 * 60_000;
 /** An MMG transaction id or ledger number as MMG writes it. */
 export const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
@@ -223,14 +231,16 @@ export function bindingOf(merchantTransactionId: string, echoedReferences: reado
 }
 
 /**
- * [owner, 1 Oct] MMG's creationDate as an instant. MMG writes Guyana
- * wall-clock time and labels it "Z" (UAT: a checkout opened at 15:38:19 Guyana
- * time, 19:38:19Z, was paid with creationDate "2026-10-01T15:39:36.526Z"), so
- * a stamp with "Z" or no zone is read as Guyana time; an explicit numeric
- * offset is honoured as stated. Anything else cannot be read: null.
+ * [owner, 1 Oct · DS632] MMG's creationDate as an instant, read in the
+ * configured zone (MMG_CHECKOUT_CREATION_ZONE). GUYANA_WALL_CLOCK reads a stamp
+ * with "Z" or no zone as Guyana wall-clock time: what MMG UAT writes (a checkout
+ * opened at 15:38:19 Guyana time, 19:38:19Z, was paid with creationDate
+ * "2026-10-01T15:39:36.526Z"). UTC reads "Z" as UTC and cannot read a stamp
+ * with no zone. An explicit numeric offset is honoured as stated in both.
+ * Anything else cannot be read: null.
  */
 const MMG_STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})?$/;
-export function mmgCreationInstant(stamp: string | null): number | null {
+export function mmgCreationInstant(stamp: string | null, zone: MmgCreationZone): number | null {
   if (typeof stamp !== 'string') return null;
   const match = MMG_STAMP.exec(stamp);
   if (!match) return null;
@@ -239,13 +249,42 @@ export function mmgCreationInstant(stamp: string | null): number | null {
   const face = new Date(Date.UTC(y, mo - 1, d, h, mi, sec, ms));
   if (face.getUTCFullYear() !== y || face.getUTCMonth() !== mo - 1 || face.getUTCDate() !== d
     || face.getUTCHours() !== h || face.getUTCMinutes() !== mi || face.getUTCSeconds() !== sec) return null;
-  const zone = match[8];
-  if (zone && zone !== 'Z') {
-    const sign = zone.startsWith('-') ? -1 : 1;
-    const offsetMs = sign * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(4, 6))) * 60_000;
+  const offset = match[8];
+  if (offset && offset !== 'Z') {
+    const sign = offset.startsWith('-') ? -1 : 1;
+    const offsetMs = sign * (Number(offset.slice(1, 3)) * 60 + Number(offset.slice(4, 6))) * 60_000;
     return face.getTime() - offsetMs;
   }
-  return instantOfGuyanaWallClock(face).getTime();
+  if (zone === 'UTC') return offset === 'Z' ? face.getTime() : null;
+  if (zone === 'GUYANA_WALL_CLOCK') return instantOfGuyanaWallClock(face).getTime();
+  return null;
+}
+
+/**
+ * [DS632] What condition (5) needs beyond MMG's stamp: the zone it is read in
+ * (null: unverified, so nothing confirms automatically), and when Swift first
+ * observed a reply naming the transaction. MMG cannot have created a payment
+ * after Swift heard about it: a stamp later than that (two minutes'
+ * tolerance) means MMG's stamps do not match the configured zone. A
+ * transaction no reply named cannot be bounded and holds the same way (the
+ * service always has the time: every candidate comes from a reply written
+ * down first [I9]).
+ */
+export interface CreationCheck {
+  zone: MmgCreationZone | null;
+  firstReplyAt: Date | null;
+}
+const UNVERIFIED: CreationCheck = { zone: null, firstReplyAt: null };
+
+/** [DS632] When Swift first observed a reply, through either door, naming this transaction. */
+function firstReplyNaming(answers: ReadonlyArray<{ body: unknown; createdAt: Date }>, txnId: string): Date | null {
+  let first: Date | null = null;
+  for (const answer of answers) {
+    const body = answer.body && typeof answer.body === 'object' && !Array.isArray(answer.body) ? answer.body as Record<string, unknown> : null;
+    if (body?.['transactionId'] !== txnId) continue;
+    if (!first || answer.createdAt < first) first = answer.createdAt;
+  }
+  return first;
 }
 
 /** MMG's success answer for one checkout, or why there is none. */
@@ -297,7 +336,8 @@ type Verdict =
 /** What one lookup answer means for one checkout. `otherCheckoutRefs` are OUR
  *  other checkouts' references that the answer names (whole values): a
  *  contradiction a person must resolve [F1]. `success` is MMG's own success
- *  answer for this checkout (successAnswerOf). */
+ *  answer for this checkout (successAnswerOf). `creation` is how MMG's stamp is
+ *  read and bounded [DS632]; without it nothing is confirmed. */
 export function judge(
   intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'amount' | 'currencyCode' | 'createdAt' | 'expiresAt'>,
   txnId: string,
@@ -305,6 +345,7 @@ export function judge(
   merchantIds: string[],
   otherCheckoutRefs: readonly string[] = [],
   success: SuccessAnswer = NO_SUCCESS,
+  creation: CreationCheck = UNVERIFIED,
 ): Verdict {
   if (detail.outcome === 'not_found') return { verdict: 'NOT_FOUND', txnId };
   if (detail.outcome === 'error') return { verdict: 'ERROR', txnId };
@@ -325,12 +366,18 @@ export function judge(
     // (4) Exactly the amount asked, in GYD.
     if (detail.amountMinor === null || detail.amountMinor !== minorOf(intent)) return hold('AMOUNT_MISMATCH', tied);
     if (detail.currencyCode !== 'GYD' || intent.currencyCode !== 'GYD') return hold('CURRENCY_MISMATCH', tied);
-    // (3) Paid to our merchant: every "accountid" credit party is ours.
+    // (3) Paid to this checkout's merchant: every "accountid" credit party is it.
     if (!detail.creditAccounts || detail.creditAccounts.length === 0) return hold('MERCHANT_UNCONFIRMED', tied);
     if (!detail.creditAccounts.every((account) => merchantIds.some((merchant) => sameMsisdn(merchant, account)))) return hold('MERCHANT_MISMATCH', tied);
-    // (5) Created inside this checkout's window.
-    const created = mmgCreationInstant(detail.createdAt);
+    // (5) Created inside this checkout's window, the stamp read in the
+    // configured zone [DS632]: with none, it cannot be verified.
+    if (creation.zone === null) return hold('CREATION_ZONE_UNVERIFIED', tied);
+    const created = mmgCreationInstant(detail.createdAt, creation.zone);
     if (created === null) return hold('CREATION_DATE_UNREADABLE', tied);
+    // [DS632] Never after Swift first heard of the payment: MMG's stamps would not match the zone.
+    if (creation.firstReplyAt === null || created > creation.firstReplyAt.getTime() + CREATION_AFTER_REPLY_TOLERANCE_MS) {
+      return hold('CREATION_AFTER_REPLY', tied);
+    }
     if (created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) {
       return hold('OUTSIDE_CHECKOUT_WINDOW', tied);
     }
@@ -346,6 +393,13 @@ export function judge(
   }
   return { verdict: 'PENDING', txnId };
 }
+
+/** [DS632] What operators need besides the reason code when the cause is how
+ *  MMG's creationDate is read. */
+const HOLD_GUIDANCE: Readonly<Record<string, string>> = {
+  CREATION_ZONE_UNVERIFIED: ' MMG_CHECKOUT_CREATION_ZONE is not set to GUYANA_WALL_CLOCK or UTC, so the time MMG gives for the payment cannot be checked against the checkout, and no MMG payment is confirmed automatically. Set it to GUYANA_WALL_CLOCK (MMG writes Guyana time; owner ruling, 4 Oct).',
+  CREATION_AFTER_REPLY: ' MMG says this payment was made after Swift had already received the MMG reply naming it, so the creationDate stamps from MMG may not match the configured MMG_CHECKOUT_CREATION_ZONE. Check that setting against a real payment before trusting any automatic confirmation.',
+};
 
 const HOLD_REASON: Record<ProviderIdentityCode, string> = {
   PROVIDER_TXN_ALREADY_CREDITED: 'ALREADY_CREDITED',
@@ -565,18 +619,22 @@ export class MmgCheckoutService {
         await this.alertRefusedRequest(intent, parsed.resultCode, configFailure, input.source);
         return 'UNKNOWN';
       }
-      if (intent.status === 'CONFIRMED') return 'CONFIRMED';
+      if (intent.status === 'CONFIRMED') {
+        await this.alertUnapplied(intent, parsed, input.source);
+        return 'CONFIRMED';
+      }
       if (intent.status === 'HELD') return 'CONFIRMING';
 
       // Return, notify and poll can overlap. Merge against the locked current
       // row, preserving both candidates and the first reply's timestamp. MMG's
       // own not-paid answer for THIS checkout releases the confirmation pause
       // in the same transaction, unless a success answer was ever given for it.
-      const released = await this.prisma.$transaction(async (tx) => {
+      const merged = await this.prisma.$transaction(async (tx) => {
         await lockBillingAuthority(tx, intent.subscriptionId);
         await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${intent.id} FOR UPDATE`;
         const current = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
-        if (current.status === 'CONFIRMED' || current.status === 'HELD') return false;
+        if (current.status === 'CONFIRMED') return 'CONFIRMED' as const;
+        if (current.status === 'HELD') return 'UNCHANGED' as const;
         const named = parsed.transactionId ? [parsed.transactionId] : [];
         const candidates = [...new Set([...current.candidates, ...named])].slice(0, MAX_CANDIDATES);
         const replyAt = !current.replyAt || now < current.replyAt ? now : current.replyAt;
@@ -594,20 +652,40 @@ export class MmgCheckoutService {
           if (moved.count !== 1) throw new Error(`Locked checkout ${current.id} changed under its reply`);
           await resolveConfirmationInTx(tx, current.subscriptionId, { checkoutId: current.id }, 'PROVEN_UNPAID',
             { actor: 'mmg-checkout-reply', reference: `${current.merchantTransactionId}:MMG_RESULT_${parsed.resultCode}` }, now);
-          return true;
+          return 'RELEASED' as const;
         }
         await tx.mmgCheckoutIntent.updateMany({
           where: { id: current.id, status: current.status },
           data: { candidates, replyAt, outcomeHint, nextCheckAt: now, ...(current.status === 'OPEN' ? { status: 'CONFIRMING' } : {}) },
         });
-        return false;
+        return 'UNCHANGED' as const;
       });
-      if (released) {
+      if (merged === 'RELEASED') {
         mmgCheckoutEventsCounter.labels('not_paid').inc();
         await this.tellPartner(intent, 'NOT_PAID');
         return 'NOT_PAID';
       }
-      return returnStateFor(await this.verify(intent.id, now));
+      if (merged === 'CONFIRMED') {
+        // Confirmed while this reply waited for the lock.
+        await this.alertUnapplied(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), parsed, input.source);
+        return 'CONFIRMED';
+      }
+      // [Sol · delta2] What verify() returns was decided on rows it read before
+      // its own writes: another verifier may confirm the checkout meanwhile
+      // (verify's own compare-and-set then matches nothing and it still says
+      // CONFIRMING). So the committed row is read again AFTER verification,
+      // however verification ends, and decides both the answer and the page:
+      // a CONFIRMED checkout, credited by another transaction than this reply
+      // names, pages operators once (alertUnapplied); a reply naming the
+      // credited payment changes nothing.
+      try {
+        await this.verify(intent.id, now);
+      } finally {
+        const settled = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: intent.id } });
+        if (settled?.status === 'CONFIRMED') await this.alertUnapplied(settled, parsed, input.source);
+      }
+      const committed = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id }, select: { status: true } });
+      return returnStateFor(committed.status as CheckoutStatus);
     });
   }
 
@@ -732,6 +810,36 @@ export class MmgCheckoutService {
     }).catch((err) => log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about a refused request'));
   }
 
+  /** [DS632] MMG answered success for a checkout that is already CONFIRMED,
+   *  naming a transaction it did not credit (neither of MMG's two numbers for
+   *  the payment it credited): money MMG may hold for the partner that was
+   *  never applied. The reply is already written down [I9]. It is never
+   *  looked up for credit and never credited; operators are paged once per
+   *  checkout, whichever door and however often, and whichever path made the
+   *  checkout CONFIRMED (already confirmed, confirmed under the lock, or
+   *  confirmed by another verifier after this reply merged) [Sol], and the
+   *  verifier that credits pages for answers written down before its credit
+   *  (alertUnappliedAnswers) [Sol · delta2]. */
+  private async alertUnapplied(intent: MmgCheckoutIntent, reply: MmgCheckoutReply, source: 'RETURN' | 'NOTIFY'): Promise<void> {
+    if (reply.resultCode !== '0' || !reply.transactionId) return;
+    // Provider identities are stored trimmed and upper-cased; a reply's id has no spaces (MMG_TXN_ID).
+    const named = reply.transactionId.toUpperCase();
+    if (intent.mmgTransactionId?.toUpperCase() === named) return;
+    const applied = await this.prisma.providerPayment.findFirst({
+      where: { provider: 'MMG', providerTxnId: named, creditedPaymentId: `mco:${intent.id}` }, select: { id: true },
+    });
+    if (applied) return;
+    mmgCheckoutEventsCounter.labels('reply_unapplied').inc();
+    log().error({ checkoutId: intent.id, source }, '[MMG checkout] MMG answered success for a confirmed checkout naming another transaction: money received and not applied');
+    await notifyAdmins(this.prisma, this.notifications, {
+      tenantId: intent.tenantId,
+      title: 'MMG checkout: money received and not applied',
+      body: `MMG answered success for checkout ${intent.id}, which is already paid, naming MMG transaction ${reply.transactionId}, which was not credited. Nothing was credited for it. Reconcile it against the MMG statement.`,
+      data: { kind: 'billing_invariants', alert: 'mmg-checkout-unapplied', checkoutId: intent.id, transactionId: reply.transactionId, source },
+      dedupeKey: `mmg-checkout-unapplied:${intent.id}`,
+    }).catch((err) => log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about money not applied'));
+  }
+
   /** [F3] The answer a key already has, if it has one: the checkout it was
    *  bound to, as it stands now, and only for the subscription it was bound for. */
   private async answerForKey(
@@ -764,7 +872,9 @@ export class MmgCheckoutService {
     now: Date,
   ): Promise<{ intentId: string; answer: () => Promise<{ created: false; checkout: StartedCheckout }> }> {
     try {
-      await this.prisma.mmgCheckoutKey.create({ data: { createdByUserId: who.userId, clientKey: who.clientKey, intentId: intent.id } });
+      // [DS633] Filed under the checkout's own tenant, named: never whatever
+      // tenant (or none) the caller's context happens to carry.
+      await this.prisma.mmgCheckoutKey.create({ data: { tenantId: intent.tenantId, createdByUserId: who.userId, clientKey: who.clientKey, intentId: intent.id } });
       // Answered as it stands NOW: a reply may have moved it on since it was read,
       // and a page is only ever handed out while the checkout is still OPEN.
       return {
@@ -800,12 +910,16 @@ export class MmgCheckoutService {
       provider = null;
     }
     const merchantIds = this.merchantIds(provider);
+    // [DS632] Condition (5) is read in the configured zone; with none, nothing confirms.
+    const zone = provider?.creationZone ?? null;
     const lookup = this.lookup();
-    // [owner, 1 Oct · condition 1] MMG's own answers for this checkout, through either door.
-    const success = successAnswerOf(intent, await this.prisma.mmgCheckoutObservation.findMany({
-      where: { intentId: intent.id, source: { in: ['RETURN', 'NOTIFY'] }, detail: { in: [...NEGATIVE_ANSWERS, SUCCESS_ANSWER] } },
+    // [owner, 1 Oct · condition 1] MMG's own answers for this checkout, through
+    // either door, and [DS632] when each transaction was first named.
+    const answers = await this.prisma.mmgCheckoutObservation.findMany({
+      where: { intentId: intent.id, source: { in: ['RETURN', 'NOTIFY'] } },
       select: { detail: true, body: true, createdAt: true },
-    }));
+    });
+    const success = successAnswerOf(intent, answers);
     const verdicts: Verdict[] = [];
     for (const txnId of intent.candidates.slice(0, MAX_CANDIDATES)) {
       const detail = await lookup.transactionLookupDetail(txnId);
@@ -820,7 +934,7 @@ export class MmgCheckoutService {
         failure: detail.outcome === 'not_found' ? 'LOOKUP_NOT_FOUND' : detail.outcome === 'error' ? 'LOOKUP_FAILED' : null,
       });
       const others = detail.outcome === 'found' ? await this.otherCheckoutRefsIn(detail.raw, intent) : [];
-      verdicts.push(judge(intent, txnId, detail, merchantIds, others, success));
+      verdicts.push(judge(intent, txnId, detail, merchantIds, others, success, { zone, firstReplyAt: firstReplyNaming(answers, txnId) }));
     }
 
     const confirmed = verdicts.find((v): v is Extract<Verdict, { verdict: 'CONFIRM' }> => v.verdict === 'CONFIRM');
@@ -958,6 +1072,15 @@ export class MmgCheckoutService {
     }
 
     mmgCheckoutEventsCounter.labels('confirmed').inc();
+    // [Sol · delta2] This verifier read MMG's answers before its lookups. A
+    // success answer naming another transaction may have been written down
+    // since: its reply then found the checkout still CONFIRMING and had
+    // nothing to page about. Of a reply merging and this credit, whichever
+    // commits last pages: a reply merging after the credit sees CONFIRMED
+    // and pages itself; one written down before it is seen here.
+    await this.alertUnappliedAnswers(intent.id).catch((err) => {
+      log().error({ err, checkoutId: intent.id }, '[MMG checkout] credited; operators could not be paged about another success answer');
+    });
     // [I5] Paying while behind re-bills at once and reinstates. It moves no
     // money and is idempotent; the billing cycle is the recovery path.
     await this.billing.afterTopUpCommitted(intent.subscriptionId, amount, { notify: false }).catch((err) => {
@@ -965,6 +1088,25 @@ export class MmgCheckoutService {
     });
     await this.tellPartner(intent, 'CONFIRMED');
     return 'CONFIRMED';
+  }
+
+  /** [Sol · delta2] After a credit commits: every success answer written down
+   *  for this checkout naming a transaction it did not credit pages operators
+   *  (alertUnapplied: once per checkout, never for the credited payment). */
+  private async alertUnappliedAnswers(intentId: string): Promise<void> {
+    const settled = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intentId } });
+    if (settled.status !== 'CONFIRMED') return;
+    const answers = await this.prisma.mmgCheckoutObservation.findMany({
+      where: { intentId, source: { in: ['RETURN', 'NOTIFY'] }, detail: SUCCESS_ANSWER },
+      select: { source: true, body: true }, orderBy: { createdAt: 'asc' }, take: 50,
+    });
+    for (const answer of answers) {
+      const body = answer.body && typeof answer.body === 'object' && !Array.isArray(answer.body) ? answer.body as Record<string, unknown> : null;
+      const transactionId = body?.['transactionId'];
+      if (typeof transactionId !== 'string' || body?.['merchantTransactionId'] !== settled.merchantTransactionId) continue;
+      await this.alertUnapplied(settled, { merchantTransactionId: settled.merchantTransactionId, transactionId, resultCode: '0' },
+        answer.source === 'NOTIFY' ? 'NOTIFY' : 'RETURN');
+    }
   }
 
   /** [I6] A person must look: nothing credits, and a reversal is a two-person decision. */
@@ -989,7 +1131,7 @@ export class MmgCheckoutService {
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: intent.tenantId,
         title: 'MMG checkout held for review',
-        body: `Checkout ${intent.id} is held (${reason}). Nothing was credited. Reconcile it against the MMG statement.`,
+        body: `Checkout ${intent.id} is held (${reason}). Nothing was credited. Reconcile it against the MMG statement.${HOLD_GUIDANCE[reason] ?? ''}`,
         data: { kind: 'billing_invariants', alert: 'mmg-checkout-held', checkoutId: intent.id, reason },
       }).catch(() => {});
       await this.tellPartner(intent, 'HELD');
@@ -1101,8 +1243,11 @@ export class MmgCheckoutService {
     }
   }
 
+  /** [DS632] Condition (3): the checkout's own merchant number, the one its
+   *  page paid. Never the push rail's (MMG_MERCHANT_ID): a payment to another
+   *  Swift account is held for a person, not attributed to this checkout. */
   private merchantIds(provider: MmgCheckoutProvider | null): string[] {
-    return [provider?.merchantId, process.env['MMG_MERCHANT_ID']].filter((id): id is string => typeof id === 'string' && id.length > 0);
+    return provider?.merchantId ? [provider.merchantId] : [];
   }
 
   private async observe(row: {

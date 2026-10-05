@@ -166,6 +166,10 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'Vendor', field: 'minOrderAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryBaseFee', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryPerKm', unit: 'MAJOR_WHOLE' },
+  // [ZONE-FARES] A zone's own taxi per-km rate: whole units of the market's
+  // currency (CHECKed whole and positive), read by the fare engine as the
+  // per-km of the market's formula for a trip that starts or ends there.
+  { model: 'Zone', field: 'taxiPerKm', unit: 'MAJOR_WHOLE' },
   { model: 'ZoneFare', field: 'fare', unit: 'MAJOR_WHOLE' },
 ];
 

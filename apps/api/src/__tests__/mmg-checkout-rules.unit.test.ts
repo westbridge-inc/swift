@@ -14,6 +14,7 @@ import {
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, guyanaDay, mmgPayLine } from '../modules/billing/fee-notice-copy';
 import type { MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { MMG_LOOKUP_REFERENCE_FIELDS, echoedReferencesFrom, lookupDetailFrom, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { setAppLogger } from '../utils/logger';
 import { PROVIDER_IDENTITY_BACKFILL_KEY } from '../modules/billing/provider-identity-backfill';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,13 @@ const uatAnswer = (patch: Record<string, unknown> = {}) => ({
 const found = (patch: Partial<Extract<MmgLookupDetail, { outcome: 'found' }>> = {}): MmgLookupDetail => ({ ...lookupDetailFrom(uatAnswer(), 'MMGTX1'), ...patch });
 /** MMG's success answer for THIS checkout (ResultCode 0) naming the transaction. */
 const answered = { txnId: 'MMGTX1' } as const;
+/** No success answer from MMG for this checkout. */
+const unanswered = { txnId: null, reason: 'NO_SUCCESS_ANSWER' } as const;
+/** [DS632] Condition (5) as staging and UAT read it: MMG_CHECKOUT_CREATION_ZONE=GUYANA_WALL_CLOCK
+ *  (verified 1 Oct), with MMG's reply naming the transaction first seen at the latest
+ *  moment it still counts (the deadline plus two minutes). These cases are about other
+ *  conditions; the zone and the reply-time bound have their own block below. */
+const GY = { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: new Date(intent.expiresAt.getTime() + 2 * 60_000) } as const;
 /** MMG's answer echoing THIS checkout's reference in a confirmed field [F1]: never present in UAT. */
 const echo = { echoedReferences: [REF] };
 
@@ -77,10 +85,10 @@ describe('the official MMG response fields', () => {
 
 describe('what a lookup answer means for a checkout [owner, 1 Oct · I2 · F1]', () => {
   it('confirms automatically only when MMG answered success for THIS checkout naming the transaction, and its lookup says "successful", exactly the amount, in GYD, to our merchant, inside the checkout window, with its ledger number', () => {
-    expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], answered)).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+    expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], answered, GY)).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
     // Our merchant MSISDN spelled without the country code; MMG's echo changes nothing.
-    expect(judge(intent, 'MMGTX1', found({ creditAccounts: ['6000001'] }), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
-    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
+    expect(judge(intent, 'MMGTX1', found({ creditAccounts: ['6000001'] }), [MERCHANT], [], answered, GY).verdict).toBe('CONFIRM');
+    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT], [], answered, GY).verdict).toBe('CONFIRM');
   });
 
   it('the UAT round trip of 1 Oct confirms: MMG’s Guyana-time creationDate falls inside the checkout window', () => {
@@ -89,19 +97,23 @@ describe('what a lookup answer means for a checkout [owner, 1 Oct · I2 · F1]',
     const opened = new Date(1790883499 * 1000);
     const uatIntent = { merchantTransactionId: REF, amount: new Prisma.Decimal(500), currencyCode: 'GYD', createdAt: opened, expiresAt: new Date(opened.getTime() + 30 * 60_000) };
     const detail = lookupDetailFrom(uatAnswer({ amount: '500', creationDate: '2026-10-01T15:39:36.526Z', transactionReference: '20402048601581', metadata: [{ key: 'amount', value: '500' }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }] }), '20402048536279');
-    expect(judge(uatIntent, '20402048536279', detail, [MERCHANT], [], { txnId: '20402048536279' }))
+    // MMG's reply was read at 15:39:05 Guyana time; MMG's own stamp is 31 seconds later.
+    const replied = new Date('2026-10-01T19:39:05Z');
+    expect(judge(uatIntent, '20402048536279', detail, [MERCHANT], [], { txnId: '20402048536279' }, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: replied }))
       .toEqual({ verdict: 'CONFIRM', txnId: '20402048536279', ledgerReference: '20402048601581' });
     // Read as UTC, that stamp would be four hours before the checkout existed.
-    expect(mmgCreationInstant('2026-10-01T15:39:36.526Z')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526Z', 'GUYANA_WALL_CLOCK')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(judge(uatIntent, '20402048536279', detail, [MERCHANT], [], { txnId: '20402048536279' }, { zone: 'UTC', firstReplyAt: replied }))
+      .toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW', decisive: true });
   });
 
   it('without MMG’s success answer naming it, an exact successful payment is held for a person at once, never credited; MMG’s echo alone included', () => {
-    expect(judge(intent, 'MMGTX1', found(), [MERCHANT])).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'NO_SUCCESS_ANSWER', decisive: true });
-    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT])).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'NO_SUCCESS_ANSWER', decisive: true });
+    expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], unanswered, GY)).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'NO_SUCCESS_ANSWER', decisive: true });
+    expect(judge(intent, 'MMGTX1', found(echo), [MERCHANT], [], unanswered, GY)).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'NO_SUCCESS_ANSWER', decisive: true });
     for (const reason of ['MMG_ANSWERS_DISAGREE', 'SUCCESS_ANSWER_AFTER_CLOSE', 'CHECKOUT_NOT_OPEN']) {
-      expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], { txnId: null, reason })).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
+      expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], { txnId: null, reason }, GY)).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
     }
-    expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], { txnId: 'MMGTX2' })).toMatchObject({ verdict: 'HOLD', reason: 'NOT_THE_ANSWERED_TRANSACTION', decisive: true });
+    expect(judge(intent, 'MMGTX1', found(), [MERCHANT], [], { txnId: 'MMGTX2' }, GY)).toMatchObject({ verdict: 'HOLD', reason: 'NOT_THE_ANSWERED_TRANSACTION', decisive: true });
   });
 
   it.each([
@@ -114,7 +126,7 @@ describe('what a lookup answer means for a checkout [owner, 1 Oct · I2 · F1]',
   });
 
   it('[F1] our reference inside some other text binds nothing: there is no substring binding', () => {
-    const verdict = judge(intent, 'MMGTX1', found({ raw: { description: `Swift ${REF}`, merchantTransactionId: REF } }), [MERCHANT]);
+    const verdict = judge(intent, 'MMGTX1', found({ raw: { description: `Swift ${REF}`, merchantTransactionId: REF } }), [MERCHANT], [], unanswered, GY);
     expect(verdict).toMatchObject({ verdict: 'HOLD', reason: 'NO_SUCCESS_ANSWER' });
   });
 
@@ -132,6 +144,7 @@ describe('what a lookup answer means for a checkout [owner, 1 Oct · I2 · F1]',
     ['no currency', { currencyCode: null }, 'CURRENCY_MISMATCH'],
     ['someone else’s merchant', { creditAccounts: ['5926999999'] }, 'MERCHANT_MISMATCH'],
     ['a foreign account beside ours', { creditAccounts: [MERCHANT, '5926999999'] }, 'MERCHANT_MISMATCH'],
+    ['[DS632] an "accountid" entry with no readable value beside ours', { creditAccounts: ['', MERCHANT] }, 'MERCHANT_MISMATCH'],
     ['our number under a key that is not "accountid"', { creditAccounts: [], creditParties: [MERCHANT] }, 'MERCHANT_UNCONFIRMED'],
     ['no merchant named', { creditAccounts: null }, 'MERCHANT_UNCONFIRMED'],
     ['a transaction a week before the checkout', { createdAt: gyStamp(new Date(CREATED.getTime() - 7 * 86_400_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
@@ -142,19 +155,19 @@ describe('what a lookup answer means for a checkout [owner, 1 Oct · I2 · F1]',
     ['no ledger number', { ledgerReference: null }, 'LEDGER_REFERENCE_MISSING'],
     ['a malformed ledger number', { ledgerReference: ' 20402048601581' }, 'LEDGER_REFERENCE_MISSING'],
   ] as const)('holds %s for a person, never credits: at once when MMG’s answer ties it to this checkout, after the window otherwise', (_label, patch, reason) => {
-    expect(judge(intent, 'MMGTX1', found(patch as never), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: false });
-    expect(judge(intent, 'MMGTX1', found(patch as never), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
-    expect(judge(intent, 'MMGTX1', found({ ...(patch as object), ...echo } as never), [MERCHANT])).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
+    expect(judge(intent, 'MMGTX1', found(patch as never), [MERCHANT], [], unanswered, GY)).toMatchObject({ verdict: 'HOLD', reason, decisive: false });
+    expect(judge(intent, 'MMGTX1', found(patch as never), [MERCHANT], [], answered, GY)).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
+    expect(judge(intent, 'MMGTX1', found({ ...(patch as object), ...echo } as never), [MERCHANT], [], unanswered, GY)).toMatchObject({ verdict: 'HOLD', reason, decisive: true });
   });
 
   it('the checkout window carries two minutes of clock tolerance on each side, and no more', () => {
     const at = (ms: number) => found({ createdAt: gyStamp(new Date(ms)) });
     const opened = CREATED.getTime();
     const closed = intent.expiresAt.getTime();
-    expect(judge(intent, 'MMGTX1', at(opened - 120_000), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
-    expect(judge(intent, 'MMGTX1', at(opened - 121_000), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
-    expect(judge(intent, 'MMGTX1', at(closed + 120_000), [MERCHANT], [], answered).verdict).toBe('CONFIRM');
-    expect(judge(intent, 'MMGTX1', at(closed + 121_000), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
+    expect(judge(intent, 'MMGTX1', at(opened - 120_000), [MERCHANT], [], answered, GY).verdict).toBe('CONFIRM');
+    expect(judge(intent, 'MMGTX1', at(opened - 121_000), [MERCHANT], [], answered, GY)).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
+    expect(judge(intent, 'MMGTX1', at(closed + 120_000), [MERCHANT], [], answered, GY).verdict).toBe('CONFIRM');
+    expect(judge(intent, 'MMGTX1', at(closed + 121_000), [MERCHANT], [], answered, GY)).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
   });
 
   it('declined, expired and reversed are not payments, and only MMG’s answer for THIS checkout says a payment failed [F5]', () => {
@@ -225,27 +238,116 @@ describe('MMG’s own success answer for a checkout [owner, 1 Oct]', () => {
   });
 });
 
-describe('MMG’s creationDate is Guyana time [owner, 1 Oct · UAT]', () => {
+describe('MMG’s creationDate is Guyana time in staging and UAT [owner, 1 Oct · UAT · DS632 GUYANA_WALL_CLOCK]', () => {
+  const GUYANA = 'GUYANA_WALL_CLOCK' as const;
   it('reads the wall-clock stamp as Guyana time (UTC−4), with or without the "Z" MMG writes', () => {
-    expect(mmgCreationInstant('2026-10-01T15:39:36.526Z')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
-    expect(mmgCreationInstant('2026-10-01T15:39:36.526')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
-    expect(mmgCreationInstant('2026-10-01T15:39:36Z')).toBe(Date.parse('2026-10-01T19:39:36.000Z'));
-    expect(mmgCreationInstant('2026-12-31T22:30:00.000Z')).toBe(Date.parse('2027-01-01T02:30:00.000Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526Z', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36Z', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.000Z'));
+    expect(mmgCreationInstant('2026-12-31T22:30:00.000Z', GUYANA)).toBe(Date.parse('2027-01-01T02:30:00.000Z'));
     // Fractions of a second are read as written, never through floating point.
-    expect(mmgCreationInstant('2026-10-01T15:39:36.29Z')).toBe(Date.parse('2026-10-01T19:39:36.290Z'));
-    expect(mmgCreationInstant('2026-10-01T15:39:36.1Z')).toBe(Date.parse('2026-10-01T19:39:36.100Z'));
-    expect(mmgCreationInstant('2026-10-01T15:39:36.123456789Z')).toBe(Date.parse('2026-10-01T19:39:36.123Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.29Z', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.290Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.1Z', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.100Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.123456789Z', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.123Z'));
   });
 
   it('honours an explicit numeric offset as stated', () => {
-    expect(mmgCreationInstant('2026-10-01T15:39:36.526-04:00')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
-    expect(mmgCreationInstant('2026-10-01T19:39:36.526+00:00')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526-04:00', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T19:39:36.526+00:00', GUYANA)).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
   });
 
   it.each([null, '', 'yesterday', '2026-10-01', '2026-02-30T10:00:00Z', '2026-10-01T24:00:00Z', '2026-10-01T15:39:36.526Zjunk', ' 2026-10-01T15:39:36Z', '2026-10-01 15:39:36'])(
-    'cannot read %s', (stamp) => {
-      expect(mmgCreationInstant(stamp)).toBeNull();
+    'cannot read %s, in either zone', (stamp) => {
+      expect(mmgCreationInstant(stamp, GUYANA)).toBeNull();
+      expect(mmgCreationInstant(stamp, 'UTC')).toBeNull();
     });
+});
+
+// ---------------------------------------------------------------------------
+// [DS632] Condition (5) holds only as well as the zone MMG's creationDate is
+// read in. MMG_CHECKOUT_CREATION_ZONE names it: GUYANA_WALL_CLOCK (what MMG
+// UAT writes, verified 1 Oct) or UTC. Unset, nothing is confirmed
+// automatically. And MMG cannot have created a payment after Swift first
+// heard of it: a stamp later than the first reply naming the transaction
+// (five minutes' tolerance) is held as CREATION_AFTER_REPLY.
+// ---------------------------------------------------------------------------
+describe('[DS632] condition (5) is read in the configured zone, MMG_CHECKOUT_CREATION_ZONE', () => {
+  // The UAT checkout of 1 Oct: opened 15:38:19 Guyana time (19:38:19Z), open
+  // for 30 minutes; MMG's success reply read at 19:39:05Z; MMG's payment made
+  // at 19:39:36.526Z. A payment made 3h48m before the checkout opened is one
+  // that was never this checkout's.
+  const opened = new Date('2026-10-01T19:38:19Z');
+  const uat = { merchantTransactionId: REF, amount: new Prisma.Decimal(1500), currencyCode: 'GYD', createdAt: opened, expiresAt: new Date(opened.getTime() + 30 * 60_000) };
+  const replied = new Date('2026-10-01T19:39:05Z');
+  const paid = new Date('2026-10-01T19:39:36.526Z');
+  const before = new Date(opened.getTime() - (3 * 60 + 48) * 60_000);
+  /** MMG writing true UTC, or Guyana wall-clock time, both labelled "Z". */
+  const trueUtc = (at: Date) => at.toISOString();
+  const guyanaTime = (at: Date) => gyStamp(at);
+  const verdictFor = (stamp: string, zone: 'GUYANA_WALL_CLOCK' | 'UTC' | null, reply: Date | null = replied) =>
+    judge(uat, 'MMGTX1', found({ createdAt: stamp }), [MERCHANT], [], answered, { zone, firstReplyAt: reply });
+
+  it('UTC: "Z" is UTC, an explicit offset is honoured as stated, and a stamp with no zone cannot be read', () => {
+    expect(mmgCreationInstant('2026-10-01T19:39:36.526Z', 'UTC')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T19:39:36.29Z', 'UTC')).toBe(Date.parse('2026-10-01T19:39:36.290Z'));
+    expect(mmgCreationInstant('2026-10-01T15:39:36.526-04:00', 'UTC')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T19:39:36.526+00:00', 'UTC')).toBe(Date.parse('2026-10-01T19:39:36.526Z'));
+    expect(mmgCreationInstant('2026-10-01T19:39:36.526', 'UTC')).toBeNull();
+    expect(mmgCreationInstant('2026-10-01T19:39:36', 'UTC')).toBeNull();
+    expect(verdictFor('2026-10-01T19:39:36.526', 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_DATE_UNREADABLE', decisive: true });
+  });
+
+  it('unset (or not valid): condition (5) cannot be verified, so a payment that meets every other condition is HELD, never credited', () => {
+    for (const stamp of [guyanaTime(paid), trueUtc(paid), '2026-10-01T15:39:36.526-04:00']) {
+      expect(verdictFor(stamp, null)).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_ZONE_UNVERIFIED', decisive: true });
+    }
+    // With no zone named at all, the same.
+    expect(judge(uat, 'MMGTX1', found({ createdAt: guyanaTime(paid) }), [MERCHANT], [], answered)).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_ZONE_UNVERIFIED', decisive: true });
+    // Without MMG's success answer it waits out the window like any other mismatch.
+    expect(judge(uat, 'MMGTX1', found({ createdAt: guyanaTime(paid) }), [MERCHANT], [], unanswered, { zone: null, firstReplyAt: replied }))
+      .toMatchObject({ verdict: 'HOLD', reason: 'CREATION_ZONE_UNVERIFIED', decisive: false });
+  });
+
+  it('the 1 Oct UAT round trip still confirms with GUYANA_WALL_CLOCK', () => {
+    expect(verdictFor('2026-10-01T15:39:36.526Z', 'GUYANA_WALL_CLOCK')).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+  });
+
+  it('the DS632 scenario, both ways: a payment made 3h48m before the checkout is never this checkout’s, whichever way MMG writes the stamp; a payment made inside it confirms only when the zone matches', () => {
+    // MMG writes true UTC; Swift is configured UTC.
+    expect(verdictFor(trueUtc(before), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW', decisive: true });
+    expect(verdictFor(trueUtc(paid), 'UTC')).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+    // MMG writes Guyana time (UAT); Swift is configured GUYANA_WALL_CLOCK.
+    expect(verdictFor(guyanaTime(before), 'GUYANA_WALL_CLOCK')).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW', decisive: true });
+    expect(verdictFor(guyanaTime(paid), 'GUYANA_WALL_CLOCK')).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+    // Unset: neither is credited.
+    for (const stamp of [trueUtc(before), trueUtc(paid), guyanaTime(before), guyanaTime(paid)]) {
+      expect(verdictFor(stamp, null)).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_ZONE_UNVERIFIED' });
+    }
+    // A zone that does not match what MMG writes never credits a payment made in time.
+    expect(verdictFor(trueUtc(paid), 'GUYANA_WALL_CLOCK')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY', decisive: true });
+    expect(verdictFor(guyanaTime(paid), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW', decisive: true });
+  });
+
+  it('CREATION_AFTER_REPLY: MMG’s stamp may be at most five minutes after Swift first saw a reply naming the transaction', () => {
+    // On 1 Oct MMG's UAT stamp was 31 s after Swift read the reply: MMG's clock
+    // runs ahead of ours. Five minutes absorbs a slower clock; a stamp in the
+    // wrong zone is hours out and is still caught. The window bound (5) keeps
+    // its two minutes (the test above).
+    for (const late of [120_001, 180_000, 300_000]) {
+      expect(verdictFor(guyanaTime(new Date(replied.getTime() + late)), 'GUYANA_WALL_CLOCK').verdict).toBe('CONFIRM');
+    }
+    expect(verdictFor(guyanaTime(new Date(replied.getTime() + 300_001)), 'GUYANA_WALL_CLOCK'))
+      .toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_AFTER_REPLY', decisive: true });
+    expect(verdictFor(trueUtc(new Date(replied.getTime() + 300_000)), 'UTC').verdict).toBe('CONFIRM');
+    expect(verdictFor(trueUtc(new Date(replied.getTime() + 300_001)), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY' });
+    // A true-UTC stamp read as Guyana time lands four hours late: caught here, before the window.
+    expect(verdictFor(trueUtc(paid), 'GUYANA_WALL_CLOCK')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY' });
+    // Without MMG's success answer it waits out the window like any other mismatch.
+    expect(judge(uat, 'MMGTX1', found({ createdAt: trueUtc(paid) }), [MERCHANT], [], unanswered, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: replied }))
+      .toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY', decisive: false });
+    // A transaction no reply named cannot be bounded, and holds the same way.
+    expect(verdictFor(guyanaTime(paid), 'GUYANA_WALL_CLOCK', null)).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY', decisive: true });
+  });
 });
 
 describe('the reference MMG’s lookup echoes [F1] (UAT, 1 Oct: no lookup field carries it)', () => {
@@ -262,6 +364,15 @@ describe('the reference MMG’s lookup echoes [F1] (UAT, 1 Oct: no lookup field 
     expect(echoedReferencesFrom(answer, ['text'])).toEqual([`Swift ${REF}`]);
     expect(echoedReferencesFrom(answer, ['num', 'missing', 'nested', 'a.b'])).toEqual([]);
     expect(echoedReferencesFrom(null, ['a'])).toEqual([]);
+  });
+});
+
+describe('[DS633] the contract says what a PAYMENT_CONFIRMING refusal carries', () => {
+  it('documents error.details.ref as optional: a client never relies on it', () => {
+    const contract = readFileSync(join(__dirname, '..', 'modules/billing/MMG-CHECKOUT-API.md'), 'utf8');
+    const row = contract.split('\n').find((line) => line.startsWith('| 409 | `PAYMENT_CONFIRMING`'));
+    expect(row, 'the PAYMENT_CONFIRMING row of section 4').toBeDefined();
+    expect(row).toMatch(/`error\.details\.ref` is optional/);
   });
 });
 
@@ -339,10 +450,37 @@ describe('payActions — MMG_CHECKOUT is live only when it truly is, and off is 
     expect(await mmgCheckoutLive(config, sub(), 'unknown', liveProvider)).toBe(false);
   });
 
-  it('only an explicit false switches a platform off', async () => {
-    for (const value of [{ ios: 'no' }, { ios: 0 }, { ios: null }, [], 'off']) {
+  it('[DS633] only a real boolean counts: any other value switches that platform off, with a warning; a row that is not an object switches every platform off', async () => {
+    const warn = vi.fn();
+    setAppLogger({ info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never);
+    try {
+      for (const value of [{ ios: 'false' }, { ios: 'no' }, { ios: 'true' }, { ios: 0 }, { ios: 1 }, { ios: null }, { ios: {} }]) {
+        resetFeeCheckoutSwitchCache();
+        warn.mockClear();
+        const config = configWith(value);
+        expect(await mmgCheckoutLive(config, sub(), 'ios', liveProvider), JSON.stringify(value)).toBe(false);
+        expect(await mmgCheckoutLive(config, sub(), 'android', liveProvider), JSON.stringify(value)).toBe(true);
+        expect(await mmgCheckoutLive(config, sub(), 'unknown', liveProvider), JSON.stringify(value)).toBe(false);
+        expect(warn, JSON.stringify(value)).toHaveBeenCalled();
+      }
+      for (const value of [[], 'off', false, 0, null]) {
+        resetFeeCheckoutSwitchCache();
+        warn.mockClear();
+        for (const platform of ['ios', 'android', 'web', 'unknown'] as const) {
+          expect(await mmgCheckoutLive(configWith(value), sub(), platform, liveProvider), `${JSON.stringify(value)} ${platform}`).toBe(false);
+        }
+        expect(warn, JSON.stringify(value)).toHaveBeenCalled();
+      }
+      // Real booleans, and a platform missing from the row (owner ruling "3 b": on), warn about nothing.
       resetFeeCheckoutSwitchCache();
-      expect(await mmgCheckoutLive(configWith(value), sub(), 'ios', liveProvider), JSON.stringify(value)).toBe(true);
+      warn.mockClear();
+      const config = configWith({ ios: false, android: true });
+      expect(await mmgCheckoutLive(config, sub(), 'ios', liveProvider)).toBe(false);
+      expect(await mmgCheckoutLive(config, sub(), 'android', liveProvider)).toBe(true);
+      expect(await mmgCheckoutLive(config, sub(), 'web', liveProvider)).toBe(true);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      setAppLogger(console);
     }
   });
 

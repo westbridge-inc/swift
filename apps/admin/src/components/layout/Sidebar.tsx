@@ -92,11 +92,11 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
   },
 ];
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
 
   return (
-    <aside className="w-64 bg-[var(--panel)] border-r border-[var(--border)] flex flex-col">
+    <aside className="w-64 h-full shrink-0 bg-[var(--panel)] border-r border-[var(--border)] flex flex-col">
       <div className="p-6 border-b border-[var(--border)]">
         <h1 className="text-xl font-bold">
           <span className="text-[var(--accent)]">Swift</span> Admin
@@ -115,7 +115,8 @@ export function Sidebar() {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                    onClick={onNavigate}
+                    className={`flex items-center gap-3 px-3 py-2 min-h-11 rounded-lg text-sm transition-colors ${
                       isActive
                         ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
                         : 'text-[var(--muted)] hover:text-white hover:bg-white/5'

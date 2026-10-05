@@ -1,7 +1,8 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { UserRole, VehicleType } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -67,7 +68,7 @@ async function makeUserWithSession(roles: UserRole[], activeRole: UserRole, extr
   return { userId: user.id, token, sessionId: session.id };
 }
 
-async function makeDriver() {
+async function makeDriver(documentsFor: VehicleType = 'CAR') {
   const owned = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'MOVER');
   const driver = await app.prisma.driver.create({
     data: {
@@ -80,6 +81,9 @@ async function makeDriver() {
       averageRating: 4.9,
     } as never,
   });
+  // Taking work re-checks current documents (and HIRE insurance for a
+  // passenger vehicle) for the vehicle class the driver will claim with.
+  await currentMoverDocuments(app.prisma, owned.userId, documentsFor, true);
   return { ...owned, driverId: driver.id };
 }
 
@@ -255,7 +259,7 @@ describe('the current taxi contract (characterization — must stay green all en
 
   it('physical capacity is authoritative: a 9-seat bus cannot serve a 10-passenger GROUP ride at any entrance [REPORT-014 F-014-01]', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const nine = await makeDriver();
+    const nine = await makeDriver('BUS_9');
     await app.prisma.driver.update({
       where: { id: nine.driverId },
       data: { vehicleType: 'BUS_9', rideClass: 'GROUP', vehicleCapacity: 9 },
@@ -305,7 +309,7 @@ describe('the current taxi contract (characterization — must stay green all en
     await app.redis.del(`dispatch:offer:${rideId}`, `dispatch:mover-offer:${nine.driverId}`, `dispatch:declined:${rideId}`);
 
     // A 15-seater serves it fine.
-    const fifteen = await makeDriver();
+    const fifteen = await makeDriver('BUS_15');
     await app.prisma.driver.update({
       where: { id: fifteen.driverId },
       data: { vehicleType: 'BUS_15', rideClass: 'GROUP', vehicleCapacity: 15 },

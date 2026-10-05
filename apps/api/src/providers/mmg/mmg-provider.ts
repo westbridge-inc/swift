@@ -77,7 +77,8 @@ export type MmgLookupDetail =
     creditParties: string[] | null;
     /** The values of the creditParty entries whose key is exactly "accountid":
      *  the account the money went to (UAT, 1 Oct: Swift's merchant MSISDN).
-     *  Null when MMG sent no creditParty list. */
+     *  An entry with an empty or missing value is kept as '' [DS632]. Null
+     *  when MMG sent no creditParty list. */
     creditAccounts: string[] | null;
     createdAt: string | null;
     /** transactionReference exactly as sent: MMG's ledger number for the
@@ -127,8 +128,10 @@ export function lookupDetailFrom(answer: Record<string, unknown>, transactionId:
     creditParties: Array.isArray(creditParty)
       ? creditParty.map((entry: unknown) => String(party(entry)?.['value'] ?? '')).filter(Boolean)
       : null,
+    // [DS632] Every "accountid" entry is kept, an empty or missing value as
+    // '': it is not our merchant, so the verifier holds the payment. Never dropped.
     creditAccounts: Array.isArray(creditParty)
-      ? creditParty.filter((entry: unknown) => party(entry)?.['key'] === 'accountid').map((entry: unknown) => String(party(entry)?.['value'] ?? '')).filter(Boolean)
+      ? creditParty.filter((entry: unknown) => party(entry)?.['key'] === 'accountid').map((entry: unknown) => String(party(entry)?.['value'] ?? ''))
       : null,
     createdAt: typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null,
     ledgerReference,

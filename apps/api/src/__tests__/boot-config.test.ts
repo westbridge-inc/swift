@@ -709,6 +709,18 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
   });
 
+  it('[DS632] MMG_CHECKOUT_CREATION_ZONE is exactly GUYANA_WALL_CLOCK or UTC, or unset: anything else refuses to start, in production and outside it, the checkout on or off', () => {
+    for (const zone of ['guyana', 'utc', 'UTC ', 'America/Guyana']) {
+      expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly GUYANA_WALL_CLOCK or UTC/);
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+    }
+    for (const zone of [undefined, '', 'GUYANA_WALL_CLOCK', 'UTC']) {
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+    }
+  });
+
   it('production boots with a complete checkout configuration, and never with the UAT page', () => {
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))
