@@ -1,4 +1,5 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
+import { bindTenantTransaction } from '../../plugins/prisma';
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Only open cash
@@ -106,9 +107,21 @@ export interface WindDownResult {
  * advertiser wind-down follows, and for the same reason.
  */
 export async function windDownPartner(
-  prisma: Prisma.TransactionClient,
+  prisma: Prisma.TransactionClient | PrismaClient,
   userId: string,
 ): Promise<WindDownResult> {
+  if ('$transaction' in prisma) return prisma.$transaction((tx) => windDownPartner(tx, userId));
+  await bindTenantTransaction(prisma);
+  // Cancellation shares the same payer-first order as activation, collection
+  // and historical settlement, including all original mover sources.
+  await prisma.$queryRaw`SELECT id FROM users WHERE id=${userId} FOR UPDATE`;
+  await prisma.$queryRaw`
+    SELECT s.id FROM subscriptions s
+    LEFT JOIN riders r ON r.id=s."riderId" LEFT JOIN drivers d ON d.id=s."driverId"
+    LEFT JOIN vendors v ON v.id=s."vendorId" LEFT JOIN vendor_owners o ON o.id=v."ownerId"
+    WHERE r."userId"=${userId} OR d."userId"=${userId} OR o."userId"=${userId}
+    ORDER BY s.id FOR UPDATE OF s
+  `;
   const owner = await prisma.vendorOwner.findUnique({ where: { userId }, select: { id: true } });
   const vendorIds = owner
     ? (await prisma.vendor.findMany({ where: { ownerId: owner.id }, select: { id: true } })).map((v) => v.id)
