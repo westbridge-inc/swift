@@ -74,6 +74,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Integrity', href: '/integrity', icon: Fingerprint },
       { label: 'Discovery', href: '/discovery', icon: Compass },
       { label: 'Ads review', href: '/ads', icon: AdsIcon },
+      { label: 'Custody cases', href: '/custody', icon: LifeBuoy },
       { label: 'Returns', href: '/returns', icon: PackageOpen },
       { label: 'Broadcast', href: '/broadcast', icon: Megaphone },
     ],
