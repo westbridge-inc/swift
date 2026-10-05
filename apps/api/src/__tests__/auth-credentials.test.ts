@@ -12,6 +12,7 @@ import { devChannelLog } from '../providers/notifications/channels';
 import { loginWithOtp } from './helpers/otp';
 import { grantStepUp } from './helpers/step-up';
 import { PASSWORD_FAILURES_PER_ACCOUNT } from '../modules/auth/password-attempts';
+import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
 // [L04 · MASTER-056, MASTER-041, MASTER-003] Credentials and lockouts.
@@ -35,8 +36,9 @@ const SPRAY_PHONE = `${PREFIX}005`;
 // Outside the launch market: no text may be sent to it.
 const FOREIGN_PHONE = '+447700900414';
 const OUTAGE_PHONE = `${PREFIX}006`;
+const SLOW_NOTICE_PHONE = `${PREFIX}007`;
 const OUTAGE_UNKNOWN_PHONE = `${PREFIX}099`;
-const ALL_PHONES = [LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE, OUTAGE_PHONE];
+const ALL_PHONES = [LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE, OUTAGE_PHONE, SLOW_NOTICE_PHONE];
 const PASSWORD = 'credentials-password-1';
 const NEW_PASSWORD = 'credentials-password-2';
 const ATTACKER_IP = '203.0.113.7';
@@ -145,9 +147,40 @@ describe('[MASTER-056] rotating addresses cannot guess one account without bound
     expect(byCode.statusCode, byCode.body).toBe(200);
     expect(await app.prisma.session.count({ where: { userId: user.id } })).toBe(1);
     // The account holder is told once, in the app (no text: a text per pause would be a spam lever).
+    await expect.poll(async () => (await pausedNotices()).length, { timeout: 5000 }).toBe(1);
     const paused = await pausedNotices();
     expect(paused).toHaveLength(1);
     expect(paused[0]!.body).toMatch(/code/i);
+  });
+});
+
+describe('[MASTER-054 × MASTER-056] the ceiling-trip attempt is not slower than any other refusal', () => {
+  it('the attempt that trips the account pause answers without waiting for the notice to be delivered', async () => {
+    const user = await createUser(SLOW_NOTICE_PHONE);
+    for (let i = 0; i < PASSWORD_FAILURES_PER_ACCOUNT - 1; i += 1) {
+      const attempt = await post('password/login', { phone: SLOW_NOTICE_PHONE, password: `slow-${i}-wrong` }, { remoteAddress: `198.19.${Math.floor(i / 250)}.${(i % 250) + 1}` });
+      expect(attempt.statusCode).toBe(401);
+    }
+    // Hold every notice delivery until released: an in-band send would hold the response too.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = NotificationService.prototype.send;
+    const held = vi.spyOn(NotificationService.prototype, 'send').mockImplementation(async function (this: NotificationService, ...args) {
+      await gate;
+      return original.apply(this, args);
+    });
+    try {
+      const trip = post('password/login', { phone: SLOW_NOTICE_PHONE, password: 'slow-last-wrong' }, { remoteAddress: '198.19.9.9' });
+      const answered = await Promise.race([trip.then((r) => r.statusCode), new Promise((resolve) => setTimeout(() => resolve('held'), 2000))]);
+      expect(answered).toBe(401);
+      expect(held).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      held.mockRestore();
+    }
+    await expect.poll(async () => (await app.prisma.notification.findMany({ where: { userId: user.id } }))
+      .filter((n) => (n.data as { kind?: string } | null)?.kind === 'password_sign_in_paused').length, { timeout: 5000 }).toBe(1);
   });
 });
 

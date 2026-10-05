@@ -601,6 +601,13 @@ export class AuthService {
       return;
     }
     if (!outcome.accountLocked || !userId) return;
+    // Off the request path: the attempt that trips the pause answers exactly
+    // as fast as any other refusal, so its timing says nothing about whether
+    // the account exists (DS695). The per-pause dedupe key keeps it to one.
+    void this.sendPasswordPausedNotice(userId);
+  }
+
+  private async sendPasswordPausedNotice(userId: string): Promise<void> {
     try {
       const { NotificationService } = await import('../notification/notification.service');
       await new NotificationService(this.app.prisma, this.app.io).send({
