@@ -3,17 +3,31 @@ vi.mock('../modules/country/country-config.service', () => ({
   CountryConfigService: class { async getSubscriptionTiers() { return {}; } async getCurrencyCode() { return 'GYD'; } },
   partnerRateFor: () => ({ rate: 6000 }),
 }));
+// [#1393] A mover activation also takes the payer's mover-fee locks and joins
+// its one shared weekly-fee authority (proved against PostgreSQL in
+// mover-fee-authority.test.ts and mover-fee-band.test.ts). This suite doubles
+// that authority, so the identity-authority guarantees below stay what it grades.
+vi.mock('../modules/subscription/mover-fee-authority', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../modules/subscription/mover-fee-authority')>(),
+  lockMoverSources: async () => [],
+  resolveMoverFeeAuthority: async (db: any) => {
+    const existing = (await db.rider.findUnique({}))?.subscription;
+    return existing ? { canonicalSubscriptionId: existing.id, feeType: existing.type } : null;
+  },
+  activateMoverFeeType: async (_tx: unknown, _payer: unknown, feeType: string) => ({ feeType }),
+  lockMoverFeeAuthority: async () => null,
+}));
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 
 function fixture() {
   const state = { review: false, banned: false, active: false, subs: [] as any[], grants: [] as any[], actions: [] as any[], trace: [] as string[] };
   const tx: any = {
     $queryRaw: async () => { state.trace.push('lock'); return []; },
-    rider: { findUnique: async () => ({ riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', user: { countryCode: 'GY' }, subscription: state.subs[0] }), findUniqueOrThrow: async () => ({ userId: 'synthetic-account' }) },
+    rider: { findUnique: async () => ({ riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', user: { countryCode: 'GY' }, subscription: state.subs[0] }), findUniqueOrThrow: async () => ({ userId: 'synthetic-account', user: { id: 'synthetic-account', tenantId: 'swift-default' } }) },
     identityClusterMember: { findUnique: async () => ({ clusterId: 'synthetic-cluster' }), findMany: async () => [{ accountId: 'synthetic-account' }] },
     identityCluster: { findUnique: async () => ({ mergedIntoId: null, authorityReviewRequired: state.review }) },
     user: { findFirst: async () => state.banned ? { id: 'independently-banned-peer' } : null },
-    subscription: { findFirst: async () => null, create: async ({ data }: any) => { state.trace.push('subscription'); const row = { id: 'synthetic-sub', ...data }; state.subs.push(row); return row; } },
+    subscription: { findFirst: async () => null, findUniqueOrThrow: async ({ where }: any) => state.subs.find((s) => s.id === where.id), create: async ({ data }: any) => { state.trace.push('subscription'); const row = { id: 'synthetic-sub', ...data }; state.subs.push(row); return row; } },
     trialGrant: { findMany: async () => state.grants, create: async ({ data }: any) => { state.trace.push('grant'); state.grants.push(data); return data; } },
     exceptionGrant: { findFirst: async () => null },
     enforcementAction: { create: async ({ data }: any) => { state.actions.push(data); return data; } },
