@@ -47,7 +47,7 @@ beforeEach(async () => {
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   app.decorate('prisma', db as unknown as FastifyInstance['prisma']);
-  app.decorate('io', { to: () => ({ emit: effects.emit }) });
+  app.decorate('io', { to: () => ({ emit: effects.emit }) } as unknown as FastifyInstance['io']);
   app.decorate('authenticate', async (request: FastifyRequest) => {
     request.user = { userId: request.headers['x-user'] ?? 'sender', role: 'CUSTOMER' } as FastifyRequest['user'];
     request.tenantId = String(request.headers['x-tenant'] ?? 'tenant-a');

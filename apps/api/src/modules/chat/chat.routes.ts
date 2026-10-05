@@ -211,7 +211,7 @@ export async function chatRoutes(app: FastifyInstance) {
     // admission below also refuses prohibited contact details and language.
     const offPlatform = detectOffPlatformContact(message);
 
-    // [F-027-12] ...with exactly one exception. The order's pickup/ride code is
+    // [F-027-12] Redact order secrets before content admission. The pickup/ride code is
     // not content to moderate, it is the proof that the driver physically met
     // the customer. Chat puts the driver in the room and copies message text
     // verbatim into the other participants' PUSH bodies, so an unguarded room
