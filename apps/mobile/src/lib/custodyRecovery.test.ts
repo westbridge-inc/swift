@@ -72,3 +72,66 @@ describe('relay tasks', () => {
     expect(isHandoffCode('12345a')).toBe(false);
   });
 });
+
+// [Fable review on #1454] The expired code, the relay rider's error handling and
+// the resolved-case noise.
+import { partyCaseWorthShowing, relayErrorAction } from './custodyRecovery';
+
+describe('an expired handoff code is never shown as live', () => {
+  const base = { caseId: 'c1', state: 'TRANSFER_IN_PROGRESS', open: true, version: 2, youHoldTheGoods: true, floatToCollect: 3000, instruction: 'Show the code.' };
+  const NOW = Date.parse('2026-10-05T12:00:00.000Z');
+  it('the server saying it expired wins', () => {
+    const v = parseHolderCaseView({ ...base, transferCode: '123456', codeExpired: true, transferCodeExpiresAt: '2026-10-05T11:59:00.000Z' }, NOW);
+    expect(v).toMatchObject({ codeExpired: true, transferCode: null, floatToCollect: 0 });
+  });
+  it('a code whose expiry has passed on this phone is dropped too, between polls', () => {
+    const v = parseHolderCaseView({ ...base, transferCode: '123456', codeExpired: false, transferCodeExpiresAt: '2026-10-05T11:59:59.000Z' }, NOW);
+    expect(v).toMatchObject({ codeExpired: true, transferCode: null });
+  });
+  it('a live code before its expiry is shown', () => {
+    const v = parseHolderCaseView({ ...base, transferCode: '123456', codeExpired: false, transferCodeExpiresAt: '2026-10-05T12:20:00.000Z' }, NOW);
+    expect(v).toMatchObject({ codeExpired: false, transferCode: '123456', transferCodeExpiresAt: '2026-10-05T12:20:00.000Z' });
+  });
+});
+
+describe('the relay rider’s handoff errors', () => {
+  const http = (status: number, code: string, message = 'server words') => ({ response: { status, data: { error: { code, message } } } });
+  it('a lost answer keeps the attempt key and the dialog: the retry must REPLAY, not try again', () => {
+    expect(relayErrorAction(new Error('Network Error'))).toMatchObject({ rotateKey: false, closeDialog: false });
+  });
+  it('a request still in flight (DUPLICATE_REQUEST) keeps the key — rotating would burn a second attempt', () => {
+    expect(relayErrorAction(http(409, 'DUPLICATE_REQUEST'))).toMatchObject({ rotateKey: false, closeDialog: false, refresh: false });
+  });
+  it('a refused code is a new attempt next time, in the same dialog', () => {
+    expect(relayErrorAction(http(400, 'INVALID_TRANSFER_CODE'))).toMatchObject({ rotateKey: true, closeDialog: false, refresh: true, message: 'server words' });
+  });
+  it.each(['TRANSFER_NOT_PENDING', 'MAX_ATTEMPTS', 'TRANSFER_CODE_EXPIRED', 'RECOVERY_STALE'])('%s closes the dialog and refreshes the list', (code) => {
+    expect(relayErrorAction(http(409, code))).toMatchObject({ closeDialog: true, refresh: true });
+  });
+  it('a handoff that is gone reads as plain words, whatever the server sent', () => {
+    const a = relayErrorAction(http(404, 'NOT_FOUND', 'RecoveryCase with id cm123 not found'));
+    expect(a).toMatchObject({ closeDialog: true, refresh: true });
+    expect(a.message).toBe('This handoff was called off or given to another rider.');
+  });
+});
+
+describe('a resolved case that says nothing new is not shown', () => {
+  const v = (state: string, open = false) => ({ caseId: 'c', state, open, ownedBySupport: true, headline: 'h', body: 'b' });
+  it('open cases, returns and handoffs are shown; delivered and closed are not', () => {
+    expect(partyCaseWorthShowing(v('SUPPORT_HOLD', true))).toBe(true);
+    expect(partyCaseWorthShowing(v('RETURNED'))).toBe(true);
+    expect(partyCaseWorthShowing(v('TRANSFERRED'))).toBe(true);
+    expect(partyCaseWorthShowing(v('DELIVERED'))).toBe(false);
+    expect(partyCaseWorthShowing(v('CLOSED'))).toBe(false);
+    expect(partyCaseWorthShowing(null)).toBe(false);
+  });
+});
+
+describe('the report reasons are thumb-sized', () => {
+  it('each reason row is at least 48dp tall', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'modules', 'mover', 'CustodyRecoverySection.tsx'), 'utf8');
+    const heights = [...src.matchAll(/minHeight:\s*(\d+)/g)].map((m) => Number(m[1]));
+    expect(heights.length).toBeGreaterThan(0);
+    for (const h of heights) expect(h).toBeGreaterThanOrEqual(48);
+  });
+});

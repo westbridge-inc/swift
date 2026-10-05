@@ -8,7 +8,7 @@ import { toast } from '../../kit/toast';
 import { haptic } from '../../lib/haptics';
 import { moneyIn } from '../../lib/money';
 import { openExternal } from '../../lib/openExternal';
-import { isHandoffCode, type RelayTask } from '../../lib/custodyRecovery';
+import { declineErrorMessage, isHandoffCode, relayErrorAction, type RelayTask } from '../../lib/custodyRecovery';
 // Through the hooks barrel, like every screen, so a screen test's barrel mock covers it.
 import { useDeclineRelay, useRelayTasks, useTransferCustody } from '../../hooks';
 import { DCard, dk } from './surface';
@@ -51,10 +51,15 @@ export function RelayTasks({ enabled, onTakenOver }: { enabled: boolean; onTaken
           toast.show('Order handed to you', 'It is now your delivery — open your active job to finish it.');
           onTakenOver?.();
         },
-        onError: (e: any) => {
-          // A refused code is a new attempt; a lost answer keeps the same key.
-          if (e?.response) attempt.current = newAttemptKey(active.caseId);
-          toast.show(e?.response?.data?.error?.message ?? "Couldn't confirm the handoff — try again.");
+        onError: (e: unknown) => {
+          // A lost answer or an in-flight duplicate keeps the key (the retry
+          // replays); a refused code is a new attempt; a handoff that is over
+          // closes the dialog and refreshes the list.
+          const act = relayErrorAction(e);
+          if (act.rotateKey) attempt.current = newAttemptKey(active.caseId);
+          if (act.closeDialog) setActive(null);
+          if (act.refresh) void tasks.refetch();
+          toast.show(act.message);
         },
       },
     );
@@ -91,7 +96,7 @@ export function RelayTasks({ enabled, onTakenOver }: { enabled: boolean; onTaken
               { caseId: t.caseId },
               {
                 onSuccess: () => toast.show('Relay declined', 'Swift will ask another rider.'),
-                onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't decline — try again."),
+                onError: (e: unknown) => { void tasks.refetch(); toast.show(declineErrorMessage(e)); },
               },
             )}
           />

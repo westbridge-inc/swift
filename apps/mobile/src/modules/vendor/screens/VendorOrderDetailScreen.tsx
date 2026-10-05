@@ -8,7 +8,7 @@ import { rejectReasonsFor } from '../rejectReasons';
 import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
 import { toast } from '../../../kit/toast';
-import { parsePartyCaseView, storeCanConfirmReturn } from '../../../lib/custodyRecovery';
+import { parsePartyCaseView, partyCaseWorthShowing, storeCanConfirmReturn } from '../../../lib/custodyRecovery';
 import { money } from '../../../lib/money';
 import { openExternal } from '../../../lib/openExternal';
 import {
@@ -227,7 +227,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
 
         {/* [AF-MOB-006] A delivery that went wrong after pickup: the store sees
             the case, and confirms when returned goods are back with it. */}
-        {custodyRecovery ? (
+        {partyCaseWorthShowing(custodyRecovery) ? (
           <CustodyRecoveryNotice
             view={custodyRecovery}
             action={storeCanConfirmReturn(custodyRecovery, order.status, order.orderType)

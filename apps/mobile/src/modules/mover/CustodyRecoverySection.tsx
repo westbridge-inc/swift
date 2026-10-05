@@ -40,7 +40,6 @@ export function CustodyRecoverySection({ orderId, inCustody }: { orderId: string
           setOpen(false);
           setReason(null);
           toast.show('Problem reported', 'Swift support has the case. Keep the order safe — the next step will show here.');
-          void holder.refetch();
         },
         onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't report the problem — check your connection and try again."),
       },
@@ -61,7 +60,14 @@ export function CustodyRecoverySection({ orderId, inCustody }: { orderId: string
             </T>
           </View>
           <T variant="label" style={{ color: dk.text, marginTop: space.sm }}>{kase.instruction}</T>
-          {kase.transferCode ? (
+          {kase.codeExpired ? (
+            <View style={{ marginTop: space.md, alignItems: 'center' }}>
+              <T variant="label" weight="bold" style={{ color: dk.text }}>Handoff code expired</T>
+              <T variant="caption" style={{ color: dk.muted, marginTop: 2, textAlign: 'center' }}>
+                Don’t hand the order over. Swift support is arranging the handoff again.
+              </T>
+            </View>
+          ) : kase.transferCode ? (
             <View style={{ marginTop: space.md, alignItems: 'center' }}>
               <T variant="caption" style={{ color: dk.muted }}>
                 {kase.relayFirstName ? `Handoff code for ${kase.relayFirstName}` : 'Handoff code'}
@@ -108,7 +114,7 @@ export function CustodyRecoverySection({ orderId, inCustody }: { orderId: string
               accessibilityRole="radio"
               accessibilityState={{ selected: reason === r.code }}
               onPress={() => setReason(r.code)}
-              style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm, minHeight: 44 }}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingVertical: space.sm, minHeight: 48 }}
             >
               <DecorativeIcon>
                 <Feather name={reason === r.code ? 'check-circle' : 'circle'} size={18} color={reason === r.code ? dk.accent : dk.muted} />

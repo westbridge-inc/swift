@@ -30,7 +30,7 @@ import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
-import { parsePartyCaseView } from '../../../lib/custodyRecovery';
+import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
@@ -1421,7 +1421,7 @@ export function DeliveryScreen() {
 
           {/* [AF-MOB-006] After pickup, a delivery problem is an owned case:
               the server's sentence says who is handling it and what happens. */}
-          {custodyRecovery ? <CustodyRecoveryNotice view={custodyRecovery} /> : null}
+          {partyCaseWorthShowing(custodyRecovery) ? <CustodyRecoveryNotice view={custodyRecovery} /> : null}
 
           {mmgClaim && !cancelled && !failed ? (
             <MmgPaymentClaimCard

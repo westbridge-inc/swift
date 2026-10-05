@@ -25,7 +25,9 @@ export function useHolderCase(orderId: string | undefined, enabled: boolean) {
   return useQuery<HolderCaseView | null>({
     queryKey: holderKey(orderId ?? ''),
     enabled: !!orderId && enabled && !pv,
-    refetchInterval: 20_000,
+    // Every 20 s while a case is open (its code can expire, its plan change);
+    // otherwise once a minute, just to notice a case opened by operations.
+    refetchInterval: (query) => (query.state.data ? 20_000 : 60_000),
     queryFn: async () => {
       try {
         return parseHolderCaseView(await unwrap(riderApi.recovery(orderId!)));

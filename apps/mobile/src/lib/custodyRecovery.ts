@@ -66,19 +66,29 @@ export interface HolderCaseView {
   ownedBySupport: boolean;
   youHoldTheGoods: boolean;
   transferCode: string | null;
+  /** When the handoff code stops working (the handoff deadline), or null. */
+  transferCodeExpiresAt: string | null;
+  /** The handoff is pending but its code has expired: show that, never the digits. */
+  codeExpired: boolean;
   floatToCollect: number;
   relayFirstName: string | null;
   instruction: string;
 }
 
-export function parseHolderCaseView(raw: unknown): HolderCaseView | null {
+/** `now` is injectable for tests; a screen passes nothing. A code past its
+ *  expiry on this phone is dropped between polls too, so the holder never
+ *  shows a code the server would refuse. */
+export function parseHolderCaseView(raw: unknown, now: number = Date.now()): HolderCaseView | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const caseId = str(r['caseId']);
   const state = str(r['state']);
   const instruction = str(r['instruction']);
   if (!caseId || !state || !instruction) return null;
-  const code = str(r['transferCode']);
+  const expiresAt = str(r['transferCodeExpiresAt']);
+  const expiresMs = expiresAt ? Date.parse(expiresAt) : NaN;
+  const codeExpired = r['codeExpired'] === true || (Number.isFinite(expiresMs) && expiresMs <= now);
+  const code = codeExpired ? null : str(r['transferCode']);
   const relay = r['relay'] && typeof r['relay'] === 'object' ? (r['relay'] as Record<string, unknown>) : null;
   return {
     caseId,
@@ -88,7 +98,9 @@ export function parseHolderCaseView(raw: unknown): HolderCaseView | null {
     ownedBySupport: r['ownedBySupport'] === true,
     youHoldTheGoods: r['youHoldTheGoods'] === true,
     transferCode: code && /^\d{6}$/.test(code) ? code : null,
-    floatToCollect: Number.isFinite(Number(r['floatToCollect'])) ? Math.max(0, Number(r['floatToCollect'])) : 0,
+    transferCodeExpiresAt: expiresAt,
+    codeExpired,
+    floatToCollect: !codeExpired && Number.isFinite(Number(r['floatToCollect'])) ? Math.max(0, Number(r['floatToCollect'])) : 0,
     relayFirstName: relay ? str(relay['firstName']) : null,
     instruction,
   };
@@ -135,4 +147,46 @@ export function parseRelayTasks(raw: unknown): RelayTask[] {
 /** A six-digit handoff code, digits only. */
 export function isHandoffCode(code: string): boolean {
   return /^\d{6}$/.test(code);
+}
+
+/** Show a party's case card? Open cases, returns and handoffs say something the
+ *  order screen does not; a resolved DELIVERED or CLOSED case only repeats it. */
+export function partyCaseWorthShowing(view: PartyCaseView | null): view is PartyCaseView {
+  return !!view && (view.open || view.state === 'RETURNED' || view.state === 'TRANSFERRED');
+}
+
+/** What the relay rider's screen does with a refused handoff. */
+export interface RelayErrorAction {
+  /** Mint a new Idempotency-Key for the next try. Never after a lost answer or
+   *  an in-flight duplicate: those must REPLAY, or a second attempt is burned. */
+  rotateKey: boolean;
+  closeDialog: boolean;
+  refresh: boolean;
+  message: string;
+}
+
+const GONE = 'This handoff was called off or given to another rider.';
+const TERMINAL = new Set(['TRANSFER_NOT_PENDING', 'MAX_ATTEMPTS', 'TRANSFER_CODE_EXPIRED', 'RECOVERY_STALE']);
+
+export function relayErrorAction(error: unknown): RelayErrorAction {
+  const res = (error as { response?: { status?: number; data?: { error?: { code?: string; message?: string } } } })?.response;
+  if (!res) {
+    return { rotateKey: false, closeDialog: false, refresh: false, message: "Couldn't reach Swift. Try again — your last try is kept, not counted twice." };
+  }
+  const code = res.data?.error?.code ?? '';
+  const message = res.data?.error?.message ?? "Couldn't confirm the handoff — try again.";
+  if (code === 'DUPLICATE_REQUEST') {
+    return { rotateKey: false, closeDialog: false, refresh: false, message: 'Still confirming your last try — wait a moment, then try again.' };
+  }
+  if (res.status === 404) return { rotateKey: true, closeDialog: true, refresh: true, message: GONE };
+  if (TERMINAL.has(code)) return { rotateKey: true, closeDialog: true, refresh: true, message };
+  return { rotateKey: true, closeDialog: false, refresh: true, message };
+}
+
+/** A failed decline: a gone handoff reads as plain words; refresh either way. */
+export function declineErrorMessage(error: unknown): string {
+  const res = (error as { response?: { status?: number; data?: { error?: { message?: string } } } })?.response;
+  if (!res) return "Couldn't reach Swift — try again.";
+  if (res.status === 404) return GONE;
+  return res.data?.error?.message ?? "Couldn't decline — try again.";
 }
