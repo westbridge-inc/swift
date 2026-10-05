@@ -236,15 +236,16 @@ afterEach(() => {
 });
 
 describe('BullMQ lifecycle', () => {
-  it('logs each retained audit class and its reason after the real retention sweep', async () => {
+  it.each([false, true])('logs each retained audit class and its reason (registry clocks: %s)', async registered => {
     const ctx = context();
     const upsert = vi.fn().mockResolvedValue({});
-    ctx.prisma = { retentionPolicy: { upsert, findMany: async () => [] } } as unknown as JobContext['prisma'];
+    const policies = registered ? ['audit_logs', 'sensitive_read_logs'].map(dataClass => ({ dataClass, enabled: true, retainDays: 7 })) : [];
+    ctx.prisma = { retentionPolicy: { upsert, findMany: async () => policies } } as unknown as JobContext['prisma'];
     const queues = createQueues(ctx.redis, ctx.log);
     const workers = await createWorkers(ctx, queues);
     try {
       const worker = (bullState.workers as FakeWorker[]).find(w => w.name === QUEUE_NAMES.VERIFICATION)!;
-      await worker.processor({ name: 'retention-sweep', data: {} });
+      await expect(worker.processor({ name: 'retention-sweep', data: {} })).resolves.toBeUndefined();
       expect(upsert).toHaveBeenCalledTimes(3);
       expect(log.info).toHaveBeenCalledWith({
         enforced: [],
