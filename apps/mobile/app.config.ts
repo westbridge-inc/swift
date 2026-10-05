@@ -340,7 +340,27 @@ const config: SwiftExpoConfig = {
         color: brandMaroon,
       },
     ],
-    'react-native-maps',
+    // react-native-maps ships its own config plugin, and Expo gives IT the
+    // manifest instead of the built-in step that reads
+    // `android.config.googleMaps.apiKey` above. That plugin writes
+    // com.google.android.geo.API_KEY only from `androidGoogleMapsApiKey`, and
+    // REMOVES it when the option is absent. Without this option a build that
+    // HAS the key still ships a keyless manifest (it happened with the
+    // 1 Oct preview and Play builds). android-maps-key-manifest.test.ts
+    // compiles the real manifest to keep it that way.
+    //
+    // Only when EAS says the build IS Android (it sets EAS_BUILD_PLATFORM on
+    // the builder, where prebuild writes the manifest): plugin options, unlike
+    // android.config, survive into the public config the app embeds, and iOS
+    // has no Google Maps. An unset platform (CI, a local `expo export`) gets
+    // no option, while the missing-key gate above stays strict for it. A local
+    // Android build that needs maps sets EAS_BUILD_PLATFORM=android too.
+    [
+      'react-native-maps',
+      androidMapsApiKey && process.env['EAS_BUILD_PLATFORM'] === 'android'
+        ? { androidGoogleMapsApiKey: androidMapsApiKey }
+        : {},
+    ],
     'expo-image',
     'expo-secure-store',
     'expo-video',
