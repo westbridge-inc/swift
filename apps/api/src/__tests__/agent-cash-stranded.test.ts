@@ -217,8 +217,8 @@ const within = async <T>(p: Promise<T>, ms = 15_000): Promise<T> => {
   }
 };
 
-/** Hold the payment row in the database until `waiters` finishers are all
- *  blocked on it, so their compare-and-sets really race. */
+/** Hold the payment row until every finisher is waiting on its lock chain.
+ * Payer → source → payment locks can queue more than two levels deep. */
 async function holdingPaymentRow<T>(paymentId: string, waiters: number, start: () => Array<Promise<T>>): Promise<Array<Promise<T>>> {
   let sent: Array<Promise<T>> = [];
   await prisma.$transaction(async (tx) => {
@@ -227,10 +227,14 @@ async function holdingPaymentRow<T>(paymentId: string, waiters: number, start: (
     sent = start();
     const deadline = Date.now() + 15_000;
     for (;;) {
-      // A later waiter queues behind the first one, not behind this lock.
-      const blocked = (await prisma.$queryRaw<Array<{ blocked: number }>>`SELECT count(*)::int AS blocked FROM pg_stat_activity a
-        WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
-           OR EXISTS (SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS b(p) WHERE ${pid}::int = ANY(pg_blocking_pids(b.p)))`)[0]!.blocked;
+      const blocked = (await prisma.$queryRaw<Array<{ blocked: number }>>`
+        WITH RECURSIVE waiting(pid, path) AS (
+          SELECT a.pid, ARRAY[a.pid] FROM pg_stat_activity a WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
+          UNION ALL
+          SELECT a.pid, w.path || a.pid FROM waiting w JOIN pg_stat_activity a ON w.pid = ANY(pg_blocking_pids(a.pid))
+          WHERE NOT a.pid = ANY(w.path)
+        ) SELECT count(DISTINCT pid)::int AS blocked FROM waiting
+      `)[0]!.blocked;
       if (blocked >= waiters) return;
       if (Date.now() > deadline) throw new Error(`only ${blocked} of ${waiters} finishers reached the payment row`);
       await new Promise((resolve) => setTimeout(resolve, 25));

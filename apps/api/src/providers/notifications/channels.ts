@@ -10,8 +10,11 @@ import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio
 import { SmtpEmailProvider } from './smtp-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
 
+export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
+export interface SmsOptions { handoff?: NotificationHandoff }
 export interface SmsProvider {
-  sendSms(to: string, body: string): Promise<{ ref: string }>;
+  supportsHandoff?: true;
+  sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }>;
 }
 
 /** Hard cap on an outbound SMS call — a hung provider must never hang the
@@ -29,6 +32,7 @@ const pushProviderTimeoutMs = () => {
  *  class (alert-class.ts, pushOptionsFor) and passed through every layer to
  *  the adapter, which maps it onto its own wire fields. */
 export interface PushOptions {
+  handoff?: NotificationHandoff;
   /** The class these options came from: recorded, never sent. */
   alertClass: AlertClass;
   /** high = delivered at once, even to a dozing Android; normal = the
@@ -66,6 +70,7 @@ export function pushWindow(options: PushOptions, now: number): { ttl?: number } 
 }
 
 export interface PushProvider {
+  supportsHandoff?: true;
   /** `invalidTokens` = tokens the provider says are dead (app uninstalled) —
    *  the caller deactivates them so we stop pushing at ghosts. `options`
    *  carries the alert class delivery; omitted = the standard class. */
@@ -109,14 +114,18 @@ export function resetDevChannelLog() {
 let seq = 0;
 
 class DevSms implements SmsProvider {
-  async sendSms(to: string, body: string) {
+  readonly supportsHandoff = true;
+  async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
     devChannelLog.push({ channel: 'sms', to, body, at: new Date() });
     return { ref: `dev_sms_${++seq}` };
   }
 }
 
 class DevPush implements PushProvider {
-  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH) {
+  readonly supportsHandoff = true;
+  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH): Promise<{ sent: number; invalidTokens?: string[] }> {
+    if (options.handoff) return await options.handoff('chunk:0', () => this.sendPush(deviceTokens, title, body, data, { ...options, handoff: undefined })) ?? { sent: 0, invalidTokens: [] };
     // The log is what WOULD have been sent: a push whose deadline has passed
     // is dropped here exactly as the Expo adapter drops it.
     if (!pushWindow(options, Date.now())) return { sent: 0 };
@@ -171,6 +180,7 @@ const devChannels: NotificationChannels = {
  * with Node's global fetch. Credentials are env-only (hard rule: no secrets in code).
  */
 class TwilioSmsProvider implements SmsProvider {
+  readonly supportsHandoff = true;
   private sid = process.env['TWILIO_ACCOUNT_SID'] ?? '';
   private keySid = process.env['TWILIO_API_KEY_SID'] ?? '';
   private keySecret = process.env['TWILIO_API_KEY_SECRET']?.trim() ?? '';
@@ -182,7 +192,8 @@ class TwilioSmsProvider implements SmsProvider {
     if (invalidConfig) throw new Error(`${invalidConfig} for the twilio provider`);
   }
 
-  async sendSms(to: string, body: string): Promise<{ ref: string }> {
+  async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
     const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
     // Bound the call: a hung Twilio must not hang the login request behind it.
     const controller = new AbortController();
@@ -195,12 +206,13 @@ class TwilioSmsProvider implements SmsProvider {
         const sender: Record<string, string> = this.messagingServiceSid
           ? { MessagingServiceSid: this.messagingServiceSid }
           : { From: this.from };
-        res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
+        const effect = () => fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
           method: 'POST',
           headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ To: to, ...sender, Body: body }).toString(),
           signal: controller.signal,
         });
+        res = await effect();
       } catch {
         throw new Error(controller.signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS request failed');
       }
@@ -258,12 +270,21 @@ function expoMessage(
  * `invalidTokens` for deactivation.
  */
 export class ExpoPushProvider implements PushProvider {
+  readonly supportsHandoff = true;
   private static CHUNK = 100; // Expo's documented max messages per request
   private url = process.env['EXPO_PUSH_URL'] ?? 'https://exp.host/--/api/v2/push/send';
 
-  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH) {
+  async sendPush(deviceTokens: string[], title: string, body: string, data?: Record<string, unknown>, options: PushOptions = STANDARD_PUSH): Promise<{ sent: number; invalidTokens?: string[] }> {
     let sent = 0;
     const invalidTokens: string[] = [];
+    if (options.handoff) {
+      for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
+        const result = await options.handoff(`chunk:${i / ExpoPushProvider.CHUNK}`, () => this.sendPush(
+          deviceTokens.slice(i, i + ExpoPushProvider.CHUNK), title, body, data, { ...options, handoff: undefined }));
+        if (result) { sent += result.sent; invalidTokens.push(...(result.invalidTokens ?? [])); }
+      }
+      return { sent, invalidTokens };
+    }
 
     for (let i = 0; i < deviceTokens.length; i += ExpoPushProvider.CHUNK) {
       // Measured per request: a later chunk asks for less time, and nothing
@@ -367,10 +388,14 @@ export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY
     /** The wrapped provider — lets composition tests assert WHICH provider
      *  config selected without unwrapping behavior. */
     inner,
+    supportsHandoff: true,
     async sendPush(deviceTokens, title, body, data, options) {
       let lastErr: unknown;
       for (let attempt = 0; attempt <= delays.length; attempt += 1) {
         try {
+          if (options?.handoff && !inner.supportsHandoff) {
+            return await options.handoff('chunk:0', () => inner.sendPush(deviceTokens, title, body, data, { ...options, handoff: undefined })) ?? { sent: 0, invalidTokens: [] };
+          }
           return await inner.sendPush(deviceTokens, title, body, data, options);
         } catch (err) {
           lastErr = err;
