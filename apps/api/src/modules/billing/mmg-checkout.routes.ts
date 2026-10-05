@@ -78,6 +78,13 @@ const rateLimited = {
     new AppError(429, 'RATE_LIMITED', 'Too many attempts. Wait a minute and try again.', { retryAfterSeconds: Math.max(1, Math.ceil(context.ttl / 1000)) }),
 };
 
+/** [Sol · #1404] The public doors are limited per SOURCE: the proxy-resolved
+ *  address (Fastify's trustProxy, never a raw X-Forwarded-For), the same
+ *  bucket an anonymous caller gets from the global key. Never the global
+ *  key's per-user bucket, which a bearer token selects: one source rotating
+ *  signed-in principals would multiply its allowance. */
+const perSource = { keyGenerator: (request: FastifyRequest) => request.ip };
+
 const LATEST_WINDOW_MS = 24 * 3_600_000;
 const RECENT_CHECKOUTS = 10;
 const REF_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -290,7 +297,7 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   const rt = () => (runtime ??= mmgCheckoutRuntimeOf(app));
 
   /** The web return page forwards MMG's reply, from either registered URL, with the path as `outcome`. */
-  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited } } }, async (request) => {
+  app.post('/return', { bodyLimit: MMG_CHECKOUT_RETURN_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_RETURN_RATE, ...rateLimited, ...perSource } } }, async (request) => {
     const body = returnBody.parse(request.body ?? {});
     if (!mmgCheckoutEnabled()) return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
     if (ambiguousToken(body.params)) {
@@ -302,7 +309,7 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
   });
 
   /** MMG's own servers, if MMG calls one: JSON or a form, always 200, never a word about any account. */
-  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited } } }, async (request) => {
+  app.post('/notify', { bodyLimit: MMG_CHECKOUT_NOTIFY_BODY_LIMIT, config: { rateLimit: { ...MMG_CHECKOUT_NOTIFY_RATE, ...rateLimited, ...perSource } } }, async (request) => {
     if (mmgCheckoutEnabled()) {
       const params = notifyParams(request.body, request.query);
       if (ambiguousToken(params)) {
