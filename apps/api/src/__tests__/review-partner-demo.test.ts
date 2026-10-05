@@ -379,6 +379,62 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
       });
     }
   });
+
+  it('the partner seed touches only synthetic accounts: a real person inside a REVIEW tenant (one re-kinded after a real sign-up) is left untouched, while the synthetic partner beside it is seeded', async () => {
+    // The database derives isSynthetic on a USER write only. A tenant whose kind
+    // changes later keeps its real people unflagged: the seed's own check is the guard.
+    const FLIP = `review-flip-${RUN}`;
+    const realPhone = `${prodPhoneBase}79`;
+    let fictionPhone = '';
+    const ids = { real: '', fiction: '' };
+    await system(async () => {
+      await app.prisma.tenant.create({ data: { id: FLIP, name: 'Re-kinded', slug: FLIP, kind: 'PRODUCTION' } });
+      const real = await app.prisma.user.create({ data: { phone: realPhone, firstName: 'Real', lastName: 'Rider', roles: ['MOVER', 'RIDER'], activeRole: 'RIDER', tenantId: FLIP } });
+      ids.real = real.id;
+      prodUserIds.push(real.id);
+      expect(real.isSynthetic).toBe(false);
+      await app.prisma.tenant.update({ where: { id: FLIP }, data: { kind: 'REVIEW' } });
+      // A fictional identifier from the provisioned review range, beside the real one.
+      for (let i = 0; i < 100 && !fictionPhone; i++) {
+        const candidate = `+59200093${String(i).padStart(2, '0')}`;
+        if (!(await app.prisma.user.findUnique({ where: { phone: candidate }, select: { id: true } }))) fictionPhone = candidate;
+      }
+      expect(fictionPhone).not.toBe('');
+      const fiction = await app.prisma.user.create({ data: { phone: fictionPhone, firstName: 'Demo', lastName: 'Driver', roles: ['MOVER', 'CUSTOMER', 'DRIVER'], activeRole: 'DRIVER', lastMoverRole: 'DRIVER', tenantId: FLIP } });
+      ids.fiction = fiction.id;
+      prodUserIds.push(fiction.id);
+      expect(fiction.isSynthetic).toBe(true);
+      expect((await app.prisma.user.findUniqueOrThrow({ where: { id: real.id } })).isSynthetic).toBe(false);
+      // The real account's credential is the older one, so the seed reaches it first.
+      await app.prisma.reviewCredential.create({ data: { id: `rc-${RUN}-flip-real`, tenantId: FLIP, role: 'RIDER', identifier: realPhone, staticOtpHash: hashReviewCode(`rc-${RUN}-flip-real`, '333333'), rotatedAt: new Date(Date.now() - 60_000) } });
+      await app.prisma.reviewCredential.create({ data: { id: `rc-${RUN}-flip-fiction`, tenantId: FLIP, role: 'DRIVER', identifier: fictionPhone, staticOtpHash: hashReviewCode(`rc-${RUN}-flip-fiction`, '444444') } });
+    });
+    try {
+      const seeded = await system(() => seedReviewPartners(app.prisma, FLIP));
+      expect(seeded).toMatchObject({ RIDER: { credentials: 1, ready: 0 }, DRIVER: { credentials: 1, ready: 1 }, profiles: 1 });
+      expect(seeded.documentsCommitted).toBe(driverChecklist.length);
+      await system(async () => {
+        const real = await app.prisma.user.findUniqueOrThrow({ where: { id: ids.real }, select: { avatar: true, selfieCapturedAt: true, trustLevel: true, isSynthetic: true } });
+        expect(await app.prisma.rider.count({ where: { userId: ids.real } })).toBe(0);
+        expect(await app.prisma.driver.count({ where: { userId: ids.real } })).toBe(0);
+        expect(await app.prisma.verificationDocument.count({ where: { userId: ids.real } })).toBe(0);
+        expect([real.avatar, real.selfieCapturedAt, real.trustLevel, real.isSynthetic]).toEqual([null, null, 'L1', false]);
+        const fiction = await app.prisma.user.findUniqueOrThrow({ where: { id: ids.fiction }, select: { avatar: true, trustLevel: true } });
+        expect(await app.prisma.driver.count({ where: { userId: ids.fiction } })).toBe(1);
+        expect(await app.prisma.verificationDocument.count({ where: { userId: ids.fiction } })).toBe(driverChecklist.length);
+        expect([fiction.avatar, fiction.trustLevel]).toEqual([partnerPortraitUrl('DRIVER'), 'L2']);
+      });
+    } finally {
+      await system(async () => {
+        await app.prisma.reviewCredential.deleteMany({ where: { tenantId: FLIP } });
+        await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: [ids.real, ids.fiction] } } });
+        await app.prisma.rider.deleteMany({ where: { userId: { in: [ids.real, ids.fiction] } } });
+        await app.prisma.driver.deleteMany({ where: { userId: { in: [ids.real, ids.fiction] } } });
+        await app.prisma.user.deleteMany({ where: { tenantId: FLIP } });
+        await app.prisma.tenant.deleteMany({ where: { id: FLIP } });
+      });
+    }
+  });
 });
 
 describe('[REVIEW-PARTNER · DL-6] sign-in: each partner through the production door, with no SMS', () => {
