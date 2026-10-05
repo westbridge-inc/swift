@@ -4,16 +4,25 @@ import { readFileSync } from 'node:fs';
 const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
 const offenders = [];
 const forbidden = /\bprisma\s+(?:[^\n;&]*?\s)?db\s+push\b/i;
+// Check a continued command and simple adjacent literal concatenation together.
+// This is a static setup-path gate, not an interpreter for computed commands.
+function commandText(body) {
+  return body.split('\n').filter(line => !/^\s*(?:#|\/\/|\*|<!--)/.test(line)).join('\n')
+    .replace(/\\\r?\n/g, ' ')
+    .replace(/['"]\s*\+\s*['"]/g, '');
+}
 for (const file of files) {
   if (/(^|\/)package\.json$/.test(file)) {
     const scripts = JSON.parse(readFileSync(file, 'utf8')).scripts ?? {};
     for (const [name, command] of Object.entries(scripts)) {
-      if (forbidden.test(command)) offenders.push(`${file}: scripts.${name}`);
+      if (forbidden.test(commandText(command))) offenders.push(`${file}: scripts.${name}`);
     }
-  } else if (/^(?:scripts\/|apps\/[^/]+\/scripts\/|\.github\/workflows\/)/.test(file) && /\.(?:sh|ts|js|mjs|yml|yaml)$/.test(file)) {
-    readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
-      if (!/^\s*(?:#|\/\/|\*|<!--)/.test(line) && forbidden.test(line)) offenders.push(`${file}:${i + 1}`);
-    });
+  } else if (
+    /(^|\/)(?:Makefile|makefile|GNUmakefile)$/.test(file)
+    || (/^(?:scripts\/|apps\/[^/]+\/scripts\/|infrastructure\/|deploy\/|\.github\/(?:workflows|actions)\/)/.test(file)
+      && /\.(?:sh|bash|zsh|ts|js|mjs|cjs|py|mk|yml|yaml)$/.test(file))
+  ) {
+    if (forbidden.test(commandText(readFileSync(file, 'utf8')))) offenders.push(file);
   }
 }
 if (offenders.length) {
