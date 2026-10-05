@@ -241,7 +241,9 @@ function holderInstruction(kase: CustodyRecoveryCase, float: number, orderType: 
     case 'TRANSFER_IN_PROGRESS': return float > 0
       ? `Another rider is coming to collect the order. Show them your handoff code only once they have the order's cash float for you (GY$${Math.round(float).toLocaleString('en-US')}).`
       : 'Another rider is coming to collect the order. Show them your handoff code when you hand it over.';
-    case 'TRANSFERRED': return 'You handed the order over. It is no longer in your custody.';
+    // Only the CURRENT holder can read a case, so after a verified handoff the
+    // reader is the relay rider who took the order over.
+    case 'TRANSFERRED': return 'Another rider handed this order to you. Deliver it as normal.';
     case 'DELIVERED': return 'The order was delivered.';
     case 'RETURNED': return 'The order was returned.';
     case 'CLOSED': return 'Swift closed this case.';

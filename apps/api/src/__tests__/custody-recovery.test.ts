@@ -396,6 +396,12 @@ describe('[AF-MOB-006] a second mover cannot collect before the atomic transfer'
     expect(replay.statusCode).toBe(409);
     expect(replay.json().error.code).toBe('TRANSFER_NOT_PENDING');
 
+    // The case is now the relay rider's to read (they hold the order), and it
+    // speaks to them; the old holder can no longer read it.
+    const nowHeld = await as(relay.token, 'GET', `/api/v1/rider/orders/${order.id}/recovery`);
+    expect(nowHeld.json().data).toMatchObject({ state: 'TRANSFERRED', youHoldTheGoods: true, transferCode: null });
+    expect(nowHeld.json().data.instruction).toMatch(/handed this order to you/);
+    expect((await as(holder.token, 'GET', `/api/v1/rider/orders/${order.id}/recovery`)).statusCode).toBe(404);
     // The old holder has no door left; the new holder has the ordinary one.
     expect((await as(holder.token, 'PUT', `/api/v1/rider/orders/${order.id}/arrived`, {})).statusCode).toBe(403);
     expect((await as(relay.token, 'PUT', `/api/v1/rider/orders/${order.id}/arrived`, {})).statusCode).toBe(200);
