@@ -1,4 +1,3 @@
-import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -13,6 +12,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { OrderService } from '../modules/order/order.service';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
 
 // ---------------------------------------------------------------------------
@@ -126,7 +126,9 @@ async function makeDriver(at: Point, extra: Record<string, unknown> = {}): Promi
       averageRating: 4.9, acceptanceRate: 90,
     } as never,
   }));
-  await sys(() => currentMoverDocuments(app.prisma, u.userId, driver.vehicleType, true));
+  // [#1405] Taking work re-checks the driver's current approved documents,
+  // HIRE-class insurance included, as for every taxi suite's driver.
+  await sys(() => currentMoverDocuments(app.prisma, u.userId, 'CAR', true));
   return { ...u, driverId: driver.id };
 }
 
