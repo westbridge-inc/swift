@@ -61,7 +61,7 @@ async function fixture(status = 'ACTIVE') {
       }),
     },
     vendorOwner: { findUnique: async () => ({ id: 'owner-fixture', userId: 'account-fixture', vendors: [vendor] }) },
-    user: { findUnique: async (q: Query) => project((vendor.owner as Row).user as Row, q.select) },
+    user: { findUnique: async (q: Query) => project((vendor['owner'] as Row)['user'] as Row, q.select) },
     docType: { count: async () => 1, findMany: async () => [] },
     documentRecord: { findFirst: async () => null, findMany: vi.fn(async (q: Query) => records.filter(r => matches(r, q.where)).map(r => project(r, q.select))) },
     extractionRun: { findMany: extracted }, auditLog: { create: audit },
@@ -77,7 +77,7 @@ async function fixture(status = 'ACTIVE') {
     const service = new VerificationService(prisma, new NotificationService(prisma, recordingIo()), new SandboxKycProvider());
     vi.spyOn(service, 'isRoleVerified').mockResolvedValue(true);
     vi.spyOn(service, 'checklistEvidenceValidUntil').mockResolvedValue(null);
-    vi.spyOn(SubscriptionService.prototype, 'priceForActivation').mockResolvedValue(undefined);
+    vi.spyOn(SubscriptionService.prototype, 'priceForActivation').mockResolvedValue(null);
     const projection = service as unknown as { projectVendorActivation: (db: typeof prisma, id: string) => Promise<void> };
     await runWithTenant('tenant-public', () => projection.projectVendorActivation(prisma, 'account-fixture'));
   };
@@ -104,7 +104,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
 
   it.each(['disabled-tenant', 'reclassified-tenant'])('a %s after initial route admission cannot leak through compiler reread', async change => {
     const h = await fixture();
-    h.afterInitial(() => { Object.assign(h.vendor.tenant as Row, change === 'disabled-tenant' ? { isActive: false } : { kind: 'REVIEW' }); });
+    h.afterInitial(() => { Object.assign(h.vendor['tenant'] as Row, change === 'disabled-tenant' ? { isActive: false } : { kind: 'REVIEW' }); });
     expect((await h.read()).data.disclosure).toBeNull();
     expect(h.extracted).not.toHaveBeenCalled();
   });
@@ -129,15 +129,15 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
     await expect(foreign.read('tenant-other')).rejects.toMatchObject({ statusCode: 404 });
     expect(foreign.extracted).not.toHaveBeenCalled();
     const hidden = await fixture();
-    Object.assign(hidden.vendor.tenant as Row, { kind: 'REVIEW' });
+    Object.assign(hidden.vendor['tenant'] as Row, { kind: 'REVIEW' });
     await expect(hidden.read()).rejects.toMatchObject({ statusCode: 404 });
     expect(hidden.extracted).not.toHaveBeenCalled();
   });
 
   it.each(['unverified', 'fee-suspended', 'fee-paused', 'fee-grace-expired', 'fee-period-ended'])('%s withholds disclosure before extraction', async restriction => {
     const h = await fixture();
-    if (restriction === 'unverified') h.vendor.isVerified = false;
-    else h.vendor.subscription = {
+    if (restriction === 'unverified') h.vendor['isVerified'] = false;
+    else h.vendor['subscription'] = {
       status: restriction === 'fee-suspended' ? 'SUSPENDED' : restriction === 'fee-paused' ? 'PAUSED' : restriction === 'fee-grace-expired' ? 'PAST_DUE' : 'ACTIVE',
       gracePeriodEnd: restriction === 'fee-grace-expired' ? new Date(0) : null,
       autoRenew: restriction !== 'fee-period-ended', currentPeriodEnd: new Date(0),
@@ -149,7 +149,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
 
   it.each(['legacy', 'paid', 'grace'])('an eligible CLOSED store retains the supplier block (%s)', async subscription => {
     const h = await fixture('CLOSED');
-    if (subscription !== 'legacy') h.vendor.subscription = {
+    if (subscription !== 'legacy') h.vendor['subscription'] = {
       status: subscription === 'paid' ? 'ACTIVE' : 'PAST_DUE', autoRenew: true,
       gracePeriodEnd: new Date(Date.now() + 60_000), currentPeriodEnd: new Date(Date.now() + 60_000),
     };
@@ -160,7 +160,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
   it('bound REVIEW and CRAWLER callers retain their own eligible disclosure', async () => {
     for (const kind of ['REVIEW', 'CRAWLER']) {
       const h = await fixture();
-      (h.vendor.tenant as Row).kind = kind;
+      (h.vendor['tenant'] as Row)['kind'] = kind;
       expect((await h.read('tenant-public')).data.disclosure).toMatchObject({ complete: true });
     }
     expect(crypto.unwrap).not.toHaveBeenCalled();
@@ -170,7 +170,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
 describe('R3 actual activation projection', () => {
   it('a pending store with a complete lawful block activates without PERSONAL extraction', async () => {
     const h = await fixture('PENDING_APPROVAL');
-    h.vendor.isVerified = false;
+    h.vendor['isVerified'] = false;
     await h.activate();
     expect(h.vendor).toMatchObject({ status: 'ACTIVE', isVerified: true, acceptingOrders: true });
     expect(h.extracted).not.toHaveBeenCalled();
@@ -179,10 +179,10 @@ describe('R3 actual activation projection', () => {
 
   it.each(['legalName', 'address', 'contact', 'operator'])('missing required %s still blocks activation', async missing => {
     const h = await fixture('PENDING_APPROVAL');
-    h.vendor.isVerified = false;
+    h.vendor['isVerified'] = false;
     if (missing === 'legalName') h.records.splice(0, 1);
-    if (missing === 'address') h.vendor.addressLine1 = null;
-    if (missing === 'contact') ((h.vendor.owner as Row).user as Row).isPhoneVerified = false;
+    if (missing === 'address') h.vendor['addressLine1'] = null;
+    if (missing === 'contact') ((h.vendor['owner'] as Row)['user'] as Row)['isPhoneVerified'] = false;
     if (missing === 'operator') vi.stubEnv('SUPPORT_EMAIL', '');
     await h.activate();
     expect(h.vendor).toMatchObject({ status: 'PENDING_APPROVAL', isVerified: false });
