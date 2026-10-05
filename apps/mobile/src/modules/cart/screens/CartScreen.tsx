@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Alert, AppState, Platform, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -161,8 +161,10 @@ export function CartScreen() {
   const [pendingTrackId, setPendingTrackId] = useState<string | null>(null);
   useEffect(() => {
     if (placeOrder.isSuccess || !pendingTrackId) return;
+    // iOS navigates from onDismissed below; this fallback is for Android,
+    // where that callback never fires.
+    if (Platform.OS === 'ios') return;
     const id = pendingTrackId;
-    setPendingTrackId(null);
     // WAS: InteractionManager.runAfterInteractions(...).
     //
     // React Native 0.85 turned InteractionManager into a stub whose
@@ -178,7 +180,13 @@ export function CartScreen() {
     // waits two frames instead of pretending.
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => navigation.navigate('Delivery', { orderId: id }));
+      raf2 = requestAnimationFrame(() => {
+        // [ANDROID-QA] Clear the staged id only HERE. Clearing it before the
+        // frames re-ran this effect, and its cleanup cancelled both frames:
+        // "Track order" closed the ceremony and went nowhere on Android.
+        setPendingTrackId(null);
+        navigation.navigate('Delivery', { orderId: id });
+      });
     });
     return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
   }, [placeOrder.isSuccess, pendingTrackId, navigation]);
