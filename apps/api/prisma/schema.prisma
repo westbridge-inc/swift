@@ -2239,6 +2239,9 @@ model CustodyRecoveryCase {
   /// The handoff code the holder shows the relay rider. Returned to nobody
   /// but the holder; cleared when the transfer ends either way.
   transferCode     String?
+  /// When THIS code stops working: set when the code is minted and never moved
+  /// (a later bump of the case deadline can never revive it). Null with no code.
+  transferCodeExpiresAt DateTime?
   transferAttempts Int                   @default(0)
   /// The operations owner (an admin user id).
   ownerUserId      String?

@@ -200,7 +200,7 @@ export async function moveCaseInTransaction(
     state: to,
     version: { increment: 1 },
     ...(open ? { deadlineAt: caseDeadline(to, now), resolvedAt: null } : { resolvedAt: now, resolution: opts.resolution ?? to }),
-    ...(leavingTransfer ? { transferCode: null, transferAttempts: 0 } : {}),
+    ...(leavingTransfer ? { transferCode: null, transferCodeExpiresAt: null, transferAttempts: 0 } : {}),
     // A relay that did not happen leaves no relay rider behind: the task
     // disappears from their list the moment the step commits.
     ...(leavingTransfer && to !== 'TRANSFERRED' ? { relayRiderId: null } : {}),

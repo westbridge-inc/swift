@@ -609,7 +609,7 @@ describe('[AF-MOB-006 · DS667] the handoff code contract', () => {
   it('a code past its handoff deadline is refused, and moves nothing', async () => {
     const { holder, relay, order, caseId, code } = await relayArranged();
     await runWithoutTenant(() => app.prisma.custodyRecoveryCase.update({
-      where: { id: caseId }, data: { deadlineAt: new Date(Date.now() - 1000) },
+      where: { id: caseId }, data: { deadlineAt: new Date(Date.now() - 1000), transferCodeExpiresAt: new Date(Date.now() - 1000) },
     }), 'test');
     const res = await transfer(relay.token, caseId, code);
     expect(res.statusCode).toBe(409);
@@ -623,6 +623,26 @@ describe('[AF-MOB-006 · DS667] the handoff code contract', () => {
     expect(view.transferCodeExpiresAt).toBeTruthy();
     expect(view.instruction).toMatch(/handoff code expired/);
     // And an expired handoff is not on the relay rider's list.
+    const tasks = (await as(relay.token, 'GET', '/api/v1/rider/recovery/relays')).json().data;
+    expect(tasks.find((t: { caseId: string }) => t.caseId === caseId)).toBeUndefined();
+  });
+
+  it('a bumped case deadline can never revive an expired code: the code keys on its OWN expiry', async () => {
+    // [Fable r2 S3] The escalation sweep (or any later step) re-arms the CASE
+    // deadline. If the code's validity rode that deadline, a bump would bring a
+    // dead code back to life. The code carries its own expiry, set when it is
+    // minted and never moved.
+    const { holder, relay, order, caseId, code } = await relayArranged();
+    await runWithoutTenant(() => app.prisma.custodyRecoveryCase.update({
+      where: { id: caseId },
+      data: { transferCodeExpiresAt: new Date(Date.now() - 1000), deadlineAt: new Date(Date.now() + 3600_000) },
+    }), 'test');
+    const res = await transfer(relay.token, caseId, code);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('TRANSFER_CODE_EXPIRED');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).riderId).toBe(holder.rider.id);
+    const view = (await as(holder.token, 'GET', `/api/v1/rider/orders/${order.id}/recovery`)).json().data;
+    expect(view).toMatchObject({ transferCode: null, codeExpired: true });
     const tasks = (await as(relay.token, 'GET', '/api/v1/rider/recovery/relays')).json().data;
     expect(tasks.find((t: { caseId: string }) => t.caseId === caseId)).toBeUndefined();
   });
@@ -647,7 +667,7 @@ describe('[AF-MOB-006 · DS667] the handoff code contract', () => {
     const escalated = await escalateOverdueCases({ prisma: app.prisma, io: app.io, notifications: new NotificationService(app.prisma, app.io) });
     expect(escalated).toContain(caseId);
     const kase = await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test');
-    expect(kase).toMatchObject({ state: 'RELAY_REQUIRED', transferCode: null, relayRiderId: null });
+    expect(kase).toMatchObject({ state: 'RELAY_REQUIRED', transferCode: null, transferCodeExpiresAt: null, relayRiderId: null });
     expect((await relayNotices(relay.user.id, caseId)).map((n) => (n.data as { kind?: string }).kind)).toContain('custody_relay_cancelled');
     expect((await transfer(relay.token, caseId, code)).statusCode).toBe(404);
     // The holder no longer shows a code.
@@ -658,6 +678,8 @@ describe('[AF-MOB-006 · DS667] the handoff code contract', () => {
     const fresh = await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test');
     expect(fresh.transferCode).toMatch(/^\d{6}$/);
     expect(fresh.transferAttempts).toBe(0);
+    // The fresh code carries its own fresh expiry.
+    expect(fresh.transferCodeExpiresAt!.getTime()).toBeGreaterThan(Date.now());
   });
 
   it('when operations calls the handoff off, the named relay rider is told', async () => {

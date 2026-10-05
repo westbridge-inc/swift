@@ -149,10 +149,20 @@ describe('[AF-MOB-006] the database holds the case invariants', () => {
 
   it('a transfer code exists only while a transfer is in progress with a named relay rider', async () => {
     const o = await order();
-    await expect(kase(o, { transferCode: '123456' })).rejects.toThrow(/custody_recovery_cases_transfer_code_check/);
-    await expect(kase(o, { state: 'TRANSFER_IN_PROGRESS', transferCode: '123456' })).rejects.toThrow(/custody_recovery_cases_transfer_code_check/);
-    const ok = await kase(o, { state: 'TRANSFER_IN_PROGRESS', transferCode: '123456', relayRiderId: 'rider-y' });
+    // Every code carries its own expiry (below), so these give one; what they
+    // grade is the state/relay window.
+    const exp = new Date(Date.now() + 600_000);
+    await expect(kase(o, { transferCode: '123456', transferCodeExpiresAt: exp })).rejects.toThrow(/custody_recovery_cases_transfer_code_check/);
+    await expect(kase(o, { state: 'TRANSFER_IN_PROGRESS', transferCode: '123456', transferCodeExpiresAt: exp })).rejects.toThrow(/custody_recovery_cases_transfer_code_check/);
+    const ok = await kase(o, { state: 'TRANSFER_IN_PROGRESS', transferCode: '123456', transferCodeExpiresAt: exp, relayRiderId: 'rider-y' });
     expect(ok.transferCode).toBe('123456');
+  });
+
+  it('[Fable r2] a code always carries its own expiry, and an expiry never outlives its code', async () => {
+    const o = await order();
+    await expect(kase(o, { state: 'TRANSFER_IN_PROGRESS', transferCode: '123456', relayRiderId: 'rider-y' }))
+      .rejects.toThrow(/custody_recovery_cases_code_expiry_check/);
+    await expect(kase(o, { transferCodeExpiresAt: new Date() })).rejects.toThrow(/custody_recovery_cases_code_expiry_check/);
   });
 
   it('a case never moves to another order or tenant', async () => {
