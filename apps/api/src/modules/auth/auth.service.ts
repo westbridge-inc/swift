@@ -46,6 +46,7 @@ import {
   recordPasswordFailure,
   resetPasswordAttemptBudget,
 } from './password-attempts';
+import { stepUpKey } from './step-up';
 
 interface DeviceInfo {
   deviceId: string;
@@ -491,15 +492,24 @@ export class AuthService {
   // Email + password (secondary to phone OTP)
   // -------------------------------------------------------------------------
 
+  /**
+   * [L04 · MASTER-003] Set or change the password from a signed-in session.
+   * The route has already required a fresh step-up on THIS session. A new
+   * credential is a new generation: every other session of the account ends
+   * (with the same mover-authority and outbox handling as a logout), this
+   * session's tokens are replaced so its old refresh token stops working, and
+   * the owner is told by an inbox notice and a text to the phone on the
+   * account. Returns this session's new tokens.
+   */
   async setPassword(userId: string, sessionId: string, password: string) {
     const passwordHash = await bcrypt.hash(password, 12);
-    await this.app.prisma.$transaction(async (tx) => {
+    const changed = await this.app.prisma.$transaction(async (tx) => {
       // Authenticate-time proof is not enough for a security mutation: a
       // password reset, ban, or logout may revoke this session while bcrypt is
       // running. Serialize with those paths (User -> Session), then prove the
       // exact request generation still exists before changing the credential.
-      const users = await tx.$queryRaw<Array<{ status: UserStatus }>>`
-        SELECT "status"
+      const users = await tx.$queryRaw<Array<{ status: UserStatus; phone: string; activeRole: UserRole }>>`
+        SELECT "status", "phone", "activeRole"
         FROM "users"
         WHERE "id" = ${userId}
         FOR UPDATE
@@ -519,19 +529,76 @@ export class AuthService {
       if (!session || session.expiresAt <= new Date()) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
-      if (
-        user.status === 'SUSPENDED'
-        || user.status === 'BANNED'
-        || user.status === 'DEACTIVATED'
-      ) {
-        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
-      }
+      if (BLOCKED_STATUSES.has(user.status)) throw accountSuspended();
 
       await tx.user.update({
         where: { id: userId },
         data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
       });
+
+      // Every OTHER session of the account ends, each exactly as a logout of
+      // that device would end it (its mover authority retired, its outbox row
+      // written), in this transaction. Locked in id order.
+      const others = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "sessions"
+        WHERE "userId" = ${userId} AND "id" <> ${sessionId}
+        ORDER BY "id"
+        FOR UPDATE
+      `;
+      const revoked: Array<{ sessionId: string; cleanup: MoverSessionRevocationCleanup }> = [];
+      for (const other of others) {
+        revoked.push({ sessionId: other.id, cleanup: await this.revokeLockedSession(tx, other.id, userId) });
+      }
+
+      // This session continues under new credentials: the old access and
+      // refresh tokens (and the previous refresh token's grace) are gone.
+      const accessToken = this.app.jwt.sign({ userId, role: user.activeRole, jti: nanoid(8) });
+      const refreshToken = nanoid(64);
+      await tx.session.update({
+        where: { id: sessionId },
+        data: {
+          token: accessToken,
+          refreshToken,
+          previousRefreshToken: null,
+          rotatedAt: new Date(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
+      return { phone: user.phone, revoked, tokens: { accessToken, refreshToken, expiresIn: 900 } };
     });
+
+    // PostgreSQL committed the security decision; the rest is best-effort and
+    // never turns a completed change into an error.
+    await resetPasswordAttemptBudget(this.app.redis, userId)
+      .catch((error) => this.app.log.error({ err: error, userId }, 'password-set attempt budget reset failed'));
+    await this.app.redis.del(stepUpKey(sessionId)).catch(() => {});
+    for (const { sessionId: revokedId, cleanup } of changed.revoked) {
+      this.disconnectSessionSockets(revokedId);
+      await completeMoverSessionRevocation(this.app, cleanup)
+        .catch((error) => this.app.log.error({ err: error, sessionId: revokedId }, 'post-password-set mover cleanup failed'));
+    }
+    await this.sendPasswordChangedNotice(userId, changed.phone);
+    return changed.tokens;
+  }
+
+  /** [MASTER-003] The security notice: an inbox row (with push), and a text to the phone on the account. */
+  private async sendPasswordChangedNotice(userId: string, phone: string): Promise<void> {
+    const body = "Your Swift password was just changed and your other devices were signed out. If this wasn't you, contact Swift support now.";
+    try {
+      const { NotificationService } = await import('../notification/notification.service');
+      await new NotificationService(this.app.prisma, this.app.io).send({
+        userId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Your password was changed',
+        body,
+        data: { kind: 'password_changed' },
+      });
+    } catch (error) {
+      this.app.log.error({ err: error, userId }, 'password-changed inbox notice failed');
+    }
+    await this.channels.sms.sendSms(phone, body)
+      .catch((error) => this.app.log.error({ err: error, userId }, 'password-changed text failed'));
   }
 
   async loginWithPassword(

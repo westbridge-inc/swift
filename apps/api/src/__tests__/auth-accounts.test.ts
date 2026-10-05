@@ -10,6 +10,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestPasswordResetOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { nanoid } from 'nanoid';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
@@ -240,9 +241,14 @@ describe('Email + password login with lockout', () => {
     moverToken = login.json().data.tokens.accessToken;
   });
 
-  it('sets a password (authenticated)', async () => {
+  it('sets a password (authenticated, with a fresh step-up on this session)', async () => {
+    // [L04 · MASTER-003] A password change needs a step-up on THIS session
+    // (refusal without one is graded in auth-credentials.test.ts) and replaces
+    // this session's tokens; the suite carries on with the new access token.
+    await grantStepUp(app, moverToken);
     const res = await inject('POST', '/api/v1/auth/password/set', { password: PASSWORD }, moverToken);
     expect(res.statusCode).toBe(200);
+    moverToken = res.json().data.tokens.accessToken;
   });
 
   it('logs in with phone + password', async () => {
