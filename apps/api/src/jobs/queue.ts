@@ -525,6 +525,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       switch (job.name) {
         case 'process-billing': {
+          const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period
           // ends, then turns PAUSED (not operable, owing nothing); resuming
@@ -543,7 +544,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, confirmationReviews, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           // [DS213 F1-1] A stopped plan that fails to pause counts too.
@@ -612,6 +613,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const tails = await billing.drainTopUpTails();
           if (tails.retried > 0 || tails.pending > 0) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
+          }
+          // [MMG checkout 2/6] Hosted checkouts: expire the ones no reply ever
+          // came for (I8, no dunning) and look again at every one that is due.
+          // Isolated: a checkout failure never stops the rest of this poll.
+          try {
+            const { MmgCheckoutService } = await import('../modules/billing/mmg-checkout.service');
+            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).pollIntents();
+            if (checkouts.expired + checkouts.checked > 0) ctx.log.info(checkouts, 'MMG checkouts polled');
+          } catch (err) {
+            ctx.log.error({ err }, '[MMG checkout] poll failed; the next poll retries');
           }
           await billing.scanUnkeyedTopUpDuplicates();
           // [G5-F6] A settlement publication that stopped part-way (interrupted,
@@ -1643,6 +1654,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const report = await runBillingInvariants(ctx.prisma);
         const broken =
           report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+          report.unjudgedSubscriptions.length +
           report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
@@ -1652,7 +1664,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );

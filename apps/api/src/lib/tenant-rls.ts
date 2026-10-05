@@ -105,7 +105,14 @@ export const TENANT_TABLES = [
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',
-  'mmg_agent_payments', 'order_outbox', 'orders', 'pending_attributions',
+  'mmg_agent_payments',
+  // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
+  // walled like the provider payment that credits it.
+  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
+  // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
+  'billing_obligation_transitions',
+  'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
@@ -119,6 +126,7 @@ export const TENANT_TABLES = [
   // [M-20] A settlement file as one staged, validated import.
   'settlement_imports', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency',
+  'mover_fee_authorities', 'mover_fee_subscriptions',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
   // [PT-1] Card rail v2: enrolled cards, hosted sessions and their evidence.

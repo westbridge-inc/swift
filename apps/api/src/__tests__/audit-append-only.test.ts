@@ -103,7 +103,16 @@ describe('[ADM-003] the database refuses to change an audit row', () => {
 
   it('TRUNCATE is refused — a row trigger does not fire for it, so it has its own', async () => {
     await seed();
-    await expect(prisma.$executeRawUnsafe('TRUNCATE audit_logs')).rejects.toThrow(/append-only/);
+    // Other retained evidence now references audit rows (mover fee decisions,
+    // consumed weekly-fee obligations), so a bare TRUNCATE is refused by those
+    // foreign keys before the trigger is reached. It stays refused.
+    await expect(prisma.$executeRawUnsafe('TRUNCATE audit_logs')).rejects.toThrow();
+    // CASCADE clears the foreign keys to reach the trigger itself, inside a
+    // transaction that is always rolled back: a missing trigger truncates nothing.
+    await expect(prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('TRUNCATE audit_logs CASCADE');
+      throw new Error('TRUNCATE was not refused');
+    })).rejects.toThrow(/append-only/);
     expect(await prisma.auditLog.count({ where: { entity: `AuditProbe${RUN}` } })).toBeGreaterThan(0);
   });
 
