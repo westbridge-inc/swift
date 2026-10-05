@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Alert, AppState, Platform, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -161,8 +161,10 @@ export function CartScreen() {
   const [pendingTrackId, setPendingTrackId] = useState<string | null>(null);
   useEffect(() => {
     if (placeOrder.isSuccess || !pendingTrackId) return;
+    // iOS navigates from onDismissed below; this fallback is for Android,
+    // where that callback never fires.
+    if (Platform.OS === 'ios') return;
     const id = pendingTrackId;
-    setPendingTrackId(null);
     // WAS: InteractionManager.runAfterInteractions(...).
     //
     // React Native 0.85 turned InteractionManager into a stub whose
@@ -178,7 +180,13 @@ export function CartScreen() {
     // waits two frames instead of pretending.
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => navigation.navigate('Delivery', { orderId: id }));
+      raf2 = requestAnimationFrame(() => {
+        // [ANDROID-QA] Clear the staged id only HERE. Clearing it before the
+        // frames re-ran this effect, and its cleanup cancelled both frames:
+        // "Track order" closed the ceremony and went nowhere on Android.
+        setPendingTrackId(null);
+        navigation.navigate('Delivery', { orderId: id });
+      });
     });
     return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
   }, [placeOrder.isSuccess, pendingTrackId, navigation]);
@@ -669,7 +677,7 @@ export function CartScreen() {
             {promoMsg && !promoMsg.ok ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.lg }}>
                 <Feather name="alert-circle" size={13} color={color.error} />
-                <T variant="caption" tone="error">
+                <T variant="caption" tone="error" style={{ flex: 1 }}>
                   {promoMsg.text}
                 </T>
               </View>
@@ -959,7 +967,7 @@ export function CartScreen() {
                   appointments[i.itemId] ? (
                     <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Feather name="calendar" size={13} color={color.text.muted} />
-                      <T variant="caption" tone="muted">
+                      <T variant="caption" tone="muted" style={{ flex: 1 }}>
                         {i.name} — {formatAppointmentSlot(appointments[i.itemId]!.slotStart)}
                         {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
                       </T>
@@ -997,7 +1005,7 @@ export function CartScreen() {
           {!c.meetsMinimum && short.length === 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 This store has a minimum order of {money(c.minimumOrderAmount)}.
               </T>
             </View>
@@ -1005,7 +1013,7 @@ export function CartScreen() {
           {unslotted.length > 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="calendar" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 Pick a time for {unslotted[0].name} before ordering.
               </T>
             </View>
@@ -1013,7 +1021,7 @@ export function CartScreen() {
           {orderErr ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.error} />
-              <T variant="label" tone="error">
+              <T variant="label" tone="error" style={{ flex: 1 }}>
                 {orderErr}
               </T>
             </View>

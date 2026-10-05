@@ -1073,10 +1073,12 @@ export const tenantUnscopedAccessCounter = new client.Counter({
   registers: [registry],
 });
 /** [TEN-03] Transaction-local bindings performed (tenant / system) and the
- *  in-transaction fallbacks that could not be batched. */
+ *  in-transaction fallbacks that could not be batched. [MASTER-019] system_tx:
+ *  a system transaction opened on the system connection; system_refused_in_tx:
+ *  a system query refused rather than moved out of a caller's transaction. */
 export const tenantBindCounter = new client.Counter({
   name: 'swift_tenant_bind_total',
-  help: 'RLS bindings by kind (tenant, system, tenant_fallback_in_tx, system_fallback_in_tx)',
+  help: 'RLS bindings by kind (tenant, tenant_fallback_in_tx, system, system_no_client, system_tx, system_refused_in_tx)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });
