@@ -22,10 +22,11 @@ import { BUCKET_OF, IDENTITY_DOC_TYPES, LICENCE_DISCLOSURE_TYPES } from './doc-r
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { inoperableSubscriptionWhere } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
+import { safePublicPhone } from '../../utils/vendor-public-phone';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
-export type DisclosureSource = 'RECORD' | 'PROPRIETOR' | 'SELF_DECLARED' | 'ACCOUNT' | 'PLATFORM';
+export type DisclosureSource = 'RECORD' | 'PROPRIETOR' | 'SELF_DECLARED' | 'ACCOUNT' | 'PUBLISHED' | 'PLATFORM';
 export interface DisclosureElement { value: string; source: DisclosureSource; docType?: string; recordId?: string }
 export interface DisclosureBlock {
   complete: boolean;
@@ -51,11 +52,12 @@ export function platformOperator(env: Record<string, string | undefined> = proce
   return legalName && registeredAddress && supportEmail ? { legalName, registeredAddress, supportEmail } : null;
 }
 
+type DisclosurePurpose = 'PUBLIC_STOREFRONT' | 'VENDOR_ACTIVATION';
 type RecordSource = { id: string; tenantId: string; accountId: string; subjectId: string | null; docType: string; submissionId: string };
 
 /** Only declared non-PII BUSINESS fields enter this reader. Neither purpose
  * needs PERSONAL values: a valid licence's on-file fact is sufficient. */
-async function readFields(db: Db, record: RecordSource, codes: readonly string[]): Promise<Map<string, string>> {
+async function readFields(db: Db, record: RecordSource, codes: readonly string[], purpose: DisclosurePurpose): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!codes.length) return out;
   const runs = await db.extractionRun.findMany({
@@ -72,8 +74,18 @@ async function readFields(db: Db, record: RecordSource, codes: readonly string[]
     const fields = run.fields.filter(f => f.runId === run.id && f.valueCt && !out.has(f.fieldCode));
     if (!fields.length || !run.wrappedDek || !kp) continue;
     const dek = await kp.unwrapDek(Buffer.from(run.wrappedDek));
+    const opened: string[] = [];
     for (const f of fields) {
-      if (f.valueCt && !out.has(f.fieldCode)) out.set(f.fieldCode, unpackAndDecrypt(Buffer.from(f.valueCt), dek).toString('utf8'));
+      if (f.valueCt && !out.has(f.fieldCode)) { out.set(f.fieldCode, unpackAndDecrypt(Buffer.from(f.valueCt), dek).toString('utf8')); opened.push(f.fieldCode); }
+    }
+    // [row 107] Every decrypt of document evidence leaves one audit row on the
+    // document's own trail (the custody narrative reads it): which fields, for
+    // which purpose — never the values.
+    if (opened.length) {
+      await db.auditLog.create({ data: {
+        userId: null, action: 'DISCLOSURE_FIELDS_DECRYPTED', entity: 'VerificationDocument', entityId: record.submissionId,
+        changes: { purpose, docType: record.docType, recordId: record.id, fields: opened },
+      } });
     }
   }
   return out;
@@ -86,7 +98,7 @@ export async function disclosureGateEngaged(db: Db, countryCode: string): Promis
 }
 
 const DISCLOSURE_VENDOR_SELECT = {
-  id: true, tenantId: true, name: true, addressLine1: true, addressLine2: true,
+  id: true, tenantId: true, name: true, addressLine1: true, addressLine2: true, publicPhone: true,
   owner: { select: { userId: true, user: { select: {
     tenantId: true, countryCode: true, firstName: true, lastName: true, phone: true, isPhoneVerified: true,
   } } } },
@@ -123,7 +135,7 @@ export async function compileActivationDisclosure(
   return compileDisclosure(db, vendor, 'VENDOR_ACTIVATION', now);
 }
 
-async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: 'PUBLIC_STOREFRONT' | 'VENDOR_ACTIVATION', now: Date): Promise<DisclosureBlock> {
+async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: DisclosurePurpose, now: Date): Promise<DisclosureBlock> {
   const missing: string[] = [];
   const accountId = vendor.owner.userId;
   const records = (await db.documentRecord.findMany({
@@ -141,7 +153,7 @@ async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: 'PUB
   }) : [];
   const publicFields = new Map(registry.map(r => [r.legacyCode, new Set(r.fields.map(f => f.fieldCode))]));
   const business = candidates.filter(r => publicFields.has(r.docType));
-  const fieldsFor = (r: RecordSource, codes: readonly string[]) => readFields(db, r, codes.filter(c => publicFields.get(r.docType)?.has(c)));
+  const fieldsFor = (r: RecordSource, codes: readonly string[]) => readFields(db, r, codes.filter(c => publicFields.get(r.docType)?.has(c)), purpose);
   const provenance = (r: RecordSource) => ({ docType: r.docType, ...(purpose === 'VENDOR_ACTIVATION' ? { recordId: r.id } : {}) });
   const identity = records.find((r) => IDENTITY_DOC_TYPES.includes(r.docType));
 
@@ -171,10 +183,17 @@ async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: 'PUB
   }
   if (!address) missing.push('address');
 
-  // Electronic contact: the verified account contact — none is blocking.
-  const contact: DisclosureElement | null = vendor.owner.user.isPhoneVerified && vendor.owner.user.phone
-    ? { value: vendor.owner.user.phone, source: 'ACCOUNT' } : null;
-  if (!contact) missing.push('contact');
+  // Electronic contact. The requirement is met by the owner's VERIFIED account
+  // contact, but that number is private: [row 107] the public block shows only
+  // the contact the store itself PUBLISHED (none → withheld; the platform
+  // operator block below is always reachable). Activation sees the account
+  // contact, for completeness only.
+  const accountContact = vendor.owner.user.isPhoneVerified && vendor.owner.user.phone ? vendor.owner.user.phone : null;
+  if (!accountContact) missing.push('contact');
+  const published = safePublicPhone(vendor.publicPhone);
+  const contact: DisclosureElement | null = purpose === 'PUBLIC_STOREFRONT'
+    ? (published ? { value: published, source: 'PUBLISHED' } : null)
+    : (accountContact ? { value: accountContact, source: 'ACCOUNT' } : null);
 
   // PERSONAL licences truthfully disclose only their on-file fact. Their
   // numbers are not required for completeness in either caller, so neither

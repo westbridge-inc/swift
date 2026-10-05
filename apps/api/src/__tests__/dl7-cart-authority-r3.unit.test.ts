@@ -26,6 +26,8 @@ async function fixture() {
     vendor: { findUnique: readVendor, findFirst: readVendor },
     promoCode: { findUnique: async () => promo }, address: { findFirst: async (q: Query) => queryRow(address, q) },
     user: { findUniqueOrThrow: readUser },
+    // Main's identity authority gate on promo: an unclustered account.
+    identityClusterMember: { findUnique: async () => null },
   });
   const redis = recordingRedis(); const io = recordingIo();
   const host = await hostRoutes(customerRoutes, { prisma, redis, io });

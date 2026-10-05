@@ -1344,6 +1344,13 @@ export async function customerRoutes(app: FastifyInstance) {
           b.averageRating - a.averageRating ||
           a.name.localeCompare(b.name),
       );
+      // [DL-7 · SX397 F4] THE TOTAL'S CONTRACT: it counts the ranking
+      // population as it was when the ranking was computed — the same caller
+      // predicate, read once. The page rows are re-read with every caller
+      // filter, so a store that became hidden in between is never RETURNED,
+      // though it may still be COUNTED for this one response. The total is
+      // pagination metadata, never content; it reveals nothing the caller was
+      // not eligible to rank a moment earlier (dl7-public-scope-r3).
       total = idRows.length;
       const pageIds = idRows.slice(skip, skip + limit).map((r) => r.id);
       // Recheck all caller filters after ranking; visibility can change

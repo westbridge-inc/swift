@@ -138,3 +138,15 @@ export function visibleVendorInTenant(tenantId: string) {
   if (!tenantId) throw new Error('[R048-003] visibleVendorInTenant needs a tenant');
   return { ...VISIBLE_VENDOR_REL, tenantId } as const;
 }
+
+/** [DL-7 · SX397 F3] The visibility predicate for an actual catalogue read.
+ *  A PUBLIC request (the resolver bound `request.publicTenantId`) re-states the
+ *  public requirements — an ACTIVE, PRODUCTION operator — at the read itself,
+ *  so a tenant reclassified (REVIEW, CRAWLER) or switched off after the
+ *  resolver admitted it is never read for a guest. A bound caller keeps its
+ *  own tenant's semantics: a REVIEW or CRAWLER customer still sees its own
+ *  operator's catalogue. */
+export function catalogueVendorInTenant(tenantId: string, publicMode: boolean) {
+  const inTenant = visibleVendorInTenant(tenantId);
+  return publicMode ? { ...inTenant, tenant: { ...VISIBLE_VENDOR.tenant, ...PRODUCTION_TENANT.tenant } } : inTenant;
+}

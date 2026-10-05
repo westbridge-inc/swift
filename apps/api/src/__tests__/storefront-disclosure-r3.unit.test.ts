@@ -78,6 +78,9 @@ async function fixture(status = 'ACTIVE') {
     vi.spyOn(service, 'isRoleVerified').mockResolvedValue(true);
     vi.spyOn(service, 'checklistEvidenceValidUntil').mockResolvedValue(null);
     vi.spyOn(SubscriptionService.prototype, 'priceForActivation').mockResolvedValue(null);
+    // Main's activation edge starts the store's trial subscription in the same
+    // transaction; its own suites cover it. This grades the disclosure gate.
+    vi.spyOn(SubscriptionService.prototype, 'startTrialForVendor').mockResolvedValue(null as never);
     const projection = service as unknown as { projectVendorActivation: (db: typeof prisma, id: string) => Promise<void> };
     await runWithTenant('tenant-public', () => projection.projectVendorActivation(prisma, 'account-fixture'));
   };
@@ -109,12 +112,44 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
     expect(h.extracted).not.toHaveBeenCalled();
   });
 
-  it('the active public block has labelled lawful values without private record IDs', async () => {
+  it('the active public block has labelled lawful values without private record IDs, and never the private account contact', async () => {
     const h = await fixture();
     const block = (await h.read()).data.disclosure;
-    expect(block).toMatchObject({ complete: true, contact: { source: 'ACCOUNT', value: 'TEST_ACCOUNT_CONTACT' } });
+    // [row 107] The verified account contact satisfies the requirement, but it
+    // is private: with nothing published the public block withholds it.
+    expect(block).toMatchObject({ complete: true, contact: null });
+    expect(JSON.stringify(block)).not.toContain('TEST_ACCOUNT_CONTACT');
     expect(JSON.stringify(block)).not.toContain('recordId');
     expect(JSON.stringify(block)).not.toContain('private-identity-record');
+  });
+
+  it('[row 107] the public block shows only the contact the store published', async () => {
+    const h = await fixture();
+    h.vendor['publicPhone'] = '+5926001234';
+    const block = (await h.read()).data.disclosure;
+    expect(block).toMatchObject({ complete: true, contact: { source: 'PUBLISHED', value: '+5926001234' } });
+    expect(JSON.stringify(block)).not.toContain('TEST_ACCOUNT_CONTACT');
+  });
+
+  it('[row 107] each decrypt of a business licence writes exactly one audit row, naming fields but never values', async () => {
+    const h = await fixture();
+    h.records.push({ id: 'business-licence-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-business',
+      docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null,
+      submission: { purgedAt: null, userId: 'account-fixture', docType: 'trade_licence', subjectId: 'subject-business' } });
+    (h.prisma as unknown as { docType: { findMany: unknown } }).docType.findMany = async () => [{ legacyCode: 'trade_licence', fields: [{ fieldCode: 'permit_number' }] }];
+    crypto.decrypt.mockReturnValue(Buffer.from('TL-0042'));
+    h.extracted.mockResolvedValue([{ id: 'run-fixture', wrappedDek: Buffer.from('fixture-wrapped'), fields: [
+      { id: 'field-fixture', runId: 'run-fixture', fieldCode: 'permit_number', valueCt: Buffer.from('fixture-encrypted') },
+    ] }] as never);
+    const block = (await h.read()).data.disclosure as { licences: unknown[] };
+    expect(block.licences).toContainEqual({ value: 'TL-0042', source: 'RECORD', docType: 'trade_licence' });
+    expect(h.audit).toHaveBeenCalledTimes(1);
+    expect(h.audit).toHaveBeenCalledWith({ data: { userId: null, action: 'DISCLOSURE_FIELDS_DECRYPTED', entity: 'VerificationDocument', entityId: 'licence-submission',
+      changes: { purpose: 'PUBLIC_STOREFRONT', docType: 'trade_licence', recordId: 'business-licence-record', fields: ['permit_number'] } } });
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain('TL-0042');
+    // a second read is a second decrypt, and a second row
+    await h.read();
+    expect(h.audit).toHaveBeenCalledTimes(2);
   });
 
   it('a PERSONAL licence discloses its on-file fact, not its decrypted private number', async () => {
@@ -141,6 +176,10 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
       status: restriction === 'fee-suspended' ? 'SUSPENDED' : restriction === 'fee-paused' ? 'PAUSED' : restriction === 'fee-grace-expired' ? 'PAST_DUE' : 'ACTIVE',
       gracePeriodEnd: restriction === 'fee-grace-expired' ? new Date(0) : null,
       autoRenew: restriction !== 'fee-period-ended', currentPeriodEnd: new Date(0),
+      // Main's operability rule (billing confirmation clock): a PAST_DUE store is
+      // inoperable once auto-suspension is due and not paused.
+      autoSuspendEnabled: true, billingConfirmationPausedAt: null,
+      billingEnforcementDueAt: restriction === 'fee-grace-expired' ? new Date(0) : null,
     };
     expect((await h.read()).data.disclosure).toBeNull();
     expect(h.extracted).not.toHaveBeenCalled();
@@ -152,6 +191,7 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
     if (subscription !== 'legacy') h.vendor['subscription'] = {
       status: subscription === 'paid' ? 'ACTIVE' : 'PAST_DUE', autoRenew: true,
       gracePeriodEnd: new Date(Date.now() + 60_000), currentPeriodEnd: new Date(Date.now() + 60_000),
+      autoSuspendEnabled: true, billingConfirmationPausedAt: null, billingEnforcementDueAt: new Date(Date.now() + 60_000),
     };
     expect((await h.read()).data.disclosure).toMatchObject({ complete: true });
     expect(crypto.unwrap).not.toHaveBeenCalled();
