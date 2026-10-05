@@ -315,8 +315,8 @@ For Swift support, never a partner. Both routes are under `/api/v1/admin`, for `
 - Answer: `{ success: true, data: MmgCheckoutSupportRow[], nextCursor: string | null }`, newest first. A row: `id`, `swiftReference`, `mmgTransactionId`, `mmgTransactionReference` (when a lookup returned one), `amount`, `currencyCode`, `status`, `platform`, `partner` (`kind`, `displayName`, `maskedPhone`, `subscriptionId`), `createdAt`, `replyAt`, `confirmedAt`, `reason` (operators only) and `matchedBy`.
 
 `GET /api/v1/admin/billing/mmg-checkouts/:id`
-- The row (without `matchedBy`), plus `timeline` (every reply and lookup in order: `source`, `at`, MMG's `resultCode`, the lookup's `transactionStatus`, `amount`, `currency`, `mmgTransactionId`, `mmgTransactionReference`, `windowCheck` and `failure`), `timelineTruncated`, and `creditedPeriod` for a `CONFIRMED` checkout (`APPLIED` with the week it paid, `CREDIT` kept for the next bill, or `PENDING`, with the receipt number).
-- `404` for an unknown id and for another operator's.
+- The row (without `matchedBy`), plus `timeline` (every reply and lookup in order: `source`, `at`, MMG's `resultCode`, the lookup's `transactionStatus`, `amount`, `currency`, `mmgTransactionId`, `mmgTransactionReference`, `windowCheck` (a lookup: `INSIDE`, `OUTSIDE` the window, `AFTER_REPLY` when MMG's time is more than two minutes after the first reply naming the payment, or `UNREADABLE`; the same check that credits) and `failure`), `timelineTruncated`, and `creditedPeriod` for a `CONFIRMED` checkout (`APPLIED` with the week it paid, `CREDIT` kept for the next bill, or `PENDING`, with the receipt number).
+- `404` for an unknown id and for another tenant's checkout.
 
 **Never in an answer:** the MMG page (sealed at rest), any token or Idempotency-Key, MMG's reply message or HTML, keys or headers.
 

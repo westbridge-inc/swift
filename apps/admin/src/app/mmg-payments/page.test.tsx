@@ -180,6 +180,18 @@ describe('MMG payments: one payment, its timeline and what it paid', () => {
     expect(within(panel).queryByText('Credited period')).toBeNull();
   });
 
+  it("[Sol, DS663] a lookup whose MMG time is after MMG's first reply says so, never 'Inside the checkout window'", async () => {
+    mockApi(({ url }: ApiRequest) => (url.pathname === `${PATH}/${held.id}`
+      ? { body: { success: true, data: detailOf(held, { timeline: [{ at: held.replyAt!, source: 'LOOKUP', resultCode: null, transactionStatus: 'successful', mmgTransactionId: '20402048536280', mmgTransactionReference: held.mmgTransactionReference, amount: '6001', currency: 'GYD', windowCheck: 'AFTER_REPLY', failure: null }] }) } }
+      : page([held])));
+    const { user } = renderWithQuery(<MmgPaymentsPage />);
+    await screen.findByRole('table');
+    await user.click(screen.getByRole('button', { name: `Open payment ${held.swiftReference}` }));
+    const panel = await screen.findByRole('region', { name: 'Payment detail' });
+    expect(within(panel).getByText("After MMG's first reply: MMG's time may not match the zone setting")).toBeTruthy();
+    expect(within(panel).queryByText('Inside the checkout window')).toBeNull();
+  });
+
   it('a payment that cannot be opened shows the error, never a stale panel', async () => {
     mockApi(({ url }: ApiRequest) => (url.pathname === `${PATH}/${confirmed.id}`
       ? { status: 404, body: { success: false, error: { code: 'NOT_FOUND', message: 'MMG checkout not found' } } }

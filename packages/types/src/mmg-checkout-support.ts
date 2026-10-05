@@ -75,8 +75,10 @@ export interface MmgCheckoutTimelineEntry {
   /** The amount and currency MMG's lookup reported, as sent. */
   amount: string | null;
   currency: string | null;
-  /** A lookup: was MMG's creationDate inside this checkout's window. A reply: did it arrive by the deadline. */
-  windowCheck: 'INSIDE' | 'OUTSIDE' | 'UNREADABLE' | null;
+  /** A lookup: where MMG's creationDate stands, by the same check that credits: INSIDE, OUTSIDE the
+   *  checkout's window, AFTER_REPLY (more than two minutes after the first reply naming it: MMG's time
+   *  may not match the configured zone), or UNREADABLE. A reply: did it arrive by the deadline. */
+  windowCheck: 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE' | null;
   /** Why nothing could be used (NO_TOKEN, INVALID_RESPONSE, LOOKUP_NOT_FOUND, LOOKUP_FAILED, RESULT_CODE_n). */
   failure: string | null;
 }

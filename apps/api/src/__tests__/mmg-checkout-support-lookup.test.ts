@@ -536,6 +536,19 @@ describe('2. the answer discloses nothing secret: exactly the contract keys', ()
 });
 
 describe('2. the detail: the row, a timeline from the observations, and the credited period', () => {
+  it('[Sol, DS663] a payment MMG stamps three minutes after its first reply, inside the window: held as CREATION_AFTER_REPLY, and support shows AFTER_REPLY, never INSIDE', async () => {
+    const rider = await makeRider();
+    const c = await started(rider);
+    const txn = mmgId();
+    mmgAnswers(txn, mmgId(), c.amountGyd, { creationDate: gyStamp(new Date(Date.now() + 3 * 60_000)) });
+    expect((await returnWith(reply(c.row, '0', txn))).json().data.state).toBe('CONFIRMING');
+    expect(await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: c.ref } })).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    const detail = (await asAdmin(`${SEARCH}/${c.ref}`)).json().data as MmgCheckoutSupportDetail;
+    const lookupEntry = detail.timeline.find((e) => e.source === 'LOOKUP');
+    expect(lookupEntry).toMatchObject({ mmgTransactionId: txn, transactionStatus: 'successful', windowCheck: 'AFTER_REPLY' });
+    expect(detail.timeline.some((e) => e.source === 'LOOKUP' && e.windowCheck === 'INSIDE')).toBe(false);
+  });
+
   it('a confirmed payment: the reply (ResultCode 0, in time), the lookup (successful, amount, GYD, ledger number, inside the window), the week it paid and its receipt', async () => {
     const detail = (await asAdmin(`${SEARCH}/${s.confirmed.ref}`)).json().data as MmgCheckoutSupportDetail;
     expect(detail).toMatchObject({ id: s.confirmed.ref, swiftReference: s.confirmed.ours, mmgTransactionId: s.confirmed.txn, mmgTransactionReference: s.confirmed.ledger, status: 'CONFIRMED', timelineTruncated: false });

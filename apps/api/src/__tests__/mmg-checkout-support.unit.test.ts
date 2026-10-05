@@ -84,39 +84,47 @@ const answerAt = (created: unknown) => lookupDetailFrom({
 
 describe('the window support sees is the window judge() decides with', () => {
   const success = { txnId: '20402048536279' };
-  // [#1393 DS632] judge() reads MMG's stamp in the configured zone and bounds it
-  // by the first reply naming the transaction (two minutes' tolerance); here
-  // that reply came as late as a success answer still counts (the deadline
-  // plus two minutes), so only the window (and a stamp hours out) decides.
-  const creation = { zone: 'GUYANA_WALL_CLOCK' as const, firstReplyAt: new Date(intent.expiresAt.getTime() + 2 * 60_000) };
-  /** [name, MMG's creationDate, the window support shows, judge()'s verdict or hold reason] */
-  const cases: Array<[string, unknown, 'INSIDE' | 'OUTSIDE' | 'UNREADABLE', string]> = [
-    ['three minutes before it opened', gyStamp(new Date(opened.getTime() - 3 * 60_000)), 'OUTSIDE', 'OUTSIDE_CHECKOUT_WINDOW'],
-    ['one minute before it opened (inside the tolerance)', gyStamp(new Date(opened.getTime() - 60_000)), 'INSIDE', 'CONFIRM'],
-    ['a minute after it opened', gyStamp(new Date(opened.getTime() + 60_000)), 'INSIDE', 'CONFIRM'],
-    ['one minute after it closed (inside the tolerance)', gyStamp(new Date(intent.expiresAt.getTime() + 60_000)), 'INSIDE', 'CONFIRM'],
-    ['three minutes after it closed', gyStamp(new Date(intent.expiresAt.getTime() + 3 * 60_000)), 'OUTSIDE', 'OUTSIDE_CHECKOUT_WINDOW'],
-    // Hours out: judge() holds it before the window, as MMG's stamps not matching the zone.
-    ['a UTC stamp read as Guyana time, four hours late', new Date(opened.getTime() + 60_000).toISOString(), 'OUTSIDE', 'CREATION_AFTER_REPLY'],
-    ['an unreadable stamp', '1 Oct 2026', 'UNREADABLE', 'CREATION_DATE_UNREADABLE'],
-    ['no stamp', undefined, 'UNREADABLE', 'CREATION_DATE_UNREADABLE'],
+  const GY = 'GUYANA_WALL_CLOCK' as const;
+  const at = (ms: number) => new Date(ms);
+  const replied = at(opened.getTime() + 60_000);
+  const lastCountingReply = at(intent.expiresAt.getTime() + 2 * 60_000);
+  /** [name, MMG's creationDate, the first reply naming the transaction, the window support shows, judge()'s verdict or hold reason] */
+  const cases: Array<[string, unknown, Date | null, 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE', string]> = [
+    ['three minutes before it opened', gyStamp(at(opened.getTime() - 3 * 60_000)), replied, 'OUTSIDE', 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['one minute before it opened (inside the tolerance)', gyStamp(at(opened.getTime() - 60_000)), replied, 'INSIDE', 'CONFIRM'],
+    ['a minute after it opened, as the reply came', gyStamp(replied), replied, 'INSIDE', 'CONFIRM'],
+    // [Sol, DS663] The after-reply bound decides first, exactly as judge() does: two minutes, no more.
+    ['exactly two minutes after the first reply', gyStamp(at(replied.getTime() + 2 * 60_000)), replied, 'INSIDE', 'CONFIRM'],
+    ['two minutes and one millisecond after the first reply, inside the window', gyStamp(at(replied.getTime() + 2 * 60_000 + 1)), replied, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
+    ['inside the window, half an hour after the first reply', gyStamp(at(intent.expiresAt.getTime() - 60_000)), replied, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
+    ['one minute after it closed, the reply as late as one still counts', gyStamp(at(intent.expiresAt.getTime() + 60_000)), lastCountingReply, 'INSIDE', 'CONFIRM'],
+    ['three minutes after it closed, the reply as late as one still counts', gyStamp(at(intent.expiresAt.getTime() + 3 * 60_000)), lastCountingReply, 'OUTSIDE', 'OUTSIDE_CHECKOUT_WINDOW'],
+    // Hours out: MMG's stamps do not match the zone.
+    ['a UTC stamp read as Guyana time, four hours late', replied.toISOString(), replied, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
+    ['no reply ever named the transaction', gyStamp(replied), null, 'AFTER_REPLY', 'CREATION_AFTER_REPLY'],
+    ['an unreadable stamp', '1 Oct 2026', replied, 'UNREADABLE', 'CREATION_DATE_UNREADABLE'],
+    ['no stamp', undefined, replied, 'UNREADABLE', 'CREATION_DATE_UNREADABLE'],
   ];
-  it.each(cases)('%s', (_name, created, window, decided) => {
+  it.each(cases)('%s', (_name, created, firstReplyAt, window, decided) => {
     const detail = answerAt(created);
-    const verdict = judge(intent, '20402048536279', detail, ['0000000'], [], success, creation);
+    const verdict = judge(intent, '20402048536279', detail, ['0000000'], [], success, { zone: GY, firstReplyAt });
     expect(verdict.verdict === 'CONFIRM' ? 'CONFIRM' : verdict.verdict === 'HOLD' ? verdict.reason : verdict.verdict).toBe(decided);
-    expect(windowCheckOf(intent, detail.createdAt, 'GUYANA_WALL_CLOCK')).toBe(window);
+    expect(windowCheckOf(intent, detail.createdAt, { zone: GY, firstReplyAt })).toBe(window);
+    // Support says INSIDE exactly when the creation time lets the payment be credited.
+    expect(window === 'INSIDE').toBe(decided === 'CONFIRM');
   });
 
   it('read in the zone the server is configured with; with none, support cannot read it either', () => {
-    const inTime = new Date(opened.getTime() + 60_000);
-    expect(windowCheckOf(intent, inTime.toISOString(), 'UTC')).toBe('INSIDE');
-    expect(windowCheckOf(intent, gyStamp(inTime), 'UTC')).toBe('OUTSIDE');
-    expect(windowCheckOf(intent, '2026-10-01T15:39:19.000-04:00', 'UTC')).toBe('INSIDE');
+    const inTime = at(opened.getTime() + 60_000);
+    expect(windowCheckOf(intent, inTime.toISOString(), { zone: 'UTC', firstReplyAt: inTime })).toBe('INSIDE');
+    expect(windowCheckOf(intent, gyStamp(inTime), { zone: 'UTC', firstReplyAt: inTime })).toBe('OUTSIDE');
+    expect(windowCheckOf(intent, '2026-10-01T15:39:19.000-04:00', { zone: 'UTC', firstReplyAt: inTime })).toBe('INSIDE');
     // Even a stamp with an explicit offset: judge() verifies nothing without a configured zone, so support claims nothing.
-    for (const stamp of [gyStamp(inTime), inTime.toISOString(), '2026-10-01T15:39:19.000-04:00']) expect(windowCheckOf(intent, stamp, null)).toBe('UNREADABLE');
+    for (const stamp of [gyStamp(inTime), inTime.toISOString(), '2026-10-01T15:39:19.000-04:00']) {
+      expect(windowCheckOf(intent, stamp, { zone: null, firstReplyAt: inTime })).toBe('UNREADABLE');
+    }
     // judge() holds every payment then (CREATION_ZONE_UNVERIFIED).
-    expect(judge(intent, '20402048536279', answerAt(gyStamp(inTime)), ['0000000'], [], success, { zone: null, firstReplyAt: intent.expiresAt }))
+    expect(judge(intent, '20402048536279', answerAt(gyStamp(inTime)), ['0000000'], [], success, { zone: null, firstReplyAt: inTime }))
       .toMatchObject({ verdict: 'HOLD', reason: 'CREATION_ZONE_UNVERIFIED' });
   });
 });
@@ -127,7 +135,7 @@ describe('a timeline entry says only what the allowlist names', () => {
     const entry = timelineEntryOf(intent, {
       source: 'RETURN', detail: 'MMG_RESULT_0', failure: null, createdAt: at,
       body: { merchantTransactionId: intent.merchantTransactionId, transactionId: '20402048536279', ResultCode: '0', ResultMessage: 'Transaction Successful', htmlResponse: '<html><body><h1>Transaction Successful</h1></body></html>', token: '[redacted]' },
-    }, 'GUYANA_WALL_CLOCK');
+    }, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: at });
     expect(Object.keys(entry).sort()).toEqual([...MMG_CHECKOUT_TIMELINE_KEYS].sort());
     expect(entry).toMatchObject({ source: 'RETURN', resultCode: '0', mmgTransactionId: '20402048536279', windowCheck: 'INSIDE', transactionStatus: null, amount: null });
     expect(JSON.stringify(entry)).not.toMatch(/Successful|html|redacted|token/i);
@@ -137,7 +145,7 @@ describe('a timeline entry says only what the allowlist names', () => {
     const entry = timelineEntryOf(intent, {
       source: 'LOOKUP', detail: '20402048536279', failure: null, createdAt: at,
       body: { transactionStatus: 'successful', amount: '500', currency: 'GYD', creationDate: gyStamp(at), transactionReference: '20402048601581', subType: 'subscriber_mpay', debitParty: [{ key: 'accountid', value: '6000002' }] },
-    }, 'GUYANA_WALL_CLOCK');
+    }, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: at });
     expect(entry).toMatchObject({
       source: 'LOOKUP', transactionStatus: 'successful', amount: '500', currency: 'GYD',
       mmgTransactionId: '20402048536279', mmgTransactionReference: '20402048601581', windowCheck: 'INSIDE', resultCode: null,
@@ -145,8 +153,16 @@ describe('a timeline entry says only what the allowlist names', () => {
     expect(JSON.stringify(entry)).not.toContain('6000002');
   });
 
+  it('[Sol, DS663] a lookup whose MMG time is more than two minutes after the first reply naming it shows AFTER_REPLY, as judge() holds it', () => {
+    const entry = timelineEntryOf(intent, {
+      source: 'LOOKUP', detail: '20402048536279', failure: null, createdAt: at,
+      body: { transactionStatus: 'successful', amount: '500', currency: 'GYD', creationDate: gyStamp(new Date(at.getTime() + 2 * 60_000 + 1)), transactionReference: '20402048601581' },
+    }, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: at });
+    expect(entry.windowCheck).toBe('AFTER_REPLY');
+  });
+
   it('a lookup MMG could not answer carries its failure and nothing invented', () => {
-    const entry = timelineEntryOf(intent, { source: 'LOOKUP', detail: '20402048536279', failure: 'LOOKUP_NOT_FOUND', createdAt: at, body: null }, 'GUYANA_WALL_CLOCK');
+    const entry = timelineEntryOf(intent, { source: 'LOOKUP', detail: '20402048536279', failure: 'LOOKUP_NOT_FOUND', createdAt: at, body: null }, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: at });
     expect(entry).toMatchObject({ failure: 'LOOKUP_NOT_FOUND', transactionStatus: null, amount: null, currency: null, windowCheck: null, mmgTransactionReference: null });
   });
 
@@ -154,7 +170,7 @@ describe('a timeline entry says only what the allowlist names', () => {
     const entry = timelineEntryOf(intent, {
       source: 'LOOKUP', detail: 'not an id!', failure: null, createdAt: at,
       body: { transactionStatus: 'x'.repeat(200), amount: { nested: true }, currency: 'GYDX', transactionReference: 'has space' },
-    }, 'GUYANA_WALL_CLOCK');
+    }, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: at });
     expect(entry).toMatchObject({ mmgTransactionId: null, transactionStatus: null, amount: null, currency: null, mmgTransactionReference: null });
   });
 });
