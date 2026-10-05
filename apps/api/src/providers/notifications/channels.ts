@@ -195,41 +195,55 @@ class TwilioSmsProvider implements SmsProvider {
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
     if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
     const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
-    // Bound the call: a hung Twilio must not hang the login request behind it.
+    // Bound the WHOLE call, body read included: a hung Twilio must not hang
+    // the login request or the ops page behind it. Abort releases the
+    // connection; the deadline's own rejection also settles an HTTP stack
+    // that never honours its abort signal.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SMS_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error('Twilio SMS timed out'));
+        controller.abort();
+      }, SMS_TIMEOUT_MS);
+      timer.unref?.();
+    });
     try {
-      let res: Response;
-      try {
-        // A Messaging Service sends on its own sender pool; a bare From
-        // number is the legacy path. Validation guarantees exactly one.
-        const sender: Record<string, string> = this.messagingServiceSid
-          ? { MessagingServiceSid: this.messagingServiceSid }
-          : { From: this.from };
-        const effect = () => fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ To: to, ...sender, Body: body }).toString(),
-          signal: controller.signal,
-        });
-        res = await effect();
-      } catch {
-        throw new Error(controller.signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS request failed');
-      }
-      // Provider bodies can echo request metadata. Keep all response and fetch
-      // exception text outside application errors and their downstream logs.
-      if (!res.ok) throw new Error(`Twilio SMS failed (${res.status})`);
-      let data: { sid?: unknown };
-      try {
-        data = (await res.json()) as { sid?: unknown };
-      } catch {
-        throw new Error('Twilio SMS response invalid');
-      }
-      if (!data || !isTwilioMessageSid(data.sid)) throw new Error('Twilio SMS response invalid');
-      return { ref: data.sid };
+      return await Promise.race([this.post(auth, to, body, controller.signal), deadline]);
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private async post(auth: string, to: string, body: string, signal: AbortSignal): Promise<{ ref: string }> {
+    let res: Response;
+    try {
+      // A Messaging Service sends on its own sender pool; a bare From
+      // number is the legacy path. Validation guarantees exactly one.
+      const sender: Record<string, string> = this.messagingServiceSid
+        ? { MessagingServiceSid: this.messagingServiceSid }
+        : { From: this.from };
+      const effect = () => fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
+        method: 'POST',
+        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ To: to, ...sender, Body: body }).toString(),
+        signal,
+      });
+      res = await effect();
+    } catch {
+      throw new Error(signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS request failed');
+    }
+    // Provider bodies can echo request metadata. Keep all response and fetch
+    // exception text outside application errors and their downstream logs.
+    if (!res.ok) throw new Error(`Twilio SMS failed (${res.status})`);
+    let data: { sid?: unknown };
+    try {
+      data = (await res.json()) as { sid?: unknown };
+    } catch {
+      throw new Error(signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS response invalid');
+    }
+    if (!data || !isTwilioMessageSid(data.sid)) throw new Error('Twilio SMS response invalid');
+    return { ref: data.sid };
   }
 }
 
