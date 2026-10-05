@@ -4124,6 +4124,15 @@ model Zone {
   version         Int        @default(1)
   deliveryBaseFee Decimal?   @db.Decimal(10, 2)
   deliveryPerKm   Decimal?   @db.Decimal(10, 2)
+  /// [ZONE-FARES] The taxi per-km rate for a trip that starts or ends here,
+  /// in whole units of the market's currency; null = no override (the
+  /// market's rate). The formula charges it for every kilometre beyond the
+  /// included ones; the base and the included kilometres stay the market's.
+  /// When both ends set one, the higher applies. A fixed fare for the pair
+  /// (ZoneFare) still wins over it. Owner, 1 Oct 2026: an airport prices per
+  /// kilometre, never as a fixed pair — a fixed fare is unfair to people who
+  /// live near the airport. CHECKed whole and positive in the migration.
+  taxiPerKm       Decimal?   @db.Decimal(10, 2)
   surgeMultiplier Float      @default(1.0)
   riders          Rider[]    @relation("riderZones")
   faresFrom       ZoneFare[] @relation("zoneFareFrom")
