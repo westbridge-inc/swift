@@ -71,7 +71,7 @@ for (const role of ['rider', 'driver'] as const) describe(`${role} legacy docume
     const { hold } = await placeDocLegalHold(app.prisma, { subjectUserId: p.userId, placedBy: p.userId, ownerId: p.userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86400000) });
     expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD' });
     expect((await p.read()).nationalIdUrl).toBe(p.urls['nationalIdUrl']);
-    for (const key of Object.values(p.urls)) expect(await storage.getObject(key)).toEqual(bytes);
+    for (const key of Object.values(p.urls)) await expect(storage.getObject(key)).resolves.toEqual(bytes);
     await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: p.userId, reason: 'Synthetic case closed' });
     await retryAccountErasures({ prisma: app.prisma, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as any });
     expect((await p.read()).nationalIdUrl).toBeNull();
