@@ -9,7 +9,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { requestOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
+import { requestPasswordResetOtp, loginWithOtp, registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
 import { nanoid } from 'nanoid';
 import { syntheticLocationOwner } from './helpers/online-mover';
 
@@ -301,7 +301,7 @@ describe('Email + password login with lockout', () => {
       }),
     ]);
 
-    const code = await requestOtp(app, MOVER_PHONE);
+    const code = await requestPasswordResetOtp(app, MOVER_PHONE);
     const reset = await inject('POST', '/api/v1/auth/password/reset', {
       phone: MOVER_PHONE,
       code,
