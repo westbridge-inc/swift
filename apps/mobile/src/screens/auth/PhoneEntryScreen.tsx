@@ -102,6 +102,12 @@ export function PhoneEntryScreen() {
               onChangeText={onChangeDigits}
               error={err}
               autoFocus
+              // [ANDROID-QA] On Android the keyboard covers Send Code (edge-to-edge
+              // does not resize the window), so its ✓ key sends the code too.
+              returnKeyType="done"
+              onSubmitEditing={() => {
+                if (valid && !locked && !send.isPending) send.mutate(fullPhone);
+              }}
               right={
                 <View
                   accessible
