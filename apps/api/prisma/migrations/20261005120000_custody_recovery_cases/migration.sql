@@ -33,7 +33,7 @@
 --   DROP FUNCTION custody_recovery_cases_identity_frozen();
 --   DROP TYPE "CustodyRecoveryState";
 --   DROP TYPE "CustodyIncidentReason";
---   DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261004130000_custody_recovery_cases';
+--   DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261005120000_custody_recovery_cases';
 --   COMMIT;
 
 SET lock_timeout = '10s';
