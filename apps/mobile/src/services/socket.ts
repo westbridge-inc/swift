@@ -22,7 +22,9 @@ export function getSocket(): Socket {
   if (!socket) {
     socket = io(API_URL, {
       autoConnect: false,
-      transports: ['websocket'],
+      transports: ['websocket', 'polling'],
+      // Try polling when a carrier proxy rejects the first WebSocket transport.
+      tryAllTransports: true,
       // Callback form: every (re)connection attempt reads the CURRENT access
       // token. A static object froze the login-time token, so any reconnect
       // after a token refresh was rejected forever — an online mover silently
