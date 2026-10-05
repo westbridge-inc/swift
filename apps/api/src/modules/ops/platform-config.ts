@@ -28,12 +28,16 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  */
 
 /** Bump when any value below changes; recorded with every apply.
- *  2026-10-01.1: the owner's Georgetown fares — Guyana's taxiRates, and the
- *  delivery columns a fresh Georgetown Central zone is created with.
- *  2026-10-01.2 [ZONE-FARES]: the CJIA and Ogle airport zones with their own
- *  taxi per-km rate, and no fixed zone-to-zone fares at all (the Georgetown
- *  Central ↔ South 2,000 pair is gone). */
-export const PLATFORM_CONFIG_VERSION = '2026-10-01.2';
+ *  2026-10-01.1 (main): the owner's Georgetown fares — Guyana's taxiRates, and
+ *  the delivery columns a fresh Georgetown Central zone is created with.
+ *  2026-10-01.2 (main) [ZONE-FARES]: the CJIA and Ogle airport zones with their
+ *  own taxi per-km rate, and no fixed zone-to-zone fares at all (the
+ *  Georgetown Central ↔ South 2,000 pair is gone).
+ *  2026-09-30.1 (#1393): the owner's taxi weekly fee of GY$8,000.
+ *  2026-10-04.2: all of these together, as merged; no earlier version
+ *  (including 2026-10-04.1, the previous merge of this lane) describes these
+ *  values, so none may be reused. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-04.2';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -56,13 +60,14 @@ export const COMPLETE_CARD = 'complete';
 // which role it provisions is config/vehicle-classes.ts — this file only
 // prices them. Every rate is a whole number of dollars.
 // The owner, 2026-09-29: delivery riders (the STANDARD band) pay 6,000 a week,
-// down from 8,000. Taxi drivers (including taxi drivers who also deliver) and
-// heavy delivery are unchanged. Existing riders move at the next weekly re-tier.
+// down from 8,000. The owner, 2026-09-30: taxi drivers pay 8,000 a week,
+// including taxi drivers who also deliver. Heavy delivery stays 9,000.
+// Existing subscriptions move at the next weekly re-tier.
 export const guyanaTiers = {
   card: COMPLETE_CARD,
   mover: 6000,
   moverHeavy: 9000,
-  taxiDriver: 9000,
+  taxiDriver: 8000,
   // Services carry no catalogue — a solo tradesman is not a restaurant.
   serviceVendor: 8000,
   smallVendor: 15000,
