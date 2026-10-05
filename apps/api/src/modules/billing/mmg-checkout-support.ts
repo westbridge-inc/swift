@@ -12,6 +12,7 @@ import { bindTenantTransaction } from '../../plugins/prisma';
 import { normalizePhone } from '../../utils/phone';
 import { maskPhone } from '../auth/step-up';
 import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, mmgCreationInstant } from './mmg-checkout.service';
+import { mmgCreationZone, type MmgCreationZone } from '../../providers/mmg/mmg-checkout';
 
 // ---------------------------------------------------------------------------
 // [MMG support lookup] Support finds an MMG weekly-fee payment by any id MMG or
@@ -98,11 +99,17 @@ export function decodeSupportCursor(cursor: string): { createdAt: Date; id: stri
 /**
  * Condition 5 of the owner's automatic confirmation, as support reads it:
  * where MMG's creationDate falls against the checkout's window, with the same
- * clock tolerance judge() decides with. An absent or unreadable stamp is
- * UNREADABLE (judge holds it as CREATION_DATE_UNREADABLE).
+ * clock tolerance judge() decides with, the stamp read in the zone the server
+ * is configured with (MMG_CHECKOUT_CREATION_ZONE) [#1393 DS632]. An absent or
+ * unreadable stamp is UNREADABLE (judge holds it as CREATION_DATE_UNREADABLE),
+ * and so is every stamp while no zone is configured (judge holds those as
+ * CREATION_ZONE_UNVERIFIED).
  */
-export function windowCheckOf(intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null): 'INSIDE' | 'OUTSIDE' | 'UNREADABLE' {
-  const created = mmgCreationInstant(stamp);
+export function windowCheckOf(
+  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, zone: MmgCreationZone | null,
+): 'INSIDE' | 'OUTSIDE' | 'UNREADABLE' {
+  if (zone === null) return 'UNREADABLE';
+  const created = mmgCreationInstant(stamp, zone);
   if (created === null) return 'UNREADABLE';
   return created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS
     ? 'OUTSIDE'
@@ -140,7 +147,9 @@ export interface ObservationForTimeline {
  * HTML, the parties, any redacted field) ever reaches the answer. A value not
  * shaped like what it claims to be is dropped, never shown.
  */
-export function timelineEntryOf(intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, o: ObservationForTimeline): MmgCheckoutTimelineEntry {
+export function timelineEntryOf(
+  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, o: ObservationForTimeline, zone: MmgCreationZone | null,
+): MmgCheckoutTimelineEntry {
   const body = o.body && typeof o.body === 'object' && !Array.isArray(o.body) ? o.body as Record<string, unknown> : null;
   const at = o.createdAt.toISOString();
   const failure = failureOf(o.failure);
@@ -155,7 +164,7 @@ export function timelineEntryOf(intent: Pick<MmgCheckoutIntent, 'createdAt' | 'e
       mmgTransactionReference: answer ? mmgIdOf(answer['transactionReference']) : null,
       amount: answer ? amountOf(answer['amount']) : null,
       currency: answer ? currencyOf(answer['currency']) : null,
-      windowCheck: answer ? windowCheckOf(intent, typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null) : null,
+      windowCheck: answer ? windowCheckOf(intent, typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null, zone) : null,
       failure,
     };
   }
@@ -383,9 +392,10 @@ export async function mmgCheckoutSupportDetail(db: PrismaClient, input: { tenant
       select: { source: true, detail: true, failure: true, createdAt: true, body: true },
     }),
   ]);
+  const zone = mmgCreationZone();
   return {
     ...rows[0]!,
-    timeline: observations.slice(0, MMG_SUPPORT_TIMELINE_MAX).map((o) => timelineEntryOf(row, o)),
+    timeline: observations.slice(0, MMG_SUPPORT_TIMELINE_MAX).map((o) => timelineEntryOf(row, o, zone)),
     timelineTruncated: observations.length > MMG_SUPPORT_TIMELINE_MAX,
     creditedPeriod: row.status === 'CONFIRMED' ? await creditedPeriodOf(db, row) : null,
   };

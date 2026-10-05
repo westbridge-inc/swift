@@ -58,6 +58,7 @@ let app: FastifyInstance;
 let sandbox: SandboxMmgCheckoutProvider;
 let kekBefore: string | undefined;
 let enabledBefore: string | undefined;
+let zoneBefore: string | undefined;
 const startedAt = new Date();
 
 const lookups = new Map<string, MmgLookupDetail>();
@@ -231,6 +232,11 @@ beforeAll(async () => {
   process.env['MMG_CHECKOUT_ENABLED'] = '1';
   kekBefore = process.env['MASTER_KEK'];
   process.env['MASTER_KEK'] = randomBytes(32).toString('base64');
+  // [#1393 DS632] How MMG's payment time is read, as staging and production
+  // set it (deploy/.env.deploy.example): the confirmations below and the
+  // window support reports both read it. Unset, every payment would be held.
+  zoneBefore = process.env['MMG_CHECKOUT_CREATION_ZONE'];
+  process.env['MMG_CHECKOUT_CREATION_ZONE'] = 'GUYANA_WALL_CLOCK';
   resetKeyProviderForTests();
   const pair = await new Promise<{ publicKey: KeyObject; privateKey: KeyObject }>((res, rej) => {
     generateKeyPair('rsa', { modulusLength: 4096 }, (err, publicKey, privateKey) => (err ? rej(err) : res({ publicKey, privateKey })));
@@ -308,6 +314,8 @@ afterAll(async () => {
   await app.close();
   if (kekBefore === undefined) delete process.env['MASTER_KEK'];
   else process.env['MASTER_KEK'] = kekBefore;
+  if (zoneBefore === undefined) delete process.env['MMG_CHECKOUT_CREATION_ZONE'];
+  else process.env['MMG_CHECKOUT_CREATION_ZONE'] = zoneBefore;
   if (enabledBefore === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
   else process.env['MMG_CHECKOUT_ENABLED'] = enabledBefore;
   resetKeyProviderForTests();
