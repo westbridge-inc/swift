@@ -315,7 +315,21 @@ const config: SwiftExpoConfig = {
         color: brandMaroon,
       },
     ],
-    'react-native-maps',
+    // react-native-maps ships its own config plugin, and Expo gives IT the
+    // manifest instead of the built-in step that reads
+    // `android.config.googleMaps.apiKey` above. That plugin writes
+    // com.google.android.geo.API_KEY only from `androidGoogleMapsApiKey`, and
+    // REMOVES it when the option is absent. Without this option a build that
+    // HAS the key still ships a keyless manifest (it happened with the
+    // 1 Oct preview and Play builds). android-maps-key-manifest.test.ts
+    // compiles the real manifest to keep it that way.
+    //
+    // Android builds only: plugin options, unlike android.config, survive
+    // into the public config the app embeds, and iOS has no Google Maps.
+    [
+      'react-native-maps',
+      androidMapsApiKey && buildsAndroidArtifact ? { androidGoogleMapsApiKey: androidMapsApiKey } : {},
+    ],
     'expo-image',
     'expo-secure-store',
     'expo-video',
