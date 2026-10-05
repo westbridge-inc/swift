@@ -34,6 +34,7 @@ import { parseCsvWithHeader } from '../../utils/csv';
 import { guessColumnMapping, applyMapping, toImportCsv, REQUIRED_FIELDS, type ColumnMapping } from '../../utils/catalogue-map';
 import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from '../../utils/xlsx-zip-guard';
 import { parseMenuText } from '../../utils/menu-text-parse';
+import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 import { ReviewDemoMoneyRefusedError, refuseReviewAccountRoleGrant } from '../review/demo-policy';
@@ -2626,8 +2627,8 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  items to CONFIRM (master plan §3.1). Deterministic guard rails: the AI
    *  parser reads the extracted text; rows without a parseable price are
    *  dropped, never invented, and nothing imports until the vendor confirms. */
-  app.post('/items/import/menu-parse', auth, async (request) => {
-    await requireVendor(app, request, 'MANAGER');
+  app.post('/items/import/menu-parse', { ...auth, config: { rateLimit: { max: 6, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach a PDF menu');
     if (file.mimetype !== 'application/pdf') {
@@ -2635,28 +2636,18 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     const buffer = await file.toBuffer();
-    let text = '';
+    const abort = new AbortController();
+    const onAbort = () => abort.abort();
+    const onClose = () => { if (!reply.raw.writableFinished) abort.abort(); };
+    request.raw.once('aborted', onAbort);
+    reply.raw.once('close', onClose);
+    if (request.raw.aborted || reply.raw.destroyed) abort.abort();
+    let text: string;
     try {
-      const { PDFParse } = await import('pdf-parse');
-      const parser = new PDFParse({ data: new Uint8Array(buffer) });
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        // A crafted PDF (a "bomb": a tiny file that decompresses to millions of
-        // pages) can make getText() churn CPU/memory for a long time even within
-        // the 5MB upload cap. Bound it — a real menu parses in well under a second.
-        const parsed = await Promise.race([
-          parser.getText(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error('menu PDF parse exceeded its time budget')), 15_000);
-          }),
-        ]);
-        text = (parsed.text ?? '').trim();
-      } finally {
-        if (timer) clearTimeout(timer);
-        await parser.destroy().catch(() => undefined);
-      }
-    } catch {
-      throw new AppError(400, 'BAD_MENU_FILE', 'Could not read that PDF');
+      text = await extractMenuPdf(buffer, vendorId, abort.signal);
+    } finally {
+      request.raw.off('aborted', onAbort);
+      reply.raw.off('close', onClose);
     }
     if (text.length < 20) {
       throw new AppError(422, 'MENU_NO_TEXT', 'That PDF has no readable text (a photo scan?) — use CSV/Excel or type items in');

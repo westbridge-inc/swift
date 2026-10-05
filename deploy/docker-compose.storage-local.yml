@@ -1,0 +1,37 @@
+# Explicit alternative to the default S3-compatible topology.
+# Always combine -f docker-compose.yml -f docker-compose.storage-local.yml;
+# base Compose alone intentionally refuses local storage. pilot-up.sh keeps
+# the base-only S3 path; selecting this overlay is an operator cutover.
+# Optional managed-local storage topology. This is not an activation or
+# migration command. Before selecting this overlay, inventory existing
+# references and bytes, copy them into the designated external volume, and
+# verify hashes plus API/worker reads. Preserve the old root/container until
+# reconciliation is complete. Never attach an empty volume over existing
+# objects and call that a migration. There is no automatic provider switch.
+#
+# Separately prove object-byte backup/restore, database reference restore,
+# key recovery, and hold/erasure reconciliation. The acknowledgement below
+# records that obligation; it does not certify any backup. Only the authorized
+# deployment owner provisions or selects this volume. Existing-volume access
+# must already be correct for the image's unprivileged node user.
+services:
+  api:
+    environment:
+      STORAGE_PROVIDER: local
+      STORAGE_ALLOW_LOCAL: "1"
+      UPLOAD_DIR: /srv/swift/uploads
+      STORAGE_LOCAL_BACKUP_ACK: ${STORAGE_LOCAL_BACKUP_ACK:?acknowledge the separate object-byte backup obligation}
+    volumes:
+      - swift-private-uploads:/srv/swift/uploads
+  worker:
+    environment:
+      STORAGE_PROVIDER: local
+      STORAGE_ALLOW_LOCAL: "1"
+      UPLOAD_DIR: /srv/swift/uploads
+      STORAGE_LOCAL_BACKUP_ACK: ${STORAGE_LOCAL_BACKUP_ACK:?acknowledge the separate object-byte backup obligation}
+    volumes:
+      - swift-private-uploads:/srv/swift/uploads
+volumes:
+  swift-private-uploads:
+    external: true
+    name: ${SWIFT_UPLOAD_VOLUME:?select an inventoried and verified external upload volume}
