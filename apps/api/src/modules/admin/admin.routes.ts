@@ -2463,12 +2463,11 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.post('/custody-cases/:id/direct', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = z.object({
-      outcome: z.enum(CUSTODY_CASE_DIRECTABLE),
-      reason: z.string().trim().min(1).max(500),
-    }).parse(request.body ?? {});
+    const body = z.object({ outcome: z.enum(CUSTODY_CASE_DIRECTABLE) }).parse(request.body ?? {});
+    // The stated reason (header or body) was already demanded by the C3 gate.
+    const reason = reasonOf(request.body, request.headers) ?? '';
     const kase = await directCase({ ...custodyDeps, orderService }, {
-      caseId: id, adminUserId: request.user.userId, outcome: body.outcome, reason: body.reason,
+      caseId: id, adminUserId: request.user.userId, outcome: body.outcome, reason,
       ipAddress: request.ip, userAgent: request.headers['user-agent'],
     });
     return { success: true, data: { caseId: kase.id, state: kase.state, version: kase.version } };
@@ -2476,9 +2475,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.post('/custody-cases/:id/relay', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = z.object({ riderId: z.string().min(1).max(64), reason: z.string().trim().min(1).max(500) }).parse(request.body ?? {});
+    const body = z.object({ riderId: z.string().min(1).max(64) }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
     const kase = await assignRelay(custodyDeps, {
-      caseId: id, adminUserId: request.user.userId, riderId: body.riderId, reason: body.reason,
+      caseId: id, adminUserId: request.user.userId, riderId: body.riderId, reason,
       ipAddress: request.ip, userAgent: request.headers['user-agent'],
     });
     return { success: true, data: { caseId: kase.id, state: kase.state, relayRiderId: kase.relayRiderId, version: kase.version } };
@@ -2486,7 +2486,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.post('/custody-cases/:id/confirm-return', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const { reason } = z.object({ reason: z.string().trim().min(1).max(500) }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
     const pre = await app.prisma.custodyRecoveryCase.findUnique({ where: { id }, select: { orderId: true } });
     if (!pre) throw new NotFoundError('RecoveryCase', id);
     const kase = await confirmReturn({ ...custodyDeps, orderService }, {

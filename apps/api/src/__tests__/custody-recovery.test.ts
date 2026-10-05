@@ -152,7 +152,9 @@ async function relayArranged() {
   const caseId = opened.json().data.caseId as string;
   const direct = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/direct`, { outcome: 'RELAY_REQUIRED', reason: REASON });
   expect(direct.statusCode, direct.body).toBe(200);
-  const named = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/relay`, { riderId: relay.rider.id, reason: REASON });
+  // The console sends the stated reason in the x-swift-reason header (its one
+  // transport), so the relay is named that way here; the body form is used above.
+  const named = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/relay`, { riderId: relay.rider.id }, { 'x-swift-reason': REASON });
   expect(named.statusCode, named.body).toBe(200);
   expect(named.json().data.state).toBe('TRANSFER_IN_PROGRESS');
   const view = await as(holder.token, 'GET', `/api/v1/rider/orders/${order.id}/recovery`);
