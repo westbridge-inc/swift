@@ -4,6 +4,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import type { QrLookup, ScanVerdict } from './qr-codes';
 import { sanitizeSrc, sanitizeTemplate } from './qr-codes';
 import { isProduction } from '../../utils/runtime-mode';
+import { runAsSystem } from '../../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // Scan logging — the analytics spine, fire-and-forget by construction. A scan
@@ -102,8 +103,12 @@ export function enqueueScanEvent(event: PendingScanEvent): void {
 async function flush(): Promise<void> {
   if (!client || queue.length === 0) return;
   const batch = queue.splice(0, FLUSH_BATCH);
+  const db = client;
   try {
-    await client.scanEvent.createMany({ data: batch });
+    // [L01 · tenant wall] A flush writes events of every tenant (each row
+    // carries its own tenantId, taken from its QR code): named system work, not
+    // an unbound write, and never stamped with whatever tenant was ambient.
+    await runAsSystem('qr:scan-log-flush', () => db.scanEvent.createMany({ data: batch }));
   } catch {
     // Analytics never takes the request path down with it; a failed batch is
     // shed-and-counted exactly like queue overflow.

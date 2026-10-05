@@ -25,6 +25,7 @@ import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
+import { runAsSystem } from './tenant-context';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -215,7 +216,10 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
 
   const authorityRecheckTimer = setInterval(() => {
     if (authorityRecheckClosing || authorityRecheckPromise || activeSocketAuthorities.size === 0) return;
-    authorityRecheckPromise = (async () => {
+    // [L01 · tenant wall] The fallback recheck reads every live socket's session
+    // and user, across tenants: named system work, not an unbound read (a
+    // walled login would return nothing and close every socket).
+    authorityRecheckPromise = runAsSystem('socket:authority-recheck', async () => {
       const snapshot = [...activeSocketAuthorities.values()];
       const sessionIds = [...new Set(snapshot.map(({ sessionId }) => sessionId))];
       try {
@@ -261,7 +265,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
         );
         for (const authority of snapshot) closeForAuthorityStoreFailure(authority.socketId);
       }
-    })().catch((error) => {
+    }).catch((error) => {
       app.log.error(
         { err: error },
         'Socket authority fallback recheck crashed; disconnecting all transports',
