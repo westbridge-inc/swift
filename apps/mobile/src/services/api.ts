@@ -8,7 +8,7 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
@@ -237,6 +237,31 @@ export async function revokeAuthSession(refreshToken: string, pushToken: string 
   );
 }
 
+export const UPLOAD_TIMEOUT_MS = 90_000;
+
+/** Retry only standalone file uploads, never custody/identity decisions.
+ * Each attempt uses the original account boundary and the same captured file. */
+async function uploadPhoto(url: string, form: FormData, session?: AuthSessionSnapshot) {
+  const owner = session ?? getAuthSessionSnapshot();
+  const send = (retry = false) => {
+    const current = retry ? owner && authSessionForPrincipal(getAuthSessionSnapshot(), owner) : owner;
+    if (retry && !current) throw new Error('Your session changed. Please select the photo again.');
+    return api.post(url, form, capturedAuthConfig(current ?? undefined, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }));
+  };
+  try {
+    return await send();
+  } catch (error) {
+    if (!axios.isAxiosError(error) || error.response ||
+        !['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code ?? '') ||
+        !owner || !authSessionForPrincipal(getAuthSessionSnapshot(), owner)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    return send(true);
+  }
+}
+
 // Auth
 export const authApi = {
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
@@ -263,9 +288,7 @@ export const authApi = {
   logout: () => api.post('/auth/logout'),
   // Mandatory signup selfie — multipart camera capture; becomes the public photo.
   uploadSelfie: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/auth/selfie', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/auth/selfie', form, session),
 };
 
 // Customer
@@ -589,10 +612,11 @@ export const safetyApi = {
    * sweep prompts random online movers the same way. This client call is what
    * makes both of those answerable — the endpoint existed with no caller.
    */
-  livenessCheck: (form: FormData, profile: 'DRIVER' | 'RIDER') =>
-    api.post(`/safety/liveness-check?profile=${profile}`, form, {
+  livenessCheck: (form: FormData, profile: 'DRIVER' | 'RIDER', session?: AuthSessionSnapshot) =>
+    api.post(`/safety/liveness-check?profile=${profile}`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
-    }),
+    })),
   /** Trip Guardian check-in response (prompted via the guardian:checkin
    *  socket event on the order room, or by the outstanding read below). */
   guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
@@ -750,9 +774,7 @@ export const courierApi = {
   cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),
   // Proof of delivery (D8-02): upload the photo → get a url → confirm handoff.
   uploadProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/courier/order/${id}/proof-photo`, form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto(`/courier/order/${id}/proof-photo`, form, session),
   // [M-28] The proof carries the cash outcome when the RECIPIENT pays: the
   // server refuses a bare proof on an unpaid cash job (a proof never implies
   // money). The GPS is the claim's evidence when the recipient did not pay.
@@ -778,14 +800,13 @@ export const courierApi = {
   ) => api.post(`/courier/order/${id}/return`, body, capturedAuthConfig(session)),
   returnProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
     api.post(`/courier/order/${id}/return-proof`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   // E16: pickup custody proof — upload the captured pickup photo, then confirm
   // pickup with the returned URL + GPS. The server refuses the bare pickup tap.
   uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto(`/courier/order/${id}/pickup-proof-photo`, form, session),
   pickupProof: (
     id: string,
     body: { proofPhotoUrl: string; gps: { lat: number; lng: number } },
@@ -832,9 +853,7 @@ export const verificationApi = {
   status: (role: string, vehicleType?: string) =>
     api.get('/verification/status', { params: { role, ...(vehicleType ? { vehicleType } : {}) } }),
   upload: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/verification/upload', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/verification/upload', form, session),
   submitDocument: (data: {
     role: string;
     docType: string;
@@ -923,7 +942,7 @@ export const riderApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/rider/orders/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
+    uploadPhoto(`/rider/orders/${id}/handover-photo`, form, session),
   // Intermediate delivery-leg transitions. The state machine walks
   // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
   // en-route-delivery → arrived → handover/delivered. Without these the rider
@@ -957,9 +976,7 @@ export const riderApi = {
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
     api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/rider/vehicle-photo', form, session),
 };
 
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
@@ -1012,7 +1029,7 @@ export const driverApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/driver/rides/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/driver/rides/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
+    uploadPhoto(`/driver/rides/${id}/handover-photo`, form, session),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
@@ -1029,9 +1046,7 @@ export const driverApi = {
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
     api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/driver/vehicle-photo', form, session),
 };
 
 // Vendor ops (mounted at /api/v1/vendor)
@@ -1125,6 +1140,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post(`/vendor/items/${id}/image`, form, capturedVendorAuthConfig(session, storeId, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   // Modifiers (option groups + options on an item)
@@ -1185,6 +1201,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post('/vendor/items/import/xlsx', form, capturedVendorAuthConfig(session, storeId, {
+    timeout: UPLOAD_TIMEOUT_MS,
     headers: { 'Content-Type': 'multipart/form-data' },
   })),
   importMenuPdf: (
@@ -1192,6 +1209,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post('/vendor/items/import/menu-parse', form, capturedVendorAuthConfig(session, storeId, {
+    timeout: UPLOAD_TIMEOUT_MS,
     headers: { 'Content-Type': 'multipart/form-data' },
   })),
   // Storefront QR (manager+) — short link + printable SVG code + lifecycle
@@ -1259,6 +1277,7 @@ export const adsApi = {
   ) => api.post(`/ads/campaigns/${campaignId}/checkout`, { provider }, capturedAuthConfig(session)),
   uploadCreative: (campaignId: string, form: FormData, session?: AuthSessionSnapshot) =>
     api.post(`/ads/campaigns/${campaignId}/creatives`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   stats: (campaignId: string) => api.get(`/ads/campaigns/${campaignId}/stats`),

@@ -161,6 +161,7 @@ function explainPermissionDenied(
   // gallery — offer the camera first, library as the alternative.
   const pick = () =>
     Alert.alert(label(docType), 'Add a clear, well-lit photo. All corners visible, no glare.', [
+      ...(upload.isError && upload.variables ? [{ text: 'Retry saved photo', onPress: () => upload.mutate(upload.variables!) }] : []),
       { text: 'Take photo', onPress: fromCamera },
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
@@ -216,7 +217,7 @@ function explainPermissionDenied(
             tone="muted"
             style={uploadErr || rejected ? { color: color.error } : expiringSoon || expired ? { color: color.warning } : undefined}
           >
-            {caption}
+            {upload.isPending ? 'Still uploading — keep this screen open. Slow connections can take a minute.' : caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
           {/* [Owner, 1 Oct · truth] Only when the server says it face-matches

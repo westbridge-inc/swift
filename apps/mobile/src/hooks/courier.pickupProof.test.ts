@@ -39,7 +39,8 @@ describe('the client', () => {
   const courierApi = body(API, 'export const courierApi', '\n};');
   it('uploads the pickup photo to its own route, on the captured session', () => {
     expect(courierApi).toContain('uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot)');
-    expect(courierApi).toContain('`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session');
+    expect(courierApi).toContain('uploadPhoto(`/courier/order/${id}/pickup-proof-photo`, form, session)');
+    expect(API).toContain('capturedAuthConfig(current ?? undefined');
   });
   it('confirms pickup with the issued url and a GPS fix the type does not let it drop', () => {
     expect(courierApi).toContain('body: { proofPhotoUrl: string; gps: { lat: number; lng: number } }');
@@ -86,10 +87,13 @@ describe('the screen', () => {
   });
   it('the capture runs the camera and the pickup-proof mutation, never the rider leg', () => {
     const capture = body(SCREEN, 'const captureCourierPickupProof', 'const isMmgPaid');
-    expect(capture).toContain('ImagePicker.requestCameraPermissionsAsync()');
-    expect(capture).toContain('ImagePicker.launchCameraAsync({ quality: 0.6 })');
+    expect(capture).toContain("captureProof('pickup', owner)");
+    const retainedCapture = body(SCREEN, 'const captureProof =', 'const isCourier =');
+    expect(retainedCapture).toContain('capturedProofs.current.capture(key');
+    expect(retainedCapture).toContain('ImagePicker.requestCameraPermissionsAsync()');
+    expect(retainedCapture).toContain('ImagePicker.launchCameraAsync({ quality: 0.6 })');
     expect(capture).toContain('courierPickupProof.mutate(');
-    expect(capture).toContain('{ orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined }');
+    expect(capture).toContain('{ orderId: job.id, uri: captured.uri, authSession: owner ?? undefined }');
     expect(capture).not.toContain('riderAct.mutate');
   });
   it('the screen is busy while the pickup proof runs', () => {

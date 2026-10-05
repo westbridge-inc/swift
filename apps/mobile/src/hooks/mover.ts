@@ -1,3 +1,4 @@
+import { prepareUploadImage } from '../lib/uploadImage';
 import { runBillingMutation } from '../lib/billingMutation';
 import type { MutationGuard } from './useStepUp';
 import { useEffect, useMemo, useRef } from 'react';
@@ -189,7 +190,8 @@ export function useUploadVehiclePhoto(kind: MoverKind | null) {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', file as unknown as Blob);
+      form.append('file', await prepareUploadImage(file) as unknown as Blob);
+      requireAuthSessionForPrincipal(owner);
       const result = await unwrap(svc(kind as MoverKind).uploadVehiclePhoto(form, current));
       requireAuthSessionForPrincipal(owner);
       return result;
@@ -490,7 +492,8 @@ export async function evidenceFix(owner: AuthSessionSnapshot) {
 export async function uploadHandoverPhoto(kind: MoverKind, orderId: string, uri: string, owner: AuthSessionSnapshot): Promise<string> {
   const session = requireAuthSessionForPrincipal(owner);
   const form = new FormData();
-  form.append('file', { uri, name: 'handover.jpg', type: 'image/jpeg' } as any);
+  form.append('file', await prepareUploadImage({ uri, name: 'handover.jpg', type: 'image/jpeg' }) as any);
+  requireAuthSessionForPrincipal(owner);
   const result = await unwrap<{ url: string }>(svc(kind).uploadHandoverPhoto(orderId, form, session));
   requireAuthSessionForPrincipal(owner);
   if (!result?.url) throw new Error('Photo upload did not return an issued artifact.');
