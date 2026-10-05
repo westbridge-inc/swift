@@ -189,7 +189,7 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   let verified: VerifiedApproval[] = [];
   if (target.environment === 'production') {
     if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
-    verified = verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), { kind: 'plan', target: plan.target.digest, subject: plan.digest }, opts.now);
+    verified = verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), { change: 'plan', target: plan.target.digest, subject: plan.digest }, opts.now);
   }
   const approvers = verified.map((v) => v.approver);
   if (plan.changes.length === 0) {
@@ -288,7 +288,7 @@ export async function promoteBootstrapAdmin(prisma: PrismaClient, databaseUrl: s
     const approvals = opts.approvals ?? [];
     if (approvals.length === 0) { seedPlanCounter.labels('promotion_refused').inc(); throw new SeedRefused('BREAK_GLASS_REQUIRED', `a SUPER_ADMIN already exists (${existing}); promoting another is a break-glass change needing two approvals`); }
     try {
-      verified = verifyApprovals(approvals, parseApproverKeys(opts.approverKeys), { kind: 'promote', target: target.digest, subject: promotionSubject(phone) }, opts.now);
+      verified = verifyApprovals(approvals, parseApproverKeys(opts.approverKeys), { change: 'promote', target: target.digest, subject: promotionSubject(phone) }, opts.now);
     } catch (err) {
       seedPlanCounter.labels('promotion_refused').inc();
       throw err;

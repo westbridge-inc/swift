@@ -38,7 +38,7 @@ export class ApprovalRefused extends Error {
  *  exact request they signed (base64) and their SSHSIG signature (base64). */
 export interface SignedApproval { approver: string; request: string; signature: string }
 
-export interface ApprovalRequest { kind: ApprovalKind; target: string; subject: string; expires: string; nonce: string }
+export interface ApprovalRequest { change: ApprovalKind; target: string; subject: string; expires: string; nonce: string }
 
 export interface PinnedApprover { name: string; keyBlob: Buffer; fingerprint: string }
 
@@ -48,12 +48,12 @@ const sha256hex = (b: Buffer | string) => createHash('sha256').update(b).digest(
 export const promotionSubject = (phone: string) => `phone-sha256:${sha256hex(phone)}`;
 
 export function canonicalRequest(r: ApprovalRequest): string {
-  return [APPROVAL_HEADER, `kind: ${r.kind}`, `target: ${r.target}`, `subject: ${r.subject}`, `expires: ${r.expires}`, `nonce: ${r.nonce}`].join('\n') + '\n';
+  return [APPROVAL_HEADER, `kind: ${r.change}`, `target: ${r.target}`, `subject: ${r.subject}`, `expires: ${r.expires}`, `nonce: ${r.nonce}`].join('\n') + '\n';
 }
 
 /** What the server prints for the approvers to sign: valid for `lifetimeMs`. */
-export function approvalRequest(kind: ApprovalKind, target: string, subject: string, now = new Date(), lifetimeMs = APPROVAL_DEFAULT_LIFETIME_MS): string {
-  return canonicalRequest({ kind, target, subject, expires: new Date(now.getTime() + lifetimeMs).toISOString(), nonce: randomBytes(16).toString('hex') });
+export function approvalRequest(change: ApprovalKind, target: string, subject: string, now = new Date(), lifetimeMs = APPROVAL_DEFAULT_LIFETIME_MS): string {
+  return canonicalRequest({ change, target, subject, expires: new Date(now.getTime() + lifetimeMs).toISOString(), nonce: randomBytes(16).toString('hex') });
 }
 
 export function parseRequest(text: string): ApprovalRequest {
@@ -64,9 +64,9 @@ export function parseRequest(text: string): ApprovalRequest {
     return line.slice(name.length + 2);
   };
   if (lines[0] !== APPROVAL_HEADER) throw new ApprovalRefused('REQUEST_MALFORMED', 'the request does not start with the approval header');
-  const kind = field(1, 'kind');
-  if (kind !== 'plan' && kind !== 'promote') throw new ApprovalRefused('REQUEST_MALFORMED', 'the request kind is neither plan nor promote');
-  const r: ApprovalRequest = { kind, target: field(2, 'target'), subject: field(3, 'subject'), expires: field(4, 'expires'), nonce: field(5, 'nonce') };
+  const change = field(1, 'kind');
+  if (change !== 'plan' && change !== 'promote') throw new ApprovalRefused('REQUEST_MALFORMED', 'the request kind is neither plan nor promote');
+  const r: ApprovalRequest = { change, target: field(2, 'target'), subject: field(3, 'subject'), expires: field(4, 'expires'), nonce: field(5, 'nonce') };
   if (!/^[0-9a-f]{32}$/.test(r.nonce) || !Number.isFinite(Date.parse(r.expires))) throw new ApprovalRefused('REQUEST_MALFORMED', 'the request nonce or expiry is malformed');
   // Exactly the canonical bytes: nothing extra signed, nothing reinterpreted.
   if (canonicalRequest(r) !== text) throw new ApprovalRefused('REQUEST_MALFORMED', 'the request is not in canonical form');
@@ -159,7 +159,7 @@ export interface VerifiedApproval { approver: string; fingerprint: string; consu
 export function verifyApprovals(
   approvals: SignedApproval[],
   pinned: Map<string, PinnedApprover>,
-  expect: { kind: ApprovalKind; target: string; subject: string },
+  expect: { change: ApprovalKind; target: string; subject: string },
   now = new Date(),
 ): VerifiedApproval[] {
   if (pinned.size < 2) throw new ApprovalRefused('APPROVERS_NOT_PINNED', 'SEED_APPROVER_KEYS must pin at least two approvers, each with their own key');
@@ -170,8 +170,8 @@ export function verifyApprovals(
     if (!who) throw new ApprovalRefused('APPROVER_UNKNOWN', `${a.approver || '?'} is not a pinned approver`);
     const requestText = Buffer.from(a.request, 'base64').toString('utf8');
     const req = parseRequest(requestText);
-    if (req.kind !== expect.kind || req.target !== expect.target || req.subject !== expect.subject) {
-      throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} is for another ${req.kind === expect.kind ? 'database or subject' : 'kind of change'}`);
+    if (req.change !== expect.change || req.target !== expect.target || req.subject !== expect.subject) {
+      throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} is for another ${req.change === expect.change ? 'database or subject' : 'kind of change'}`);
     }
     const expiresAt = Date.parse(req.expires);
     if (expiresAt <= now.getTime()) throw new ApprovalRefused('APPROVAL_EXPIRED', `approval by ${a.approver} expired at ${req.expires}`);
