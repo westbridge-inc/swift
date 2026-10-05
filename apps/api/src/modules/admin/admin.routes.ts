@@ -47,6 +47,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
+import { AccountService, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -5787,6 +5788,45 @@ export async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     const updated = await mutationOrNotFound('SupportTicket', id, () => support.resolve(id, request.user.userId, body));
     return { success: true, data: updated };
+  });
+
+  // [DELETION-INTEGRITY] A business or advertiser asks for closure in the app
+  // and gets a ticket. This completes it, through the same erasure a person's
+  // own deletion runs: every obligation check still applies, so live work or
+  // open cash refuses with the person's own message and the request stays
+  // open. Only a request confirmed in the app qualifies, and a staff account
+  // is never closed from the support queue.
+  app.post('/support/:id/complete-account-closure', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const ticket = await tenantPrisma.supportTicket.findUnique({
+      where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
+    });
+    if (!ticket) throw new NotFoundError('SupportTicket', id);
+    if (ticket.category !== 'ACCOUNT' || ticket.subject !== ACCOUNT_CLOSURE_SUBJECT) {
+      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request confirmed in the app can be completed here.');
+    }
+    if (ticket.status === 'RESOLVED') throw new AppError(409, 'ALREADY_RESOLVED', 'This closure request is already resolved.');
+    const [subject, staffGrant] = await Promise.all([
+      tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { roles: true } }),
+      app.prisma.admin.findUnique({ where: { userId: ticket.userId }, select: { userId: true } }),
+    ]);
+    if (!subject) throw new NotFoundError('User', ticket.userId);
+    if (ticket.userId === request.user.userId || staffGrant
+      || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
+      throw new ForbiddenError('A staff account is not closed from the support queue.');
+    }
+    const outcome = await new AccountService(app).deleteAccount(ticket.userId);
+    const complete = 'deleted' in outcome && outcome.deleted === true;
+    await tenantPrisma.supportTicket.updateMany({
+      where: { id, status: { not: 'RESOLVED' } },
+      data: {
+        status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: request.user.userId, resolvedAt: new Date(),
+        adminNote: complete
+          ? 'Account closed and personal data de-identified; financial and legal records are retained.'
+          : 'Account closed; the remaining erasure is pending and retried automatically.',
+      },
+    });
+    return { success: true, data: { ticketId: id, outcome } };
   });
 
   // =========================================================================

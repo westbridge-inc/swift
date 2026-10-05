@@ -334,6 +334,10 @@ export const resolveSupportTicket = (
     method: 'PUT',
     body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
   });
+/** [DELETION-INTEGRITY] Completes an in-app account closure request: the
+ *  server runs the same erasure checks as a person's own deletion. */
+export const completeAccountClosure = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/support/${id}/complete-account-closure`, { method: 'POST', body: JSON.stringify({ reason }), reason });
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.
