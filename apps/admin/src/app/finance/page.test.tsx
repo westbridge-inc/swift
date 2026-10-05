@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import FinancePage from './page';
 import {
@@ -216,5 +216,78 @@ describe('finance settlement mutation', () => {
       String(url).includes('/api/v1/admin/finance/settlements?'),
     );
     expect(settlementReads).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [ADMIN-TRUTH] Each finance read that FAILED fell through to a zero or an
+// empty state: "0" active subscriptions, "$0" outstanding with "0 unsettled
+// handovers", "0" unconfirmed MMG deliveries, "No completed orders yet",
+// "Nothing here", and the pending sales digests silently vanished. On a
+// finance page a failed read must say it failed — never an authoritative zero.
+// ---------------------------------------------------------------------------
+
+const FAILED = { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'boom' } } };
+
+/** The summary card whose label is `label`. */
+const card = (label: string) => screen.getByText(label).parentElement as HTMLElement;
+
+function failingFinance(failing: ReadonlySet<string>) {
+  const ok = financeHandler(noMutation);
+  return mockApi((request) => (request.method === 'GET' && failing.has(request.url.pathname) ? FAILED : ok(request)));
+}
+
+describe('[ADMIN-TRUTH] a failed finance read is unavailable, never zero', () => {
+  it('revenue: the summary cards and the daily list say unavailable', async () => {
+    failingFinance(new Set(['/api/v1/admin/finance/revenue']));
+    renderWithQuery(<FinancePage />);
+
+    expect(await screen.findByText(/Revenue could not be loaded/)).toBeTruthy();
+    expect(screen.getAllByText('unavailable').length).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByText(/No completed orders in the last 30 days/)).toBeNull();
+    // Active subscriptions used to print a bare 0.
+    const active = within(card('Active Subscriptions'));
+    expect(active.getByText('unavailable')).toBeTruthy();
+    expect(active.queryByText('0')).toBeNull();
+  });
+
+  it('payment mix: no "no orders yet" and no zero unconfirmed count', async () => {
+    failingFinance(new Set(['/api/v1/admin/finance/payment-mix']));
+    renderWithQuery(<FinancePage />);
+
+    expect(await screen.findByText(/Payment mix could not be loaded/)).toBeTruthy();
+    expect(screen.queryByText(/No completed orders yet/)).toBeNull();
+    const unconfirmed = within(card('MMG deliveries unconfirmed'));
+    expect(unconfirmed.getByText('unavailable')).toBeTruthy();
+    expect(unconfirmed.queryByText('0')).toBeNull();
+  });
+
+  it('cash ledger: no $0 outstanding, no zero handovers, no "nothing here"', async () => {
+    failingFinance(new Set(['/api/v1/admin/finance/cash-settlements']));
+    renderWithQuery(<FinancePage />);
+
+    expect(await screen.findByText(/cash ledger could not be loaded/i)).toBeTruthy();
+    const outstanding = within(card('Store → rider fees outstanding'));
+    expect(outstanding.getByText('unavailable')).toBeTruthy();
+    expect(outstanding.queryByText('$0')).toBeNull();
+    expect(screen.queryByText(/0 unsettled handovers/)).toBeNull();
+    expect(screen.queryByText(/Nothing here/)).toBeNull();
+  });
+
+  it('sales digests: a failed read is shown, not hidden as "nothing pending"', async () => {
+    failingFinance(new Set(['/api/v1/admin/finance/settlements']));
+    renderWithQuery(<FinancePage />);
+
+    expect(await screen.findByText(/sales digests could not be loaded/i)).toBeTruthy();
+  });
+
+  it('when every read succeeds with real zeros, the zeros are shown as zeros', async () => {
+    mockApi(financeHandler(noMutation));
+    renderWithQuery(<FinancePage />);
+
+    expect(await screen.findByText('$0 GYD')).toBeTruthy();
+    expect(await screen.findByText('0 unsettled handovers (MMG orders)')).toBeTruthy();
+    expect(screen.getByText(/No completed orders yet/)).toBeTruthy();
+    expect(screen.queryByText(/could not be loaded/)).toBeNull();
   });
 });
