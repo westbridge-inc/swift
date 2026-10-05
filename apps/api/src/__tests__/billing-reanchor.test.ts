@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // BILLING-REANCHOR (coordinator ruling 4 Oct under the owner's delegation,
 // OWNER-DECISIONS "Weekly-fee arrears after a pause"): "No arrears for weeks a
@@ -86,6 +87,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // [#1393] Clock evidence first (RESTRICT FKs), then the events, then the rows.
+  await cleanupBillingClocks(app.prisma, subIds);
+  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });

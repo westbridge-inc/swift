@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { runBillingInvariants } from '../modules/billing/invariants';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // SUSPENSION-HEAL (AUD-L8b-003, FINAL §6b): the nightly detector finds a
 // subscription that is SUSPENDED although it is paid through the future and
@@ -55,6 +56,8 @@ async function wronglySuspendedStore(vendorOver: Record<string, unknown> = {}) {
 
 beforeAll(async () => { await prisma.$connect(); });
 afterAll(async () => {
+  // [#1393] Clock evidence first (RESTRICT FKs).
+  await cleanupBillingClocks(prisma, subIds);
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });

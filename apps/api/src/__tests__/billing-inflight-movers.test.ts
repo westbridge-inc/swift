@@ -12,6 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { cleanupBillingClocks, cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 
 // BILLING-INFLIGHT, movers (owner ruling 1 Oct ~22:10: a suspended partner
 // finishes accepted work; only NEW work is blocked until it pays). A weekly-fee
@@ -97,13 +98,16 @@ beforeAll(async () => {
 afterAll(async () => {
   // order_status_logs is append-only: deleting the parent orders cascades them.
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
+  // [#1393] A mover's fee authority and its sources go with the payer: clocks
+  // first, then the people (riders/drivers with them), then the orphaned subscriptions.
+  await cleanupPayerBillingClocks(app.prisma, userIds);
+  await cleanupBillingClocks(app.prisma, subIds);
+  await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.close();
 });
 

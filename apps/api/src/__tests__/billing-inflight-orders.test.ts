@@ -101,12 +101,13 @@ async function billingSuspend() {
   await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'SUSPENDED', suspendedAt: new Date(), currentPeriodEnd: new Date(Date.now() - DAY) } });
   await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' } });
 }
+/** A lapsed fee grace as the shared clock records it since #1393: the enforcement deadline has passed. */
 async function graceLapse() {
-  await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'PAST_DUE', isInGracePeriod: true, gracePeriodEnd: new Date(Date.now() - 60_000), currentPeriodEnd: new Date(Date.now() - 3 * DAY) } });
+  await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'PAST_DUE', isInGracePeriod: true, gracePeriodEnd: new Date(Date.now() - 60_000), billingEnforcementDueAt: new Date(Date.now() - 60_000), currentPeriodEnd: new Date(Date.now() - 3 * DAY) } });
   await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE', acceptingOrders: true, suspensionSource: null } });
 }
 async function restore() {
-  await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'ACTIVE', suspendedAt: null, isInGracePeriod: false, gracePeriodEnd: null, currentPeriodEnd: new Date(Date.now() + 6 * DAY) } });
+  await app.prisma.subscription.update({ where: { id: subId }, data: { status: 'ACTIVE', suspendedAt: null, isInGracePeriod: false, gracePeriodEnd: null, billingEnforcementDueAt: null, currentPeriodEnd: new Date(Date.now() + 6 * DAY) } });
   await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE', acceptingOrders: true, suspensionSource: null } });
 }
 
