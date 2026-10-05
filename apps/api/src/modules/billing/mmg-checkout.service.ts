@@ -808,7 +808,9 @@ export class MmgCheckoutService {
    *  looked up for credit and never credited; operators are paged once per
    *  checkout, whichever door and however often, and whichever path made the
    *  checkout CONFIRMED (already confirmed, confirmed under the lock, or
-   *  confirmed by another verifier after this reply merged) [Sol]. */
+   *  confirmed by another verifier after this reply merged) [Sol], and the
+   *  verifier that credits pages for answers written down before its credit
+   *  (alertUnappliedAnswers) [Sol · delta2]. */
   private async alertUnapplied(intent: MmgCheckoutIntent, reply: MmgCheckoutReply, source: 'RETURN' | 'NOTIFY'): Promise<void> {
     if (reply.resultCode !== '0' || !reply.transactionId) return;
     // Provider identities are stored trimmed and upper-cased; a reply's id has no spaces (MMG_TXN_ID).
@@ -1061,6 +1063,15 @@ export class MmgCheckoutService {
     }
 
     mmgCheckoutEventsCounter.labels('confirmed').inc();
+    // [Sol · delta2] This verifier read MMG's answers before its lookups. A
+    // success answer naming another transaction may have been written down
+    // since: its reply then found the checkout still CONFIRMING and had
+    // nothing to page about. Of a reply merging and this credit, whichever
+    // commits last pages: a reply merging after the credit sees CONFIRMED
+    // and pages itself; one written down before it is seen here.
+    await this.alertUnappliedAnswers(intent.id).catch((err) => {
+      log().error({ err, checkoutId: intent.id }, '[MMG checkout] credited; operators could not be paged about another success answer');
+    });
     // [I5] Paying while behind re-bills at once and reinstates. It moves no
     // money and is idempotent; the billing cycle is the recovery path.
     await this.billing.afterTopUpCommitted(intent.subscriptionId, amount, { notify: false }).catch((err) => {
@@ -1068,6 +1079,25 @@ export class MmgCheckoutService {
     });
     await this.tellPartner(intent, 'CONFIRMED');
     return 'CONFIRMED';
+  }
+
+  /** [Sol · delta2] After a credit commits: every success answer written down
+   *  for this checkout naming a transaction it did not credit pages operators
+   *  (alertUnapplied: once per checkout, never for the credited payment). */
+  private async alertUnappliedAnswers(intentId: string): Promise<void> {
+    const settled = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intentId } });
+    if (settled.status !== 'CONFIRMED') return;
+    const answers = await this.prisma.mmgCheckoutObservation.findMany({
+      where: { intentId, source: { in: ['RETURN', 'NOTIFY'] }, detail: SUCCESS_ANSWER },
+      select: { source: true, body: true }, orderBy: { createdAt: 'asc' }, take: 50,
+    });
+    for (const answer of answers) {
+      const body = answer.body && typeof answer.body === 'object' && !Array.isArray(answer.body) ? answer.body as Record<string, unknown> : null;
+      const transactionId = body?.['transactionId'];
+      if (typeof transactionId !== 'string' || body?.['merchantTransactionId'] !== settled.merchantTransactionId) continue;
+      await this.alertUnapplied(settled, { merchantTransactionId: settled.merchantTransactionId, transactionId, resultCode: '0' },
+        answer.source === 'NOTIFY' ? 'NOTIFY' : 'RETURN');
+    }
   }
 
   /** [I6] A person must look: nothing credits, and a reversal is a two-person decision. */

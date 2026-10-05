@@ -232,6 +232,8 @@ The official merchant page says MMG posts an encrypted TOKEN to the configured R
 
 The planned `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers. Its authentication and server-to-server behavior must be confirmed with MMG before enabling it (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
 
+**Registered with MMG (5 Oct 2026):** MMG has registered Swift's UAT Notify URL, `https://api-staging.swiftgy.com/api/v1/billing/mmg-checkout/notify` (this route). A notify is a pointer only: it is written down and prompts Swift's own lookup with MMG; it never credits anything by itself. Its authentication remains unconfirmed (U3).
+
 Both public routes are rate-limited and size-capped. Neither credits anything by itself: they only prompt the server to check with MMG.
 
 ### Official response interpretation (service boundary)

@@ -2250,6 +2250,56 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(named).toHaveLength(1);
   });
 
+  it('[Sol delta2 · mirror] the reply finishes its whole verification before the slower verifier confirms: the confirming verifier tells operators once', async () => {
+    // Verifier A read the checkout's answers (transaction 1 only) and waits on
+    // MMG's lookup. Reply B (transaction 2) is written down, merges, verifies
+    // (its lookups fail), reschedules and reads the checkout again: still
+    // CONFIRMING, so B has nothing to page about and answers CONFIRMING. Only
+    // then does A confirm transaction 1. A's credit is the last word, so A must
+    // see the success answer B wrote down and page.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('MIRRORFIRST');
+    const second = tx('MIRRORSECOND');
+    approved(first, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    let firstCalls = 0;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first && (firstCalls += 1) === 1) { aInLookup.open(); await releaseA.wait; return plainLookup(id); }
+      if (id === first) return { outcome: 'error', reason: 'MMG lookup HTTP 503' };
+      if (id === second) return { outcome: 'not_found' };
+      return plainLookup(id);
+    };
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      // B runs to its end while A still waits: nothing is confirmed yet.
+      expect(await codeReply(row, '0', second, 'NOTIFY')).toBe('CONFIRMING');
+      expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMING', candidates: [first, second] });
+      expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(0);
+      releaseA.open();
+      await a;
+    } finally {
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+    // A later reply for either payment changes nothing and pages no more.
+    expect(await codeReply(row, '0', second, 'RETURN')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', first, 'RETURN')).toBe('CONFIRMED');
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(1);
+    expect(await topups(s.subId)).toHaveLength(1);
+  });
+
   it('the return door and the notify door at once, both carrying MMG’s answer, credit once', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);

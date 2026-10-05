@@ -65,7 +65,7 @@ Unknown/malformed result fields do not change a checkout. A success requires tra
 ## UNCONFIRMED — requires MMG or a sandbox run
 
 - **U1/U2 resolved:** reply field names and codes are documented above.
-- **U3 partially resolved:** MMG posts an encrypted TOKEN to the configured Response URL; merchants also register an Error URL and optionally a Notify URL. Exact transport parameter spelling, Notify authentication and server-to-server behavior remain unconfirmed. Checkout series PR 3 must wire the API return/notify routes and verify those boundaries; PR 2 currently provides the service only.
+- **U3 partially resolved:** MMG posts an encrypted TOKEN to the configured Response URL; merchants also register an Error URL and optionally a Notify URL. Exact transport parameter spelling, Notify authentication and server-to-server behavior remain unconfirmed. Checkout series PR 3 must wire the API return/notify routes and verify those boundaries; PR 2 currently provides the service only. MMG registered Swift's UAT Notify URL (`https://api-staging.swiftgy.com/api/v1/billing/mmg-checkout/notify`) on 5 Oct 2026; a notify only prompts Swift's own lookup and never credits by itself.
 - **U4** Whether the amount digits are MAJOR units (D1). The MMG page displays the amount on the first sandbox run.
 - **U5 resolved (UAT, 1 Oct):** the merchant-initiated lookup finds a checkout payment by the reply's `transactionId` and answers with MMG's own ledger number in `transactionReference`.
 - **U6** Whether MMG refuses a repeated `merchantTransactionId`.
