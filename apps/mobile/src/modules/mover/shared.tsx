@@ -11,7 +11,12 @@ export const GUTTER = space['2xl'];
 
 /** A job's cash value, whatever vertical it came from. */
 export function jobAmount(j: any) {
-  return money(j?.totalAmount ?? j?.taxiFareTotal ?? j?.fare ?? 0);
+  const value: unknown = j?.totalAmount ?? j?.taxiFareTotal ?? j?.fare;
+  if ((typeof value !== 'number' && typeof value !== 'string') ||
+      (typeof value === 'string' && value.trim() === '') || !Number.isFinite(Number(value))) {
+    return 'Amount unavailable';
+  }
+  return money(Number(value));
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
