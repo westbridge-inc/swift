@@ -56,7 +56,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'dispatch_retrying', 'dispatch_exhausted', 'converted_to_pickup', 'mover_session_revocation',
     // [AF-MOB-006] A custody relay handoff: the holder and the relay rider. Standard
     // (prompt, audible); promoting them to job_update is a product decision.
-    'custody_handoff_code', 'custody_relay_assigned',
+    'custody_handoff_code', 'custody_relay_assigned', 'custody_relay_cancelled',
     'mmg_payment_confirmed', 'mmg_claim_disputed', 'mmg_claim_resolved', 'mmg_claim_mismatch',
     'mmg_unattested_cancellation', 'supply_returned',
     // Rides
@@ -71,7 +71,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // not a marketing nudge, so it stays loud)
     'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning',
     'billing_suspended', 'billing_suspended_nudge', 'billing_reminder', 'billing_banked',
-    'billing_churned', 'billing_topup', 'billing_card_action_required', 'fx_change_notice', 'usd_migration_notice',
+    'billing_churned', 'billing_topup', 'billing_mmg_checkout', 'billing_card_action_required', 'fx_change_notice',
+    'usd_migration_notice',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
     // Verification and trust
