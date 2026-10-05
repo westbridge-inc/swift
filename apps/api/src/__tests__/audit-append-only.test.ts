@@ -175,6 +175,9 @@ describe('dedicated audit purge authority', () => {
     ]) {
       for (const statement of [
         `DELETE FROM public.${table} WHERE id = '${rowId}'`,
+        `UPDATE public.${table} SET id = id WHERE id = '${rowId}'`,
+        `ALTER TABLE public.${table} DISABLE TRIGGER ALL`,
+        'SET LOCAL session_replication_role = replica',
         `SELECT public.${fn}(ARRAY['${rowId}']::text[], 'test-cleanup:app-refused')`,
         `TRUNCATE public.${table}`,
         'SET LOCAL ROLE swift_audit_purge_owner',
@@ -185,7 +188,7 @@ describe('dedicated audit purge authority', () => {
           await tx.$executeRaw`SELECT set_config('app.current_tenant', 'swift-default', true)`;
           await tx.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, 'test-cleanup:app-setting', true)`;
           await tx.$executeRawUnsafe(statement);
-        })).rejects.toThrow(/append-only|permission denied/);
+        })).rejects.toThrow(/append-only|permission denied|must be owner of table/);
       }
     }
     expect(await prisma.auditLog.count({ where: { id } })).toBe(1);
