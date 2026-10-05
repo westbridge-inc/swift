@@ -68,9 +68,13 @@ const LATE_WINDOW_MS = 7 * 24 * 3_600_000;
 const LATE_CHECK_MS = 6 * 3_600_000;
 const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_000] as const;
 /** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's
- *  creationDate, and for when MMG's success answer reached us. [DS632] Also
- *  how far MMG's creationDate may run past the first reply naming it. */
+ *  creationDate, and for when MMG's success answer reached us. */
 const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
+/** [DS632] How far MMG's creationDate may run past the first reply naming it.
+ *  That bound only detects stamps in the wrong zone (hours out); the window
+ *  bound above decides whether a payment is this checkout's. On 1 Oct MMG's
+ *  UAT stamp ran 31 s past our reply, so a slower MMG clock gets five minutes. */
+const CREATION_AFTER_REPLY_TOLERANCE_MS = 5 * 60_000;
 /** An MMG transaction id or ledger number as MMG writes it. */
 const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
@@ -366,7 +370,7 @@ export function judge(
     const created = mmgCreationInstant(detail.createdAt, creation.zone);
     if (created === null) return hold('CREATION_DATE_UNREADABLE', tied);
     // [DS632] Never after Swift first heard of the payment: MMG's stamps would not match the zone.
-    if (creation.firstReplyAt === null || created > creation.firstReplyAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) {
+    if (creation.firstReplyAt === null || created > creation.firstReplyAt.getTime() + CREATION_AFTER_REPLY_TOLERANCE_MS) {
       return hold('CREATION_AFTER_REPLY', tied);
     }
     if (created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) {
