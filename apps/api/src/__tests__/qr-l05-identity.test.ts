@@ -83,8 +83,11 @@ beforeAll(async () => {
   ownerId = (await prisma.vendorOwner.create({ data: { userId } })).id;
 });
 afterAll(async () => {
-  // Synthetic rows are left in the lane database: printed-token identity is
-  // permanent by design, so retired reservations outlive the rows anyway.
+  // Synthetic rows are left in place (printed-token identity is permanent by
+  // design, so retired reservations outlive the rows anyway), but the two
+  // synthetic operators are switched OFF: an extra ACTIVE tenant changes the
+  // public storefront's single-tenant resolution for every later suite.
+  await prisma.tenant.updateMany({ where: { id: { in: [tenantA, tenantB].filter(Boolean) } }, data: { isActive: false } });
   await Promise.all([prisma.$disconnect(), contender.$disconnect()]);
 });
 
@@ -187,7 +190,8 @@ describe('[M4 · §5.6] issuing never reuses an identity', () => {
   it('a store id that had printed codes is never given to a new store, and a store id never changes', async () => {
     const { vendor } = await fixture();
     await expect(prisma.$executeRawUnsafe('UPDATE vendors SET id=$1 WHERE id=$2', `${run}-renamed`, vendor.id)).rejects.toThrow(/QR_TARGET_IMMUTABLE/);
-    await prisma.qrCode.deleteMany({ where: { entityId: vendor.id } });
+    // Deleting the STORE (its printed code row still exists) retires every
+    // reservation that names it, in the same transaction.
     await prisma.vendor.delete({ where: { id: vendor.id } });
     const reserved = await prisma.$queryRaw<Array<{ open: bigint }>>`SELECT count(*) FILTER (WHERE "retiredAt" IS NULL) AS open FROM swift_qr.token_identities WHERE "entityType"='VENDOR' AND "entityId"=${vendor.id}`;
     expect(Number(reserved[0]!.open)).toBe(0);
