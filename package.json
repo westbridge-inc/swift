@@ -11,9 +11,9 @@
     "db:generate": "cd apps/api && npx prisma generate",
     "db:migrate": "cd apps/api && npx prisma migrate dev",
     "db:seed": "cd apps/api && npx prisma db seed",
-    "db:sync": "cd apps/api && npx prisma db push --skip-generate",
+    "db:sync": "cd apps/api && npx prisma migrate deploy",
     "db:studio": "cd apps/api && npx prisma studio",
-    "fix:env": "cd apps/api && npx prisma db push --skip-generate && npx prisma db seed"
+    "fix:env": "cd apps/api && npx prisma migrate deploy && npx prisma db seed"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.0.0",

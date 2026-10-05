@@ -659,6 +659,26 @@ export const agentCashProviderIdConflictsCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [MMG checkout 2/6] Every checkout transition, by event: created, reply,
+ *  reply_unmatched, confirmed, held, not_paid, expired. `held` pages (a person
+ *  must look); `reply_unmatched` is a reply naming no checkout Swift knows. */
+export const mmgCheckoutEventsCounter = new client.Counter({
+  name: 'swift_mmg_checkout_events_total',
+  help: 'MMG hosted-checkout transitions, by event',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
+/** [MMG checkout 2/6] The lookups that verify a checkout, by outcome (found,
+ *  not_found, error). A run of errors means MMG cannot be asked, and nothing
+ *  confirms until it can. */
+export const mmgCheckoutLookupsCounter = new client.Counter({
+  name: 'swift_mmg_checkout_lookups_total',
+  help: 'MMG lookups made to verify a checkout, by outcome',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
 /** [M-18] Provider transactions that hold MORE than one credited observation —
  *  the historical double credits the backfill could not resolve. Set by the
  *  billing poll; reversed only after provider / human reconciliation. */

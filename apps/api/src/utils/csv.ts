@@ -1,3 +1,5 @@
+import { AppError } from './errors';
+
 /**
  * Minimal RFC-4180-ish CSV parsing for catalogue imports: quoted fields,
  * embedded commas/newlines, doubled quotes, CRLF, and a trailing newline.
@@ -8,6 +10,26 @@ export function parseCsv(input: string): string[][] {
   let row: string[] = [];
   let cell = '';
   let inQuotes = false;
+  let parsedCells = 0;
+  const finishCell = () => {
+    if (row.length >= 100) throw new AppError(400, 'CSV_TOO_WIDE', 'CSV is limited to 100 columns');
+    if (++parsedCells > 500_100) throw new AppError(400, 'CSV_TOO_MANY_CELLS', 'CSV exceeds the parsed cells budget');
+    row.push(cell);
+    cell = '';
+  };
+  const finishRow = () => {
+    finishCell();
+    if (row.some((value) => value.trim().length > 0)) {
+      // Header plus 5000 data rows. Refuse before retaining or expanding another row.
+      if (rows.length >= 5001) throw new AppError(400, 'TOO_MANY_ROWS', 'Import is limited to 5000 rows per file');
+      rows.push(row);
+    }
+    row = [];
+  };
+  const append = (char: string) => {
+    if (cell.length >= 2048) throw new AppError(400, 'CSV_CELL_TOO_LONG', 'CSV fields are limited to 2048 characters');
+    cell += char;
+  };
 
   for (let i = 0; i < input.length; i++) {
     const char = input[i]!;
@@ -15,13 +37,13 @@ export function parseCsv(input: string): string[][] {
     if (inQuotes) {
       if (char === '"') {
         if (input[i + 1] === '"') {
-          cell += '"';
+          append('"');
           i++; // doubled quote inside a quoted cell
         } else {
           inQuotes = false;
         }
       } else {
-        cell += char;
+        append(char);
       }
       continue;
     }
@@ -29,27 +51,22 @@ export function parseCsv(input: string): string[][] {
     if (char === '"') {
       inQuotes = true;
     } else if (char === ',') {
-      row.push(cell);
-      cell = '';
+      finishCell();
     } else if (char === '\n' || char === '\r') {
       if (char === '\r' && input[i + 1] === '\n') i++;
-      row.push(cell);
-      cell = '';
-      rows.push(row);
-      row = [];
+      finishRow();
     } else {
-      cell += char;
+      append(char);
     }
   }
 
   // Last cell/row without trailing newline
   if (cell.length > 0 || row.length > 0) {
-    row.push(cell);
-    rows.push(row);
+    finishRow();
   }
 
   // Drop fully-empty rows (blank lines in messy files)
-  return rows.filter((r) => r.some((c) => c.trim().length > 0));
+  return rows;
 }
 
 /** First row is the header; returns objects keyed by trimmed header names. */
@@ -58,7 +75,7 @@ export function parseCsvWithHeader(input: string): Array<Record<string, string>>
   if (rows.length === 0) return [];
   const header = rows[0]!.map((h) => h.trim());
   return rows.slice(1).map((cells) => {
-    const record: Record<string, string> = {};
+    const record: Record<string, string> = Object.create(null) as Record<string, string>;
     header.forEach((key, i) => {
       record[key] = (cells[i] ?? '').trim();
     });

@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { issueReceipt, cashJournalCsv } from '../modules/billing/receipts';
 import { runBillingInvariants } from '../modules/billing/invariants';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // Scenario R (gapless receipts under concurrency) + the nightly invariants
 // [san spec 24.2/16.3]: balance provability, the wrongful-suspension
@@ -53,6 +54,7 @@ async function topupEvent(subscriptionId: string, amount: number) {
 beforeAll(async () => { await prisma.$connect(); });
 
 afterAll(async () => {
+  await cleanupBillingClocks(prisma, subIds);
   await prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.receiptCounter.deleteMany({ where: { tenantId: TENANT } });
   await prisma.collectionContact.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -107,6 +109,12 @@ describe('nightly invariants', () => {
     const { sub } = await makeVendorSub({
       status: 'SUSPENDED', suspendedAt: new Date(), currentPeriodEnd: new Date(Date.now() + 5 * 86_400_000),
     });
+    // [#1393] The detector heals only a suspension billing itself recorded (its
+    // SUSPENDED event, a billing-sourced store suspension): an admin restriction
+    // on a paid-through store is never lifted by it.
+    await prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'SUSPENDED', currencyCode: 'GYD',
+      idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}`, note: 'Auto-suspended after 3 failed charges' } });
+    await prisma.vendor.update({ where: { id: sub.vendorId! }, data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' } });
     const report = await runBillingInvariants(prisma);
     expect(report.wrongfulSuspensions).toContain(sub.id);
     const after = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
@@ -116,7 +124,9 @@ describe('nightly invariants', () => {
   });
 
   it('enforcement leak (ACTIVE, unpaid past grace+6h) is reported, not acted on', async () => {
-    const { sub } = await makeVendorSub({ currentPeriodEnd: new Date(Date.now() - 60 * 3_600_000) });
+    // [#1393] Unpaid 60 hours past its due date on the shared clock, nothing confirming.
+    const due = new Date(Date.now() - 60 * 3_600_000);
+    const { sub } = await makeVendorSub({ currentPeriodEnd: due, nextBillingDate: due });
     const report = await runBillingInvariants(prisma);
     expect(report.enforcementLeaks).toContain(sub.id);
     const untouched = await prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
