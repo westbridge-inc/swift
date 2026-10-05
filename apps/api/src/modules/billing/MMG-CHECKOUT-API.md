@@ -1,10 +1,10 @@
 # MMG weekly-fee checkout: the API contract
 
-This is the contract the phone app and the web build against. The API side ships in two PRs of the MMG checkout series:
-- **PR 2:** the checkout intent, verification with MMG, and crediting.
-- **PR 3:** the routes below and `payActions`.
+This is the contract the phone app and the web build against. The API side shipped in two PRs of the MMG checkout series:
+- **PR 2:** the checkout intent, verification with MMG, and crediting (`mmg-checkout.service.ts`).
+- **PR 3:** the routes below and `payActions` (`mmg-checkout.routes.ts`).
 
-Until PR 3 is merged, these routes do not exist and `payActions` is absent from the subscription payload. Treat an absent `payActions` as "no way to pay in the app".
+A payload from an API older than PR 3 has no `payActions`. Treat an absent `payActions` as "no way to pay in the app".
 
 The wire format to MMG is in `providers/mmg/CHECKOUT-CONTRACT.md`. It never reaches a client.
 
@@ -70,9 +70,12 @@ type PayAction =
 It is `live` only when **all** of these hold:
 - the server's MMG checkout is configured and valid (`MMG_CHECKOUT_ENABLED=1` with complete credentials, which the boot guard already checks);
 - the platform switch allows the caller's platform (section 2);
-- the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED` (paying rejoins), and its fee is not waived.
+- the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED` (paying rejoins), and its fee is not waived;
+- none of this fee's payments is being confirmed: no MMG checkout that is open, confirming, held or expired without an answer, and no card payment that is pending, awaiting 3-D Secure or unclear (the same pause that refuses a new page with `409 PAYMENT_CONFIRMING`, section 4). While a checkout is open or confirming, `latestMmgCheckout` carries it: resume or follow it from there;
+- the billing confirmation clock covers the subscription (the billing cutover maps every subscription; one it has not mapped yet stays `off` until it has, and reading the payload never maps one);
+- the partner is in a production tenant: a store-review demo account never opens a real MMG page.
 
-It is `off` for `PAUSED` (weekly billing stopped: resume first), `CANCELLED` and waived fees.
+It is `off` for `PAUSED` (weekly billing stopped: resume first), `CANCELLED`, waived fees and store-review demo accounts, and while a payment is being confirmed.
 
 ### `amountGyd`
 
@@ -130,7 +133,7 @@ poll GET …/mmg-checkout/{ref}            → section 5
 | 401 | (existing auth codes) | not signed in, or the token expired | the usual refresh or sign-in |
 | 403 | (existing role codes) | not this store's owner | hide Pay |
 | 404 | `SUBSCRIPTION_NOT_FOUND` | no subscription | refetch |
-| 409 | `PAY_ACTION_OFF` | the MMG checkout is not live for this subscription or platform | refetch the subscription, hide the button |
+| 409 | `PAY_ACTION_OFF` | the MMG checkout is not live for this subscription or platform (or the account is a store-review demo) | refetch the subscription, hide the button |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | the key was used for a different request | new tap, new key |
 | 409 | `CHECKOUT_CONFIRMING` | an earlier checkout is being confirmed; `error.details.ref` names it | show that checkout (section 5); do not start another |
 | 409 | `PAYMENT_CONFIRMING` | another weekly-fee payment (any checkout or card payment) is being confirmed; `error.details.ref` is optional: it names a checkout only when the server knows which one, so never rely on it | "We're confirming a payment. Don't pay again."; refetch the subscription |
@@ -234,7 +237,13 @@ The planned `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers. Its
 
 **Registered with MMG (5 Oct 2026):** MMG has registered Swift's UAT Notify URL, `https://api-staging.swiftgy.com/api/v1/billing/mmg-checkout/notify` (this route). A notify is a pointer only: it is written down and prompts Swift's own lookup with MMG; it never credits anything by itself. Its authentication remains unconfirmed (U3).
 
-Both public routes are rate-limited and size-capped. Neither credits anything by itself: they only prompt the server to check with MMG.
+Both public routes are rate-limited per source address and size-capped: `/return` takes 120 calls a minute and a body of up to 96 KB (the 16 values of 4096 characters the page forwards, as JSON); `/notify` takes 60 a minute and 16 KB. Over the limit is `429`, over the cap is `413`, and a `/return` body that is not `{ outcome, params }` within those bounds is `400`. Neither credits anything by itself: they only prompt the server to check with MMG. With `MMG_CHECKOUT_ENABLED` off, a body within those bounds is answered neutrally (`UNKNOWN`, `200`) and nothing is written down; a malformed `/return` body is still `400`.
+
+**One token.** MMG sends one reply token, as one string. A token named more than once (a repeated query or form field arrives as an array, and `token` and `Token` are two) is ambiguous: `/return` answers `UNKNOWN` and `/notify` ignores it, before anything is opened, looked up or written down.
+
+**MMG's result code.** MMG sends the outcome, success or failure, to the same Response URL, so the `…/pay/mmg/success` path is not a success. The API reads the reply's documented `ResultCode`:
+- `3`, `4`, `5` (invalid secret key, merchant id mismatch, token decryption failed): MMG could not accept Swift's request. The reply is written down, operators are paged once per checkout and code, the checkout is left exactly as it was whatever its state, and the page answers `UNKNOWN`. Nothing is ever credited on these.
+- every other reply goes to the service, which decides as described under "Official response interpretation" below: `0` confirms only under the six conditions (section 5): a paid record that fails one is held for a person, and a record MMG does not have yet keeps the checkout confirming; `1`, `2` and `6` are `NOT_PAID` at once; `7` is `NOT_PAID` at once when it names no transaction, and waits for MMG's lookup when it names one.
 
 ### Official response interpretation (service boundary)
 
@@ -267,7 +276,7 @@ The server writes the fee notices. They never offer an agent, cash, a Swift Numb
   - `UTC`: `Z` is UTC, and a stamp with no zone cannot be read (held).
 
   An explicit numeric offset (for example `-04:00`) is read as stated with either value. Unset is the safety net, not a configuration: no MMG payment is then confirmed automatically, each one is `HELD` (reason `CREATION_ZONE_UNVERIFIED`) and operators are alerted once per checkout. Any other value stops the server from starting. If MMG's time for a payment is later than the first MMG reply Swift received about it (beyond two minutes), the payment is `HELD` (reason `CREATION_AFTER_REPLY`) and operators are told that MMG's stamps may not match the configured zone.
-- **The per-platform switch:** the platform-config key `billing.feeCheckout.platforms`, value `{ "ios": true, "android": true, "web": true }`. A missing row, or a missing platform in it, counts as on (owner ruling "3 b": the iPhone button is on). Setting a platform to `false` hides the MMG checkout there within a minute, with no deploy. Only the JSON booleans `true` and `false` count: any other value for a platform (the string `"false"` included) switches that platform off, and a value that is not an object switches every platform off, each with a warning in the server log.
+- **The per-platform switch:** the platform-config key `billing.feeCheckout.platforms`, value `{ "ios": true, "android": true, "web": true }`. A missing row, or a missing platform in it, counts as on (owner ruling "3 b": the iPhone button is on; owner ruling of 1 Oct, option 2: the in-app MMG checkout on iOS and Android). Setting a platform to `false` hides the MMG checkout there within a minute, with no deploy or app build: the server-side fallback for the iOS app. A store-review demo account never gets it, on any platform. Only the JSON booleans `true` and `false` count: any other value for a platform (the string `"false"` included) switches that platform off, and a value that is not an object switches every platform off, each with a warning in the server log.
 
 ## 9. Answers to the UI lane (2026-09-29)
 
