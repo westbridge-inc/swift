@@ -71,9 +71,12 @@ describe('the SDK options send diagnostics only', () => {
   it('no default PII, no tracing, no replay, no screenshots, no view tree, no failed-request capture, no sessions, no native URL breadcrumbs', () => {
     expect(options).toMatchObject({
       sendDefaultPii: false,
-      // Native reports are sent by the native SDK without passing the JS scrubber.
-      enableNative: false,
-      enableNativeCrashHandling: false,
+      // Native crashes are captured; native reports do not pass the JS scrubber,
+      // so breadcrumbs and thread dumps are switched off at the source.
+      enableNative: true,
+      enableNativeCrashHandling: true,
+      maxBreadcrumbs: 0,
+      attachThreads: false,
       tracesSampleRate: 0,
       enableAutoPerformanceTracing: false,
       enableUserInteractionTracing: false,

@@ -6,11 +6,22 @@
  * variable, never committed). The address points at Swift's self-hosted,
  * Sentry-protocol error tracker (see the API's processor register).
  *
- * Privacy: no default PII, no user, no session replay, screenshots, view tree,
- * tracing, sessions or network capture, and every event and breadcrumb passes
- * `crash-scrub` on the phone. Native crash capture is deliberately OFF: native
- * reports are written and sent by the native SDK without passing through the
- * JavaScript scrubber, so they could not be held to the same guarantee.
+ * Privacy: no default PII, no user is ever set, no breadcrumbs at all
+ * (maxBreadcrumbs 0, JS and native), no session replay, screenshots, view
+ * tree, thread dumps, tracing, sessions or network capture. JavaScript events
+ * also pass `crash-scrub` on the phone.
+ *
+ * Native crash capture is ON (coordinator ruling, 5 Oct: native crashes are the
+ * most important class). Native reports are written by the native SDK and do
+ * NOT pass the JavaScript scrubber, which is why everything above is switched
+ * off at the source. What a native report carries: the crashing thread's
+ * stack, the exception type and message, release/build, environment, OS
+ * (name, version, build), device hardware (model, family, architecture,
+ * memory/storage, screen, orientation, battery, simulator flag), app context
+ * (bundle id, version, start time) and locale/timezone. The native SDKs also
+ * attach a RANDOM per-install identifier as the event's user id (not the
+ * account, not the phone number). With sendDefaultPii false they attach no IP
+ * address and no device name.
  *
  * The SDK plugs into the existing dependency-free `crash-reporter` seam: the
  * error boundary's reports are captured here, while uncaught global errors are
@@ -43,8 +54,9 @@ export function crashSdkOptions(dsn: string, environment: string): Record<string
     dsn,
     environment,
     sendDefaultPii: false,
-    enableNative: false,
-    enableNativeCrashHandling: false,
+    enableNative: true,
+    enableNativeCrashHandling: true,
+    attachThreads: false,
     tracesSampleRate: 0,
     enableAutoPerformanceTracing: false,
     enableUserInteractionTracing: false,
@@ -57,7 +69,7 @@ export function crashSdkOptions(dsn: string, environment: string): Record<string
     enableNetworkBreadcrumbs: false,
     enableNetworkTracking: false,
     enableSwizzling: false,
-    maxBreadcrumbs: 30,
+    maxBreadcrumbs: 0,
     beforeSend: (event: object) => scrubCrashEvent(event),
     beforeBreadcrumb: (crumb: object) => scrubCrashBreadcrumb(crumb),
   };
