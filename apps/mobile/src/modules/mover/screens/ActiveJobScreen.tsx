@@ -1,3 +1,4 @@
+import { MapCredits } from '../../../components/MapCredits';
 import { uploadHandoverPhoto } from '../../../hooks/mover';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
 /** @jsxImportSource react */
@@ -699,6 +700,7 @@ export function ActiveJobScreen({ navigation }: any) {
           backgroundStyle={{ backgroundColor: dk.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20 }}
           handleIndicatorStyle={{ backgroundColor: dk.faint }}
         >
+          <MapCredits />
           <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
             {stacked ? (
               <View style={{ marginBottom: space.md }}>

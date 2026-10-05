@@ -176,6 +176,7 @@ vi.mock('../kit', () => ({ CircleChip: 'CircleChip', LoadingBlock: 'LoadingBlock
 vi.mock('../kit/map-style', () => ({ rideMapProps: () => ({}) }));
 
 import { StoreLocationPicker } from './StoreLocationPicker';
+import { MapCredits } from './MapCredits';
 
 interface Element {
   type: unknown;
@@ -273,7 +274,7 @@ afterEach(() => {
 });
 
 describe('where the store map opens', () => {
-  it.each([['android', 'Map data © Google'], ['ios', 'Map data © Apple']])('shows usable basemap credit on %s', async (platform, label) => {
+  it.each([['android', 'Google Maps'], ['ios', 'Apple Maps']])('shows usable basemap credit on %s', async (platform, label) => {
     fx.platform.OS = platform;
     const { body } = await open({ device: phone });
     const children = elements(body.output)
@@ -445,5 +446,29 @@ describe('confirming the store location', () => {
 
     expect(onClose).toHaveBeenCalledOnce();
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('map routing credits', () => {
+  it('links actual OSRM routing to OSRM and OpenStreetMap data credits', () => {
+    fx.platform.OS = 'android';
+    const view = fx.mount(MapCredits, { routeSource: 'osrm' });
+    const links = ofType(view.output, 'T').filter((el) => el.props.accessibilityRole === 'link');
+    expect(links.map((el) => el.props.children)).toEqual(['Google Maps', 'Routing: OSRM', '© OpenStreetMap contributors']);
+    for (const link of links) link.props.onPress();
+    expect(fx.openExternal.mock.calls.map((call) => call[0])).toEqual([
+      'https://www.google.com/intl/en/help/terms_maps/',
+      'https://project-osrm.org/',
+      'https://www.openstreetmap.org/copyright',
+    ]);
+    expect(links[0]!.props).toMatchObject({ weight: 'regular', numberOfLines: 1, maxFontSizeMultiplier: 16 / 13 });
+    expect(links[0]!.props.style).toMatchObject({ letterSpacing: 0, fontStyle: 'normal' });
+  });
+
+  it.each(['haversine', undefined])('does not claim OSRM for source %s', (routeSource) => {
+    fx.platform.OS = 'ios';
+    const view = fx.mount(MapCredits, { routeSource });
+    expect(texts(view)).toEqual(['Apple Maps']);
   });
 });
