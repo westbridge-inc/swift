@@ -213,6 +213,21 @@ describe('[MASTER-008] the idempotency layer itself', () => {
     expect(other).toEqual({ data: { n: 2 }, replayed: false });
   });
 
+  it('a keyed request with no authenticated user is refused — there is no shared anonymous principal — and runs nothing', async () => {
+    const redis = mockRedis();
+    const fake = { redis } as unknown as FastifyInstance;
+    let ran = 0;
+    const anonymous = { headers: { 'idempotency-key': 'key-abcdef12' }, body: {} } as unknown as FastifyRequest;
+    await expect(withIdempotency(fake, anonymous, 'op', 'o1', async () => { ran += 1; return {}; })).rejects.toMatchObject({ code: 'IDEMPOTENCY_PRINCIPAL_REQUIRED' });
+    const blank = { headers: { 'idempotency-key': 'key-abcdef12' }, user: { userId: '' }, body: {} } as unknown as FastifyRequest;
+    await expect(withIdempotency(fake, blank, 'op', 'o1', async () => { ran += 1; return {}; })).rejects.toMatchObject({ code: 'IDEMPOTENCY_PRINCIPAL_REQUIRED' });
+    expect(ran).toBe(0);
+    expect(redis.store.size).toBe(0);
+    // without a key nothing is stored or replayed, so nothing is refused either
+    const unkeyed = { headers: {}, body: {} } as unknown as FastifyRequest;
+    expect(await withIdempotency(fake, unkeyed, 'op', 'o1', async () => ({ ok: true }))).toEqual({ data: { ok: true }, replayed: false });
+  });
+
   it('key order in the body does not matter; a changed value does', async () => {
     const redis = mockRedis();
     const fake = { redis } as unknown as FastifyInstance;

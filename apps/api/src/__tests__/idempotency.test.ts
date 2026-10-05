@@ -18,7 +18,7 @@ function mockRedis() {
     del: vi.fn(async (k: string) => { store.delete(k); return 1; }),
   };
 }
-const req = (key?: string) => ({ headers: key ? { 'idempotency-key': key } : {} }) as unknown as FastifyRequest;
+const req = (key?: string) => ({ headers: key ? { 'idempotency-key': key } : {}, user: { userId: 'user-1' } }) as unknown as FastifyRequest;
 const appWith = (redis: ReturnType<typeof mockRedis>) => ({ redis }) as unknown as FastifyInstance;
 const KEY = 'key-abcdef12';
 

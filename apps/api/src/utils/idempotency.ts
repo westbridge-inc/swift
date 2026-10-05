@@ -5,11 +5,15 @@ import { getTenantId } from '../plugins/tenant-context';
 
 /** [MASTER-008] Who is asking: the authenticated user, in the tenant bound to
  *  this request. A stored result is only ever replayed to the SAME principal,
- *  so a key learnt or guessed by anyone else names nothing of theirs. */
+ *  so a key learnt or guessed by anyone else names nothing of theirs. There is
+ *  no shared "anonymous" principal: a keyed request with no authenticated user
+ *  is refused, so an unauthenticated route can never share stored results. */
 function principalOf(request: FastifyRequest): string {
   const user = (request as { user?: { userId?: unknown } }).user;
-  const userId = typeof user?.userId === 'string' && user.userId !== '' ? user.userId : 'anonymous';
-  return `${getTenantId() ?? '-'}:${userId}`;
+  if (typeof user?.userId !== 'string' || user.userId === '') {
+    throw new AppError(500, 'IDEMPOTENCY_PRINCIPAL_REQUIRED', 'Idempotent replay needs an authenticated user; this route has none.');
+  }
+  return `${getTenantId() ?? '-'}:${user.userId}`;
 }
 
 /** [MASTER-008] The request body's canonical fingerprint (sorted keys at every
