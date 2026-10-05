@@ -7,6 +7,14 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { BillingService } from '../modules/billing/billing.service';
 import { registerErrorHandler } from '../middleware/error-handler';
+// [#1393] The rider and driver routes resolve the payer's one shared weekly-fee
+// subscription (proved against PostgreSQL in mover-fee-authority.test.ts). This
+// suite grades the step-up gate, so that resolution is doubled here.
+vi.mock('../modules/subscription/mover-fee-authority', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../modules/subscription/mover-fee-authority')>(),
+  moverFeePayer: async (_db: unknown, userId: string) => ({ userId, tenantId: 'swift-default' }),
+  readMoverFeeSubscription: async () => ({ subscription: { id: 'safeb-subscription' } }),
+}));
 
 afterEach(() => vi.restoreAllMocks());
 describe('billing-method mutations require the same stepped-up session', () => {

@@ -236,6 +236,30 @@ afterEach(() => {
 });
 
 describe('BullMQ lifecycle', () => {
+  it.each([false, true])('logs each retained audit class and its reason (registry clocks: %s)', async registered => {
+    const ctx = context();
+    const upsert = vi.fn().mockResolvedValue({});
+    const policies = registered ? ['audit_logs', 'sensitive_read_logs'].map(dataClass => ({ dataClass, enabled: true, retainDays: 7 })) : [];
+    ctx.prisma = { retentionPolicy: { upsert, findMany: async () => policies } } as unknown as JobContext['prisma'];
+    const queues = createQueues(ctx.redis, ctx.log);
+    const workers = await createWorkers(ctx, queues);
+    try {
+      const worker = (bullState.workers as FakeWorker[]).find(w => w.name === QUEUE_NAMES.VERIFICATION)!;
+      await expect(worker.processor({ name: 'retention-sweep', data: {} })).resolves.toBeUndefined();
+      expect(upsert).toHaveBeenCalledTimes(3);
+      expect(log.info).toHaveBeenCalledWith({
+        enforced: [],
+        skipped: [
+          { c: 'audit_logs', reason: 'permanent-evidence' },
+          { c: 'sensitive_read_logs', reason: 'policy-unapproved' },
+        ],
+      }, 'retention sweep complete');
+    } finally {
+      await workers.cleanup();
+      await Promise.all(Object.values(queues).map(queue => queue.close()));
+    }
+  });
+
   it('reuses one boot-created Queue during a burst and emits no unhandled rejection', async () => {
     const ctx = context();
     const queues = createQueues(ctx.redis, ctx.log);
