@@ -2061,15 +2061,7 @@ export class BillingService {
     if (mmgHeld) return 'held';
     if (!this.successfulChargeAuthorityAllowsAdvance(authority, sub)) return 'skipped';
     const current = { ...sub, status: authority.status } as SubWithRelations;
-    // [BILLING-REANCHOR · OWNER-DECISIONS 4 Oct] No arrears for weeks a partner
-    // was suspended or churned and not operating: a payment that brings them
-    // back buys the week starting NOW, never a stale switched-off week, and the
-    // next charge falls due a week after the return. A PAST_DUE partner was
-    // still operating inside the grace, so it pays the week that was due.
-    const reanchoredFrom = ['SUSPENDED', 'CHURNED'].includes(authority.status) && sub.nextBillingDate < now
-      ? sub.nextBillingDate
-      : null;
-    const periodStart = reanchoredFrom ? now : sub.nextBillingDate;
+    const periodStart = sub.nextBillingDate;
     const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
 
     // THE PREPAID SPEND — first, and inside this transaction, so the money and
@@ -2095,11 +2087,7 @@ export class BillingService {
       // (same value); a reserved intent approved at initiate learns it here.
       await tx.subscriptionPayment.update({
         where: { id: settlePaymentId },
-        data: {
-          status: 'CAPTURED', paidAt: now, externalRef: paymentRef, failureCode: null,
-          // The captured payment records the week it actually bought.
-          ...(reanchoredFrom ? { periodStart, periodEnd } : {}),
-        },
+        data: { status: 'CAPTURED', paidAt: now, externalRef: paymentRef, failureCode: null },
       });
     } else {
       await tx.subscriptionPayment.create({
@@ -2162,9 +2150,7 @@ export class BillingService {
     // afterwards therefore stays final; no stale post-commit writer can reopen
     // the vendor or emit a reinstatement assertion.
     if (['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(authority.status)) {
-      await this.reinstateRows(tx, current, periodKey, reanchoredFrom
-        ? `Payment received — access restored; billing restarts ${periodStart.toISOString()} (re-anchored from ${reanchoredFrom.toISOString()}; the switched-off weeks are not charged)`
-        : undefined);
+      await this.reinstateRows(tx, current, periodKey);
     }
     return 'advanced';
   }
@@ -3907,7 +3893,7 @@ export class BillingService {
     });
   }
 
-  private async reinstateRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string, note?: string) {
+  private async reinstateRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string) {
     // [REPORT-013 F-013-07] Payment restores ONLY what billing took: the one
     // shared restore (billing-access.ts), also used by the wrongful-suspension heal.
     if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
@@ -3918,7 +3904,7 @@ export class BillingService {
         type: 'REINSTATED',
         currencyCode: sub.currencyCode,
         idempotencyKey: `reinstated:${sub.id}:${periodKey}:${Date.now()}`,
-        note: note ?? 'Payment received — access restored',
+        note: 'Payment received — access restored',
       },
     });
   }
