@@ -125,7 +125,7 @@ async function uploadAndSubmit(actor: Actor, bytes: Buffer) {
   const fileUrl = up.json().data.url as string;
   const submitted = await call('POST', '/api/v1/verification/documents', actor.token, { role: 'RESTAURANT', docType: DOC_TYPE, fileUrl, consent: true, privacyNoticeVersion: 'v1' });
   expect(submitted.statusCode, submitted.body).toBe(201);
-  return { docId: submitted.json().data.id as string, fileUrl, duplicate: up.json().data.duplicate as boolean };
+  return { docId: submitted.json().data.id as string, fileUrl, uploadResponse: up.json() };
 }
 
 function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: string, payload?: unknown, headers: Record<string, string> = {}) {
@@ -317,7 +317,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
     bytes = documentBytes();
     const submitted = await uploadAndSubmit(partner, bytes);
     docId = submitted.docId;
-    expect(submitted.duplicate).toBe(false);
+    expect(submitted.uploadResponse).toEqual({ success: true, data: { url: submitted.fileUrl } });
 
     // At rest: ciphertext only; the envelope records the true type and size.
     const envelope = await sys(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: submitted.fileUrl } }));
@@ -458,7 +458,9 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
     const first = await upload(relative, shared);
     expect(first.statusCode, first.body).toBe(200);
     const linked = await uploadAndSubmit(applicant, shared);
-    expect(linked.duplicate).toBe(true);
+    // A matching document remains opaque to its uploader. The privileged
+    // case still proves the collision and enforces recusal below.
+    expect(linked.uploadResponse).toEqual({ success: true, data: { url: linked.fileUrl } });
     const linkedCase = await openCaseOf(rev1, linked.docId);
     expect(linkedCase.queue).toBe('SECOND_REVIEW'); // a collision is never an ordinary review
     // One identity, as the resolver recusal itself uses sees it.
