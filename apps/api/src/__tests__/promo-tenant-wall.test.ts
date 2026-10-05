@@ -7,6 +7,8 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { promoBelongsToCallerTenant } from '../modules/promo/promo-tenant';
+import { runAsSystem } from '../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // [L04 · R0 promo finding] A platform-wide promo code (no vendor) is Swift's
@@ -144,4 +146,19 @@ describe('[R0 promo] a platform-wide code is production’s, never the review te
     expect(after.currentUses).toBe(before.currentUses);
     expect(await app.prisma.order.count({ where: { promoCodeId: platformPromoId } })).toBe(0);
   });
+});
+
+describe('[R0 promo] which tenant a code belongs to (the rule both lookups use)', () => {
+  it('a platform code is production’s; a store code is its store’s tenant’s', () => runAsSystem('test-promo-tenant-rule', async () => {
+    // Outside any request (this suite's earlier requests leave their tenant on
+    // the test's own async context, since the bare app has no per-request hook).
+    const productionUser = await makeUser(undefined);
+    const platform = { vendorId: null };
+    const reviewStore = { vendorId: vendorIds[0]! };
+    expect(await promoBelongsToCallerTenant(app.prisma, platform, productionUser.userId)).toBe(true);
+    expect(await promoBelongsToCallerTenant(app.prisma, platform, reviewer.userId)).toBe(false);
+    expect(await promoBelongsToCallerTenant(app.prisma, reviewStore, reviewer.userId)).toBe(true);
+    expect(await promoBelongsToCallerTenant(app.prisma, reviewStore, productionUser.userId)).toBe(false);
+    expect(await promoBelongsToCallerTenant(app.prisma, platform, 'no-such-user')).toBe(false);
+  }));
 });

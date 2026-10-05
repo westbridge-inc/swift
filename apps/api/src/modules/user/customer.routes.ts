@@ -1,4 +1,5 @@
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
@@ -3307,7 +3308,12 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { code: code.toUpperCase().trim() },
     });
 
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] A code of another tenant (a platform code for anyone outside
+    // production, or another tenant's store code) is answered exactly as an
+    // unknown code — and is never attached to this cart.
+    if (!promo || !(await promoBelongsToCallerTenant(app.prisma, promo, userId))) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();
