@@ -83,6 +83,10 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // so the tap opened nothing. ActiveJob is the rider's live job; it takes no
   // params because it resolves the active job itself.
   if (kind === 'prep_ready') return { screen: 'ActiveJob' };
+  // [AF-MOB-006] Custody recovery. The holder's live job carries the handoff
+  // code; the relay rider's task waits on their dashboard until custody is theirs.
+  if (kind === 'custody_handoff_code') return { screen: 'ActiveJob' };
+  if (kind === 'custody_relay_assigned') return { screen: 'Main' };
   // A store told "a cancelled order may hold an MMG payment" runs a business:
   // their Main is the vendor dashboard, not a customer tracking screen.
   if (kind === 'mmg_unattested_cancellation') return { screen: 'Main' };

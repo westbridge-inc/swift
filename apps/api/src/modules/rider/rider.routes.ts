@@ -26,6 +26,8 @@ import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../di
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
+import { RIDER_INCIDENT_REASONS } from '../custody/custody-case';
+import { reportIncident, holderView, relayTasks, transferCustody, declineRelay } from '../custody/custody-recovery';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -1980,8 +1982,12 @@ export async function riderRoutes(app: FastifyInstance) {
         throw new NotFoundError('Order', id);
       }
       if (IN_CUSTODY.includes(order.status)) {
+        // [AF-MOB-006] Still never a release after pickup — but no longer a
+        // dead end either: the refusal names the recovery report, which opens
+        // the order's one owned case for support to act on.
         throw new AppError(409, 'CUSTODY',
-          'You have already picked this order up — it cannot be handed back. Call support and we will sort it out together.');
+          'You have already picked this order up, so it cannot be handed back. Report the problem instead: support takes the case over and tells you the next step.',
+          { recovery: { action: 'REPORT_PROBLEM', path: `/api/v1/rider/orders/${id}/recovery` } });
       }
       if (!PRE_CUSTODY.includes(order.status)) {
         throw new AppError(409, 'INVALID_STATUS', `This order can no longer be handed back (${order.status}).`);
@@ -2028,6 +2034,78 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     return { success: true, data: { orderId: id, status: outcome.reopenStatus } };
+  });
+
+  // =========================================================================
+  // [AF-MOB-006] CUSTODY RECOVERY — after pickup, a problem is a case, not a
+  // phone call. The holder reports it; operations owns and directs it; a
+  // relay rider takes the goods over only with the holder's code.
+  // =========================================================================
+  const custodyDeps = { prisma: app.prisma, io: app.io, notifications: new NotificationService(app.prisma, app.io) };
+  const recoveryReportSchema = z.object({
+    reason: z.enum(RIDER_INCIDENT_REASONS),
+    note: z.string().trim().max(300).optional(),
+    gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }).optional(),
+  });
+
+  /** POST /orders/:id/recovery — the holder reports a problem after pickup.
+   *  Opens the order's ONE case (201) or returns the open one (200). */
+  app.post('/orders/:id/recovery', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const rider = await getRider(app, request.user.userId);
+    const body = recoveryReportSchema.parse(request.body ?? {});
+    const result = await reportIncident(custodyDeps, {
+      orderId: id, riderId: rider.id, userId: request.user.userId,
+      reason: body.reason, note: body.note ?? null, gps: body.gps ?? null,
+    });
+    reply.code(result.created ? 201 : 200);
+    return { success: true, data: { created: result.created, ...(await holderView(custodyDeps, id, rider.id)) } };
+  });
+
+  /** GET /orders/:id/recovery — the holder's (or former holder's) view of the
+   *  order's latest case, with the handoff code while a transfer is pending. */
+  app.get('/orders/:id/recovery', { preHandler: [app.authenticate] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const rider = await getRider(app, request.user.userId);
+    return { success: true, data: await holderView(custodyDeps, id, rider.id) };
+  });
+
+  /** GET /recovery/relays — handoffs this rider has been asked to take over. */
+  app.get('/recovery/relays', { preHandler: [app.authenticate] }, async (request) => {
+    const rider = await getRider(app, request.user.userId);
+    return { success: true, data: await relayTasks(custodyDeps, rider.id) };
+  });
+
+  /** POST /recovery/:caseId/transfer — the relay rider enters the holder's
+   *  code at the meeting point. Idempotent on Idempotency-Key, so an offline
+   *  retry returns the original result instead of a second attempt. */
+  app.post('/recovery/:caseId/transfer', { preHandler: [app.authenticate] }, async (request) => {
+    const { caseId } = request.params as { caseId: string };
+    const rider = await getRider(app, request.user.userId);
+    const body = z.object({
+      code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit handoff code'),
+      gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
+      version: z.number().int().min(0).optional(),
+    }).parse(request.body ?? {});
+    const { data, replayed } = await withIdempotency(app, request, 'custody-transfer', caseId, async () => {
+      const outcome = await transferCustody(custodyDeps, {
+        caseId, relayRiderId: rider.id, relayUserId: request.user.userId,
+        code: body.code, gps: body.gps, ...(body.version !== undefined ? { version: body.version } : {}),
+      });
+      return { caseId, orderId: outcome.order.id, state: outcome.kase.state, orderStatus: outcome.order.status };
+    });
+    return { success: true, data, replayed };
+  });
+
+  /** POST /recovery/:caseId/decline — the relay rider cannot take it. */
+  app.post('/recovery/:caseId/decline', { preHandler: [app.authenticate] }, async (request) => {
+    const { caseId } = request.params as { caseId: string };
+    const rider = await getRider(app, request.user.userId);
+    const { reason } = z.object({ reason: z.string().trim().max(300).optional() }).parse(request.body ?? {});
+    const result = await declineRelay(custodyDeps, {
+      caseId, relayRiderId: rider.id, relayUserId: request.user.userId, ...(reason ? { reason } : {}),
+    });
+    return { success: true, data: { caseId, state: result.kase.state } };
   });
 
   /** GET /demand — unassigned deliveries near the rider, grouped by store
