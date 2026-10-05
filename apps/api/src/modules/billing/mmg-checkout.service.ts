@@ -77,6 +77,11 @@ const MAX_CANDIDATES = 5;
 const MAX_REPLY_PARAMS = 16;
 const MAX_REPLY_PARAM_CHARS = 4096;
 const POLL_BATCH = 50;
+/** [Sol, DS659 · delta3] How far back the poll looks for a CONFIRMED
+ *  checkout's unapplied payment whose operator page was never saved, and how
+ *  many rows each read takes. */
+export const MMG_UNAPPLIED_RECONCILE_LOOKBACK_MS = 14 * 24 * 3_600_000;
+const UNAPPLIED_READ_BATCH = 200;
 const CLIENT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
 /** Creating a checkout re-reads after a lost race; it never spins. */
 const CREATE_ATTEMPTS = 3;
@@ -196,6 +201,16 @@ const redactedObject = (value: Record<string, unknown>): Prisma.InputJsonValue =
 function hintFrom(outcome: unknown): string | null {
   const text = typeof outcome === 'string' ? outcome.toLowerCase() : '';
   return /^[a-z0-9_-]{1,32}$/.test(text) ? text : null;
+}
+
+/** mmg_txn_canon: an MMG transaction id trimmed and upper-cased. */
+function canonicalMmgTxn(id: string): string {
+  return id.trim().toUpperCase();
+}
+
+/** [Sol, DS659 · delta3] The operators' page for one unapplied payment: per checkout and transaction. */
+function unappliedPageKey(checkoutId: string, transactionId: string): string {
+  return `mmg-checkout-unapplied:${checkoutId}:${canonicalMmgTxn(transactionId)}`;
 }
 
 function returnStateFor(status: CheckoutStatus): ReturnState {
@@ -724,6 +739,11 @@ export class MmgCheckoutService {
           log().error({ err, checkoutId: row.id }, '[MMG checkout] verification failed; it stays due and is retried');
         }
       }
+      try {
+        await this.reconcileUnappliedPages(now);
+      } catch (err) {
+        log().error({ err }, '[MMG checkout] the unapplied-payment page reconcile failed; it is retried on the next poll');
+      }
       return out;
     });
   }
@@ -806,20 +826,33 @@ export class MmgCheckoutService {
    *  the payment it credited): money MMG may hold for the partner that was
    *  never applied. The reply is already written down [I9]. It is never
    *  looked up for credit and never credited; operators are paged once per
-   *  checkout, whichever door and however often, and whichever path made the
+   *  checkout and transaction [Sol, DS659 · delta3], whichever door and however often, and whichever path made the
    *  checkout CONFIRMED (already confirmed, confirmed under the lock, or
    *  confirmed by another verifier after this reply merged) [Sol], and the
    *  verifier that credits pages for answers written down before its credit
    *  (alertUnappliedAnswers) [Sol · delta2]. */
-  private async alertUnapplied(intent: MmgCheckoutIntent, reply: MmgCheckoutReply, source: 'RETURN' | 'NOTIFY'): Promise<void> {
-    if (reply.resultCode !== '0' || !reply.transactionId) return;
-    // Provider identities are stored trimmed and upper-cased; a reply's id has no spaces (MMG_TXN_ID).
-    const named = reply.transactionId.toUpperCase();
-    if (intent.mmgTransactionId?.toUpperCase() === named) return;
+  private async alertUnapplied(
+    intent: MmgCheckoutIntent, reply: MmgCheckoutReply, source: 'RETURN' | 'NOTIFY', options: { onlyIfUnpaged?: boolean } = {},
+  ): Promise<boolean> {
+    if (reply.resultCode !== '0' || !reply.transactionId) return false;
+    // Provider identities are stored trimmed and upper-cased (mmg_txn_canon).
+    const named = canonicalMmgTxn(reply.transactionId);
+    if (intent.mmgTransactionId && canonicalMmgTxn(intent.mmgTransactionId) === named) return false;
     const applied = await this.prisma.providerPayment.findFirst({
       where: { provider: 'MMG', providerTxnId: named, creditedPaymentId: `mco:${intent.id}` }, select: { id: true },
     });
-    if (applied) return;
+    if (applied) return false;
+    // [Sol, DS659 · delta3] One page per checkout AND transaction: the same
+    // payment through either door collapses; a different payment pages again.
+    const dedupeKey = unappliedPageKey(intent.id, named);
+    if (options.onlyIfUnpaged) {
+      // The reconcile pages only what no operator was ever paged about. A page
+      // is only ever written once the checkout is CONFIRMED.
+      const since = new Date((intent.confirmedAt ?? intent.createdAt).getTime() - CHECKOUT_CLOCK_TOLERANCE_MS);
+      // Operators' inboxes live in their own tenants: read across them, as notifyAdmins pages across them.
+      const paged = await runAsSystem('mmg-checkout-unapplied-reconcile', () => this.prisma.notification.findFirst({ where: { dedupeKey, createdAt: { gte: since } }, select: { id: true } }));
+      if (paged) return false;
+    }
     mmgCheckoutEventsCounter.labels('reply_unapplied').inc();
     log().error({ checkoutId: intent.id, source }, '[MMG checkout] MMG answered success for a confirmed checkout naming another transaction: money received and not applied');
     await notifyAdmins(this.prisma, this.notifications, {
@@ -827,8 +860,9 @@ export class MmgCheckoutService {
       title: 'MMG checkout: money received and not applied',
       body: `MMG answered success for checkout ${intent.id}, which is already paid, naming MMG transaction ${reply.transactionId}, which was not credited. Nothing was credited for it. Reconcile it against the MMG statement.`,
       data: { kind: 'billing_invariants', alert: 'mmg-checkout-unapplied', checkoutId: intent.id, transactionId: reply.transactionId, source },
-      dedupeKey: `mmg-checkout-unapplied:${intent.id}`,
+      dedupeKey,
     }).catch((err) => log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about money not applied'));
+    return true;
   }
 
   /** [F3] The answer a key already has, if it has one: the checkout it was
@@ -1081,23 +1115,80 @@ export class MmgCheckoutService {
     return 'CONFIRMED';
   }
 
-  /** [Sol · delta2] After a credit commits: every success answer written down
-   *  for this checkout naming a transaction it did not credit pages operators
-   *  (alertUnapplied: once per checkout, never for the credited payment). */
-  private async alertUnappliedAnswers(intentId: string): Promise<void> {
+  /** [Sol · delta2 · delta3] After a credit commits: every transaction a
+   *  success answer written down for this checkout names, and it did not
+   *  credit, pages operators (alertUnapplied: once per checkout and
+   *  transaction, never for the credited payment). Every answer is read,
+   *  however many repeat one payment. Returns how many pages were attempted. */
+  private async alertUnappliedAnswers(intentId: string, options: { onlyIfUnpaged?: boolean } = {}): Promise<number> {
     const settled = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intentId } });
-    if (settled.status !== 'CONFIRMED') return;
-    const answers = await this.prisma.mmgCheckoutObservation.findMany({
-      where: { intentId, source: { in: ['RETURN', 'NOTIFY'] }, detail: SUCCESS_ANSWER },
-      select: { source: true, body: true }, orderBy: { createdAt: 'asc' }, take: 50,
-    });
-    for (const answer of answers) {
-      const body = answer.body && typeof answer.body === 'object' && !Array.isArray(answer.body) ? answer.body as Record<string, unknown> : null;
-      const transactionId = body?.['transactionId'];
-      if (typeof transactionId !== 'string' || body?.['merchantTransactionId'] !== settled.merchantTransactionId) continue;
-      await this.alertUnapplied(settled, { merchantTransactionId: settled.merchantTransactionId, transactionId, resultCode: '0' },
-        answer.source === 'NOTIFY' ? 'NOTIFY' : 'RETURN');
+    if (settled.status !== 'CONFIRMED') return 0;
+    let attempted = 0;
+    for (const { transactionId, source } of (await this.successNamed([settled])).get(settled.id) ?? []) {
+      if (await this.alertUnapplied(settled, { merchantTransactionId: settled.merchantTransactionId, transactionId, resultCode: '0' }, source, options)) attempted += 1;
     }
+    return attempted;
+  }
+
+  /** Each checkout's success answers (ResultCode 0, through either door,
+   *  naming that checkout), one entry per distinct transaction (canonical
+   *  spelling), the first answer's door. Read in pages until exhausted. */
+  private async successNamed(intents: ReadonlyArray<Pick<MmgCheckoutIntent, 'id' | 'merchantTransactionId'>>): Promise<Map<string, Array<{ transactionId: string; source: 'RETURN' | 'NOTIFY' }>>> {
+    const refOf = new Map(intents.map((intent) => [intent.id, intent.merchantTransactionId]));
+    const seen = new Map<string, Map<string, { transactionId: string; source: 'RETURN' | 'NOTIFY' }>>();
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.prisma.mmgCheckoutObservation.findMany({
+        where: { intentId: { in: [...refOf.keys()] }, source: { in: ['RETURN', 'NOTIFY'] }, detail: SUCCESS_ANSWER },
+        orderBy: { id: 'asc' }, take: UNAPPLIED_READ_BATCH, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        select: { id: true, intentId: true, source: true, body: true },
+      });
+      for (const answer of page) {
+        const body = answer.body && typeof answer.body === 'object' && !Array.isArray(answer.body) ? answer.body as Record<string, unknown> : null;
+        const transactionId = body?.['transactionId'];
+        if (!answer.intentId || typeof transactionId !== 'string' || body?.['merchantTransactionId'] !== refOf.get(answer.intentId)) continue;
+        const named = seen.get(answer.intentId) ?? new Map();
+        if (!named.has(canonicalMmgTxn(transactionId))) named.set(canonicalMmgTxn(transactionId), { transactionId, source: answer.source === 'NOTIFY' ? 'NOTIFY' : 'RETURN' });
+        seen.set(answer.intentId, named);
+      }
+      if (page.length < UNAPPLIED_READ_BATCH) break;
+      cursor = page[page.length - 1]!.id;
+    }
+    return new Map([...seen].map(([id, named]) => [id, [...named.values()]]));
+  }
+
+  /**
+   * [Sol, DS659 · delta3] The durable net under every unapplied-payment page.
+   * Paging is best effort where it happens (a reply, a credit), and a
+   * CONFIRMED checkout leaves polling, so a page that failed to save would be
+   * lost. Every poll, each checkout CONFIRMED in the lookback is read again:
+   * a success answer naming a transaction it did not credit, that no operator
+   * was ever paged about (its per-transaction key), is paged now. Idempotent:
+   * once saved, the key is found and nothing more is sent.
+   */
+  async reconcileUnappliedPages(now: Date = new Date()): Promise<number> {
+    return runAsSystem('mmg-checkout-unapplied-reconcile', async () => {
+      const since = new Date(now.getTime() - MMG_UNAPPLIED_RECONCILE_LOOKBACK_MS);
+      let paged = 0;
+      let cursor: string | undefined;
+      for (;;) {
+        const confirmed = await this.prisma.mmgCheckoutIntent.findMany({
+          where: { status: 'CONFIRMED', confirmedAt: { gte: since } },
+          orderBy: { id: 'asc' }, take: UNAPPLIED_READ_BATCH, ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        });
+        const named = await this.successNamed(confirmed);
+        for (const intent of confirmed) {
+          for (const { transactionId, source } of named.get(intent.id) ?? []) {
+            if (intent.mmgTransactionId && canonicalMmgTxn(intent.mmgTransactionId) === canonicalMmgTxn(transactionId)) continue;
+            if (await this.alertUnapplied(intent, { merchantTransactionId: intent.merchantTransactionId, transactionId, resultCode: '0' }, source, { onlyIfUnpaged: true })) paged += 1;
+          }
+        }
+        if (confirmed.length < UNAPPLIED_READ_BATCH) break;
+        cursor = confirmed[confirmed.length - 1]!.id;
+      }
+      if (paged > 0) mmgCheckoutEventsCounter.labels('unapplied_reconciled').inc(paged);
+      return paged;
+    });
   }
 
   /** [I6] A person must look: nothing credits, and a reversal is a two-person decision. */
