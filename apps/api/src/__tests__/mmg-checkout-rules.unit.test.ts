@@ -269,7 +269,7 @@ describe('MMG’s creationDate is Guyana time in staging and UAT [owner, 1 Oct �
 // UAT writes, verified 1 Oct) or UTC. Unset, nothing is confirmed
 // automatically. And MMG cannot have created a payment after Swift first
 // heard of it: a stamp later than the first reply naming the transaction
-// (five minutes' tolerance) is held as CREATION_AFTER_REPLY.
+// (two minutes' tolerance) is held as CREATION_AFTER_REPLY.
 // ---------------------------------------------------------------------------
 describe('[DS632] condition (5) is read in the configured zone, MMG_CHECKOUT_CREATION_ZONE', () => {
   // The UAT checkout of 1 Oct: opened 15:38:19 Guyana time (19:38:19Z), open
@@ -328,18 +328,11 @@ describe('[DS632] condition (5) is read in the configured zone, MMG_CHECKOUT_CRE
     expect(verdictFor(guyanaTime(paid), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'OUTSIDE_CHECKOUT_WINDOW', decisive: true });
   });
 
-  it('CREATION_AFTER_REPLY: MMG’s stamp may be at most five minutes after Swift first saw a reply naming the transaction', () => {
-    // On 1 Oct MMG's UAT stamp was 31 s after Swift read the reply: MMG's clock
-    // runs ahead of ours. Five minutes absorbs a slower clock; a stamp in the
-    // wrong zone is hours out and is still caught. The window bound (5) keeps
-    // its two minutes (the test above).
-    for (const late of [120_001, 180_000, 300_000]) {
-      expect(verdictFor(guyanaTime(new Date(replied.getTime() + late)), 'GUYANA_WALL_CLOCK').verdict).toBe('CONFIRM');
-    }
-    expect(verdictFor(guyanaTime(new Date(replied.getTime() + 300_001)), 'GUYANA_WALL_CLOCK'))
+  it('CREATION_AFTER_REPLY: MMG’s stamp may be at most two minutes after Swift first saw a reply naming the transaction', () => {
+    expect(verdictFor(guyanaTime(new Date(replied.getTime() + 120_000)), 'GUYANA_WALL_CLOCK').verdict).toBe('CONFIRM');
+    expect(verdictFor(guyanaTime(new Date(replied.getTime() + 120_001)), 'GUYANA_WALL_CLOCK'))
       .toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_AFTER_REPLY', decisive: true });
-    expect(verdictFor(trueUtc(new Date(replied.getTime() + 300_000)), 'UTC').verdict).toBe('CONFIRM');
-    expect(verdictFor(trueUtc(new Date(replied.getTime() + 300_001)), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY' });
+    expect(verdictFor(trueUtc(new Date(replied.getTime() + 120_001)), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY' });
     // A true-UTC stamp read as Guyana time lands four hours late: caught here, before the window.
     expect(verdictFor(trueUtc(paid), 'GUYANA_WALL_CLOCK')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_AFTER_REPLY' });
     // Without MMG's success answer it waits out the window like any other mismatch.
