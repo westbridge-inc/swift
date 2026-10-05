@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ get: vi.fn(), setIntent: vi.fn(), myAdvertisers: vi.fn(() => ({ data: [], isLoading: false, isError: false })), fetchAds: vi.fn(), startAdEventLoop: vi.fn() }));
 vi.mock('../../../mobile/src/services/api', () => ({ api: { get: mocks.get } }));
-vi.mock('../../../mobile/src/stores/authStore', () => ({ useAuthStore: (select: (s: unknown) => unknown) => select({
+vi.mock('../../../mobile/src/stores/authStore', () => ({ useAuthStore: (select: (_s: unknown) => unknown) => select({
   setIntent: mocks.setIntent, setMoverPreset: vi.fn(), setCountry: vi.fn(), promptLogin: vi.fn(),
 }) }));
 vi.mock('../../../mobile/src/stores/moverPreview', () => ({ useMoverPreview: () => vi.fn() }));
@@ -21,7 +21,7 @@ vi.mock('../../../mobile/src/kit/pressable-scale', () => ({ PressableScale: ({ c
 vi.mock('../../../mobile/node_modules/react-native', () => ({
   View: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   ScrollView: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Pressable: ({ children, onPress, testID }: { children: React.ReactNode | ((p: { pressed: boolean }) => React.ReactNode); onPress: () => void; testID: string }) =>
+  Pressable: ({ children, onPress, testID }: { children: React.ReactNode | ((_p: { pressed: boolean }) => React.ReactNode); onPress: () => void; testID: string }) =>
     <button data-testid={testID} onClick={onPress}>{typeof children === 'function' ? children({ pressed: false }) : children}</button>,
 }));
 vi.mock('../../../mobile/node_modules/react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
@@ -42,7 +42,7 @@ vi.mock('../../../mobile/node_modules/@react-navigation/native-stack', () => ({ 
 }) }));
 vi.mock('../../../mobile/node_modules/@react-navigation/bottom-tabs', () => ({ createBottomTabNavigator: () => ({}) }));
 let AdvertiserStack: React.ComponentType;
-let useAds: (city: string) => { data?: unknown };
+let useAds: (_city: string) => { data?: unknown };
 let RolePickerScreen: React.ComponentType;
 beforeAll(async () => {
   ({ AdvertiserStack } = await import(new URL('../../../mobile/src/modules/advertiser/AdvertiserStack.tsx', import.meta.url).pathname));
