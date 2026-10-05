@@ -40,6 +40,7 @@ describe('manual-only launch verification policy', () => {
     vi.stubEnv('ID_ANALYZER_API_KEY', 'unit-test-only');
     for (const [name, adapter] of [['sandbox', SandboxKycProvider], ['didit', DiditKycProvider], ['idanalyzer', IdAnalyzerKycProvider]] as const) {
       vi.stubEnv('KYC_PROVIDER', name);
+      expect(() => getKycProvider()).not.toThrow();
       expect(getKycProvider()).toBeInstanceOf(adapter);
     }
   });

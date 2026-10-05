@@ -101,11 +101,11 @@ export class ManualReviewKycProvider implements KycProvider {
   async getStatus(): Promise<KycStatus> { return 'pending_manual'; }
 }
 
-/** Provider selection is config, not code. */
+/** Production launch permits manual review only; other adapters are fixtures. */
 export function getKycProvider(): KycProvider {
   const provider = process.env['KYC_PROVIDER'] ?? 'sandbox';
-  if (isProduction() && provider === 'sandbox') {
-    throw new Error('KYC_PROVIDER=sandbox is forbidden in production');
+  if (isProduction() && provider !== 'manual') {
+    throw new Error(`KYC_PROVIDER=${provider} is forbidden in production; manual is required for launch`);
   }
   switch (provider) {
     case 'sandbox':

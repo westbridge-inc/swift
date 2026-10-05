@@ -113,7 +113,7 @@ const STUBS: Record<string, string> = {
   ORDER_HOLD_MINUTES: '5',
   OTP_HASH_SECRET: 'x'.repeat(48),
   JWT_SECRET: 'x'.repeat(48),
-  KYC_PROVIDER: 'didit',
+  KYC_PROVIDER: 'manual',
   DIDIT_API_KEY: 'STUB-NOT-A-REAL-KEY',
   ID_ANALYZER_API_KEY: 'STUB-NOT-A-REAL-KEY',
   PAYMENT_PROVIDER: 'disabled',
