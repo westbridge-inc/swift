@@ -86,10 +86,10 @@ export class QrService {
     // is a worse outcome than the disclosure it replaced.
     //
     // That is now prevented at the source rather than compensated for here: a
-    // vendor cannot leave its lineage behind (`vendors_tenant_move_guard`), and
-    // the supported move (`move_vendor_tenant`) carries the printed codes with
-    // it, so a code whose tenant does not match its vendor should not exist. If
-    // one does — historical residue predating the guard — this read simply does
+    // vendor's tenant never changes (`vendors_tenant_immutable`), and a code's
+    // tenant must match its vendor's (`qr_codes_tenant_matches_vendor`), so a
+    // code whose tenant does not match its vendor should not exist. If one
+    // does — historical residue predating the guard — this read simply does
     // not reuse it and the vendor mints a fresh one.
     //
     // An earlier version of this comment said the stale code "stays deactivated
@@ -204,8 +204,14 @@ export class QrService {
           },
         });
       } catch (e) {
-        const target = isUniqueViolation(e) ? String((e.meta as { target?: unknown } | undefined)?.target ?? '') : '';
-        if (attempt === 0 && target.includes('shortCode')) continue;
+        if (!isUniqueViolation(e)) throw e;
+        const target = String((e.meta as { target?: unknown } | undefined)?.target ?? '');
+        // A short code that was EVER issued is refused by the identity
+        // registry's trigger (qr_codes_token_reserve) as a unique violation
+        // that reaches Prisma without a target. Either way the code is taken:
+        // draw a new one once. (A one-ACTIVE race then fails again on the
+        // second attempt and surfaces to the caller exactly as before.)
+        if (attempt === 0 && (target.includes('shortCode') || target === '')) continue;
         throw e;
       }
     }

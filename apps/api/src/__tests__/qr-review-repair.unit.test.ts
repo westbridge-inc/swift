@@ -70,7 +70,26 @@ function claimFixture() {
       }),
     },
   };
-  return { request, candidate, client, service: new AttributionService(client as unknown as PrismaClient) };
+  // [AX8] A transaction the way PostgreSQL runs it for this service: the
+  // per-install advisory lock (taken by the service's own $executeRaw) is held
+  // until the transaction ends, and a throw rolls back every write inside it.
+  let held: Promise<void> = Promise.resolve();
+  const transactional = Object.assign(client, {
+    $transaction: vi.fn(async <T,>(fn: (tx: unknown) => Promise<T>) => {
+      const saved = { candidate: { ...candidate }, receipt };
+      let release: (() => void) | null = null;
+      const tx = { ...client, $executeRaw: vi.fn(async () => {
+        const previous = held;
+        held = new Promise<void>(r => { release = r; });
+        await previous;
+        return 1;
+      }) };
+      try { return await fn(tx); }
+      catch (e) { Object.assign(candidate, saved.candidate); receipt = saved.receipt; throw e; }
+      finally { (release as (() => void) | null)?.(); }
+    }),
+  });
+  return { request, candidate, client: transactional, service: new AttributionService(transactional as unknown as PrismaClient) };
 }
 
 describe('AX8: candidate consumption and receipt insertion commit together', () => {
@@ -90,11 +109,15 @@ describe('AX8: candidate consumption and receipt insertion commit together', () 
     f.client.attributionClaim.create.mockImplementationOnce(async args => { reached(); await hold; return create(args); });
     const a = f.service.claim('synthetic-install-race', 'ios', undefined, f.request);
     await ready;
-    let b;
-    try { b = await f.service.claim('synthetic-install-race', 'ios', undefined, f.request); }
-    finally { release(); }
+    // The second request for the same install is serialized behind the first
+    // (contract §7): it starts while the first holds its receipt write, and is
+    // answered only after the first commits.
+    const b = f.service.claim('synthetic-install-race', 'ios', undefined, f.request);
+    await new Promise(r => setTimeout(r, 20));
+    release();
     const first = await a;
-    expect([first, b]).toEqual([0, 1].map(() => ({ destination: '/store/synthetic-store', tenantHint: lookup.tenantId, outcome: 'matched' })));
+    const second = await b;
+    expect([first, second]).toEqual([0, 1].map(() => ({ destination: '/store/synthetic-store', tenantHint: lookup.tenantId, outcome: 'matched' })));
   });
 });
 
@@ -108,6 +131,7 @@ function productionConfig(): Record<string, string | undefined> {
     TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`, TWILIO_API_KEY_SECRET: 'synthetic-only', TWILIO_FROM: '+15550000000',
     PUSH_PROVIDER: 'expo', MASTER_KEK: Buffer.alloc(32, 7).toString('base64'),
     STORAGE_SIGNING_SECRET: 'synthetic'.repeat(8), STORAGE_PROVIDER: 's3', CONSENT_IP_PEPPER: 'synthetic'.repeat(8),
+    AWS_S3_BUCKET: 'synthetic-boot-bucket',
     SCAN_IP_SALT: 'synthetic-scan'.repeat(4), ATTRIB_SALT: 'synthetic-attribution'.repeat(4),
   };
   for (const key of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET']) env[key] = 'synthetic-only';

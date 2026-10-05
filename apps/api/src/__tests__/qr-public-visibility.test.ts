@@ -9,7 +9,7 @@ import { AttributionService } from '../modules/qr/attribution.service';
 import { QrService } from '../modules/qr/qr.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { flushScanLog } from '../modules/qr/scan-log';
-import { tenantScopeExtensionFor } from '../plugins/prisma';
+import { scopedClientFor } from '../plugins/prisma';
 import { runWithTenant } from '../plugins/tenant-context';
 
 const prisma = new PrismaClient();
@@ -138,18 +138,29 @@ describe('attribution revalidates the current target, including receipts and rac
     expect((await svc.claim(id, 'android', undefined, request)).destination).toBe(`/store/${slug}`);
     expect((await svc.claim(`${run}-ios-rename`, 'ios', undefined, { ip: '198.51.100.247', ua: ios })).destination).toBe(`/store/${slug}`);
   });
-  it('the P2002 winner path also revalidates a hidden receipt', async () => {
+  it('the winner found under the per-install lock also revalidates a hidden receipt', async () => {
     const q = hidden[0]!, id = `${run}-race`;
-    // Model the first SELECT missing a concurrent winner, then traverse a
-    // REAL database P2002 on INSERT and reread that materialized receipt.
+    // Model the first SELECT missing a concurrent winner: the re-read under the
+    // per-install lock finds the materialized receipt, writes nothing, and the
+    // receipt is revalidated like any replay.
     await prisma.attributionClaim.create({ data: { tenantId: q.tenantId, qrCodeId: q.id, installId: id, platform: 'android', outcome: 'deterministic', destinationPath: `/store/${q.slug}` } });
     const firstRead = vi.spyOn(prisma.attributionClaim, 'findUnique').mockResolvedValueOnce(null);
-    const spy = vi.spyOn(prisma.attributionClaim, 'create');
     try {
       expect(await new AttributionService(prisma).claim(id, 'android', `swift_qr=${live.code}`, request)).toEqual({ destination: null, tenantHint: null, outcome: 'none' });
-      expect(spy).toHaveBeenCalledOnce();
       expect(firstRead).toHaveBeenCalledOnce();
-    } finally { spy.mockRestore(); firstRead.mockRestore(); }
+      expect(await prisma.attributionClaim.count({ where: { installId: id } })).toBe(1);
+    } finally { firstRead.mockRestore(); }
+  });
+  it('the P2002 winner path (a writer outside the lock) also revalidates a hidden receipt', async () => {
+    const q = hidden[0]!, id = `${run}-race-p2002`;
+    await prisma.attributionClaim.create({ data: { tenantId: q.tenantId, qrCodeId: q.id, installId: id, platform: 'android', outcome: 'deterministic', destinationPath: `/store/${q.slug}` } });
+    const firstRead = vi.spyOn(prisma.attributionClaim, 'findUnique').mockResolvedValueOnce(null);
+    const { Prisma } = await import('@prisma/client');
+    const tx = vi.spyOn(prisma, '$transaction').mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('synthetic unique collision', { code: 'P2002', clientVersion: '6' }));
+    try {
+      expect(await new AttributionService(prisma).claim(id, 'android', `swift_qr=${live.code}`, request)).toEqual({ destination: null, tenantHint: null, outcome: 'none' });
+      expect(tx).toHaveBeenCalledOnce();
+    } finally { tx.mockRestore(); firstRead.mockRestore(); }
   });
   it('a corrupt receipt tenant cannot borrow another code’s current destination', async () => {
     // Real storage rejects corruption; a historical receipt is simulated at
@@ -167,7 +178,9 @@ it('real routes work with FORCE RLS, NOBYPASSRLS app role and unscoped access de
   const client = new PrismaClient({ datasourceUrl: url.toString() });
   const oldBind = process.env['TENANT_RLS_BIND'], oldDeny = process.env['TENANT_UNSCOPED_ACCESS'];
   process.env['TENANT_RLS_BIND'] = '1'; process.env['TENANT_UNSCOPED_ACCESS'] = 'deny';
-  const a = await boot(client.$extends(tenantScopeExtensionFor(client, prisma)) as unknown as PrismaClient);
+  // The production client shape (#1444): request scoping on the swift_app
+  // login, system transactions routed to the system connection at BEGIN.
+  const a = await boot(scopedClientFor(client, prisma));
   try {
     const roles = await client.$queryRaw<Array<{ role: string; superuser: boolean; bypass: boolean }>>`SELECT current_user::text AS role, rolsuper AS superuser, rolbypassrls AS bypass FROM pg_roles WHERE rolname = current_user`;
     expect(roles).toEqual([{ role: 'swift_app', superuser: false, bypass: false }]);

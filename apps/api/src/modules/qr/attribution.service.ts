@@ -116,40 +116,55 @@ export class AttributionService {
   }
 
   /** First-launch claim. Deterministic on Android referrer; single-candidate
-   *  fingerprint match on iOS; receipt-idempotent per installId always. */
+   *  fingerprint match on iOS; receipt-idempotent per installId always.
+   *
+   *  [AX8] Consuming the iOS candidate and writing the receipt are ONE
+   *  transaction, serialized per installId: a receipt that fails to insert
+   *  leaves the candidate unclaimed (the compare-and-set rolls back with it),
+   *  and a concurrent claim for the same install waits for the first and then
+   *  replays its receipt — never a second, empty outcome. */
   async claim(
     installId: string,
     platform: string,
     referrer: string | undefined,
     request: { ip: string; ua: string | undefined },
   ): Promise<ClaimResult> {
-    return runAsSystem('public-qr-attribution', async () => {
+    return runAsSystem('qr-attribution-claim', async () => {
       const existing = await this.prisma.attributionClaim.findUnique({ where: { installId } });
       if (existing) return this.replay(existing);
 
-      const resolved = await this.resolveClaim(installId, platform, referrer, request);
+      let receipt: { qrCodeId: string | null; tenantId: string; destinationPath: string | null; outcome: string };
       try {
-        await this.prisma.attributionClaim.create({
-          data: {
-            tenantId: resolved.tenantId ?? 'swift-default',
-            installId,
-            platform,
-            qrCodeId: resolved.qrCodeId,
-            destinationPath: resolved.destination,
-            outcome: resolved.outcome,
-          },
+        receipt = await this.prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`qr-claim:${installId}`}, 0))`;
+          const won = await tx.attributionClaim.findUnique({ where: { installId } });
+          if (won) return won;
+          const resolved = await this.resolveClaim(tx, installId, platform, referrer, request);
+          // The receipt's tenant is the stored candidate's / code's
+          // (attribution_claims_tenant_matches_code holds it to the code).
+          return tx.attributionClaim.create({
+            data: {
+              tenantId: resolved.tenantId ?? 'swift-default',
+              installId,
+              platform,
+              qrCodeId: resolved.qrCodeId,
+              destinationPath: resolved.destination,
+              outcome: resolved.outcome,
+            },
+          });
         });
       } catch (e) {
         if (!isUniqueViolation(e)) throw e;
-        // Two concurrent claims for one installId: the receipt is the truth.
-        const winner = await this.prisma.attributionClaim.findUniqueOrThrow({ where: { installId } });
-        return this.replay(winner);
+        // A writer outside this lock (another process before the lock
+        // existed): the receipt is the truth.
+        receipt = await this.prisma.attributionClaim.findUniqueOrThrow({ where: { installId } });
       }
-      return this.replay({ ...resolved, tenantId: resolved.tenantId ?? 'swift-default', destinationPath: resolved.destination });
+      return this.replay(receipt);
     });
   }
 
   private async resolveClaim(
+    tx: Prisma.TransactionClient,
     installId: string,
     platform: string,
     referrer: string | undefined,
@@ -165,7 +180,7 @@ export class AttributionService {
 
     // iOS: recompute the fingerprint from THIS request.
     const fpHash = computeFpHash(request.ip, request.ua);
-    const candidates = await this.prisma.pendingAttribution.findMany({
+    const candidates = await tx.pendingAttribution.findMany({
       where: { fpHash, expiresAt: { gt: new Date() }, claimedAt: null },
     });
     if (candidates.length !== 1) {
@@ -174,12 +189,13 @@ export class AttributionService {
     const candidate = candidates[0]!;
     const dest = await this.destinationForReceipt(candidate.qrCodeId, candidate.tenantId);
     if (!dest) return { destination: null, tenantId: null, qrCodeId: null, outcome: 'none' };
-    const won = await this.prisma.pendingAttribution.updateMany({
-      where: { id: candidate.id, claimedAt: null }, // race guard
+    // Compare-and-set, inside the receipt's transaction: rolled back with it.
+    const won = await tx.pendingAttribution.updateMany({
+      where: { id: candidate.id, claimedAt: null },
       data: { claimedAt: new Date(), claimedInstallId: installId },
     });
     return won.count === 1
-      ? { destination: dest.path, tenantId: dest.tenantId, qrCodeId: dest.qrCodeId, outcome: 'matched' }
+      ? { destination: dest.path, tenantId: candidate.tenantId, qrCodeId: candidate.qrCodeId, outcome: 'matched' }
       : { destination: null, tenantId: null, qrCodeId: null, outcome: 'none' };
   }
 

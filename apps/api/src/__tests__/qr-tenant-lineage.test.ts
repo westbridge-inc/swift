@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { QrService } from '../modules/qr/qr.service';
-import { TENANT_LINEAGE_TABLES, tenantLineageDdl, vendorTenantMoveDdl } from '../lib/tenant-rls';
+import { TENANT_LINEAGE_TABLES, tenantLineageDdl } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 
@@ -67,7 +67,6 @@ beforeAll(async () => {
   // false green. Every other lineage-installing suite filters; this one did not.
   const LINEAGE_TABLES = ['qr_codes', 'slug_redirects', 'pending_attributions', 'attribution_claims', 'scan_events'];
   await installDdl(prisma, tenantLineageDdl().filter((s) => LINEAGE_TABLES.some((t) => s.includes(`${t}_tenant_matches`))));
-  await installDdl(prisma, vendorTenantMoveDdl());
   await prisma.user.deleteMany({ where: { phone: ownerPhone } }).catch(() => {});
   tenantA = await tenant('a');
   tenantB = await tenant('b');
@@ -137,6 +136,11 @@ describe('[PR1197-S1-04] storage refuses a QR row whose target is in another ten
   it('UPDATING a good row into a cross-tenant one is refused too', async () => {
     await expect(
       prisma.$executeRawUnsafe(`UPDATE "qr_codes" SET "entityId" = $1 WHERE "id" = $2`, vendorB, `ok-${RUN}`),
+      // The identity guard (a printed code never retargets) fires before the
+      // lineage guard; either refusal leaves the row as it was.
+    ).rejects.toThrow(/STA-1 lineage|QR_TOKEN_IMMUTABLE/);
+    await expect(
+      prisma.$executeRawUnsafe(`UPDATE "qr_codes" SET "tenantId" = $1 WHERE "id" = $2`, tenantB, `ok-${RUN}`),
     ).rejects.toThrow(/STA-1 lineage/);
   });
 
@@ -262,62 +266,37 @@ describe('[PR1197-S1-04] the tables that record the CREDIT obey the same rule', 
 // ---------------------------------------------------------------------------
 // [review finding 1] A PRINTED CODE MUST NOT SILENTLY DIE.
 //
-// Binding the resolver to `id + tenantId` is right, but on its own it turned a
-// cross-tenant DISCLOSURE into a permanent, silent OUTAGE: a vendor moved
-// between tenants kept its old code, `getOrCreateForVendor` matched on
-// entityId alone and handed the same dead code back forever, and every scan
-// resolved to nothing. Worse than what it replaced.
+// Binding the resolver to `id + tenantId` is right, but on its own a vendor
+// moved between tenants would keep its old code and every scan would resolve
+// to nothing. Under the launch contract a vendor never changes tenant at all
+// (vendors_tenant_immutable), so the printed code can never be stranded.
 // ---------------------------------------------------------------------------
 describe('[PR1197-S1-04] a vendor cannot walk away from its printed codes', () => {
-  const restore = async () => {
-    await prisma.$executeRawUnsafe(`SELECT move_vendor_tenant($1, $2)`, vendorMove, tenantA);
-    await prisma.$executeRawUnsafe(`DELETE FROM "qr_codes" WHERE "entityId" = $1 AND "tenantId" = $2`, vendorMove, tenantB);
-  };
-
-  it('REFUSES an unaccompanied move — the statement that used to strand every sticker', async () => {
+  it('REFUSES the tenant change itself — the statement that used to strand every sticker', async () => {
     const minted = await svc.getOrCreateForVendor(vendorMove, ownerId);
     expect(minted.tenantId).toBe(tenantA);
     await expect(
       prisma.vendor.update({ where: { id: vendorMove }, data: { tenantId: tenantB } }),
-      'a bare UPDATE of vendors.tenantId must not be allowed to leave lineage rows behind',
-    ).rejects.toThrow(/cannot change tenant while/i);
-    // ...and the vendor did not move.
+      'a store never changes tenant, so no printed code or credit row is left behind',
+    ).rejects.toThrow(/VENDOR_TENANT_IMMUTABLE/);
     const v = await prisma.vendor.findUniqueOrThrow({ where: { id: vendorMove }, select: { tenantId: true } });
     expect(v.tenantId).toBe(tenantA);
   });
 
-  it('the supported move carries the printed code with it — the sticker keeps working', async () => {
-    const minted = await svc.getOrCreateForVendor(vendorMove, ownerId);
-    expect(await svc.findByShortCode(minted.shortCode)).toMatchObject({ status: 'ACTIVE', entity: { live: true } });
-    try {
-      await prisma.$executeRawUnsafe(`SELECT move_vendor_tenant($1, $2)`, vendorMove, tenantB);
-
-      // THE POINT OF THE WHOLE CHANGE. A sticker already on a shop window
-      // resolves after the move. The first attempt at this fix turned a
-      // cross-tenant disclosure into a permanent dead code, which is worse.
-      const resolved = await svc.findByShortCode(minted.shortCode);
-      expect(resolved, 'the ALREADY-PRINTED code still resolves after the move').toMatchObject({ status: 'ACTIVE', entityId: vendorMove, entity: { live: true } });
-      const row = await prisma.qrCode.findUniqueOrThrow({ where: { id: minted.id }, select: { tenantId: true, status: true } });
-      expect(row.tenantId, 'the code moved with its vendor').toBe(tenantB);
-      expect(row.status, 'and it is still the live code, not deactivated history').toBe('ACTIVE');
-    } finally {
-      await restore();
-    }
-  });
-
-  it('leaves no row of any credit table behind in the old tenant', async () => {
+  it('the printed code keeps working, and no credit row is in another tenant', async () => {
     const minted = await svc.getOrCreateForVendor(vendorMove, ownerId);
     await prisma.scanEvent.create({ data: { tenantId: tenantA, qrCodeId: minted.id, decision: 'WEB_RENDER' } });
-    try {
-      await prisma.$executeRawUnsafe(`SELECT move_vendor_tenant($1, $2)`, vendorMove, tenantB);
-      const stranded = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
-        `SELECT (SELECT count(*) FROM qr_codes WHERE "entityId" = $1 AND "tenantId" = $2)
-              + (SELECT count(*) FROM scan_events s JOIN qr_codes q ON q.id = s."qrCodeId" WHERE q."entityId" = $1 AND s."tenantId" = $2)::bigint AS n`,
-        vendorMove, tenantA,
-      );
-      expect(Number(stranded[0]!.n), 'a row left in the old tenant is a row the resolver can never see').toBe(0);
-    } finally {
-      await restore();
-    }
+    await expect(prisma.$transaction(async (tx) => {
+      await tx.vendor.update({ where: { id: vendorMove }, data: { tenantId: tenantB } });
+      await tx.qrCode.updateMany({ where: { entityId: vendorMove }, data: { tenantId: tenantB } });
+      await tx.scanEvent.updateMany({ where: { qrCodeId: minted.id }, data: { tenantId: tenantB } });
+    })).rejects.toThrow(/VENDOR_TENANT_IMMUTABLE/);
+    expect(await svc.findByShortCode(minted.shortCode)).toMatchObject({ status: 'ACTIVE', entityId: vendorMove, entity: { live: true } });
+    const stranded = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+      `SELECT (SELECT count(*) FROM qr_codes WHERE "entityId" = $1 AND "tenantId" <> $2)
+            + (SELECT count(*) FROM scan_events s JOIN qr_codes q ON q.id = s."qrCodeId" WHERE q."entityId" = $1 AND s."tenantId" <> $2)::bigint AS n`,
+      vendorMove, tenantA,
+    );
+    expect(Number(stranded[0]!.n)).toBe(0);
   });
 });

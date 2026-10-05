@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { TENANT_LINEAGE_TABLES, VENDOR_NON_QR_DEPENDENCIES, tenantLineageDdl, vendorTenantMoveDdl } from '../lib/tenant-rls';
-import { Prisma } from '@prisma/client';
+import { TENANT_LINEAGE_TABLES, tenantLineageDdl } from '../lib/tenant-rls';
 
 // ---------------------------------------------------------------------------
 // [PR1197-S1-04] THE MIGRATION IS THE ONLY THING THAT INSTALLS THIS IN PRODUCTION.
@@ -23,8 +22,9 @@ import { Prisma } from '@prisma/client';
 // ---------------------------------------------------------------------------
 
 const MIGRATIONS = path.resolve(__dirname, '../../prisma/migrations');
-const QR_LINEAGE = path.join(MIGRATIONS, '20260930151000_qr_tenant_lineage');
-const VENDOR_MOVE = path.join(MIGRATIONS, '20260930151100_vendor_tenant_move_guard');
+const QR_LINEAGE = path.join(MIGRATIONS, '20261005210000_qr_tenant_lineage');
+const VENDOR_TENANT = path.join(MIGRATIONS, '20261005210200_vendor_tenant_immutable');
+const QR_IDENTITY = path.join(MIGRATIONS, '20261005210300_qr_token_identity');
 
 /** The seven tables whose lineage this PR closes. */
 const QR_LINEAGE_TABLES = ['qr_codes', 'slug_redirects', 'pending_attributions', 'attribution_claims', 'scan_events', 'scan_daily_rollups', 'orders'];
@@ -34,16 +34,12 @@ const read = (dir: string) => readFileSync(path.join(dir, 'migration.sql'), 'utf
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 
 describe('[PR1197-S1-04] the shipped migration really installs the lineage wall', () => {
-  it('the move dependency census covers every current tenant-bearing vendorId model', () => {
-    const actual = Prisma.dmmf.datamodel.models
-      .filter(m => m.fields.some(f => f.name === 'vendorId') && m.fields.some(f => f.name === 'tenantId'))
-      .map(m => m.dbName ?? m.name).sort();
-    expect([...VENDOR_NON_QR_DEPENDENCIES].sort()).toEqual(actual);
-  });
-  it('both migration directories exist', () => {
+  it('all three migration directories exist, each with its rollback', () => {
     // Named individually so a deletion says WHICH control left the build.
     expect(existsSync(path.join(QR_LINEAGE, 'migration.sql')), `${QR_LINEAGE} is missing — production would have no QR lineage triggers`).toBe(true);
-    expect(existsSync(path.join(VENDOR_MOVE, 'migration.sql')), `${VENDOR_MOVE} is missing — a vendor could again walk away from its printed codes`).toBe(true);
+    expect(existsSync(path.join(VENDOR_TENANT, 'migration.sql')), `${VENDOR_TENANT} is missing — a vendor could again walk away from its printed codes`).toBe(true);
+    expect(existsSync(path.join(QR_IDENTITY, 'migration.sql')), `${QR_IDENTITY} is missing — a printed token could be reissued`).toBe(true);
+    for (const dir of [QR_LINEAGE, VENDOR_TENANT, QR_IDENTITY]) expect(existsSync(path.join(dir, 'rollback.sql')), dir).toBe(true);
   });
 
   it('the QR migration creates a trigger for every credit table the registry names', () => {
@@ -64,29 +60,30 @@ describe('[PR1197-S1-04] the shipped migration really installs the lineage wall'
     }
   });
 
-  it('the vendor-move migration is byte-equivalent to its generator', () => {
-    // Generated, not hand-written, so drift between the two is impossible to
-    // introduce accidentally — and visible immediately when introduced on purpose.
-    const shipped = normalise(read(VENDOR_MOVE));
-    for (const statement of vendorTenantMoveDdl()) {
-      expect(shipped, `a statement from vendorTenantMoveDdl() is not in the shipped migration:\n${statement.slice(0, 120)}...`).toContain(normalise(statement));
+  it('the store-tenant migration refuses every tenant change, and no move function or move guard ships', () => {
+    const sql = read(VENDOR_TENANT);
+    expect(normalise(sql)).toContain(normalise('CREATE TRIGGER vendors_tenant_immutable BEFORE UPDATE OF "tenantId" ON public.vendors FOR EACH ROW EXECUTE FUNCTION public.vendors_tenant_immutable();'));
+    expect(sql).toContain("USING ERRCODE = '23514'");
+    for (const dir of readdirSync(MIGRATIONS).filter((d) => existsSync(path.join(MIGRATIONS, d, 'migration.sql')))) {
+      const text = readFileSync(path.join(MIGRATIONS, dir, 'migration.sql'), 'utf8');
+      expect(text, dir).not.toMatch(/move_vendor_tenant|vendors_tenant_move_guard|qr_codes_credit_move_guard/);
     }
   });
 
-  it('the guard and the supported move both ship — one without the other is a trap', () => {
-    const sql = read(VENDOR_MOVE);
-    expect(sql).toContain('CREATE CONSTRAINT TRIGGER vendors_tenant_move_guard');
-    expect(sql).toContain('CREATE CONSTRAINT TRIGGER qr_codes_credit_move_guard');
-    expect(sql).not.toContain('app.vendor_tenant_move');
-    expect(sql).toContain('FUNCTION move_vendor_tenant(');
+  it('the identity migration’s rollback is monotonic: it drops nothing', () => {
+    const rollback = readFileSync(path.join(QR_IDENTITY, 'rollback.sql'), 'utf8');
+    expect(rollback).not.toMatch(/\bDROP\b/i);
+    expect(rollback).toContain('QR_TOKEN_IDENTITY_MISSING');
   });
 
   it('no later migration quietly drops these triggers', () => {
     // A DROP in a subsequent migration would leave every test green — the suites
     // install their own DDL — while production lost the wall.
-    const names = [...QR_LINEAGE_TABLES.map((t) => TENANT_LINEAGE_TABLES.find((r) => r.table === t)!.trigger), 'vendors_tenant_move_guard', 'qr_codes_credit_move_guard'];
+    const names = [...QR_LINEAGE_TABLES.map((t) => TENANT_LINEAGE_TABLES.find((r) => r.table === t)!.trigger), 'vendors_tenant_immutable',
+      'qr_codes_token_reserve', 'qr_codes_token_retire', 'qr_codes_identity_immutable', 'vendors_qr_target_identity', 'vendors_qr_target_retire',
+      'token_identities_immutable', 'token_identities_no_truncate'];
     const later = readdirSync(MIGRATIONS)
-      .filter((d) => d > '20260930151100_vendor_tenant_move_guard' && existsSync(path.join(MIGRATIONS, d, 'migration.sql')));
+      .filter((d) => d > '20261005210300_qr_token_identity' && existsSync(path.join(MIGRATIONS, d, 'migration.sql')));
     const offenders: string[] = [];
     for (const dir of later) {
       const sql = readFileSync(path.join(MIGRATIONS, dir, 'migration.sql'), 'utf8');

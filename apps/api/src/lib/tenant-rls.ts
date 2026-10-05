@@ -269,26 +269,26 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'document_record', trigger: 'document_record_tenant_matches_account', parent: 'users', fk: 'accountId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
-  // QR parents are locked FOR SHARE until commit. Vendor/QR tenant updates
-  // take conflicting row locks, so a child insert cannot race a parent move.
+  // QR parents are locked FOR SHARE until commit, so a child insert cannot race
+  // a change to its parent. (A vendor's tenant never changes at all:
+  // vendors_tenant_immutable, migration 20261005210200.)
   // Optional code links explicitly retain null; a non-null missing/hidden
   // parent is refused on UPDATE as well as INSERT.
   { table: 'qr_codes', trigger: 'qr_codes_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'], requiredParent: true,
-    parentTenantSql: `SELECT "tenantId" FROM vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
+    parentTenantSql: `SELECT "tenantId" FROM public.vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
   { table: 'slug_redirects', trigger: 'slug_redirects_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'], requiredParent: true,
-    parentTenantSql: `SELECT "tenantId" FROM vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
+    parentTenantSql: `SELECT "tenantId" FROM public.vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
   { table: 'pending_attributions', trigger: 'pending_attributions_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
-    parentTenantSql: `SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
+    parentTenantSql: `SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
   { table: 'attribution_claims', trigger: 'attribution_claims_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
-    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
   { table: 'scan_events', trigger: 'scan_events_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
-    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
   { table: 'scan_daily_rollups', trigger: 'scan_daily_rollups_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
-    parentTenantSql: `SELECT "tenantId" FROM qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
-  // Order credit must identify THIS store, as well as this tenant. Moving
-  // financial order tenancy is never part of the QR-only move routine.
+    parentTenantSql: `SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
+  // Order credit must identify THIS store, as well as this tenant.
   { table: 'orders', trigger: 'orders_tenant_matches_attribution_code', parent: 'qr_codes', fk: 'attributionQrCodeId', watch: ['attributionQrCodeId', 'vendorId'], requiredParent: true,
-    parentTenantSql: `SELECT CASE WHEN NEW."attributionQrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM qr_codes WHERE id = NEW."attributionQrCodeId" AND "entityType" = 'VENDOR' AND "entityId" = NEW."vendorId" FOR SHARE) END` },
+    parentTenantSql: `SELECT CASE WHEN NEW."attributionQrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."attributionQrCodeId" AND "entityType" = 'VENDOR' AND "entityId" = NEW."vendorId" FOR SHARE) END` },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
@@ -312,7 +312,8 @@ export function tenantLineageDdl(): string[] {
       BEGIN
         ${parentTenantSql ?? `SELECT "tenantId" FROM ${parent} WHERE id = NEW."${fk}"`} INTO parent_tenant;
         IF parent_tenant IS NULL THEN
-          ${requiredParent ? '-- A QR UPDATE with a missing/hidden non-null parent is refused too.' : `-- Nullable-owner UPDATEs retain their recorded tenant when a parent is deleted.
+          ${requiredParent ? '-- A QR UPDATE with a missing/hidden non-null parent is refused too.' : `-- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
           IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;`}
           RAISE EXCEPTION '${table} row % names ${parent} row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
@@ -329,104 +330,6 @@ export function tenantLineageDdl(): string[] {
     `DROP TRIGGER IF EXISTS ${trigger} ON ${table}`,
     `CREATE TRIGGER ${trigger} BEFORE INSERT OR UPDATE OF "tenantId", ${(watch ?? [fk]).map((c) => `"${c}"`).join(', ')} ON ${table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
   ]);
-}
-
-/** Tenant-bearing store dependencies measured against the current schema.
- * A QR-only move refuses these rather than silently moving orders, money,
- * menus, or operational history into a different operator's tenant. */
-export const VENDOR_NON_QR_DEPENDENCIES = [
-  'booking_exceptions', 'categories', 'delivery_cash_settlements',
-  'discovery_category_requests', 'items', 'mmg_refund_obligations',
-  'mmg_refund_sends', 'orders', 'settlements',
-  'vendor_discovery_categories', 'vendor_prep_stats',
-] as const;
-
-/** Parent guards validate the FINAL transaction state. Deferral permits the
- * parent-first QR-only move without a caller-writable GUC exemption. Child
- * FOR SHARE locks serialize QR inserts against moves. Rare administrative
- * moves also take SHARE table locks on non-QR dependencies: several carry
- * vendorId without an FK and otherwise hold no parent lock on INSERT. Ordinary
- * store updates do not take these locks. Guard functions have a
- * fixed search path and read with migration-owner authority so RLS cannot
- * hide an old-tenant dependency from the invariant check; they write nothing.
- * The move itself remains SECURITY INVOKER. */
-export function vendorTenantMoveDdl(): string[] {
-  const direct = ['qr_codes', 'slug_redirects'];
-  const credit = ['pending_attributions', 'attribution_claims', 'scan_events', 'scan_daily_rollups'];
-  const dependencyLocks = VENDOR_NON_QR_DEPENDENCIES.map(t => `public.${t}`).join(', ');
-  return [
-    `CREATE OR REPLACE FUNCTION vendors_tenant_move_guard() RETURNS trigger AS $$
-      DECLARE final_tenant TEXT; stranded BIGINT;
-      BEGIN
-        IF NEW."tenantId" IS NOT DISTINCT FROM OLD."tenantId" THEN RETURN NULL; END IF;
-        IF current_setting('transaction_isolation') <> 'read committed' THEN
-          RAISE EXCEPTION 'vendor tenant moves require READ COMMITTED isolation [STA-1 lineage]' USING ERRCODE = 'check_violation';
-        END IF;
-        LOCK TABLE ${dependencyLocks} IN SHARE MODE;
-        SELECT "tenantId" INTO final_tenant FROM public.vendors WHERE id = NEW.id;
-        IF final_tenant IS NULL THEN RETURN NULL; END IF; -- parent deleted in the same transaction
-        SELECT ${[
-          ...direct.map(t => `(SELECT count(*) FROM public.${t} WHERE "entityType" = 'VENDOR' AND "entityId" = NEW.id AND "tenantId" IS DISTINCT FROM final_tenant)`),
-          ...VENDOR_NON_QR_DEPENDENCIES.map(t => `(SELECT count(*) FROM public.${t} WHERE "vendorId" = NEW.id AND "tenantId" IS DISTINCT FROM final_tenant)`),
-        ].join(' + ')} INTO stranded;
-        IF stranded > 0 THEN
-          RAISE EXCEPTION 'vendor % cannot change tenant while % lineage row(s) remain in another tenant [PR1197-S1-04]',
-            NEW.id, stranded USING ERRCODE = 'check_violation';
-        END IF;
-        RETURN NULL;
-      END $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp`,
-    `DROP TRIGGER IF EXISTS vendors_tenant_move_guard ON vendors`,
-    `CREATE CONSTRAINT TRIGGER vendors_tenant_move_guard AFTER UPDATE OF "tenantId" ON vendors DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION vendors_tenant_move_guard()`,
-    `CREATE OR REPLACE FUNCTION qr_codes_credit_move_guard() RETURNS trigger AS $$
-      DECLARE final_tenant TEXT; final_vendor TEXT; stranded BIGINT;
-      BEGIN
-        IF NEW."tenantId" IS NOT DISTINCT FROM OLD."tenantId" AND NEW."entityId" IS NOT DISTINCT FROM OLD."entityId" AND NEW."entityType" IS NOT DISTINCT FROM OLD."entityType" THEN RETURN NULL; END IF;
-        IF NEW."entityId" IS DISTINCT FROM OLD."entityId" OR NEW."entityType" IS DISTINCT FROM OLD."entityType" THEN
-          RAISE EXCEPTION 'printed QR target is immutable [STA-1 lineage]' USING ERRCODE = 'check_violation';
-        END IF;
-        IF current_setting('transaction_isolation') <> 'read committed' THEN
-          RAISE EXCEPTION 'QR tenant/target moves require READ COMMITTED isolation [STA-1 lineage]' USING ERRCODE = 'check_violation';
-        END IF;
-        SELECT "tenantId", "entityId" INTO final_tenant, final_vendor FROM public.qr_codes WHERE id = NEW.id;
-        IF final_tenant IS NULL THEN RETURN NULL; END IF;
-        SELECT ${credit.map(t => `(SELECT count(*) FROM public.${t} WHERE "qrCodeId" = NEW.id AND "tenantId" IS DISTINCT FROM final_tenant)`).join(' + ')}
-          + (SELECT count(*) FROM public.orders WHERE "attributionQrCodeId" = NEW.id AND ("tenantId" IS DISTINCT FROM final_tenant OR "vendorId" IS DISTINCT FROM final_vendor)) INTO stranded;
-        IF stranded > 0 THEN
-          RAISE EXCEPTION 'QR % cannot change its target while % credit lineage row(s) would be stranded [STA-1 lineage]', NEW.id, stranded USING ERRCODE = 'check_violation';
-        END IF;
-        RETURN NULL;
-      END $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp`,
-    `DROP TRIGGER IF EXISTS qr_codes_credit_move_guard ON qr_codes`,
-    `CREATE CONSTRAINT TRIGGER qr_codes_credit_move_guard AFTER UPDATE OF "tenantId", "entityId", "entityType" ON qr_codes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION qr_codes_credit_move_guard()`,
-    `CREATE OR REPLACE FUNCTION move_vendor_tenant(p_vendor_id TEXT, p_new_tenant TEXT) RETURNS void AS $$
-      DECLARE old_tenant TEXT; dependencies BIGINT;
-      BEGIN
-        IF current_setting('transaction_isolation') <> 'read committed' THEN
-          RAISE EXCEPTION 'vendor tenant moves require READ COMMITTED isolation [STA-1 lineage]' USING ERRCODE = 'check_violation';
-        END IF;
-        -- Serialize even dependencies without a vendor FK before the census.
-        -- Lock tables before the vendor to avoid a needless lock inversion.
-        LOCK TABLE ${dependencyLocks} IN SHARE MODE;
-        -- Lock BEFORE the census; a concurrent QR writer holds FOR SHARE.
-        SELECT "tenantId" INTO old_tenant FROM public.vendors WHERE id = p_vendor_id FOR UPDATE;
-        IF old_tenant IS NULL THEN
-          RAISE EXCEPTION 'vendor % does not exist or is not visible', p_vendor_id USING ERRCODE = 'check_violation';
-        END IF;
-        IF old_tenant = p_new_tenant THEN RETURN; END IF;
-        IF NOT EXISTS (SELECT 1 FROM public.tenants WHERE id = p_new_tenant) THEN
-          RAISE EXCEPTION 'target tenant does not exist' USING ERRCODE = 'check_violation';
-        END IF;
-        SELECT ${VENDOR_NON_QR_DEPENDENCIES.map(t => `(SELECT count(*) FROM public.${t} WHERE "vendorId" = p_vendor_id)`).join(' + ')} INTO dependencies;
-        IF dependencies > 0 THEN
-          RAISE EXCEPTION 'vendor % has non-QR dependencies; QR-only tenant move refused [PR1197-S1-04]', p_vendor_id USING ERRCODE = 'check_violation';
-        END IF;
-        UPDATE public.vendors SET "tenantId" = p_new_tenant WHERE id = p_vendor_id;
-        ${direct.map(t => `UPDATE public.${t} SET "tenantId" = p_new_tenant WHERE "entityType" = 'VENDOR' AND "entityId" = p_vendor_id AND "tenantId" = old_tenant;`).join('\n        ')}
-        ${credit.map(t => `UPDATE public.${t} c SET "tenantId" = p_new_tenant FROM public.qr_codes q WHERE q.id = c."qrCodeId" AND q."entityType" = 'VENDOR' AND q."entityId" = p_vendor_id AND c."tenantId" = old_tenant;`).join('\n        ')}
-        -- Deferred constraints are checked at commit. No session flag permits
-        -- skipping them, and a financial/order dependency aborts the move.
-      END $$ LANGUAGE plpgsql SECURITY INVOKER SET search_path = public, pg_temp`,
-  ];
 }
 
 /** [DOC-INV-7] A receipt that can be edited proves nothing. Mirrors migration 20260905180000. */
