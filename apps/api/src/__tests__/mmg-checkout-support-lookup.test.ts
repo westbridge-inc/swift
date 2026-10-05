@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastify';
+import { Writable } from 'node:stream';
+import { loggerRedactConfig, loggerSerializers } from '../utils/logger-config';
 import rateLimit from '@fastify/rate-limit';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -203,8 +205,8 @@ const s = {} as {
   open: { ref: string; ours: string };
 };
 
-async function buildApp(): Promise<FastifyInstance> {
-  const server = Fastify({ logger: false });
+async function buildApp(logger: FastifyServerOptions['logger'] = false, beforeReady?: (server: FastifyInstance) => void): Promise<FastifyInstance> {
+  const server = Fastify({ logger });
   registerErrorHandler(server);
   registerEmptyJsonBodyParser(server);
   await server.register(rateLimit, { max: 1000, timeWindow: '1 minute', keyGenerator: rateLimitKey((token) => server.jwt.verify(token)) });
@@ -222,6 +224,7 @@ async function buildApp(): Promise<FastifyInstance> {
   await server.register(driverRoutes, { prefix: '/api/v1/driver' });
   await server.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
   await server.register(adminRoutes, { prefix: '/api/v1/admin' });
+  beforeReady?.(server);
   await server.ready();
   return server;
 }
@@ -601,5 +604,37 @@ describe('3. the partner sees both ids on their receipt; MMG\'s only once CONFIR
 
   it('following one checkout answers the same receipt fields', async () => {
     expect((await follow(s.store, s.confirmed.ref)).json().data).toMatchObject({ swiftReference: s.confirmed.ours, mmgTransactionId: s.confirmed.txn });
+  });
+});
+
+describe('[Sol · #1422] a phone search that fails never writes the phone to the operational log', () => {
+  it('the request and its failure are logged by route template only, with the production logger settings', async () => {
+    const lines: string[] = [];
+    const stream = new Writable({ write(chunk, _encoding, done) { lines.push(String(chunk)); done(); } });
+    // The production logger settings (app.ts): redaction and serializers. The
+    // search route fails the way a database or audit failure would, with an
+    // error that carries the raw request target.
+    const logged = await buildApp({ level: 'trace', stream, redact: loggerRedactConfig, serializers: loggerSerializers }, (server) => {
+      server.addHook('preHandler', async (request) => {
+        if (request.routeOptions.url === SEARCH) {
+          throw Object.assign(new Error(`audit write refused for GET ${request.url}`), { url: request.url, query: request.query });
+        }
+      });
+    });
+    try {
+      const phone = s.rider.phone;
+      const res = await logged.inject({ method: 'GET', url: `${SEARCH}?q=${encodeURIComponent(phone)}`, headers: { authorization: `Bearer ${admin.token}` } });
+      expect(res.statusCode).toBe(500);
+      expect(res.body).not.toContain(phone.slice(1));
+      const log = lines.join('');
+      // The failure was logged, by route template...
+      expect(log).toContain('Unhandled error');
+      expect(log).toContain(SEARCH);
+      // ...and nowhere does the phone appear, in any spelling.
+      for (const spelling of [phone, encodeURIComponent(phone), phone.slice(1), phone.slice(4)]) expect(log).not.toContain(spelling);
+      expect(log).not.toContain('?q=');
+    } finally {
+      await logged.close();
+    }
   });
 });
