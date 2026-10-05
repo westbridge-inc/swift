@@ -67,10 +67,10 @@ for (const role of ['rider', 'driver'] as const) describe(`${role} legacy docume
 
   it('keeps held objects, then the account retry worker purges after legal-hold release', async () => {
     const p = await mover(role);
-    const doc = await app.prisma.verificationDocument.create({ data: { userId: p.userId, role: 'MOVER', docType: 'national_id', fileUrl: p.urls.nationalIdUrl! } });
+    const doc = await app.prisma.verificationDocument.create({ data: { userId: p.userId, role: 'MOVER', docType: 'national_id', fileUrl: p.urls['nationalIdUrl']! } });
     const { hold } = await placeDocLegalHold(app.prisma, { subjectUserId: p.userId, placedBy: p.userId, ownerId: p.userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86400000) });
     expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD' });
-    expect((await p.read()).nationalIdUrl).toBe(p.urls.nationalIdUrl);
+    expect((await p.read()).nationalIdUrl).toBe(p.urls['nationalIdUrl']);
     for (const key of Object.values(p.urls)) expect(await storage.getObject(key)).toEqual(bytes);
     await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: p.userId, reason: 'Synthetic case closed' });
     await retryAccountErasures({ prisma: app.prisma, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as any });
@@ -94,23 +94,23 @@ for (const role of ['rider', 'driver'] as const) describe(`${role} legacy docume
 
   it('does not purge an owned photo while another account references a local alias', async () => {
     const p = await mover(role); const other = await mover(role);
-    const alias = p.urls.vehiclePhotoUrl!.replace('/uploads/', '');
+    const alias = p.urls['vehiclePhotoUrl']!.replace('/uploads/', '');
     if (role === 'rider') await app.prisma.rider.update({ where: { id: other.profileId }, data: { vehiclePhotoUrl: alias } });
     else await app.prisma.driver.update({ where: { id: other.profileId }, data: { vehiclePhotoUrl: alias } });
     const del = vi.spyOn(storage, 'delete');
     expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE' });
-    expect(del).not.toHaveBeenCalledWith(p.urls.vehiclePhotoUrl);
-    expect((await p.read()).vehiclePhotoUrl).toBe(p.urls.vehiclePhotoUrl);
-    expect(await storage.getObject(p.urls.vehiclePhotoUrl!)).toEqual(bytes);
+    expect(del).not.toHaveBeenCalledWith(p.urls['vehiclePhotoUrl']);
+    expect((await p.read()).vehiclePhotoUrl).toBe(p.urls['vehiclePhotoUrl']);
+    expect(await storage.getObject(p.urls['vehiclePhotoUrl']!)).toEqual(bytes);
   });
 
   it('refuses a foreign object pointer without touching foreign bytes', async () => {
     const p = await mover(role); const other = await mover(role);
-    if (role === 'rider') await app.prisma.rider.update({ where: { id: p.profileId }, data: { nationalIdUrl: other.urls.nationalIdUrl } });
-    else await app.prisma.driver.update({ where: { id: p.profileId }, data: { nationalIdUrl: other.urls.nationalIdUrl } });
+    if (role === 'rider') await app.prisma.rider.update({ where: { id: p.profileId }, data: { nationalIdUrl: other.urls['nationalIdUrl'] } });
+    else await app.prisma.driver.update({ where: { id: p.profileId }, data: { nationalIdUrl: other.urls['nationalIdUrl'] } });
     const del = vi.spyOn(storage, 'delete');
     expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE' });
-    expect(del).not.toHaveBeenCalledWith(other.urls.nationalIdUrl);
-    expect(await storage.getObject(other.urls.nationalIdUrl!)).toEqual(bytes);
+    expect(del).not.toHaveBeenCalledWith(other.urls['nationalIdUrl']);
+    expect(await storage.getObject(other.urls['nationalIdUrl']!)).toEqual(bytes);
   });
 });

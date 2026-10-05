@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -64,6 +65,7 @@ async function makePartner(partner: Partner, due: Date) {
   await app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'late-approval', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
   });
+  await grantStepUp(app, token);
   const entity = partner === 'TAXI_DRIVER'
     ? {
         driverId: (await app.prisma.driver.create({
