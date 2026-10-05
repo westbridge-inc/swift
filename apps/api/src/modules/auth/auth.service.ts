@@ -5,7 +5,7 @@ import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/cl
 import { AppError } from '../../utils/errors';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
-import { checkOtpDailyBudget } from '../../utils/sms-budget';
+import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
@@ -42,7 +42,7 @@ import { publicLaunchCountryFromPhone } from './launch-market';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import {
   clearPasswordFailures,
-  isPasswordSourceLocked,
+  isPasswordSignInLocked,
   recordPasswordFailure,
   resetPasswordAttemptBudget,
 } from './password-attempts';
@@ -550,6 +550,11 @@ export class AuthService {
       for (const other of others) {
         revoked.push({ sessionId: other.id, cleanup: await this.revokeLockedSession(tx, other.id, userId) });
       }
+      // An ended device must stop receiving pushes too — the notice below
+      // included. Push registrations belong to installs, not sessions, so every
+      // one is retired here, as a reset does; this device re-registers its own
+      // on its next launch.
+      await tx.deviceToken.updateMany({ where: { userId, isActive: true }, data: { isActive: false } });
 
       // This session continues under new credentials: the old access and
       // refresh tokens (and the previous refresh token's grace) are gone.
@@ -597,6 +602,8 @@ export class AuthService {
     } catch (error) {
       this.app.log.error({ err: error, userId }, 'password-changed inbox notice failed');
     }
+    // The launch-market destination gate every other text passes.
+    if (!smsDestinationAllowed(phone)) return;
     await this.channels.sms.sendSms(phone, body)
       .catch((error) => this.app.log.error({ err: error, userId }, 'password-changed text failed'));
   }
@@ -619,11 +626,11 @@ export class AuthService {
     const matches = await bcrypt.compare(password, user?.passwordHash ?? NO_ACCOUNT_PASSWORD_HASH);
     if (!user || !user.passwordHash) throw invalid;
 
-    // [L04 · MASTER-056] The lock is per (account, source): five wrong
-    // passwords from one address lock that address only. The owner elsewhere,
-    // and SMS-code sign-in, are untouched by someone else's guesses.
+    // [L04 · MASTER-056] Five wrong passwords from one source lock that source
+    // only; a wider ceiling across all sources pauses password sign-in for the
+    // account. SMS-code sign-in reads neither, so the owner always has a way in.
     const source = deviceInfo.ipAddress;
-    if (await isPasswordSourceLocked(this.app.redis, user.id, source)) throw invalid;
+    if (await isPasswordSignInLocked(this.app.redis, user.id, source)) throw invalid;
 
     // Password hashing stays outside the lock so one expensive comparison does
     // not block every security mutation for this user. Once it finishes, both

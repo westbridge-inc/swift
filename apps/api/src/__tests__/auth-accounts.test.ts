@@ -274,7 +274,7 @@ describe('Email + password login with lockout', () => {
     expect(wrong.json().error.code).toBe(unknown.json().error.code);
   });
 
-  it('locks the account after 5 failures — even the right password is refused', async () => {
+  it('five failures from one address lock password sign-in from that address — even the right password is refused', async () => {
     for (let i = 0; i < 5; i++) {
       const attempt = await inject('POST', '/api/v1/auth/password/login', {
         phone: MOVER_PHONE,

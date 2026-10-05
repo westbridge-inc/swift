@@ -378,6 +378,7 @@ export async function authRoutes(app: FastifyInstance) {
     // [L04 · MASTER-041] A browser receives its session exactly as SMS-code
     // sign-in gives it: HttpOnly cookies and no credential in the body.
     if (browserClientOf(request)) {
+      clearSignupContinuationCookie(reply);
       setSessionCookies(reply, result.tokens);
       return reply.send({ success: true, data: withoutTokens(result) });
     }

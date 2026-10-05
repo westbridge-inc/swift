@@ -1,32 +1,72 @@
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
+import { isIPv4, isIPv6 } from 'node:net';
 import type Redis from 'ioredis';
+import { isProduction } from '../../utils/runtime-mode';
 
 /**
- * [L04 · MASTER-056] Wrong-password budget per (account, source).
+ * [L04 · MASTER-056] Wrong-password budgets.
+ *
+ * Two bounds, both on password sign-in only — SMS-code sign-in reads neither,
+ * so the real owner always has a way in:
+ *  - per (account, source): five wrong passwords from one source inside the
+ *    window lock password sign-in for THAT source only. A guesser at one
+ *    address can never spend the owner's budget elsewhere.
+ *  - per account, across ALL sources: a wider ceiling. An attacker rotating
+ *    addresses gets at most this many guesses per window at one account,
+ *    then password sign-in pauses for that account everywhere.
  *
  * The source is the client address the app already trusts (request.ip, which
- * Fastify derives under TRUST_PROXY). Five wrong passwords from one source
- * inside the window lock password sign-in for THAT source only, for the lock
- * period. A guesser somewhere else can therefore never spend the owner's
- * budget, and SMS-code sign-in reads none of this, so it stays open.
- *
- * The address itself is never stored: keys carry a digest of it. A password
- * reset or a password change starts a new generation, so every source's
- * counter and lock for that account are left behind at once.
+ * Fastify derives under TRUST_PROXY), bucketed: IPv6 by its /64 (one host
+ * owns a whole /64), IPv4-mapped IPv6 as its IPv4 address. Keys carry a keyed
+ * HMAC of the bucket (the OTP hashing secret), never the address, so the
+ * keyspace is not a reversible address log. A password reset or change starts
+ * a new generation, leaving every count and lock behind at once.
  */
 export const PASSWORD_FAILURES_PER_SOURCE = 5;
 export const PASSWORD_FAILURE_WINDOW_S = 15 * 60;
 export const PASSWORD_SOURCE_LOCK_S = 15 * 60;
+/** The account-wide ceiling across ALL sources in the window. */
+export const PASSWORD_FAILURES_PER_ACCOUNT = 20;
+export const PASSWORD_ACCOUNT_LOCK_S = 15 * 60;
 
-const sourceDigest = (source: string): string => createHash('sha256')
-  .update('swift:password-source:v1\0')
-  .update(source || 'unknown')
-  .digest('hex')
-  .slice(0, 32);
+/** The unit a per-source budget belongs to: an IPv4 address, or an IPv6 /64. */
+export function passwordSourceBucket(source: string): string {
+  const raw = (source || '').trim().toLowerCase();
+  const mapped = raw.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped && isIPv4(mapped[1]!)) return `v4:${mapped[1]}`;
+  if (isIPv4(raw)) return `v4:${raw}`;
+  if (isIPv6(raw)) {
+    const [head = '', tail = ''] = raw.split('::');
+    const left = head ? head.split(':') : [];
+    const right = tail ? tail.split(':') : [];
+    const groups = raw.includes('::') ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+    return `v6:${groups.slice(0, 4).map((g) => g.padStart(4, '0')).join(':')}::/64`;
+  }
+  return `other:${raw || 'unknown'}`;
+}
+
+function digestKey(env: Record<string, string | undefined>): string {
+  const secret = env['OTP_HASH_SECRET'] ?? env['JWT_SECRET'];
+  if (secret) return secret;
+  // Production is refused by the boot guard without one of these secrets.
+  if (isProduction(env)) throw new Error('OTP_HASH_SECRET or JWT_SECRET is required in production');
+  return 'swift-local-password-source-key-not-for-production';
+}
+
+/** A keyed pseudonym of the source's bucket. */
+export function passwordSourceDigest(source: string, env: Record<string, string | undefined> = process.env): string {
+  return createHmac('sha256', digestKey(env))
+    .update('swift:password-source:v2\0')
+    .update(passwordSourceBucket(source))
+    .digest('hex')
+    .slice(0, 32);
+}
 
 const generationKey = (userId: string) => `pwauth:{${userId}}:gen`;
-const failKey = (userId: string, gen: string, source: string) => `pwauth:{${userId}}:fail:${gen}:${sourceDigest(source)}`;
-const lockKey = (userId: string, gen: string, source: string) => `pwauth:{${userId}}:lock:${gen}:${sourceDigest(source)}`;
+const failKey = (userId: string, gen: string, source: string) => `pwauth:{${userId}}:fail:${gen}:${passwordSourceDigest(source)}`;
+const lockKey = (userId: string, gen: string, source: string) => `pwauth:{${userId}}:lock:${gen}:${passwordSourceDigest(source)}`;
+const accountFailKey = (userId: string, gen: string) => `pwauth:{${userId}}:acctfail:${gen}`;
+const accountLockKey = (userId: string, gen: string) => `pwauth:{${userId}}:acctlock:${gen}`;
 
 async function generationOf(redis: Redis, userId: string): Promise<string> {
   return (await redis.get(generationKey(userId))) ?? '0';
@@ -46,15 +86,16 @@ end
 return 0
 `;
 
-export async function isPasswordSourceLocked(redis: Redis, userId: string, source: string): Promise<boolean> {
+/** Password sign-in is paused for this source, or for the whole account. */
+export async function isPasswordSignInLocked(redis: Redis, userId: string, source: string): Promise<boolean> {
   const gen = await generationOf(redis, userId);
-  return (await redis.exists(lockKey(userId, gen, source))) === 1;
+  return (await redis.exists(lockKey(userId, gen, source), accountLockKey(userId, gen))) > 0;
 }
 
-/** Count one wrong password from this source. Returns true when it locked the source. */
+/** Count one wrong password against this source AND the account. Returns true when either locked. */
 export async function recordPasswordFailure(redis: Redis, userId: string, source: string): Promise<boolean> {
   const gen = await generationOf(redis, userId);
-  const locked = await redis.eval(
+  const sourceLocked = await redis.eval(
     RECORD_FAILURE_SCRIPT,
     2,
     failKey(userId, gen, source),
@@ -63,13 +104,22 @@ export async function recordPasswordFailure(redis: Redis, userId: string, source
     String(PASSWORD_FAILURE_WINDOW_S),
     String(PASSWORD_SOURCE_LOCK_S),
   );
-  return Number(locked) === 1;
+  const accountLocked = await redis.eval(
+    RECORD_FAILURE_SCRIPT,
+    2,
+    accountFailKey(userId, gen),
+    accountLockKey(userId, gen),
+    String(PASSWORD_FAILURES_PER_ACCOUNT),
+    String(PASSWORD_FAILURE_WINDOW_S),
+    String(PASSWORD_ACCOUNT_LOCK_S),
+  );
+  return Number(sourceLocked) === 1 || Number(accountLocked) === 1;
 }
 
 /** A successful sign-in from this source clears its count. */
 export async function clearPasswordFailures(redis: Redis, userId: string, source: string): Promise<void> {
   const gen = await generationOf(redis, userId);
-  await redis.del(failKey(userId, gen, source));
+  await redis.del(failKey(userId, gen, source), accountFailKey(userId, gen));
 }
 
 /** A new credential: every source's count and lock for this account is left behind. */
