@@ -1,4 +1,5 @@
 import { runtimeMode } from './runtime-mode';
+import { malformedAllowlistPositions } from '../providers/notifications/sms-recipient-allowlist';
 import { firstInvalidTwilioConfig } from './twilio-identity';
 import { assertDisabledCardRailConfig } from './card-rail';
 import { testControlEnabled } from '../modules/ops/test-control';
@@ -34,6 +35,18 @@ export function assertTestControlConfig(env: Record<string, string | undefined> 
  * STORAGE_SIGNING_SECRET = anyone can forge a render token for any applicant's
  * decrypted ID. Neither failure is visible at runtime, so we assert them here.
  */
+function assertSmsRecipientAllowlistConfig(env: Record<string, string | undefined>): void {
+  const present = env['SMS_RECIPIENT_ALLOWLIST'] !== undefined || env['SMS_RECIPIENT_ALLOWLIST_FILE'] !== undefined;
+  if (!present) return;
+  if (runtimeMode(env) === 'production') {
+    throw new Error('FATAL: SMS_RECIPIENT_ALLOWLIST is set in production — it exists only to stop non-production deployments texting strangers, and in production it would silently stop real users receiving codes. Remove it. Refusing to start.');
+  }
+  const bad = malformedAllowlistPositions(env['SMS_RECIPIENT_ALLOWLIST']);
+  if (bad.length > 0) {
+    throw new Error(`FATAL: SMS_RECIPIENT_ALLOWLIST entry ${bad.join(', ')} is not an E.164 number (+ and digits). Refusing to start rather than texting no one by mistake.`);
+  }
+}
+
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
@@ -45,6 +58,11 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
+  // [L04 · SMS allowlist] The non-production recipient allowlist is checked
+  // before the production gate: production refuses it outright (it must never
+  // quietly restrict real users), and elsewhere a malformed entry is refused
+  // loudly instead of silently texting no one. Values are never echoed.
+  assertSmsRecipientAllowlistConfig(env);
   if (runtimeMode(env) !== 'production') {
     assertDurableStorageConfig(env);
     return;
