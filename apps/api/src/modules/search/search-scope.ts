@@ -125,7 +125,7 @@ export function requireRequestTenant(request?: Pick<FastifyRequest, 'tenantId'>)
  * 503, never an empty grid); with it unset, exactly one active tenant may
  * exist, and two means the deployment has to say which.
  */
-export async function resolvePublicMarketTenant(app: FastifyInstance): Promise<string> {
+export async function resolvePublicMarketTenant(app: Pick<FastifyInstance, 'prisma'>): Promise<string> {
   const explicit = process.env['PUBLIC_TENANT_ID'];
   if (explicit) {
     const configured = await app.prisma.tenant.findUnique({ where: { id: explicit }, select: { id: true, isActive: true, kind: true } });

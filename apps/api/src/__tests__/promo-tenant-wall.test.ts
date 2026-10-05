@@ -22,6 +22,9 @@ import { runAsSystem } from '../plugins/tenant-context';
 const DAY = 24 * 60 * 60 * 1000;
 const RUN = nanoid(6).replace(/[^A-Za-z0-9]/g, 'Q').toLowerCase();
 const REVIEW = `review-promo-${RUN}`;
+// A second operator of PRODUCTION kind (a future white-label licensee): it is
+// not Swift's production operator, so Swift's platform codes are not its own.
+const OTHER_OP = `other-op-${RUN}`;
 const PLATFORM_CODE = `PLATWALL${RUN.toUpperCase()}`;
 const UNKNOWN_CODE = `NOSUCH${RUN.toUpperCase()}`;
 const PHONE_PREFIX = '+5920424';
@@ -29,6 +32,10 @@ const PHONE_PREFIX = '+5920424';
 let app: FastifyInstance;
 let reviewer: { userId: string; token: string };
 let platformPromoId = '';
+let priorPublicTenant: string | undefined;
+let otherCustomer: { userId: string; token: string };
+let otherVendorId = '';
+let oItemId = '';
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 
@@ -61,22 +68,31 @@ function inject(method: 'GET' | 'POST', url: string, payload: unknown, token: st
   });
 }
 
-async function cleanup() {
+/** Fixture and assertion database work, outside any request tenant: in this
+ *  bare app an injected request's tenant stays on the suite's own async
+ *  context and would otherwise scope (or stamp) the suite's own queries. */
+const sys = <T>(fn: () => Promise<T>): Promise<T> => runAsSystem('test-promo-wall', fn);
+
+async function cleanup() { await sys(cleanupNow); }
+async function cleanupNow() {
   const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
   const ids = [...new Set([...userIds, ...users.map((u) => u.id)])];
+  // This suite's tenants from any run (a crashed run leaves its own behind).
+  const tenants = (await app.prisma.tenant.findMany({ where: { OR: [{ id: { startsWith: 'review-promo-' } }, { id: { startsWith: 'other-op-' } }] }, select: { id: true } })).map((t) => t.id);
+  const vendors = [...new Set([...vendorIds, ...(await app.prisma.vendor.findMany({ where: { tenantId: { in: tenants } }, select: { id: true } })).map((v) => v.id)])];
   await app.prisma.cartItem.deleteMany({ where: { cart: { customerId: { in: ids } } } });
   await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
   await app.prisma.order.deleteMany({ where: { customerId: { in: ids } } });
   await app.prisma.promoCode.deleteMany({ where: { code: { in: [PLATFORM_CODE] } } });
-  await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+  await app.prisma.item.deleteMany({ where: { vendorId: { in: vendors } } });
+  await app.prisma.category.deleteMany({ where: { vendorId: { in: vendors } } });
+  await app.prisma.vendor.deleteMany({ where: { id: { in: vendors } } });
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-  await app.prisma.reviewSession.deleteMany({ where: { tenantId: REVIEW } });
-  await app.prisma.tenant.deleteMany({ where: { id: REVIEW } });
+  await app.prisma.reviewSession.deleteMany({ where: { tenantId: { in: tenants } } });
+  await app.prisma.tenant.deleteMany({ where: { id: { in: tenants } } });
 }
 
 beforeAll(async () => {
@@ -118,9 +134,35 @@ beforeAll(async () => {
 
   const added = await inject('POST', '/api/v1/customer/cart/items', { vendorId: vendor.id, itemId: item.id, quantity: 1 }, reviewer.token);
   expect([200, 201], added.body).toContain(added.statusCode);
+
+  // The second PRODUCTION-kind operator, with its own open store and a
+  // customer holding a cart there. The deployment names Swift's operator.
+  priorPublicTenant = process.env['PUBLIC_TENANT_ID'];
+  process.env['PUBLIC_TENANT_ID'] = 'swift-default';
+  await sys(async () => {
+    await app.prisma.tenant.create({ data: { id: OTHER_OP, name: 'Other operator', slug: OTHER_OP, kind: 'PRODUCTION', isActive: true } });
+    otherCustomer = await makeUser(OTHER_OP);
+    const otherOwner = await makeUser(OTHER_OP);
+    const ovo = await app.prisma.vendorOwner.create({ data: { userId: otherOwner.userId } });
+    const otherVendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: ovo.id, tenantId: OTHER_OP, name: 'Other Grill', slug: `other-grill-${RUN}`, vendorType: 'RESTAURANT',
+        phone: `${PHONE_PREFIX}901`, addressLine1: '2 Other Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+        latitude: 6.802, longitude: -58.157, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+      },
+    });
+    otherVendorId = otherVendor.id;
+    vendorIds.push(otherVendor.id);
+    const oCategory = await app.prisma.category.create({ data: { vendorId: otherVendor.id, tenantId: OTHER_OP, name: 'Menu', sortOrder: 0 } });
+    oItemId = (await app.prisma.item.create({ data: { vendorId: otherVendor.id, categoryId: oCategory.id, tenantId: OTHER_OP, name: 'Other Wrap', basePrice: 3000 } })).id;
+  });
+  expect((await sys(() => app.prisma.user.findUniqueOrThrow({ where: { id: otherCustomer.userId }, select: { tenantId: true } }))).tenantId).toBe(OTHER_OP);
+  const oAdded = await inject('POST', '/api/v1/customer/cart/items', { vendorId: otherVendorId, itemId: oItemId, quantity: 1 }, otherCustomer.token);
+  expect([200, 201], oAdded.body).toContain(oAdded.statusCode);
 });
 
 afterAll(async () => {
+  if (priorPublicTenant === undefined) delete process.env['PUBLIC_TENANT_ID']; else process.env['PUBLIC_TENANT_ID'] = priorPublicTenant;
   await cleanup();
   await app.close();
 });
@@ -144,14 +186,33 @@ describe('[R0 promo] a platform-wide code is production’s, never the review te
     expect(res.statusCode, res.body).toBeLessThan(500);
     const after = await app.prisma.promoCode.findUniqueOrThrow({ where: { id: platformPromoId }, select: { currentUses: true } });
     expect(after.currentUses).toBe(before.currentUses);
-    expect(await app.prisma.order.count({ where: { promoCodeId: platformPromoId } })).toBe(0);
+    expect(await sys(() => app.prisma.order.count({ where: { promoCodeId: platformPromoId } }))).toBe(0);
+  });
+});
+
+describe('[R0 promo] another PRODUCTION-kind operator does not inherit Swift’s platform codes', () => {
+  it('checkout: its customer’s order is refused at the promo wall exactly like an unknown code, and no redemption moves', async () => {
+    const before = await app.prisma.promoCode.findUniqueOrThrow({ where: { id: platformPromoId }, select: { currentUses: true } });
+    const unknown = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: UNKNOWN_CODE, fulfillmentSelections: { [otherVendorId]: 'PICKUP' } }, otherCustomer.token);
+    // Control: this checkout reaches the promo lookup (an unknown code is the promo refusal, not an earlier gate).
+    expect(unknown.statusCode, unknown.body).toBe(404);
+    expect(unknown.json().error.code).toBe('INVALID_PROMO');
+    const platform = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: PLATFORM_CODE, fulfillmentSelections: { [otherVendorId]: 'PICKUP' } }, otherCustomer.token);
+    expect({ status: platform.statusCode, body: platform.body }).toEqual({ status: unknown.statusCode, body: unknown.body });
+    const after = await app.prisma.promoCode.findUniqueOrThrow({ where: { id: platformPromoId }, select: { currentUses: true } });
+    expect(after.currentUses).toBe(before.currentUses);
+    expect(await sys(() => app.prisma.order.count({ where: { customerId: otherCustomer.userId } }))).toBe(0);
+  });
+
+  it('validate: the same', async () => {
+    const platform = await inject('POST', '/api/v1/customer/promo/validate', { code: PLATFORM_CODE }, otherCustomer.token);
+    const unknown = await inject('POST', '/api/v1/customer/promo/validate', { code: UNKNOWN_CODE }, otherCustomer.token);
+    expect({ status: platform.statusCode, body: platform.body }).toEqual({ status: unknown.statusCode, body: unknown.body });
   });
 });
 
 describe('[R0 promo] which tenant a code belongs to (the rule both lookups use)', () => {
-  it('a platform code is production’s; a store code is its store’s tenant’s', () => runAsSystem('test-promo-tenant-rule', async () => {
-    // Outside any request (this suite's earlier requests leave their tenant on
-    // the test's own async context, since the bare app has no per-request hook).
+  it('a platform code is production’s; a store code is its store’s tenant’s', () => sys(async () => {
     const productionUser = await makeUser(undefined);
     const platform = { vendorId: null };
     const reviewStore = { vendorId: vendorIds[0]! };
@@ -160,5 +221,7 @@ describe('[R0 promo] which tenant a code belongs to (the rule both lookups use)'
     expect(await promoBelongsToCallerTenant(app.prisma, reviewStore, reviewer.userId)).toBe(true);
     expect(await promoBelongsToCallerTenant(app.prisma, reviewStore, productionUser.userId)).toBe(false);
     expect(await promoBelongsToCallerTenant(app.prisma, platform, 'no-such-user')).toBe(false);
+    // Another PRODUCTION-kind operator is not Swift's production operator.
+    expect(await promoBelongsToCallerTenant(app.prisma, platform, otherCustomer.userId)).toBe(false);
   }));
 });
