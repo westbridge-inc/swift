@@ -1,9 +1,9 @@
 import React from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), setIntent: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), setIntent: vi.fn(), myAdvertisers: vi.fn(() => ({ data: [], isLoading: false, isError: false })), fetchAds: vi.fn(), startAdEventLoop: vi.fn() }));
 vi.mock('../../../mobile/src/services/api', () => ({ api: { get: mocks.get } }));
 vi.mock('../../../mobile/src/stores/authStore', () => ({ useAuthStore: (select: (s: unknown) => unknown) => select({
   setIntent: mocks.setIntent, setMoverPreset: vi.fn(), setCountry: vi.fn(), promptLogin: vi.fn(),
@@ -27,8 +27,26 @@ vi.mock('../../../mobile/node_modules/react-native', () => ({
 vi.mock('../../../mobile/node_modules/react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
 vi.mock('../../../mobile/node_modules/@expo/vector-icons', () => ({ Feather: () => null }));
 
+vi.mock('../../../mobile/src/hooks/advertiser', () => ({ useMyAdvertisers: mocks.myAdvertisers }));
+vi.mock('../../../mobile/src/lib/ads', () => ({ fetchAds: mocks.fetchAds, startAdEventLoop: mocks.startAdEventLoop }));
+vi.mock('../../../mobile/src/modules/advertiser/screens/AdvertiserRegisterScreen', () => ({ AdvertiserRegisterScreen: () => <span>Advertiser registration</span> }));
+vi.mock('../../../mobile/src/modules/advertiser/screens/AdvertiserHomeScreen', () => ({ AdvertiserHomeScreen: () => null }));
+vi.mock('../../../mobile/src/modules/advertiser/screens/NewCampaignScreen', () => ({ NewCampaignScreen: () => null }));
+vi.mock('../../../mobile/src/modules/advertiser/screens/CampaignDetailScreen', () => ({ CampaignDetailScreen: () => null }));
+vi.mock('../../../mobile/src/modules/advertiser/screens/AdvertiserBillingScreen', () => ({ AdvertiserBillingScreen: () => null }));
+vi.mock('../../../mobile/src/modules/advertiser/screens/AdvertiserTeamScreen', () => ({ AdvertiserTeamScreen: () => null }));
+vi.mock('../../../mobile/src/modules/profile/screens/GetHelpScreen', () => ({ GetHelpScreen: () => null }));
+vi.mock('../../../mobile/node_modules/@react-navigation/native-stack', () => ({ createNativeStackNavigator: () => ({
+  Navigator: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Screen: ({ component: Component }: { component: React.ComponentType }) => <Component />,
+}) }));
+vi.mock('../../../mobile/node_modules/@react-navigation/bottom-tabs', () => ({ createBottomTabNavigator: () => ({}) }));
+let AdvertiserStack: React.ComponentType;
+let useAds: (city: string) => { data?: unknown };
 let RolePickerScreen: React.ComponentType;
 beforeAll(async () => {
+  ({ AdvertiserStack } = await import(new URL('../../../mobile/src/modules/advertiser/AdvertiserStack.tsx', import.meta.url).pathname));
+  ({ useAds } = await import(new URL('../../../mobile/src/hooks/ads.ts', import.meta.url).pathname));
   ({ RolePickerScreen } = await import(new URL('../../../mobile/src/screens/auth/RolePickerScreen.tsx', import.meta.url).pathname));
 });
 afterEach(() => vi.clearAllMocks());
@@ -62,5 +80,31 @@ describe('advertising launch entry', () => {
     mocks.get.mockRejectedValue(new Error('offline'));
     await act(async () => { await client.invalidateQueries(); });
     await waitFor(() => expect(screen.queryByTestId('role-picker-advertiser')).toBeNull());
+  });
+});
+
+describe('saved advertising surfaces', () => {
+  it('keeps a persisted advertiser intent out of registration while advertising is off', async () => {
+    mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: false } } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    render(<QueryClientProvider client={client}><AdvertiserStack /></QueryClientProvider>);
+    await waitFor(() => expect(screen.queryByText('Advertiser registration')).toBeNull());
+    expect(mocks.myAdvertisers).not.toHaveBeenCalled();
+    expect(screen.getByText('Swift Business')).toBeTruthy();
+  });
+  it('still reaches advertiser registration when enabled', async () => {
+    mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: true } } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    render(<QueryClientProvider client={client}><AdvertiserStack /></QueryClientProvider>);
+    await waitFor(() => expect(screen.getByText('Advertiser registration')).toBeTruthy());
+  });
+  it('does not serve or expose cached home ads when disabled', async () => {
+    mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: false } } });
+    mocks.fetchAds.mockResolvedValue({ data: 'cached ad' });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const { result } = renderHook(() => useAds('Georgetown'), { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.fetchAds).not.toHaveBeenCalled();
+    expect(result.current.data).toBeUndefined();
   });
 });

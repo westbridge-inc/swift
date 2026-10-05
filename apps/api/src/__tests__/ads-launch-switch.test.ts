@@ -2,7 +2,6 @@ import Fastify, { type FastifyInstance, type HTTPMethods } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { publicRoutes } from '../modules/public/public.routes';
-import { registerErrorHandler } from '../utils/errors';
 
 let app: FastifyInstance;
 let routes: Array<{ method: HTTPMethods; url: string }>;
@@ -13,7 +12,6 @@ beforeEach(async () => {
   routes = [];
   vi.clearAllMocks();
   app = Fastify();
-  registerErrorHandler(app);
   app.decorate('authenticate', authenticate);
   app.decorate('authenticateOptional', authenticate);
   app.decorate('prisma', { adPlacement: { findMany } });

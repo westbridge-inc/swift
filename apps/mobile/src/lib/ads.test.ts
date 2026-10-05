@@ -236,6 +236,16 @@ describe('principal-bound ad event runtime', () => {
     expect(mocks.apiPost.mock.calls[1]?.[2].headers.Authorization).toBe('Bearer access-b');
   });
 
+  it('collapses and retires cached ads when the server disables advertising', async () => {
+    mocks.apiGet.mockResolvedValueOnce({ data: { data: servedAds } });
+    const ads = await import('./ads');
+    await ads.fetchAds('*', ['home_top_card']);
+    mocks.apiGet.mockRejectedValueOnce({ response: { status: 403, data: { error: { code: 'ADS_DISABLED' } } } });
+    await expect(ads.fetchAds('*', ['home_top_card'])).resolves.toEqual({ data: null, trackable: false, trackingScope: null });
+    mocks.apiGet.mockRejectedValueOnce(new Error('offline'));
+    await expect(ads.fetchAds('*', ['home_top_card'])).resolves.toEqual({ data: null, trackable: false, trackingScope: null });
+  });
+
   it('makes cached content display-only across scopes but trackable for its owner', async () => {
     const aScope = authenticatedScope('a-scope', 1);
     mocks.currentScope = aScope;
