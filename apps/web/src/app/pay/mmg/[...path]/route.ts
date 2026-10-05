@@ -1,4 +1,5 @@
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { BodyTooLargeError, readBoundedBody } from '@/lib/bounded-body';
 
 export const dynamic = 'force-dynamic';
 const words = {
@@ -20,6 +21,29 @@ const headers = {
 // exactly like ?token=, as params.token, and the outcome is only ever one of
 // these words, so it never carries the reply.
 const OUTCOMES = new Set(['success', 'error', 'response']);
+
+// [MASTER-051] A return body is read under a hard cap and a deadline before any
+// form parser sees it. The cap sits above the largest body the field rules
+// below can ever accept — 16 values of 4096 characters, every byte
+// percent-encoded (x3, about 197 KB with names and separators) — so no reply
+// MMG can legitimately send is refused; deploy/Caddyfile enforces the same cap
+// at the proxy.
+// Only the two form encodings a browser return can carry are read at all.
+const MAX_RETURN_BODY_BYTES = 256 * 1024;
+const RETURN_BODY_DEADLINE_MS = 10_000;
+const FORM_TYPES = new Set(['application/x-www-form-urlencoded', 'multipart/form-data']);
+
+async function postedFields(request: Request): Promise<unknown> {
+  const type = request.headers.get('content-type') ?? '';
+  if (!FORM_TYPES.has(type.split(';')[0]!.trim().toLowerCase())) {
+    await request.body?.cancel().catch(() => {});
+    throw new Error('Unreadable return');
+  }
+  const bytes = await readBoundedBody(request, MAX_RETURN_BODY_BYTES, RETURN_BODY_DEADLINE_MS);
+  // `bytes` owns its whole buffer (readBoundedBody allocates it exactly), so the
+  // buffer is the body with nothing before or after it.
+  return new Response(bytes.buffer as ArrayBuffer, { headers: { 'content-type': type } }).formData();
+}
 
 /** base64 or base64url with '=' padding, at most 4096 characters, like a query value. */
 function replyOf(value: string): string {
@@ -48,9 +72,10 @@ function readPath(path: unknown): { outcome: string; token: string | undefined }
 
 async function handle(request: Request, context: Context) {
   let state: keyof typeof words = 'UNKNOWN';
+  let status = 200;
   try {
     const { outcome, token } = readPath((await context.params).path);
-    const fields: unknown = request.method === 'POST' ? await request.formData() : new URL(request.url).searchParams;
+    const fields: unknown = request.method === 'POST' ? await postedFields(request) : new URL(request.url).searchParams;
     const entries: Array<[string, string]> = [];
     if (!fields || typeof fields !== 'object' || !('forEach' in fields) || typeof fields.forEach !== 'function') throw new Error('Unreadable return');
     fields.forEach((value: unknown, key: unknown) => {
@@ -78,10 +103,13 @@ async function handle(request: Request, context: Context) {
       const candidate = body?.data?.state;
       if (body?.success === true && Object.hasOwn(words, candidate)) state = candidate;
     }
-  } catch { /* Deliberately no logging: URLs, form fields and fetch errors can carry return tokens. */ }
+  } catch (error) {
+    // Deliberately no logging: URLs, form fields and fetch errors can carry return tokens.
+    if (error instanceof BodyTooLargeError) status = 413;
+  }
   // A route-handler document bypasses the React layout and all analytics. No
   // return input, outcome, amount, identity or reference reaches this HTML.
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>Swift weekly fee</title><style>body{margin:0;background:#faf8f6;color:#261d20;font:18px/1.6 system-ui,sans-serif}main{max-width:32rem;margin:10vh auto;padding:2rem}h1{font-size:2rem;line-height:1.2}a{display:inline-block;color:#8e243f;font-weight:650;text-underline-offset:4px}p{margin-top:1.5rem}</style></head><body><main><h1>Weekly fee</h1><p>${words[state]}</p><p><a href="swift://pay/mmg/return">Back to the Swift app</a></p><p><a href="/weekly-fee">Continue on the web</a></p></main></body></html>`, { headers });
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>Swift weekly fee</title><style>body{margin:0;background:#faf8f6;color:#261d20;font:18px/1.6 system-ui,sans-serif}main{max-width:32rem;margin:10vh auto;padding:2rem}h1{font-size:2rem;line-height:1.2}a{display:inline-block;color:#8e243f;font-weight:650;text-underline-offset:4px}p{margin-top:1.5rem}</style></head><body><main><h1>Weekly fee</h1><p>${words[state]}</p><p><a href="swift://pay/mmg/return">Back to the Swift app</a></p><p><a href="/weekly-fee">Continue on the web</a></p></main></body></html>`, { status, headers });
 }
 export const GET = handle;
 export const POST = handle;

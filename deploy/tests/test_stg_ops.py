@@ -616,8 +616,16 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
         self.assertRegex(
             body,
             re.escape(f"@api host {API_HOST}") + r"\nhandle @api \{\n@metrics path /metrics\nrespond @metrics 403\n"
-            r"reverse_proxy api:3000\n\}\nhandle \{\nreverse_proxy web:3000\n\}",
+            r"reverse_proxy api:3000\n\}\nhandle \{\n@mmg_return path /pay/mmg/\*\nrequest_body @mmg_return \{\n"
+            r"max_size 256KiB\n\}\nreverse_proxy web:3000\n\}",
         )
+
+    def test_the_mmg_return_body_cap_matches_the_route(self):
+        # [MASTER-051] The proxy refuses an oversized MMG return body before
+        # forwarding it, at exactly the cap the route itself reads under.
+        route = (DEPLOY.parent / "apps" / "web" / "src" / "app" / "pay" / "mmg" / "[...path]" / "route.ts").read_text()
+        self.assertRegex(route, r"(?m)^const MAX_RETURN_BODY_BYTES = 256 \* 1024;$")
+        self.assertRegex(self.TEXT, r"(?m)^\s*max_size 256KiB$")
 
     def test_the_website_keeps_its_own_security_headers(self):
         # next.config.ts sets them; the proxy neither duplicates nor overrides any.

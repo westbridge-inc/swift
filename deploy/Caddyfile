@@ -76,7 +76,14 @@
         respond @metrics 403
         reverse_proxy api:3000
     }
+    # [MASTER-051] The public MMG payment return takes an unauthenticated POST
+    # body. Its size is capped here, before anything is forwarded, at the same
+    # 256 KiB the route itself enforces (apps/web/src/app/pay/mmg/[...path]/route.ts).
     handle {
+        @mmg_return path /pay/mmg/*
+        request_body @mmg_return {
+            max_size 256KiB
+        }
         reverse_proxy web:3000
     }
 }
