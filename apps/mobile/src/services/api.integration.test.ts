@@ -731,3 +731,52 @@ describe('weekly fee MMG transport', () => {
     auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
   });
 });
+
+describe('weak-network driver acceptance', () => {
+  it('retries the exact offer once after a lost response', async () => {
+    const requests: InternalAxiosRequestConfig[] = [];
+    setAdapter(async (config) => {
+      requests.push(config);
+      if (requests.length === 1) throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    const result = await driverApi.acceptOffer('ride-a', 2000, 'attempt-a');
+    expect(result.data.data.id).toBe('ride-a');
+    expect(requests).toHaveLength(2);
+    expect(requests.map((request) => request.url)).toEqual(['/driver/offers/accept', '/driver/offers/accept']);
+    expect(requests[0]?.data).toBe(requests[1]?.data);
+    expect(JSON.parse(requests[1]!.data)).toEqual({ orderId: 'ride-a', fare: 2000, offerAttemptId: 'attempt-a' });
+  });
+  it('reconciles a lost board response against the already-held ride', async () => {
+    const urls: string[] = [];
+    setAdapter(async (config) => {
+      urls.push(config.url!);
+      if (config.method === 'post') throw new AxiosError('timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { id: 'ride-a' } });
+    });
+    expect((await driverApi.accept('ride-a')).data.data.id).toBe('ride-a');
+    expect(urls).toEqual(['/driver/rides/ride-a/accept', '/driver/rides/active']);
+  });
+  it('does not borrow another account for a retry', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; auth.current = accountB; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a', 2000, 'attempt-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it.each([400, 401, 403, 409, 500])('does not retry an authoritative rejection %i', async (status) => {
+    let calls = 0;
+    if (status === 401) auth.current = null;
+    setAdapter(async (config) => {
+      calls++;
+      throw new AxiosError('rejected', 'ERR_BAD_RESPONSE', config, undefined, response(config, status, {}));
+    });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
+  it('never exceeds two accept attempts', async () => {
+    let calls = 0;
+    setAdapter(async (config) => { calls++; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(driverApi.acceptOffer('ride-a')).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+});

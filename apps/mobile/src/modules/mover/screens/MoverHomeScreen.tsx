@@ -277,10 +277,11 @@ export function DispatchOfferCard({
             <StopsSummary count={offerStops.length} testID="driver-offer-stops" />
           </View>
 
+          {accepting ? <T variant="label" tone="muted">Checking acceptance… Keep this screen open.</T> : null}
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
             <PillButton label="Decline" variant="outline" onPress={onDecline} style={{ paddingHorizontal: space['2xl'] }} />
             <PillButton
-              label={`Accept ${isDriver ? 'ride' : 'delivery'}`}
+              label={accepting ? 'Checking acceptance…' : `Accept ${isDriver ? 'ride' : 'delivery'}`}
               loading={accepting}
               onPress={() => {
                 haptic.commit();
@@ -990,7 +991,8 @@ export function MoverHomeScreen({ navigation }: any) {
                     ) : null}
                     {/* Who you'd front cash for — trust before float (§4d) */}
                     <CustomerTrustBadge trust={j.customerTrust} cash={j.paymentMethod === 'CASH'} />
-                    <PillButton label="Accept" size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />
+                    <PillButton label={accept.isPending ? 'Checking acceptance…' : 'Accept'} size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />
+                    {accept.isPending ? <T variant="label" tone="muted">Checking acceptance… Keep this screen open.</T> : null}
                   </DCard>
                 ))}
               </>
