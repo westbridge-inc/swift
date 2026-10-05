@@ -58,6 +58,13 @@ export type OtpPurpose = 'sign-in' | 'password-reset';
 /** [L04 · AUTH-2] Account states that may not start a session by any credential. */
 const BLOCKED_STATUSES: ReadonlySet<UserStatus> = new Set<UserStatus>(['SUSPENDED', 'BANNED', 'DEACTIVATED']);
 const accountSuspended = () => new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
+/**
+ * [L04 · MASTER-054] Compared against when there is no account or no password,
+ * so every public password attempt costs one bcrypt comparison at the same
+ * work factor as a real hash (12). It is the hash of random bytes that were
+ * discarded when it was made: no password matches it.
+ */
+const NO_ACCOUNT_PASSWORD_HASH = '$2a$12$BtoqUaI0gAvmIblEDnOQbuHKARxmMbd/Kr6Kp0uvRhw35lrqjgZA2';
 /** Fields that must never leave the API on a user object. A deny-list (not a
  *  select) so the response keeps its shape — the app reads roles and the
  *  rider/driver/vendorOwner includes to route the account to its surface. */
@@ -532,21 +539,14 @@ export class AuthService {
       ? await this.app.prisma.user.findUnique({ where: { phone: identifier.phone } })
       : await this.app.prisma.user.findUnique({ where: { email: identifier.email! } });
 
-    // One generic failure for unknown user / no password / wrong password —
-    // no account enumeration through this endpoint.
+    // [L04 · MASTER-054] One generic failure for an unknown account, an account
+    // without a password, a wrong password and a locked account: same status,
+    // same body. Every attempt runs exactly one comparison (against a hash
+    // nothing matches when there is no password), so neither the answer nor the
+    // work done tells an account that exists from one that does not.
     const invalid = new AppError(401, 'INVALID_CREDENTIALS', 'Invalid phone/email or password');
+    const matches = await bcrypt.compare(password, user?.passwordHash ?? NO_ACCOUNT_PASSWORD_HASH);
     if (!user || !user.passwordHash) throw invalid;
-
-    if (
-      user.lockedUntil
-      && user.lockedUntil > new Date()
-      && !requiresPrivilegedSessionAssurance(user.activeRole, user.roles)
-    ) {
-      const minutesLeft = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60_000);
-      throw new AppError(423, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${minutesLeft} min`);
-    }
-
-    const matches = await bcrypt.compare(password, user.passwordHash);
 
     // Password hashing stays outside the lock so one expensive comparison does
     // not block every security mutation for this user. Once it finishes, both
@@ -585,9 +585,10 @@ export class AuthService {
       }
 
       const now = new Date();
+      // A locked account answers exactly like a wrong password (MASTER-054):
+      // the lock is enforced, never announced. The OTP sign-in stays open.
       if (locked.lockedUntil && locked.lockedUntil > now) {
-        const minutesLeft = Math.ceil((locked.lockedUntil.getTime() - now.getTime()) / 60_000);
-        throw new AppError(423, 'ACCOUNT_LOCKED', `Too many failed attempts. Try again in ${minutesLeft} min`);
+        return { kind: 'invalid' as const };
       }
 
       if (!matches) {

@@ -274,14 +274,24 @@ describe('Email + password login with lockout', () => {
         phone: MOVER_PHONE,
         password: `wrong-password-${i}`,
       });
-      expect([401, 423]).toContain(attempt.statusCode);
+      expect(attempt.statusCode).toBe(401);
     }
     const locked = await inject('POST', '/api/v1/auth/password/login', {
       phone: MOVER_PHONE,
       password: PASSWORD,
     });
-    expect(locked.statusCode).toBe(423);
-    expect(locked.json().error.code).toBe('ACCOUNT_LOCKED');
+    // [L04 · MASTER-054] The lock is enforced, never announced: the right
+    // password on a locked account gets exactly the unknown-account answer
+    // (it used to be a distinct 423 ACCOUNT_LOCKED, which told a guesser the
+    // account exists). No session is issued.
+    const unknown = await inject('POST', '/api/v1/auth/password/login', {
+      phone: '+5929990000',
+      password: PASSWORD,
+    });
+    expect(locked.statusCode).toBe(401);
+    expect(locked.json().error.code).toBe('INVALID_CREDENTIALS');
+    expect(locked.body).toBe(unknown.body);
+    expect(locked.json().data?.tokens).toBeUndefined();
   });
 
   it('password reset via OTP unlocks the account and kills every session', async () => {
