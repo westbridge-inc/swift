@@ -4,7 +4,7 @@ import { getMapsProvider, type MapsProvider, type RouteLegsEstimate, type RouteS
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { AppError } from '../../utils/errors';
 import { type GeoPoint } from '../../utils/geo';
-import { resolveFareZones, zonePricedPairs, DEFAULT_TENANT_ID } from './fare-zones';
+import { resolveFareZonePath, resolveFareZones, zonePricedPairs, zoneTaxiPerKm, DEFAULT_TENANT_ID } from './fare-zones';
 import { assertTaxiRouteInMarket, placeCode } from './taxi-itinerary';
 import { CountryConfigService } from '../country/country-config.service';
 import { readTaxiRates, readClassRates, assertSaneFare, type TaxiRates, type ClassRates } from '../country/pricing-config';
@@ -221,8 +221,9 @@ export class FareService {
       }
     }
 
-    // Formula fallback — validated rates, cash-friendly rounding
-    const fare = formulaFare(rates, distanceKm, durationMin);
+    // Formula fallback — validated rates, cash-friendly rounding. [ZONE-FARES]
+    // A zone at either end may set its own per-km rate (the higher of the two).
+    const fare = formulaFare(ratesForTrip(rates, zoneTaxiPerKm(resolved.from, resolved.to)), distanceKm, durationMin);
 
     return {
       fare,
@@ -280,7 +281,9 @@ export class FareService {
     const points: GeoPoint[] = [pickup, ...stops.map((s) => ({ lat: s.lat, lng: s.lng })), dropoff];
 
     // [M-34] The requester's market's zones, every leg and the direct pair.
-    const [zonePriced] = await zonePricedPairs(this.prisma, { tenantId, countryCode }, points);
+    // [ZONE-FARES] Resolved once: the same picks name the ends' per-km below.
+    const path = await resolveFareZonePath(this.prisma, { tenantId, countryCode }, points);
+    const [zonePriced] = await zonePricedPairs(this.prisma, { tenantId, countryCode }, points, path);
     if (zonePriced) {
       throw new AppError(409, 'MULTI_STOP_ZONE_PRICED',
         'This trip has a fixed zone fare, so stops cannot be added to it yet. Remove the stops to book it at the fixed fare.',
@@ -307,8 +310,12 @@ export class FareService {
     const rates = (await readTaxiRates(this.prisma, countryCode)).payload;
     const classRates = (await readClassRates(this.prisma, countryCode)).payload;
 
+    // [ZONE-FARES] The pickup's and the destination's zones set the per-km, as
+    // for a ride without stops; a stop on the way never does.
+    const perKm = zoneTaxiPerKm(path.picks[0]!, path.picks[points.length - 1]!);
+
     return {
-      tiers: tierFares(formulaFare(rates, billableKm, durationMin), 'formula', rates.minimum, classRates),
+      tiers: tierFares(formulaFare(ratesForTrip(rates, perKm), billableKm, durationMin), 'formula', rates.minimum, classRates),
       currencyCode: config.currencyCode,
       distanceKm: round1(billableKm),
       durationMin,
@@ -326,4 +333,14 @@ export class FareService {
 
 function round1(n: number): number {
   return Math.round(n * 10) / 10;
+}
+
+/**
+ * [ZONE-FARES] The market's rates with the per-km rate a trip's ends set (see
+ * fare-zones `zoneTaxiPerKm`) in place of the market's own, or the market's
+ * rates unchanged when neither end sets one. Only the per-km moves: the base,
+ * the included kilometres, the per-minute and the minimum stay the market's.
+ */
+export function ratesForTrip(rates: TaxiRates, zonePerKm: number | null): TaxiRates {
+  return zonePerKm === null ? rates : { ...rates, perKm: zonePerKm };
 }

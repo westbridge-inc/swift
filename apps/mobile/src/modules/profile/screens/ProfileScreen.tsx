@@ -83,6 +83,7 @@ function MarketingConsentRow() {
       onPress={() => openPayLink(`${API_URL}/legal/marketing`)}
       right={
         <BrandSwitch
+          label="Marketing messages"
           value={toggle.isPending ? !granted : granted}
           disabled={consent.isLoading || toggle.isPending}
           onChange={(next) => toggle.mutate(next)}

@@ -1,3 +1,4 @@
+import type { MmgCheckoutSupportDetail, MmgCheckoutSupportPage, MmgCheckoutSupportStatus } from '@swift/types';
 import type { RejectionReasonCode } from './rejection-reasons';
 
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
@@ -434,6 +435,39 @@ export interface CreatePromoInput {
 }
 export const createPromo = (body: CreatePromoInput, reason: string) =>
   apiFetch('/api/v1/admin/promos', { method: 'POST', body: JSON.stringify(body), reason });
+// ── [ZONE-FARES] Fixed zone-to-zone taxi fares (C5: a reason, then a second admin) ──
+/** A zone a fixed fare can join, with its own taxi per-km rate (null = the market's). */
+export interface FareZone {
+  id: string;
+  name: string;
+  countryCode: string;
+  isActive: boolean;
+  priority: number;
+  taxiPerKm: number | null;
+}
+/** One directional fixed fare, as the server prices it. */
+export interface ZoneFare {
+  id: string;
+  fromZoneId: string;
+  toZoneId: string;
+  fromZoneName: string;
+  toZoneName: string;
+  countryCode: string;
+  fare: number | null;
+  /** False when either zone is inactive: the fare prices nothing until it serves again. */
+  zonesActive: boolean;
+  updatedBy: string | null;
+  updatedAt: string;
+}
+export const fetchZoneFares = (): Promise<Envelope<{ fares: ZoneFare[]; zones: FareZone[] }>> => apiFetch('/api/v1/admin/zone-fares');
+export const createZoneFare = (body: { fromZoneId: string; toZoneId: string; fare: number }, reason: string) =>
+  apiFetch('/api/v1/admin/zone-fares', { method: 'POST', body: JSON.stringify(body), reason });
+/** The pair travels with the change so the second admin reads which two zones it is, and the server refuses another pair. */
+export const updateZoneFare = (id: string, body: { fromZoneId: string; toZoneId: string; fare: number }, reason: string) =>
+  apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), reason });
+export const deleteZoneFare = (id: string, pair: { fromZoneId: string; toZoneId: string }, reason: string) =>
+  apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(pair), reason });
+
 export const fetchConfig = (): Promise<Envelope<ConfigRow[]>> => apiFetch('/api/v1/admin/config');
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
@@ -534,8 +568,10 @@ export const rejectCreative = (id: string, reason: string, notes?: string) =>
     body: JSON.stringify({ reason, ...(notes ? { notes } : {}) }),
   });
 
-export const fetchVerificationQueue = (status = 'PENDING', role = 'operator') =>
-  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=100`);
+export const fetchVerificationQueue = (status = 'PENDING', role = 'operator', page = 1) =>
+  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=50&page=${page}`);
+export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verification/queue/counts');
+export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
 export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
@@ -777,3 +813,24 @@ export const recordCollectionContact = (
     method: 'POST',
     body: JSON.stringify(body),
   });
+
+// ── MMG payments: support lookup [MMG-CHECKOUT-API.md section 11] ───────────
+// Support finds a partner's MMG weekly-fee payment by the Swift reference,
+// MMG's transaction ID, MMG's reference number or the partner's phone. Both
+// reads are C1: the server records each one (who, which identifier matched,
+// the checkout ids). The shapes are the shared contract in @swift/types.
+export interface MmgCheckoutSearch {
+  q?: string;
+  status?: MmgCheckoutSupportStatus | '';
+  cursor?: string | null;
+}
+export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success: boolean } & MmgCheckoutSupportPage> => {
+  const params = new URLSearchParams();
+  if (search.q?.trim()) params.set('q', search.q.trim());
+  if (search.status) params.set('status', search.status);
+  if (search.cursor) params.set('cursor', search.cursor);
+  const query = params.toString();
+  return apiFetch(`/api/v1/admin/billing/mmg-checkouts${query ? `?${query}` : ''}`);
+};
+export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
