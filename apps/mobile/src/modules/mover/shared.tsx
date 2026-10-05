@@ -9,9 +9,13 @@ import { money } from '../../lib/money';
 
 export const GUTTER = space['2xl'];
 
-/** A job's cash value, whatever vertical it came from. */
+/**
+ * A job's cash value, whatever vertical it came from. The live boards name it
+ * differently: the driver board sends `fareTotal` (null until quoted) and the
+ * rider board sends `totalEarning` (delivery fee + tip).
+ */
 export function jobAmount(j: any) {
-  const value: unknown = j?.totalAmount ?? j?.taxiFareTotal ?? j?.fare;
+  const value: unknown = j?.totalAmount ?? j?.taxiFareTotal ?? j?.fareTotal ?? j?.fare ?? j?.totalEarning;
   if ((typeof value !== 'number' && typeof value !== 'string') ||
       (typeof value === 'string' && value.trim() === '') || !Number.isFinite(Number(value))) {
     return 'Amount unavailable';

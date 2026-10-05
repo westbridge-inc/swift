@@ -8,6 +8,7 @@ import { openExternal } from '../../../lib/openExternal';
 
 // Published launch support channels.
 const SUPPORT_EMAIL = 'support@swiftgy.com';
+const SUPPORT_PHONE = { display: '+592 716 3534', dial: 'tel:+5927163534' } as const;
 
 export function ContactUsScreen() {
   const navigation = useNavigation<any>();
@@ -35,8 +36,8 @@ export function ContactUsScreen() {
           <SettingsRow
             icon="phone"
             label="Call support"
-            sub="+592 716 3534"
-            onPress={() => void openExternal('tel:+5927163534', "Couldn't open your phone app — call +592 716 3534.")}
+            sub={SUPPORT_PHONE.display}
+            onPress={() => void openExternal(SUPPORT_PHONE.dial, `Couldn't open your phone app — call ${SUPPORT_PHONE.display}.`)}
           />
           <SettingsRow
             icon="mail"

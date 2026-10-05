@@ -52,7 +52,22 @@ describe('launch support truth', () => {
     expect(jobAmount({ taxiFareTotal: '2400' })).toBe('$2,400');
     expect(jobAmount({ totalAmount: 'bad', fare: 20 })).toBe('Amount unavailable');
   });
-  it.each(['RIDER_ASSIGNED', 'READY_FOR_PICKUP', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'])('keeps rider chat reachable in %s', (status) => {
+  it('reads the price the live boards actually send', () => {
+    // Driver board: fareTotal (null until quoted). Rider board: totalEarning (fee + tip).
+    expect(jobAmount({ fareTotal: 1800 })).toBe('$1,800');
+    expect(jobAmount({ fareTotal: null })).toBe('Amount unavailable');
+    expect(jobAmount({ deliveryFee: 500, tipAmount: 150, totalEarning: 650 })).toBe('$650');
+    expect(jobAmount({ totalAmount: 4200, totalEarning: 650 })).toBe('$4,200');
+  });
+  it('dials, shows and explains the same support number', () => {
+    const phone = nodes(ContactUsScreen()).filter((node) => node.type === 'SettingsRow').find((node) => node.props.label === 'Call support')!;
+    phone.props.onPress();
+    const [target, failure] = fx.open.mock.calls[0]!;
+    const digits = (v: string) => v.replace(/\D/g, '');
+    expect(digits(target)).toBe(digits(phone.props.sub));
+    expect(failure).toContain(phone.props.sub);
+  });
+  it.each(['RIDER_ASSIGNED', 'READY_FOR_PICKUP', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING'])('keeps rider chat reachable in %s', (status) => {
     fx.orders = [{ id: 'live-order', status, rider: { firstName: 'Rider' } }, { id: 'no-rider', status }];
     const list = nodes(ChatListScreen()).find((node) => node.type === 'FlatList');
     expect(list?.props.data.map((row: any) => row.id)).toEqual(['live-order']);

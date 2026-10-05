@@ -9,7 +9,7 @@ import { useOrders } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
 import { Card, EmptyState, ErrorState, LoadingBlock, Screen, T } from '../../../kit';
 
-const ACTIVE = new Set(['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED']);
+const ACTIVE = new Set(['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING']);
 const RECENT = new Set(['DELIVERED', 'COMPLETED']);
 
 // Kit Chat List (40). Swift chat is order-scoped (customer ↔ rider), so the
