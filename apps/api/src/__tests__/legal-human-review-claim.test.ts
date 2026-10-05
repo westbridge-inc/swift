@@ -55,7 +55,7 @@ describe('[F-1218-02] the Privacy Policy is graded against the document state ma
   });
 
   it('the identity check is described in exactly one paragraph, so the words graded are the words served', () => {
-    expect(aiParagraph).toMatch(/Didit|ID Analyzer/);
+    expect(aiParagraph).toMatch(/identity verification/i);
     expect(aiParagraph).toMatch(/face[- ]match/i);
     expect(PRIVACY.split('<p><b>AI processing:</b>')).toHaveLength(2);
   });

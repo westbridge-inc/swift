@@ -111,6 +111,19 @@ const PUBLISHED: Record<
     driver_agreement: '7e560184f2106df06f56b95888d6dc4e2c5e3db3aeeae193396a75bc4e3b11f7',
     vendor_agreement: '28757aca7ff1309b7c7bb6914b782c1950fb4d353c71ceb5961231f81e33b693',
   },
+  // [L13 item 3 · owner 2026-10-04 manual-only launch verification] The Privacy
+  // Policy no longer names an external identity-verification provider (production
+  // refuses both adapters): verification is described as human review, the
+  // processor list names the hosting/storage company, email, MMG and the phone's
+  // own map, discloses the shared-trip page's OpenStreetMap frame, and error
+  // tracking is described as self-hosted. The other three documents' words are
+  // unchanged; the shared last-updated date re-pins them.
+  '2026-10-05': {
+    terms: '02c8b365275c314823988349a0433834834349ad0971e30e867c480cc791280c',
+    privacy: 'caa90b770550e533e293051b15832defe5162cbe32dfea7f7d411ff7fea916e2',
+    driver_agreement: '09f9887c6adc3547b701430949bd5de55b4fac75516626f496bfb496630c3a6d',
+    vendor_agreement: 'e3e425e583ef200d55d4a99c15dde6e1cbe9cf1b0ac71d641f35ab24e428baa3',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

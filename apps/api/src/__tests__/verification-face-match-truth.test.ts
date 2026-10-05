@@ -145,12 +145,12 @@ describe('GET /verification/status names the documents the server compares with 
 
   it('one predicate: the submit path takes its face-match leg for exactly the documents the flag can name', () => {
     for (const docType of ['owner_national_id', 'national_id']) {
-      expect(identityFaceMatchLeg(docType, { FEATURE_BIOMETRIC_FACE_MATCH: '1' }), docType).toBe(true);
-      expect(identityFaceMatchLeg(docType, {}), docType).toBe(false);
-      expect(identityFaceMatchLeg(docType, { FEATURE_BIOMETRIC_FACE_MATCH: '0' }), docType).toBe(false);
+      expect(identityFaceMatchLeg(docType, { NODE_ENV: 'test', FEATURE_BIOMETRIC_FACE_MATCH: '1' }), docType).toBe(true);
+      expect(identityFaceMatchLeg(docType, { NODE_ENV: 'test' }), docType).toBe(false);
+      expect(identityFaceMatchLeg(docType, { NODE_ENV: 'test', FEATURE_BIOMETRIC_FACE_MATCH: '0' }), docType).toBe(false);
     }
     for (const docType of ['business_registration', 'tin_certificate', 'storefront_photo', 'drivers_licence', 'police_clearance']) {
-      expect(identityFaceMatchLeg(docType, { FEATURE_BIOMETRIC_FACE_MATCH: '1' }), docType).toBe(false);
+      expect(identityFaceMatchLeg(docType, { NODE_ENV: 'test', FEATURE_BIOMETRIC_FACE_MATCH: '1' }), docType).toBe(false);
     }
     // The submit path branches on that same predicate, so the flag cannot drift from what runs.
     const service = readFileSync(join(__dirname, '..', 'modules', 'verification', 'verification.service.ts'), 'utf8');

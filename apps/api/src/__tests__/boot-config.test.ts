@@ -32,8 +32,7 @@ const good: Record<string, string | undefined> = {
   TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
-  KYC_PROVIDER: 'didit',
-  DIDIT_API_KEY: 'didit-live-key',
+  KYC_PROVIDER: 'manual',
   PAYMENT_PROVIDER: 'stripe',
   STRIPE_SECRET_KEY: 'sk_live_boot_config_test',
   MMG_DRIVER: 'live',
@@ -85,6 +84,24 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it.each(['didit', 'idanalyzer'])('manual-only launch refuses external production KYC %s even when configured', (provider) => {
+    expect(() => assertSafeBootConfig({
+      ...good, KYC_PROVIDER: provider, DIDIT_API_KEY: 'unit-test-only', ID_ANALYZER_API_KEY: 'unit-test-only',
+    })).toThrow(/KYC_PROVIDER.*manual/);
+  });
+
+  it('manual-only launch refuses production biometric enablement', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, KYC_PROVIDER: 'manual', FEATURE_BIOMETRIC_FACE_MATCH: '1',
+    })).toThrow(/FEATURE_BIOMETRIC_FACE_MATCH/);
+  });
+
+  it('manual-only launch admits manual production without external verification keys', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, KYC_PROVIDER: 'manual', DIDIT_API_KEY: undefined, ID_ANALYZER_API_KEY: undefined,
+    })).not.toThrow();
+  });
+
   it('boots with the card rail explicitly disabled and no card credentials', () => {
     expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
   });
@@ -155,8 +172,8 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it('refuses sandbox or unconfigured KYC in production', () => {
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/KYC_PROVIDER/);
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/KYC_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, DIDIT_API_KEY: undefined })).toThrow(/DIDIT_API_KEY/);
-    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/ID_ANALYZER_API_KEY/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'didit', DIDIT_API_KEY: undefined })).toThrow(/KYC_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/KYC_PROVIDER/);
   });
 
   it('refuses sandbox/test subscription card processors in production', () => {
