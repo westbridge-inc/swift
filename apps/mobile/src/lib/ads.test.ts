@@ -22,6 +22,10 @@ vi.mock('react-native-mmkv', () => ({
     set(key: string, value: string) {
       mocks.values.set(key, value);
     }
+
+    delete(key: string) {
+      mocks.values.delete(key);
+    }
   },
 }));
 
