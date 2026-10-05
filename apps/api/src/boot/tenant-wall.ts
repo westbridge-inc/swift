@@ -1,5 +1,8 @@
 import type { PrismaClient } from '@prisma/client';
-import { assertTenantWall, attestationLine, attestationOf, readRlsFacts, type RlsAttestation } from '../lib/rls-attestation';
+import {
+  assertTenantPolicyContract, assertTenantWall, attestationLine, attestationOf, readRlsFacts, readTenantPolicyContract,
+  tenantPolicyContractGaps, type RlsAttestation,
+} from '../lib/rls-attestation';
 import { rlsAttestationGauge } from '../plugins/observability';
 
 type EnvLike = Record<string, string | undefined>;
@@ -20,6 +23,12 @@ export async function attestTenantWallAtBoot(db: PrismaClient, log: BootLog, env
   const rls = attestationOf(await readRlsFacts(db));
   rlsAttestationGauge.labels(rls.enforced ? 'enforced' : 'bypassed').set(1);
   log[rls.enforced ? 'info' : 'warn']({ rls: rls.facts, bypasses: rls.bypasses }, `tenant wall: ${attestationLine(rls)}`);
+  // [DB-01] The policies themselves, against the versioned contract — refused
+  // in production at any posture (see assertTenantPolicyContract).
+  const contract = await readTenantPolicyContract(db);
+  const gaps = tenantPolicyContractGaps(contract);
+  log[gaps.length === 0 ? 'info' : 'warn']({ contract, gaps }, `tenant policy contract v${contract.version}: ${gaps.length === 0 ? 'holds' : `${gaps.length} gap(s)`}`);
+  assertTenantPolicyContract(contract, env);
   assertTenantWall(rls, await db.tenant.count({ where: { isActive: true } }), env);
   return rls;
 }
