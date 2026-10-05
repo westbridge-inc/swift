@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
+import { appRoleDdl } from '../lib/tenant-rls';
 import { AUDIT_PURGE_SETTING, purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
@@ -116,14 +117,14 @@ describe('[ADM-003] the database refuses to change an audit row', () => {
   });
 });
 
-describe('[ADM-003] the one exception is a transaction that names itself', () => {
-  it('a purge removes rows only under a stated reason, and the licence dies with its transaction', async () => {
+describe('[ADM-003] the one exception requires dedicated database authority', () => {
+  it('a privileged purge requires a stated reason and grants no authority to the next direct delete', async () => {
     const id = await seed('ADM003_PURGEABLE');
     const removed = await purgeAuditLogs(prisma, { id }, 'retention:adm003-suite');
     expect(removed).toBe(1);
     expect(await prisma.auditLog.count({ where: { id } })).toBe(0);
 
-    // the setting was transaction-local: the very next delete is refused again
+    // Function authority does not license a direct delete afterwards.
     const other = await seed();
     await expect(prisma.auditLog.deleteMany({ where: { id: other } })).rejects.toThrow(/append-only/);
   });
@@ -138,9 +139,8 @@ describe('[ADM-003] the one exception is a transaction that names itself', () =>
 
   it('a session that merely sets the setting OUTSIDE a transaction does not get a standing licence', async () => {
     const id = await seed();
-    // is_local = false would be a licence for the whole session; the helper
-    // uses true. Prove the shape the helper relies on: a separate statement's
-    // local setting is gone by the time an unbatched delete runs.
+    // Neither a caller-selected local setting nor the next direct statement
+    // obtains the dedicated function owner's authority.
     await prisma.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, 'not-a-batch', true)`;
     await expect(prisma.auditLog.deleteMany({ where: { id } })).rejects.toThrow(/append-only/);
     expect(await prisma.auditLog.count({ where: { id } })).toBe(1);
@@ -148,6 +148,50 @@ describe('[ADM-003] the one exception is a transaction that names itself', () =>
 });
 
 describe('dedicated audit purge authority', () => {
+  it('swift_app cannot execute either purge function before or after the app-role installer', async () => {
+    for (const reinstall of [false, true]) {
+      if (reinstall) {
+        for (const ddl of appRoleDdl()) await prisma.$executeRawUnsafe(ddl);
+      }
+      const privileges = await prisma.$queryRaw<Array<{ name: string; allowed: boolean }>>`
+        SELECT p.proname AS name, has_function_privilege('swift_app', p.oid, 'EXECUTE') AS allowed
+        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.proname IN ('swift_purge_audit_logs', 'swift_purge_sensitive_read_logs')`;
+      expect(privileges).toHaveLength(2);
+      expect(privileges.map(row => row.allowed)).toEqual([false, false]);
+    }
+  });
+
+  it('swift_app cannot delete either trail through SQL, settings, purge functions, truncation or role assumption', async () => {
+    const id = await seed();
+    const read = await prisma.sensitiveReadLog.create({ data: {
+      actorUserId: `probe-${RUN}`, action: 'AUDIT_APP_PROBE', capability: 'test', purpose: 'test fixture',
+    } });
+    readIds.push(read.id);
+    for (const [table, rowId, fn] of [
+      ['audit_logs', id, 'swift_purge_audit_logs'],
+      ['sensitive_read_logs', read.id, 'swift_purge_sensitive_read_logs'],
+    ]) {
+      for (const statement of [
+        `DELETE FROM public.${table} WHERE id = '${rowId}'`,
+        `SELECT public.${fn}(ARRAY['${rowId}']::text[], 'test-cleanup:app-refused')`,
+        `TRUNCATE public.${table}`,
+        'SET LOCAL ROLE swift_audit_purge_owner',
+        'SET LOCAL ROLE swift_audit_purge_executor',
+      ]) {
+        await expect(prisma.$transaction(async tx => {
+          await tx.$executeRawUnsafe('SET LOCAL SESSION AUTHORIZATION swift_app');
+          await tx.$executeRaw`SELECT set_config('app.current_tenant', 'swift-default', true)`;
+          await tx.$executeRaw`SELECT set_config(${AUDIT_PURGE_SETTING}, 'test-cleanup:app-setting', true)`;
+          await tx.$executeRawUnsafe(statement);
+        })).rejects.toThrow(/append-only|permission denied/);
+      }
+    }
+    expect(await prisma.auditLog.count({ where: { id } })).toBe(1);
+    expect(await prisma.sensitiveReadLog.count({ where: { id: read.id } })).toBe(1);
+  });
+
   it('an ordinary role cannot license a delete, call the purge function, or assume its owner', async () => {
     const id = await seed();
     for (const statement of [

@@ -1,3 +1,4 @@
+BEGIN;
 -- Purge authority is isolated from request and worker logins. No membership is granted here.
 -- Audit retention stays permanent unless a separately authorized operator is provisioned.
 DO $roles$
@@ -50,7 +51,7 @@ BEGIN
 END $purge$;
 ALTER FUNCTION public.swift_purge_audit_logs(text[], text) OWNER TO swift_audit_purge_owner;
 REVOKE ALL ON FUNCTION public.swift_purge_audit_logs(text[], text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.swift_purge_audit_logs(text[], text) TO swift_audit_purge_executor;
+REVOKE ALL ON FUNCTION public.swift_purge_audit_logs(text[], text) FROM swift_app;
 
 CREATE OR REPLACE FUNCTION public.sensitive_read_logs_append_only() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $guard$
@@ -81,7 +82,7 @@ BEGIN
 END $purge$;
 ALTER FUNCTION public.swift_purge_sensitive_read_logs(text[], text) OWNER TO swift_audit_purge_owner;
 REVOKE ALL ON FUNCTION public.swift_purge_sensitive_read_logs(text[], text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.swift_purge_sensitive_read_logs(text[], text) TO swift_audit_purge_executor;
+REVOKE ALL ON FUNCTION public.swift_purge_sensitive_read_logs(text[], text) FROM swift_app;
 
 -- TRUNCATE never qualifies as an explicit-id purge.
 CREATE FUNCTION public.sensitive_read_logs_block_truncate() RETURNS trigger
@@ -91,3 +92,25 @@ BEGIN
 END $truncate$;
 CREATE TRIGGER sensitive_read_logs_no_truncate BEFORE TRUNCATE ON public.sensitive_read_logs
 FOR EACH STATEMENT EXECUTE FUNCTION public.sensitive_read_logs_block_truncate();
+
+-- Creation defaults may grant EXECUTE to any application/tenant group, not just
+-- PUBLIC or swift_app. Ownership changes preserve those ACLs: remove every
+-- non-owner grant after CREATE, then grant only the dedicated executor.
+DO $purge_acl$
+DECLARE entry record;
+BEGIN
+  FOR entry IN
+    SELECT DISTINCT p.oid::regprocedure AS signature, r.rolname
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    CROSS JOIN LATERAL aclexplode(p.proacl) acl
+    JOIN pg_roles r ON r.oid = acl.grantee
+    WHERE n.nspname = 'public'
+      AND p.proname IN ('swift_purge_audit_logs', 'swift_purge_sensitive_read_logs')
+      AND acl.grantee <> p.proowner
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', entry.signature, entry.rolname);
+  END LOOP;
+END $purge_acl$;
+GRANT EXECUTE ON FUNCTION public.swift_purge_audit_logs(text[], text) TO swift_audit_purge_executor;
+GRANT EXECUTE ON FUNCTION public.swift_purge_sensitive_read_logs(text[], text) TO swift_audit_purge_executor;
+COMMIT;
