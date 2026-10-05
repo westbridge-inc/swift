@@ -105,4 +105,22 @@ describe('the Google Maps key reaches the Android manifest', () => {
     expect(publicConfig.length).toBeGreaterThan(100);
     expect(publicConfig).not.toContain('qa-test-maps-key-not-real');
   }, 60_000);
+
+  it('with no build platform set (a local or CI export), the public config never carries the key', () => {
+    // Only EAS states the platform. Anything else, such as
+    // `expo export --platform ios` in CI, must not put the key into the
+    // embedded config, even though the missing-key gate stays strict there.
+    const publicConfig = runIsolated(PUBLIC, { ANDROID_GOOGLE_MAPS_API_KEY: 'qa-test-maps-key-not-real' });
+
+    expect(publicConfig.length).toBeGreaterThan(100);
+    expect(publicConfig).not.toContain('qa-test-maps-key-not-real');
+  }, 60_000);
+
+  it('the missing-key gate stays strict when the platform is unset, and lets an iOS build through', () => {
+    // Behaviour, not text: a distributable build with no key and no stated
+    // platform must refuse to evaluate the config (CI builds both platforms).
+    expect(() => runIsolated(PUBLIC, { EAS_BUILD: 'true' })).toThrow(/ANDROID_GOOGLE_MAPS_API_KEY/);
+    expect(() => runIsolated(PUBLIC, { EAS_BUILD: 'true', EAS_BUILD_PLATFORM: 'android' })).toThrow(/ANDROID_GOOGLE_MAPS_API_KEY/);
+    expect(runIsolated(PUBLIC, { EAS_BUILD: 'true', EAS_BUILD_PLATFORM: 'ios' }).length).toBeGreaterThan(100);
+  }, 90_000);
 });

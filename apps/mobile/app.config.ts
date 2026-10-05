@@ -324,11 +324,17 @@ const config: SwiftExpoConfig = {
     // 1 Oct preview and Play builds). android-maps-key-manifest.test.ts
     // compiles the real manifest to keep it that way.
     //
-    // Android builds only: plugin options, unlike android.config, survive
-    // into the public config the app embeds, and iOS has no Google Maps.
+    // Only when EAS says the build IS Android (it sets EAS_BUILD_PLATFORM on
+    // the builder, where prebuild writes the manifest): plugin options, unlike
+    // android.config, survive into the public config the app embeds, and iOS
+    // has no Google Maps. An unset platform (CI, a local `expo export`) gets
+    // no option, while the missing-key gate above stays strict for it. A local
+    // Android build that needs maps sets EAS_BUILD_PLATFORM=android too.
     [
       'react-native-maps',
-      androidMapsApiKey && buildsAndroidArtifact ? { androidGoogleMapsApiKey: androidMapsApiKey } : {},
+      androidMapsApiKey && process.env['EAS_BUILD_PLATFORM'] === 'android'
+        ? { androidGoogleMapsApiKey: androidMapsApiKey }
+        : {},
     ],
     'expo-image',
     'expo-secure-store',
