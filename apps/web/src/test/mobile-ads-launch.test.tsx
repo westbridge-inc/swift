@@ -108,6 +108,15 @@ describe('saved advertising surfaces', () => {
     expect(mocks.fetchAds).not.toHaveBeenCalled();
     expect(result.current.data).toBeUndefined();
   });
+  it('does not request home ads when disabled and the cache is empty', async () => {
+    mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: false } } });
+    mocks.fetchAds.mockResolvedValue({ data: 'unexpected ad' });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const { result } = renderHook(() => useAds('Georgetown'), { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+    await waitFor(() => expect(client.getQueryState(['public', 'capabilities'])?.status).toBe('success'));
+    expect(mocks.fetchAds).not.toHaveBeenCalled();
+    expect(result.current.data).toBeUndefined();
+  });
   it('removes already rendered home ads after a server shutdown', async () => {
     mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: true } } });
     mocks.fetchAds.mockResolvedValue({ data: 'live ad' });
