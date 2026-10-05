@@ -7,6 +7,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { customerApi } from '../../../services/api';
 import { useProfile } from '../../../hooks/customer';
+import { useStepUp } from '../../../hooks/useStepUp';
+import { isStepUpDismissed } from '../../../lib/stepUp';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -23,6 +25,7 @@ const GUTTER = space['2xl'];
 export function PersonalDataScreen({ route, navigation }: any = {}) {
   const closureRequest = route?.params?.closureRequest === true;
   const qc = useQueryClient();
+  const stepUp = useStepUp();
   const profile = useProfile<any>();
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const logoutIfCurrent = useAuthStore((s) => s.logoutIfCurrent);
@@ -93,9 +96,10 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
   const deleteAccount = useMutation({
     mutationFn: async () => {
       const owner = requireAuthSessionSnapshot();
-      const res = closureRequest
-        ? await customerApi.requestAccountClosure(owner)
-        : await customerApi.deleteAccount(owner);
+      setConfirmDelete(false);
+      const res = await stepUp.withStepUp(() => closureRequest
+        ? customerApi.requestAccountClosure(owner)
+        : customerApi.deleteAccount(owner))();
       const current = requireAuthSessionForPrincipal(owner);
       setConfirmDelete(false);
       const deletion = res.data?.data;
@@ -112,7 +116,7 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
     },
     onError: (e: any) => {
       setConfirmDelete(false);
-      if (!(e instanceof AuthSessionBoundaryError)) {
+      if (!(e instanceof AuthSessionBoundaryError) && !isStepUpDismissed(e)) {
         toast.error(e?.response?.data?.error?.message ?? 'Couldn’t delete the account. Try again.');
       }
     },
@@ -235,6 +239,7 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
           <PillButton label="Keep my account" variant="soft" onPress={() => setConfirmDelete(false)} />
         </View>
       </PopupCard>
+      {stepUp.sheet}
     </Screen>
   );
 }
