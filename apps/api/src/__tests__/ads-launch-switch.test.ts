@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type HTTPMethods } from 'fastify';
+import Fastify, { type FastifyInstance, type HTTPMethods, type InjectOptions } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { publicRoutes } from '../modules/public/public.routes';
@@ -14,7 +14,7 @@ beforeEach(async () => {
   app = Fastify();
   app.decorate('authenticate', authenticate);
   app.decorate('authenticateOptional', authenticate);
-  app.decorate('prisma', { adPlacement: { findMany } });
+  app.decorate('prisma', { adPlacement: { findMany } } as unknown as FastifyInstance['prisma']);
   app.addHook('onRoute', (route) => {
     if (route.url.startsWith('/api/v1/ads')) {
       for (const method of [route.method].flat()) {
@@ -34,7 +34,7 @@ describe('launch advertising switch', () => {
     vi.stubEnv('NODE_ENV', 'production');
     expect(routes.length).toBeGreaterThanOrEqual(19);
     for (const route of routes) {
-      const response = await app.inject(route);
+      const response = await app.inject(route as InjectOptions);
       expect(response.statusCode, `${route.method} ${route.url}`).toBe(403);
       if (route.method !== 'HEAD') expect(response.json()).toMatchObject({
         success: false, error: { code: 'ADS_DISABLED', message: 'Advertising is currently unavailable.' },

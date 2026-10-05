@@ -102,9 +102,20 @@ describe('saved advertising surfaces', () => {
     mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: false } } });
     mocks.fetchAds.mockResolvedValue({ data: 'cached ad' });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    client.setQueryData(['ads', 'serve', 'Georgetown', 'anonymous', undefined, undefined], { data: 'cached ad' });
     const { result } = renderHook(() => useAds('Georgetown'), { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
     await act(async () => { await Promise.resolve(); });
     expect(mocks.fetchAds).not.toHaveBeenCalled();
     expect(result.current.data).toBeUndefined();
+  });
+  it('removes already rendered home ads after a server shutdown', async () => {
+    mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: true } } });
+    mocks.fetchAds.mockResolvedValue({ data: 'live ad' });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const { result } = renderHook(() => useAds('Georgetown'), { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+    await waitFor(() => expect(result.current.data).toEqual({ data: 'live ad' }));
+    mocks.get.mockResolvedValue({ data: { success: true, data: { adsEnabled: false } } });
+    await act(async () => { await client.invalidateQueries({ queryKey: ['public', 'capabilities'] }); });
+    await waitFor(() => expect(result.current.data).toBeUndefined());
   });
 });
