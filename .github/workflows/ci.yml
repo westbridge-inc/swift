@@ -49,6 +49,8 @@ jobs:
       # sneak back in.)
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
+      - name: Development scripts use checked-in migrations
+        run: node scripts/check-db-scripts.mjs
       - run: pnpm lint
       - run: pnpm type-check
       - name: Mobile unit tests
