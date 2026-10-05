@@ -6,6 +6,7 @@ import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
+import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
 /**
  * [R2 C2] `/test-control/identity` exists only in loadtest and test builds
@@ -45,7 +46,10 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
-  if (runtimeMode(env) !== 'production') return;
+  if (runtimeMode(env) !== 'production') {
+    assertDurableStorageConfig(env);
+    return;
+  }
 
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
@@ -269,6 +273,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (storage === 'local' && env['STORAGE_ALLOW_LOCAL'] !== '1') {
     throw new Error('FATAL: STORAGE_PROVIDER is local (or unset) in production — uploads and verification documents would live on a single instance\'s disk. Set STORAGE_PROVIDER=s3|r2, or STORAGE_ALLOW_LOCAL=1 only for a deliberate single-instance pilot with a persistent volume.');
   }
+  assertDurableStorageConfig(env);
 
   // [V8] CONSENT_IP_PEPPER degrades SILENTLY: when missing or under 32 chars,
   // hashIp() returns null and the consent ledger simply stops recording IP

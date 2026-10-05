@@ -364,7 +364,22 @@ export function appRoleDdl(): string[] {
     `GRANT USAGE ON SCHEMA public TO swift_app`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_app`,
     `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_app`,
-    `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO swift_app`,
+    // Purge functions are operator-only. Never re-grant them when healing an
+    // app-role environment, even if creation defaults previously granted them.
+    `DO $app_functions$
+      DECLARE fn record;
+      BEGIN
+        FOR fn IN SELECT p.oid::regprocedure AS signature, p.proname
+          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'public' AND p.prokind IN ('f', 'w')
+        LOOP
+          IF fn.proname IN ('swift_purge_audit_logs', 'swift_purge_sensitive_read_logs') THEN
+            EXECUTE format('REVOKE ALL ON FUNCTION %s FROM swift_app', fn.signature);
+          ELSE
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO swift_app', fn.signature);
+          END IF;
+        END LOOP;
+      END $app_functions$`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO swift_app`,

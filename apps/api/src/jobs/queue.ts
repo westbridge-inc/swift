@@ -898,7 +898,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const results = await runRetentionSweep(ctx.prisma);
         const enforced = results.filter((r) => !r.skipped);
         ctx.log.info(
-          { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).length },
+          { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
         return;

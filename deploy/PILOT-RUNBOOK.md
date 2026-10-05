@@ -676,7 +676,64 @@ The seed only creates rows; it never changes or deletes them. An install seeded 
 Georgetown Central ↔ South 2,000 pair until an admin removes it, and it gains the airport zones only by a seed run or
 the admin calls above.
 
-## 11. The production host (PILOT_ENV=production)
+## 11. Audit evidence and retention authority
+
+The current retention decision is a draft pending legal confirmation. The admin
+audit trail (`audit_logs`) is permanent legal evidence. Sensitive access records
+(`sensitive_read_logs`) have no approved expiry window or implemented legal-hold
+release check. The daily `retention-sweep` deliberately retains both: every run
+reports `audit_logs(permanent-evidence)` and
+`sensitive_read_logs(policy-unapproved)` with zero deletions. Its completion log
+includes each skipped class and reason. Adding an enabled registry clock does
+not override these decisions. No purge executor membership is granted to the
+API login or the ordinary retention worker. The API must use a non-owner,
+non-superuser login with no replication or role-administration privilege; a
+table owner can alter triggers. The role-contract cutover remains a separate
+release gate.
+
+The migration creates two NOLOGIN roles. `swift_audit_purge_owner` owns the
+bounded SECURITY DEFINER functions and must have no members.
+`swift_audit_purge_executor` can read the two trails and invoke those functions;
+it cannot delete, update or truncate tables directly. Function grants inherited
+from creation defaults are removed before granting this executor access.
+The functions enforce an explicit batch of at most 1,000 IDs and a reason, but
+do **not** determine retention eligibility or release legal holds. The admin
+trail function is retained for isolated synthetic test cleanup; it is not an
+approved live-data retention policy.
+
+Do not provision an automated purge job yet. Before enabling sensitive-read
+retention, obtain the approved configurable window and build a reviewed
+legal-hold check and deletion receipt that commit with deletion. Separate that
+job's sensitive-read authority from the permanent admin trail before granting
+it access; the current executor covers both functions.
+
+For a separately authorized maintenance executor, the database administrator
+can grant `swift_audit_purge_executor` to a dedicated, least-privilege NOINHERIT
+login provisioned outside the repository. That login must not be an API or
+ordinary worker login, table owner, superuser, or member of
+`swift_audit_purge_owner`. Use `GRANT swift_audit_purge_executor TO
+<approved_maintenance_login>` with the actual reviewed login identifier. On the
+dedicated connection, begin a transaction, run
+`SET LOCAL ROLE swift_audit_purge_executor`, select only the approved explicit
+IDs, invoke the relevant helper/function with the recorded authorization
+reason, and commit. `SET LOCAL` ends the elevated role at commit or rollback.
+Never grant the owner role. Revoke executor membership when the authorization
+ends. This procedure does not authorize purging permanent evidence.
+
+The migration's `rollback.sql` sidecar restores the exact previous trigger
+bodies and clears the new function search-path settings. It restores the legacy
+caller-setting authority, so roll back callers first and explicitly acknowledge
+that change with `SET swift.audit_purge_rollback = 'restore-legacy-guard'` on the
+same migration-runner connection before executing the sidecar. The sidecar
+locks both trails and refuses while either purge role has members or the purge
+function owner differs. It removes local purge functions, policies, grants and
+the new sensitive-read TRUNCATE trigger. It drops unused roles; cluster-wide
+roles with other database/object dependencies remain NOLOGIN with this
+database's purge grants removed. Do not remove another database's role to make
+rollback pass. Reset the acknowledgement after the rehearsal. Rollback cannot
+restore rows already deleted.
+
+## 12. The production host (PILOT_ENV=production)
 
 The same scripts run the production host, a separate server. They never turn a
 staging host into production. deploy/.env on that host says
