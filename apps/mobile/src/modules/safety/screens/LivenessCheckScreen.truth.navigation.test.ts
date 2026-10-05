@@ -23,7 +23,11 @@ import type { User } from '@swift/types';
 // hands back a photo), and the HTTP transport, a synthetic server.
 // ---------------------------------------------------------------------------
 
-const fx = vi.hoisted(() => ({ storage: new Map<string, string>() }));
+const fx = vi.hoisted(() => ({
+  storage: new Map<string, string>(),
+  resize: vi.fn(async () => ({ uri: 'file:///shift-selfie-small.jpg' })),
+}));
+vi.mock('expo-image-manipulator', () => ({ manipulateAsync: fx.resize, SaveFormat: { JPEG: 'jpeg' } }));
 
 vi.mock('react-native', async () => {
   const R = await import('react');
@@ -33,7 +37,9 @@ vi.mock('react-native', async () => {
   class Value { constructor(public value = 0) {} setValue(value: number) { this.value = value; } interpolate() { return this; } stopAnimation() {} }
   const animation = () => ({ start: (cb?: (result: { finished: boolean }) => void) => cb?.({ finished: true }), stop() {} });
   return {
-    View, ScrollView: View, Text: View, Image: () => null, ActivityIndicator: () => null,
+    View, ScrollView: View, Text: View,
+    Image: Object.assign(() => null, { getSize: (_uri: string, done: (width: number, height: number) => void) => done(4000, 3000) }),
+    ActivityIndicator: () => null,
     Pressable: ({ children, onPress }: any) => R.createElement('div', { role: 'button', onClick: () => onPress?.() }, kids(children)),
     Platform: { OS: 'ios', select: (options: any) => options.ios ?? options.default },
     I18nManager: { getConstants: () => ({ isRTL: false }) },
@@ -127,6 +133,7 @@ async function transport(config: InternalAxiosRequestConfig) {
   const method = String(config.method ?? 'get').toUpperCase();
   const url = String(config.url ?? '');
   if (method === 'POST' && url === '/safety/liveness-check?profile=RIDER') {
+    expect(config.timeout).toBe(90000);
     posted.push(url);
     return respond(config, 200, { success: true, data: verdict });
   }
@@ -159,11 +166,13 @@ async function riderSendsShiftSelfie() {
   expect(text()).toContain('Identity check');
   await press('Take selfie');
   await press('Use this photo');
+  expect(fx.resize).toHaveBeenCalledWith('file:///shift-selfie.jpg', [{ resize: { width: 1280 } }], { compress: 0.6, format: 'jpeg' });
   expect(posted).toEqual(['/safety/liveness-check?profile=RIDER']);
 }
 
 beforeEach(() => {
   posted.length = 0;
+  fx.resize.mockClear();
   verdict = {};
   api.defaults.adapter = transport;
   axios.defaults.adapter = async (config: InternalAxiosRequestConfig) => ({ config, status: 200, statusText: 'OK', headers: {}, data: {} });
