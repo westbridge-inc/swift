@@ -162,6 +162,9 @@ export interface RelayErrorAction {
   rotateKey: boolean;
   closeDialog: boolean;
   refresh: boolean;
+  /** Empty the code field: a new attempt starts blank, so a reflex second tap
+   *  on "Confirm" cannot resend the refused code and burn a second attempt. */
+  clearCode: boolean;
   message: string;
 }
 
@@ -171,16 +174,16 @@ const TERMINAL = new Set(['TRANSFER_NOT_PENDING', 'MAX_ATTEMPTS', 'TRANSFER_CODE
 export function relayErrorAction(error: unknown): RelayErrorAction {
   const res = (error as { response?: { status?: number; data?: { error?: { code?: string; message?: string } } } })?.response;
   if (!res) {
-    return { rotateKey: false, closeDialog: false, refresh: false, message: "Couldn't reach Swift. Try again — your last try is kept, not counted twice." };
+    return { rotateKey: false, closeDialog: false, refresh: false, clearCode: false, message: "Couldn't reach Swift. Try again — your last try is kept, not counted twice." };
   }
   const code = res.data?.error?.code ?? '';
   const message = res.data?.error?.message ?? "Couldn't confirm the handoff — try again.";
   if (code === 'DUPLICATE_REQUEST') {
-    return { rotateKey: false, closeDialog: false, refresh: false, message: 'Still confirming your last try — wait a moment, then try again.' };
+    return { rotateKey: false, closeDialog: false, refresh: false, clearCode: false, message: 'Still confirming your last try — wait a moment, then try again.' };
   }
-  if (res.status === 404) return { rotateKey: true, closeDialog: true, refresh: true, message: GONE };
-  if (TERMINAL.has(code)) return { rotateKey: true, closeDialog: true, refresh: true, message };
-  return { rotateKey: true, closeDialog: false, refresh: true, message };
+  if (res.status === 404) return { rotateKey: true, closeDialog: true, refresh: true, clearCode: true, message: GONE };
+  if (TERMINAL.has(code)) return { rotateKey: true, closeDialog: true, refresh: true, clearCode: true, message };
+  return { rotateKey: true, closeDialog: false, refresh: true, clearCode: true, message };
 }
 
 /** A failed decline: a gone handoff reads as plain words; refresh either way. */

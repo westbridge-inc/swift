@@ -57,6 +57,7 @@ export function RelayTasks({ enabled, onTakenOver }: { enabled: boolean; onTaken
           // closes the dialog and refreshes the list.
           const act = relayErrorAction(e);
           if (act.rotateKey) attempt.current = newAttemptKey(active.caseId);
+          if (act.clearCode) setCode('');
           if (act.closeDialog) setActive(null);
           if (act.refresh) void tasks.refetch();
           toast.show(act.message);

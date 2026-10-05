@@ -102,8 +102,12 @@ describe('the relay rider’s handoff errors', () => {
   it('a request still in flight (DUPLICATE_REQUEST) keeps the key — rotating would burn a second attempt', () => {
     expect(relayErrorAction(http(409, 'DUPLICATE_REQUEST'))).toMatchObject({ rotateKey: false, closeDialog: false, refresh: false });
   });
-  it('a refused code is a new attempt next time, in the same dialog', () => {
-    expect(relayErrorAction(http(400, 'INVALID_TRANSFER_CODE'))).toMatchObject({ rotateKey: true, closeDialog: false, refresh: true, message: 'server words' });
+  it('a refused code is a new attempt next time, in the same dialog — with the field cleared, so a reflex second tap cannot resend it', () => {
+    expect(relayErrorAction(http(400, 'INVALID_TRANSFER_CODE'))).toMatchObject({ rotateKey: true, closeDialog: false, refresh: true, clearCode: true, message: 'server words' });
+  });
+  it('a kept attempt keeps what was typed (the retry is the same request)', () => {
+    expect(relayErrorAction(new Error('Network Error')).clearCode).toBe(false);
+    expect(relayErrorAction(http(409, 'DUPLICATE_REQUEST')).clearCode).toBe(false);
   });
   it.each(['TRANSFER_NOT_PENDING', 'MAX_ATTEMPTS', 'TRANSFER_CODE_EXPIRED', 'RECOVERY_STALE'])('%s closes the dialog and refreshes the list', (code) => {
     expect(relayErrorAction(http(409, code))).toMatchObject({ closeDialog: true, refresh: true });
