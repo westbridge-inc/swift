@@ -27,7 +27,7 @@ import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { RIDER_INCIDENT_REASONS } from '../custody/custody-case';
-import { reportIncident, holderView, relayTasks, transferCustody, declineRelay } from '../custody/custody-recovery';
+import { reportIncident, holderView, relayTasks, transferCustody, declineRelay, invalidTransferCodeError } from '../custody/custody-recovery';
 import { startOnlineSession, closeOnlineSession } from './online-hours';
 import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -2087,13 +2087,21 @@ export async function riderRoutes(app: FastifyInstance) {
       gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
       version: z.number().int().min(0).optional(),
     }).parse(request.body ?? {});
-    const { data, replayed } = await withIdempotency(app, request, 'custody-transfer', caseId, async () => {
+    // [DS667 S2] A refused code is a RESULT, stored under the key like a
+    // success: one physical attempt burns one attempt, and a retry of the same
+    // request (a lost answer) replays the same refusal without re-running.
+    type TransferAnswer =
+      | { refused: 'INVALID_TRANSFER_CODE'; remaining: number }
+      | { caseId: string; orderId: string; state: string; orderStatus: string };
+    const { data, replayed } = await withIdempotency(app, request, 'custody-transfer', caseId, async (): Promise<TransferAnswer> => {
       const outcome = await transferCustody(custodyDeps, {
         caseId, relayRiderId: rider.id, relayUserId: request.user.userId,
         code: body.code, gps: body.gps, ...(body.version !== undefined ? { version: body.version } : {}),
       });
+      if (outcome.kind === 'WRONG_CODE') return { refused: 'INVALID_TRANSFER_CODE' as const, remaining: outcome.remaining };
       return { caseId, orderId: outcome.order.id, state: outcome.kase.state, orderStatus: outcome.order.status };
     });
+    if ('refused' in data) throw invalidTransferCodeError(data.remaining);
     return { success: true, data, replayed };
   });
 

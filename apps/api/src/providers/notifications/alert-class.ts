@@ -56,7 +56,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'dispatch_retrying', 'dispatch_exhausted', 'converted_to_pickup', 'mover_session_revocation',
     // [AF-MOB-006] A custody relay handoff: the holder and the relay rider. Standard
     // (prompt, audible); promoting them to job_update is a product decision.
-    'custody_handoff_code', 'custody_relay_assigned',
+    'custody_handoff_code', 'custody_relay_assigned', 'custody_relay_cancelled',
     'mmg_payment_confirmed', 'mmg_claim_disputed', 'mmg_claim_resolved', 'mmg_claim_mismatch',
     'mmg_unattested_cancellation', 'supply_returned',
     // Rides

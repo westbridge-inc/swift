@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -562,5 +564,87 @@ describe('[AF-MOB-006] a return tells each party the truth about the money', () 
   it('a courier parcel goes back to its sender with no store money in the sentence', () => {
     const parcel = { orderType: 'COURIER', paymentMethod: 'CASH', subtotalBase: 0 };
     expect(partyCaseView(kase, 'CUSTOMER', parcel)!.body).toBe('Your order could not be delivered and is on its way back to you.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [AF-MOB-006 · DS667] The handoff code's contract, hardened after review:
+// one physical attempt burns one attempt (an idempotent retry of a refused
+// code replays the refusal), the comparison is constant-time, the code dies
+// with its deadline, and a relay rider is told when the handoff is called off.
+// ---------------------------------------------------------------------------
+describe('[AF-MOB-006 · DS667] the handoff code contract', () => {
+  const relayNotices = (riderUserId: string, caseId: string) => runWithoutTenant(() => app.prisma.notification.findMany({
+    where: { userId: riderUserId, data: { path: ['caseId'], equals: caseId } },
+  }), 'test');
+
+  it('a wrong code retried with the same Idempotency-Key replays the refusal and burns ONE attempt', async () => {
+    const { relay, caseId, code } = await relayArranged();
+    const wrong = code === '000000' ? '111111' : '000000';
+    const key = `cr-wrong-${nanoid(10)}`;
+    const first = await transfer(relay.token, caseId, wrong, { 'idempotency-key': key });
+    expect(first.statusCode).toBe(400);
+    expect(first.json().error.code).toBe('INVALID_TRANSFER_CODE');
+    // The answer was lost; the phone retries the same request.
+    const retry = await transfer(relay.token, caseId, wrong, { 'idempotency-key': key });
+    expect(retry.statusCode).toBe(400);
+    expect(retry.json().error.code).toBe('INVALID_TRANSFER_CODE');
+    expect(retry.json().error.message).toBe(first.json().error.message);
+    const kase = await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test');
+    expect(kase.transferAttempts).toBe(1);
+    expect((await trail(caseId)).filter((r) => r.action === 'CUSTODY_CASE_TRANSFER_CODE_FAILED')).toHaveLength(1);
+    // A NEW attempt (a new key) still counts, and the right code still works.
+    expect((await transfer(relay.token, caseId, wrong, { 'idempotency-key': `cr-wrong-${nanoid(10)}` })).statusCode).toBe(400);
+    expect((await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test')).transferAttempts).toBe(2);
+    expect((await transfer(relay.token, caseId, code)).statusCode).toBe(200);
+  });
+
+  it('the code is compared in constant time', () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'modules', 'custody', 'custody-recovery.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    expect(src).toMatch(/timingSafeEqual\(/);
+    expect(src).not.toMatch(/input\.code\s*!==?\s*kase\.transferCode|kase\.transferCode\s*!==?\s*input\.code/);
+  });
+
+  it('a code past its handoff deadline is refused, and moves nothing', async () => {
+    const { holder, relay, order, caseId, code } = await relayArranged();
+    await runWithoutTenant(() => app.prisma.custodyRecoveryCase.update({
+      where: { id: caseId }, data: { deadlineAt: new Date(Date.now() - 1000) },
+    }), 'test');
+    const res = await transfer(relay.token, caseId, code);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('TRANSFER_CODE_EXPIRED');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).riderId).toBe(holder.rider.id);
+    const kase = await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test');
+    expect(kase.transferAttempts).toBe(0);
+  });
+
+  it('when the handoff deadline escalates, the code dies, the relay rider is told, and a fresh name mints a fresh code', async () => {
+    const { holder, relay, caseId, code } = await relayArranged();
+    await runWithoutTenant(() => app.prisma.custodyRecoveryCase.update({
+      where: { id: caseId }, data: { deadlineAt: new Date(Date.now() - 1000) },
+    }), 'test');
+    const escalated = await escalateOverdueCases({ prisma: app.prisma, io: app.io, notifications: new NotificationService(app.prisma, app.io) });
+    expect(escalated).toContain(caseId);
+    const kase = await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test');
+    expect(kase).toMatchObject({ state: 'RELAY_REQUIRED', transferCode: null, relayRiderId: null });
+    expect((await relayNotices(relay.user.id, caseId)).map((n) => (n.data as { kind?: string }).kind)).toContain('custody_relay_cancelled');
+    expect((await transfer(relay.token, caseId, code)).statusCode).toBe(404);
+    // The holder no longer shows a code.
+    expect((await as(holder.token, 'GET', `/api/v1/rider/orders/${kase.orderId}/recovery`)).json().data.transferCode).toBeNull();
+    // Operations names the relay rider again: a fresh code.
+    const named = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/relay`, { riderId: relay.rider.id }, { 'x-swift-reason': REASON });
+    expect(named.statusCode, named.body).toBe(200);
+    const fresh = await runWithoutTenant(() => app.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: caseId } }), 'test');
+    expect(fresh.transferCode).toMatch(/^\d{6}$/);
+    expect(fresh.transferAttempts).toBe(0);
+  });
+
+  it('when operations calls the handoff off, the named relay rider is told', async () => {
+    const { relay, caseId } = await relayArranged();
+    const res = await as(adminToken, 'POST', `/api/v1/admin/custody-cases/${caseId}/direct`, { outcome: 'SUPPORT_HOLD' }, { 'x-swift-reason': REASON });
+    expect(res.statusCode, res.body).toBe(200);
+    const notices = await relayNotices(relay.user.id, caseId);
+    expect(notices.map((n) => (n.data as { kind?: string }).kind)).toContain('custody_relay_cancelled');
   });
 });
