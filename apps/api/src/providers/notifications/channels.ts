@@ -273,32 +273,45 @@ export class ExpoPushProvider implements PushProvider {
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
       const controller = new AbortController();
       const timeoutMs = pushProviderTimeoutMs();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      timer.unref?.();
-      let res: Response;
+      type Tickets = { data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }> };
+      // The deadline includes reading both success and error bodies. Abort
+      // releases the connection; the rejection also bounds adapters that do
+      // not settle when their signal is aborted.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Expo push request failed: timed out after ${timeoutMs}ms`));
+          controller.abort();
+        }, timeoutMs);
+        timer.unref?.();
+      });
+      let payload: Tickets;
       try {
-        res = await fetch(this.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify(chunk.map((to) => expoMessage(to, title, body, data, options, window))),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        const reason = controller.signal.aborted
-          ? `timed out after ${timeoutMs}ms`
-          : (error as Error).message;
-        throw new Error(`Expo push request failed: ${reason}`);
+        payload = await Promise.race([
+          (async (): Promise<Tickets> => {
+            let res: Response;
+            try {
+              res = await fetch(this.url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify(chunk.map((to) => expoMessage(to, title, body, data, options, window))),
+                signal: controller.signal,
+              });
+            } catch (error) {
+              throw new Error(`Expo push request failed: ${(error as Error).message}`);
+            }
+            if (!res.ok) {
+              const detail = await res.text().catch(() => '');
+              throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
+            }
+            // Tickets come back in message order — index maps ticket -> token.
+            return await res.json() as Tickets;
+          })(),
+          deadline,
+        ]);
       } finally {
         clearTimeout(timer);
       }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
-      }
-      // Tickets come back in message order — index maps ticket -> token.
-      const payload = (await res.json()) as {
-        data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }>;
-      };
       (payload.data ?? []).forEach((ticket, idx) => {
         if (ticket.status === 'ok') {
           sent += 1;
