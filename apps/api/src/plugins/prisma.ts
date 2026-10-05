@@ -4,7 +4,7 @@ export { unscopedAccessPolicy, rlsBindEnabled };
 import { destructiveGuardExtension, isTestRuntime } from '../lib/test-target-lock';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
-import { getTenantContext, type TenantMode } from './tenant-context';
+import { getTenantContext, tenantContext, type TenantMode } from './tenant-context';
 import { tenantUnscopedAccessCounter, tenantBindCounter } from './observability';
 import { poolRoleForApiProcess, resolveDatabaseUrl } from '../utils/db-pool';
 import { isDevelopment } from '../utils/runtime-mode';
@@ -264,6 +264,18 @@ export class TenantContextRequiredError extends Error {
 }
 let unscopedLogBudget = 200;
 
+/** [L04 · R5 auto-bind] A query inside a transaction asked for a tenant other
+ *  than the one the transaction was bound to when it began. The connection is
+ *  bound to the first tenant, so answering would silently read nothing of the
+ *  second: it is refused by name instead, and the transaction rolls back. */
+export class TenantSwitchInTransactionError extends Error {
+  readonly code = 'TENANT_SWITCH_IN_TRANSACTION';
+  readonly statusCode = 500;
+  constructor(what: string) {
+    super(`[R5] ${what} asked for another tenant inside a transaction bound to one tenant; start that work in its own transaction`);
+  }
+}
+
 type ScopeParams = {
   model?: string;
   operation: string;
@@ -331,7 +343,56 @@ function tenantScope(params: ScopeParams, connection: Connection, wiring: ScopeW
   // The system login is not walled by the tenant setting; the predicate above
   // still confines a tenant-bound query run on it (e.g. inside a system transaction).
   if (connection === 'system') return query(args);
-  return rlsBindEnabled() ? bindTenant(query, args, tenantId, wiring.batch()) : query(args);
+  if (!rlsBindEnabled()) return query(args);
+  // [L04 · R5 auto-bind] Inside a transaction that began bound, the connection
+  // already carries the tenant for the transaction's whole life: run here — or
+  // refuse by name if this query asks for a different tenant.
+  const txTenant = boundTransactionTenant(params);
+  if (txTenant !== undefined) {
+    if (txTenant !== tenantId) {
+      tenantBindCounter.labels('tenant_switch_refused').inc();
+      return Promise.reject(new TenantSwitchInTransactionError(`${model}.${operation}`));
+    }
+    return query(args);
+  }
+  return bindTenant(query, args, tenantId, wiring.batch());
+}
+
+/** The tenant the caller's transaction was bound to at BEGIN, when this query
+ *  belongs to one; undefined otherwise (or for a transaction begun unbound). */
+function boundTransactionTenant(params: { __internalParams?: { transaction?: unknown } }): string | undefined {
+  if (!params.__internalParams?.transaction) return undefined;
+  return tenantContext.getStore()?.txTenant;
+}
+
+type RawParams = { args: unknown; query: (a: unknown) => Promise<unknown>; __internalParams?: { transaction?: unknown } };
+/** [L04 · R5 auto-bind] Top-level raw SQL ($queryRaw/$executeRaw and their
+ *  Unsafe forms) is bound exactly like a model query: under a request tenant it
+ *  runs in one batch after set_config; inside a bound transaction it runs on
+ *  that transaction (or is refused if it asks for another tenant). Unbound, it
+ *  runs as written — on the walled login that reads nothing (fail closed). */
+function rawTenantBinding(params: RawParams, wiring: ScopeWiring): Promise<unknown> {
+  const { args, query } = params;
+  if (!rlsBindEnabled()) return query(args);
+  const ctx = getTenantContext();
+  if (!ctx.tenantId) {
+    tenantBindCounter.labels(ctx.mode === 'system' ? 'raw_system' : 'raw_unbound').inc();
+    return query(args);
+  }
+  const txTenant = boundTransactionTenant(params);
+  if (txTenant !== undefined) {
+    if (txTenant !== ctx.tenantId) {
+      tenantBindCounter.labels('tenant_switch_refused').inc();
+      return Promise.reject(new TenantSwitchInTransactionError('raw SQL'));
+    }
+    return query(args);
+  }
+  if (params.__internalParams?.transaction) return query(args); // a transaction begun unbound: unchanged
+  return bindTenant(query as (a: Record<string, unknown>) => Promise<unknown>, args as Record<string, unknown>, ctx.tenantId, wiring.batch());
+}
+function rawTenantBindingExtension(wiring: ScopeWiring) {
+  const bind = (params: RawParams) => rawTenantBinding(params, wiring);
+  return { name: 'rawTenantBinding', query: { $queryRaw: bind, $executeRaw: bind, $queryRawUnsafe: bind, $executeRawUnsafe: bind } } as never;
 }
 
 /** [TEN-03] The bound query: `set_config` and the operation in ONE batch
@@ -431,6 +492,28 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
       }
       tenantBindCounter.labels('system_no_client').inc();
     }
+    // [L04 · R5 auto-bind] A transaction that BEGINS under a request tenant is
+    // bound for its whole life: set_config(…, true) is the first statement on
+    // its pinned connection, so every later statement — raw SQL and model
+    // queries alike — sees that tenant, and the setting dies with the
+    // transaction (commit or rollback), never reaching the next user of the
+    // pooled connection. The tenant is recorded so a switch inside is refused.
+    const tenantId = ctx.tenantId;
+    if (rlsBindEnabled() && tenantId) {
+      const store = { ...(tenantContext.getStore() ?? { mode: 'request' as const }), tenantId, txTenant: tenantId };
+      tenantBindCounter.labels('tenant_tx').inc();
+      if (typeof input === 'function') {
+        const fn = input as (tx: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> }) => Promise<unknown>;
+        return tenantContext.run(store, () => own(async (tx: Parameters<typeof fn>[0]) => {
+          await tx.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+          return fn(tx);
+        }, options));
+      }
+      if (Array.isArray(input)) {
+        const bindFirst = (client as unknown as BatchClient).$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+        return tenantContext.run(store, async () => ((await own([bindFirst, ...input], options)) as unknown[]).slice(1));
+      }
+    }
     return own(input, options);
   };
   Object.defineProperty(client, '$transaction', { value: begin, writable: true, configurable: true, enumerable: false });
@@ -454,7 +537,7 @@ const extendedPrisma = new PrismaClient({
 }).$extends(orderStatusLogAppendOnly).$extends({
   name: 'tenantScope',
   query: TENANT_QUERY_EXTENSIONS,
-})
+}).$extends(rawTenantBindingExtension(PROCESS_WIRING))
   // [R048-001] In test mode a deleteMany/updateMany with no predicate and any
   // raw DDL are refused unless the suite granted itself the capability: cleanup
   // is namespace-owned or it does not run. Outside tests the extension is not
@@ -483,6 +566,7 @@ export function scopedClientFor(raw: PrismaClient, systemRaw: PrismaClient | nul
   const guarded = raw.$extends(orderStatusLogAppendOnly) as unknown as PrismaClient;
   const extended = guarded
     .$extends(tenantScopeExtensionFor(guarded, system))
+    .$extends(rawTenantBindingExtension({ batch: () => guarded as unknown as BatchClient, system: () => system }))
     .$extends(isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' }) as unknown as PrismaClient;
   return routeSystemTransactions(extended, () => system);
 }
