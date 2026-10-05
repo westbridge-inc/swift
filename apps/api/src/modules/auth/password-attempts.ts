@@ -92,8 +92,8 @@ export async function isPasswordSignInLocked(redis: Redis, userId: string, sourc
   return (await redis.exists(lockKey(userId, gen, source), accountLockKey(userId, gen))) > 0;
 }
 
-/** Count one wrong password against this source AND the account. Returns true when either locked. */
-export async function recordPasswordFailure(redis: Redis, userId: string, source: string): Promise<boolean> {
+/** Count one wrong password against this source AND the account; says which lock (if any) this failure set. */
+export async function recordPasswordFailure(redis: Redis, userId: string, source: string): Promise<{ sourceLocked: boolean; accountLocked: boolean }> {
   const gen = await generationOf(redis, userId);
   const sourceLocked = await redis.eval(
     RECORD_FAILURE_SCRIPT,
@@ -113,7 +113,22 @@ export async function recordPasswordFailure(redis: Redis, userId: string, source
     String(PASSWORD_FAILURE_WINDOW_S),
     String(PASSWORD_ACCOUNT_LOCK_S),
   );
-  return Number(sourceLocked) === 1 || Number(accountLocked) === 1;
+  return { sourceLocked: Number(sourceLocked) === 1, accountLocked: Number(accountLocked) === 1 };
+}
+
+/**
+ * The budget subject for an attempt. A real account is its id; an unknown
+ * identifier (or an account with no password) gets a keyed pseudonym of the
+ * identifier, so every attempt touches the budget store the same way and an
+ * unknown account is counted and locked exactly like a real one (MASTER-054).
+ */
+export function passwordBudgetSubject(
+  account: { id: string } | null,
+  identifier: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  if (account) return account.id;
+  return `none:${createHmac('sha256', digestKey(env)).update('swift:password-subject:v1\0').update(identifier.toLowerCase()).digest('hex').slice(0, 32)}`;
 }
 
 /** A successful sign-in from this source clears its count. */

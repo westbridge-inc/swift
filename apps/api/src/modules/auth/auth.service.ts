@@ -43,6 +43,8 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 import {
   clearPasswordFailures,
   isPasswordSignInLocked,
+  passwordBudgetSubject,
+  PASSWORD_ACCOUNT_LOCK_S,
   recordPasswordFailure,
   resetPasswordAttemptBudget,
 } from './password-attempts';
@@ -587,6 +589,33 @@ export class AuthService {
     return changed.tokens;
   }
 
+  /** [MASTER-056] Count a wrong password. A store failure is logged, never a
+   *  different answer. When the account-wide ceiling trips, the account holder
+   *  gets ONE in-app notice for that pause (no text: that would be a spam lever). */
+  private async countPasswordFailure(subject: string, source: string, userId: string | null): Promise<void> {
+    let outcome: { accountLocked: boolean };
+    try {
+      outcome = await recordPasswordFailure(this.app.redis, subject, source);
+    } catch (error) {
+      this.app.log.error({ err: error }, '[auth] password failure could not be counted');
+      return;
+    }
+    if (!outcome.accountLocked || !userId) return;
+    try {
+      const { NotificationService } = await import('../notification/notification.service');
+      await new NotificationService(this.app.prisma, this.app.io).send({
+        userId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Password sign-in paused',
+        body: 'We paused password sign-in on your account for 15 minutes after many wrong attempts. You can still sign in with a code.',
+        data: { kind: 'password_sign_in_paused' },
+        dedupeKey: `password-sign-in-paused:${Math.floor(Date.now() / (PASSWORD_ACCOUNT_LOCK_S * 1000))}`,
+      });
+    } catch (error) {
+      this.app.log.error({ err: error, userId }, 'password-sign-in-paused notice failed');
+    }
+  }
+
   /** [MASTER-003] The security notice: an inbox row (with push), and a text to the phone on the account. */
   private async sendPasswordChangedNotice(userId: string, phone: string): Promise<void> {
     const body = "Your Swift password was just changed and your other devices were signed out. If this wasn't you, contact Swift support now.";
@@ -624,13 +653,24 @@ export class AuthService {
     // work done tells an account that exists from one that does not.
     const invalid = new AppError(401, 'INVALID_CREDENTIALS', 'Invalid phone/email or password');
     const matches = await bcrypt.compare(password, user?.passwordHash ?? NO_ACCOUNT_PASSWORD_HASH);
-    if (!user || !user.passwordHash) throw invalid;
 
     // [L04 · MASTER-056] Five wrong passwords from one source lock that source
     // only; a wider ceiling across all sources pauses password sign-in for the
     // account. SMS-code sign-in reads neither, so the owner always has a way in.
+    // An unknown account is budgeted under a pseudonym the same way (same
+    // store calls, same answers), and a store failure is a refusal for every
+    // account alike — never a different answer for one that exists.
     const source = deviceInfo.ipAddress;
-    if (await isPasswordSignInLocked(this.app.redis, user.id, source)) throw invalid;
+    const subject = passwordBudgetSubject(user?.passwordHash ? user : null, identifier.phone ?? identifier.email ?? '');
+    const locked = await isPasswordSignInLocked(this.app.redis, subject, source).catch((error) => {
+      this.app.log.error({ err: error }, '[auth] password attempt budget unavailable — refusing password sign-in');
+      return true;
+    });
+    if (locked) throw invalid;
+    if (!user || !user.passwordHash) {
+      await this.countPasswordFailure(subject, source, null);
+      throw invalid;
+    }
 
     // Password hashing stays outside the lock so one expensive comparison does
     // not block every security mutation for this user. Once it finishes, both
@@ -723,7 +763,7 @@ export class AuthService {
       };
     });
     if (login.kind === 'invalid' && 'countAsFailure' in login) {
-      await recordPasswordFailure(this.app.redis, user.id, source);
+      await this.countPasswordFailure(subject, source, user.id);
       throw invalid;
     }
     if (login.kind === 'invalid') throw invalid;

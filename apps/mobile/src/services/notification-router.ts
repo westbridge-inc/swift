@@ -169,6 +169,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (kind === 'password_changed') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my password' } };
   }
+  // [L04 · MASTER-056] Password sign-in paused after many wrong attempts: the
+  // owner can still sign in with a code; help is the door if it wasn't them.
+  if (kind === 'password_sign_in_paused') {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Someone is trying my password' } };
+  }
   if (kind === 'liveness_locked') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } };
   }

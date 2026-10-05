@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
 import { prismaPlugin } from '../plugins/prisma';
@@ -34,7 +34,9 @@ const SET_OTHER_STEP_UP_PHONE = `${PREFIX}004`;
 const SPRAY_PHONE = `${PREFIX}005`;
 // Outside the launch market: no text may be sent to it.
 const FOREIGN_PHONE = '+447700900414';
-const ALL_PHONES = [LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE];
+const OUTAGE_PHONE = `${PREFIX}006`;
+const OUTAGE_UNKNOWN_PHONE = `${PREFIX}099`;
+const ALL_PHONES = [LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE, OUTAGE_PHONE];
 const PASSWORD = 'credentials-password-1';
 const NEW_PASSWORD = 'credentials-password-2';
 const ATTACKER_IP = '203.0.113.7';
@@ -126,9 +128,13 @@ describe('[MASTER-056] rotating addresses cannot guess one account without bound
     const user = await createUser(SPRAY_PHONE);
     // One wrong password from each of many addresses: no single source ever
     // reaches its own limit of five.
+    const pausedNotices = async () => (await app.prisma.notification.findMany({ where: { userId: user.id } }))
+      .filter((n) => (n.data as { kind?: string } | null)?.kind === 'password_sign_in_paused');
     for (let i = 0; i < PASSWORD_FAILURES_PER_ACCOUNT; i += 1) {
       const attempt = await post('password/login', { phone: SPRAY_PHONE, password: `spray-${i}-wrong` }, { remoteAddress: `198.18.${Math.floor(i / 250)}.${(i % 250) + 1}` });
       expect(attempt.statusCode).toBe(401);
+      // No notice until the ceiling itself trips.
+      if (i === PASSWORD_FAILURES_PER_ACCOUNT - 2) expect(await pausedNotices()).toHaveLength(0);
     }
     // Now even the right password, from an address never seen, is refused with the ordinary answer…
     const fresh = await post('password/login', { phone: SPRAY_PHONE, password: PASSWORD }, { remoteAddress: '192.0.2.200' });
@@ -138,6 +144,39 @@ describe('[MASTER-056] rotating addresses cannot guess one account without bound
     const byCode = await loginWithOtp(app, SPRAY_PHONE);
     expect(byCode.statusCode, byCode.body).toBe(200);
     expect(await app.prisma.session.count({ where: { userId: user.id } })).toBe(1);
+    // The account holder is told once, in the app (no text: a text per pause would be a spam lever).
+    const paused = await pausedNotices();
+    expect(paused).toHaveLength(1);
+    expect(paused[0]!.body).toMatch(/code/i);
+  });
+});
+
+describe('[MASTER-054 × MASTER-056] a budget-store outage is not an account oracle', () => {
+  it('with the budget store failing, an unknown account and an existing one (wrong or right password) get the same refusal after the same store calls', async () => {
+    await createUser(OUTAGE_PHONE);
+    const calls: Record<string, number> = {};
+    const answers: Record<string, { status: number; body: string }> = {};
+    const fail = () => Promise.reject(new Error('injected: budget store down'));
+    const spies = (['get', 'exists', 'eval', 'del', 'incr', 'expire'] as const).map((m) => vi.spyOn(app.redis, m).mockImplementation(fail as never));
+    try {
+      for (const [label, payload] of [
+        ['unknown', { phone: OUTAGE_UNKNOWN_PHONE, password: 'outage-wrong-1' }],
+        ['existing-wrong', { phone: OUTAGE_PHONE, password: 'outage-wrong-1' }],
+        ['existing-right', { phone: OUTAGE_PHONE, password: PASSWORD }],
+      ] as const) {
+        for (const spy of spies) spy.mockClear();
+        const res = await post('password/login', payload, { remoteAddress: '192.0.2.77' });
+        answers[label] = { status: res.statusCode, body: res.body };
+        calls[label] = spies.reduce((n, spy) => n + spy.mock.calls.length, 0);
+      }
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+    expect(answers['unknown']!.status).toBe(401);
+    expect(answers['existing-wrong']).toEqual(answers['unknown']);
+    expect(answers['existing-right']).toEqual(answers['unknown']);
+    expect(calls['existing-wrong']).toBe(calls['unknown']);
+    expect(calls['existing-right']).toBe(calls['unknown']);
   });
 });
 
