@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -45,6 +46,7 @@ async function makeUser(roles: UserRole[]) {
   await app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'del', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) },
   });
+  await grantStepUp(app, token);
   return { userId: user.id, token };
 }
 

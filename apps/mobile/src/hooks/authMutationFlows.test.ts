@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   setUserIfCurrent: vi.fn(),
   switchRole: vi.fn(),
   driverGoOnline: vi.fn(),
+  rideCapabilities: vi.fn(),
   driverUploadVehicle: vi.fn(),
   riderHandover: vi.fn(),
   lastKnownPosition: vi.fn(),
@@ -87,6 +88,7 @@ vi.mock('../services/api', () => ({
     uploadVehiclePhoto: mocks.driverUploadVehicle,
   },
   riderApi: { handover: mocks.riderHandover },
+  rideApi: { capabilities: mocks.rideCapabilities },
   verificationApi: {
     upload: mocks.uploadVerification,
     submitDocument: mocks.submitDocument,
@@ -171,6 +173,8 @@ beforeEach(() => {
     append() {}
   });
   mocks.current = { ...accountA };
+  // An older server: no capability read (404) — go-online is exactly today's.
+  mocks.rideCapabilities.mockRejectedValue({ response: { status: 404 } });
   mocks.user = {
     id: accountA.userId,
     firstName: 'Account',
@@ -462,6 +466,33 @@ describe('multi-step authenticated mutation ownership', () => {
 // "Save vehicle" does; a result that lands after the account changed is never
 // applied to the next account; a retry that changed nothing leaves the session.
 // ---------------------------------------------------------------------------
+describe('[TAXI multi-stop] go-online declares stops only to a server that offers them', () => {
+  function arrangeOnline() {
+    mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'DRIVER' } } });
+    mocks.driverGoOnline.mockResolvedValue({ data: { data: { online: true } } });
+  }
+
+  it('the server advertises stops (maxStops 2): the capability goes with the go-online', async () => {
+    mocks.rideCapabilities.mockResolvedValue({ data: { data: { maxStops: 2 } } });
+    arrangeOnline();
+    await (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
+    expect(mocks.rideCapabilities).toHaveBeenCalledWith(expect.objectContaining({ userId: accountA.userId }));
+    expect(mocks.driverGoOnline).toHaveBeenCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['TAXI_STOPS_V1']);
+  });
+
+  it.each([
+    ['stops switched off (maxStops 0)', () => mocks.rideCapabilities.mockResolvedValue({ data: { data: { maxStops: 0 } } })],
+    ['an older server without the read (404)', () => mocks.rideCapabilities.mockRejectedValue({ response: { status: 404 } })],
+    ['the read fails', () => mocks.rideCapabilities.mockRejectedValue(new Error('offline'))],
+  ])('%s: exactly today’s go-online call, no capability', async (_label, arrange) => {
+    arrange();
+    arrangeOnline();
+    await (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
+    expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
+    expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+});
+
 describe('changing the vehicle follows the session that asked', () => {
   type ChangeVars = { vehicleType: 'CAR' | 'BICYCLE'; vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string } };
   const car: ChangeVars = { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2019, color: 'White', licensePlate: 'PAB 1234' } };

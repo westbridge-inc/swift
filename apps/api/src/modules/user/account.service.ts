@@ -1,3 +1,4 @@
+import { eraseMoverObjects } from './mover-object-erasure';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
@@ -359,6 +360,9 @@ export class AccountService {
       });
     }
 
+    const moverObjects = await eraseMoverObjects(prisma, storage, userId);
+    pendingDocuments += moverObjects.pending;
+
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
     //     which is PUBLIC for the local provider. Nulling the column (step 4)
     //     leaves the object reachable — a DPA deletion-barrier breach. Delete
@@ -458,9 +462,9 @@ export class AccountService {
       },
     });
 
-    if (deferred.count > 0) {
+    if (deferred.count > 0 || moverObjects.held > 0) {
       return {
-        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count,
+        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held,
         pendingDocuments, pendingAvatarObjects,
         message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };

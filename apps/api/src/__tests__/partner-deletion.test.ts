@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -33,7 +34,7 @@ const vendorIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_817_000_000 + Math.floor(Math.random() * 100_000_000);
 
-async function makePartner(roles: UserRole[], opts: { committedFloat?: number } = {}) {
+async function makePartner(roles: UserRole[], opts: { committedFloat?: number; stepUp?: boolean } = {}) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
@@ -50,6 +51,7 @@ async function makePartner(roles: UserRole[], opts: { committedFloat?: number } 
   await app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'p', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) },
   });
+  if (opts.stepUp !== false) await grantStepUp(app, token);
   const rider = await app.prisma.rider.findUniqueOrThrow({ where: { userId: user.id }, select: { id: true } });
   return { userId: user.id, token, riderId: rider.id };
 }
@@ -138,6 +140,21 @@ describe('[5.1.1v] the verdict, without a database', () => {
 });
 
 describe('[5.1.1v] a partner deletes their own account', () => {
+  it.each(['DELETE', 'POST'] as const)('requires session step-up before %s closure can change account authority', async (method) => {
+    const p = await makePartner(method === 'POST' ? ['VENDOR_OWNER'] : ['MOVER'], { stepUp: false });
+    const request = () => app.inject({ method, url: method === 'POST' ? '/api/v1/customer/account/closure-request' : '/api/v1/customer/account', headers: { authorization: `Bearer ${p.token}` } });
+    const denied = await request();
+    expect(denied.statusCode, denied.payload).toBe(403);
+    expect(denied.json().error.code).toBe('STEP_UP_REQUIRED');
+    expect(await app.prisma.supportTicket.count({ where: { userId: p.userId } })).toBe(0);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: p.userId } })).status).toBe('ACTIVE');
+    expect(await app.prisma.session.count({ where: { userId: p.userId } })).toBe(1);
+    await grantStepUp(app, p.token);
+    const accepted = await request();
+    expect(accepted.statusCode, accepted.payload).toBe(method === 'POST' ? 202 : 200);
+    expect(accepted.json().data).toMatchObject(method === 'POST' ? { status: 'CLOSURE_REQUESTED' } : { deleted: true });
+  });
+
   it('starts one durable closure request in-app without revoking access', async () => {
     const p = await makePartner(['VENDOR_OWNER']);
     const request = () => app.inject({ method: 'POST', url: '/api/v1/customer/account/closure-request', headers: { authorization: `Bearer ${p.token}` } });

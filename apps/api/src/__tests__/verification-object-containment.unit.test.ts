@@ -218,7 +218,7 @@ afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllEnvs(); 
 // are not the subject of these tests; the input principal is explicitly bound.
 async function handlers(h: ReturnType<typeof harness>, routes: typeof verificationRoutes) {
   const registered = new Map<string, (...args: any[]) => any>();
-  const app: any = { prisma: h.db, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
+  const app: any = { prisma: h.db, redis: { exists: vi.fn(async () => 1) }, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
   h.db.$extends = () => h.db;
   for (const verb of ['get', 'post', 'put', 'patch', 'delete']) {
     app[verb] = (path: string, ...args: any[]) => { registered.set(`${verb} ${path}`, args.at(-1)); };
@@ -748,7 +748,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     });
     const routes = await handlers(h, customerRoutes);
     const reply = { code: vi.fn() };
-    const result = await routes.get('delete /account')!({ user: { userId: A } }, reply);
+    const result = await routes.get('delete /account')!({ user: { userId: A }, authSessionId: 'verified-synthetic-session' }, reply);
     expect(result).toMatchObject({ success: true, data: { deleted: false, status: 'PENDING_DOCUMENT_ERASURE' } });
     expect(reply.code).toHaveBeenCalledWith(202);
     expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
