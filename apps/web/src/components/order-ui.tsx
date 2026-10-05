@@ -4,10 +4,12 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Star, Clock } from 'lucide-react';
 import { Bone, LoadingRegion } from './customer-skeletons';
+import { FavouriteButton } from './account/favourites';
 import type { Vendor } from '@/lib/customer';
 
-export function VendorCard({ v }: { v: Vendor }) {
+export function VendorCard({ v, categoryName }: { v: Vendor; categoryName?: string }) {
   return (
+    <div className="relative min-w-0">
     <Link href={`/order/vendor/${v.id}`} className="group block min-w-0 overflow-hidden rounded-2xl border border-black/5 bg-white transition-shadow hover:shadow-md">
       <div data-store-part="image" className="relative h-32 bg-[var(--swift-subtle)]">
         {v.coverImageUrl && <Image src={v.coverImageUrl} alt={v.name} fill unoptimized sizes="(min-width: 1024px) 264px, (min-width: 640px) 30vw, 46vw" loading="lazy" className="object-cover" />}
@@ -22,6 +24,9 @@ export function VendorCard({ v }: { v: Vendor }) {
         </p>
       </div>
     </Link>
+    <div className="absolute right-2 top-2"><FavouriteButton vendorId={v.id} name={v.name} /></div>
+    {categoryName && v.itemsInCategory ? <p className="px-3 py-2 text-sm text-[var(--swift-muted)]">{v.itemsInCategory} {categoryName.toLowerCase()} items</p> : null}
+    </div>
   );
 }
 

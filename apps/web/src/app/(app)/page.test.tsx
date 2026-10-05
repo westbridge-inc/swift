@@ -91,7 +91,7 @@ describe('[Q7b] / is the ordering home', () => {
     expect(bowl.getAttribute('href')).toBe('/order/vendor/v1?item=i1');
     expect(bowl.textContent).toMatch(/GY\$1,800/);
     const open = screen.getByRole('region', { name: 'Open now' });
-    expect(within(open).getByRole('link', { name: /Shanta Kitchen/ }).getAttribute('href')).toBe('/order/vendor/v1');
+    expect(within(open).getByRole('link', { name: /^Shanta Kitchen/ }).getAttribute('href')).toBe('/order/vendor/v1');
     expect(within(screen.getByRole('region', { name: 'Closed now' })).getByText('Late Night Roti')).toBeTruthy();
     expect(homeRequests()).toHaveLength(1);
   });
@@ -107,10 +107,11 @@ describe('[Q7b] / is the ordering home', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Show stores near me' }));
     const near = await screen.findByRole('region', { name: 'Stores near you' });
     // Nearby first, then the rest, each store once.
-    expect(within(near).getAllByRole('link').map((link) => link.textContent)).toEqual([
+    expect(within(near).getAllByRole('link').filter((link) => link.getAttribute('href')?.startsWith('/order/vendor/')).map((link) => link.textContent)).toEqual([
       expect.stringContaining('Pepperpot Corner'),
       expect.stringContaining('Shanta Kitchen'),
     ]);
+    expect(within(near).getAllByRole('link', { name: /^Sign in to save/ })).toHaveLength(2);
     const sorted = homeRequests().at(-1)!;
     expect([sorted.searchParams.get('lat'), sorted.searchParams.get('lng')]).toEqual(['6.8', '-58.15']);
     const paths = fetchMock.mock.calls.map(([url]) => new URL(String(url)).pathname);

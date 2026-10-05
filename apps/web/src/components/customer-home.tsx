@@ -14,6 +14,7 @@ import { useCustomerSession } from '@/components/customer-session';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
+import { HomeCategories } from '@/components/customer-discovery';
 import { EmptyNote, VendorCard } from '@/components/order-ui';
 
 /**
@@ -143,6 +144,8 @@ export function CustomerHome({ market }: { market: string }) {
         </nav>
       </section>
 
+      <HomeCategories near={near} fallback={data?.categories} />
+
       {data?.activeOrder ? <LiveOrder order={data.activeOrder} /> : null}
 
       {feed.isError && !data ? (
@@ -153,6 +156,14 @@ export function CustomerHome({ market }: { market: string }) {
         <>
           {data.popularItems.length > 0 ? <PopularRail items={data.popularItems} /> : null}
           {data.orderAgain.length > 0 ? <VendorRail title="Order again" vendors={data.orderAgain} /> : null}
+          <section aria-labelledby="recommended-title">
+            <div className="flex items-center justify-between gap-3">
+              <h2 id="recommended-title" className="text-xl font-extrabold">Recommended for you</h2>
+              <Link href="/order/browse?view=recommended" className="inline-flex min-h-11 items-center text-sm font-semibold text-[var(--swift-red)]">See all</Link>
+            </div>
+            {data.featured.length ? <ul className={RAIL}>{data.featured.slice(0, 10).map((v) => <li key={v.id} className="w-60 shrink-0 snap-start"><VendorCard v={v} /></li>)}</ul>
+              : <p className="mt-3 text-sm text-[var(--swift-muted)]">Nothing&apos;s open right now — check back soon.</p>}
+          </section>
           <section aria-labelledby="open-stores-title">
             <h2 id="open-stores-title" className="text-xl font-extrabold">
               {data.nearby.length > 0 ? 'Stores near you' : 'Open now'}

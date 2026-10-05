@@ -12,6 +12,7 @@ import { useCustomerSession } from '@/components/customer-session';
 import { MenuSkeleton } from '@/components/customer-skeletons';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { FavouriteButton } from '@/components/account/favourites';
 import { signInPath } from '@/lib/customer-routes';
 
 /** The store, reopened at one item: `?item=` from Home's popular rail, the
@@ -41,12 +42,18 @@ function itemPrice(item: MenuItem, sel: Record<string, string>) {
 }
 
 export default function VendorPage() {
+  const { scope, epoch } = useCustomerSession();
+  // Drop open item/booking state along with the previous session's menu.
+  return <SessionVendorPage key={JSON.stringify([scope, epoch])} />;
+}
+
+function SessionVendorPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const session = useCustomerSession();
-  // [Q7b] Cached per store, so going back to it is instant; refreshed in the
-  // background. A menu is the same for everyone who opens it.
-  const store = useQuery<VendorDetail>({ queryKey: ['customer', 'vendor', id], queryFn: () => getVendor(id) });
+  // Visibility is session-specific; returning to this store in a new session
+  // must fetch again without showing a previous session's menu.
+  const store = useQuery<VendorDetail>({ queryKey: ['customer', 'vendor', session.scope, session.epoch, id], queryFn: () => getVendor(id) });
   const v = store.data ?? null;
   const [modal, setModal] = useState<MenuItem | null>(null);
   const [sel, setSel] = useState<Record<string, string>>({});
@@ -138,7 +145,7 @@ export default function VendorPage() {
         {v.coverImageUrl && <Image src={v.coverImageUrl} alt={v.name} fill unoptimized sizes="(min-width: 1152px) 1120px, calc(100vw - 32px)" priority className="object-cover" />}
       </div>
       <div className="swift-menu-heading">
-        <h1 className="text-2xl font-extrabold md:text-3xl">{v.name}</h1>
+        <div className="flex items-center justify-between gap-3"><h1 className="text-2xl font-extrabold md:text-3xl">{v.name}</h1><FavouriteButton vendorId={v.id} name={v.name} /></div>
         <p className="mt-1 flex flex-wrap items-center gap-3 text-sm text-[var(--swift-muted)]">
           <span className="flex items-center gap-1"><Star className="h-4 w-4 fill-amber-400 text-amber-400" />{v.displayRating === null ? 'New' : `${v.displayRating.toFixed(1)} ${v.ratingBucket}`}</span>
           <span className="flex items-center gap-1"><Clock className="h-4 w-4" />~{v.estimatedPrepTime} min</span>

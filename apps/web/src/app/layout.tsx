@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { appleStartupImages } from '@/lib/apple-startup-images';
 import './globals.css';
 import { appChrome, swiftDesignVariables } from '@/lib/design-tokens';
+import { SignedOutNotice } from '@/components/customer-session';
 import { ServiceWorkerRegistrar } from '@/components/service-worker-registrar';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
 
@@ -73,6 +74,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en-GY" style={swiftDesignVariables}>
       <body>
         <ServiceWorkerRegistrar />
+        <SignedOutNotice />
         {children}
       </body>
     </html>
