@@ -72,6 +72,12 @@ function codesMatch(given: string, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** A code is dead at or past its own expiry; a code with no expiry is dead too
+ *  (the database refuses that shape, so it can only mean a damaged row). */
+function codeHasExpired(expiresAt: Date | null): boolean {
+  return !expiresAt || expiresAt.getTime() <= Date.now();
+}
+
 /** The refusal a wrong handoff code gets. Built in ONE place so the first
  *  answer and an idempotent replay of it are word for word the same. */
 export function invalidTransferCodeError(remaining: number): AppError {
@@ -251,7 +257,8 @@ export async function holderView(deps: CustodyDeps, orderId: string, riderId: st
   // it the code is never shown (the server refuses it), and the holder is told
   // it expired and that support is arranging the handoff again.
   const pendingHandoff = isHolder && kase.state === 'TRANSFER_IN_PROGRESS';
-  const codeExpired = pendingHandoff && kase.deadlineAt.getTime() <= Date.now();
+  // Keyed on the code's OWN expiry, never the case deadline a sweep may bump.
+  const codeExpired = pendingHandoff && codeHasExpired(kase.transferCodeExpiresAt);
   const relay = kase.relayRiderId
     ? await deps.prisma.rider.findUnique({ where: { id: kase.relayRiderId }, select: { user: { select: { firstName: true } }, vehicleType: true } })
     : null;
@@ -271,7 +278,7 @@ export async function holderView(deps: CustodyDeps, orderId: string, riderId: st
       : null,
     // The holder SHOWS this; the relay rider types it. Nobody else reads it.
     transferCode: pendingHandoff && !codeExpired ? kase.transferCode : null,
-    transferCodeExpiresAt: pendingHandoff ? kase.deadlineAt : null,
+    transferCodeExpiresAt: pendingHandoff ? kase.transferCodeExpiresAt : null,
     codeExpired,
     // On cash the holder fronted the store; the float moves with the goods.
     floatToCollect: pendingHandoff && !codeExpired && float > 0 ? float : 0,
@@ -307,7 +314,7 @@ function holderInstruction(kase: CustodyRecoveryCase, float: number, orderType: 
 export async function relayTasks(deps: CustodyDeps, riderId: string) {
   const cases = await deps.prisma.custodyRecoveryCase.findMany({
     // An expired handoff is not a task: its code is refused (DS667).
-    where: { relayRiderId: riderId, state: 'TRANSFER_IN_PROGRESS', deadlineAt: { gt: new Date() } },
+    where: { relayRiderId: riderId, state: 'TRANSFER_IN_PROGRESS', transferCodeExpiresAt: { gt: new Date() } },
     orderBy: { updatedAt: 'desc' },
   });
   const out = [];
@@ -330,7 +337,7 @@ export async function relayTasks(deps: CustodyDeps, riderId: string) {
       } : null,
       floatToBring: float,
       deadlineAt: kase.deadlineAt,
-      expiresAt: kase.deadlineAt,
+      expiresAt: kase.transferCodeExpiresAt,
       instruction: float > 0
         ? `Meet ${holder?.user.firstName ?? 'the rider'}, give them the order's cash float (GY$${Math.round(float).toLocaleString('en-US')}), take the order and enter the code they show you.`
         : `Meet ${holder?.user.firstName ?? 'the rider'}, take the order and enter the code they show you.`,
@@ -371,11 +378,11 @@ export async function transferCustody(deps: CustodyDeps, input: TransferInput) {
     if (input.version !== undefined && input.version !== kase.version) {
       throw new AppError(409, 'RECOVERY_STALE', 'This handoff changed since your screen loaded — refresh and try again.');
     }
-    // [DS667 S3] The code lives only as long as the handoff's deadline. The
-    // escalation sweep then voids it and returns the case to RELAY_REQUIRED;
-    // between the deadline and that sweep it is refused here, and naming the
-    // relay rider again mints a fresh one.
-    if (kase.deadlineAt.getTime() <= Date.now()) {
+    // [DS667 S3 · Fable r2] The code lives until its OWN expiry, set when it
+    // was minted and never moved — a later bump of the case deadline can never
+    // revive it. The escalation sweep voids it and returns the case to
+    // RELAY_REQUIRED; naming the relay rider again mints a fresh code.
+    if (codeHasExpired(kase.transferCodeExpiresAt)) {
       throw new AppError(409, 'TRANSFER_CODE_EXPIRED', 'This handoff code has expired. Swift support will arrange the handoff again.');
     }
     const { locked, remaining } = handoverAttemptState(kase.transferAttempts);
@@ -673,7 +680,7 @@ export async function assignRelay(
     }
     await ensureOwner(tx, kase, input.adminUserId);
     const moved = await moveCaseInTransaction(tx, kase, 'TRANSFER_IN_PROGRESS', { userId: input.adminUserId, role: 'ADMIN' }, {
-      data: { relayRiderId: relay.id, transferCode: newTransferCode(), transferAttempts: 0 },
+      data: { relayRiderId: relay.id, transferCode: newTransferCode(), transferCodeExpiresAt: caseDeadline('TRANSFER_IN_PROGRESS', new Date()), transferAttempts: 0 },
       // The code itself is never written to the trail.
       details: { relayRiderId: relay.id, reason: input.reason },
     });

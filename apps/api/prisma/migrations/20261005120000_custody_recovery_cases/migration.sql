@@ -12,7 +12,8 @@
 --  2. One OPEN case per order: a partial unique index on orderId WHERE "resolvedAt" IS NULL.
 --  3. The open/resolved law held by the database: "resolvedAt" IS NULL exactly when the state is one of
 --     the four open states (mirrors CUSTODY_CASE_LAW; the schema suite grades the two against each other).
---     Plus: a transfer code exists only while a transfer is in progress, and attempts are never negative.
+--     Plus: a transfer code exists only while a transfer is in progress, always with its own expiry, and
+--     attempts are never negative.
 --  4. The tenant wall: RLS ENABLED and FORCED with the canonical policy (rlsDdlFor('custody_recovery_cases')).
 --  5. Tenant lineage: a case's tenant is its order's tenant (tenantLineageDdl(), byte for byte).
 --  6. Identity freeze: id, tenantId and orderId never change once written.
@@ -57,6 +58,7 @@ CREATE TABLE "custody_recovery_cases" (
     "holderRiderId" TEXT NOT NULL,
     "relayRiderId" TEXT,
     "transferCode" TEXT,
+    "transferCodeExpiresAt" TIMESTAMP(3),
     "transferAttempts" INTEGER NOT NULL DEFAULT 0,
     "ownerUserId" TEXT,
     "ownerAssignedAt" TIMESTAMP(3),
@@ -100,6 +102,9 @@ ALTER TABLE "custody_recovery_cases" ADD CONSTRAINT "custody_recovery_cases_open
   CHECK (("resolvedAt" IS NULL) = ("state" IN ('SUPPORT_HOLD', 'RETURN_REQUIRED', 'RELAY_REQUIRED', 'TRANSFER_IN_PROGRESS')));
 ALTER TABLE "custody_recovery_cases" ADD CONSTRAINT "custody_recovery_cases_transfer_code_check"
   CHECK ("transferCode" IS NULL OR ("state" = 'TRANSFER_IN_PROGRESS' AND "relayRiderId" IS NOT NULL));
+-- A code always carries its own expiry, and an expiry never outlives its code.
+ALTER TABLE "custody_recovery_cases" ADD CONSTRAINT "custody_recovery_cases_code_expiry_check"
+  CHECK (("transferCode" IS NULL) = ("transferCodeExpiresAt" IS NULL));
 ALTER TABLE "custody_recovery_cases" ADD CONSTRAINT "custody_recovery_cases_attempts_check"
   CHECK ("transferAttempts" >= 0 AND "escalationCount" >= 0 AND "version" >= 0);
 
