@@ -36,7 +36,7 @@ import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegradedCounter, type RuntimeReadinessState } from './plugins/readiness';
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
-import { loggerRedactConfig } from './utils/logger-config';
+import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
@@ -83,6 +83,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       level: process.env['LOG_LEVEL'] || 'info',
       // secrets and credentials never reach log output
       redact: loggerRedactConfig,
+      serializers: loggerSerializers,
       transport:
         isDevelopment()
           ? { target: 'pino-pretty', options: { colorize: true } }
