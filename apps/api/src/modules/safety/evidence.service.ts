@@ -146,7 +146,11 @@ export class EvidenceService {
   private async captureOrderArtifacts(orderId: string): Promise<CapturedItem[]> {
     const items: CapturedItem[] = [];
     const order = await this.prisma.order.findUnique({ where: { id: orderId } });
-    if (order) items.push({ kind: 'ORDER_SNAPSHOT', label: `Order ${order.orderNumber} at capture`, content: order });
+    // The scoped parent lookup is the authority for every child below.
+    // A missing parent must refuse capture, not assemble a partial bundle
+    // from globally addressed timelines, conversations, or liveness rows.
+    if (!order) throw new NotFoundError('Order');
+    items.push({ kind: 'ORDER_SNAPSHOT', label: `Order ${order.orderNumber} at capture`, content: order });
     const timeline = await this.prisma.orderStatusLog.findMany({ where: { orderId }, orderBy: { createdAt: 'asc' }, take: 200 });
     if (timeline.length) items.push({ kind: 'STATUS_TIMELINE', label: 'Order status timeline', content: timeline });
     const session = await this.prisma.tripSafetySession.findUnique({ where: { orderId } });
