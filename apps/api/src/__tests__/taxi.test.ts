@@ -20,6 +20,7 @@ import { syntheticLocationOwner } from './helpers/online-mover';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { readDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // [R048-001] this suite quiets the WHOLE driver pool between cases (an unscoped Driver.updateMany) so no leftover driver takes a trip — a stated, reviewable capability.
 grantSuiteCapability('unscoped-mutation');
@@ -40,6 +41,8 @@ const NOWHERE = { lat: 6.95, lng: -58.4 }; // outside every zone
 let app: FastifyInstance;
 let fare: FareService;
 let dispatch: DispatchService;
+// [ZONE-FARES] The Central ↔ South 2,000 fare is no longer seeded: this suite plants it for itself.
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 const createdUserIds: string[] = [];
 
@@ -107,7 +110,7 @@ async function makeDriverDeviceSession(userId: string, deviceId: string) {
   return { token, sessionId: session.id };
 }
 
-async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
+async function makeDriver(opts: { lat?: number; lng?: number; currentInsurance?: boolean } = {}) {
   const u = await makeUserWithSession(['DRIVER', 'CUSTOMER'], 'DRIVER');
   const driver = await app.prisma.driver.create({
     data: {
@@ -122,6 +125,13 @@ async function makeDriver(opts: { lat?: number; lng?: number } = {}) {
       locationSessionId: u.sessionId,
     },
   });
+  // Online fixtures must satisfy the same current insurance gate at custody
+  // as at GO. Negative GO cases opt out explicitly below.
+  if (opts.currentInsurance !== false) await app.prisma.verificationDocument.create({ data: {
+    userId: u.userId, role: 'MOVER', docType: 'vehicle_insurance', status: 'APPROVED',
+    fileUrl: 'storage://synthetic/current-insurance', expiresAt: new Date(Date.now() + DAY),
+    coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
+  } });
   return { ...u, driverId: driver.id };
 }
 
@@ -189,9 +199,11 @@ beforeAll(async () => {
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
 
   await purgeFixtures();
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
 });
 
 afterAll(async () => {
+  await removeGeorgetownPair();
   await purgeFixtures();
   await app.close();
 });
@@ -211,7 +223,7 @@ describe('Fare engine — table first, formula fallback, deterministic', () => {
   it('uses the zone-to-zone table when both ends resolve', async () => {
     const estimate = await fare.estimate(CENTRAL, SOUTH, 'GY');
     expect(estimate.source).toBe('zone_table');
-    expect(estimate.fare).toBe(2000); // seeded fixed fare
+    expect(estimate.fare).toBe(2000); // the suite's fixed fare (helpers/zone-fare-fixture)
     expect(estimate.currencyCode).toBe('GYD');
   });
 
@@ -220,13 +232,13 @@ describe('Fare engine — table first, formula fallback, deterministic', () => {
     const estimate = await fare.estimate(SOUTH, { lat: 6.76, lng: -58.14 }, 'GY');
     expect(estimate.source).toBe('formula');
     expect(estimate.fare % 100).toBe(0); // cash-friendly rounding
-    expect(estimate.fare).toBeGreaterThanOrEqual(1500); // minimum
+    expect(estimate.fare).toBeGreaterThanOrEqual(800); // minimum
   });
 
   it('falls back when an end is outside every zone, and enforces the minimum', async () => {
     const short = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(short.source).toBe('formula');
-    expect(short.fare).toBe(1500); // tiny hop -> minimum fare
+    expect(short.fare).toBe(800); // tiny hop -> minimum fare
 
     const sameTwice = await fare.estimate(NOWHERE, { lat: 6.951, lng: -58.401 }, 'GY');
     expect(sameTwice.fare).toBe(short.fare); // deterministic
@@ -916,7 +928,7 @@ describe('Taxi live-operation gate (hire-class insurance)', () => {
   }
 
   async function offlineDriver() {
-    const d = await makeDriver();
+    const d = await makeDriver({ currentInsurance: false });
     await app.prisma.driver.update({ where: { id: d.driverId }, data: { isOnline: false } });
     return d;
   }

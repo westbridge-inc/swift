@@ -46,23 +46,50 @@ export function checkoutAmountGyd(fee: { weeklyFeeGyd: number; amountDueGyd: num
   return Math.ceil(Math.round(owed * 100) / 100);
 }
 
-let switchCache: { at: number; value: Record<string, unknown> | null } | null = null;
+type PlatformSwitches = Record<'ios' | 'android' | 'web', boolean>;
+const PLATFORMS = ['ios', 'android', 'web'] as const;
+let switchCache: { at: number; switches: PlatformSwitches } | null = null;
 /** Tests reset the one-minute cache of the per-platform switch. */
 export function resetFeeCheckoutSwitchCache(): void {
   switchCache = null;
 }
 
+/** The switch row as read, at most once a minute: a missing row, or a
+ *  platform missing from it, is ON (owner ruling "3 b"). [DS633] Only a real
+ *  boolean counts: any other value for a platform (the string "false"
+ *  included) switches that platform OFF, and a row that is not an object
+ *  switches every platform OFF, each with a warning, so a kill switch written
+ *  with the wrong type still kills. */
+function platformSwitches(row: { value: unknown } | null): PlatformSwitches {
+  if (!row) return { ios: true, android: true, web: true };
+  const value = row.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    log().warn({ key: FEE_CHECKOUT_PLATFORMS_KEY }, '[MMG checkout] the per-platform switch is not an object of true/false values; the MMG checkout is OFF on every platform until it is corrected');
+    return { ios: false, android: false, web: false };
+  }
+  const switches = { ios: true, android: true, web: true };
+  for (const platform of PLATFORMS) {
+    if (!Object.prototype.hasOwnProperty.call(value, platform)) continue;
+    const on = (value as Record<string, unknown>)[platform];
+    if (typeof on === 'boolean') {
+      switches[platform] = on;
+    } else {
+      switches[platform] = false;
+      log().warn({ key: FEE_CHECKOUT_PLATFORMS_KEY, platform }, '[MMG checkout] a per-platform switch value is not true or false; the MMG checkout is OFF on that platform until it is corrected');
+    }
+  }
+  return switches;
+}
+
 /** A missing row, or a platform missing from it, is ON (owner ruling "3 b");
- *  only an explicit `false` switches a platform off. */
+ *  `false`, or any value that is not a real boolean, switches a platform off. */
 export async function feeCheckoutPlatforms(prisma: Pick<PrismaClient, 'platformConfig'>): Promise<Record<'ios' | 'android' | 'web', boolean>> {
   const now = Date.now();
   if (!switchCache || now - switchCache.at > SWITCH_TTL_MS) {
     const row = await prisma.platformConfig.findUnique({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } });
-    const value = row?.value;
-    switchCache = { at: now, value: value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null };
+    switchCache = { at: now, switches: platformSwitches(row) };
   }
-  const on = (platform: string) => switchCache?.value?.[platform] !== false;
-  return { ios: on('ios'), android: on('android'), web: on('web') };
+  return { ...switchCache.switches };
 }
 
 /**

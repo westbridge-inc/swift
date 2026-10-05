@@ -1,3 +1,5 @@
+import type { RejectionReasonCode } from './rejection-reasons';
+
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 /** The header the server reads first for the reason law (ADM-006). */
 const REASON_HEADER = 'x-swift-reason';
@@ -432,6 +434,39 @@ export interface CreatePromoInput {
 }
 export const createPromo = (body: CreatePromoInput, reason: string) =>
   apiFetch('/api/v1/admin/promos', { method: 'POST', body: JSON.stringify(body), reason });
+// ── [ZONE-FARES] Fixed zone-to-zone taxi fares (C5: a reason, then a second admin) ──
+/** A zone a fixed fare can join, with its own taxi per-km rate (null = the market's). */
+export interface FareZone {
+  id: string;
+  name: string;
+  countryCode: string;
+  isActive: boolean;
+  priority: number;
+  taxiPerKm: number | null;
+}
+/** One directional fixed fare, as the server prices it. */
+export interface ZoneFare {
+  id: string;
+  fromZoneId: string;
+  toZoneId: string;
+  fromZoneName: string;
+  toZoneName: string;
+  countryCode: string;
+  fare: number | null;
+  /** False when either zone is inactive: the fare prices nothing until it serves again. */
+  zonesActive: boolean;
+  updatedBy: string | null;
+  updatedAt: string;
+}
+export const fetchZoneFares = (): Promise<Envelope<{ fares: ZoneFare[]; zones: FareZone[] }>> => apiFetch('/api/v1/admin/zone-fares');
+export const createZoneFare = (body: { fromZoneId: string; toZoneId: string; fare: number }, reason: string) =>
+  apiFetch('/api/v1/admin/zone-fares', { method: 'POST', body: JSON.stringify(body), reason });
+/** The pair travels with the change so the second admin reads which two zones it is, and the server refuses another pair. */
+export const updateZoneFare = (id: string, body: { fromZoneId: string; toZoneId: string; fare: number }, reason: string) =>
+  apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body), reason });
+export const deleteZoneFare = (id: string, pair: { fromZoneId: string; toZoneId: string }, reason: string) =>
+  apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(pair), reason });
+
 export const fetchConfig = (): Promise<Envelope<ConfigRow[]>> => apiFetch('/api/v1/admin/config');
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
@@ -532,14 +567,19 @@ export const rejectCreative = (id: string, reason: string, notes?: string) =>
     body: JSON.stringify({ reason, ...(notes ? { notes } : {}) }),
   });
 
-export const fetchVerificationQueue = (status = 'PENDING', role = 'operator') =>
-  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=100`);
+export const fetchVerificationQueue = (status = 'PENDING', role = 'operator', page = 1) =>
+  apiFetch(`/api/v1/admin/verification/queue?status=${status}&role=${role}&limit=50&page=${page}`);
+export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verification/queue/counts');
+export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
 export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
-export const rejectDoc = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+// [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
+// reviewer's words and the server's reason code. The words also ride the
+// reason header [ADM-006].
+export const rejectDoc = (id: string, reason: string, reasonCode: RejectionReasonCode) =>
+  apiFetch(`/api/v1/admin/verification/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason, reasonCode }), reason });
 
 // ── Background jobs / dead letters (N4 · WS-8.1) ────────────────────────────
 // GET /dlq, POST /dlq/:queue/:id/requeue and DELETE /dlq/:queue/:id have been

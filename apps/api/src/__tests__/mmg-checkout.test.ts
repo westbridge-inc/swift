@@ -8,7 +8,7 @@ import {
   randomBytes,
   type KeyObject,
 } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fromMajor, fromMinor } from '../utils/currency-amount';
@@ -30,6 +30,7 @@ import {
   formatCheckoutAmount,
   getMmgCheckoutProvider,
   loadMmgCheckoutConfig,
+  mmgCreationZone,
   newMerchantTransactionId,
   oaepSha256MaxPlaintextBytes,
   requestInitiationTime,
@@ -572,6 +573,70 @@ describe('configuration — off unless exactly 1, then complete or refused', () 
     expect(fatal(() => assertMmgCheckoutConfig(productionEnv({ MMG_CHECKOUT_URL: undefined })))).toMatch(/MMG_CHECKOUT_URL must be set explicitly/);
     expect(fatal(() => assertMmgCheckoutConfig(productionEnv({ MMG_CHECKOUT_URL: MMG_CHECKOUT_UAT_URL })))).toMatch(/non-UAT/);
     expect(fatal(() => assertMmgCheckoutConfig(liveEnv({ MMG_DRIVER: 'mock' })))).toMatch(/sandbox or live/);
+  });
+});
+
+// [DS632] MMG's lookup creationDate is read in ONE named zone. Exactly one of
+// two words, or unset: unset (or, past the boot guard, not valid) means the
+// payment time cannot be verified, and every MMG payment is held for a person.
+describe('[DS632] MMG_CHECKOUT_CREATION_ZONE: exactly GUYANA_WALL_CLOCK or UTC, or unset', () => {
+  it.each(['guyana', 'GUYANA', 'utc', ' UTC', 'UTC ', 'America/Guyana', 'Z', '-04:00', 'GUYANA_WALL_CLOCK,UTC', 'Guyana_Wall_Clock'])(
+    'refuses %j at boot, in every mode, with the checkout on or off', (zone) => {
+      for (const env of [
+        { NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone },
+        { NODE_ENV: 'production', MMG_CHECKOUT_ENABLED: '0', MMG_CHECKOUT_CREATION_ZONE: zone },
+        { NODE_ENV: 'development', MMG_CHECKOUT_ENABLED: '1', MMG_CHECKOUT_CREATION_ZONE: zone },
+        liveEnv({ MMG_CHECKOUT_CREATION_ZONE: zone }),
+        productionEnv({ MMG_CHECKOUT_CREATION_ZONE: zone }),
+      ]) {
+        expect(fatal(() => assertMmgCheckoutConfig(env))).toMatch(/^FATAL: MMG_CHECKOUT_CREATION_ZONE must be exactly GUYANA_WALL_CLOCK or UTC/);
+      }
+    });
+
+  it('starts when it is unset, empty, or either word', () => {
+    for (const zone of [undefined, '', 'GUYANA_WALL_CLOCK', 'UTC']) {
+      expect(() => assertMmgCheckoutConfig(liveEnv({ MMG_CHECKOUT_CREATION_ZONE: zone })), String(zone)).not.toThrow();
+      expect(() => assertMmgCheckoutConfig(productionEnv({ MMG_CHECKOUT_CREATION_ZONE: zone })), String(zone)).not.toThrow();
+      expect(() => assertMmgCheckoutConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+    }
+  });
+
+  it('[owner, 4 Oct] the deploy template sets GUYANA_WALL_CLOCK for staging and production, a value the boot guard accepts', () => {
+    const template = readFileSync(join(process.cwd(), '../../deploy/.env.deploy.example'), 'utf8');
+    const declared = template.split('\n').map((line) => /^MMG_CHECKOUT_CREATION_ZONE=(\S*)\s*$/.exec(line)?.[1]).filter((v) => v !== undefined);
+    expect(declared).toEqual(['GUYANA_WALL_CLOCK']);
+    expect(mmgCreationZone({ MMG_CHECKOUT_CREATION_ZONE: declared[0] })).toBe('GUYANA_WALL_CLOCK');
+    expect(() => assertMmgCheckoutConfig(productionEnv({ MMG_CHECKOUT_CREATION_ZONE: declared[0] }))).not.toThrow();
+  });
+
+  it('at runtime, unset, empty or not valid is unverified (null), never a guessed zone', () => {
+    expect(mmgCreationZone({})).toBeNull();
+    expect(mmgCreationZone({ MMG_CHECKOUT_CREATION_ZONE: '' })).toBeNull();
+    for (const zone of ['guyana', 'utc', ' UTC', 'America/Guyana']) expect(mmgCreationZone({ MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toBeNull();
+    expect(mmgCreationZone({ MMG_CHECKOUT_CREATION_ZONE: 'GUYANA_WALL_CLOCK' })).toBe('GUYANA_WALL_CLOCK');
+    expect(mmgCreationZone({ MMG_CHECKOUT_CREATION_ZONE: 'UTC' })).toBe('UTC');
+  });
+
+  it('is parsed with the rest of the checkout configuration, and every provider carries it', () => {
+    expect(loadMmgCheckoutConfig(liveEnv()).creationZone).toBeNull();
+    expect(loadMmgCheckoutConfig(liveEnv({ MMG_CHECKOUT_CREATION_ZONE: 'UTC' })).creationZone).toBe('UTC');
+    expect(loadMmgCheckoutConfig(liveEnv({ MMG_CHECKOUT_CREATION_ZONE: 'utc' })).creationZone).toBeNull();
+    expect(getMmgCheckoutProvider(liveEnv({ MMG_CHECKOUT_CREATION_ZONE: 'GUYANA_WALL_CLOCK' })).creationZone).toBe('GUYANA_WALL_CLOCK');
+    expect(getMmgCheckoutProvider(liveEnv({ MMG_CHECKOUT_CREATION_ZONE: 'UTC' })).creationZone).toBe('UTC');
+    expect(getMmgCheckoutProvider(liveEnv()).creationZone).toBeNull();
+    expect(getMmgCheckoutProvider({ NODE_ENV: 'test' }).creationZone).toBeNull();
+    expect(new SandboxMmgCheckoutProvider({ request: mmg, result: swift }, 'UTC').creationZone).toBe('UTC');
+    expect(new SandboxMmgCheckoutProvider({ request: mmg, result: swift }, null).creationZone).toBeNull();
+    const before = process.env['MMG_CHECKOUT_CREATION_ZONE'];
+    try {
+      process.env['MMG_CHECKOUT_CREATION_ZONE'] = 'GUYANA_WALL_CLOCK';
+      expect(new SandboxMmgCheckoutProvider({ request: mmg, result: swift }).creationZone).toBe('GUYANA_WALL_CLOCK');
+      delete process.env['MMG_CHECKOUT_CREATION_ZONE'];
+      expect(new SandboxMmgCheckoutProvider({ request: mmg, result: swift }).creationZone).toBeNull();
+    } finally {
+      if (before === undefined) delete process.env['MMG_CHECKOUT_CREATION_ZONE'];
+      else process.env['MMG_CHECKOUT_CREATION_ZONE'] = before;
+    }
   });
 });
 

@@ -402,6 +402,36 @@ export function describeShape(value: unknown): Record<string, string> {
 
 // -- Configuration --------------------------------------------------------------
 
+/**
+ * [DS632] How MMG's lookup `creationDate` is read: MMG_CHECKOUT_CREATION_ZONE.
+ *  - GUYANA_WALL_CLOCK: a stamp ending in "Z", or with no zone, is Guyana
+ *    wall-clock time; an explicit numeric offset is honoured as stated. This
+ *    is what MMG writes (UAT verified 1 Oct; owner ruling 4 Oct: production
+ *    too): staging and production set it.
+ *  - UTC: "Z" is UTC and an explicit offset is honoured as stated; a stamp
+ *    with no zone cannot be read.
+ * Unset, MMG's payment time cannot be checked against the checkout, so no MMG
+ * payment is confirmed automatically: each one is held for a person. That is
+ * the safety net for a missing setting, never a configuration.
+ */
+export const MMG_CREATION_ZONES = ['GUYANA_WALL_CLOCK', 'UTC'] as const;
+export type MmgCreationZone = (typeof MMG_CREATION_ZONES)[number];
+
+/** The setting exactly as written: a zone, null when unset or empty, or INVALID. */
+function creationZoneSetting(raw: string | undefined): MmgCreationZone | null | 'INVALID' {
+  if (raw === undefined || raw === '') return null;
+  return (MMG_CREATION_ZONES as readonly string[]).includes(raw) ? (raw as MmgCreationZone) : 'INVALID';
+}
+
+/** [DS632] The zone the verifier reads `creationDate` in, or null: unverified,
+ *  and every MMG payment is held for a person. Never throws and never guesses:
+ *  a value that is not exactly one of the two words is null here, and the boot
+ *  guard refuses to start with it (assertMmgCheckoutConfig). */
+export function mmgCreationZone(env: Record<string, string | undefined> = process.env): MmgCreationZone | null {
+  const setting = creationZoneSetting(env['MMG_CHECKOUT_CREATION_ZONE']);
+  return setting === 'INVALID' ? null : setting;
+}
+
 export interface MmgCheckoutConfig {
   /** The MMG hosted-checkout page (checkoutPageUrl). */
   checkoutPage: string;
@@ -419,6 +449,8 @@ export interface MmgCheckoutConfig {
   requestPublicKey: KeyObject;
   /** MMG_CHECKOUT_PRIVATE_KEY — what replies are decrypted with. */
   resultPrivateKey: KeyObject;
+  /** [DS632] MMG_CHECKOUT_CREATION_ZONE (mmgCreationZone); null = unverified. */
+  creationZone: MmgCreationZone | null;
 }
 
 /** On only at exactly '1'. The boot guard refuses any other non-zero spelling. */
@@ -538,19 +570,26 @@ export function loadMmgCheckoutConfig(env: Record<string, string | undefined> = 
         `but a checkout request for this merchant can reach ${widest.length}. Shorten MMG_CHECKOUT_MERCHANT_NAME or use the key MMG issued. Refusing to start.`,
     );
   }
-  return { checkoutPage, merchantId, clientId, merchantName, returnOrigin, secretKey, requestPublicKey, resultPrivateKey };
+  return { checkoutPage, merchantId, clientId, merchantName, returnOrigin, secretKey, requestPublicKey, resultPrivateKey, creationZone: mmgCreationZone(env) };
 }
 
 /**
  * The boot guard (called by assertSafeBootConfig in EVERY mode — staging runs
- * in development mode against MMG UAT). The flag is exactly 0 or 1; once on,
- * the live driver needs its whole configuration, and production never runs
- * the sandbox or a UAT page.
+ * in development mode against MMG UAT). The flag is exactly 0 or 1, and the
+ * creationDate zone one of its two words or unset; once on, the live driver
+ * needs its whole configuration, and production never runs the sandbox or a
+ * UAT page.
  */
 export function assertMmgCheckoutConfig(env: Record<string, string | undefined> = process.env): void {
   const flag = env['MMG_CHECKOUT_ENABLED'];
   if (flag !== undefined && flag !== '' && flag !== '0' && flag !== '1') {
     throw new Error('FATAL: MMG_CHECKOUT_ENABLED must be exactly 0 or 1 — a misspelled switch is not guessed at. Refusing to start.');
+  }
+  // [DS632] The creationDate zone is exactly one of two words, or unset (then
+  // every MMG payment is held for a person). A misspelled zone is not guessed
+  // at, whatever the switch says.
+  if (creationZoneSetting(env['MMG_CHECKOUT_CREATION_ZONE']) === 'INVALID') {
+    throw new Error(`FATAL: MMG_CHECKOUT_CREATION_ZONE must be exactly ${MMG_CREATION_ZONES.join(' or ')}, or unset (then no MMG payment is confirmed automatically) — a misspelled zone is not guessed at. Refusing to start.`);
   }
   if (flag !== '1') return;
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
@@ -588,6 +627,8 @@ export interface MmgCheckoutProvider {
   readonly driver: 'disabled' | 'sandbox' | 'live';
   /** The merchant MSISDN a checkout pays: what a verifier matches MMG's creditParty against. */
   readonly merchantId: string | null;
+  /** [DS632] How MMG's lookup creationDate is read; null = unverified, nothing confirms automatically. */
+  readonly creationZone: MmgCreationZone | null;
   /** Builds the MMG page URL for one attempt. Local only: no network. */
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession;
   /** Opens a reply token into its generic object. A hint, never proof [I2]. */
@@ -626,6 +667,7 @@ function createCheckoutWith(parties: CheckoutParties, input: MmgCheckoutCreate):
 class DisabledMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'disabled' as const;
   readonly merchantId = null;
+  readonly creationZone = null;
   createCheckout(_input: MmgCheckoutCreate): MmgCheckoutSession {
     throw new AppError(503, 'MMG_CHECKOUT_DISABLED', 'Paying on the MMG checkout page is not available.');
   }
@@ -638,6 +680,9 @@ export class LiveMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'live' as const;
   get merchantId(): string {
     return this.config.merchantId;
+  }
+  get creationZone(): MmgCreationZone | null {
+    return this.config.creationZone;
   }
   constructor(private readonly config: MmgCheckoutConfig) {}
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession {
@@ -673,8 +718,9 @@ export class SandboxMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly merchantId = SANDBOX_MERCHANT_ID;
   private generated: SandboxCheckoutKeys | null = null;
 
-  /** Keys are made on first use (a 4096-bit pair takes a moment), unless given. */
-  constructor(private readonly given?: SandboxCheckoutKeys) {}
+  /** Keys are made on first use (a 4096-bit pair takes a moment), unless given.
+   *  The creationDate zone is MMG_CHECKOUT_CREATION_ZONE unless given. */
+  constructor(private readonly given?: SandboxCheckoutKeys, readonly creationZone: MmgCreationZone | null = mmgCreationZone()) {}
 
   private keys(): SandboxCheckoutKeys {
     if (this.given) return this.given;
@@ -730,7 +776,7 @@ export function getMmgCheckoutProvider(env: Record<string, string | undefined> =
   }
   switch (driver) {
     case 'sandbox':
-      sandboxProvider ??= new SandboxMmgCheckoutProvider();
+      sandboxProvider ??= new SandboxMmgCheckoutProvider(undefined, mmgCreationZone(env));
       return sandboxProvider;
     case 'live':
       return new LiveMmgCheckoutProvider(loadMmgCheckoutConfig(env));

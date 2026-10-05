@@ -566,5 +566,7 @@ export const IDENTITY_DOC_TYPES: readonly string[] = ['owner_national_id', 'nati
 /** [DOC-1 §3.6 · P3-2] The registration records that promote an UNREGISTERED store, and the declaration that puts it there. */
 export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration'];
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
+/** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
+export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];

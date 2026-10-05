@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET, POST } from './route';
-const context = (outcome = 'success') => ({ params: Promise.resolve({ outcome }) });
+const context = (outcome = 'success') => ({ params: Promise.resolve({ path: [outcome] }) });
 const texts = {
   CONFIRMED: 'Payment received. Your Swift weekly fee is paid.',
   CONFIRMING: "We're confirming your payment with MMG. Don't pay again. You can close this page.",

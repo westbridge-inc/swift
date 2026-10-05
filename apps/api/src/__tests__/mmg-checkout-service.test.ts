@@ -11,7 +11,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { runWithTenant } from '../plugins/tenant-context';
+import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -26,7 +26,7 @@ import {
   runProviderIdentityBackfill,
 } from '../modules/billing/provider-identity-backfill';
 import { getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
-import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, newMerchantTransactionId, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
+import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, newMerchantTransactionId, type MmgCheckoutProvider, type MmgCreationZone, type SandboxCheckoutKeys } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, sandboxAddHistory, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,8 @@ let app: FastifyInstance;
 let billing: BillingService;
 let notifications: NotificationService;
 let sandbox: SandboxMmgCheckoutProvider;
+/** This file's one RSA pair: every sandbox below shares it, so any of them opens any reply. */
+let keys: SandboxCheckoutKeys;
 let service: MmgCheckoutService;
 let checkoutProvider: () => MmgCheckoutProvider;
 let kekBefore: string | undefined;
@@ -177,6 +179,24 @@ async function confirmingWith(ref: string, txn: string) {
     body: { merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0' },
   } });
 }
+/** [DS632] The same sandbox (this file's keys) reading MMG's creationDate in another zone, or in none. */
+const sandboxIn = (zone: MmgCreationZone | null) => new SandboxMmgCheckoutProvider(keys, zone);
+/** MMG's success answer for `txn`, written down as a reply is, as received at `at` through `source`. */
+async function answeredAt(row: { id: string; merchantTransactionId: string; tenantId: string }, txn: string, at: Date, source: 'RETURN' | 'NOTIFY') {
+  const current = await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: row.id } });
+  await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: {
+    status: 'CONFIRMING', candidates: [...new Set([...current.candidates, txn])],
+    replyAt: current.replyAt && current.replyAt < at ? current.replyAt : at, nextCheckAt: new Date(),
+  } });
+  await app.prisma.mmgCheckoutObservation.create({ data: {
+    tenantId: row.tenantId, intentId: row.id, source, detail: 'MMG_RESULT_0', createdAt: at,
+    body: { merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0' },
+  } });
+}
+/** The operator pages of one kind about one checkout. */
+const pagesAbout = async (operatorId: string, checkoutId: string, alert: string) => (await app.prisma.notification.findMany({
+  where: { userId: operatorId, data: { path: ['checkoutId'], equals: checkoutId } },
+})).filter((n) => (n.data as Record<string, unknown>)['alert'] === alert);
 /** A checkout written before the shared confirmation authority existed. Since
  *  then a checkout cannot open while another payment for the same fee is being
  *  confirmed, so a checkout and a live push request together are only a
@@ -213,7 +233,10 @@ beforeAll(async () => {
   const pair = await new Promise<{ publicKey: KeyObject; privateKey: KeyObject }>((resolve, reject) => {
     generateKeyPair('rsa', { modulusLength: 4096 }, (err, publicKey, privateKey) => (err ? reject(err) : resolve({ publicKey, privateKey })));
   });
-  sandbox = new SandboxMmgCheckoutProvider({ request: pair, result: pair });
+  keys = { request: pair, result: pair };
+  // [DS632] Staging and UAT read MMG's creationDate as Guyana wall-clock time
+  // (MMG_CHECKOUT_CREATION_ZONE=GUYANA_WALL_CLOCK, verified 1 Oct).
+  sandbox = new SandboxMmgCheckoutProvider(keys, 'GUYANA_WALL_CLOCK');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -327,7 +350,10 @@ describe('starting a checkout — server-priced, written down first, one open at
     const old = (await start(s)).checkout;
     await app.prisma.mmgCheckoutIntent.update({ where: { id: old.ref }, data: { expiresAt: new Date(Date.now() - 1000) } });
     // An expired page may still be paid on MMG's side: never a second page yet.
-    await expect(start(s)).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_CONFIRMING' });
+    // [DS633] This refusal names no checkout: details.ref is optional.
+    const refused = await start(s).catch((err: unknown) => err);
+    expect(refused).toMatchObject({ statusCode: 409, code: 'PAYMENT_CONFIRMING' });
+    expect((refused as { details?: { ref?: string } }).details?.ref).toBeUndefined();
     expect((await intentOf(old.ref)).status).toBe('EXPIRED');
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
     // A person confirms it was not paid (finance review): the partner may pay again.
@@ -1700,6 +1726,23 @@ describe('[F7] payment evidence is filed under the checkout’s own tenant', () 
   });
 });
 
+describe('[DS633] an Idempotency-Key is filed under its checkout’s tenant', () => {
+  it('a key bound to an open checkout carries that checkout’s tenant, even when bound with no tenant in context', async () => {
+    const tenantId = `ten-key-${RUN.toLowerCase()}`;
+    await app.prisma.tenant.create({ data: { id: tenantId, name: 'Checkout key tenant', slug: `key-tenant-${RUN.toLowerCase()}` } });
+    tenantIds.push(tenantId);
+    const t = await makeSub({ tenantId });
+    const first = await runWithTenant(tenantId, () => start(t));
+    expect((await intentOf(first.checkout.ref)).tenantId).toBe(tenantId);
+    // A second tap with a new key, answered with the open checkout, as system work would be.
+    const next = key();
+    const again = await runAsSystem('ds633-checkout-key-tenant', () => start(t, next));
+    expect(again).toMatchObject({ created: false, checkout: { ref: first.checkout.ref } });
+    const bound = await app.prisma.mmgCheckoutKey.findUniqueOrThrow({ where: { createdByUserId_clientKey: { createdByUserId: t.userId, clientKey: next } } });
+    expect(bound).toMatchObject({ intentId: first.checkout.ref, tenantId });
+  });
+});
+
 describe('the shared wallet receipt tenant', () => {
   it('a matching named tenant owns the receipt and counter, and failure rolls credit and receipt back together', async () => {
     const tenantId = `ten-rollback-${RUN.toLowerCase()}`;
@@ -1948,10 +1991,12 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     ['MMG’s word for it is not "successful"', { transactionStatus: 'completed' }, 'STATUS_NOT_SUCCESSFUL'],
     ['the money went to another merchant', { creditParty: [{ key: 'accountid', value: '5926999999' }] }, 'MERCHANT_MISMATCH'],
     ['our number is not under "accountid"', { creditParty: [{ key: 'msisdn', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_UNCONFIRMED'],
+    ['[DS632] an "accountid" entry with an empty value beside ours', { creditParty: [{ key: 'accountid', value: '' }, { key: 'accountid', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_MISMATCH'],
+    ['[DS632] an "accountid" entry with no value beside ours', { creditParty: [{ key: 'accountid' }, { key: 'accountid', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_MISMATCH'],
     ['one dollar short', { amount: '2099' }, 'AMOUNT_MISMATCH'],
     ['another currency', { currency: 'USD' }, 'CURRENCY_MISMATCH'],
     ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
-    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'OUTSIDE_CHECKOUT_WINDOW'],
+    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'CREATION_AFTER_REPLY'],
     ['no creationDate', { creationDate: undefined }, 'CREATION_DATE_UNREADABLE'],
     ['no ledger number', { transactionReference: undefined }, 'LEDGER_REFERENCE_MISSING'],
   ] as const)('%s: HELD for a person, nothing credited, the pause kept, operators alerted once', async (_label, answer, reason) => {
@@ -1971,6 +2016,29 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
     expect(await toldOf(s.userId, 'HELD')).toHaveLength(1);
     expect(await heldAlerts(operator.id, row.id)).toHaveLength(1);
+  });
+
+  it('[DS632] condition (3) is the checkout’s own merchant only: a payment to the push rail’s number (MMG_MERCHANT_ID) is HELD, never credited', async () => {
+    const before = process.env['MMG_MERCHANT_ID'];
+    process.env['MMG_MERCHANT_ID'] = '5926999911';
+    try {
+      const s = await makeSub();
+      const row = await intentOf((await start(s)).checkout.ref);
+      const txn = tx('PUSHRAILNUMBER');
+      approved(txn, 2100, {}, { creditParty: [{ key: 'accountid', value: '5926999911' }] });
+      expect(await codeReply(row, '0', txn)).toBe('CONFIRMING');
+      expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'MERCHANT_MISMATCH' });
+      expect(await topups(s.subId)).toHaveLength(0);
+      expect(await identityOf(txn)).toBeNull();
+      // The same payment to the checkout's own merchant confirms.
+      const t = await makeSub();
+      const own = await intentOf((await start(t)).checkout.ref);
+      approved(tx('CHECKOUTNUMBER'), 2100);
+      expect(await codeReply(own, '0', tx('CHECKOUTNUMBER'))).toBe('CONFIRMED');
+    } finally {
+      if (before === undefined) delete process.env['MMG_MERCHANT_ID'];
+      else process.env['MMG_MERCHANT_ID'] = before;
+    }
   });
 
   it('MMG’s success answer that reaches us after the checkout closed is HELD, even with an exact payment made in time', async () => {
@@ -2036,6 +2104,202 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await topups(s.subId)).toHaveLength(1);
   });
 
+  it('[DS632] after a checkout is CONFIRMED, MMG’s success answer naming ANOTHER transaction is written down and operators are told once that money was received and not applied; nothing is credited', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const paid = tx('APPLIEDTX');
+    approved(paid, 2100);
+    expect(await codeReply(row, '0', paid, 'RETURN')).toBe('CONFIRMED');
+    // MMG repeating the credited payment, by either of its numbers, is not new money.
+    expect(await codeReply(row, '0', paid, 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', ledgerOf(paid), 'NOTIFY')).toBe('CONFIRMED');
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(0);
+
+    const other = tx('UNAPPLIEDTX');
+    approved(other, 2100);
+    lookedUp.length = 0;
+    expect(await codeReply(row, '0', other, 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', other, 'RETURN')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', tx('UNAPPLIEDTX2'), 'NOTIFY')).toBe('CONFIRMED');
+    // Written down, never looked up for credit, never credited.
+    const named = (await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id, source: { in: ['RETURN', 'NOTIFY'] } } }))
+      .filter((o) => (o.body as Record<string, unknown> | null)?.['transactionId'] === other);
+    expect(named).toHaveLength(2);
+    expect(lookedUp).toEqual([]);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: paid });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(other)).toBeNull();
+    // Operators are told once for this checkout, whichever door and however often.
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.title).toMatch(/money received and not applied/i);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: other });
+    // The partner hears nothing new.
+    expect(await toldOf(s.userId, 'CONFIRMED')).toHaveLength(1);
+    expect(await toldOf(s.userId, 'HELD')).toHaveLength(0);
+  });
+
+  it('[Sol] a second payment whose reply merges while a verifier confirms the first is written down, never credited, and operators are told once', async () => {
+    // The interleaving, made deterministic: verifier A has read the checkout's
+    // answers (transaction 1 only) and waits on MMG's lookup; reply B (transaction
+    // 2) is written down and merged while the checkout is still CONFIRMING; A then
+    // confirms transaction 1; only then does B's own verification run.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('RACEFIRST');
+    const second = tx('RACESECOND');
+    approved(first, 2100);
+    approved(second, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const bAtVerify = barrier();
+    const aDone = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first) { aInLookup.open(); await releaseA.wait; }
+      return plainLookup(id);
+    };
+    const target = service as unknown as { verify: (id: string, now: Date) => Promise<string> };
+    const plainVerify = target.verify.bind(service);
+    let calls = 0;
+    const spy = vi.spyOn(target, 'verify').mockImplementation(async (id, now) => {
+      if (id === row.id && (calls += 1) === 2) { bAtVerify.open(); await aDone.wait; }
+      return plainVerify(id, now);
+    });
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      const b = codeReply(row, '0', second, 'NOTIFY');
+      await bAtVerify.wait;
+      expect((await intentOf(row.id)).candidates).toEqual([first, second]);
+      releaseA.open();
+      await a;
+      aDone.open();
+      expect(await b).toBe('CONFIRMED');
+    } finally {
+      spy.mockRestore();
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
+    const named = (await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id, source: 'NOTIFY' } }))
+      .filter((o) => (o.body as Record<string, unknown> | null)?.['transactionId'] === second);
+    expect(named).toHaveLength(1);
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+  });
+
+  it('[Sol delta2] the same race with the reply paused INSIDE its own verification: its lookups fail, it reschedules a checkout another verifier has just confirmed, and operators are still told once', async () => {
+    // Verifier A waits on MMG's lookup of transaction 1. Reply B (transaction 2)
+    // merges, then starts its own verification, reading the checkout as
+    // CONFIRMING; it waits on its lookup of transaction 2. A confirms
+    // transaction 1. B's lookups fail (an error, then not found), so B
+    // reschedules: a compare-and-set that now matches no row.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('RESCHEDFIRST');
+    const second = tx('RESCHEDSECOND');
+    approved(first, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const bInLookup = barrier();
+    const aDone = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    let firstCalls = 0;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first && (firstCalls += 1) === 1) { aInLookup.open(); await releaseA.wait; return plainLookup(id); }
+      if (id === first) return { outcome: 'error', reason: 'MMG lookup HTTP 503' };
+      if (id === second) { bInLookup.open(); await aDone.wait; return { outcome: 'not_found' }; }
+      return plainLookup(id);
+    };
+    let answer: string | undefined;
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      const b = codeReply(row, '0', second, 'NOTIFY').then((state) => { answer = state; });
+      await bInLookup.wait;
+      expect((await intentOf(row.id)).status).toBe('CONFIRMING');
+      releaseA.open();
+      await a;
+      expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+      aDone.open();
+      await b;
+    } finally {
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    // The page is the point: the second payment is recorded and never credited.
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+    // The reply answers what is committed, not what it read before the race.
+    expect(answer).toBe('CONFIRMED');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
+    const named = (await app.prisma.mmgCheckoutObservation.findMany({ where: { intentId: row.id, source: 'NOTIFY' } }))
+      .filter((o) => (o.body as Record<string, unknown> | null)?.['transactionId'] === second);
+    expect(named).toHaveLength(1);
+  });
+
+  it('[Sol delta2 · mirror] the reply finishes its whole verification before the slower verifier confirms: the confirming verifier tells operators once', async () => {
+    // Verifier A read the checkout's answers (transaction 1 only) and waits on
+    // MMG's lookup. Reply B (transaction 2) is written down, merges, verifies
+    // (its lookups fail), reschedules and reads the checkout again: still
+    // CONFIRMING, so B has nothing to page about and answers CONFIRMING. Only
+    // then does A confirm transaction 1. A's credit is the last word, so A must
+    // see the success answer B wrote down and page.
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const first = tx('MIRRORFIRST');
+    const second = tx('MIRRORSECOND');
+    approved(first, 2100);
+    await confirmingWith(row.id, first);
+    const barrier = () => { let open!: () => void; const wait = new Promise<void>((resolve) => { open = resolve; }); return { open, wait }; };
+    const aInLookup = barrier();
+    const releaseA = barrier();
+    const plainLookup = lookup.transactionLookupDetail;
+    let firstCalls = 0;
+    lookup.transactionLookupDetail = async (id) => {
+      if (id === first && (firstCalls += 1) === 1) { aInLookup.open(); await releaseA.wait; return plainLookup(id); }
+      if (id === first) return { outcome: 'error', reason: 'MMG lookup HTTP 503' };
+      if (id === second) return { outcome: 'not_found' };
+      return plainLookup(id);
+    };
+    try {
+      const a = service.pollIntents(new Date());
+      await aInLookup.wait;
+      // B runs to its end while A still waits: nothing is confirmed yet.
+      expect(await codeReply(row, '0', second, 'NOTIFY')).toBe('CONFIRMING');
+      expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMING', candidates: [first, second] });
+      expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(0);
+      releaseA.open();
+      await a;
+    } finally {
+      lookup.transactionLookupDetail = plainLookup;
+    }
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: first });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(second)).toBeNull();
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.data).toMatchObject({ checkoutId: row.id, transactionId: second });
+    // A later reply for either payment changes nothing and pages no more.
+    expect(await codeReply(row, '0', second, 'RETURN')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', first, 'RETURN')).toBe('CONFIRMED');
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(1);
+    expect(await topups(s.subId)).toHaveLength(1);
+  });
+
   it('the return door and the notify door at once, both carrying MMG’s answer, credit once', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);
@@ -2046,5 +2310,110 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     expect(await topups(s.subId)).toHaveLength(1);
     expect(await identityOf(ledgerOf(txn))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
     expect(await toldOf(s.userId, 'CONFIRMED')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [DS632] Condition (5) holds only as well as the zone MMG's creationDate is
+// read in: MMG_CHECKOUT_CREATION_ZONE, GUYANA_WALL_CLOCK (what MMG UAT writes,
+// verified 1 Oct) or UTC. Unset, nothing is confirmed automatically. And MMG
+// cannot have created a payment after Swift first heard of it.
+// ---------------------------------------------------------------------------
+describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
+  it('unset: no MMG payment is confirmed automatically; it is HELD (CREATION_ZONE_UNVERIFIED), nothing credited, the pause kept, operators alerted once', async () => {
+    checkoutProvider = () => sandboxIn(null);
+    const s = await makeSub({ due: new Date(Date.now() - 60_000) });
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('ZONEUNSET');
+    approved(txn, 2100);
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_ZONE_UNVERIFIED' });
+    expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMING');
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+    expect((await holdOf(row.id)).status).toBe('ACTIVE');
+    expect((await clockOf(s.subId)).pausedAt).not.toBeNull();
+    expect(await toldOf(s.userId, 'HELD')).toHaveLength(1);
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toMatch(/MMG_CHECKOUT_CREATION_ZONE/);
+  });
+
+  it.each([
+    ['MMG writes true UTC and Swift is configured UTC', 'UTC', (at: Date) => at.toISOString()],
+    ['MMG writes Guyana time, as in UAT, and Swift is configured GUYANA_WALL_CLOCK', 'GUYANA_WALL_CLOCK', gyStamp],
+  ] as const)('the DS632 scenario, both ways (%s): a real payment made 3h48m before the checkout is HELD and never credited to it; a payment made inside the checkout is credited', async (_label, zone, stampOf) => {
+    checkoutProvider = () => sandboxIn(zone);
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const early = tx(`DSEARLY${zone === 'UTC' ? 'U' : 'G'}`);
+    approved(early, 2100, {}, { creationDate: stampOf(new Date(row.createdAt.getTime() - (3 * 60 + 48) * 60_000)) });
+    expect(await codeReply(row, '0', early)).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(early)).toBeNull();
+    expect(await identityOf(ledgerOf(early))).toBeNull();
+
+    const t = await makeSub();
+    const paidRow = await intentOf((await start(t)).checkout.ref);
+    const paid = tx(`DSINTIME${zone === 'UTC' ? 'U' : 'G'}`);
+    approved(paid, 2100, {}, { creationDate: stampOf(new Date()) });
+    expect(await codeReply(paidRow, '0', paid)).toBe('CONFIRMED');
+    expect(await topups(t.subId)).toHaveLength(1);
+    expect(await identityOf(paid)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${paidRow.id}` });
+  });
+
+  it('CREATION_AFTER_REPLY: a true-UTC stamp read as Guyana time is HELD, nothing credited, and operators are told once that MMG’s stamps may not match the configured zone', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('TRUEUTCREADASGY');
+    approved(txn, 2100, {}, { creationDate: new Date().toISOString() });
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMING');
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toMatch(/may not match/);
+    expect(pages[0]!.body).toMatch(/MMG_CHECKOUT_CREATION_ZONE/);
+  });
+
+  it('the bound is the FIRST reply naming the transaction, whichever door brought it', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 20 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('FIRSTREPLY');
+    // MMG's server named it two minutes in; the browser came back fifteen minutes in.
+    await answeredAt(row, txn, new Date(opened.getTime() + 2 * 60_000), 'NOTIFY');
+    await answeredAt(row, txn, new Date(opened.getTime() + 15 * 60_000), 'RETURN');
+    // MMG's stamp says ten minutes in: inside the window, before the second
+    // reply, but after the first one plus two minutes.
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date(opened.getTime() + 10 * 60_000)) });
+    await service.pollIntents(new Date());
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+  });
+
+  it('the 1 Oct UAT round trip, at its exact times, still confirms with GUYANA_WALL_CLOCK', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    // Opened 15:38:19 Guyana time; MMG's reply read at 15:39:05; MMG's stamp 15:39:36.526, written with a "Z".
+    const opened = new Date('2026-10-01T19:38:19Z');
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('UATEXACT');
+    await answeredAt(row, txn, new Date('2026-10-01T19:39:05Z'), 'RETURN');
+    approved(txn, 2100, {}, { creationDate: '2026-10-01T15:39:36.526Z' });
+    await service.pollIntents(new Date());
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(txn)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
+    expect(await identityOf(ledgerOf(txn))).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
   });
 });

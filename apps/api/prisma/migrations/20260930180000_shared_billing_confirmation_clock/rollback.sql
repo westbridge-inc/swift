@@ -1,7 +1,12 @@
 -- Only an unused expand migration may be rolled back. A clock retains timer
 -- and obligation evidence even if it has no payment hold or notice. After
 -- backfill or any runtime adoption, keep the schema and repair forward.
+-- [Sol] These tables force row-level security, so a role that sees only some
+-- rows could find them "empty". Row security is off for this transaction: a
+-- role that does not bypass it is refused with an error instead. Run this as
+-- a role that bypasses row-level security (a superuser or BYPASSRLS).
 BEGIN;
+SET LOCAL row_security = off;
 LOCK TABLE billing_obligation_transitions, billing_dunning_clocks, payment_confirmation_holds, billing_fee_notices, billing_notice_handoffs IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM billing_obligation_transitions)

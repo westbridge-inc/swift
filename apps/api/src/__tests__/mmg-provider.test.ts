@@ -338,6 +338,14 @@ describe('MMG live adapter — the checkout lookup as MMG UAT answers it', () =>
     expect(lookupDetailFrom({ ...UAT_ANSWER, transactionStatus: 'completed' }, 'T1')).toMatchObject({ status: 'approved', statusText: 'completed' });
   });
 
+  it('[DS632] an "accountid" party with an empty or missing value is kept, never dropped: the verifier then holds the payment', () => {
+    for (const blank of [{ key: 'accountid', value: '' }, { key: 'accountid' }, { key: 'accountid', value: null }]) {
+      const detail = lookupDetailFrom({ ...UAT_ANSWER, creditParty: [blank, { key: 'accountid', value: '9991161' }] }, 'T1');
+      expect(detail.creditAccounts, JSON.stringify(blank)).toEqual(['', '9991161']);
+    }
+    expect(lookupDetailFrom({ ...UAT_ANSWER, creditParty: [{ key: 'accountid' }] }, 'T1').creditAccounts).toEqual(['']);
+  });
+
   it.each([201, 202, 204])('an HTTP %s answer is not an answer: an error to retry, never evidence', async (status) => {
     const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(status, UAT_ANSWER));
     const mmg = new LiveMmgProvider(CFG, fetchMock as any);

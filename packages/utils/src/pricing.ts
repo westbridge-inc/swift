@@ -2,6 +2,11 @@
  * Pricing helpers. Customer prices carry NO markup — customers pay the vendor
  * base price; platform revenue is weekly subscriptions only. The fees below are
  * mover earnings, not platform revenue.
+ *
+ * The default rates repeat the API's (DEFAULT_DELIVERY_RATES,
+ * DEFAULT_COURIER_RATES, DEFAULT_TAXI_RATES), the one place they live;
+ * apps/api's fares-georgetown-defaults test pins them to it. The API prices
+ * every real fare and fee; these helpers do not round the way it does.
  */
 
 /**
@@ -15,7 +20,7 @@ export function calculateDeliveryFee(options: {
   includedKm?: number;
   surgeMultiplier?: number;
 }): number {
-  const { distanceKm, baseFee = 500, perKmRate = 200, includedKm = 2, surgeMultiplier = 1.0 } = options;
+  const { distanceKm, baseFee = 500, perKmRate = 100, includedKm = 3, surgeMultiplier = 1.0 } = options;
   const distanceFee = Math.max(0, distanceKm - includedKm) * perKmRate;
   return Math.ceil((baseFee + distanceFee) * surgeMultiplier);
 }
@@ -29,21 +34,22 @@ export function calculateCourierFee(options: {
   speed?: 'standard' | 'express' | 'rush';
 }): number {
   const { distanceKm, packageSize, speed = 'standard' } = options;
-  const baseFee = 1000;
-  const perKmRate = 300;
+  const baseFee = 800;
+  const perKmRate = 120;
   const sizeSurcharge = { SMALL: 0, MEDIUM: 500, LARGE: 1000, EXTRA_LARGE: 2000 }[packageSize];
   const speedMultiplier = { standard: 1.0, express: 1.5, rush: 2.0 }[speed];
   return Math.ceil((baseFee + distanceKm * perKmRate + sizeSurcharge) * speedMultiplier);
 }
 
 /**
- * Taxi fare = base + distance * perKm + duration * perMin.
+ * Taxi fare = base + max(0, distance - includedKm) * perKm + duration * perMin.
  * Minimum fare enforced.
  */
 export function calculateTaxiFare(options: {
   distanceKm: number;
   durationMin: number;
   baseFare?: number;
+  includedKm?: number;
   perKmRate?: number;
   perMinRate?: number;
   minimumFare?: number;
@@ -53,13 +59,14 @@ export function calculateTaxiFare(options: {
   const {
     distanceKm,
     durationMin,
-    baseFare = 1000,
-    perKmRate = 300,
-    perMinRate = 50,
-    minimumFare = 1500,
+    baseFare = 800,
+    includedKm = 3,
+    perKmRate = 175,
+    perMinRate = 0,
+    minimumFare = 800,
     surgeMultiplier = 1.0,
     vehicleMultiplier = 1.0,
   } = options;
-  const fare = baseFare + distanceKm * perKmRate + durationMin * perMinRate;
+  const fare = baseFare + Math.max(0, distanceKm - includedKm) * perKmRate + durationMin * perMinRate;
   return Math.max(minimumFare, Math.ceil(fare * surgeMultiplier * vehicleMultiplier));
 }
