@@ -387,6 +387,17 @@ export function tenantPolicyContractGaps(c: TenantPolicyContractFacts): string[]
   return gaps;
 }
 
+/** [DB-01] Additional PERMISSIVE policies a reviewed migration installed on a
+ *  tenant table on purpose, for a dedicated role that is never the request
+ *  login (20261004130000_audit_purge_authority: the audit-purge owner and
+ *  executor). Each must match exactly — table, name, command and roles — and
+ *  must not apply to the connected login; anything else beside the tenant
+ *  policy widens the wall and is a gap. */
+export const SANCTIONED_EXTRA_POLICIES: ReadonlyArray<{ table: string; name: string; cmd: string; roles: readonly string[] }> = [
+  { table: 'sensitive_read_logs', name: 'audit_purge_owner_select', cmd: 'r', roles: ['swift_audit_purge_executor', 'swift_audit_purge_owner'] },
+  { table: 'sensitive_read_logs', name: 'audit_purge_owner_delete', cmd: 'd', roles: ['swift_audit_purge_owner'] },
+];
+
 type PolicyRow = {
   table: string;
   has_tenant: boolean;
@@ -394,6 +405,11 @@ type PolicyRow = {
   permissive: boolean | null;
   cmd: string | null;
   to_public: boolean | null;
+  /** The policy's roles by name, sorted (empty for PUBLIC). */
+  roles: string[] | null;
+  /** Whether the policy applies to the connected login through a role
+   *  membership (a superuser is reported by readRlsFacts, not here). */
+  applies_to_me: boolean | null;
   qual: string | null;
   with_check: string | null;
 };
@@ -412,6 +428,9 @@ export async function readTenantPolicyContract(db: RawDb): Promise<TenantPolicyC
            p.polpermissive                       AS permissive,
            p.polcmd::text                        AS cmd,
            (p.polroles = '{0}'::oid[])           AS to_public,
+           ARRAY(SELECT r.rolname::text FROM pg_roles r WHERE r.oid = ANY(p.polroles) ORDER BY 1) AS roles,
+           (NOT COALESCE((SELECT me.rolsuper FROM pg_roles me WHERE me.rolname = current_user), false)
+             AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER'))) AS applies_to_me,
            pg_get_expr(p.polqual, p.polrelid)      AS qual,
            pg_get_expr(p.polwithcheck, p.polrelid) AS with_check
       FROM pg_class c
@@ -435,7 +454,10 @@ export async function readTenantPolicyContract(db: RawDb): Promise<TenantPolicyC
     // Another permissive policy (any name but the tenant policy's): permissive
     // policies are OR-ed, so it widens the wall. (A rewritten tenant policy is
     // reported above as not canonical, not again here.)
-    if (policies.some((p) => p.polname !== null && p.polname !== TENANT_POLICY_NAME && p.permissive === true)) extraPermissiveTables.push(table);
+    const isSanctioned = (p: PolicyRow) => p.applies_to_me === false && SANCTIONED_EXTRA_POLICIES.some((s) =>
+      s.table === table && s.name === p.polname && s.cmd === p.cmd && p.to_public === false
+      && [...(p.roles ?? [])].sort().join(',') === [...s.roles].sort().join(','));
+    if (policies.some((p) => p.polname !== null && p.polname !== TENANT_POLICY_NAME && p.permissive === true && !isSanctioned(p))) extraPermissiveTables.push(table);
   }
   return {
     version: TENANT_POLICY_CONTRACT_VERSION,

@@ -117,6 +117,25 @@ describe('[DB-01] each drift is named, and production refuses to start on it', (
     expectGap(c, /POLICY_NOT_CANONICAL.*eta_pad_stats/);
   });
 
+  it('the sanctioned audit-purge policies pass only exactly as reviewed, and never when they apply to the connected login', async () => {
+    const S = 'sensitive_read_logs';
+    // as installed by the reviewed migration: not a gap
+    expect((await readTenantPolicyContract(raw)).extraPermissiveTables).not.toContain(S);
+    // the same name widened to everyone
+    expect((await underDrift([`ALTER POLICY audit_purge_owner_select ON "${S}" TO PUBLIC`], readTenantPolicyContract)).extraPermissiveTables).toEqual([S]);
+    // the same name with another command
+    expect((await underDrift([`DROP POLICY audit_purge_owner_select ON "${S}"`, `CREATE POLICY audit_purge_owner_select ON "${S}" FOR ALL TO swift_audit_purge_owner, swift_audit_purge_executor USING (true)`], readTenantPolicyContract)).extraPermissiveTables).toEqual([S]);
+    // the sanctioned name on another tenant table
+    expect((await underDrift([`CREATE POLICY audit_purge_owner_select ON "${TABLE}" FOR SELECT TO swift_audit_purge_owner, swift_audit_purge_executor USING (true)`], readTenantPolicyContract)).extraPermissiveTables).toEqual([TABLE]);
+    // the connected (non-superuser) login made a member of the executor role
+    const asMember = await underDrift([
+      `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'swift_rls_probe') THEN CREATE ROLE swift_rls_probe NOLOGIN NOBYPASSRLS; END IF; END $$`,
+      'GRANT swift_audit_purge_executor TO swift_rls_probe',
+      'SET LOCAL ROLE swift_rls_probe',
+    ], readTenantPolicyContract);
+    expect(asMember.extraPermissiveTables).toEqual([S]);
+  });
+
   it('the tenant policy re-created as RESTRICTIVE (no permissive tenant policy left)', async () => {
     const c = await underDrift([
       `DROP POLICY tenant_isolation ON "${TABLE}"`,
