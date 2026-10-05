@@ -27,7 +27,8 @@ const DOC_LABELS: Record<string, string> = {
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',
   fitness_cert: 'Fitness Certificate',
-  vehicle_exterior_photo: 'Car Exterior Photo (H plate + yellow visible)',
+  // Owner ruling 2026-10-01: a taxi may be any colour; the H plate must show.
+  vehicle_exterior_photo: 'Car exterior photo (H plate visible)',
   owner_national_id: 'Owner National ID',
   business_registration: 'Business Registration',
   tin_certificate: 'TIN Certificate',
@@ -61,6 +62,7 @@ export function DocumentUploadCard({
   submittedAt,
   reviewNote,
   isNext,
+  faceMatched = false,
 }: {
   role: string;
   docType: string;
@@ -69,6 +71,8 @@ export function DocumentUploadCard({
   submittedAt?: string | null;
   reviewNote?: string | null;
   isNext?: boolean;
+  /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
+  faceMatched?: boolean;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -215,7 +219,10 @@ function explainPermissionDenied(
             {caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
-          {docType === 'national_id' || docType === 'owner_national_id' ? (
+          {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
+              this document. It used to show under every ID, while the
+              server's face-matching was switched off. */}
+          {faceMatched ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               Face-matched against your profile selfie
             </T>

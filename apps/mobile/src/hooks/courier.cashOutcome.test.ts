@@ -103,11 +103,16 @@ describe('the screen', () => {
     expect(SCREEN).toContain('label="Sender didn\'t pay"');
     expect(SCREEN).toContain('label="Sender refused to pay"');
   });
-  it("recipient pays → the door's proof carries 'paid'; the failed outcomes route into the proof capture", () => {
+  it("recipient pays → the door's proof carries 'paid'; a failed outcome is recorded through the handover, with the server-issued photo when one was taken", () => {
     expect(SCREEN).toContain("() => captureCourierProof('paid')");
     expect(SCREEN).toContain('label="Recipient didn\'t pay"');
+    // [SAFE-B] A missing photo must not stop the rider recording an unpaid outcome: the failed courier outcome
+    // goes through the shared handover with the optional photo the server issued (it is evidence for review,
+    // never a precondition), instead of forcing the camera first.
     const record = body(SCREEN, 'const recordUnpaid', 'const collectFromSender');
-    expect(record).toContain('else if (isCourier) void captureCourierProof(outcome)');
+    expect(record).not.toContain('captureCourierProof(outcome)');
+    expect(record).toContain('const proof = photo ? { photoUrl: photo.url, authSession: photo.owner } : {};');
+    expect(record).toContain("else riderAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }, { onSuccess, onError });");
     const capture = body(SCREEN, 'const captureCourierProof', 'const markDelivered');
     expect(capture).toContain("async (outcome?: 'paid' | FailedOutcome)");
     expect(capture).toContain('{ orderId: job.id, uri: shot.assets[0].uri, outcome, authSession: owner ?? undefined }');

@@ -26,6 +26,7 @@
  */
 
 export const TENANT_TABLES = [
+  'handover_photo_proofs', 'cash_handover_evidence', 'mmg_payer_evidence', 'identity_review_cases',
   'EmergencyContact', 'EvidenceBundle', 'IncidentCase', 'LivenessCheck',
   'SafetyAccessLog', 'SosAlert', 'TripSafetySession', 'actor_rating_stats',
   // [S-01] The SOS escalation outbox belongs to the alert's tenant.
@@ -104,7 +105,14 @@ export const TENANT_TABLES = [
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',
-  'mmg_agent_payments', 'order_outbox', 'orders', 'pending_attributions',
+  'mmg_agent_payments',
+  // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
+  // walled like the provider payment that credits it.
+  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
+  // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
+  'billing_obligation_transitions',
+  'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
@@ -118,6 +126,7 @@ export const TENANT_TABLES = [
   // [M-20] A settlement file as one staged, validated import.
   'settlement_imports', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency',
+  'mover_fee_authorities', 'mover_fee_subscriptions',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
   // [PT-1] Card rail v2: enrolled cards, hosted sessions and their evidence.
@@ -363,7 +372,22 @@ export function appRoleDdl(): string[] {
     `GRANT USAGE ON SCHEMA public TO swift_app`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_app`,
     `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_app`,
-    `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO swift_app`,
+    // Purge functions are operator-only. Never re-grant them when healing an
+    // app-role environment, even if creation defaults previously granted them.
+    `DO $app_functions$
+      DECLARE fn record;
+      BEGIN
+        FOR fn IN SELECT p.oid::regprocedure AS signature, p.proname
+          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'public' AND p.prokind IN ('f', 'w')
+        LOOP
+          IF fn.proname IN ('swift_purge_audit_logs', 'swift_purge_sensitive_read_logs') THEN
+            EXECUTE format('REVOKE ALL ON FUNCTION %s FROM swift_app', fn.signature);
+          ELSE
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO swift_app', fn.signature);
+          END IF;
+        END LOOP;
+      END $app_functions$`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO swift_app`,

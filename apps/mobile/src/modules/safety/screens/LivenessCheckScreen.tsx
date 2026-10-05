@@ -83,7 +83,8 @@ export function LivenessCheckScreen() {
   const errStatus = (check.error as any)?.response?.status as number | undefined;
   const errCode = (check.error as any)?.response?.data?.error?.code as string | undefined;
   const locked = errStatus === 423 || errCode === 'LIVENESS_LOCKED';
-  const failed = result?.outcome === 'FAIL' || result?.outcome === 'ERROR_FAIL_CLOSED';
+  const mismatched = result?.outcome === 'FAIL';
+  const notRun = result?.outcome === 'ERROR_FAIL_CLOSED';
   const passed = result?.allowedOnline === true;
 
   const deadline = respondBy ? new Date(respondBy) : null;
@@ -127,8 +128,7 @@ export function LivenessCheckScreen() {
       <Header title="Identity check" />
       <View style={{ paddingHorizontal: space.lg, paddingTop: space.md, paddingBottom: space['2xl'] }}>
         <T variant="body" tone="muted" center style={{ marginBottom: space.md }}>
-          Take a quick selfie — it’s matched against your profile photo so riders
-          and customers always meet the person on the account.
+          Take a quick selfie so riders and customers always meet the person on the account.
         </T>
 
         {deadlineValid && !passed ? (
@@ -169,7 +169,7 @@ export function LivenessCheckScreen() {
           <>
             {frame}
 
-            {failed ? (
+            {mismatched ? (
               <View style={{ borderRadius: radius.lg, backgroundColor: withAlpha(color.warning, 0.12), borderWidth: 1, borderColor: withAlpha(color.warning, 0.4), padding: space.md, marginTop: space.lg }}>
                 <T variant="label">
                   That selfie didn’t match your profile photo.
@@ -186,7 +186,18 @@ export function LivenessCheckScreen() {
               </View>
             ) : null}
 
-            {check.isError && !locked && !failed ? (
+            {notRun ? (
+              <View style={{ borderRadius: radius.lg, backgroundColor: withAlpha(color.warning, 0.12), borderWidth: 1, borderColor: withAlpha(color.warning, 0.4), padding: space.md, marginTop: space.lg }}>
+                <T variant="label">
+                  The identity check couldn’t run just now, so you can’t go online yet.
+                </T>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  Try again in a few minutes. If it keeps happening, contact support.
+                </T>
+              </View>
+            ) : null}
+
+            {check.isError && !locked && !mismatched && !notRun ? (
               <T variant="label" tone="error" center style={{ marginTop: space.md }}>
                 The check couldn’t be submitted. Check your connection and try again.
               </T>

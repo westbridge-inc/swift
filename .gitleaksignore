@@ -9,3 +9,10 @@ a9098c8ff4db34dd95f2d334f674d9c564452b60:apps/api/src/__tests__/boot-config.test
 # The finishing commit assembles it at runtime instead; this entry covers the draft commit.
 # Verified false positive 2026-09-23 (AVAIL-1 finishing lane).
 894e1610a391765686429e5d11ae16266c41f00c:apps/api/src/__tests__/rate-limit-key.test.ts:jwt:74
+# Checkout v2 migration test used an inert idempotency fixture in its draft commit.
+# These exact historical lines are storage input and equality assertions, never
+# authentication/provider credentials. The current fixture is an explicit test key.
+# Coordinator verified and authorized these three fingerprints on 2026-09-30.
+4ad1f3b7dca9b18cb0c6ccfda7f98d3be5ec7f44:apps/mobile/src/lib/checkoutAttempt.test.ts:generic-api-key:278
+4ad1f3b7dca9b18cb0c6ccfda7f98d3be5ec7f44:apps/mobile/src/lib/checkoutAttempt.test.ts:generic-api-key:280
+4ad1f3b7dca9b18cb0c6ccfda7f98d3be5ec7f44:apps/mobile/src/lib/checkoutAttempt.test.ts:generic-api-key:283

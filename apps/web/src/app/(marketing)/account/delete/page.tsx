@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
+import { site } from '@/site.config';
 
 // Google Play's account-deletion policy requires a PUBLICLY reachable URL, in
 // addition to the in-app path — reachable by someone who has already
@@ -50,7 +51,7 @@ export default function DeleteAccountPage() {
       <div className="max-w-3xl">
         <h1 className="text-4xl font-extrabold tracking-tight">Delete your Swift account</h1>
         <p className="mt-4 text-lg text-[var(--swift-muted)]">
-          Swift is operated by Westbridge Inc. You can delete your Swift account and its personal
+          Swift is operated by {site.legalEntityName} You can delete your Swift account and its personal
           data at any time. This page explains how, and exactly what is removed and what we are
           required to keep.
         </p>

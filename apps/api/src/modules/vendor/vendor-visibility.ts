@@ -109,7 +109,7 @@ export function isVendorVisible(vendor: {
   status: string;
   isVerified: boolean;
   tenant?: { isActive: boolean } | null;
-  subscription?: { status: SubscriptionStatus; gracePeriodEnd: Date | null; autoRenew: boolean; currentPeriodEnd: Date } | null;
+  subscription?: { status: SubscriptionStatus; gracePeriodEnd: Date | null; billingConfirmationPausedAt: Date | null; billingEnforcementDueAt: Date | null; autoSuspendEnabled: boolean; autoRenew: boolean; currentPeriodEnd: Date } | null;
 }): boolean {
   return (
     vendor.status === VISIBLE_VENDOR.status &&
@@ -127,7 +127,7 @@ export const VISIBLE_VENDOR_SELECT = {
   status: true,
   isVerified: true,
   tenant: { select: { isActive: true } },
-  subscription: { select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true } },
+  subscription: { select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true } },
 } as const;
 
 /** [R048-003] The visibility predicate INSIDE one tenant — for relation

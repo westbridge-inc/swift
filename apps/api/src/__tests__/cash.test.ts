@@ -11,18 +11,28 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { CashRulesService, orderingRestriction } from '../modules/cash/cash-rules.service';
+import { CashRulesService, orderingRestriction, DEFAULT_CASH_RULES } from '../modules/cash/cash-rules.service';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
+import { retainedPhonePrefix } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // cash rules. The cash-rules table as tests: a simulated dishonest rider
 // gets flagged, a prankster customer gets restricted, and an honest rider's
 // clean claim pays. Claims are impossible outside the delivery state or
 // without a GPS stamp.
+//
+// [SAFE-B] A failed handover strikes, auto-approves and pays only on evidence
+// the server holds: the fix the rider's own session persisted at the door and
+// the photo the server issued. Every positive fixture here files that way;
+// claims planted without a filing are history for the guardrails and can never
+// be paid. Filings, proofs, claims, strikes and reserve entries are retained, so
+// the suite never deletes them and stays correct on a database that keeps every
+// earlier run: its users live in a phone namespace unique to the run, every
+// order has its own door, references are unique, and queue lookups page.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -39,40 +49,32 @@ let app: FastifyInstance;
 let cash: CashRulesService;
 let orders: OrderService;
 let adminToken: string;
+let adminUserId = '';
 let vendorId: string;
 
 const createdUserIds: string[] = [];
 
-const RESERVE_NOTE = 'cash.test fixture reserve';
+const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+/** [SAFE-B · retained history] A phone namespace no other suite uses or purges, unique to the run. */
+const PHONE_PREFIX = retainedPhonePrefix('02');
+const RESERVE_NOTE = `cash.test fixture reserve ${RUN}`;
+/** A payment reference unique to this run: references are UNIQUE and PAID claims are retained. */
+const ref = (label: string) => `${label}-${RUN}`;
 let itemId = '';
 
-async function purgeFixtures() {
-  const users = await app.prisma.user.findMany({
-    where: { phone: { startsWith: '+59200133' } },
-    select: { id: true },
-  });
-  const ids = users.map((u) => u.id);
-  if (ids.length === 0) return;
-  const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
-  const riderIds = riders.map((r) => r.id);
-  // [P31-1] The reserve draws of this suite's payouts go first (a draw outlives its claim as an
-  // orphan otherwise, and the suite's funding entry with it), then the funding, then the claims.
-  await app.prisma.rlpReserveEntry.deleteMany({
-    where: { OR: [{ claim: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] } }, { note: RESERVE_NOTE }] },
-  });
-  await app.prisma.reimbursementClaim.deleteMany({
-    where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
-  });
-  const ordersToDrop = await app.prisma.order.findMany({
-    where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }] },
-    select: { id: true },
-  });
-  const orderIds = ordersToDrop.map((o) => o.id);
-  await app.prisma.earning.deleteMany({ where: { orderId: { in: orderIds } } });
-  await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
-  await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+/** Every order gets its own door, at the address key's 4-decimal precision, in this file's sandbox. A door is
+ *  used only if no retained strike sits at its key: a strike an earlier run left there would co-fire
+ *  collusion_address on a claim this run expects to be clean. */
+const RUN_DOOR_BASE = { lat: 7.2007 + Math.floor(Math.random() * 500) * 0.0001, lng: -58.6007 - Math.floor(Math.random() * 500) * 0.0001 };
+let doorSeq = 0;
+async function freshDoor(): Promise<{ lat: number; lng: number }> {
+  for (;;) {
+    const i = doorSeq;
+    doorSeq += 1;
+    const door = { lat: Number((RUN_DOOR_BASE.lat + (i % 40) * 0.0001).toFixed(4)), lng: Number((RUN_DOOR_BASE.lng - Math.floor(i / 40) * 0.0001).toFixed(4)) };
+    const struck = await app.prisma.strike.count({ where: { addressKey: `geo:${door.lat.toFixed(4)}:${door.lng.toFixed(4)}` } });
+    if (struck === 0) return door;
+  }
 }
 
 let seq = 0;
@@ -80,7 +82,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, opts: { created
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200133${String(seq).padStart(2, '0')}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Cash',
       lastName: `User${seq}`,
       roles,
@@ -93,22 +95,23 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, opts: { created
   });
   createdUserIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
-  await app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId: user.id, token, refreshToken: nanoid(48),
       ...(roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN') && { authMethod: 'OTP' as const }),
       deviceId: 'step10', deviceType: 'test', expiresAt: new Date(Date.now() + DAY),
     },
   });
-  return { userId: user.id, token };
+  return { userId: user.id, token, sessionId: session.id };
 }
 
 async function makeRider() {
   const u = await makeUser(['RIDER', 'CUSTOMER'], 'RIDER');
+  // [SAFE-B] The rider's own session owns its location stream, as the location route records it.
   const rider = await app.prisma.rider.create({
     data: {
       userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE',
-      documentsVerified: true, isOnline: true, locationSessionId: syntheticLocationOwner('cash'), currentLat: GPS.lat, currentLng: GPS.lng,
+      documentsVerified: true, isOnline: true, locationSessionId: u.sessionId, currentLat: GPS.lat, currentLng: GPS.lng,
     },
   });
   return { ...u, riderId: rider.id };
@@ -119,8 +122,9 @@ async function makeAtDoorOrder(
   riderId: string,
   amount: number,
   status: OrderStatus = 'ARRIVED',
-  delivery: { lat: number; lng: number } = { lat: 7.2007, lng: -58.6007 },
+  door?: { lat: number; lng: number },
 ) {
+  const delivery = door ?? await freshDoor();
   const created = await app.prisma.order.create({
     data: {
       orderNumber: `S10-${nanoid(10)}`,
@@ -148,7 +152,37 @@ async function makeAtDoorOrder(
     data: { orderId: created.id, status: 'PICKED_UP', changedBy: riderId, note: 'fixture pickup', createdAt: new Date(Date.now() - 40 * 60_000) },
   });
   if (status === 'ARRIVED' || status === 'FAILED') await arriveAtDoor(created.id, riderId, delivery);
-  return created;
+  return { ...created, door: delivery };
+}
+
+/** [SAFE-B] The server issues the door photo for this rider's order, exactly as the upload route does. */
+const issuedPhoto = async (orderId: string, riderUserId: string) =>
+  (await issueSyntheticHandoverPhoto(app.prisma, { orderId, actorId: riderUserId, role: 'RIDER' })).url;
+
+/** [SAFE-B] A claim the platform would pay: a fresh pair at its own door, the rider's session-owned fix there,
+ *  the server-issued photo, the refusal filed. Positive payout fixtures are never planted. */
+async function payable(amount = 2000) {
+  const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+  const rider = await makeRider();
+  const order = await makeAtDoorOrder(customer.userId, rider.riderId, amount);
+  const { claim } = await cash.handover(order.id, rider.userId, {
+    outcome: 'refused', gps: order.door, photoUrl: await issuedPhoto(order.id, rider.userId), sessionId: rider.sessionId,
+  });
+  expect(claim, 'a payable fixture is a complete, auto-approved filing').toMatchObject({ status: 'AUTO_APPROVED', evidenceComplete: true, flags: [] });
+  return claim!;
+}
+
+/** The review queue is oldest-first and pages at 50: on a database that keeps history, find a claim by paging. */
+async function queuedClaim(claimId: string, status = 'PENDING_REVIEW') {
+  for (let page = 1; page <= 200; page += 1) {
+    const res = await inject('GET', `/api/v1/admin/cash-rules/claims?status=${status}&limit=50&page=${page}`, undefined, adminToken);
+    expect(res.statusCode).toBe(200);
+    const rows = res.json().data as Array<{ id: string; status: string; amount: string | number }>;
+    const hit = rows.find((c) => c.id === claimId);
+    if (hit) return hit;
+    if (rows.length < 50) return undefined;
+  }
+  return undefined;
 }
 
 /** [AF-MOB-001] A REAL at-door order carries an arrival: the status-log row the
@@ -218,10 +252,9 @@ beforeAll(async () => {
   orders = new OrderService(app.prisma, ioStub);
   cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, ioStub), orders);
 
-  await purgeFixtures();
-
   const admin = await makeUser(['ADMIN'], 'ADMIN');
   adminToken = admin.token;
+  adminUserId = admin.userId;
   await app.prisma.admin.create({ data: { userId: admin.userId, permissions: ['*'] } });
 
   // One vendor for all the synthetic orders
@@ -230,7 +263,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vendorOwner.id, name: 'Cash Corner', slug: `cash-corner-${nanoid(6)}`,
-      vendorType: 'RESTAURANT', phone: '+5920013399',
+      vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}999`,
       addressLine1: '1 Cash Corner', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: GPS.lat, longitude: GPS.lng,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
@@ -245,8 +278,21 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await purgeFixtures();
-  await app.close();
+  // [SAFE-B · retained history] Filings, issued proofs, claims, strikes and reserve entries are evidence and
+  // money records, kept with every row they reference (orders, users, riders, the store). Only scaffolding
+  // that is not evidence is touched, in one transaction: the admin fixture is removed (later suites page
+  // every admin), and the retained riders and store are taken out of service so no other suite is offered
+  // them. A failure here is a real failure: nothing is swallowed and nothing half-commits.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      await tx.rider.updateMany({ where: { userId: { in: createdUserIds } }, data: { isOnline: false, isAvailable: false } });
+      await tx.vendor.updateMany({ where: { id: vendorId }, data: { status: 'CLOSED', acceptingOrders: false, isCurrentlyOpen: false } });
+      await tx.cart.deleteMany({ where: { customerId: { in: createdUserIds } } });
+      if (adminUserId) await tx.user.delete({ where: { id: adminUserId } });
+    });
+  } finally {
+    await app.close();
+  }
 });
 
 describe('Golden rule handover', () => {
@@ -306,10 +352,11 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     const rider = await makeRider();
     const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3500);
 
+    // [SAFE-B] The photo the server issued; the route files the fix the rider's own session persisted at the door.
     const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
       outcome: 'refused',
-      gps: GPS,
-      photoUrl: 'storage://t/door.jpg',
+      gps: order.door,
+      photoUrl: await issuedPhoto(order.id, rider.userId),
     }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('FAILED');
@@ -322,40 +369,56 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     expect(strike!.addressKey).toContain('geo:');
   });
 
+  it('[SAFE-B] a refusal filed only on declarations — typed GPS at the door and a photo URL the server never issued — records the outcome for review and strikes nobody', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3500);
+    const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
+      outcome: 'refused',
+      gps: order.door,
+      photoUrl: 'storage://t/door.jpg',
+    }, rider.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('FAILED');
+    expect(res.json().data.claim).toMatchObject({ status: 'PENDING_REVIEW', flags: ['evidence_incomplete'] });
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { orderId: order.id } })).evidenceComplete).toBe(false);
+    expect(await app.prisma.strike.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await app.prisma.cashHandoverEvidence.count({ where: { orderId: order.id, photoProofId: null } })).toBe(1);
+  });
+
   it('a claim reported implausibly far from the door goes to review, not auto-payout [SWIFT-076]', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider();
     // A unique delivery point so no historical guardrail (shared-address, pair,
     // outlier) can co-fire — gps_far is proven in isolation. The reported
-    // handover GPS is ~17 km from this door.
-    const door = { lat: 7.25, lng: -58.55 };
-    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3500, 'ARRIVED', door);
+    // handover GPS is far from this door, while the server-held evidence (the
+    // session fix at the door, the issued photo) is complete.
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3500);
 
     const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
       outcome: 'refused',
       gps: GPS_FAR,
-      photoUrl: 'storage://t/door.jpg',
+      photoUrl: await issuedPhoto(order.id, rider.userId),
     }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('FAILED'); // the order still fails through the machine
     expect(res.json().data.claim.status).toBe('PENDING_REVIEW'); // caused solely by proximity
-    // [P31-1] A far GPS also fails the bundle's rider-at-door artefact, so the evidence flag rides along.
-    expect(res.json().data.claim.flags).toEqual(['gps_far', 'evidence_incomplete']);
+    // [SAFE-B] The bundle reads the server's fix, not the typed GPS: it is complete, and the declared distance alone routes to a person.
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { orderId: order.id } })).evidenceComplete).toBe(true);
+    expect(res.json().data.claim.flags).toEqual(['gps_far']);
 
-    // The customer is still struck — a far GPS doesn't erase the failed handover.
+    // The customer is still struck: the evidence the server holds supports the failed handover.
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();
   });
 
   it('claim payout is single-winner: two concurrent markClaimPaid → one pays, one 400s (no double-payout)', async () => {
-    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const rider = await makeRider();
-    const claim = await plantClaim(rider.riderId, customer.userId, 0); // AUTO_APPROVED
+    const claim = await payable(); // AUTO_APPROVED on a real, complete filing
 
     // Two admins (or a double-click / retry) mark the SAME claim paid at once.
     const results = await Promise.allSettled([
-      cash.markClaimPaid(claim.id, 'admin-a', 'REF-A1', 2000),
-      cash.markClaimPaid(claim.id, 'admin-b', 'REF-B1', 2000),
+      cash.markClaimPaid(claim.id, 'admin-a', ref('REF-A1'), 2000),
+      cash.markClaimPaid(claim.id, 'admin-b', ref('REF-B1'), 2000),
     ]);
     // Exactly one payout goes through; the loser is rejected, not a second payout.
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
@@ -363,15 +426,15 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
 
     const final = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
     expect(final.status).toBe('PAID');
+    // One draw from the reserve, never two.
+    expect(await app.prisma.rlpReserveEntry.count({ where: { claimId: claim.id } })).toBe(1);
 
     // A later attempt on an already-PAID claim is a clean 400, never another payout.
-    await expect(cash.markClaimPaid(claim.id, 'admin-c', 'REF-C1', 2000)).rejects.toThrow(/PAID/);
+    await expect(cash.markClaimPaid(claim.id, 'admin-c', ref('REF-C1'), 2000)).rejects.toThrow(/PAID/);
   });
 
   it('[WR-004] a claim payout without a payment reference is refused — PAID needs evidence', async () => {
-    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const rider = await makeRider();
-    const claim = await plantClaim(rider.riderId, customer.userId, 0); // AUTO_APPROVED
+    const claim = await payable(); // AUTO_APPROVED on a real, complete filing
 
     await expect(cash.markClaimPaid(claim.id, 'admin-a', '', 2000)).rejects.toThrow(/reference/i);
     await expect(cash.markClaimPaid(claim.id, 'admin-a', '   ', 2000)).rejects.toThrow(/reference/i);
@@ -379,25 +442,38 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     // The refusal changed nothing: the claim is still payable with evidence.
     const still = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
     expect(still.status).toBe('AUTO_APPROVED');
-    const paid = await cash.markClaimPaid(claim.id, 'admin-a', 'BANK-REF-1', 2000);
+    const paid = await cash.markClaimPaid(claim.id, 'admin-a', ref('BANK-REF-1'), 2000);
     expect(paid.status).toBe('PAID');
-    expect(paid.paymentRef).toBe('BANK-REF-1');
+    expect(paid.paymentRef).toBe(ref('BANK-REF-1').toUpperCase());
   });
 
-  it('orders at/over the USD gate are not auto-covered (strike still recorded)', async () => {
+  it('[SAFE-B] a claim planted without a filing is history only: even approved by a person, its payout is refused and nothing is drawn', async () => {
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const rider = await makeRider();
+    const planted = await plantClaim(rider.riderId, customer.userId, 0, 'PENDING_REVIEW');
+    await cash.approveClaim(planted.id, 'admin-a', 'approved without a filing');
+    await expect(cash.markClaimPaid(planted.id, 'admin-a', ref('BANK-HIST-1'), 2000)).rejects.toMatchObject({ code: 'RLP_EVIDENCE_INCOMPLETE' });
+    const row = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: planted.id } });
+    expect({ status: row.status, paymentRef: row.paymentRef }).toEqual({ status: 'APPROVED', paymentRef: null });
+    expect(await app.prisma.rlpReserveEntry.count({ where: { claimId: planted.id } })).toBe(0);
+  });
+
+  it('orders at/over the USD gate are not auto-covered; the unpaid outcome is filed, and a declaration alone strikes nobody', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2' });
     const rider = await makeRider();
     const order = await makeAtDoorOrder(customer.userId, rider.riderId, 20000);
 
     const res = await inject('POST', `/api/v1/rider/orders/${order.id}/handover`, {
       outcome: 'no_show',
-      gps: GPS,
+      gps: order.door,
     }, rider.token);
     expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('FAILED');
     expect(res.json().data.claim).toBeNull();
 
-    const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
-    expect(strike).not.toBeNull();
+    // [SAFE-B] No issued photo: nothing the server holds supports punishment, so no strike; the filing is kept for support.
+    expect(await app.prisma.strike.count({ where: { orderId: order.id } })).toBe(0);
+    expect(await app.prisma.cashHandoverEvidence.count({ where: { orderId: order.id } })).toBe(1);
   });
 
   it('a rider over the monthly cap goes to review, not auto-payout', async () => {
@@ -413,8 +489,10 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
 
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3000);
-    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS });
+    // [SAFE-B] A complete filing, so the cap is what routes it to a person.
+    const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: await issuedPhoto(order.id, rider.userId), sessionId: rider.sessionId });
 
+    expect(result.claim!.evidenceComplete).toBe(true);
     expect(result.claim!.status).toBe('PENDING_REVIEW');
     expect(result.claim!.flags).toContain('over_cap');
   });
@@ -427,12 +505,16 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
       await plantClaim(peer.riderId, victim.userId, 40 + i); // outside 30d window for cap, inside 90d
     }
 
-    // Steady stream: enough claims that no realistic peer average excuses it
-    // (the cap-test rider above is also a "peer" here, raising the bar)
+    // Steady stream: enough claims that no realistic peer average excuses it. [SAFE-B · retained history]
+    // The peer average is every other rider's 30-day claim count, and a database that keeps history holds
+    // earlier runs' riders too: measure it here and plant past it, at least the nine this test always used.
+    const peers = await app.prisma.reimbursementClaim.groupBy({ by: ['riderId'], where: { createdAt: { gte: new Date(Date.now() - 30 * DAY) }, riderId: { not: null } }, _count: true });
+    const peerAvg = peers.length ? peers.reduce((s, g) => s + g._count, 0) / peers.length : 0;
+    const steady = Math.max(9, Math.floor(DEFAULT_CASH_RULES.outlierMultiplier * Math.max(1, peerAvg)) + 1);
     const dishonest = await makeRider();
-    for (let i = 0; i < 9; i++) {
+    for (let i = 0; i < steady; i++) {
       const victim = await makeUser(['CUSTOMER'], 'CUSTOMER');
-      await plantClaim(dishonest.riderId, victim.userId, 1 + i);
+      await plantClaim(dishonest.riderId, victim.userId, 1 + (i % 25));
     }
 
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
@@ -562,15 +644,15 @@ describe('Admin review + founder metrics', () => {
   it('flagged claims queue through review -> approve -> paid', async () => {
     // [P31-1] A flagged claim WITH its evidence bundle: the queue holds other suites' claims too,
     // some filed without a bundle (a far GPS, no photo) — those are refused at payout by design.
+    // [SAFE-B] The bundle is a real filing (session fix at the door, issued photo); the typed GPS
+    // is far from the door, so the claim is flagged gps_far and waits for a person.
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider();
-    const flagged = await plantClaim(rider.riderId, customer.userId, 0, 'PENDING_REVIEW');
-    const queue = await inject('GET', '/api/v1/admin/cash-rules/claims?limit=200', undefined, adminToken);
-    expect(queue.statusCode).toBe(200);
-    const pending = queue.json().data as Array<{ id: string; status: string; amount: string | number }>;
-    expect(pending.length).toBeGreaterThan(0);
-    const mine = pending.find((c) => c.id === flagged.id);
-    expect(mine, 'the planted flagged claim is in the review queue').toBeTruthy();
+    const order = await makeAtDoorOrder(customer.userId, rider.riderId, 2000);
+    const flagged = (await cash.handover(order.id, rider.userId, { outcome: 'refused', gps: GPS_FAR, photoUrl: await issuedPhoto(order.id, rider.userId), sessionId: rider.sessionId })).claim!;
+    expect(flagged).toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true, flags: ['gps_far'] });
+    const mine = await queuedClaim(flagged.id);
+    expect(mine, 'the flagged claim is in the review queue').toBeTruthy();
 
     const claimId = flagged.id;
     const approve = await inject('PUT', `/api/v1/admin/cash-rules/claims/${claimId}/approve`, { reason: 'Verified with photos' }, adminToken);
@@ -621,18 +703,14 @@ describe('Admin review + founder metrics', () => {
 // ---------------------------------------------------------------------------
 
 describe('[A-11] a claim payout carries evidence that holds up', () => {
-  async function payable() {
-    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const rider = await makeRider();
-    return plantClaim(rider.riderId, customer.userId, 0); // AUTO_APPROVED, amount 2000
-  }
+  // [SAFE-B] `payable()` (above) files a real, complete refusal: AUTO_APPROVED, amount 2000.
 
   it('one transfer settles ONE claim — a reused reference is refused', async () => {
     const first = await payable();
     const second = await payable();
-    await cash.markClaimPaid(first.id, 'admin-a', 'BANK-REUSE-9', 2000);
+    await cash.markClaimPaid(first.id, 'admin-a', ref('BANK-REUSE-9'), 2000);
 
-    await expect(cash.markClaimPaid(second.id, 'admin-a', 'BANK-REUSE-9', 2000))
+    await expect(cash.markClaimPaid(second.id, 'admin-a', ref('BANK-REUSE-9'), 2000))
       .rejects.toThrow(/already recorded against another claim/i);
 
     // the refusal changed nothing: the second claim is still payable
@@ -644,12 +722,12 @@ describe('[A-11] a claim payout carries evidence that holds up', () => {
   it('the same reference typed in a different case is the SAME reference', async () => {
     const first = await payable();
     const second = await payable();
-    await cash.markClaimPaid(first.id, 'admin-a', 'Bank-Case-7', 2000);
+    await cash.markClaimPaid(first.id, 'admin-a', `Bank-Case-7-${RUN.toLowerCase()}`, 2000);
     // normalised on the way in, so case cannot defeat the unique index
-    await expect(cash.markClaimPaid(second.id, 'admin-a', 'bank-case-7', 2000))
+    await expect(cash.markClaimPaid(second.id, 'admin-a', `bank-case-7-${RUN.toUpperCase()}`, 2000))
       .rejects.toThrow(/already recorded/i);
     const stored = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: first.id } });
-    expect(stored.paymentRef).toBe('BANK-CASE-7');
+    expect(stored.paymentRef).toBe(`BANK-CASE-7-${RUN.toUpperCase()}`);
   });
 
   it('a reference too short or malformed is refused, and says WHICH', async () => {
@@ -695,12 +773,12 @@ describe('[A-11] a claim payout carries evidence that holds up', () => {
 
   it('records the exact figure and WHO paid it, alongside who approved it', async () => {
     const claim = await payable();
-    const paid = await cash.markClaimPaid(claim.id, 'admin-payer', 'BANK-OK-1', '2000.00');
+    const paid = await cash.markClaimPaid(claim.id, 'admin-payer', ref('BANK-OK-1'), '2000.00');
     expect(paid.status).toBe('PAID');
     const row = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
     expect(Number(row.paidAmount)).toBe(2000);
     expect(row.paidById).toBe('admin-payer');
-    expect(row.paymentRef).toBe('BANK-OK-1');
+    expect(row.paymentRef).toBe(ref('BANK-OK-1').toUpperCase());
     // the approver and the payer are separately attributable — the point of paidById
     expect(row.reviewedBy).not.toBe(null);
   });

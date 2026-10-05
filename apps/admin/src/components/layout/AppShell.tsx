@@ -4,6 +4,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
+import { Modal } from '@/components/Modal';
 import { sessionProbe } from '@/lib/api';
 
 /**
@@ -16,6 +17,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const isLogin = pathname === '/login';
   const [ready, setReady] = useState(false);
+  const [drawer, setDrawer] = useState(false);
+  useEffect(() => { setDrawer(false); }, [pathname]);
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 768px)');
+    const close = () => { if (media.matches) setDrawer(false); };
+    media.addEventListener('change', close);
+    return () => media.removeEventListener('change', close);
+  }, []);
 
   useEffect(() => {
     if (isLogin) {
@@ -44,12 +53,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex h-screen">
-      <Sidebar />
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <Header />
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+    <div className="flex h-dvh">
+      <div data-desktop-sidebar className="hidden md:flex shrink-0"><Sidebar /></div>
+      <div className="min-w-0 flex-1 flex flex-col overflow-hidden" inert={drawer ? true : undefined}>
+        <Header onOpenNavigation={() => setDrawer(true)} />
+        <main className="min-w-0 flex-1 overflow-auto p-4 md:p-6">{children}</main>
       </div>
+      {drawer && <Modal title="Navigation" onClose={() => setDrawer(false)} className="admin-drawer" overlayTestId="navigation-overlay">
+        <button className="admin-drawer-close" onClick={() => setDrawer(false)} aria-label="Close navigation">Close navigation ×</button>
+        <Sidebar onNavigate={() => setDrawer(false)} />
+      </Modal>}
     </div>
   );
 }

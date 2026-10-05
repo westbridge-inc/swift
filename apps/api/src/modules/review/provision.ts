@@ -9,8 +9,9 @@
  * `review:expire` forces DL-9; `review:status` says what exists.
  *
  * The CONTENT PACK (Part 6: fictional vendors, catalogue, images with licence
- * provenance, NAME-DENYLIST) is not created here — it is founder content and
- * an Opus seed, and `status` reports it as absent rather than pretending.
+ * provenance, NAME-DENYLIST) is seeded by `review:seed` (content-pack.ts), not
+ * here; `provision` and `status` report it from the pack's own rows —
+ * ABSENT, INCOMPLETE or PRESENT — rather than pretending.
  *
  * Fictional identifiers: E.164 under REVIEW_PHONE_PREFIX (default
  * `+59200099`). Whether a prefix is truly undialable is a carrier fact the
@@ -21,6 +22,7 @@ import crypto from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { hashReviewCode } from './credentials';
 import { assertTenantWall, attestationOf, readRlsFacts } from '../../lib/rls-attestation';
+import { REVIEW_SLUG_PATTERN, reviewContentPackFacts, type ContentPackState, type ContentPackFacts } from './content-pack';
 
 export const DEFAULT_REVIEW_TTL_DAYS = 14;
 export const DEFAULT_REVIEW_PHONE_PREFIX = '+59200099';
@@ -39,7 +41,7 @@ export interface ProvisionResult {
   sessionId: string;
   expiresAt: Date;
   credentials: MintedCredential[];
-  contentPack: 'ABSENT';
+  contentPack: ContentPackState;
 }
 
 const sixDigits = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
@@ -50,7 +52,7 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
   const now = input.now ?? new Date();
   const ttlDays = input.ttlDays ?? DEFAULT_REVIEW_TTL_DAYS;
   const prefix = input.phonePrefix ?? process.env['REVIEW_PHONE_PREFIX'] ?? DEFAULT_REVIEW_PHONE_PREFIX;
-  if (!/^review-[a-z0-9-]{2,40}$/.test(input.slug)) throw new Error('slug must match /^review-[a-z0-9-]{2,40}$/ — the fiction is named as such');
+  if (!REVIEW_SLUG_PATTERN.test(input.slug)) throw new Error('slug must match /^review-[a-z0-9-]{2,40}$/ — the fiction is named as such');
   // [TA-S0-003] Minting a tenant at runtime is exactly the path the boot-only
   // wall gate cannot see. Assert the wall HERE, for the tenant count this
   // provisioning produces: in production, a bypassed wall or a missing
@@ -68,7 +70,9 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
     let identifier = identifierFor(prefix);
     for (let i = 0; i < 20 && await prisma.user.findUnique({ where: { phone: identifier }, select: { id: true } }); i++) identifier = identifierFor(prefix);
     const user = await prisma.user.create({ data: {
-      phone: identifier, firstName: 'Demo', lastName: 'Reviewer', activeRole: role, tenantId: tenant.id, isSynthetic: true, isPhoneVerified: true,
+      // `roles` must hold the active role: the app signs out a persisted
+      // session whose roles are empty (authHydration "invalid_roles").
+      phone: identifier, firstName: 'Demo', lastName: 'Reviewer', roles: [role], activeRole: role, tenantId: tenant.id, isSynthetic: true, isPhoneVerified: true,
     } });
     const code = sixDigits();
     const id = `rc_${crypto.randomBytes(8).toString('hex')}`;
@@ -76,7 +80,8 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
     void user;
     credentials.push({ role, identifier, code });
   }
-  return { tenantId: tenant.id, sessionId: session.id, expiresAt: session.expiresAt, credentials, contentPack: 'ABSENT' };
+  const pack = await reviewContentPackFacts(prisma, tenant.id);
+  return { tenantId: tenant.id, sessionId: session.id, expiresAt: session.expiresAt, credentials, contentPack: pack.state };
 }
 
 /** New codes for every credential of the tenant; the old ones stop working at once. */
@@ -106,7 +111,9 @@ export interface ReviewStatus {
   credentials: number;
   syntheticUsers: number;
   syntheticVendors: number;
-  contentPack: 'ABSENT' | 'PRESENT';
+  /** PRESENT only when every pack store is live and every pack item is on sale. */
+  contentPack: ContentPackState;
+  contentPackDetail: ContentPackFacts | null;
   phonePrefixNote: string;
 }
 
@@ -120,6 +127,7 @@ export async function reviewStatus(prisma: PrismaClient, tenantId: string): Prom
       prisma.vendor.count({ where: { tenantId, isSynthetic: true } }),
     ])
     : [0, 0, 0];
+  const pack = tenant ? await reviewContentPackFacts(prisma, tenantId) : null;
   const prefix = process.env['REVIEW_PHONE_PREFIX'] ?? DEFAULT_REVIEW_PHONE_PREFIX;
   return {
     tenant,
@@ -127,7 +135,8 @@ export async function reviewStatus(prisma: PrismaClient, tenantId: string): Prom
     credentials,
     syntheticUsers,
     syntheticVendors,
-    contentPack: syntheticVendors > 0 ? 'PRESENT' : 'ABSENT',
+    contentPack: pack?.state ?? 'ABSENT',
+    contentPackDetail: pack,
     phonePrefixNote: prefix === DEFAULT_REVIEW_PHONE_PREFIX
       ? `identifiers use the PLACEHOLDER prefix ${prefix} — confirm an undialable range with the carrier and set REVIEW_PHONE_PREFIX (FD-STA-6)`
       : `identifiers use REVIEW_PHONE_PREFIX=${prefix}`,

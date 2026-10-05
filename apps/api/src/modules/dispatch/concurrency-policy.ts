@@ -1,3 +1,4 @@
+import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { Prisma } from '@prisma/client';
 // Type-only import: erased at compile time, so this does NOT create a runtime
 // cycle with dispatch.service even though that module imports this one. The
@@ -128,6 +129,10 @@ export async function reserveRiderLeg(
   orderId: string,
   capacity: number,
 ): Promise<boolean> {
+  const rider = await tx.rider.findUnique({ where: { id: riderId }, select: { userId: true } });
+  if (!rider) return false;
+  const documents = await lockMoverDocuments(tx, rider.userId, 'RIDER');
+  assertMoverDocuments(documents);
   const rows = await tx.$executeRaw`
     UPDATE "riders" r SET
       "currentOrderId" = COALESCE(r."currentOrderId", ${orderId}),
@@ -138,6 +143,7 @@ export async function reserveRiderLeg(
       )
     FROM "users" u
     WHERE r."id" = ${riderId}
+      AND ${documentDeadlineSql(documents)}
       AND u."id" = r."userId"
       AND u."status" = 'ACTIVE'
       AND u."activeRole"::text IN ('MOVER', 'RIDER')
