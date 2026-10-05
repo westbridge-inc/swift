@@ -297,7 +297,13 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // and `isAvailable`, so it can only surface goods an anonymous visitor could
   // already see on a store page. Requiring a session here would mean asking
   // someone to sign up before they can see what is for sale.
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
+  // /billing/mmg-checkout is MMG's reply path [mmg checkout 3/6]: the web
+  // return page (no session survives MMG's cross-site redirect) and MMG's own
+  // servers post an encrypted reply token there. The token is opened with the
+  // merchant key and only prompts the server's own MMG lookup; the answer is
+  // one of four states with no amount, name or reference. Rate-limited,
+  // body-capped, inert with the flag off — proven in mmg-checkout-routes.test.ts.
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/billing/mmg-checkout', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.
