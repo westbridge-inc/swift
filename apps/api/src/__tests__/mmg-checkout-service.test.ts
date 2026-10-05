@@ -2114,6 +2114,9 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     // MMG repeating the credited payment, by either of its numbers, is not new money.
     expect(await codeReply(row, '0', paid, 'NOTIFY')).toBe('CONFIRMED');
     expect(await codeReply(row, '0', ledgerOf(paid), 'NOTIFY')).toBe('CONFIRMED');
+    // ...however MMG spells it: identities are compared canonically (mmg_txn_canon).
+    expect(await codeReply(row, '0', ledgerOf(paid).toLowerCase(), 'NOTIFY')).toBe('CONFIRMED');
+    expect(await codeReply(row, '0', paid.toLowerCase(), 'RETURN')).toBe('CONFIRMED');
     expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(0);
 
     const other = tx('UNAPPLIEDTX');

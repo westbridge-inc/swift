@@ -208,9 +208,10 @@ function canonicalMmgTxn(id: string): string {
   return id.trim().toUpperCase();
 }
 
-/** [Sol, DS659 · delta3] The operators' page for one unapplied payment: per checkout and transaction. */
-function unappliedPageKey(checkoutId: string, transactionId: string): string {
-  return `mmg-checkout-unapplied:${checkoutId}:${canonicalMmgTxn(transactionId)}`;
+/** [Sol, DS659 · delta3] The operators' page for one unapplied payment: per
+ *  checkout and transaction, the transaction in its canonical spelling. */
+function unappliedPageKey(checkoutId: string, canonicalTxn: string): string {
+  return `mmg-checkout-unapplied:${checkoutId}:${canonicalTxn}`;
 }
 
 function returnStateFor(status: CheckoutStatus): ReturnState {
