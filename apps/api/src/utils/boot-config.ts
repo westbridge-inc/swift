@@ -46,6 +46,19 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // production", it is a misconfiguration nobody may guess their way past.
   if (runtimeMode(env) !== 'production') return;
 
+  // Launch safeguards are enforced by the server and worker, regardless of
+  // what an older client displays. These bypasses exist only for local/test
+  // fixtures; production must never admit them.
+  if (env['CONSENT_REQUIRED'] === '0') {
+    throw new Error('FATAL: CONSENT_REQUIRED=0 bypasses signup consent in production. Refusing to start.');
+  }
+  if (env['ADMIN_CAPABILITY_MODE'] === 'shadow') {
+    throw new Error('FATAL: ADMIN_CAPABILITY_MODE=shadow bypasses administrator enforcement in production. Refusing to start.');
+  }
+  if (env['PREVIEW_MODE'] === '1') {
+    throw new Error('FATAL: PREVIEW_MODE=1 bypasses launch listing safeguards in production. Refusing to start.');
+  }
+
   if (env['DEV_OTP_BYPASS'] === '1') {
     throw new Error('FATAL: DEV_OTP_BYPASS=1 in production — this disables OTP verification. Refusing to start.');
   }
