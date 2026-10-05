@@ -201,6 +201,21 @@ describe('[DB-05] the backfill: true where the owners agree, quarantined (NULL) 
   });
 });
 
+describe('[DB-05] the application wall: a tenant-bound read sees its own rows, never another tenant’s', () => {
+  it('ContentReport and ReturnRequest listed from each tenant (the admin queues’ scope is now this column)', async () => {
+    const mine = await system(() => app.prisma.contentReport.create({ data: report(ids.reviewUser) }));
+    const theirs = await system(() => app.prisma.contentReport.create({ data: report(ids.prodUser) }));
+    const rMine = await system(() => app.prisma.returnRequest.create({ data: rr(ids.reviewOrder, ids.reviewUser) }));
+    const rTheirs = await system(() => app.prisma.returnRequest.create({ data: rr(ids.prodOrder, ids.prodUser) }));
+    const reports = (tenant: string) => runWithTenant(tenant, () => app.prisma.contentReport.findMany({ where: { id: { in: [mine.id, theirs.id] } }, select: { id: true } }));
+    const returns = (tenant: string) => runWithTenant(tenant, () => app.prisma.returnRequest.findMany({ where: { id: { in: [rMine.id, rTheirs.id] } }, select: { id: true } }));
+    expect((await reports(REVIEW)).map((r) => r.id)).toEqual([mine.id]);
+    expect((await reports(PRODUCTION)).map((r) => r.id)).toEqual([theirs.id]);
+    expect((await returns(REVIEW)).map((r) => r.id)).toEqual([rMine.id]);
+    expect((await returns(PRODUCTION)).map((r) => r.id)).toEqual([rTheirs.id]);
+  });
+});
+
 describe('[DB-05] the wall binds a NOBYPASSRLS role', () => {
   it('bound to production it counts ZERO of the fiction’s rows; the fiction sees its own; nobody sees a quarantined row', async () => {
     await system(() => app.prisma.contentReport.create({ data: report(ids.reviewUser) }));
