@@ -19,6 +19,19 @@
 #     is the current checkout (the exact revision pilot-up.sh deployed);
 #   - the target database already carries its deployment_identity row;
 #   - SEED_ADMIN_PHONE (E.164) is set in the environment.
+#
+# [PROD-PATH] PILOT_ENV is staging or production, and the database must say
+# the same thing: a production host seeds only a database whose
+# deployment_identity names production (NODE_ENV=production, and the
+# operator-recorded SEED_FX_GYD_PER_USD), and a staging host never seeds one
+# that does. On production the spine needs TWO people (seed-plan.ts):
+#   1. a first run prints the plan and its digest and exits 2;
+#   2. each approver signs that digest, read-only, never both halves alone:
+#        SEED_SIGN_PLAN=<digest> SEED_SIGN_APPROVER=<name> ./deploy/seed-production.sh <sha>
+#      (the plan is rebuilt and the digest must still match it);
+#   3. the operator applies with both lines:
+#        SEED_PLAN_APPROVALS='[<first>,<second>]' ./deploy/seed-production.sh <sha>
+# Every ceremony step reads SEED_PLAN_SECRET from the encrypted store as a file.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -32,7 +45,17 @@ env_value() { grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA (the exact revision pilot-up.sh deployed)"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
-[ "$(env_value PILOT_ENV)" = staging ] || die "PILOT_ENV must be staging"
+PILOT_ENV="$(env_value PILOT_ENV)"
+case "$PILOT_ENV" in
+  staging | production) ;;
+  *) die "PILOT_ENV must be staging or production" ;;
+esac
+if [ "$PILOT_ENV" = production ]; then
+  [ "$(env_value NODE_ENV | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')" = production ] ||
+    die "PILOT_ENV=production needs NODE_ENV=production: the production spine is never seeded in another posture"
+  [[ "${SEED_FX_GYD_PER_USD:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "${SEED_FX_GYD_PER_USD}" =~ [1-9] ]] ||
+    die "set SEED_FX_GYD_PER_USD (today's GYD per USD, a positive number) in the environment: production records the rate the operator observed, never a constant"
+fi
 SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 [ -n "$SEED_ADMIN_PHONE" ] || die "set SEED_ADMIN_PHONE (the first SUPER_ADMIN's E.164 phone) in the environment"
 # +592600 is DEMO_PHONE_PREFIX (apps/api/src/modules/ops/purge-plan.ts): the
@@ -49,8 +72,16 @@ for tool in git docker; do command -v "$tool" >/dev/null 2>&1 || die "$tool is r
 # reaches the container only as a FILE — its value is never read or printed here.
 SEED_SIGN_APPROVER="${SEED_SIGN_APPROVER:-}"
 SEED_PROMOTION_APPROVALS="${SEED_PROMOTION_APPROVALS:-}"
+# [PROD-PATH] The plan half of the ceremony: SEED_SIGN_PLAN is the digest one
+# approver signs; SEED_PLAN_APPROVALS carries both signed lines to the apply.
+SEED_SIGN_PLAN="${SEED_SIGN_PLAN:-}"
+SEED_PLAN_APPROVALS="${SEED_PLAN_APPROVALS:-}"
 SEED_PLAN_SECRET_FILE=""
-if [ -n "$SEED_SIGN_APPROVER" ] || [ -n "$SEED_PROMOTION_APPROVALS" ]; then
+if [ -n "$SEED_SIGN_PLAN" ]; then
+  [[ "$SEED_SIGN_PLAN" =~ ^[0-9a-f]{64}$ ]] || die "SEED_SIGN_PLAN must be the 64-character plan digest the first run printed"
+  [ -n "$SEED_SIGN_APPROVER" ] || die "SEED_SIGN_PLAN needs SEED_SIGN_APPROVER: the approver's own short lowercase name"
+fi
+if [ -n "$SEED_SIGN_APPROVER" ] || [ -n "$SEED_PROMOTION_APPROVALS" ] || [ -n "$SEED_PLAN_APPROVALS" ]; then
   [ -z "$SEED_SIGN_APPROVER" ] || [[ "$SEED_SIGN_APPROVER" =~ ^[a-z][a-z0-9-]{1,31}$ ]] ||
     die "SEED_SIGN_APPROVER must be a short lowercase name (a-z, 0-9, -)"
   STORE_BIN="$(command -v swift-secrets || true)"
@@ -61,15 +92,24 @@ if [ -n "$SEED_SIGN_APPROVER" ] || [ -n "$SEED_PROMOTION_APPROVALS" ]; then
     die "swift-secrets.service could not materialize the store"
   SEED_PLAN_SECRET_FILE=/run/secrets/SEED_PLAN_SECRET
 fi
-export SEED_SIGN_APPROVER SEED_PROMOTION_APPROVALS SEED_PLAN_SECRET_FILE
+export SEED_SIGN_APPROVER SEED_PROMOTION_APPROVALS SEED_PLAN_SECRET_FILE SEED_SIGN_PLAN SEED_PLAN_APPROVALS
 
 # The one-off container joins the stack's private network, so the stack's
 # Postgres must be up. This read is also the deployment-identity gate: the
 # seed binds its plan to the identity row, so never seed a database that does
 # not say which deployment it is. Only the count is captured — never a URL.
+# [PROD-PATH] The row's environment is read too, and must agree with this host.
 IDENTITY="$("${COMPOSE[@]}" exec -T postgres sh -c \
-  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) FROM deployment_identity;"' 2>/dev/null || true)"
-[ "$IDENTITY" = "1" ] || die "could not read the deployment_identity row (is Postgres up and migrated, and was the row written?) — refusing to seed an unidentified database"
+  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT count(*) || chr(58) || coalesce(max(environment), chr(32)) FROM deployment_identity;"' 2>/dev/null || true)"
+[ "${IDENTITY%%:*}" = "1" ] || die "could not read the deployment_identity row (is Postgres up and migrated, and was the row written?) — refusing to seed an unidentified database"
+IDENTITY_ENV="${IDENTITY#*:}"
+if [ "$PILOT_ENV" = production ]; then
+  [ "$IDENTITY_ENV" = production ] ||
+    die "PILOT_ENV=production, but this database's deployment_identity is not production — refusing to seed it as production"
+else
+  [ "$IDENTITY_ENV" != production ] ||
+    die "this database's deployment_identity is production, but PILOT_ENV=staging — a staging host never seeds a production database"
+fi
 
 cd "$ROOT"
 [ -z "$(git status --porcelain --untracked-files=normal)" ] ||

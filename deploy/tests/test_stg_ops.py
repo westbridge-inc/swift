@@ -518,7 +518,7 @@ class Q11WebsiteCompose(unittest.TestCase):
         self.assertIn("dockerfile: apps/web/Dockerfile", web)
         self.assertIn("image: swift-web:${SWIFT_TAG:-local}", web)
         self.assertIn("NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}", web)
-        self.assertIn("SWIFT_WEB_CHANNEL: staging", web)
+        self.assertIn("SWIFT_WEB_CHANNEL: ${SWIFT_WEB_CHANNEL:-staging}", web)
         # Unfilled company details stay refused unless the operator says otherwise.
         self.assertIn("NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}", web)
 

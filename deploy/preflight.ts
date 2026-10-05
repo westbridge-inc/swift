@@ -136,6 +136,10 @@ const STUBS: Record<string, string> = {
   STORAGE_SIGNING_SECRET: 'x'.repeat(48),
   STORAGE_PROVIDER: 's3',
   CONSENT_IP_PEPPER: 'x'.repeat(48),
+  OPS_ONCALL_PHONES: '+15550000001',
+  EMAIL_PROVIDER: 'smtp',
+  SMTP_HOST: 'stub.invalid', SMTP_PORT: '465', SMTP_USER: 'STUB',
+  SMTP_PASS: 'STUB-NOT-A-REAL-SECRET', EMAIL_FROM: 'stub@stub.invalid',
 };
 
 const fileEnv: Record<string, string | undefined> = readEnvFile(envPath);

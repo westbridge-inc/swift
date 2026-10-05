@@ -1,13 +1,31 @@
 #!/usr/bin/env bash
-# Single-host STAGING cutover. Invoke with an approved full origin/main SHA.
+# Single-host cutover, for the STAGING or the PRODUCTION host (PILOT_ENV in
+# deploy/.env). Invoke with an approved full origin/main SHA.
 # This script intentionally stops the old API/worker before migration. When
 # deploy/.env sets WEB_HOST it also builds and serves the website (apps/web)
 # for the same SHA; without WEB_HOST it does nothing more. ADMIN_HOST does the
 # same for the admin console (apps/admin), behind an optional second gate.
+#
+#   ./deploy/pilot-up.sh <sha>               the whole stack
+#   ./deploy/pilot-up.sh --data-only <sha>   [PROD-PATH] the database only:
+#       every check below, then Postgres, Redis, search and routing up and the
+#       migrations applied. The API, worker, website, console and Caddy are
+#       never started, stopped or replaced — refused outright while an API or
+#       worker is running. For a new host before its provider credentials and
+#       its DNS exist: migrate, back up, rehearse a restore, seed.
+#
+# [PROD-PATH] PILOT_ENV=production adds production-only refusals, each before
+# anything changes: NODE_ENV must be production; no served name may be a
+# staging name; documents in object storage, never on this disk; the backup
+# keys in the store; no unfilled site details; and, for the whole stack, every
+# served name must already resolve to THIS host (Caddy obtains certificates
+# for them, and the public names stay on the old host until DNS moves).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+DATA_ONLY=0
+if [ "${1:-}" = "--data-only" ]; then DATA_ONLY=1; shift; fi
 SHA="${1:-}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 ROUTING=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.routing.yml")
@@ -17,13 +35,22 @@ env_value() {
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
 
+# A setting as Compose reads it: an unquoted value ends before " #".
+env_setting() {
+  env_value "$1" | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//'
+}
+
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
-[ "$(env_value PILOT_ENV)" = staging ] || die "PILOT_ENV must be staging"
+PILOT_ENV="$(env_value PILOT_ENV)"
+case "$PILOT_ENV" in
+  staging | production) ;;
+  *) die "PILOT_ENV must be staging or production" ;;
+esac
 API_HOST="$(env_value API_HOST)"
 [[ "$API_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
-  die "API_HOST must be a DNS hostname for staging HTTPS"
+  die "API_HOST must be a DNS hostname for $PILOT_ENV HTTPS"
 [ "$API_HOST" != localhost ] || die "API_HOST cannot be localhost"
 # [Q11] The website is optional: a DNS name in WEB_HOST turns it on, and every
 # Compose call below then includes its profile (so the port and isolation
@@ -135,7 +162,51 @@ if [ -n "$ADMIN_BASIC_AUTH_HASH" ]; then
     die "ADMIN_BASIC_AUTH_HASH must be a bcrypt hash of cost 10 or more in single quotes (see PILOT-RUNBOOK.md 3d), or empty for no gate"
   unset gate_hash
 fi
+# [PROD-PATH] The production host's own refusals. Each names its setting and
+# runs before anything changes; staging is exactly as it was.
+if [ "$PILOT_ENV" = production ]; then
+  [ "$(env_setting NODE_ENV)" = production ] ||
+    die "PILOT_ENV=production needs NODE_ENV=production: the production host never runs a development, loadtest or test posture"
+  read -r -a served_names <<< "$API_HOST $API_ALIAS_HOST $WEB_HOST $WEB_ALIAS_HOSTS $ADMIN_HOST"
+  for served_name in "${served_names[@]}"; do
+    case "$(lower "$served_name")" in
+      *staging*) die "PILOT_ENV=production refuses the staging name $served_name: a production stack never answers a staging name" ;;
+    esac
+  done
+  case "$(env_setting STORAGE_PROVIDER)" in
+    s3 | r2) ;;
+    *) die "PILOT_ENV=production needs STORAGE_PROVIDER=s3 or r2: identity documents never live on this disk" ;;
+  esac
+  case "$(env_setting STORAGE_ALLOW_LOCAL)" in
+    "" | 0) ;;
+    *) die "PILOT_ENV=production refuses STORAGE_ALLOW_LOCAL: identity documents never live on this disk" ;;
+  esac
+  case "$(env_setting WEB_ALLOW_SITE_TOKENS)" in
+    "" | 0) ;;
+    *) die "PILOT_ENV=production refuses WEB_ALLOW_SITE_TOKENS: the public site never shows unfilled company details" ;;
+  esac
+fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
+# [PROD-PATH] The production stack obtains certificates for every name it
+# serves, so each must already resolve to this host. Until DNS moves, the
+# public names still reach the old host: starting here would fail its own
+# readiness check after stopping nothing, or worse, after a migration. The
+# database-only stage serves nothing and needs no name.
+if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ]; then
+  for tool in getent hostname; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
+  host_addresses=" $(hostname -I 2>/dev/null || true) "
+  read -r -a served_names <<< "$API_HOST $API_ALIAS_HOST $WEB_HOST $WEB_ALIAS_HOSTS $ADMIN_HOST"
+  for served_name in "${served_names[@]}"; do
+    resolved="$(getent ahostsv4 "$served_name" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+    [ -n "$resolved" ] || die "$served_name does not resolve yet; point its DNS at this host before the production stack starts (the database-only stage needs none: --data-only)"
+    for address in $resolved; do
+      case "$host_addresses" in
+        *" $address "*) ;;
+        *) die "$served_name resolves to $address, which is not this host; move its DNS here before the production stack starts (the database-only stage needs none: --data-only)" ;;
+      esac
+    done
+  done
+fi
 
 cd "$ROOT"
 [ -z "$(git status --porcelain --untracked-files=normal)" ] ||
@@ -146,6 +217,10 @@ git merge-base --is-ancestor "$SHA" origin/main ||
 git switch --detach "$SHA"
 [ "$(git rev-parse HEAD)" = "$SHA" ] || die "checkout differs from requested SHA"
 export SWIFT_TAG="$SHA"
+# [PROD-PATH] The website's build channel follows the host: the staging site
+# calls the staging API, the production site the production API, and the
+# site's own origin law refuses any other pairing at build time.
+export SWIFT_WEB_CHANNEL="$PILOT_ENV"
 
 # ── secrets store checks (begin) ──────────────────────────────────────────
 # Secrets never live in deploy/.env: the encrypted host store holds them
@@ -181,8 +256,12 @@ for name in $WIRED; do
     die "$name is wired as ${name}_FILE but is not in the encrypted store; run: sudo swift-secrets set $name"
 done
 for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
-  grep -qx "$name" <<< "$STORED" ||
+  if ! grep -qx "$name" <<< "$STORED"; then
+    # [PROD-PATH] Production never runs a day without its off-site backup.
+    [ "${PILOT_ENV:-}" != production ] ||
+      die "$name is not in the encrypted store; production never runs without its off-site backup keys (sudo swift-secrets set $name)"
     echo "WARNING: $name is not in the encrypted store; the nightly backup unit (BACKUP_REQUIRED=1) fails until it is" >&2
+  fi
 done
 # Fresh files for this deploy, and proof the unit is installed.
 sudo -n systemctl restart swift-secrets.service ||
@@ -225,17 +304,27 @@ if "osrm" not in s or any(x.get("ports") for x in s.values()):
 }
 verify_private_ports
 
+# [PROD-PATH] The database-only stage never runs under a serving API: a
+# migration under a live old binary is exactly what the full deploy stops
+# the API to avoid. Refused before anything is pulled or built.
+if [ "$DATA_ONLY" -eq 1 ]; then
+  for service in api worker; do
+    [ -z "$("${COMPOSE[@]}" ps -q "$service" 2>/dev/null || true)" ] ||
+      die "--data-only refuses a stack whose $service is running; use the full deploy, which stops it before migrating"
+  done
+fi
+
 # Pull versioned infrastructure images, then build the exact checked-out API.
 "${COMPOSE[@]}" pull postgres redis meilisearch caddy
 "${ROUTING[@]}" pull osrm
 "${COMPOSE[@]}" build api
 # [Q11] The website's image for the same exact commit, built before anything
 # is stopped: a site that does not build leaves the running stack untouched.
-if [ -n "$WEB_HOST" ]; then
+if [ -n "$WEB_HOST" ] && [ "$DATA_ONLY" -eq 0 ]; then
   "${COMPOSE[@]}" build web
 fi
 # [ADMIN-CONSOLE] The same for the admin console: built before anything stops.
-if [ -n "$ADMIN_HOST" ]; then
+if [ -n "$ADMIN_HOST" ] && [ "$DATA_ONLY" -eq 0 ]; then
   "${COMPOSE[@]}" build admin
 fi
 "${COMPOSE[@]}" up -d --wait postgres redis meilisearch
@@ -245,12 +334,16 @@ fi
 docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" \
   -e "fetch('http://osrm:5000/nearest/v1/driving/-58.16,6.80').then(async r => { if (!r.ok || (await r.json()).code !== 'Ok') process.exit(1) }).catch(() => process.exit(1))"
 
-"${COMPOSE[@]}" stop api worker
+[ "${DATA_ONLY:-0}" -eq 1 ] || "${COMPOSE[@]}" stop api worker
 "${COMPOSE[@]}" up -d --force-recreate migrate
 MIGRATE_ID="$("${COMPOSE[@]}" ps -a -q migrate)"
 [ -n "$MIGRATE_ID" ] || die "migration container was not created"
 . "$HERE/wait-for-migration.sh"
 wait_for_migration "$MIGRATE_ID" || die "migration did not complete successfully"
+if [ "${DATA_ONLY:-0}" -eq 1 ]; then
+  echo "DATABASE READY at exact SHA $SHA ($PILOT_ENV; migrations applied; the API, worker and Caddy were not started)"
+  exit 0
+fi
 
 "${COMPOSE[@]}" up -d --no-deps --force-recreate api worker
 "${COMPOSE[@]}" up -d --no-deps --force-recreate caddy
@@ -322,4 +415,4 @@ if [ -n "$ADMIN_HOST" ]; then
   fi
   echo "ADMIN CONSOLE READY at https://$ADMIN_HOST (exact SHA $SHA; extra sign-in gate $ADMIN_GATE)"
 fi
-echo "STAGING READY at exact SHA $SHA"
+echo "$(printf '%s' "$PILOT_ENV" | tr '[:lower:]' '[:upper:]') READY at exact SHA $SHA"

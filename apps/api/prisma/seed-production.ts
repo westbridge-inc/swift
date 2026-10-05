@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
-import { seedPlatformSpine } from './seed-platform';
-import { promoteBootstrapAdmin, signPromotionForTarget, type SeedPlan } from '../src/modules/ops/seed-plan';
+import { desiredPlatformConfig, seedPlatformSpine } from './seed-platform';
+import { promoteBootstrapAdmin, signPromotionForTarget, signSeedPlanForTarget, type SeedPlan } from '../src/modules/ops/seed-plan';
 import type { Approval } from '../src/modules/ops/purge-plan';
 
 /**
@@ -15,6 +15,9 @@ import type { Approval } from '../src/modules/ops/purge-plan';
  *      `SEED_PLAN_APPROVALS='[{"approver":"…","signature":"…"}]'`; without
  *      them it prints the plan digest to sign and exits 2. Anywhere else the
  *      plan applies directly (an empty diff applies nothing and says so).
+ *      [PROD-PATH] Each approver signs with SEED_SIGN_PLAN=<digest> and
+ *      SEED_SIGN_APPROVER=<name> (read-only; the plan is rebuilt and must
+ *      still carry that digest).
  *   3. The first SUPER_ADMIN (SEED_ADMIN_PHONE) is minted only while NONE
  *      exists; afterwards it is a break-glass change needing two approvals
  *      over the target and the phone (`SEED_PROMOTION_APPROVALS`).
@@ -57,6 +60,17 @@ async function main(): Promise<void> {
     // SEED_ADMIN_PHONE on this database. Read-only — it prints the approval
     // (a name and a signature, never the key) and seeds nothing.
     const signer = process.env['SEED_SIGN_APPROVER'];
+    // [PROD-PATH] Plan-sign mode: ONE approver's half of a production spine
+    // apply, over the digest a first run printed. Read-only: the plan is
+    // rebuilt and must still carry that digest; nothing is seeded.
+    const planDigest = process.env['SEED_SIGN_PLAN'];
+    if (planDigest) {
+      if (!signer) throw new Error('SEED_SIGN_PLAN needs SEED_SIGN_APPROVER (the approver\'s own name)');
+      const approval = await signSeedPlanForTarget(prisma, databaseUrl, desiredPlatformConfig(), secret, signer, planDigest);
+      console.warn(`Approval by ${approval.approver} for plan ${planDigest.slice(0, 12)} on this database — hand this line to the operator:`);
+      console.log(JSON.stringify(approval));
+      return;
+    }
     if (signer) {
       const approval = await signPromotionForTarget(prisma, databaseUrl, secret, signer, process.env['SEED_ADMIN_PHONE'] ?? '');
       console.warn(`Approval by ${approval.approver} for this database and phone — hand this line to the operator:`);

@@ -50,6 +50,10 @@ services:
       SEED_PLAN_SECRET_FILE: ${SEED_PLAN_SECRET_FILE:-}
       SEED_PROMOTION_APPROVALS: ${SEED_PROMOTION_APPROVALS:-}
       SEED_SIGN_APPROVER: ${SEED_SIGN_APPROVER:-}
+      # [PROD-PATH] The plan half on a production target: the digest one
+      # approver signs, and both signed lines for the apply. Not secrets.
+      SEED_SIGN_PLAN: ${SEED_SIGN_PLAN:-}
+      SEED_PLAN_APPROVALS: ${SEED_PLAN_APPROVALS:-}
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     networks: [private]

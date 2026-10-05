@@ -6,7 +6,7 @@ import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription }
 import { getChannels } from '../../providers/notifications/channels';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
-import { getMmgProvider } from '../../providers/mmg/mmg-provider';
+import { getMmgProvider, mmgDisabled } from '../../providers/mmg/mmg-provider';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
@@ -1705,6 +1705,11 @@ export class BillingService {
     }
 
     if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {
+      // [PROD-PATH] MMG fully off (MMG_DRIVER=disabled): defer, exactly as a
+      // card does while its rail is off — BEFORE any lookup, intent row or
+      // request. Nothing is charged, nothing fails, nobody is dunned and the
+      // period does not move; the week is billed once MMG is switched on.
+      if (mmgDisabled()) return { ok: false, deferred: true, rail: 'MOBILE_MONEY' };
       const mmg = getMmgProvider();
       // SWIFT-004 — MMG double-charge guard. The poller's synthetic 24h expiry
       // can mark a prior request FAILED while MMG still holds it live on the
@@ -2812,6 +2817,13 @@ export class BillingService {
       .slice(0, 200);
     const out = { settled: 0, banked: 0, adopted: 0, failed: 0, stillPending: 0 };
     if (pending.length === 0) return out;
+    // [PROD-PATH] MMG fully off: no row is stamped, looked up, expired or
+    // dunned. Only MMG's own answer may resolve a request it once accepted
+    // [LAW M-5], so every row waits, untouched, until MMG is switched on.
+    if (mmgDisabled()) {
+      out.stillPending = pending.length;
+      return out;
+    }
 
     const mmg = getMmgProvider();
     for (const payment of pending) {

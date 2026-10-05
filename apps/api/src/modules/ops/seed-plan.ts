@@ -146,6 +146,24 @@ export async function buildSeedPlan(prisma: PrismaClient, databaseUrl: string, d
 export function signSeedApproval(secret: string, approver: string, planDigest: string): Approval {
   return { approver, signature: hmac(secret, `seed-approve:${approver}:${planDigest}`) };
 }
+
+/**
+ * [PROD-PATH] ONE approver's half of a production spine apply — what each
+ * person hands the operator. Read-only: the plan is REBUILT for this target
+ * and the configuration this code holds, and the approver signs only if its
+ * digest is still the one they were shown. A digest from another database,
+ * another configuration or a database that has changed since is refused, so
+ * nobody signs a plan they did not see. applySeedPlan verifies each half.
+ */
+export async function signSeedPlanForTarget(prisma: PrismaClient, databaseUrl: string, desired: DesiredConfig, secret: string | undefined, approver: string, digest: string): Promise<Approval> {
+  if (!secret) throw new SeedRefused('SECRET_REQUIRED', 'signing an approval needs SEED_PLAN_SECRET');
+  if (!APPROVER_NAME.test(approver)) throw new SeedRefused('APPROVER_INVALID', 'an approver name is 2–32 lowercase letters, digits or hyphens');
+  if (!/^[0-9a-f]{64}$/.test(digest)) throw new SeedRefused('DIGEST_INVALID', 'the plan digest is the 64-character hex the first run printed');
+  const plan = await buildSeedPlan(prisma, databaseUrl, desired);
+  if (plan.target.environment === 'unknown') throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first');
+  if (plan.digest !== digest) throw new SeedRefused('PLAN_CHANGED', `the plan for this database is now ${plan.digest.slice(0, 12)}, not the digest given; print it again and sign what is current`);
+  return signSeedApproval(secret, approver, plan.digest);
+}
 function verifySeedApprovals(secret: string, digest: string, approvals: Approval[]): string[] {
   if (approvals.length < 2) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
   const names = new Set(approvals.map((a) => a.approver.trim().toLowerCase()));

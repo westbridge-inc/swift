@@ -461,7 +461,14 @@ errors. The UnsetEnvironment property mirrors swift-backup.service: the two
 `*_FILE` names deploy/.env wires for the containers would otherwise shadow the
 credential directory systemd provides, exactly the trap the backup unit hit.
 Record the actual elapsed time and inspect constraints and policies in the
-scratch database. Restore an encrypted document from the separate document
+scratch database. On a new or quiet database, add `--compare-source` (first
+argument, before the object) to judge the copy against the live database it
+came from instead of fixed minimums: every table's row count, every table's
+row-level-security switches, and every policy, constraint and index must
+match exactly, and the script prints both summaries (the backup heartbeats
+in platform_config are left out of the count, since backup.sh writes them
+after the dump). A row written to the live database since the dump is a
+mismatch, so run it right after the backup. Restore an encrypted document from the separate document
 bucket and verify it can be decrypted with the off-host MASTER_KEK escrow
 copy; the database dump alone cannot prove this. Keep the scratch database
 until the drill evidence is reviewed. A controlled cleanup then uses a
@@ -668,3 +675,91 @@ The console's **Zones** page shows the zones with their per-km rates and adds, c
 The seed only creates rows; it never changes or deletes them. An install seeded before October still has the old
 Georgetown Central ↔ South 2,000 pair until an admin removes it, and it gains the airport zones only by a seed run or
 the admin calls above.
+
+## 11. The production host (PILOT_ENV=production)
+
+The same scripts run the production host, a separate server. They never turn a
+staging host into production. deploy/.env on that host says
+`PILOT_ENV=production`, and pilot-up.sh then also refuses, each before
+anything changes:
+
+- any NODE_ENV but `production`;
+- a served name (API_HOST, API_ALIAS_HOST, WEB_HOST, WEB_ALIAS_HOSTS,
+  ADMIN_HOST) containing `staging`;
+- documents on the host's disk (STORAGE_PROVIDER must be s3 or r2, and
+  STORAGE_ALLOW_LOCAL must be unset) and WEB_ALLOW_SITE_TOKENS;
+- a store without AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (the backup
+  keys);
+- for the whole stack, a served name that does not already resolve to this
+  host (`getent ahostsv4` against `hostname -I`): Caddy obtains the
+  certificates, and the public names stay on the old host until DNS moves.
+
+The website, when WEB_HOST is set, is built on the production channel
+(SWIFT_WEB_CHANNEL follows PILOT_ENV), so it must call `https://api.<site
+domain>`.
+
+The API refuses to boot in production unless every provider is real or
+explicitly off. Beyond the earlier guards:
+
+- **MMG.** `MMG_DRIVER=live` with every credential and the verified
+  reference round-trip, or exactly `MMG_DRIVER=disabled` with
+  `MMG_CHECKOUT_ENABLED=0`. With MMG off, the weekly fee on the MMG rail is
+  deferred, the way a card is while the card rail is off. Nothing is
+  charged, failed or dunned, and the week is billed once MMG is switched on.
+  The poller leaves every row untouched, and any other MMG call refuses with
+  MMG_DISABLED.
+- **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
+  unacknowledged SOS escalates to them by SMS.
+- **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
+  EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE).
+
+### Database first, before the providers and DNS
+
+    cd /opt/swift
+    ./deploy/pilot-up.sh --data-only "$APPROVED_SHA"
+
+It runs every check above except DNS, starts Postgres, Redis, search and
+routing, and applies the migrations. It never starts, stops or builds the
+API, worker, website, console or Caddy, and it refuses outright while an
+API or worker is running. Then write the identity row the seed and the
+purge tools bind to, once, as swift-deploy:
+
+    docker compose -f deploy/docker-compose.yml exec -T postgres sh -c \
+      'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' <<'SQL'
+    INSERT INTO deployment_identity (id, "deploymentId", environment, "updatedAt")
+    VALUES ('singleton', 'swift-production', 'production', now());
+    SQL
+
+Back up and rehearse the restore (sections 4 and 5, with `--compare-source`).
+
+### The spine seed: a two-person ceremony
+
+seed-production.sh on PILOT_ENV=production needs NODE_ENV=production,
+SEED_FX_GYD_PER_USD (today's observed GYD per USD) in the environment, and a
+database whose deployment_identity says production. A staging host never
+seeds a production database. SEED_PLAN_SECRET must be in the store (section
+6b, step 1).
+
+1. The first run prints the plan and its digest, and exits 2:
+
+       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' ./deploy/seed-production.sh "$SHA"
+
+2. Each approver signs that digest, read-only. The plan is rebuilt and must
+   still carry it. It prints one line, `{"approver":"…","signature":"…"}`:
+
+       SEED_FX_GYD_PER_USD=<rate> SEED_SIGN_PLAN=<digest> SEED_SIGN_APPROVER=<their-name> ./deploy/seed-production.sh "$SHA"
+
+   Two different people sign. Nobody signs both halves.
+
+3. The operator applies with both lines. While no SUPER_ADMIN exists,
+   SEED_ADMIN_PHONE becomes the first one:
+
+       SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' \
+       SEED_PLAN_APPROVALS='[<first line>,<second line>]' ./deploy/seed-production.sh "$SHA"
+
+### The whole stack
+
+Once the owner's provider secrets are stored and wired (TWILIO_*,
+SMTP_PASS_FILE, OPS_ONCALL_PHONES) and DNS points at this host, run
+`./deploy/pilot-up.sh "$APPROVED_SHA"`. It ends with `PRODUCTION READY at
+exact SHA …`. Then follow section 9 for the certificate chain.

@@ -6,7 +6,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
-  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, promoteBootstrapAdmin, seedPlanDigest, signPromotionApproval, signPromotionForTarget, signSeedApproval,
+  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, promoteBootstrapAdmin, seedPlanDigest, signPromotionApproval, signPromotionForTarget, signSeedApproval, signSeedPlanForTarget,
   type DesiredConfig, type SeedPlan,
 } from '../modules/ops/seed-plan';
 import { desiredPlatformConfig, seedPlatformSpine } from '../modules/ops/platform-config';
@@ -314,6 +314,72 @@ describe('[DS250 F3] sign mode through the real seed entry point', () => {
     expect(await prisma.user.count()).toBe(usersBefore);
     expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
   }, 120_000);
+});
+
+describe('[PROD-PATH] the plan half of the production ceremony: each approver signs what is current', () => {
+  it('two halves signed by signSeedPlanForTarget apply the plan on a production target; signing itself writes nothing', async () => {
+    await setIdentity('production');
+    try {
+      const desired = desiredFor(20);
+      const printed = await buildSeedPlan(prisma, URL_, desired);
+      const auditsBefore = await prisma.privilegedChangeAudit.count();
+      const alice = await signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', printed.digest);
+      const bob = await signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'bob', printed.digest);
+      expect(alice).toEqual(signSeedApproval(SECRET, 'alice', printed.digest));
+      expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
+      expect(await prisma.platformConfig.findUnique({ where: { key: KEY } }).then((r) => r?.value)).not.toBe(20);
+      const rebuilt = await buildSeedPlan(prisma, URL_, desired);
+      const res = await applySeedPlan(prisma, URL_, desired, rebuilt, { secret: SECRET, approvals: [alice, bob], actor: 'alice' });
+      expect(res).toMatchObject({ applied: 1, configVersion: 'test-20' });
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('refuses a digest that is not the current plan, a missing key, a bad name, a malformed digest and an unidentified database', async () => {
+    const desired = desiredFor(21);
+    const current = await buildSeedPlan(prisma, URL_, desired);
+    const stale = (await buildSeedPlan(prisma, URL_, desiredFor(22))).digest;
+    const code = (p: Promise<unknown>) => p.then(() => 'SIGNED', (e: unknown) => (e as SeedRefused).code);
+    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', stale))).toBe('PLAN_CHANGED');
+    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, undefined, 'alice', current.digest))).toBe('SECRET_REQUIRED');
+    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'Alice Smith', current.digest))).toBe('APPROVER_INVALID');
+    expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', current.digest.slice(0, 12)))).toBe('DIGEST_INVALID');
+    await prisma.deploymentIdentity.deleteMany({ where: { id: 'singleton' } });
+    try {
+      const unknown = await buildSeedPlan(prisma, URL_, desired);
+      expect(await code(signSeedPlanForTarget(prisma, URL_, desired, SECRET, 'alice', unknown.digest))).toBe('TARGET_UNKNOWN');
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('plan-sign mode through the real seed entry point prints one approval over the current spine plan, seeds nothing, never prints the key', async () => {
+    const auditsBefore = await prisma.privilegedChangeAudit.count();
+    const configBefore = await prisma.platformConfig.count();
+    const digest = (await buildSeedPlan(prisma, URL_, desiredPlatformConfig())).digest;
+    const res = spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), ['prisma/seed-production.ts'], {
+      encoding: 'utf8',
+      timeout: 90_000,
+      env: { PATH: process.env['PATH'] ?? '', NODE_ENV: 'test', DATABASE_URL: URL_, SEED_PLAN_SECRET: SECRET, SEED_SIGN_APPROVER: 'owner', SEED_SIGN_PLAN: digest },
+    });
+    expect(res.status, res.stderr).toBe(0);
+    const lines = res.stdout.trim().split('\n');
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toEqual(signSeedApproval(SECRET, 'owner', digest));
+    expect(res.stdout + res.stderr).not.toContain(SECRET);
+    expect(await prisma.privilegedChangeAudit.count()).toBe(auditsBefore);
+    expect(await prisma.platformConfig.count()).toBe(configBefore);
+
+    const stale = spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), ['prisma/seed-production.ts'], {
+      encoding: 'utf8',
+      timeout: 90_000,
+      env: { PATH: process.env['PATH'] ?? '', NODE_ENV: 'test', DATABASE_URL: URL_, SEED_PLAN_SECRET: SECRET, SEED_SIGN_APPROVER: 'owner', SEED_SIGN_PLAN: 'f'.repeat(64) },
+    });
+    expect(stale.status).not.toBe(0);
+    expect(stale.stdout).toBe('');
+    expect(stale.stderr).toContain('PLAN_CHANGED');
+  }, 200_000);
 });
 
 describe('[R048-005] the demo seed needs an ephemeral database', () => {
