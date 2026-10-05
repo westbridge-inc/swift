@@ -19,6 +19,25 @@ describe('bounded chat contact patterns', () => {
   ])('refuses links outside the complete canonical exception %s', (text) => {
     expect(chatContentReason(text)).toBe('LINK');
   });
+  it.each([
+    'meet at 11.am', 'see you 3.pm', 'I.am on my way', 'it.was good', 'come.to the gate',
+    'no.in stock', 'he.said hi', 'we.are here', 'do.it now', 'she.loves it',
+  ])('does not mistake ordinary words joined by a dot for a link: %s', (text) => {
+    expect(chatContentReason(text)).toBeUndefined();
+  });
+  it.each(['visit shop.gy today', 'join t.me/swiftdeals', 'see example.com', 'mysite.online/menu', 'order at food.store'])(
+    'still refuses a bare web address %s', (text) => {
+      expect(chatContentReason(text)).toBe('LINK');
+    },
+  );
+  it.each(['call-6001000', 'tel-5926001000', 'my-592-600-1000', '$5926001000', 'GYD 5926001000'])(
+    'refuses a number joined by a hyphen or dressed as a currency amount %s', (text) => {
+      expect(chatContentReason(text)).toBe('PHONE');
+    },
+  );
+  it.each(['SW-260715-001234', 'order SW-260715-001QDB arrived'])('allows an order reference %s', (text) => {
+    expect(chatContentReason(text)).toBeUndefined();
+  });
   it.each(['05-10-2026', '5-10-2026', '31.12.2026', '29-02-2028', 'deliver on 05-10-2026 please'])('allows a day-month-year date %s', (text) => {
     expect(chatContentReason(text)).toBeUndefined();
   });
