@@ -211,7 +211,7 @@ describe('[W-01] every request carries the client name and the cookies; a 401 re
 });
 
 describe('[W-01] the gate is the server’s word, not a token’s presence', () => {
-  it('sessionProbe is ok only when the server names a user; a 401 and a network failure are both "not signed in"', async () => {
+  it('sessionProbe is ok only when the server names a user; only a 401 proves signed out', async () => {
     const auth = await loadAuth();
     mockApi(() => signedInAs('u1'));
     expect(await auth.sessionProbe()).toMatchObject({ ok: true, user: { id: 'u1' } });
@@ -219,7 +219,7 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
 
     const auth2 = await loadAuth();
     mockApi(() => ({ status: 401, body: { success: false } }));
-    expect(await auth2.sessionProbe()).toEqual({ ok: false });
+    expect(await auth2.sessionProbe()).toEqual({ ok: false, signedOut: true });
 
     const auth3 = await loadAuth();
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
@@ -343,14 +343,13 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
     await expect(auth.apiFetch('/api/v1/vendor/orders')).rejects.toMatchObject({ status: 409, code: 'SESSION_CHANGED' });
   });
 
-  it('LEARNING who the session belongs to is not an account change — a page that loads while the probe runs is not killed', async () => {
+  it('a bootstrap read queued behind the first identity probe succeeds in the new epoch', async () => {
     const auth = await loadAuth();
     // the shape every page has: a probe and a data read start together, and the
-    // probe answers first. Nothing changed accounts — the app just found out.
+    // probe answers first. The read must start under the proven epoch.
     mockApi(({ url }) => (url.pathname.endsWith('/auth/me') ? signedInAs('u1') : { body: { success: true, data: { ok: true } } }));
-    const [probe, data] = await Promise.all([auth.sessionProbe(), auth.apiFetch('/api/v1/customer/home')]);
-    expect(probe.ok).toBe(true);
-    expect(data).toMatchObject({ data: { ok: true } });
+    await expect(Promise.all([auth.sessionProbe(), auth.apiFetch('/api/v1/customer/home')]))
+      .resolves.toMatchObject([{ ok: true }, { data: { ok: true } }]);
   });
 
   it('a signed-OUT answer does not render under a session that began while it was in flight', async () => {
@@ -382,9 +381,11 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
 
   it('signing out and back in as someone else clears what was keyed to the first person', async () => {
     const auth = await loadAuth();
-    sessionStorage.setItem('swift_web_checkout_attempt:store-a', 'sig-1');
     mockApi(() => signedInAs('u1'));
     await auth.sessionProbe();
+    // Create the attempt under a proven identity, as checkout does. A draft
+    // made before the first probe now belongs to the previous guest epoch.
+    sessionStorage.setItem('swift_web_checkout_attempt:store-a', 'sig-1');
     expect(sessionStorage.getItem('swift_web_checkout_attempt:store-a')).toBe('sig-1');
     auth.adoptSession('u2');
     expect(sessionStorage.getItem('swift_web_checkout_attempt:store-a')).toBeNull();
@@ -425,7 +426,7 @@ describe('[Q7b] a returning customer is restored, and the app shell hears every 
   it('the probe itself never spends a refresh: guests must not use up the per-address refresh limit on every page', async () => {
     const auth = await loadAuth();
     const fetchMock = mockApi(() => ({ status: 401, body: { success: false } }));
-    expect(await auth.sessionProbe()).toEqual({ ok: false });
+    expect(await auth.sessionProbe()).toEqual({ ok: false, signedOut: true });
     expect(trail(fetchMock)).toEqual(['GET /api/v1/auth/me']);
   });
 

@@ -7,6 +7,8 @@ import * as api from '@/lib/customer';
 const state = vi.hoisted(() => ({ pathname: '/', principal: null as string | null, replace: vi.fn(), sessionProbe: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => state.pathname, useRouter: () => ({ replace: state.replace, push: vi.fn(), back: vi.fn() }) }));
 vi.mock('@/lib/auth', () => ({
+  currentSessionEpoch: () => 0,
+  verifySessionNow: state.sessionProbe,
   sessionProbe: state.sessionProbe,
   restoreSession: vi.fn().mockResolvedValue({ ok: false }),
   getSessionPrincipal: () => state.principal,
@@ -122,7 +124,9 @@ describe('[PWA-1] the customer shell, installed', () => {
     fireEvent.change(address, { target: { value: 'Test destination, Georgetown' } });
     act(() => { window.dispatchEvent(new Event('offline')); });
     expect(screen.getByText('You’re offline.')).toBeTruthy();
-    act(() => { window.dispatchEvent(new Event('online')); });
+    const probes = state.sessionProbe.mock.calls.length;
+    await act(async () => { window.dispatchEvent(new Event('online')); });
+    expect(state.sessionProbe).toHaveBeenCalledTimes(probes + 1);
     expect(reload).not.toHaveBeenCalled();
     expect(screen.queryByText('You’re offline.')).toBeNull();
     expect(screen.getByRole('textbox', { name: 'Search the delivery destination' })).toBe(address);

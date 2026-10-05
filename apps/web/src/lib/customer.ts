@@ -3,7 +3,7 @@
 // Customer ordering client for the web app — talks to the SAME backend the
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
-import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
+import { BROWSER_CLIENT, ApiRequestError, adoptSession, apiFetch, currentSessionEpoch, getSessionPrincipal, sendOtp } from './auth';
 import { formatMoney } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
@@ -12,7 +12,8 @@ export { sendOtp };
 
 // ── Auth (customer) ────────────────────────────────────────────────────────
 /** OTP login that accepts a CUSTOMER account (partner login rejects them). */
-export async function verifyCustomerLogin(phone: string, code: string): Promise<{ user: any }> {
+export async function verifyCustomerLogin(phone: string, code: string, onAdopt?: (_epoch: number) => void): Promise<{ user: any }> {
+  const epoch = currentSessionEpoch();
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
     credentials: 'include',
@@ -27,7 +28,9 @@ export async function verifyCustomerLogin(phone: string, code: string): Promise<
   if (data.isNewUser || !data.user?.id) {
     throw new Error('No Swift account is registered to that number yet. Create your account on this page to continue.');
   }
+  if (currentSessionEpoch() !== epoch) throw new ApiRequestError('The signed-in account changed. Try again.', 409, 'SESSION_CHANGED');
   adoptSession(data.user.id);
+  onAdopt?.(currentSessionEpoch());
   return { user: data.user };
 }
 
@@ -35,6 +38,7 @@ const API_BASE = API_URL;
 
 /** Verify the OTP without deciding a role — returns whether the number is new. */
 export async function verifyOtp(phone: string, code: string): Promise<{ isNewUser: boolean; user?: any; signedIn: boolean }> {
+  const epoch = currentSessionEpoch();
   const res = await fetch(`${API_BASE}/api/v1/auth/verify-otp`, {
     method: 'POST', credentials: 'include',
     headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
@@ -42,6 +46,7 @@ export async function verifyOtp(phone: string, code: string): Promise<{ isNewUse
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
+  if (currentSessionEpoch() !== epoch) throw new ApiRequestError('The signed-in account changed. Try again.', 409, 'SESSION_CHANGED');
   const d = json.data;
   if (!d.isNewUser && d.user?.id) { adoptSession(d.user.id); return { isNewUser: false, user: d.user, signedIn: true }; }
   return { isNewUser: true, signedIn: false };
@@ -49,6 +54,7 @@ export async function verifyOtp(phone: string, code: string): Promise<{ isNewUse
 
 /** Register a brand-new account with the chosen role (after OTP verify). */
 export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean }): Promise<{ user: any; roles: string[] }> {
+  const epoch = currentSessionEpoch();
   const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
     method: 'POST', credentials: 'include',
     headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
@@ -57,6 +63,7 @@ export async function registerAccount(body: { phone: string; firstName: string; 
   const json = await res.json().catch(() => ({}));
   const registered = json?.data?.user;
   if (!res.ok || !registered?.id) throw new Error(json?.error?.message || 'Could not create your account.');
+  if (currentSessionEpoch() !== epoch) throw new ApiRequestError('The signed-in account changed. Try again.', 409, 'SESSION_CHANGED');
   adoptSession(registered.id);
   return { user: json.data.user, roles: json.data.user?.roles ?? [] };
 }

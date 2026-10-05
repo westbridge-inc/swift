@@ -80,7 +80,8 @@ describe('web taxi pilot restriction', () => {
     ['customer home', CustomerHome], ['explore', ExplorePage],
     ['welcome', WelcomePage], ['FAQ', FaqPage], ['how it works', HowItWorksPage], ['footer', SiteFooter],
   ] as const)('%s states that taxi rides require the mobile app', (_name, Page) => {
-    render(<Page />);
+    // Customer routes receive this provider from AppLayout in production.
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><Page /></QueryClientProvider>);
     expect(screen.getAllByText(/taxi rides.*Swift mobile app/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/everything works, including tracking/)).toBeNull();
     expect(screen.queryByText(/No app needed|Everything the Swift app does, now on the web/)).toBeNull();

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { restoreSession, sessionProbe } from '@/lib/auth';
+import { currentSessionProof, restoreSession, sessionProbe } from '@/lib/auth';
 
 /** The return document carries no identity. Resolve only from this session. */
 export function WeeklyFeeDestination() {
@@ -12,10 +12,13 @@ export function WeeklyFeeDestination() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      let session = await sessionProbe();
-      if (!session.ok) session = await restoreSession();
+      let session = await currentSessionProof(sessionProbe());
+      if (session.signedOut) {
+        const restored = await currentSessionProof(restoreSession());
+        if (restored.ok || restored.signedOut) session = restored;
+      }
       if (cancelled) return;
-      if (!session.ok) { router.replace('/login?next=%2Fweekly-fee'); return; }
+      if (!session.ok) { if (session.signedOut) router.replace('/login?next=%2Fweekly-fee'); return; }
       const roles = Array.isArray(session.user?.['roles']) ? session.user['roles'] : [];
       const vendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!session.user?.['vendorOwner'];
       const mover = roles.some((r) => ['MOVER', 'RIDER', 'DRIVER'].includes(r));
