@@ -10,7 +10,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 
 export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false }: {
   family: FeeFamily; sub?: FeeSubscription | null; loading?: boolean; error?: boolean;
@@ -75,10 +75,15 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
         <View>
           <T variant="heading">Recent checkouts</T>
-          {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => <Card key={c.ref} style={{ marginTop: space.md }}>
-            <T variant="caption" tone="muted">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</T>
-            <T variant="body">{checkoutWords(c.ref === view.checkout?.ref ? view.checkout : c, c.ref === view.checkout?.ref && view.returned)}</T>
-          </Card>) : <T variant="caption" tone="muted" style={{ marginTop: space.md }}>No recent checkouts.</T>}
+          {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
+            const shown = c.ref === view.checkout?.ref ? view.checkout : c;
+            return <Card key={c.ref} style={{ marginTop: space.md }}>
+              <T variant="caption" tone="muted">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</T>
+              <T variant="body">{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</T>
+              {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
+              {checkoutReferences(shown).map((r) => <T key={r.label} variant="caption" tone="muted" selectable>{r.label}: {r.value}</T>)}
+            </Card>;
+          }) : <T variant="caption" tone="muted" style={{ marginTop: space.md }}>No recent checkouts.</T>}
         </View>
       </ScrollView>}
   </Screen>;
