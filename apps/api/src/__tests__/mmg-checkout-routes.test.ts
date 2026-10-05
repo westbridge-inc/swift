@@ -1059,6 +1059,36 @@ describe('limits: rate and body caps on every door', () => {
     expect(bigForm.statusCode).toBe(413);
   });
 
+  it('[Sol] one source shares ONE ceiling on each public door, whatever bearer token it sends', async () => {
+    // A signed-in caller's token selects a per-user bucket in the global key;
+    // on the public doors that would let one source multiply its allowance by
+    // rotating principals. Anonymous and two signed-in partners, from one
+    // address, together get exactly the ceiling.
+    const fresh = await buildApp();
+    try {
+      const a = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const b = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const c = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+      const as = (who: Actor | null) => (who ? { authorization: `Bearer ${who.token}` } : {});
+      const doors = [
+        { max: MMG_CHECKOUT_RETURN_RATE.max, hit: (who: Actor | null) => fresh.inject({ method: 'POST', url: RETURN_URL, headers: { 'content-type': 'application/json', ...as(who) }, payload: { outcome: 'success', params: { token: 'x' } } }) },
+        { max: MMG_CHECKOUT_NOTIFY_RATE.max, hit: (who: Actor | null) => fresh.inject({ method: 'POST', url: NOTIFY_URL, headers: { 'content-type': 'application/json', ...as(who) }, payload: { token: 'x' } }) },
+      ];
+      for (const door of doors) {
+        const callers = [null, a, b];
+        for (let i = 0; i < door.max; i += 1) expect((await door.hit(callers[i % callers.length] ?? null)).statusCode).toBe(200);
+        // Over the ceiling for everyone at that source: anonymous, the same partners, and a principal not seen before.
+        for (const who of [null, a, b, c]) {
+          const over = await door.hit(who);
+          expect(over.statusCode).toBe(429);
+          expect(over.json().error.code).toBe('RATE_LIMITED');
+        }
+      }
+    } finally {
+      await fresh.close();
+    }
+  });
+
   it('starting a checkout is rate-limited per partner', async () => {
     const p = await makeStore();
     for (let i = 0; i < MMG_CHECKOUT_START_RATE.max; i += 1) {
