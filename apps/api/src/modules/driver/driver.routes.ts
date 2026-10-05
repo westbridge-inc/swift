@@ -21,7 +21,7 @@ import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
-import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
@@ -32,6 +32,7 @@ import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handove
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
@@ -166,7 +167,7 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return {
       success: true,
-      data: driver ? { ...driver, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
+      data: driver ? { ...driver, subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
     };
   });
 
@@ -354,7 +355,8 @@ export async function driverRoutes(app: FastifyInstance) {
     // subscription row; the verdict maps onto this route's historical codes.
     // [REVIEW-PARTNER] Except in the store-review fiction, which has no money
     // rail and therefore never holds one (review/demo-policy.ts).
-    const operability = subscriptionOperability(driver.subscription, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') });
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
@@ -377,6 +379,10 @@ export async function driverRoutes(app: FastifyInstance) {
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'DRIVER');
+      await lockMoverSources(tx, feePayer);
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') })).operable) {
+        throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active shared weekly fee is required to go online.');
+      }
 
       // Revalidate the exact authenticated session under the User lock. A
       // logout/reuse-revocation that completed during the slower gates must
@@ -1718,6 +1724,18 @@ export async function driverRoutes(app: FastifyInstance) {
 
   // ─── Subscription ──────────────────────────────────────────────────────
 
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the driver starts and
+  // follows a checkout for their own weekly fee: the payer's ONE canonical
+  // subscription [#1393 mover fee authority], the same one GET /subscription
+  // shows, which may sit on the mover's rider profile.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+    },
+  });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },
@@ -1730,12 +1748,23 @@ export async function driverRoutes(app: FastifyInstance) {
       },
     });
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-    const sub = driver!.subscription;
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const sub = (await readMoverFeeSubscription(app.prisma, feePayer))?.subscription;
     if (!sub) return { success: true, data: null };
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
-    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-    return { success: true, data: { ...sub, ...(await sanDisplay(app.prisma, sub)), ...(await payInfo(app.prisma, sub)) } };
+    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1], then
+    // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+    return {
+      success: true,
+      data: {
+        ...sub,
+        moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
+        ...(await sanDisplay(app.prisma, sub)),
+        ...(await payInfo(app.prisma, sub)),
+        ...(await mmgCheckout.feePayload(sub, request.headers)),
+      },
+    };
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (CASH prepaid vs
@@ -1752,7 +1781,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
     if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     await requireStepUp(app, request);
-    const sub = await app.prisma.subscription.findFirst({ where: { driverId: driver.id } });
+    const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
     const updated = body.method === 'NONE'

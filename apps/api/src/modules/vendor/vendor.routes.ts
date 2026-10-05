@@ -43,6 +43,7 @@ import { DeliveryCashSettlementService, assertSettlementId, settlementAttestatio
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
@@ -3539,6 +3540,15 @@ export async function vendorRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /subscription — Current subscription details */
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the store's OWNER starts
+  // and follows a checkout for the selected store's subscription.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const { vendorId } = await requireVendor(app, request, 'OWNER');
+      return app.prisma.subscription.findFirst({ where: { vendorId } });
+    },
+  });
+
   app.get('/subscription', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     // NO operability gate here, deliberately [PINV-8]. A suspended store must
@@ -3558,6 +3568,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
             ...(await sanDisplay(app.prisma, subscription)),
             ...(await payInfo(app.prisma, subscription)),
+            // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+            ...(await mmgCheckout.feePayload(subscription, request.headers)),
             weeklyRate: Number(subscription.weeklyRate),
           }
         : null,

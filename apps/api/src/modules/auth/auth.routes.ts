@@ -387,10 +387,11 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send({ success: true });
   });
 
-  // Reset request = just the normal OTP send; reset proves ownership again
+  // Reset request = the normal OTP send, for the reset purpose only: this code
+  // resets a password and cannot sign in [L04 · AUTH-2]
   app.post('/password/reset-request', otpRateLimit, async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
-    const result = await authService.sendOtp(body.phone, request.ip);
+    const result = await authService.sendOtp(body.phone, request.ip, 'password-reset');
     return reply.send({ success: true, data: result });
   });
 

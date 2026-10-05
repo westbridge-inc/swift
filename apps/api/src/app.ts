@@ -342,6 +342,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // webhook secret arrives with MMG biller onboarding.
   const { agentCashRoutes } = await import('./modules/billing/agent-cash.routes');
   await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
+  // MMG hosted-checkout replies [mmg checkout 3/6]: the web return page
+  // forwards MMG's reply here and MMG's own servers may call notify. Both are
+  // rate-limited, body-capped and inert while MMG_CHECKOUT_ENABLED is off; a
+  // reply only prompts the server's own MMG lookup, never a credit.
+  const { mmgCheckoutPublicRoutes } = await import('./modules/billing/mmg-checkout.routes');
+  await app.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps
