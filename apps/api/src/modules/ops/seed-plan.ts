@@ -225,7 +225,7 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
     await opts.failpoint?.('after-drift-check');
     // [PROD-PATH] Single use, under the same lock as the change: an approval
     // already consumed is refused, even after a rollback of the data.
-    if (verified.length) await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor });
+    if (plan.target.environment === 'production') await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor });
     for (const ch of plan.changes) {
       if (ch.table === 'platformConfig') {
         const want = desired.platformConfig.find((c) => c.key === ch.key)!;
@@ -299,7 +299,9 @@ export async function promoteBootstrapAdmin(prisma: PrismaClient, databaseUrl: s
   const user = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
     if (mode === 'bootstrap' && (await tx.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) > 0) throw new SeedRefused('BREAK_GLASS_REQUIRED', 'a SUPER_ADMIN appeared while bootstrapping; this is now a break-glass change');
-    if (verified.length) await consumeApprovals(tx, verified, { action: 'PROMOTE_SUPER_ADMIN', target: target as unknown as Prisma.InputJsonValue, actor: opts.actor });
+    // Break-glass: the two approvals are consumed before the account is
+    // touched, in this transaction; fewer than two refuse (consumeApprovals).
+    if (mode === 'break-glass') await consumeApprovals(tx, verified, { action: 'PROMOTE_SUPER_ADMIN', target: target as unknown as Prisma.InputJsonValue, actor: opts.actor });
     const u = await tx.user.upsert({
       where: { phone },
       update: { roles: { set: ['SUPER_ADMIN', 'CUSTOMER'] }, activeRole: 'SUPER_ADMIN', status: 'ACTIVE' },

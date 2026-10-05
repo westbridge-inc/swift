@@ -31,7 +31,7 @@ import { refreshLegEtas, cachedLegEtas } from '../dispatch/live-eta';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
-import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { requireStepUp } from '../auth/step-up';
 import { normalizeRegistrationMark } from '../verification/subjects';
 import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
@@ -47,6 +47,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -427,6 +428,7 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
         float: {
           limit: Number(rider.floatLimit),
@@ -613,11 +615,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
     // grandfathered (legacy accounts pre-dating birth-on-verification); the
     // verdict maps onto this route's historical codes.
-    const sub = await app.prisma.subscription.findFirst({
-      where: { riderId: rider.id },
-      select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true, billingMethod: true },
-    });
-    const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
@@ -639,11 +638,21 @@ export async function riderRoutes(app: FastifyInstance) {
     // allowing stale work to resurrect delivery supply.
     const { updated, retiredDriverId } = await app.prisma.$transaction(async (tx) => {
       await lockIdentityAuthority(tx);
-      const currentSubscription = await tx.subscription.findFirst({ where: { riderId: rider.id }, select: { id: true } });
+      // [SAFE-B · #1393] Only a mover with no weekly-fee subscription at all (the
+      // grandfathered path) needs the identity authority here. The shared mover
+      // fee belongs to the payer: a dual-role mover's one subscription may sit on
+      // the driver profile.
+      const currentSubscription = await tx.subscription.findFirst({
+        where: { OR: [{ riderId: rider.id }, { driver: { userId: request.user.userId } }] }, select: { id: true },
+      });
       if (!currentSubscription) await requireIdentityAuthority(tx, request.user.userId);
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
+      await lockMoverSources(tx, feePayer);
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'GRANDFATHER' })).operable) {
+        throw new AppError(403, 'SUBSCRIPTION_SUSPENDED', 'Your shared weekly fee does not currently permit going online.');
+      }
 
       // Authentication can be revoked after the Fastify pre-handler but while
       // verification checks are still running. Lock/revalidate this exact
@@ -2081,7 +2090,7 @@ export async function riderRoutes(app: FastifyInstance) {
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
     await requireStepUp(app, request);
-    const sub = await app.prisma.subscription.findFirst({ where: { riderId: rider.id } });
+    const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const updated = body.method === 'NONE'
       ? await billing.stopBilling(sub.id, request.user.userId)
@@ -2122,6 +2131,18 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /subscription — Current subscription with payment history. */
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the rider starts and
+  // follows a checkout for their own weekly fee: the payer's ONE canonical
+  // subscription [#1393 mover fee authority], the same one GET /subscription
+  // shows, which may sit on the mover's driver profile.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+    },
+  });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.rider.findUnique({
       where: { userId: request.user.userId },
@@ -2139,16 +2160,15 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
     const rider = found!;
 
-    if (!rider.subscription) {
-      return { success: true, data: null };
-    }
-
-    const sub = rider.subscription;
+    const feePayer = await moverFeePayer(app.prisma, rider.userId);
+    const view = await readMoverFeeSubscription(app.prisma, feePayer);
+    if (!view) return { success: true, data: null };
+    const sub = view.subscription;
     const now = new Date();
     // THE canOperate rule (operate-gate.ts): the badge must show exactly what
     // the go-online switch allows — including the grace-lapse cutoff, which
     // this display copy used to miss.
-    const isActive = subscriptionOperability(sub, { missingRow: 'BLOCK' }, now).operable && sub.currentPeriodEnd > now;
+    const isActive = (await moverFeeOperability(app.prisma, feePayer, { missingRow: 'BLOCK' }, now)).operable && sub.currentPeriodEnd > now;
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
@@ -2156,10 +2176,13 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...sub,
+        moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
         // "My Swift Number" + Pay-screen block [san spec 2.4/6.1] — SAN,
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
+        // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+        ...(await mmgCheckout.feePayload(sub, request.headers, now)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)

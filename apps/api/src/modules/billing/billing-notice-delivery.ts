@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import type { NotificationAudience } from '../notification/notification.service';
 import { NotificationService, notifyAdmins, tenantOfSubscription } from '../notification/notification.service';
-import { getChannels } from '../../providers/notifications/channels';
+import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import { log } from '../../utils/logger';
 
 /** BillingEvent is the committed delivery intent. Only notes bearing this
@@ -44,12 +44,9 @@ function parseBillingNotice(note: string | null, subscriptionId: string): Billin
   }
 }
 
-type NoticeDb = Pick<PrismaClient, '$queryRaw' | '$executeRaw' | 'billingEvent' | 'user'>;
 type NoticeRow = { id: string; subscriptionId: string; note: string | null; createdAt: Date; deliveredAt: Date | null };
-export type BillingNoticeLeaseGuard = () => Promise<boolean>;
-type BillingNoticeSmsSender = (
-  subscriptionId: string, userId: string, body: string, renewLease: BillingNoticeLeaseGuard,
-) => Promise<void>;
+/** The claim expired or another worker took it over: hand nothing off. */
+class NoticeClaimLost extends Error {}
 
 /** The committed event is historical authority, not a fresh balance/access
  * decision. Render both channels as history even on first delivery: payment,
@@ -63,15 +60,25 @@ function historicalPayerNotice(notice: BillingNotice, event: NoticeRow): Billing
 }
 
 /** Claim one committed intent before any external send. Lease checks fence
- * stale preparation work; process death leaves the row retryable on expiry.
- * An in-flight provider send may still outlive its lease or lose its database
- * acknowledgement, so this is not an exactly-once provider-delivery promise. */
+ * stale preparation work; process death leaves the row retryable on expiry,
+ * and an attempt that does not complete leaves it due after a short cooldown,
+ * so a persistently failing oldest row never starves the bounded drain.
+ *
+ * [#1393] A payer notice (suspended nudge, churn) is a weekly-fee demand. Its
+ * intent completes in the same transaction that records it as a stage of the
+ * fee-demand outbox (`event:<id>`), and only while this worker's claim is
+ * still unexpired and its own; from then on the outbox alone delivers it,
+ * through the shared confirmation fence: nothing while a payment is being
+ * confirmed, nothing after its obligation was paid, cancelled or closed, and
+ * an SMS whose handoff outcome is unknown is never blindly resent. The intent
+ * is never retried after that handoff, so a superseded stage cannot keep a
+ * drain slot. An admin page still completes only when every admin has it.
+ * Neither path is an exactly-once provider-delivery promise. */
 export async function deliverBillingNotice(
-  prisma: NoticeDb,
+  prisma: PrismaClient,
   notifications: NotificationService,
   event: NoticeRow,
   _now = new Date(),
-  sendSms?: BillingNoticeSmsSender,
 ): Promise<boolean> {
   if (event.deliveredAt) return false;
   const parsed = parseBillingNotice(event.note, event.subscriptionId);
@@ -80,12 +87,12 @@ export async function deliverBillingNotice(
   const token = randomUUID();
   // Acquisition/renewal use the database wall clock, never a scheduler's old
   // batch time or a worker's potentially skewed host clock.
-  const claimed = await prisma.$queryRaw<Array<{ id: string; noticeSmsSentAt: Date | null }>>`
+  const claimed = await prisma.$queryRaw<Array<{ id: string }>>`
     UPDATE "billing_events"
     SET "noticeLeaseToken" = ${token}, "noticeLeaseUntil" = clock_timestamp() + INTERVAL '120 seconds'
     WHERE "id" = ${event.id} AND "deliveredAt" IS NULL
       AND ("noticeLeaseUntil" IS NULL OR "noticeLeaseUntil" <= clock_timestamp())
-    RETURNING "id", "noticeSmsSentAt"
+    RETURNING "id"
   `;
   if (claimed.length !== 1) return false;
 
@@ -96,67 +103,53 @@ export async function deliverBillingNotice(
       AND "noticeLeaseUntil" > clock_timestamp()
   `) === 1;
 
-  let inboxDelivered = false;
-  let smsDelivered = !notice.sms || !!claimed[0]!.noticeSmsSentAt;
   try {
-    if (notice.target === 'admins') {
-      const tenantId = await tenantOfSubscription(prisma as PrismaClient, event.subscriptionId, true);
-      if (!await renew()) return false;
-      await notifyAdmins(prisma as PrismaClient, notifications, {
-        tenantId, title: notice.title, body: notice.body, data: notice.data,
-        dedupeKey: `billing-notice:${event.id}`, requireAll: true,
-      });
-      inboxDelivered = true;
-    } else {
-      if (!await renew()) return false;
-      try {
-        const id = await notifications.send({
-          userId: notice.userId!, type: 'SYSTEM_ANNOUNCEMENT',
-          title: notice.title, body: notice.body, audience: notice.audience,
-          data: notice.data, dedupeKey: `billing-notice:${event.id}`,
+    if (notice.target === 'payer') {
+      // The outbox re-checks the payer, the obligation and the pause itself;
+      // a refused handoff (payer changed, payer lookup outage) rolls back and
+      // leaves this intent due.
+      const stage = await prisma.$transaction(async (tx) => {
+        const demand = await enqueueFeeDemandInTx(tx, {
+          userId: notice.userId!, type: 'SYSTEM_ANNOUNCEMENT', title: notice.title, body: notice.body,
+          audience: notice.audience, data: notice.data, feeStageKey: `event:${event.id}`, feeSms: notice.sms,
         });
-        inboxDelivered = !!id;
+        const handedOff = await tx.$executeRaw`
+          UPDATE "billing_events"
+          SET "deliveredAt" = clock_timestamp(), "noticeLeaseToken" = NULL, "noticeLeaseUntil" = NULL
+          WHERE "id" = ${event.id} AND "noticeLeaseToken" = ${token} AND "deliveredAt" IS NULL
+            AND "noticeLeaseUntil" > clock_timestamp()
+        `;
+        // An expired or taken-over claim records nothing: a stage exists only
+        // for an intent this claim handed off.
+        if (handedOff !== 1) throw new NoticeClaimLost();
+        return demand.id;
+      }).catch((err: unknown) => {
+        if (err instanceof NoticeClaimLost) return null;
+        throw err;
+      });
+      if (!stage) return false;
+      try {
+        return !!await notifications.deliverFeeDemand(stage);
       } catch (err) {
-        log().warn({ err, eventId: event.id }, 'billing notice inbox/push send failed; SMS remains independent');
-      }
-      if (!smsDelivered) {
-        try {
-          // A slow inbox operation may have outlived the lease. A stale owner
-          // must not begin another channel effect, even if no rival claimed yet.
-          if (sendSms) {
-            if (!await renew()) return false;
-            // Recipient preparation may also await database reads. The
-            // callback must fence again immediately before its provider call.
-            await sendSms(event.subscriptionId, notice.userId!, notice.sms!, renew);
-          }
-          else {
-            const user = await prisma.user.findUnique({ where: { id: notice.userId! }, select: { phone: true } });
-            if (!user?.phone) throw new Error('payer phone unavailable');
-            if (!await renew()) return false;
-            await getChannels().sms.sendSms(user.phone, notice.sms!);
-          }
-          // Checkpoint this channel independently: an inbox/push failure after
-          // SMS must not cause another SMS on the next normal retry.
-          const stamped = await prisma.$executeRaw`
-            UPDATE "billing_events" SET "noticeSmsSentAt" = COALESCE("noticeSmsSentAt", clock_timestamp())
-            WHERE "id" = ${event.id} AND "noticeLeaseToken" = ${token}
-          `;
-          smsDelivered = stamped === 1;
-        } catch (err) {
-          log().warn({ err, eventId: event.id }, 'billing notice SMS failed; committed intent remains retryable');
-        }
+        // The outbox holds the stage and every channel outcome (an UNKNOWN
+        // handoff included); this intent's own duty is complete.
+        log().warn({ err, eventId: event.id }, 'billing notice handed to the fee-demand outbox; its delivery outcome is held there');
+        return false;
       }
     }
 
-    if (inboxDelivered && smsDelivered) {
-      const completed = await prisma.$executeRaw`
-        UPDATE "billing_events"
-        SET "deliveredAt" = clock_timestamp(), "noticeLeaseToken" = NULL, "noticeLeaseUntil" = NULL
-        WHERE "id" = ${event.id} AND "noticeLeaseToken" = ${token} AND "deliveredAt" IS NULL
-      `;
-      return completed === 1;
-    }
-    return false;
+    const tenantId = await tenantOfSubscription(prisma, event.subscriptionId, true);
+    if (!await renew()) return false;
+    await notifyAdmins(prisma, notifications, {
+      tenantId, title: notice.title, body: notice.body, data: notice.data,
+      dedupeKey: `billing-notice:${event.id}`, requireAll: true,
+    });
+    const completed = await prisma.$executeRaw`
+      UPDATE "billing_events"
+      SET "deliveredAt" = clock_timestamp(), "noticeLeaseToken" = NULL, "noticeLeaseUntil" = NULL
+      WHERE "id" = ${event.id} AND "noticeLeaseToken" = ${token} AND "deliveredAt" IS NULL
+    `;
+    return completed === 1;
   } finally {
     // Incomplete rows remain due, but a short cooldown lets newer rows pass
     // a persistently failing oldest row on the next bounded drain. A crashed
@@ -174,12 +167,11 @@ export async function deliverBillingNoticeByKey(
   notifications: NotificationService,
   idempotencyKey: string,
   now = new Date(),
-  sendSms?: BillingNoticeSmsSender,
 ): Promise<boolean> {
   const event = await prisma.billingEvent.findUnique({
     where: { idempotencyKey }, select: { id: true, subscriptionId: true, note: true, createdAt: true, deliveredAt: true },
   });
-  return event ? deliverBillingNotice(prisma, notifications, event, now, sendSms) : false;
+  return event ? deliverBillingNotice(prisma, notifications, event, now) : false;
 }
 
 /** Retry comes from BillingEvent, not the original SUSPENDED selector. Thus a
@@ -188,7 +180,6 @@ export async function drainPendingBillingNotices(
   prisma: PrismaClient,
   notifications: NotificationService,
   now = new Date(),
-  sendSms?: BillingNoticeSmsSender,
 ): Promise<{ attempted: number; delivered: number }> {
   const rows = await prisma.$queryRaw<NoticeRow[]>`
     SELECT "id", "subscriptionId", "note", "createdAt", "deliveredAt"
@@ -204,7 +195,7 @@ export async function drainPendingBillingNotices(
   let delivered = 0;
   for (const row of rows) {
     try {
-      if (await deliverBillingNotice(prisma, notifications, row, now, sendSms)) delivered += 1;
+      if (await deliverBillingNotice(prisma, notifications, row, now)) delivered += 1;
     } catch (err) {
       log().warn({ err, eventId: row.id }, 'billing notice delivery retry failed');
     }

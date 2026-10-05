@@ -1,4 +1,4 @@
-import type { PaymentMethod, Prisma, SubscriptionStatus } from '@prisma/client';
+import type { Prisma, Subscription, SubscriptionStatus } from '@prisma/client';
 import { mmgDisabled, mmgRailPaused } from '../../providers/mmg/mmg-provider';
 
 // THE canOperate predicate (lifecycle/billing spec §14, G-BILL-03) — the ONE
@@ -25,8 +25,10 @@ export type SubscriptionOperability =
   | { operable: true }
   | { operable: false; why: 'MISSING' | 'STATUS' | 'GRACE_LAPSED' | 'BILLING_STOPPED'; status?: SubscriptionStatus };
 
+export type OperabilitySubscription = Pick<Subscription, 'status' | 'gracePeriodEnd' | 'autoRenew' | 'currentPeriodEnd' | 'billingConfirmationPausedAt' | 'billingEnforcementDueAt' | 'autoSuspendEnabled' | 'billingMethod'>;
+
 export function subscriptionOperability(
-  sub: { status: SubscriptionStatus; gracePeriodEnd: Date | null; autoRenew: boolean; currentPeriodEnd: Date; billingMethod: PaymentMethod } | null | undefined,
+  sub: OperabilitySubscription | null | undefined,
   opts: { missingRow: 'BLOCK' | 'GRANDFATHER' },
   now = new Date(),
   env: Record<string, string | undefined> = process.env,
@@ -37,9 +39,11 @@ export function subscriptionOperability(
   if (!OPERABLE_STATUSES.includes(sub.status)) {
     return { operable: false, why: 'STATUS', status: sub.status };
   }
-  // [PROD-PATH] While MMG is switched off, an MMG-rail partner cannot pay, so
-  // their grace does not run out: the clock is held (billing/mmg-pause.ts).
-  if (sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < now && !mmgRailPaused(sub, env)) {
+  const graceEnd = sub.billingEnforcementDueAt;
+  // [PROD-PATH] While MMG is switched off an MMG-rail partner cannot pay, so
+  // their grace never lapses: their dunning clock is paused for the span
+  // (billing/mmg-pause.ts), and this holds even before its first tick.
+  if (sub.status === 'PAST_DUE' && sub.autoSuspendEnabled && !sub.billingConfirmationPausedAt && graceEnd && graceEnd <= now && !mmgRailPaused(sub, env)) {
     return { operable: false, why: 'GRACE_LAPSED', status: sub.status };
   }
   // [E12] A partner who stopped weekly billing works exactly until the period
@@ -58,9 +62,8 @@ export function inoperableSubscriptionWhere(now = new Date(), env: Record<string
     OR: [
       { status: { notIn: [...OPERABLE_STATUSES] } },
       // [PROD-PATH] The same held grace as subscriptionOperability while MMG is off.
-      mmgDisabled(env)
-        ? { status: 'PAST_DUE', gracePeriodEnd: { lt: now }, billingMethod: { not: 'MOBILE_MONEY' } }
-        : { status: 'PAST_DUE', gracePeriodEnd: { lt: now } },
+      { status: 'PAST_DUE', autoSuspendEnabled: true, billingConfirmationPausedAt: null, billingEnforcementDueAt: { lte: now },
+        ...(mmgDisabled(env) ? { billingMethod: { not: 'MOBILE_MONEY' as const } } : {}) },
       // [E12] Billing stopped and the paid period (or trial) over — the same
       // refusal subscriptionOperability makes, so a catalogue read never shows
       // a store the gate would refuse.

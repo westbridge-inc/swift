@@ -196,6 +196,11 @@ export async function consumeApprovals(
   verified: VerifiedApproval[],
   context: { action: string; target: Prisma.InputJsonValue; actor?: string },
 ): Promise<void> {
+  // Fail closed whatever the caller verified: a change gated on two people
+  // never proceeds on fewer than two distinct consumed approvals.
+  if (verified.length < 2 || new Set(verified.map((v) => v.fingerprint)).size < 2) {
+    throw new ApprovalRefused('APPROVALS_REQUIRED', 'this change needs two approvals by two different people');
+  }
   for (const v of verified) {
     const used = await tx.privilegedChangeAudit.findFirst({ where: { action: 'SEED_APPROVAL_CONSUMED', planDigest: v.consumption }, select: { id: true } });
     if (used) throw new ApprovalRefused('APPROVAL_REPLAYED', `approval by ${v.approver} was already used; sign a new request`);

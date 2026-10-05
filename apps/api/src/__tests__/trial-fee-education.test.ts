@@ -3,10 +3,14 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { sweepTrialFeeEducation, firstPaymentFunnel } from '../modules/billing/trial-fee-education';
 import { NotificationService } from '../modules/notification/notification.service';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
-// The trial first-payment funnel [san spec 21.4]: day-10 education, day-13
-// exact-amount reminder — each stage exactly once (BillingEvent unique-key
-// gate), SAN included, and the pilot metric derived from ledger rows.
+// The trial first-payment funnel [san spec 21.4]: day-10 and day-13 notices
+// of the first fee — each stage exactly once (BillingEvent unique-key gate) —
+// and the pilot metric derived from ledger rows. [owner, 2026-09-29] Partners
+// pay on the MMG checkout in the Swift app: a notice names it only while it is
+// live, otherwise the amount and when it is due, and never an MMG agent, cash
+// or a Swift Number (the SAN digits no longer ride in the message).
 
 const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
 const io = { to: () => ({ emit: () => undefined }) } as never;
@@ -49,6 +53,7 @@ async function makeTrial(daysLeft: number) {
 beforeAll(async () => { await prisma.$connect(); });
 
 afterAll(async () => {
+  await cleanupBillingClocks(prisma, subIds);
   await prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -61,7 +66,7 @@ afterAll(async () => {
 });
 
 describe('the trial fee-education sweep', () => {
-  it('day-10 trials learn how they will pay (MMG in the app, never an agent or the Swift Number); day-13 get the exact amount; each stage once', async () => {
+  it('day-10 trials get the due date; day-13 get the exact amount; neither carries the SAN or an agent; each stage once', async () => {
     const early = await makeTrial(3.5); // ~4 days left → d10 stage
     const late = await makeTrial(0.8); // <1 day → d13 stage
 
@@ -75,12 +80,16 @@ describe('the trial fee-education sweep', () => {
     // prints the number (`123 456 7890`) for a counter.
     const closedDoors = /\bagents?\b|swift number|\bcash\b|\d{3}\D\d{3}\D\d{4}/i;
     const earlyNotif = await prisma.notification.findFirst({ where: { userId: early.userId }, orderBy: { createdAt: 'desc' } });
-    expect(earlyNotif?.body).toContain('Payment with MMG opens in the app soon');
-    expect(earlyNotif?.body).not.toMatch(closedDoors);
+    // The checkout is off here (MMG_CHECKOUT_ENABLED unset): the amount and when
+    // it is due, and no way to pay promised.
+    expect(earlyNotif?.body).toContain('Your first weekly fee of GY$2,100 is due on');
     const lateNotif = await prisma.notification.findFirst({ where: { userId: late.userId }, orderBy: { createdAt: 'desc' } });
     expect(lateNotif?.body).toContain('GY$2,100');
-    expect(lateNotif?.body).toContain('Payment with MMG opens in the app soon');
-    expect(lateNotif?.body).not.toMatch(closedDoors);
+    for (const body of [earlyNotif?.body, lateNotif?.body]) {
+      expect(body).not.toMatch(/MMG agent|any agent|Swift Number|account number|pay cash|coming soon|with MMG in the Swift app/i);
+      expect(body, 'the SAN no longer rides in a message').not.toMatch(/\d{3} \d{3} \d{4}/);
+      expect(body).not.toMatch(closedDoors);
+    }
 
     // Idempotent: a second sweep sends nothing new for these subs.
     const again = await sweepTrialFeeEducation(prisma, notifications);
@@ -89,6 +98,25 @@ describe('the trial fee-education sweep', () => {
     });
     expect(eduEvents).toBe(2);
     expect(again.day10 + again.day13).toBeLessThanOrEqual(first.day10 + first.day13);
+  });
+
+  it('while the MMG checkout is live the notice points to it; a wallet that covers the fee is told so, never asked again', async () => {
+    const before = process.env['MMG_CHECKOUT_ENABLED'];
+    process.env['MMG_CHECKOUT_ENABLED'] = '1';
+    try {
+      const owing = await makeTrial(3.5);
+      const covered = await makeTrial(3.5);
+      await prisma.prepaidBalance.create({ data: { subscriptionId: covered.sub.id, balance: 2100 } });
+      await sweepTrialFeeEducation(prisma, notifications);
+      const told = await prisma.notification.findFirst({ where: { userId: owing.userId }, orderBy: { createdAt: 'desc' } });
+      expect(told?.body).toContain('Pay GY$2,100 with MMG in the Swift app.');
+      const coveredNotice = await prisma.notification.findFirst({ where: { userId: covered.userId }, orderBy: { createdAt: 'desc' } });
+      expect(coveredNotice?.body).toContain('Your balance already covers your first weekly fee of GY$2,100.');
+      expect(coveredNotice?.body).not.toMatch(/Pay GY\$/);
+    } finally {
+      if (before === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
+      else process.env['MMG_CHECKOUT_ENABLED'] = before;
+    }
   });
 
   it('the pilot metric derives paid-before-end from ledger rows', async () => {

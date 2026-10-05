@@ -801,6 +801,13 @@ purge tools bind to, once, as swift-deploy:
     VALUES ('singleton', 'swift-production', 'production', now());
     SQL
 
+Before the API ever starts, the weekly-fee confirmation cutover must report
+READY: apps/api/BILLING-CONFIRMATION-CUTOVER.md, step 3 (the versioned
+backfill) and step 4 (the check). Until then billing stays BLOCKED: no
+collection, no fee demand, no suspension. The backfill runs with tsx, which
+the runtime image does not carry; run it in the build-stage container the
+seed uses (section 6), never on a host install.
+
 Back up and rehearse the restore (sections 4 and 5, with `--compare-source`:
 in schemas public and swift_qr it compares every table's row count and
 content checksum, column definitions and defaults, RLS switches, policies,

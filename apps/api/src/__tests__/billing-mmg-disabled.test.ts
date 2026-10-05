@@ -1,62 +1,73 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { PaymentMethod, SubscriptionStatus } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
-import { syntheticLocationOwner } from './helpers/online-mover';
-import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { sandboxResetMmg } from '../providers/mmg/mmg-provider';
-import { subscriptionOperability, inoperableSubscriptionWhere } from '../modules/subscription/operate-gate';
-import { MMG_PAUSE_CLOCK_KEY, syncMmgPauseClock } from '../modules/billing/mmg-pause';
+import { subscriptionOperability, inoperableSubscriptionWhere, type OperabilitySubscription } from '../modules/subscription/operate-gate';
+import { MMG_PAUSE_CLOCKS_KEY, syncMmgPauseClock } from '../modules/billing/mmg-pause';
+import { activeOverdueMs, FULL_FEE_GRACE_MS } from '../modules/billing/dunning-clock';
+import { mmgTerminalProof } from '../modules/billing/mmg-terminal-evidence';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [PROD-PATH] MMG fully OFF (MMG_DRIVER=disabled), the owner's ruling for a
-// production launch before the live merchant keys arrive. The weekly fee on
-// the MMG rail is then DEFERRED, exactly like a card while the card rail is
-// off: no payment row, no request, no failure, no dunning, no period moved.
-// And the poller, which would ask MMG about every in-flight row, leaves each
-// one exactly as it was — an UNKNOWN stays UNKNOWN, a PENDING stays PENDING —
-// so nothing a live MMG once accepted is ever judged without MMG's answer.
+// production launch before the live merchant keys arrive. For a partner on
+// the MMG rail, billing is PAUSED — a true pause:
+//   - nothing is charged (not even prepaid balance), nothing is written, no
+//     failure is recorded, nobody is dunned, suspended, nudged or churned;
+//   - the recovery paths (a recorded failure whose outcome never landed, the
+//     terminal-failure repair) wait too, and apply exactly as before once MMG
+//     is on again;
+//   - the shared dunning clock is paused for the span, so the grace the
+//     operate gate enforces is exactly what it was when MMG went off;
+//   - once MMG is on, the paused week is billed exactly once.
+// Subjects are stores (vendor subscriptions): their fee has one owner.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
 let app: FastifyInstance;
 let billing: BillingService;
 const userIds: string[] = [];
+const vendorIds: string[] = [];
 const subIds: string[] = [];
 let seq = 0;
 const PHONE_PREFIX = retainedPhonePrefix('18');
 
-async function makeMoverWithMmgSub(due: Date, opts: { msisdn?: string | null; method?: 'MOBILE_MONEY' | 'CASH'; status?: 'ACTIVE' | 'PAST_DUE' | 'SUSPENDED'; extra?: Record<string, unknown> } = {}) {
+async function makeVendorSub(due: Date, opts: { msisdn?: string | null; method?: PaymentMethod; status?: SubscriptionStatus; extra?: Record<string, unknown> } = {}) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
       phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Off', lastName: `U${seq}`,
-      roles: ['MOVER', 'CUSTOMER'] as UserRole[], activeRole: 'MOVER', isPhoneVerified: true, selfieCapturedAt: new Date(),
+      roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true, selfieCapturedAt: new Date(),
     },
   });
   userIds.push(user.id);
-  const rider = await app.prisma.rider.create({
-    data: { userId: user.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, locationSessionId: syntheticLocationOwner('billing-mmg-off') },
+  const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
+  const vendor = await app.prisma.vendor.create({
+    data: {
+      ownerId: owner.id, name: `MMG Off Store ${seq}`, slug: `mmg-off-${nanoid(8).toLowerCase()}`,
+      vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}9${String(seq).padStart(2, '0')}`,
+      addressLine1: '1 Pause Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
+      status: 'ACTIVE', acceptingOrders: true, isVerified: true,
+    },
   });
+  vendorIds.push(vendor.id);
+  const method = opts.method ?? 'MOBILE_MONEY';
   const sub = await app.prisma.subscription.create({
     data: {
-      riderId: rider.id,
-      type: 'DELIVERY_RIDER',
-      status: opts.status ?? 'ACTIVE',
-      weeklyRate: 12000,
-      billingMethod: opts.method ?? 'MOBILE_MONEY',
-      mmgPayerMsisdn: opts.msisdn === undefined ? `6091${String(seq).padStart(3, '0')}` : opts.msisdn,
+      vendorId: vendor.id, type: 'RESTAURANT', status: opts.status ?? 'ACTIVE', weeklyRate: 12000,
+      billingMethod: method,
+      mmgPayerMsisdn: method === 'MOBILE_MONEY' ? (opts.msisdn === undefined ? `6091${String(seq).padStart(3, '0')}` : opts.msisdn) : null,
+      currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due, nextBillingDate: due,
       ...(opts.extra ?? {}),
-      currentPeriodStart: new Date(due.getTime() - 7 * DAY),
-      currentPeriodEnd: due,
-      nextBillingDate: due,
     },
   });
   subIds.push(sub.id);
@@ -73,6 +84,10 @@ async function subWithRelations(subId: string) {
     },
   });
 }
+const sub = (id: string) => app.prisma.subscription.findUniqueOrThrow({ where: { id } });
+const clockOf = (id: string) => app.prisma.billingDunningClock.findUnique({ where: { subscriptionId: id } });
+const OFF = { MMG_DRIVER: 'disabled' };
+const ON = { MMG_DRIVER: 'sandbox' };
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -88,69 +103,63 @@ beforeAll(async () => {
 
 afterAll(async () => {
   vi.unstubAllEnvs();
-  await app.prisma.platformConfig.deleteMany({ where: { key: MMG_PAUSE_CLOCK_KEY } }).catch(() => {});
+  await app.prisma.platformConfig.deleteMany({ where: { key: MMG_PAUSE_CLOCKS_KEY } }).catch(() => {});
   try {
     await app.prisma.$transaction(async (tx) => {
       const kept = await retainedCohort(tx, { subscriptionIds: subIds });
       const goneSubs = without(subIds, kept.subscriptionIds);
-      const goneUsers = without(userIds, kept.userIds);
+      await cleanupBillingClocks(tx, goneSubs);
       await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
       await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
       await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
       await tx.subscription.deleteMany({ where: { id: { in: goneSubs } } });
       await tx.notification.deleteMany({ where: { userId: { in: userIds } } });
-      await tx.rider.deleteMany({ where: { userId: { in: goneUsers } } });
-      await tx.user.deleteMany({ where: { id: { in: goneUsers } } });
       await retireKeptScaffolding(tx, kept);
     }, { timeout: 60_000 });
+  } catch {
+    // Retained money evidence may keep some scaffolding; the suite's rows are unique to this run.
   } finally {
     await app.close();
   }
 });
 
-describe('[PROD-PATH] MMG_DRIVER=disabled: the weekly fee on the MMG rail', () => {
+/** Run `fn` with MMG switched off. */
+async function whileOff<T>(fn: () => Promise<T>): Promise<T> {
+  vi.stubEnv('MMG_DRIVER', 'disabled');
+  try { return await fn(); } finally { vi.unstubAllEnvs(); }
+}
+
+describe('[PROD-PATH] MMG_DRIVER=disabled: the weekly fee on the MMG rail is paused', () => {
   it('pauses the charge: nothing written, no request to MMG, no failure, the period unmoved', async () => {
-    vi.stubEnv('MMG_DRIVER', 'disabled');
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     try {
       const due = new Date(Date.now() - 60_000);
-      const subId = await makeMoverWithMmgSub(due);
-      const outcome = await billing.billSubscription((await subWithRelations(subId)) as any);
-      expect(outcome).toBe('pending');
-
+      const subId = await makeVendorSub(due);
+      expect(await whileOff(async () => billing.billSubscription((await subWithRelations(subId)) as any))).toBe('pending');
       expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: subId } })).toBe(0);
-      // A true pause: not even the attempt is recorded.
       expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId } })).toBe(0);
-      const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-      expect(after.status).toBe('ACTIVE');
-      expect(after.failedAttempts).toBe(0);
-      expect(after.nextBillingDate.getTime()).toBe(due.getTime());
+      expect(await sub(subId)).toMatchObject({ status: 'ACTIVE', failedAttempts: 0, nextBillingDate: due });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
-      vi.unstubAllEnvs();
     }
   });
 
   it('reactivation bills the paused week exactly once: one request, one settlement, one period, across repeated runs', async () => {
     sandboxResetMmg();
     const due = new Date(Date.now() - 60_000);
-    const subId = await makeMoverWithMmgSub(due);
-    // Paused: the hourly cycle and the poll job run three times and touch nothing.
-    vi.stubEnv('MMG_DRIVER', 'disabled');
-    try {
+    const subId = await makeVendorSub(due);
+    await whileOff(async () => {
       for (let i = 0; i < 3; i += 1) {
+        await syncMmgPauseClock(app.prisma, new Date(), OFF);
         await billing.runBillingCycle();
         await billing.pollPendingMmgCharges();
       }
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    });
     expect(await app.prisma.subscriptionPayment.count({ where: { subscriptionId: subId } })).toBe(0);
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId } })).toBe(0);
-    // MMG on again (the sandbox here): the cycle and the poller run three
-    // more times — the paused week is requested once and settled once.
     for (let i = 0; i < 3; i += 1) {
+      await syncMmgPauseClock(app.prisma, new Date(), ON);
       await billing.runBillingCycle();
       await billing.pollPendingMmgCharges();
     }
@@ -158,215 +167,224 @@ describe('[PROD-PATH] MMG_DRIVER=disabled: the weekly fee on the MMG rail', () =
     expect(payments).toHaveLength(1);
     expect(payments[0]).toMatchObject({ paymentMethod: 'MOBILE_MONEY', status: 'CAPTURED' });
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' } })).toBe(1);
-    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    const after = await sub(subId);
     expect(after.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
     expect(after).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
   });
 
   it('spends no prepaid balance while paused, and spends it once MMG is on', async () => {
     const due = new Date(Date.now() - 60_000);
-    const subId = await makeMoverWithMmgSub(due);
+    const subId = await makeVendorSub(due);
     await app.prisma.prepaidBalance.create({ data: { subscriptionId: subId, balance: 50000, currencyCode: 'GYD' } });
-    vi.stubEnv('MMG_DRIVER', 'disabled');
-    try {
-      expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    expect(await whileOff(async () => billing.billSubscription((await subWithRelations(subId)) as any))).toBe('pending');
     expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance)).toBe(50000);
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId } })).toBe(0);
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).nextBillingDate.getTime()).toBe(due.getTime());
+    expect((await sub(subId)).nextBillingDate.getTime()).toBe(due.getTime());
     expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('succeeded');
     expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance)).toBe(38000);
   });
 
   it('a subscription with no MMG payer number is paused, never failed as "insufficient balance"', async () => {
     const due = new Date(Date.now() - 60_000);
-    const subId = await makeMoverWithMmgSub(due, { msisdn: null });
-    vi.stubEnv('MMG_DRIVER', 'disabled');
-    try {
-      expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
-    } finally {
-      vi.unstubAllEnvs();
-    }
-    const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-    expect(after).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
+    const subId = await makeVendorSub(due, { msisdn: null });
+    expect(await whileOff(async () => billing.billSubscription((await subWithRelations(subId)) as any))).toBe('pending');
+    expect(await sub(subId)).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } })).toBe(0);
+    // MMG on: the same subscription is billed (and fails for want of a payer), so the pause was load-bearing.
+    await billing.billSubscription((await subWithRelations(subId)) as any);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } })).toBe(1);
   });
 
-  it('a recorded failure whose outcome never landed is not applied while paused (the duplicate-attempt recovery)', async () => {
+  it('a recorded failure whose outcome never landed is not applied while paused (the duplicate-attempt recovery); it is once MMG is on', async () => {
     const due = new Date(Date.now() - 60_000);
-    const subId = await makeMoverWithMmgSub(due);
+    const subId = await makeVendorSub(due);
     const periodKey = due.toISOString().slice(0, 10);
     await app.prisma.billingEvent.create({ data: { subscriptionId: subId, type: 'CHARGE_ATTEMPT', amount: 12000, currencyCode: 'GYD', idempotencyKey: `charge:${subId}:${periodKey}:a0` } });
     await app.prisma.billingEvent.create({ data: { subscriptionId: subId, type: 'CHARGE_FAILED', amount: 12000, currencyCode: 'GYD', idempotencyKey: `failed:${subId}:${periodKey}:a0`, note: 'declined' } });
-    vi.stubEnv('MMG_DRIVER', 'disabled');
-    try {
-      expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
-    } finally {
-      vi.unstubAllEnvs();
-    }
-    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
-    // MMG on: the recorded failure is applied as before (the pause holds it, never erases it).
+    expect(await whileOff(async () => billing.billSubscription((await subWithRelations(subId)) as any))).toBe('pending');
+    expect(await sub(subId)).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
     await billing.billSubscription((await subWithRelations(subId)) as any);
-    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).toMatchObject({ status: 'PAST_DUE', failedAttempts: 1 });
+    expect(await sub(subId)).toMatchObject({ status: 'PAST_DUE', failedAttempts: 1 });
   });
 
   it('the terminal-failure repair does not dun while paused, and does once MMG is on', async () => {
     const due = new Date(Date.now() - 60_000);
-    const subId = await makeMoverWithMmgSub(due);
-    await app.prisma.subscriptionPayment.create({
+    const subId = await makeVendorSub(due);
+    const periodKey = due.toISOString().slice(0, 10);
+    // The attempt this request belongs to: its currency is what MMG's answer is checked against.
+    await app.prisma.billingEvent.create({ data: { subscriptionId: subId, type: 'CHARGE_ATTEMPT', amount: 12000, currencyCode: 'GYD', idempotencyKey: `charge:${subId}:${periodKey}:a0` } });
+    const payment = await app.prisma.subscriptionPayment.create({
       data: {
         subscriptionId: subId, amount: 12000, status: 'FAILED', paymentMethod: 'MOBILE_MONEY',
-        externalRef: `mmgtx_declined_${nanoid(8)}`, clientKey: `mmg-off-${nanoid(12)}`,
+        externalRef: `mmgtx_declined_${nanoid(8)}`, clientKey: `sub:${subId}:${periodKey}:a0`,
         periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), createdAt: new Date(Date.now() - 60 * 60 * 1000),
       },
     });
-    vi.stubEnv('MMG_DRIVER', 'disabled');
-    try {
-      const paused = await billing.reconcileTerminalWithoutOutcome();
-      expect(paused.repaired).toBe(0);
-    } finally {
-      vi.unstubAllEnvs();
-    }
-    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
+    // MMG's own declined answer, bound to this request: what the repair may act on.
+    const evidence = { transactionId: payment.externalRef!, reference: payment.clientKey!, amountMinor: 1_200_000, currencyCode: 'GYD', status: 'declined' as const };
+    await app.prisma.subscriptionPayment.update({ where: { id: payment.id }, data: { failureRaw: { mmgTerminalEvidence: mmgTerminalProof(payment, 'GYD', evidence, 'LOOKUP', 'gen-1', new Date()) } } });
+    const paused = await whileOff(() => billing.reconcileTerminalWithoutOutcome());
+    expect(paused.repaired).toBe(0);
+    expect(await sub(subId)).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } })).toBe(0);
     await billing.reconcileTerminalWithoutOutcome();
-    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } })).toMatchObject({ status: 'PAST_DUE', failedAttempts: 1 });
+    expect(await sub(subId)).toMatchObject({ status: 'PAST_DUE', failedAttempts: 1 });
   });
 
-  it('a suspended MMG-rail partner is neither nudged nor churned while paused; a cash one still is', async () => {
+  it('a suspended MMG-rail store is neither nudged nor churned while paused; once MMG is on it is', async () => {
     const longAgo = new Date(Date.now() - 40 * DAY);
-    const mmgSub = await makeMoverWithMmgSub(longAgo, { status: 'SUSPENDED', extra: { suspendedAt: longAgo } });
-    const cashSub = await makeMoverWithMmgSub(longAgo, { status: 'SUSPENDED', method: 'CASH', msisdn: null, extra: { suspendedAt: longAgo } });
-    vi.stubEnv('MMG_DRIVER', 'disabled');
-    try {
-      await billing.sweepSuspended();
-    } finally {
-      vi.unstubAllEnvs();
-    }
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: mmgSub } })).status).toBe('SUSPENDED');
-    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: mmgSub } })).toBe(0);
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: cashSub } })).status).toBe('CHURNED');
+    const subId = await makeVendorSub(longAgo, { status: 'SUSPENDED', extra: { suspendedAt: longAgo, failedAttempts: 3 } });
+    await whileOff(() => billing.sweepSuspended());
+    expect((await sub(subId)).status).toBe('SUSPENDED');
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId } })).toBe(0);
+    await billing.sweepSuspended();
+    expect((await sub(subId)).status).toBe('CHURNED');
   });
 
   it('the poller leaves every in-flight MMG row exactly as it was, unstamped', async () => {
     const due = new Date(Date.now() - 60_000);
-    const subId = await makeMoverWithMmgSub(due);
-    const pending = await app.prisma.subscriptionPayment.create({
-      data: {
+    const subId = await makeVendorSub(due);
+    const rows = await Promise.all([
+      app.prisma.subscriptionPayment.create({ data: {
         subscriptionId: subId, amount: 12000, status: 'PENDING', paymentMethod: 'MOBILE_MONEY',
         externalRef: `mmg-off-${nanoid(8)}`, clientKey: `mmg-off-${nanoid(12)}`,
-        periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
-        createdAt: new Date(Date.now() - 2 * DAY),
-      },
-    });
-    const unknown = await app.prisma.subscriptionPayment.create({
-      data: {
-        subscriptionId: subId, amount: 12000, status: 'UNKNOWN', paymentMethod: 'MOBILE_MONEY',
-        clientKey: `mmg-off-${nanoid(12)}`,
-        periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
-        createdAt: new Date(Date.now() - 2 * DAY),
-      },
-    });
-    vi.stubEnv('MMG_DRIVER', 'disabled');
-    try {
-      const polled = await billing.pollPendingMmgCharges();
-      expect(polled.settled + polled.failed + polled.banked + polled.adopted).toBe(0);
-      for (const before of [pending, unknown]) {
-        const row = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: before.id } });
-        expect(row.status).toBe(before.status);
-        expect(row.lastPolledAt).toBeNull();
-        expect(row.pollBackoffSec).toBe(before.pollBackoffSec);
-        expect(row.failureCode).toBeNull();
-      }
-      const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
-      expect(after.nextBillingDate.getTime()).toBe(due.getTime());
-    } finally {
-      vi.unstubAllEnvs();
+        periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), createdAt: new Date(Date.now() - 2 * DAY),
+      } }),
+      app.prisma.subscriptionPayment.create({ data: {
+        subscriptionId: subId, amount: 12000, status: 'UNKNOWN', paymentMethod: 'MOBILE_MONEY', clientKey: `mmg-off-${nanoid(12)}`,
+        periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), createdAt: new Date(Date.now() - 2 * DAY),
+      } }),
+    ]);
+    const polled = await whileOff(() => billing.pollPendingMmgCharges());
+    expect(polled.settled + polled.failed + polled.banked + polled.adopted).toBe(0);
+    for (const before of rows) {
+      const row = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: before.id } });
+      expect(row).toMatchObject({ status: before.status, lastPolledAt: null, pollBackoffSec: before.pollBackoffSec, failureCode: null });
     }
   });
 });
 
 describe('[PROD-PATH] the operate gate holds an MMG-rail partner inside grace while MMG is off', () => {
   const now = new Date('2026-10-05T12:00:00.000Z');
-  const lapsed = { status: 'PAST_DUE' as const, gracePeriodEnd: new Date('2026-10-04T12:00:00.000Z'), autoRenew: true, currentPeriodEnd: new Date('2026-10-10T00:00:00.000Z') };
-  const off = { MMG_DRIVER: 'disabled' };
-  const on = { MMG_DRIVER: 'live' };
+  const lapsed: OperabilitySubscription = {
+    status: 'PAST_DUE', gracePeriodEnd: new Date('2026-10-04T12:00:00.000Z'), billingEnforcementDueAt: new Date('2026-10-04T12:00:00.000Z'),
+    billingConfirmationPausedAt: null, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date('2026-10-10T00:00:00.000Z'), billingMethod: 'MOBILE_MONEY',
+  };
 
   it('MMG off: an MMG-rail partner whose grace ran out still operates; a cash partner does not', () => {
-    expect(subscriptionOperability({ ...lapsed, billingMethod: 'MOBILE_MONEY' }, { missingRow: 'BLOCK' }, now, off)).toEqual({ operable: true });
-    expect(subscriptionOperability({ ...lapsed, billingMethod: 'CASH' }, { missingRow: 'BLOCK' }, now, off)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
+    expect(subscriptionOperability(lapsed, { missingRow: 'BLOCK' }, now, OFF)).toEqual({ operable: true });
+    expect(subscriptionOperability({ ...lapsed, billingMethod: 'CASH' }, { missingRow: 'BLOCK' }, now, OFF)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
   });
 
   it('MMG on: the lapse refuses as before', () => {
-    expect(subscriptionOperability({ ...lapsed, billingMethod: 'MOBILE_MONEY' }, { missingRow: 'BLOCK' }, now, on)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
+    expect(subscriptionOperability(lapsed, { missingRow: 'BLOCK' }, now, ON)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
   });
 
   it('the hold is only about grace: suspended and billing-stopped partners stay refused', () => {
-    expect(subscriptionOperability({ ...lapsed, status: 'SUSPENDED', billingMethod: 'MOBILE_MONEY' }, { missingRow: 'BLOCK' }, now, off)).toMatchObject({ operable: false, why: 'STATUS' });
-    expect(subscriptionOperability({ ...lapsed, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z'), billingMethod: 'MOBILE_MONEY' }, { missingRow: 'BLOCK' }, now, off)).toMatchObject({ operable: false, why: 'BILLING_STOPPED' });
-  });
-
-  it('the database form agrees: the lapsed-grace branch excludes the MMG rail only while MMG is off', () => {
-    const offWhere = JSON.stringify(inoperableSubscriptionWhere(now, off));
-    const onWhere = JSON.stringify(inoperableSubscriptionWhere(now, on));
-    expect(offWhere).toContain('"billingMethod":{"not":"MOBILE_MONEY"}');
-    expect(onWhere).not.toContain('billingMethod');
+    expect(subscriptionOperability({ ...lapsed, status: 'SUSPENDED' }, { missingRow: 'BLOCK' }, now, OFF)).toMatchObject({ operable: false, why: 'STATUS' });
+    expect(subscriptionOperability({ ...lapsed, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z') }, { missingRow: 'BLOCK' }, now, OFF)).toMatchObject({ operable: false, why: 'BILLING_STOPPED' });
   });
 
   it('the database form, run for real, matches the predicate for both rails', async () => {
     const graceGone = new Date(Date.now() - DAY);
-    const mmg = await makeMoverWithMmgSub(new Date(Date.now() + 2 * DAY), { status: 'PAST_DUE', extra: { gracePeriodEnd: graceGone } });
-    const cash = await makeMoverWithMmgSub(new Date(Date.now() + 2 * DAY), { status: 'PAST_DUE', method: 'CASH', msisdn: null, extra: { gracePeriodEnd: graceGone } });
+    const extra = { gracePeriodEnd: graceGone, billingEnforcementDueAt: graceGone };
+    const mmg = await makeVendorSub(new Date(Date.now() + 2 * DAY), { status: 'PAST_DUE', extra });
+    const cash = await makeVendorSub(new Date(Date.now() + 2 * DAY), { status: 'PAST_DUE', method: 'CASH', extra });
     const blocked = async (env: Record<string, string>) => (await app.prisma.subscription.findMany({
       where: { id: { in: [mmg, cash] }, ...inoperableSubscriptionWhere(new Date(), env) }, select: { id: true },
     })).map((r) => r.id).sort();
-    expect(await blocked(off)).toEqual([cash]);
-    expect(await blocked(on)).toEqual([mmg, cash].sort());
+    expect(await blocked(OFF)).toEqual([cash]);
+    expect(await blocked(ON)).toEqual([mmg, cash].sort());
   });
 });
 
-describe('[PROD-PATH] the MMG-off pause clock holds every MMG-rail deadline for the span', () => {
-  it('moves grace, retry and the churn clock by the elapsed span, only for the MMG rail, only while MMG is off, never twice', async () => {
-    await app.prisma.platformConfig.deleteMany({ where: { key: MMG_PAUSE_CLOCK_KEY } });
-    const t0 = new Date('2026-10-05T10:00:00.000Z');
-    const grace = new Date('2026-10-05T11:00:00.000Z');
-    const retry = new Date('2026-10-05T11:00:00.000Z');
-    const suspendedAt = new Date('2026-09-20T10:00:00.000Z');
-    const pastDue = await makeMoverWithMmgSub(new Date(Date.now() + DAY), { status: 'PAST_DUE', extra: { gracePeriodEnd: grace, nextRetryAt: retry } });
-    const suspended = await makeMoverWithMmgSub(new Date(Date.now() + DAY), { status: 'SUSPENDED', extra: { suspendedAt, nextRetryAt: retry } });
-    const cash = await makeMoverWithMmgSub(new Date(Date.now() + DAY), { status: 'PAST_DUE', method: 'CASH', msisdn: null, extra: { gracePeriodEnd: grace, nextRetryAt: retry } });
-    const off = { MMG_DRIVER: 'disabled' };
-    const read = (id: string) => app.prisma.subscription.findUniqueOrThrow({ where: { id }, select: { gracePeriodEnd: true, nextRetryAt: true, suspendedAt: true } });
+describe('[PROD-PATH] the MMG-off pause holds the shared dunning clock for the span', () => {
+  it('pauses an MMG-rail store\'s clock (not a cash one), accrues nothing while off, and resumes it with the grace it had', async () => {
+    await app.prisma.platformConfig.deleteMany({ where: { key: MMG_PAUSE_CLOCKS_KEY } });
+    const t0 = new Date();
+    const due = new Date(t0.getTime() - 10 * 3_600_000); // ten hours overdue
+    const mmg = await makeVendorSub(due, { status: 'PAST_DUE', extra: { failedAttempts: 1 } });
+    const cash = await makeVendorSub(due, { status: 'PAST_DUE', method: 'CASH', extra: { failedAttempts: 1 } });
 
-    expect(await syncMmgPauseClock(app.prisma, t0, off)).toMatchObject({ paused: true, movedMs: 0 });
-    expect((await read(pastDue)).gracePeriodEnd!.getTime()).toBe(grace.getTime());
-    // Ten minutes later, two workers tick at once: the first is held after it
-    // has read the stored tick while the second runs; the span moves once.
-    const t1 = new Date(t0.getTime() + 10 * 60_000);
+    expect(await syncMmgPauseClock(app.prisma, t0, OFF)).toMatchObject({ paused: true });
+    const paused = (await clockOf(mmg))!;
+    expect(paused.pausedAt?.getTime()).toBe(t0.getTime());
+    const elapsedAtPause = Number(paused.elapsedMs);
+    expect(elapsedAtPause).toBeGreaterThanOrEqual(10 * 3_600_000 - 1_000);
+    expect((await sub(mmg)).billingConfirmationPausedAt?.getTime()).toBe(t0.getTime());
+    expect((await clockOf(cash))?.pausedAt ?? null).toBeNull();
+
+    // An hour later MMG is still off: nothing accrues, nothing is paused twice.
+    const t1 = new Date(t0.getTime() + 3_600_000);
+    await syncMmgPauseClock(app.prisma, t1, OFF);
+    const still = (await clockOf(mmg))!;
+    expect(Number(still.elapsedMs)).toBe(elapsedAtPause);
+    expect(still.version).toBe(paused.version);
+
+    // MMG on: resumed with exactly the overdue time it had at the pause.
+    const t2 = new Date(t0.getTime() + 5 * 3_600_000);
+    const on = await syncMmgPauseClock(app.prisma, t2, ON);
+    expect(on.paused).toBe(false);
+    expect(on.resumedNow).toBeGreaterThanOrEqual(1);
+    const resumed = (await clockOf(mmg))!;
+    expect(resumed.pausedAt).toBeNull();
+    expect(activeOverdueMs(resumed, t2)).toBe(elapsedAtPause);
+    const after = await sub(mmg);
+    expect(after.billingConfirmationPausedAt).toBeNull();
+    expect(after.billingEnforcementDueAt?.getTime()).toBe(t2.getTime() + FULL_FEE_GRACE_MS - elapsedAtPause);
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: MMG_PAUSE_CLOCKS_KEY } })).toBeNull();
+  });
+
+  it('two ticks at once pause a clock once', async () => {
+    await app.prisma.platformConfig.deleteMany({ where: { key: MMG_PAUSE_CLOCKS_KEY } });
+    const t0 = new Date();
+    const id = await makeVendorSub(new Date(t0.getTime() - 3_600_000), { status: 'PAST_DUE', extra: { failedAttempts: 1 } });
+    // Create the clock first (an earlier ordinary read), so both ticks find it running.
+    await syncMmgPauseClock(app.prisma, t0, ON);
+    await app.prisma.$transaction(async (tx) => (await import('../modules/billing/dunning-clock')).currentDunningClock(tx, id, t0));
+    const before = (await clockOf(id))!;
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     let firstRead!: () => void;
     const reading = new Promise<void>((resolve) => { firstRead = resolve; });
-    const first = syncMmgPauseClock(app.prisma, t1, off, async (b) => { if (b === 'after-read') { firstRead(); await held; } });
+    const first = syncMmgPauseClock(app.prisma, t0, OFF, async (b) => { if (b === 'after-read') { firstRead(); await held; } });
     await reading;
-    const second = syncMmgPauseClock(app.prisma, t1, off);
+    const second = syncMmgPauseClock(app.prisma, t0, OFF);
     await new Promise((r) => setTimeout(r, 400));
     release();
     await Promise.all([first, second]);
-    expect((await read(pastDue)).gracePeriodEnd!.getTime()).toBe(grace.getTime() + 10 * 60_000);
-    expect((await read(pastDue)).nextRetryAt!.getTime()).toBe(retry.getTime() + 10 * 60_000);
-    expect((await read(suspended)).suspendedAt!.getTime()).toBe(suspendedAt.getTime() + 10 * 60_000);
-    expect((await read(suspended)).nextRetryAt!.getTime()).toBe(retry.getTime() + 10 * 60_000);
-    expect((await read(cash)).gracePeriodEnd!.getTime()).toBe(grace.getTime());
-    // A clock that steps backwards moves nothing.
-    await syncMmgPauseClock(app.prisma, t0, off);
-    expect((await read(pastDue)).gracePeriodEnd!.getTime()).toBe(grace.getTime() + 10 * 60_000);
-    // MMG on: the clock row goes and nothing moves; the next pause starts fresh.
-    const t2 = new Date(t1.getTime() + 60 * 60_000);
-    expect(await syncMmgPauseClock(app.prisma, t2, { MMG_DRIVER: 'live' })).toMatchObject({ paused: false, movedMs: 0 });
-    expect(await app.prisma.platformConfig.findUnique({ where: { key: MMG_PAUSE_CLOCK_KEY } })).toBeNull();
-    expect((await read(pastDue)).gracePeriodEnd!.getTime()).toBe(grace.getTime() + 10 * 60_000);
+    const after = (await clockOf(id))!;
+    expect(after.pausedAt).not.toBeNull();
+    expect(after.version).toBe(before.version + 1);
+    await syncMmgPauseClock(app.prisma, new Date(), ON);
+  });
+
+  it('a clock this pause holds that has since gained another hold is left paused for that owner, and forgotten', async () => {
+    await app.prisma.platformConfig.deleteMany({ where: { key: MMG_PAUSE_CLOCKS_KEY } });
+    const t0 = new Date();
+    const id = await makeVendorSub(new Date(t0.getTime() - 3_600_000), { status: 'PAST_DUE', extra: { failedAttempts: 1 } });
+    await syncMmgPauseClock(app.prisma, t0, OFF);
+    const paused = (await clockOf(id))!;
+    expect(paused.pausedAt?.getTime()).toBe(t0.getTime());
+    // A finance review now holds the same clock.
+    await app.prisma.billingDunningClock.update({ where: { id: paused.id }, data: { authorityHoldReason: 'FINANCE_REVIEW', version: { increment: 1 } } });
+    await syncMmgPauseClock(app.prisma, new Date(t0.getTime() + 60_000), ON);
+    expect((await clockOf(id))!.pausedAt?.getTime()).toBe(t0.getTime());
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: MMG_PAUSE_CLOCKS_KEY } })).toBeNull();
+    await app.prisma.billingDunningClock.update({ where: { id: paused.id }, data: { authorityHoldReason: null, version: { increment: 1 } } });
+  });
+
+  it('a clock paused by something else (a payment being confirmed) is never resumed by this pause', async () => {
+    await app.prisma.platformConfig.deleteMany({ where: { key: MMG_PAUSE_CLOCKS_KEY } });
+    const t0 = new Date();
+    const id = await makeVendorSub(new Date(t0.getTime() - 3_600_000), { status: 'PAST_DUE', extra: { failedAttempts: 1 } });
+    // Paused by its own owner before MMG went off.
+    const clock = await app.prisma.$transaction(async (tx) => (await import('../modules/billing/dunning-clock')).currentDunningClock(tx, id, t0));
+    await app.prisma.billingDunningClock.update({ where: { id: clock.id }, data: {
+      elapsedMs: BigInt(activeOverdueMs(clock, t0)), runningSince: null, pausedAt: t0, version: { increment: 1 },
+    } });
+    await syncMmgPauseClock(app.prisma, new Date(t0.getTime() + 60_000), OFF);
+    await syncMmgPauseClock(app.prisma, new Date(t0.getTime() + 120_000), ON);
+    expect((await clockOf(id))!.pausedAt?.getTime()).toBe(t0.getTime());
   });
 });
