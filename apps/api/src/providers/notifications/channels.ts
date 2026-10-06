@@ -9,6 +9,7 @@ import { isProduction } from '../../utils/runtime-mode';
 import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
+import { guardNonProductionSms } from './sms-recipient-allowlist';
 
 export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
 export interface SmsOptions { handoff?: NotificationHandoff }
@@ -452,7 +453,8 @@ export function getChannels(): NotificationChannels {
     case 'dev':
       return { sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() };
     case 'twilio':
-      return { sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: getEmailProvider() };
+      // [L04 · SMS allowlist] Outside production a real provider texts only allowlisted numbers.
+      return { sms: guardNonProductionSms(new TwilioSmsProvider()), push: withPushRetry(getPushProvider()), email: getEmailProvider() };
     default:
       throw new Error('Unknown NOTIFICATION_PROVIDER');
   }
