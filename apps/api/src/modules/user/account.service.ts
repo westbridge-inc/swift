@@ -33,6 +33,11 @@ const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 /** The subject of a closure request confirmed in the app. Support completes
  *  only these: a typed-in ticket is not a confirmed request. */
 export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
+/** The server-written record that a closure request was confirmed in the app
+ *  (behind the deletion step-up). Anyone can type the subject into a support
+ *  ticket; only the confirmed request writes this record, so support completes
+ *  only a ticket that carries it. */
+export const ACCOUNT_CLOSURE_CONFIRMED = 'ACCOUNT_CLOSURE_CONFIRMED_IN_APP';
 
 export class AccountService {
   constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
@@ -99,11 +104,20 @@ export class AccountService {
 
   private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
     const where = { userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
-    return await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
+    const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
       ?? await tx.supportTicket.create({ data: {
         userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
         message: 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.',
       } });
+    // Same transaction as the request: the confirmation and its ticket commit
+    // together. One record per ticket; a repeated request reuses it.
+    const confirmed = await tx.auditLog.findFirst({
+      where: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
+    });
+    if (!confirmed) {
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id } });
+    }
+    return ticket;
   }
 
   private async closureReceipt(userId: string, ticketId: string) {

@@ -165,6 +165,10 @@ function harness() {
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },
     extractionRun: { updateMany: vi.fn() }, extractedField: { updateMany: vi.fn() },
     integritySettings: { findUnique: vi.fn() },
+    // Account erasure keeps review scores but clears review words (owner
+    // decision 2026-10-05); no review rows exist in this harness.
+    rating: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(async (fn: any) => fn(db)),
     $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
       ?? [{ id: String(values[0] ?? A), status: 'ACTIVE', tenantId: 'tenant-a', countryCode: 'GY' }]),
@@ -172,6 +176,9 @@ function harness() {
   for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart']) {
     db[name] = { deleteMany: vi.fn() };
   }
+  // The synthetic route session is not a fresh code sign-in, so deletion
+  // falls through to the step-up grant the route harness holds in Redis.
+  db.session.findUnique = vi.fn(async () => null);
   const provider = {
     engine: { name: 'test', version: '1', external: false },
     verifyDocument: vi.fn(async () => ({ status: 'pending_manual' as const, referenceToken: 'test' })),

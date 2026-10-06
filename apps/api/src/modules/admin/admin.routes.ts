@@ -49,7 +49,7 @@ import { requireStepUp } from '../auth/step-up';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError } from '../../utils/errors';
-import { AccountService, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
+import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -5915,7 +5915,13 @@ export async function adminRoutes(app: FastifyInstance) {
       where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
     });
     if (!ticket) throw new NotFoundError('SupportTicket', id);
-    if (ticket.category !== 'ACCOUNT' || ticket.subject !== ACCOUNT_CLOSURE_SUBJECT) {
+    // The subject alone can be typed by anyone; the confirmation record is
+    // written only by the in-app request, behind the deletion step-up.
+    const confirmedInApp = ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT
+      && await app.prisma.auditLog.findFirst({
+        where: { userId: ticket.userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
+      });
+    if (!confirmedInApp) {
       throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request confirmed in the app can be completed here.');
     }
     if (ticket.status === 'RESOLVED') throw new AppError(409, 'ALREADY_RESOLVED', 'This closure request is already resolved.');
