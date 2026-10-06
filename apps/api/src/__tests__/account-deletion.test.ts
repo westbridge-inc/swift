@@ -14,6 +14,7 @@ import { AccountService } from '../modules/user/account.service';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { lockMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { RatingService } from '../modules/rating/rating.service';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -305,3 +306,49 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(res.json().error.code).toBe('ACTIVE_ORDERS');
   });
 });
+
+// [DELETION-INTEGRITY · owner decision 2026-10-05] A store's rating keeps the
+// reviews a deleted person wrote — score and tags still count — but free text
+// can identify them, so the comment AND the store's reply to it are deleted.
+describe('DELETION-INTEGRITY — reviews the person wrote are kept anonymised', () => {
+  it('keeps the score and tags, deletes the comment and the store reply, and leaves the store rating unchanged', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const vendor = await app.prisma.vendor.findFirstOrThrow({ select: { id: true } });
+    const order = await app.prisma.order.create({ data: {
+      orderNumber: `RV-${nanoid(10).toUpperCase()}`, customerId: u.userId, vendorId: vendor.id,
+      orderType: 'FOOD_DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Test St', deliveryLat: 6.8055, deliveryLng: -58.1553,
+      subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+    } });
+    const rating = await app.prisma.rating.create({ data: {
+      orderId: order.id, raterId: u.userId, vendorId: vendor.id, type: 'CUSTOMER_TO_VENDOR', score: 2,
+      tags: ['cold_food'], comment: 'Del here from the blue house by the market, food was cold',
+      response: 'Sorry Del, we will call you about the blue house order', respondedAt: new Date(), respondedBy: u.userId,
+      visibleAt: new Date(),
+    } });
+    await app.prisma.ratingOutbox.create({ data: { ratingId: rating.id, command: 'SYNTHETIC_PAYLOAD', payload: { comment: 'Del here from the blue house', score: 2 } } });
+    try {
+      const reviews = new RatingService(app.prisma);
+      const before = await reviews.getVendorReviews(vendor.id, 100);
+
+      const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+      expect(res.statusCode, res.payload).toBe(200);
+
+      const kept = await app.prisma.rating.findUniqueOrThrow({ where: { id: rating.id } });
+      expect(kept).toMatchObject({ score: 2, tags: ['cold_food'], state: 'ACTIVE', comment: null, response: null, respondedAt: null, respondedBy: null });
+      const outbox = await app.prisma.ratingOutbox.findFirstOrThrow({ where: { ratingId: rating.id } });
+      expect(outbox.payload).toEqual({ score: 2 });
+
+      const after = await reviews.getVendorReviews(vendor.id, 100);
+      expect(after.distribution).toEqual(before.distribution);
+      expect(after.total).toBe(before.total);
+      const shown = after.reviews.find((r) => r.id === rating.id)!;
+      expect(shown).toMatchObject({ score: 2, comment: null, response: null });
+      expect(JSON.stringify(shown)).not.toMatch(/Del\b|blue house/);
+      expect(shown.rater).toMatchObject({ firstName: 'Deleted', avatar: null });
+    } finally {
+      await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: rating.id } });
+      await app.prisma.rating.deleteMany({ where: { id: rating.id } });
+    }
+  });
+});
+
