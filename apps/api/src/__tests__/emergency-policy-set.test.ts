@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { serveEmergencyPolicy, setEmergencyPolicy } from '../modules/country/emergency-policy';
-import { GY_EMERGENCY_POLICY } from '../../scripts/set-emergency-policy';
 
 // ---------------------------------------------------------------------------
 // [L10 §2] The owner confirmed Guyana's numbers (police 911, fire 912,
@@ -12,8 +13,13 @@ import { GY_EMERGENCY_POLICY } from '../../scripts/set-emergency-policy';
 
 const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL']! } } });
 let original: Prisma.JsonValue = null;
+// The script sits outside this package's rootDir (src), so it is loaded by
+// path, the way the livetest suites load theirs; tsconfig.scripts.json
+// type-checks the script itself.
+let GY_EMERGENCY_POLICY: Record<'police' | 'fire' | 'ambulance', { number: string; verified: boolean }>;
 
 beforeAll(async () => {
+  ({ GY_EMERGENCY_POLICY } = await import(pathToFileURL(join(__dirname, '../../scripts/set-emergency-policy.ts')).href));
   original = (await prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' }, select: { emergency: true } })).emergency;
 });
 afterAll(async () => {
