@@ -22,7 +22,7 @@ import { DECLARATION_CONSENT_TYPE } from '../modules/vendor/unregistered-declara
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import {
-  VENDOR_TIER_CAPS_DEFAULTS, assertPromotable, assertWithinTierCaps, judgeTierCap, promoteIfRegistered, tierUsage, vendorTierCapsFor,
+  VENDOR_TIER_CAPS_DEFAULTS, assertPromotable, assertWithinTierCaps, judgeTierCap, nudgeOwnerOnce, promoteIfRegistered, tierUsage, vendorTierCapsFor,
 } from '../modules/vendor/vendor-tier';
 import { CountryConfigService } from '../modules/country/country-config.service';
 import { guyanaWallClockParts } from '../utils/guyana-day';
@@ -271,6 +271,30 @@ describe('[DOC-1 P3-2] the build against the contract: declaration, requirement 
     const facade = await system(() => new CountryConfigService(app.prisma).getDocumentChecklist('GY', 'RESTAURANT', 'UNREGISTERED'));
     expect(facade).toEqual(expect.arrayContaining([DECLARATION_DOC_TYPE, 'food_handler_cert']));
     expect(await system(() => new CountryConfigService(app.prisma).getDocumentChecklist('GY', 'RESTAURANT'))).toContain(REGISTRATION_DOC_TYPES[0]);
+  });
+
+  it('the once-a-day nudge counts the GUYANA day: one sent at 19:00 in Guyana still holds at 20:30 (00:30 UTC); one from the previous Guyana evening does not', async () => {
+    const v = await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, ownerId: true } }));
+    const owner = await system(() => app.prisma.vendorOwner.findUniqueOrThrow({ where: { id: v.ownerId }, select: { userId: true } }));
+    const verdict = judgeTierCap({ dayStart: new Date(), weekStart: new Date(), ordersToday: 25, grossThisWeek: 0 }, VENDOR_TIER_CAPS_DEFAULTS, 1000);
+    expect(verdict.nudge).toBe(true);
+    const sent: unknown[] = [];
+    const notifications = { send: async (input: unknown) => { sent.push(input); } };
+    const plant = (at: string) => system(() => app.prisma.notification.create({ data: {
+      userId: owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'nudge', body: 'nudge',
+      data: { kind: 'vendor_tier_nudge', vendorId }, createdAt: new Date(at),
+    } }));
+    const now = new Date('2031-03-10T00:30:00.000Z'); // 20:30 GYT on 9 March
+    const planted: string[] = [];
+    try {
+      planted.push((await plant('2031-03-09T03:00:00.000Z')).id); // 23:00 GYT on the 8th: yesterday
+      expect(await system(() => nudgeOwnerOnce(app.prisma, notifications, v, verdict, VENDOR_TIER_CAPS_DEFAULTS, now))).toBe(true);
+      planted.push((await plant('2031-03-09T23:00:00.000Z')).id); // 19:00 GYT on the 9th: today
+      expect(await system(() => nudgeOwnerOnce(app.prisma, notifications, v, verdict, VENDOR_TIER_CAPS_DEFAULTS, now))).toBe(false);
+      expect(sent).toHaveLength(1);
+    } finally {
+      await system(() => app.prisma.notification.deleteMany({ where: { id: { in: planted } } }));
+    }
   });
 
   it('test_nudge_at_sixty_percent: a checkout that lands the store at 60 % of a cap tells the owner once a day, with the DCRA steps', async () => {
