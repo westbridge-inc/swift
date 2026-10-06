@@ -91,7 +91,7 @@ describe('[73] the owner finds their live alert again after a restart', () => {
     const res = await get('/api/v1/safety/sos/owned-active', owner.token);
     expect(res.statusCode).toBe(200);
     const rows = res.json().data as Array<Record<string, unknown>>;
-    const ids = rows.map((r) => r.id);
+    const ids = rows.map((r) => r['id']);
     expect(ids).toEqual(expect.arrayContaining([live.id, pending.id]));
     expect(ids).not.toContain(closed.id);
     expect(ids).not.toContain(foreign.id);
