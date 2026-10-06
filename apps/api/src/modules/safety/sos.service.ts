@@ -451,7 +451,14 @@ export class SosService {
   async ack(id: string, opsUserId: string) {
     const acked = await this.transition(id, 'ACKNOWLEDGED', { acknowledgedAt: new Date(), acknowledgedBy: opsUserId });
     // [S-19] A human acknowledged the emergency: the ops page's obligation is met.
-    await runWithoutTenant(() => acknowledgeOpsAlert(this.prisma, { sosAlertId: id, userId: opsUserId })).catch(() => null);
+    // [M076] The page keeps its own rule (only its audience can acknowledge
+    // it, with a receipt), so an SOS acknowledged by someone outside that
+    // audience leaves the page open and escalating: say so, never silently.
+    const page = await runWithoutTenant(() => acknowledgeOpsAlert(this.prisma, { sosAlertId: id, userId: opsUserId })).catch((err) => {
+      log().error({ err, sosAlertId: id }, '[S-19] SOS acknowledged, but acknowledging its ops page failed: the page stays open and escalates');
+      return null;
+    });
+    if (page && page.refused.length > 0) log().warn({ sosAlertId: id, opsUserId, refused: page.refused }, '[S-19] SOS acknowledged by someone outside its ops page audience: the page stays open and escalates');
     return acked;
   }
 

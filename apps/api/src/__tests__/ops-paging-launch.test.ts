@@ -13,6 +13,9 @@ import { safetyRoutes } from '../modules/safety/safety.routes';
 import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
 import { pageOps } from '../modules/ops/ops-page';
 import { openOpsAlert, escalateOverdueOpsAlerts, acknowledgeOpsAlert } from '../modules/safety/ops-alert';
+import { SosService } from '../modules/safety/sos.service';
+import { drainSosEscalations } from '../modules/safety/sos-escalation';
+import { OPS_WAR_ROOM, tenantWarRoom } from '../modules/safety/war-room';
 import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/notifications/channels';
 
 // ---------------------------------------------------------------------------
@@ -295,6 +298,45 @@ describe('[GUARDRAILS §3] an app-store reviewer\'s demo SOS never pages real op
     await runWithoutTenant(() => notifyAdmins(app.prisma, notifications(), { tenantId: TENANT_REVIEW, title: 'Demo notice', body: 'Demo.', data: { kind: 'sos_marked_safe', probe: RUN } }), 'test:l10-paging');
     const reached = await app.prisma.notification.count({ where: { userId: superAdmin.userId, data: { path: ['probe'], equals: RUN } } });
     expect(reached).toBe(0);
+  });
+
+  it('a REVIEW-tenant SOS stays in its own war room (sos:active and a repeat press\'s sos:retrigger never reach the platform room); a real tenant\'s reaches both', async () => {
+    // A socket server that records every room an emit is addressed to.
+    const emits: Array<{ event: string; rooms: string[]; sosAlertId: unknown }> = [];
+    const capture = {
+      to: (rooms: string | string[]) => ({ emit: (event: string, payload: { sosAlertId?: unknown }) => { emits.push({ event, rooms: [rooms].flat(), sosAlertId: payload?.sosAlertId }); return true; } }),
+      in: () => ({ fetchSockets: async () => [] }),
+    } as unknown as Server;
+    const sos = new SosService(app.prisma, capture);
+    const raised: Record<string, string> = {};
+    try {
+      for (const tenantId of [TENANT_REVIEW, TENANT_B]) {
+        const person = await makeUser(['CUSTOMER'], tenantId);
+        const alert = await sos.create({ actorUserId: person.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.8, lng: -58.15 });
+        raised[tenantId] = alert.id;
+        await drainSosEscalations(app.prisma, capture, { alertIds: [alert.id] });
+        // A repeat press on the live alert, from a new position.
+        await sos.create({ actorUserId: person.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.81, lng: -58.16 });
+      }
+      const roomsFor = (tenantId: string, event: string) => emits.filter((e) => e.sosAlertId === raised[tenantId] && e.event === event).flatMap((e) => e.rooms);
+      // Positive control: a real tenant's SOS reaches its own room AND the platform room, on both events.
+      for (const event of ['sos:active', 'sos:retrigger']) {
+        expect(roomsFor(TENANT_B, event), `real tenant ${event}`).toEqual(expect.arrayContaining([tenantWarRoom(TENANT_B), OPS_WAR_ROOM]));
+        // The demo: never the platform room (and, once the review seal lands, possibly no emit at all).
+        expect(roomsFor(TENANT_REVIEW, event), `review tenant ${event}`).not.toContain(OPS_WAR_ROOM);
+        for (const room of roomsFor(TENANT_REVIEW, event)) expect(room).toBe(tenantWarRoom(TENANT_REVIEW));
+      }
+    } finally {
+      await runWithoutTenant(async () => {
+        const ids = Object.values(raised);
+        await app.prisma.evidenceBundle.deleteMany({ where: { sosAlertId: { in: ids } } }).catch(() => {});
+        const pages = (await app.prisma.opsAlert.findMany({ where: { sosAlertId: { in: ids } }, select: { id: true } })).map((a) => a.id);
+        await app.prisma.opsAlertRecipient.deleteMany({ where: { opsAlertId: { in: pages } } }).catch(() => {});
+        await app.prisma.opsAlert.deleteMany({ where: { id: { in: pages } } }).catch(() => {});
+        for (const id of ids) await app.prisma.notification.deleteMany({ where: { data: { path: ['sosAlertId'], equals: id } } }).catch(() => {});
+        await app.prisma.sosAlert.deleteMany({ where: { id: { in: ids } } }).catch(() => {});
+      }, 'test-cleanup:l10-paging');
+    }
   });
 });
 
