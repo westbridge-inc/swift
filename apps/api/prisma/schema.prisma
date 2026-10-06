@@ -402,6 +402,7 @@ model Tenant {
   orders           Order[]
   rideQueueEntries RideQueueEntry[]
   taxiTripStops    TaxiTripStop[]
+  custodyRecoveryCases CustodyRecoveryCase[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -1833,6 +1834,9 @@ model Order {
   deliveryCashSettlement DeliveryCashSettlement?
   items                  OrderItem[]
   supportTickets         SupportTicket[]
+  /// [AF-MOB-006] Recovery cases for goods already in a rider's custody. At most
+  /// one is open at a time (a partial unique index); resolved ones stay as history.
+  custodyRecoveryCases   CustodyRecoveryCase[]
 
   pickupAddress        String?
   pickupLat            Float?
@@ -2174,6 +2178,92 @@ model TaxiTripStop {
   @@unique([orderId, sequence])
   @@index([tenantId])
   @@map("taxi_trip_stops")
+}
+
+/// [AF-MOB-006] Where a custody recovery case stands. Its classification
+/// (open or resolved) and its edges live in modules/order/order-status.ts
+/// (CUSTODY_CASE_LAW, CUSTODY_CASE_TRANSITIONS), never here.
+enum CustodyRecoveryState {
+  SUPPORT_HOLD
+  RETURN_REQUIRED
+  RELAY_REQUIRED
+  TRANSFER_IN_PROGRESS
+  DELIVERED
+  RETURNED
+  TRANSFERRED
+  CLOSED
+}
+
+/// [AF-MOB-006] Why a delivery needed recovery after pickup. The first eleven
+/// are what a rider reports; the last three are recorded by the system.
+enum CustodyIncidentReason {
+  VEHICLE_BREAKDOWN
+  CRASH
+  MEDICAL
+  UNSAFE_RECIPIENT
+  RECIPIENT_ABSENT
+  INACCESSIBLE_PROPERTY
+  DAMAGED_OR_PROHIBITED
+  WRONG_PACKAGE
+  POLICE_OR_ROAD_CLOSURE
+  DEVICE_FAILURE
+  OTHER
+  MOVER_SIGNAL_LOST
+  MOVER_SESSION_ENDED
+  RETURN_STARTED
+}
+
+/// [AF-MOB-006] ONE owned recovery case for a delivery that went wrong after
+/// pickup: the goods (and, on cash, the float the rider fronted the store) are
+/// in someone's custody, so somebody must own what happens next. At most one
+/// case per order is open (a partial unique index), and the database ties
+/// `resolvedAt` to the open states (a CHECK). `holderRiderId` is the one
+/// custody holder and equals the order's riderId while the case is open; a
+/// relay rider becomes the holder only through the verified transfer. The
+/// trail of every step is in audit_logs (entity CustodyRecoveryCase).
+/// Mover and operator ids are plain ids (audit-log style): no cascade from a
+/// person's deletion may erase a custody record.
+model CustodyRecoveryCase {
+  id               String                @id @default(cuid())
+  tenantId         String                @default("swift-default")
+  tenant           Tenant                @relation(fields: [tenantId], references: [id])
+  orderId          String
+  order            Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  state            CustodyRecoveryState  @default(SUPPORT_HOLD)
+  reason           CustodyIncidentReason
+  reasonNote       String?
+  /// Who opened it: a user id, or null when the system did.
+  openedBy         String?
+  holderRiderId    String
+  relayRiderId     String?
+  /// The handoff code the holder shows the relay rider. Returned to nobody
+  /// but the holder; cleared when the transfer ends either way.
+  transferCode     String?
+  /// When THIS code stops working: set when the code is minted and never moved
+  /// (a later bump of the case deadline can never revive it). Null with no code.
+  transferCodeExpiresAt DateTime?
+  transferAttempts Int                   @default(0)
+  /// The operations owner (an admin user id).
+  ownerUserId      String?
+  ownerAssignedAt  DateTime?
+  /// When humans are paged if nothing has moved.
+  deadlineAt       DateTime
+  escalationCount  Int                   @default(0)
+  lastEscalatedAt  DateTime?
+  /// Bumped on every change, so a client acting on an old screen is refused.
+  version          Int                   @default(0)
+  incidentLat      Float?
+  incidentLng      Float?
+  resolvedAt       DateTime?
+  resolution       String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@index([tenantId])
+  @@index([orderId])
+  @@index([state, deadlineAt])
+  @@index([relayRiderId])
+  @@map("custody_recovery_cases")
 }
 
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle
