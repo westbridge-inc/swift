@@ -165,9 +165,14 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     expect(b.statusCode, b.payload).toBe(202);
     expect(a.json().data).toMatchObject({ deleted: false, status: 'CLOSURE_REQUESTED' });
     expect(a.json().data.ticketId).toBe(b.json().data.ticketId);
-    const viaDelete = await del(p.token);
+    // Build 10+ (shows every receipt by its message) gets the same request back.
+    const viaDelete = await app.inject({ method: 'DELETE', url: '/api/v1/customer/account?receipts=v2', headers: { authorization: `Bearer ${p.token}` } });
     expect(viaDelete.statusCode, viaDelete.payload).toBe(202);
     expect(viaDelete.json().data.ticketId).toBe(a.json().data.ticketId);
+    // Build 9 is never told the account was deleted: same request, not a success.
+    const build9 = await del(p.token);
+    expect(build9.statusCode, build9.payload).toBe(409);
+    expect(build9.json().error).toMatchObject({ code: 'ACCOUNT_CLOSURE_REQUESTED', details: { ticketId: a.json().data.ticketId } });
     expect(await app.prisma.supportTicket.count({ where: { userId: p.userId } })).toBe(1);
     expect(await app.prisma.session.count({ where: { userId: p.userId } })).toBe(1);
   });
