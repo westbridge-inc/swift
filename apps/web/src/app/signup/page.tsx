@@ -76,6 +76,15 @@ export default function SignupPage() {
   // The partner agreement: an explicit, unticked clickwrap. The API records the
   // consent and refuses a partner sign-up without it (AGREEMENT_REQUIRED).
   const [agree, setAgree] = useState(false);
+  // A tick is given to the agreement on screen: it is cleared whenever the role
+  // or the step changes, so it never carries from one agreement to the other,
+  // nor survives leaving the step (reset during render, so no frame shows it).
+  const agreementScope = `${role}:${step}`;
+  const [agreeScope, setAgreeScope] = useState(agreementScope);
+  if (agreeScope !== agreementScope) {
+    setAgreeScope(agreementScope);
+    setAgree(false);
+  }
   // A signed-in business account whose store was never created comes back
   // here from the console (/signup?resume=business) straight to that step.
   useEffect(() => {
