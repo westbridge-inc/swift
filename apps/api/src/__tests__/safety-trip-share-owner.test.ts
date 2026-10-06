@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';
 import { nanoid } from 'nanoid';
-import { TripShareService, tripShareDigest } from '../modules/safety/trip-share.service';
+import { TripShareService } from '../modules/safety/trip-share.service';
 import type { NotificationChannels } from '../../src/providers/notifications/channels';
 
 // Trip Share (safety spec §6). The laws under test: the token is unguessable
