@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { runBillingInvariants } from '../modules/billing/invariants';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { restoreBillingAccess } from '../modules/billing/billing-access';
 
 // SUSPENSION-HEAL (AUD-L8b-003, FINAL §6b): the nightly detector finds a
 // subscription that is SUSPENDED although it is paid through the future and
@@ -91,6 +92,23 @@ describe('SUSPENSION-HEAL — the wrongful-suspension heal reopens the store it 
     const s = await wronglySuspendedStore({ isVerified: false });
     await runBillingInvariants(prisma);
     const v = await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } });
+    expect(v.acceptingOrders).toBe(false);
+  });
+
+  it('[Fable #1481 S4-2] a store an admin already reinstated (ACTIVE, stale BILLING source) keeps the intake its owner chose', async () => {
+    const s = await wronglySuspendedStore({ status: 'ACTIVE', acceptingOrders: false, suspensionSource: 'BILLING' });
+    await runBillingInvariants(prisma);
+    const v = await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } });
+    expect(v.status).toBe('ACTIVE');
+    expect(v.acceptingOrders).toBe(false);
+  });
+
+  it('[Fable #1481 S4-1] a suspension with no source (an owner closing their account) is never lifted as a billing one', async () => {
+    const s = await wronglySuspendedStore({ suspensionSource: null });
+    await runBillingInvariants(prisma);
+    expect(await prisma.$transaction((tx) => restoreBillingAccess(tx, s.vendorId))).toBe(false);
+    const v = await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } });
+    expect(v.status).toBe('SUSPENDED');
     expect(v.acceptingOrders).toBe(false);
   });
 

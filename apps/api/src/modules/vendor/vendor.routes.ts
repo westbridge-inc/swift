@@ -662,7 +662,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       select: { isVerified: true, status: true, vendorType: true, suspensionSource: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
-    const billingHold = vendor.status === 'SUSPENDED' && (vendor.suspensionSource === 'BILLING' || vendor.suspensionSource == null);
+    // [Fable #1481 S4-1] Only a suspension billing stamped is a billing hold; one with no source (e.g. an owner
+    // closing their account) keeps the ordinary rule.
+    const billingHold = vendor.status === 'SUSPENDED' && vendor.suspensionSource === 'BILLING';
     if ((vendor.status === 'SUSPENDED' && !(work === 'IN_FLIGHT' && billingHold)) || vendor.status === 'CLOSED') {
       throw new AppError(403, 'VENDOR_SUSPENDED', 'Your store is not active and cannot work orders. Reopen it from Account.');
     }

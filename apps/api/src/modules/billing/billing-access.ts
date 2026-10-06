@@ -6,24 +6,24 @@ import type { Prisma } from '@prisma/client';
  * a real payment (BillingService.reinstateRows) and by the nightly
  * wrongful-suspension heal (invariants.ts), inside the caller's transaction.
  *
- * - The lifecycle CAS matches a billing-caused suspension only: an admin,
- *   safety or moderation suspension survives. A pre-migration suspension has
- *   a null source; the only automated suspender has always been billing, so a
- *   null source lifts too (an admin can always re-suspend, which stamps ADMIN).
- * - Order intake reopens only where the document truth (isVerified) still
- *   stands: a store whose documents died meanwhile comes back ACTIVE but
- *   closed, never a blind acceptingOrders=true.
+ * - The lifecycle CAS matches a suspension billing stamped (BILLING) only: an
+ *   admin, safety, moderation or wind-down suspension survives, and so does
+ *   one with no source [Fable #1481 S4-1].
+ * - Order intake reopens only when THIS call lifted that suspension (billing
+ *   closed it), and only where the document truth (isVerified) still stands.
+ *   A store already ACTIVE keeps the intake its owner chose [Fable #1481 S4-2].
  *
  * Returns true when this call lifted a billing suspension.
  */
 export async function restoreBillingAccess(tx: Prisma.TransactionClient, vendorId: string): Promise<boolean> {
   const lifted = await tx.vendor.updateMany({
-    where: { id: vendorId, status: 'SUSPENDED', OR: [{ suspensionSource: 'BILLING' }, { suspensionSource: null }] },
+    where: { id: vendorId, status: 'SUSPENDED', suspensionSource: 'BILLING' },
     data: { status: 'ACTIVE', suspensionSource: null },
   });
+  if (lifted.count !== 1) return false;
   await tx.vendor.updateMany({
     where: { id: vendorId, status: 'ACTIVE', isVerified: true },
     data: { acceptingOrders: true },
   });
-  return lifted.count === 1;
+  return true;
 }

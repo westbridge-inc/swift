@@ -148,6 +148,16 @@ describe('BILLING-INFLIGHT — a weekly-fee hold blocks new orders, never accept
     expect(res.json().error.code).toBe('SUBSCRIPTION_PAST_DUE');
   });
 
+  it('[Fable #1481 S4-1] a suspension with no source (an owner closing their account) is not a billing hold: progress stays refused', async () => {
+    await restore();
+    const order = await makeOrder('ACCEPTED');
+    await app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: null } });
+    const res = await put(order.id, 'preparing');
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('VENDOR_SUSPENDED');
+    await restore();
+  });
+
   it('an ADMIN suspension keeps its own rule: progress stays refused (not a billing hold)', async () => {
     await restore();
     const order = await makeOrder('ACCEPTED');
