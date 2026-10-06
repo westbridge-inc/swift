@@ -878,15 +878,8 @@ export async function driverRoutes(app: FastifyInstance) {
       request.log.warn({ err: error, orderId: id }, 'direct taxi assignment socket publication failed after commit');
     }
 
-    await notifications.send({
-      userId: order.customerId,
-      type: 'ORDER_UPDATE',
-      title: 'Driver Found!',
-      // [73 · owner ruling] Car and plate stay in the push: checking the plate before getting in is a safety step.
-      body: `${driver.user.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
-      data: taxiNotificationData(id, { status: 'DRIVER_ASSIGNED' }),
-    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'direct taxi assignment notification failed after commit'));
-
+    // The rider's "Driver Found!" push (car and plate, owner ruling) is sent once, by
+    // dispatch.claimOrder above, for this entrance and the offer card alike.
     return { success: true, data: responseOrder };
   });
 

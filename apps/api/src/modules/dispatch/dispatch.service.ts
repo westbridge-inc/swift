@@ -2929,13 +2929,23 @@ export class DispatchService {
     } catch (err) {
       warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch socket publication failed after claim commit');
     }
-    await this.notifications
-      .riderAssigned(
+    // [73 · owner ruling] A taxi rider hears "Driver Found!" with the car and its plate, tagged
+    // as a taxi, from either entrance; every other order keeps the delivery copy.
+    const assignedPush = order.orderType === 'TAXI' && order.driver
+      ? this.notifications.driverFound(order.customerId, orderId, {
+        firstName: order.driver.user?.firstName || 'Your driver',
+        vehicleColor: order.driver.vehicleColor,
+        vehicleMake: order.driver.vehicleMake,
+        vehicleModel: order.driver.vehicleModel,
+        licensePlate: order.driver.licensePlate,
+      })
+      : this.notifications.riderAssigned(
         order.customerId,
         order.orderNumber,
         (pool === 'DRIVER' ? order.driver?.user?.firstName : order.rider?.user?.firstName) || 'Your mover',
         orderId,
-      )
+      );
+    await assignedPush
       .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch assignment notification failed after claim commit'));
 
     try {

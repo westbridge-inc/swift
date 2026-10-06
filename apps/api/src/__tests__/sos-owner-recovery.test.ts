@@ -115,6 +115,42 @@ describe('[73] the owner finds their live alert again after a restart', () => {
     expect(mine.json().data.status).toBe('ACTIVE');
     expect((await get(`/api/v1/safety/sos/${live.id}`, stranger.token)).statusCode).toBe(403);
   });
+
+  it('keeps the tenant wall: the owner\'s alert written in another tenant is neither listed nor readable; their platform (no-tenant) alert is both (DS759)', async () => {
+    const me = await makeUser(['CUSTOMER']);
+    const otherTenant = `l10-owner-b-${RUN}`;
+    await runWithoutTenant(() => app.prisma.tenant.create({ data: { id: otherTenant, name: 'L10 owner tenant B', slug: otherTenant, isActive: true } }), 'test-fixture:l10-sos-owner');
+    try {
+      const elsewhere = await makeAlert(me.userId, 'ACTIVE', { tenantId: otherTenant, orderId: `l10-own-b-${RUN}` });
+      const platform = await makeAlert(me.userId, 'ACTIVE', { tenantId: null, orderId: `l10-own-p-${RUN}` });
+      const listed = (await get('/api/v1/safety/sos/owned-active', me.token)).json().data.map((r: { id: string }) => r.id);
+      expect(listed).toContain(platform.id);
+      expect(listed).not.toContain(elsewhere.id);
+      expect((await get(`/api/v1/safety/sos/${platform.id}`, me.token)).statusCode).toBe(200);
+      // Not a 403: another tenant's row is not acknowledged to exist.
+      expect((await get(`/api/v1/safety/sos/${elsewhere.id}`, me.token)).statusCode).toBe(404);
+      expect((await post(`/api/v1/safety/sos/${elsewhere.id}/mark-safe`, me.token)).statusCode).toBe(404);
+      expect((await alertRow(elsewhere.id)).userSafeFlaggedAt).toBeNull();
+    } finally {
+      await runWithoutTenant(async () => {
+        await app.prisma.sosAlert.deleteMany({ where: { tenantId: otherTenant } }).catch(() => {});
+        await app.prisma.tenant.delete({ where: { id: otherTenant } }).catch(() => {});
+      }, 'test-cleanup:l10-sos-owner');
+    }
+  });
+
+  it('pages across every live alert: newest first, each once, and the last page carries no cursor (DS759)', async () => {
+    const me = await makeUser(['CUSTOMER']);
+    const base = Date.now();
+    const made = [];
+    for (let i = 0; i < 3; i += 1) made.push(await makeAlert(me.userId, 'ACTIVE', { orderId: `l10-own-page-${RUN}-${i}`, triggeredAt: new Date(base - i * 60_000) }));
+    const first = (await get('/api/v1/safety/sos/owned-active?limit=2', me.token)).json();
+    expect(first.data.map((r: { id: string }) => r.id)).toEqual([made[0]!.id, made[1]!.id]);
+    expect(first.nextCursor).toBe(made[1]!.id);
+    const second = (await get(`/api/v1/safety/sos/owned-active?limit=2&cursor=${first.nextCursor}`, me.token)).json();
+    expect(second.data.map((r: { id: string }) => r.id)).toEqual([made[2]!.id]);
+    expect(second.nextCursor).toBeNull();
+  });
 });
 
 describe('[73] "I\'m safe" is idempotent', () => {

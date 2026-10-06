@@ -602,6 +602,20 @@ export class NotificationService {
     });
   }
 
+  /** [73 · owner ruling] The rider's taxi assignment push, from either entrance (an offer-card
+   *  accept or a direct accept, both through dispatch.claimOrder): the driver's first name, the
+   *  car and its plate (checking the plate before getting in is a safety step), tagged as a taxi
+   *  so a tap opens the ride, never a delivery. */
+  async driverFound(customerId: string, orderId: string, driver: { firstName: string; vehicleColor: string; vehicleMake: string; vehicleModel: string; licensePlate: string }): Promise<void> {
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Driver Found!',
+      body: `${driver.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
+      data: taxiNotificationData(orderId, { status: 'DRIVER_ASSIGNED' }),
+    });
+  }
+
   async riderAssigned(customerId: string, orderNumber: string, riderName: string, orderId: string): Promise<void> {
     await this.send({
       userId: customerId,
