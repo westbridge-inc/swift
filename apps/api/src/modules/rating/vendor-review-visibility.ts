@@ -232,6 +232,13 @@ export async function vendorReviewWhereForViewer(
   return publishedVendorReviewWhere(vendorId, hiddenAuthorIds);
 }
 
+/** A deleted account: deactivated by the deletion flow, which also replaces
+ *  the phone with a `deleted:` marker. Either signal is enough. */
+export function isDeletedAccount(user: { status: string; phone: string } | null | undefined): boolean {
+  if (!user) return false;
+  return user.status === 'DEACTIVATED' || user.phone.startsWith('deleted:');
+}
+
 /**
  * A public operator reply is contact, not just a database edit. The review
  * must first be publishable to this operator (directional visibility), then
@@ -252,10 +259,22 @@ export async function requireRespondableVendorReview(
     input.responderId,
     input.vendorId,
   );
-  const rating = await db.rating.findFirst({
+  const found = await db.rating.findFirst({
     where: { id: input.reviewId, ...where },
+    include: { rater: { select: { status: true, phone: true } } },
   });
-  if (!rating) throw new NotFoundError('Review', input.reviewId);
+  if (!found) throw new NotFoundError('Review', input.reviewId);
+  const { rater, ...rating } = found;
+  // Account deletion keeps a review's score and tags but removes its comment
+  // and any store reply (owner decision 5 Oct). A store must not add text to
+  // that de-identified review afterwards.
+  if (isDeletedAccount(rater)) {
+    throw new AppError(
+      409,
+      'REVIEW_AUTHOR_DELETED',
+      'The person who wrote this review has deleted their account, so it can’t take a reply.',
+    );
+  }
 
   await assertUsersMayContact(
     db,

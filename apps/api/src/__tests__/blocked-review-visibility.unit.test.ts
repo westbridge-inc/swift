@@ -16,7 +16,7 @@ import {
 function fakePrisma(
   blockedIds: string[] = [],
   options: {
-    review?: { id: string; raterId: string } | null;
+    review?: ({ id: string; raterId: string } & Record<string, unknown>) | null;
     contactBlock?: { id: string; blockerId: string; blockedId: string; blockedAt: Date } | null;
     scoreBuckets?: Array<{ score: number; _count: number }>;
   } = {},
@@ -392,8 +392,25 @@ describe('vendor review visibility for a user block', () => {
         visibleAt: { not: null },
         raterId: { notIn: ['blocked-author'] },
       },
+      include: { rater: { select: { status: true, phone: true } } },
     });
     expect(db.userBlockFindFirst).not.toHaveBeenCalled();
+  });
+
+  it('refuses a reply to a review whose author deleted their account, before any contact check', async () => {
+    for (const rater of [
+      { status: 'DEACTIVATED', phone: '+5920000001' },
+      { status: 'ACTIVE', phone: 'deleted:author-1' },
+    ]) {
+      const db = fakePrisma([], { review: { id: 'review-1', raterId: 'author-1', response: null, rater } });
+      await expect(requireRespondableVendorReview(db.prisma, {
+        tenantId: 'tenant-1',
+        responderId: 'operator-1',
+        vendorId: 'vendor-1',
+        reviewId: 'review-1',
+      })).rejects.toMatchObject({ statusCode: 409, code: 'REVIEW_AUTHOR_DELETED' });
+      expect(db.userBlockFindFirst).not.toHaveBeenCalled();
+    }
   });
 
   it('refuses a reply when the author blocked the operator', async () => {

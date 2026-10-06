@@ -246,3 +246,47 @@ describe('Store review list projection', () => {
     expect(text).not.toContain(reviewer.lastName as string);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Account deletion keeps a review's score and tags but removes its comment and
+// any store reply. A store must not then add text to that de-identified review.
+// ---------------------------------------------------------------------------
+describe('A review whose author deleted their account', () => {
+  it('refuses a new store reply and leaves the review and the inbox untouched', async () => {
+    const author = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `RR-${nanoid(8)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: author.userId,
+        vendorId,
+        status: 'DELIVERED',
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 0, totalAmount: 1000, paymentMethod: 'CASH',
+      },
+    });
+    const review = await app.prisma.rating.create({
+      data: {
+        orderId: order.id, raterId: author.userId, vendorId, type: 'CUSTOMER_TO_VENDOR',
+        score: 3, comment: null, tags: ['slow'], visibleAt: new Date(),
+      },
+    });
+    // The state the deletion flow leaves behind.
+    await app.prisma.user.update({
+      where: { id: author.userId },
+      data: { status: 'DEACTIVATED', phone: `deleted:${author.userId}` },
+    });
+    const notesBefore = await app.prisma.notification.count({ where: { userId: author.userId } });
+
+    const res = await inject('POST', `/api/v1/vendor/reviews/${review.id}/respond`, { response: 'Thanks for the feedback' }, owner.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('REVIEW_AUTHOR_DELETED');
+
+    const after = await app.prisma.rating.findUniqueOrThrow({ where: { id: review.id } });
+    expect(after.response).toBeNull();
+    expect(after.respondedAt).toBeNull();
+    expect(after.respondedBy).toBeNull();
+    expect(await app.prisma.notification.count({ where: { userId: author.userId } })).toBe(notesBefore);
+  });
+});
