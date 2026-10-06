@@ -47,6 +47,7 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { clampDriverFare } from '../../utils/markup';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -297,6 +298,12 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId); // authz before validation
+    // [MASTER-008] The order is this rider's BEFORE anything is replayed: a
+    // replay returns a stored result without running the effect, so a check
+    // that lives only inside the effect never runs for it. Answered as the
+    // cash handover itself answers a non-owner: not found.
+    const mine = await app.prisma.order.findFirst({ where: { id, riderId: rider.id }, select: { id: true } });
+    if (!mine) throw new NotFoundError('Order', id);
     const body = handoverSchema.parse(request.body);
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
@@ -1563,6 +1570,9 @@ export async function riderRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { ridePin, handoverVersion } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
+    // [MASTER-008] Ownership BEFORE any replay (re-checked inside, at the moment
+    // of the effect): a stored result is never handed to someone else's order.
+    await getOwnedOrder(app, id, rider.id);
     // Idempotent on Idempotency-Key: a retried final step returns the original
     // result instead of failing the now-terminal transition. The whole effect
     // (incl. the transition / payment / PIN checks) runs inside the claim so a
@@ -2130,6 +2140,18 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /subscription — Current subscription with payment history. */
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the rider starts and
+  // follows a checkout for their own weekly fee: the payer's ONE canonical
+  // subscription [#1393 mover fee authority], the same one GET /subscription
+  // shows, which may sit on the mover's driver profile.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+    },
+  });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.rider.findUnique({
       where: { userId: request.user.userId },
@@ -2168,6 +2190,8 @@ export async function riderRoutes(app: FastifyInstance) {
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
+        // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+        ...(await mmgCheckout.feePayload(sub, request.headers, now)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)

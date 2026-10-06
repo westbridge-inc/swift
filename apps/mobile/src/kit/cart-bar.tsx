@@ -28,7 +28,14 @@ function useBarCart(): any {
 function cartBarState(data: any, vendorId?: string): { count: number; visible: boolean } {
   const lines: any[] = data?.items ?? [];
   const count = lines.reduce((n, l) => n + (l.quantity ?? 0), 0);
-  return { count, visible: count > 0 && (vendorId === undefined || data?.vendorId === vendorId) };
+  // GET /customer/cart has no top-level vendorId: each line carries its store
+  // (and the basket can hold more than one store), so a storefront shows the
+  // bar when any line in the basket is its own.
+  const holdsThisStore =
+    vendorId === undefined ||
+    lines.some((l) => l.vendorId === vendorId && (l.quantity ?? 0) > 0) ||
+    data?.vendorId === vendorId;
+  return { count, visible: count > 0 && holdsThisStore };
 }
 
 /**
@@ -54,9 +61,9 @@ export function useCartBarClearance({ vendorId }: { vendorId?: string } = {}): n
  * Cart tab keys its read by the delivery quote, so after the Cart tab the bar
  * makes one light read of its own), and only for a signed-in shopper. When
  * `vendorId` is passed (the storefront), the bar shows
- * only for THAT store's basket: the cart is single-vendor and carries its
- * vendorId, so browsing another storefront never surfaces another store's
- * items.
+ * only when the basket holds THAT store's items (each cart line carries its
+ * vendorId), so browsing another storefront never surfaces another store's
+ * basket.
  *
  * Placement matches the storefront exactly: absolutely positioned above the
  * safe-area bottom inset (`insets.bottom + space.lg`), spanning the paper

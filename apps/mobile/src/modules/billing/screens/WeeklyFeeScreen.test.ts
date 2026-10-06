@@ -31,6 +31,22 @@ describe('actual phone weekly fee element tree', () => {
     expect(rendered).not.toMatch(/private-number|MMG agent|instant restore|coming soon/i);
     expect(rendered).toContain('100%');
   });
+  it("each recent checkout shows the Swift reference, and MMG's transaction ID only once confirmed", () => {
+    const base = { amountGyd: 2100, currencyCode: 'GYD' as const, createdAt: '2026-10-01T19:38:19Z', expiresAt: '2026-10-01T20:08:19Z', subscriptionStatus: 'ACTIVE' };
+    const sub = { status: 'ACTIVE', amountDueGyd: 0, recentCheckouts: [
+      { ...base, ref: 'paid-ref', status: 'CONFIRMED', confirmedAt: '2026-10-01T19:39:42Z', swiftReference: '175933829900012345', mmgTransactionId: '20402048536279' },
+      { ...base, ref: 'held-ref', status: 'HELD', confirmedAt: null, swiftReference: '175933840000054321', mmgTransactionId: '20402048599999' },
+      { ...base, ref: 'old-ref', status: 'NOT_PAID', confirmedAt: null },
+    ] } as FeeSubscription;
+    const rendered = text(WeeklyFeeScreen({ family: 'vendor', sub, refresh: vi.fn() }));
+    expect(rendered).toContain('Recent checkouts');
+    expect(rendered).toMatch(/Swift reference\s*:\s*175933829900012345/);
+    expect(rendered).toMatch(/MMG transaction ID\s*:\s*20402048536279/);
+    expect(rendered).toMatch(/Swift reference\s*:\s*175933840000054321/);
+    expect(rendered).not.toContain('20402048599999');
+    expect(rendered.match(/Swift reference/g)).toHaveLength(2);
+    expect(rendered.match(/MMG transaction ID/g)).toHaveLength(1);
+  });
   it('loading failure cannot show a fabricated zero balance', () => {
     const rendered = text(WeeklyFeeScreen({ family: 'rider', error: true, refresh: vi.fn() }));
     expect(rendered).toContain("couldn't load your weekly fee"); expect(rendered).not.toContain('Nothing due');
