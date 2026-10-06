@@ -179,6 +179,8 @@ const E = {
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
+  // [AF-MOB-006] A custody recovery case: who owns it, where it stands, who holds the goods.
+  custodyCase: { model: 'custodyRecoveryCase', fields: ['state', 'ownerUserId', 'holderRiderId', 'relayRiderId', 'resolvedAt', 'escalationCount'] },
 } as const satisfies Record<string, AdminRouteEntity>;
 
 /**
@@ -238,6 +240,16 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
+  // [AF-MOB-006] Custody recovery after pickup. Reading a case discloses rider
+  // positions and phones (C1). Owning it is workflow (C2). Directing a return
+  // or relay, naming the relay rider and confirming a return decide where
+  // someone else's goods and a rider's fronted cash go, so a reason is owed (C3).
+  'GET /custody-cases': c('C1', 'custody.read'),
+  'GET /custody-cases/:id': c('C1', 'custody.read'),
+  'POST /custody-cases/:id/claim': c('C2', 'custody.claim', E.custodyCase),
+  'POST /custody-cases/:id/direct': c('C3', 'custody.decide', E.custodyCase),
+  'POST /custody-cases/:id/relay': c('C3', 'custody.decide', E.custodyCase),
+  'POST /custody-cases/:id/confirm-return': c('C3', 'custody.decide', E.custodyCase),
 
   // ── Moderation ──────────────────────────────────────────────────────────
   'GET /moderation/reports': c('C1', 'moderation.read'),
