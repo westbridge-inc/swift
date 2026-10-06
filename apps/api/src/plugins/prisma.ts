@@ -364,7 +364,11 @@ function tenantScope(params: ScopeParams, connection: Connection, wiring: ScopeW
  *  to, keyed by the transaction's own id — not by the async context, so a
  *  query on an outer transaction's client is judged by THAT transaction even
  *  inside a nested one begun for another tenant. Entries live exactly as long
- *  as their transaction. */
+ *  as their transaction.
+ *  Assumes ONE binding client per process: transaction ids are local to a
+ *  client's engine. The extended client is the only one that binds a tenant
+ *  (clients derived from it with $extends share its engine; the system client
+ *  never binds one). Key this by engine before adding a second binding client. */
 const boundInteractiveTransactions = new Map<string, string>();
 type TxRef = { kind?: string; id?: string | number };
 const txRefOf = (params: { __internalParams?: { transaction?: unknown } }): TxRef | undefined =>
@@ -383,7 +387,16 @@ function boundTransactionTenant(params: { __internalParams?: { transaction?: unk
 /** Marks the set_config statement of a bound query's own batch, so the
  *  transaction wrapper does not prepend a second one (review S3-2). */
 const TENANT_BIND_STATEMENT = Symbol.for('swift.tenantBindStatement');
-/** Prisma's interactive-transaction client carries its transaction id here. */
+/** Prisma's interactive-transaction client carries its transaction id here.
+ *  PINNED to Prisma runtime internals (checked on the locked 6.19.2): this
+ *  symbol on the transaction client, and `__internalParams.transaction` as
+ *  `{ kind: 'itx' | 'batch', id }` in query extensions. Neither is public API.
+ *  Both changes were simulated: a different symbol fails closed (a bound
+ *  transaction "could not be identified"); a different parameter shape
+ *  silently drops the refusal of a query whose transaction is bound to
+ *  another tenant. Either way the transaction cases in tenant-autobind.test.ts
+ *  go red, so a Prisma upgrade cannot pass CI with a changed shape. Re-check
+ *  these two internals on every Prisma upgrade. */
 const ITX_ID = Symbol.for('prisma.client.transaction.id');
 
 type RawParams = { args: unknown; query: (a: unknown) => Promise<unknown>; __internalParams?: { transaction?: unknown } };

@@ -10,6 +10,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { tenantBindCounter } from '../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // [L04 · R5 socket] A socket event handler runs outside any HTTP request, so it
@@ -89,6 +90,24 @@ describe('[R5 socket] subscribe handlers read inside the socket’s tenant', () 
       await expect.poll(async () => (await app.io.in(`vendor:${vendorId}`).fetchSockets()).length, { timeout: 3000 }).toBe(1);
     } finally {
       delete process.env['TENANT_UNSCOPED_ACCESS'];
+    }
+  });
+
+  it('with the database binding on, the handler’s read is bound to the socket’s tenant and the owner still joins', async () => {
+    const { token, vendorId } = await owner();
+    const socket = await connect(token);
+    const priorBind = process.env['TENANT_RLS_BIND'];
+    const bound = async () => (await tenantBindCounter.get()).values.find((v) => v.labels['kind'] === 'tenant')?.value ?? 0;
+    process.env['TENANT_RLS_BIND'] = '1';
+    process.env['TENANT_UNSCOPED_ACCESS'] = 'deny';
+    try {
+      const before = await bound();
+      socket.emit('vendor:subscribe', { vendorId });
+      await expect.poll(async () => (await app.io.in(`vendor:${vendorId}`).fetchSockets()).length, { timeout: 3000 }).toBe(1);
+      expect(await bound()).toBeGreaterThan(before);
+    } finally {
+      delete process.env['TENANT_UNSCOPED_ACCESS'];
+      if (priorBind === undefined) delete process.env['TENANT_RLS_BIND']; else process.env['TENANT_RLS_BIND'] = priorBind;
     }
   });
 
