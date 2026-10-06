@@ -27,6 +27,7 @@ import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-p
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
+import { partnerReceiptIds } from './mmg-checkout-receipt';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout (MMG-CHECKOUT-API.md is the contract).
@@ -70,9 +71,9 @@ const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_
 /** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's
  *  creationDate, and for when MMG's success answer reached us. [DS632] Also
  *  how far MMG's creationDate may run past the first reply naming it. */
-const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
+export const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
 /** An MMG transaction id or ledger number as MMG writes it. */
-const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+export const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
 const MAX_REPLY_PARAMS = 16;
 const MAX_REPLY_PARAM_CHARS = 4096;
@@ -117,6 +118,10 @@ export interface CheckoutView {
   expiresAt: string;
   confirmedAt: string | null;
   subscriptionStatus: SubscriptionStatus;
+  /** [MMG support lookup] Ours, the merchantTransactionId MMG was sent. Always. */
+  swiftReference: string;
+  /** [MMG support lookup] MMG's transaction, only once CONFIRMED (partnerReceiptIds). */
+  mmgTransactionId: string | null;
 }
 
 export interface StartedCheckout {
@@ -284,7 +289,7 @@ export interface CreationCheck {
 const UNVERIFIED: CreationCheck = { zone: null, firstReplyAt: null };
 
 /** [DS632] When Swift first observed a reply, through either door, naming this transaction. */
-function firstReplyNaming(answers: ReadonlyArray<{ body: unknown; createdAt: Date }>, txnId: string): Date | null {
+export function firstReplyNaming(answers: ReadonlyArray<{ body: unknown; createdAt: Date }>, txnId: string): Date | null {
   let first: Date | null = null;
   for (const answer of answers) {
     const body = answer.body && typeof answer.body === 'object' && !Array.isArray(answer.body) ? answer.body as Record<string, unknown> : null;
@@ -293,6 +298,32 @@ function firstReplyNaming(answers: ReadonlyArray<{ body: unknown; createdAt: Dat
   }
   return first;
 }
+
+/**
+ * [owner, 1 Oct · condition 5 · DS632] Where MMG's creationDate stands for
+ * one checkout: the ONE check judge() credits by and the support console
+ * shows [Sol, DS663 · #1422]. In order: no configured zone, nothing is
+ * verified; an unreadable stamp; a stamp more than two minutes after Swift
+ * first heard of the payment (MMG's stamps do not match the zone), or no reply
+ * named it; outside the checkout's window (two minutes either side).
+ */
+export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNREADABLE' | 'AFTER_REPLY' | 'OUTSIDE';
+export function creationCheckOf(
+  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
+): CreationCheckResult {
+  if (creation.zone === null) return 'ZONE_UNVERIFIED';
+  const created = mmgCreationInstant(stamp, creation.zone);
+  if (created === null) return 'UNREADABLE';
+  if (creation.firstReplyAt === null || created > creation.firstReplyAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'AFTER_REPLY';
+  if (created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'OUTSIDE';
+  return 'INSIDE';
+}
+const CREATION_HOLDS: Record<Exclude<CreationCheckResult, 'INSIDE'>, string> = {
+  ZONE_UNVERIFIED: 'CREATION_ZONE_UNVERIFIED',
+  UNREADABLE: 'CREATION_DATE_UNREADABLE',
+  AFTER_REPLY: 'CREATION_AFTER_REPLY',
+  OUTSIDE: 'OUTSIDE_CHECKOUT_WINDOW',
+};
 
 /** MMG's success answer for one checkout, or why there is none. */
 export type SuccessAnswer = { txnId: string } | { txnId: null; reason: string };
@@ -377,17 +408,10 @@ export function judge(
     if (!detail.creditAccounts || detail.creditAccounts.length === 0) return hold('MERCHANT_UNCONFIRMED', tied);
     if (!detail.creditAccounts.every((account) => merchantIds.some((merchant) => sameMsisdn(merchant, account)))) return hold('MERCHANT_MISMATCH', tied);
     // (5) Created inside this checkout's window, the stamp read in the
-    // configured zone [DS632]: with none, it cannot be verified.
-    if (creation.zone === null) return hold('CREATION_ZONE_UNVERIFIED', tied);
-    const created = mmgCreationInstant(detail.createdAt, creation.zone);
-    if (created === null) return hold('CREATION_DATE_UNREADABLE', tied);
-    // [DS632] Never after Swift first heard of the payment: MMG's stamps would not match the zone.
-    if (creation.firstReplyAt === null || created > creation.firstReplyAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) {
-      return hold('CREATION_AFTER_REPLY', tied);
-    }
-    if (created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) {
-      return hold('OUTSIDE_CHECKOUT_WINDOW', tied);
-    }
+    // configured zone [DS632], never after Swift first heard of the payment:
+    // the one creation-time check support shows too (creationCheckOf).
+    const created = creationCheckOf(intent, detail.createdAt, creation);
+    if (created !== 'INSIDE') return hold(CREATION_HOLDS[created], tied);
     // (6) MMG's ledger number is credited with the transaction, once (confirm).
     if (!detail.ledgerReference || !MMG_TXN_ID.test(detail.ledgerReference)) return hold('LEDGER_REFERENCE_MISSING', tied);
     // Everything matches, but only MMG's success answer for THIS checkout
@@ -1398,6 +1422,7 @@ export class MmgCheckoutService {
       expiresAt: intent.expiresAt.toISOString(),
       confirmedAt: intent.confirmedAt ? intent.confirmedAt.toISOString() : null,
       subscriptionStatus,
+      ...partnerReceiptIds(intent),
     };
   }
 }

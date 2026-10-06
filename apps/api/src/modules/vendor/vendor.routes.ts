@@ -1,3 +1,5 @@
+import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
+import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
@@ -42,6 +44,7 @@ import { DeliveryCashSettlementService, assertSettlementId, settlementAttestatio
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
@@ -603,6 +606,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const menu = new VendorMenuService(app.prisma);
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
+  const custodyDeps = { prisma: app.prisma, io: app.io, notifications };
   const settlementLedger = new DeliveryCashSettlementService(app.prisma, notifications);
   const picking = new PickingService(app.prisma, app.io);
   const verification = new VerificationService(
@@ -1530,7 +1534,24 @@ export async function vendorRoutes(app: FastifyInstance) {
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
     // [S1 response-shaping] same redaction as the board — closed order, no
     // customer contact, rider contact, or delivery destination.
-    return { success: true, data: redactCustomerContact({ ...order, respondBy }) };
+    // [AF-MOB-006] The store sees the order's recovery case: a return coming
+    // back to it, another rider taking over, or support holding it.
+    const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
+    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy }), custodyRecovery } };
+  });
+
+  /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
+   *  confirms the goods came back. Closes the return (RETURNED) through the
+   *  canonical seam, which resolves the case and frees the rider. */
+  app.post<{ Params: IdParam }>('/orders/:id/recovery/return-received', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    if (order.orderType === 'COURIER') {
+      throw new AppError(409, 'NOT_A_STORE_RETURN', 'A courier parcel goes back to its sender, not to a store.');
+    }
+    const kase = await confirmReturn({ ...custodyDeps, orderService }, {
+      orderId: order.id, actor: { userId: request.user.userId, role: 'VENDOR' },
+    });
+    return { success: true, data: { orderId: order.id, caseId: kase.id, state: kase.state } };
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
@@ -3531,6 +3552,15 @@ export async function vendorRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /subscription — Current subscription details */
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the store's OWNER starts
+  // and follows a checkout for the selected store's subscription.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const { vendorId } = await requireVendor(app, request, 'OWNER');
+      return app.prisma.subscription.findFirst({ where: { vendorId } });
+    },
+  });
+
   app.get('/subscription', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     // NO operability gate here, deliberately [PINV-8]. A suspended store must
@@ -3550,6 +3580,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
             ...(await sanDisplay(app.prisma, subscription)),
             ...(await payInfo(app.prisma, subscription)),
+            // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+            ...(await mmgCheckout.feePayload(subscription, request.headers)),
             weeklyRate: Number(subscription.weeklyRate),
           }
         : null,

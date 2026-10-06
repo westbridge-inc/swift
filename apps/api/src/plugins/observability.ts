@@ -451,6 +451,15 @@ export const notificationFailuresCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [L04 · SMS allowlist] Outside production, a text to a number that is not on
+ *  SMS_RECIPIENT_ALLOWLIST is not sent and counted here. No label carries the
+ *  number: the count is the evidence, never the recipient. */
+export const smsRecipientNotAllowlistedCounter = new client.Counter({
+  name: 'swift_sms_recipient_not_allowlisted_total',
+  help: 'Non-production SMS not sent because the recipient is not on SMS_RECIPIENT_ALLOWLIST',
+  registers: [registry],
+});
+
 /** [M-04] Terminal MMG payments (FAILED/EXPIRED) whose subscription carries no
  *  recorded outcome for that period — the state a crash between the terminal
  *  CAS and the dunning application used to leave behind. Set by the repair
