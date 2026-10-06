@@ -111,6 +111,12 @@ describe('[R5 auto-bind] a transaction that begins under a tenant is bound for i
     expect(Object.fromEntries(after.map((u) => [u.id, u.firstName]))).toEqual({ [userT]: 'Written', [userU]: 'Bound' });
   });
 
+  it('a client derived with $extends (as admin routes derive one) binds its transactions the same way', async () => {
+    const derived = (walled as unknown as { $extends: (e: object) => PrismaClient }).$extends({ name: 'derivedForTest' });
+    const seen = await runWithTenant(T, () => derived.$transaction(async (tx) => countUser(tx, userT)));
+    expect(seen).toBe(1);
+  });
+
   it('batch: an array transaction is bound too', async () => {
     const [viaModel, viaRaw] = await runWithTenant(T, () => walled.$transaction([
       walled.user.findUnique({ where: { id: userT }, select: { id: true } }),
