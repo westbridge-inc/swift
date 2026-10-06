@@ -96,6 +96,7 @@ beforeAll(async () => {
 afterAll(async () => {
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: userIds } }, select: { id: true } });
   const riderIds = riders.map((r) => r.id);
+  await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await app.prisma.subscription.deleteMany({ where: { riderId: { in: riderIds } } });
@@ -117,14 +118,15 @@ describe('[5.1.1v] the verdict, without a database', () => {
     expect(verdictFor({ committedFloat: 500, unsettledCashCount: 0, earningsOwed: 0 }).blockers).toEqual(['CASH_HELD']);
     expect(verdictFor({ committedFloat: 0, unsettledCashCount: 1, earningsOwed: 0 }).blockers).toEqual(['UNSETTLED_CASH']);
     expect(verdictFor({ committedFloat: 0, unsettledCashCount: 0, earningsOwed: 250 }).blockers).toEqual([]);
+    expect(verdictFor({ committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0, openClaimCount: 1 }).blockers).toEqual(['OPEN_CLAIM']);
   });
 
   it('reports every blocker at once, not the first one', () => {
     // Told one at a time, a person clears a blocker, tries again, and is
     // refused for a different reason they were never shown. That is the
     // "contact Support" dead end with extra steps.
-    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250 });
-    expect(all.blockers).toHaveLength(2);
+    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250, openClaimCount: 1 });
+    expect(all.blockers).toHaveLength(PARTNER_BLOCKERS.length);
     for (const b of PARTNER_BLOCKERS) expect(refusalMessage(all.blockers)).toContain(BLOCKER_MESSAGE[b]);
   });
 
@@ -285,6 +287,28 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     expect(Number(earning.amount)).toBe(900);
     expect(await app.prisma.rider.findUnique({ where: { id: p.riderId } })).toMatchObject({ isOnline: false, isAvailable: false, licensePlate: null, currentLat: null, currentLng: null });
     expect(await app.prisma.user.findUnique({ where: { id: p.userId } })).toMatchObject({ firstName: 'Deleted', email: null });
+  });
+
+  it('an open loss-protection claim Swift has not paid blocks deletion until it is paid or decided', async () => {
+    const p = await makePartner(['MOVER']);
+    const order = await makeCashOrder(p.riderId);
+    const claim = await app.prisma.reimbursementClaim.create({ data: {
+      orderId: order.orderId, riderId: p.riderId, customerId: (await app.prisma.order.findUniqueOrThrow({ where: { id: order.orderId } })).customerId,
+      amount: 1500, reason: 'no_show', gpsLat: 6.8055, gpsLng: -58.1553, status: 'APPROVED',
+    } });
+    const refused = await del(p.token);
+    expect(refused.statusCode, refused.payload).toBe(409);
+    expect(refused.json().error.code).toBe('PARTNER_OBLIGATIONS');
+    expect(refused.json().error.message).toContain('Get help');
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: p.userId } })).status).toBe('ACTIVE');
+    for (const status of ['PENDING_REVIEW', 'AUTO_APPROVED'] as const) {
+      await app.prisma.reimbursementClaim.update({ where: { id: claim.id }, data: { status } });
+      expect((await del(p.token)).statusCode, status).toBe(409);
+    }
+    await app.prisma.reimbursementClaim.update({ where: { id: claim.id }, data: { status: 'PAID', paidAt: new Date() } });
+    const accepted = await del(p.token);
+    expect(accepted.statusCode, accepted.payload).toBe(200);
+    expect(await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).toMatchObject({ status: 'PAID', riderId: p.riderId });
   });
 
   it('money already PAID OUT does not block — it has already reached them', async () => {

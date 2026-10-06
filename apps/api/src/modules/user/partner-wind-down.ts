@@ -2,10 +2,14 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 
 /** Account closure preserves financial history. Earnings describe direct payments
- * between participants; Swift holds no balance to pay out. Only open cash
- * obligations block erasure. The caller also checks live work under authority locks.
+ * between participants; Swift holds no balance to pay out. Open cash obligations
+ * block erasure, and so does an open loss-protection claim: money Swift itself
+ * owes the mover, which support pays or decides (coordinator ruling 2026-10-05,
+ * Q1a). Rescue incentives deliberately do not block: they have no payout path
+ * and ship switched off (rescue-incentive-deletion-rule.unit.test.ts). The
+ * caller also checks live work under authority locks.
  */
-export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH'] as const;
+export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'OPEN_CLAIM'] as const;
 export type PartnerBlocker = (typeof PARTNER_BLOCKERS)[number];
 
 export interface PartnerObligations {
@@ -15,6 +19,8 @@ export interface PartnerObligations {
   unsettledCashCount: number;
   /** Historical direct-payment earnings; not a Swift payout obligation. */
   earningsOwed: number;
+  /** Loss-protection claims for this mover that Swift has neither paid nor rejected. */
+  openClaimCount?: number;
 }
 
 export interface PartnerDeletionVerdict {
@@ -34,6 +40,7 @@ export function verdictFor(o: PartnerObligations): PartnerDeletionVerdict {
   const blockers: PartnerBlocker[] = [];
   if (o.committedFloat > 0) blockers.push('CASH_HELD');
   if (o.unsettledCashCount > 0) blockers.push('UNSETTLED_CASH');
+  if ((o.openClaimCount ?? 0) > 0) blockers.push('OPEN_CLAIM');
   return { blockers, clear: blockers.length === 0 };
 }
 
@@ -49,6 +56,8 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
     'You are holding vendor cash from a delivery that has not been settled. Hand it in, then return here to delete your account. Use Get help if you cannot resolve the handover.',
   UNSETTLED_CASH:
     'A cash settlement is still open between you and a store. Confirm the handover, then return here to delete your account. Use Get help if the other party cannot confirm.',
+  OPEN_CLAIM:
+    'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
 };
 
 /** The whole refusal, as one sentence a person can act on. */
@@ -66,12 +75,16 @@ export async function partnerObligations(
   tx: Prisma.TransactionClient,
   userId: string,
 ): Promise<PartnerObligations> {
-  const rider = await tx.rider.findUnique({
-    where: { userId },
-    select: { id: true, committedFloat: true },
+  const [rider, driver] = await Promise.all([
+    tx.rider.findUnique({ where: { userId }, select: { id: true, committedFloat: true } }),
+    tx.driver.findUnique({ where: { userId }, select: { id: true } }),
+  ]);
+  const claimants = [...(rider ? [{ riderId: rider.id }] : []), ...(driver ? [{ driverId: driver.id }] : [])];
+  const openClaimCount = claimants.length === 0 ? 0 : await tx.reimbursementClaim.count({
+    where: { OR: claimants, paidAt: null, status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] } },
   });
   if (!rider && await tx.vendor.count({ where: { owner: { userId } } }) === 0) {
-    return { committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0 };
+    return { committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0, openClaimCount };
   }
 
   const unsettled = await tx.deliveryCashSettlement.count({
@@ -83,6 +96,7 @@ export async function partnerObligations(
     committedFloat: Number(rider?.committedFloat ?? 0),
     unsettledCashCount: unsettled,
     earningsOwed: 0,
+    openClaimCount,
   };
 }
 
