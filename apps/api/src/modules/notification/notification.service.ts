@@ -229,6 +229,23 @@ function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
   return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 
+/**
+ * [144 · OPS-PAGING] The ONE definition of who an admin notice or an ops page
+ * reaches in-app, shared by notifyAdmins and the OpsAlert outbox
+ * (safety/ops-alert.ts) so the two can never drift:
+ *  - a tenant's notice: that tenant's ACTIVE ADMINs plus every ACTIVE SUPER_ADMIN;
+ *  - `null` (platform): every ACTIVE SUPER_ADMIN, and nobody else.
+ * Platform pages ALSO text the configured OPS_ONCALL_PHONES list (ops-alert.ts,
+ * coordinator ruling 5 Oct 2026). Whether launch responders keep SUPER_ADMIN or
+ * get a narrower responder role is an open owner question; until it is answered
+ * this stays today's audience.
+ */
+export function adminAudienceWhere(tenantId: string | null): Prisma.UserWhereInput {
+  return tenantId
+    ? { status: 'ACTIVE', roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, OR: [{ tenantId }, { roles: { has: 'SUPER_ADMIN' } }] }
+    : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } };
+}
+
 export async function notifyAdmins(
   prisma: PrismaClient,
   notifications: NotificationService,
@@ -292,13 +309,7 @@ export async function notifyAdmins(
   // sanctioned cross-tenant read; it must not depend on whose request it
   // happens to run inside.
   const admins = await runWithoutTenant(() => prisma.user.findMany({
-    where: input.tenantId
-      ? {
-        status: 'ACTIVE',
-        roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] },
-        OR: [{ tenantId: input.tenantId }, { roles: { has: 'SUPER_ADMIN' } }],
-      }
-      : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } },
+    where: adminAudienceWhere(input.tenantId),
     select: { id: true },
   }));
   // [REPORT-035 F-035-06 · S0 evidence] Count DELIVERIES, not candidates.
