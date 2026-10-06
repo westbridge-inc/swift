@@ -7,6 +7,7 @@ import { cardShadow } from './card';
 import { haptic } from '../lib/haptics';
 import { HeartGlyph, StarGlyph } from './glyphs';
 import { T } from './text';
+import { touchTarget } from './touch-target';
 
 function RoundIconButton({
   icon,
@@ -29,7 +30,7 @@ function RoundIconButton({
       accessibilityRole="button"
       accessibilityLabel={label ?? icon.replace(/-/g, ' ')}
       accessibilityState={{ disabled }}
-      style={{ opacity: disabled ? 0.4 : 1 }}
+      style={{ ...touchTarget(size), opacity: disabled ? 0.4 : 1 }}
     >
       {({ pressed }) => (
         <View
@@ -278,12 +279,23 @@ export function TonePill({ label, tone = 'neutral', dark }: { label: string; ton
 }
 
 /** Brand-tracked switch (settings rows). */
-export function BrandSwitch({ value, onChange, disabled, accessibilityLabel }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean; accessibilityLabel?: string }) {
+export function BrandSwitch({
+  value,
+  onChange,
+  disabled,
+  label,
+}: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  /** The row's visible name, so a screen reader announces what it switches. */
+  label?: string;
+}) {
   return (
     <Switch
+      accessibilityLabel={label}
       value={value}
       onValueChange={onChange}
-      accessibilityLabel={accessibilityLabel}
       disabled={disabled}
       trackColor={{ true: color.brand[500], false: color.border.subtle }}
       thumbColor={color.white}

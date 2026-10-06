@@ -64,6 +64,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
+import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -4733,6 +4734,53 @@ export async function adminRoutes(app: FastifyInstance) {
       (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
     if (body.decision === 'PAID') await billing.recoverConfirmationSettlements(result.subscriptionId);
     return { success: true, data: result };
+  });
+
+  // ── MMG payments: support lookup [MMG-CHECKOUT-API.md section 11] ─────────
+  //
+  // Support finds a partner's MMG weekly-fee payment by the Swift reference,
+  // MMG's transaction id, MMG's ledger number or the partner's phone: an exact
+  // match after normalisation, never a substring. Both reads are C1 and each
+  // is audited INSIDE the request, before anything is answered: who, when,
+  // which identifier matched and the checkout ids, never the query itself
+  // (it may be a phone number). A search that finds nothing is recorded too;
+  // a refused read, or a detail of a checkout that is not there, disclosed
+  // nothing and is not.
+  const mmgCheckoutSearchSchema = z.object({
+    q: z.string().max(64).optional(),
+    status: z.enum(MMG_SUPPORT_STATUSES).optional(),
+    cursor: z.string().max(200).optional(),
+    limit: z.coerce.number().int().min(1).max(MMG_SUPPORT_PAGE_MAX).optional(),
+  });
+
+  app.get('/billing/mmg-checkouts', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const query = mmgCheckoutSearchSchema.parse(request.query ?? {});
+    const cursor = query.cursor === undefined ? null : decodeSupportCursor(query.cursor);
+    if (query.cursor !== undefined && !cursor) throw new ValidationError('That page link is not one this list gave out. Start the search again.');
+    const result = await searchMmgCheckouts(tenantPrisma, { tenantId, q: query.q, status: query.status, cursor, limit: query.limit ?? MMG_SUPPORT_PAGE_DEFAULT });
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: {
+        queryType: result.queryType,
+        queryShape: result.queryShape,
+        matchedIds: result.data.map((row) => row.id).join(','),
+        matchedCount: result.data.length,
+        statusFilter: query.status ?? null,
+        page: cursor ? 'next' : 'first',
+      },
+    });
+    return { success: true, data: result.data, nextCursor: result.nextCursor };
+  });
+
+  app.get('/billing/mmg-checkouts/:id', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const detail = await mmgCheckoutSupportDetail(tenantPrisma, { tenantId, id });
+    if (!detail) throw new NotFoundError('MMG checkout', id);
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'DETAIL', matchedIds: detail.id, matchedCount: 1, checkoutStatus: detail.status },
+    });
+    return { success: true, data: detail };
   });
 
   // ── Collections workbench [san spec PART 21] — the founder's call list ────

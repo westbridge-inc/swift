@@ -21,7 +21,7 @@ function MonitoringControlBody() {
         <T variant="body" weight="semibold">Extra safety check-ins on my trips</T>
         <T variant="caption" tone="muted">Swift keeps a closer watch on your trips and checks in sooner when something looks wrong. {status}</T>
       </View>
-      <BrandSwitch accessibilityLabel="Extra safety check-ins on my trips" value={value === true} disabled={!known || save.isPending} onChange={(enabled: boolean) => { setDraft(enabled); setMessage(null); }} />
+      <BrandSwitch label="Extra safety check-ins on my trips" value={value === true} disabled={!known || save.isPending} onChange={(enabled: boolean) => { setDraft(enabled); setMessage(null); }} />
     </View>
     <PillButton label={save.isPending ? 'Saving…' : 'Save safety preference'} disabled={!known || typeof value !== 'boolean' || save.isPending || value === query.data} loading={save.isPending} onPress={() => {
       if (!known || typeof value !== 'boolean' || save.isPending || busy.current) return;
