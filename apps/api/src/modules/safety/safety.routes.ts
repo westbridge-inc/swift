@@ -504,8 +504,9 @@ export async function safetyRoutes(app: FastifyInstance) {
       subjectUserId: z.string().min(1),
       category: z.string().trim().min(2).max(60),
       severity: z.enum(['S0', 'S1', 'S2', 'S3', 'S4']).optional(),
-      orderId: z.string().optional(),
-      sosAlertId: z.string().optional(),
+      // [M069 · DS757] An empty id would skip the tuple checks below and be stored: refused up front.
+      orderId: z.string().min(1).optional(),
+      sosAlertId: z.string().min(1).optional(),
       summary: z.string().trim().min(5).max(2000),
     }).parse(request.body ?? {});
     const { idempotencyKey, ...intakeBody } = body;

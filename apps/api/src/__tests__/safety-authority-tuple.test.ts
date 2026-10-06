@@ -161,6 +161,14 @@ describe('[M069] the ops intake tuple is validated before any effect', () => {
     expect(await casesFor(subjectA.userId)).toHaveLength(0);
   });
 
+  it('an empty order or SOS id is refused up front: it can never skip the checks and be stored (DS757)', async () => {
+    for (const ids of [{ orderId: '' }, { sosAlertId: '' }, { orderId: '', sosAlertId: '' }]) {
+      const res = await logCase(adminA.token, { subjectUserId: subjectA.userId, ...ids });
+      expect(res.statusCode, JSON.stringify(ids)).toBe(400);
+    }
+    expect(await casesFor(subjectA.userId)).toHaveLength(0);
+  });
+
   it('a replayed key with a changed tuple is refused and the first case is untouched', async () => {
     const order = await makeOrder(subjectA.userId);
     const key = `l10-${RUN}`;
