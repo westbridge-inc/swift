@@ -120,6 +120,7 @@ export default function SupportPage() {
         ) : (
           tickets.map((t: any) => {
             const isSafety = t.category === 'SAFETY';
+            const completion = completing?.id === t.id ? completing : null;
             const open = closing?.id === t.id;
             const choices = RESOLUTIONS.filter((r) => !isSafety || r.safety);
             const noteTooShort = isSafety && (closing?.note ?? '').trim().length < SAFETY_NOTE_MIN;
@@ -155,7 +156,7 @@ export default function SupportPage() {
 
                 {t.status !== 'RESOLVED' && isClosureRequest(t) && (
                   <div className="mt-4">
-                    {completing?.id !== t.id ? (
+                    {!completion ? (
                       <button
                         onClick={() => { closeAccount.reset(); setCompleting({ id: t.id, reason: '' }); }}
                         className="px-4 py-2 rounded-lg text-sm border border-red-500/40 text-red-400 hover:bg-red-500/10"
@@ -174,7 +175,7 @@ export default function SupportPage() {
                         </label>
                         <textarea
                           id={`closure-reason-${t.id}`}
-                          value={completing.reason}
+                          value={completion.reason}
                           onChange={(e) => setCompleting({ id: t.id, reason: e.target.value })}
                           rows={2}
                           className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
@@ -184,8 +185,8 @@ export default function SupportPage() {
                         ) : null}
                         <div className="mt-3 flex gap-2">
                           <button
-                            onClick={() => closeAccount.mutate({ id: t.id, reason: completing.reason.trim() })}
-                            disabled={closeAccount.isPending || completing.reason.trim().length === 0}
+                            onClick={() => closeAccount.mutate({ id: t.id, reason: completion.reason.trim() })}
+                            disabled={closeAccount.isPending || completion.reason.trim().length === 0}
                             className="px-4 py-2 rounded-lg text-sm bg-red-600 hover:bg-red-600/80 disabled:opacity-50"
                           >
                             {closeAccount.isPending ? 'Closing…' : 'Close the account'}
