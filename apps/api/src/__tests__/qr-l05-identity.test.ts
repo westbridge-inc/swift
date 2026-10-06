@@ -83,11 +83,28 @@ beforeAll(async () => {
   ownerId = (await prisma.vendorOwner.create({ data: { userId } })).id;
 });
 afterAll(async () => {
-  // Synthetic rows are left in place (printed-token identity is permanent by
-  // design, so retired reservations outlive the rows anyway), but the two
-  // synthetic operators are switched OFF: an extra ACTIVE tenant changes the
-  // public storefront's single-tenant resolution for every later suite.
-  await prisma.tenant.updateMany({ where: { id: { in: [tenantA, tenantB].filter(Boolean) } }, data: { isActive: false } });
+  // The synthetic operators' rows are removed (later suites count every user
+  // and store on the default tenant), child rows first. Printed-token identity
+  // is permanent by design: the registry keeps each code as RETIRED after its
+  // row goes. The two synthetic operators themselves stay, switched OFF: an
+  // extra ACTIVE tenant changes the public storefront's single-tenant
+  // resolution for every later suite.
+  const tenants = [tenantA, tenantB].filter(Boolean);
+  const inTenants = { tenantId: { in: tenants } };
+  await prisma.attributionClaim.deleteMany({ where: inTenants });
+  await prisma.pendingAttribution.deleteMany({ where: inTenants });
+  await prisma.scanEvent.deleteMany({ where: inTenants });
+  await prisma.scanDailyRollup.deleteMany({ where: inTenants });
+  await prisma.order.deleteMany({ where: inTenants });
+  await prisma.slugRedirect.deleteMany({ where: inTenants });
+  await prisma.qrCode.deleteMany({ where: inTenants });
+  await prisma.vendor.deleteMany({ where: inTenants });
+  if (ownerId) await prisma.vendorOwner.deleteMany({ where: { id: ownerId } });
+  if (userId) {
+    await prisma.customer.deleteMany({ where: { userId } });
+    await prisma.user.deleteMany({ where: { id: userId } });
+  }
+  await prisma.tenant.updateMany({ where: { id: { in: tenants } }, data: { isActive: false } });
   await Promise.all([prisma.$disconnect(), contender.$disconnect()]);
 });
 
