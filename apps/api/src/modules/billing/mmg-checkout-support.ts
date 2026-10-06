@@ -107,7 +107,7 @@ export function decodeSupportCursor(cursor: string): { createdAt: Date; id: stri
  */
 export function windowCheckOf(
   intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
-): 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE' {
+): 'INSIDE' | 'OUTSIDE' | 'UNCONFIRMED' | 'UNREADABLE' {
   const result = creationCheckOf(intent, stamp, creation);
   return result === 'ZONE_UNVERIFIED' ? 'UNREADABLE' : result;
 }
@@ -396,6 +396,8 @@ export async function mmgCheckoutSupportDetail(db: PrismaClient, input: { tenant
   const zone = mmgCreationZone();
   const creationFor = (o: ObservationForTimeline): CreationCheck => ({
     zone, firstReplyAt: o.source === 'LOOKUP' && o.detail ? firstReplyNaming(answers, o.detail) : null,
+    // [option b] A lookup is written down the moment its answer arrives: that is when Swift asked.
+    lookedUpAt: o.source === 'LOOKUP' ? o.createdAt : null,
   });
   return {
     ...rows[0]!,

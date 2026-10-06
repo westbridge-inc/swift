@@ -1995,8 +1995,8 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     ['[DS632] an "accountid" entry with no value beside ours', { creditParty: [{ key: 'accountid' }, { key: 'accountid', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_MISMATCH'],
     ['one dollar short', { amount: '2099' }, 'AMOUNT_MISMATCH'],
     ['another currency', { currency: 'USD' }, 'CURRENCY_MISMATCH'],
-    ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
-    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'CREATION_AFTER_REPLY'],
+    ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'CREATION_UNCONFIRMED'],
+    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'CREATION_UNCONFIRMED'],
     ['no creationDate', { creationDate: undefined }, 'CREATION_DATE_UNREADABLE'],
     ['no ledger number', { transactionReference: undefined }, 'LEDGER_REFERENCE_MISSING'],
   ] as const)('%s: HELD for a person, nothing credited, the pause kept, operators alerted once', async (_label, answer, reason) => {
@@ -2508,7 +2508,7 @@ describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
     const early = tx(`DSEARLY${zone === 'UTC' ? 'U' : 'G'}`);
     approved(early, 2100, {}, { creationDate: stampOf(new Date(row.createdAt.getTime() - (3 * 60 + 48) * 60_000)) });
     expect(await codeReply(row, '0', early)).toBe('CONFIRMING');
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
     expect(await topups(s.subId)).toHaveLength(0);
     expect(await identityOf(early)).toBeNull();
     expect(await identityOf(ledgerOf(early))).toBeNull();
@@ -2522,22 +2522,22 @@ describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
     expect(await identityOf(paid)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${paidRow.id}` });
   });
 
-  it('CREATION_AFTER_REPLY: a true-UTC stamp read as Guyana time is HELD, nothing credited, and operators are told once that MMG’s stamps may not match the configured zone', async () => {
+  it('CREATION_UNCONFIRMED: a true-UTC stamp read as Guyana time is HELD, nothing credited, and operators are told once that MMG’s time could not be confirmed against Swift’s records', async () => {
     const s = await makeSub();
     const operator = await operatorFor();
     const row = await intentOf((await start(s)).checkout.ref);
     const txn = tx('TRUEUTCREADASGY');
     approved(txn, 2100, {}, { creationDate: new Date().toISOString() });
     expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
     expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMING');
     expect(await topups(s.subId)).toHaveLength(0);
     expect(await identityOf(txn)).toBeNull();
     expect(await identityOf(ledgerOf(txn))).toBeNull();
     const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
     expect(pages).toHaveLength(1);
-    expect(pages[0]!.body).toMatch(/may not match/);
-    expect(pages[0]!.body).toMatch(/MMG_CHECKOUT_CREATION_ZONE/);
+    expect(pages[0]!.body).toMatch(/could not be confirmed against Swift/i);
+    expect(pages[0]!.body).not.toMatch(/MMG_CHECKOUT_CREATION_ZONE|zone setting/);
   });
 
   it('the bound is the FIRST reply naming the transaction, whichever door brought it', async () => {
@@ -2553,9 +2553,42 @@ describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
     // reply, but after the first one plus two minutes.
     approved(txn, 2100, {}, { creationDate: gyStamp(new Date(opened.getTime() + 10 * 60_000)) });
     await service.pollIntents(new Date());
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
     expect(await topups(s.subId)).toHaveLength(0);
     expect(await identityOf(txn)).toBeNull();
+  });
+
+  it('[option b] a late retry CONFIRMS: MMG answers only 3.5 minutes after its reply, with its stamp = when Swift asked (staging, 6 Oct)', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 5 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('LATERETRY');
+    // MMG's success reply reached Swift 3.5 minutes ago; its lookup could not answer then.
+    await answeredAt(row, txn, new Date(Date.now() - 3.5 * 60_000), 'RETURN');
+    // Now it answers: successful, and its creationDate is the moment of THIS lookup (Guyana time).
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date()) });
+    await service.pollIntents(new Date());
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-held')).toHaveLength(0);
+  });
+
+  it('[option b] a hold on MMG’s time says what is known: it could not be confirmed against Swift’s records, never blaming the zone setting', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('UNCONFIRMEDTIME');
+    // A payment-time stamp three hours before the checkout, looked up now: neither a payment in the window nor the lookup's clock.
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date(Date.now() - 3 * 3_600_000)) });
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
+    expect(await topups(s.subId)).toHaveLength(0);
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toMatch(/could not be confirmed against Swift/i);
+    expect(pages[0]!.body).not.toMatch(/MMG_CHECKOUT_CREATION_ZONE|zone setting/);
   });
 
   it('the 1 Oct UAT round trip, at its exact times, still confirms with GUYANA_WALL_CLOCK', async () => {

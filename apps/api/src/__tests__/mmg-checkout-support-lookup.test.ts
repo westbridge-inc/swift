@@ -539,16 +539,17 @@ describe('2. the answer discloses nothing secret: exactly the contract keys', ()
 });
 
 describe('2. the detail: the row, a timeline from the observations, and the credited period', () => {
-  it('[Sol, DS663] a payment MMG stamps three minutes after its first reply, inside the window: held as CREATION_AFTER_REPLY, and support shows AFTER_REPLY, never INSIDE', async () => {
+  it('[Sol, DS663] a payment MMG stamps ten minutes after its first reply and its lookup, inside the window: held as CREATION_UNCONFIRMED, and support shows UNCONFIRMED, never INSIDE', async () => {
     const rider = await makeRider();
     const c = await started(rider);
     const txn = mmgId();
-    mmgAnswers(txn, mmgId(), c.amountGyd, { creationDate: gyStamp(new Date(Date.now() + 3 * 60_000)) });
+    // Neither a payment time before the reply nor the lookup's own clock (option b: five minutes).
+    mmgAnswers(txn, mmgId(), c.amountGyd, { creationDate: gyStamp(new Date(Date.now() + 10 * 60_000)) });
     expect((await returnWith(reply(c.row, '0', txn))).json().data.state).toBe('CONFIRMING');
-    expect(await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: c.ref } })).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: c.ref } })).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
     const detail = (await asAdmin(`${SEARCH}/${c.ref}`)).json().data as MmgCheckoutSupportDetail;
     const lookupEntry = detail.timeline.find((e) => e.source === 'LOOKUP');
-    expect(lookupEntry).toMatchObject({ mmgTransactionId: txn, transactionStatus: 'successful', windowCheck: 'AFTER_REPLY' });
+    expect(lookupEntry).toMatchObject({ mmgTransactionId: txn, transactionStatus: 'successful', windowCheck: 'UNCONFIRMED' });
     expect(detail.timeline.some((e) => e.source === 'LOOKUP' && e.windowCheck === 'INSIDE')).toBe(false);
   });
 
