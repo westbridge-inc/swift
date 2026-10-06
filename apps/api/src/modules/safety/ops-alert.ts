@@ -237,7 +237,7 @@ export async function escalateOverdueOpsAlerts(
       if (escalationDue) opsAlertCounter.labels('escalation_killed').inc();
       // Not escalating on this pass: a recipient attached late still gets the page itself now.
       for (const r of a.recipients.filter((x) => attachedLate.includes(x.id))) {
-        const id = await notifications.send({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: a.title, body: a.body, data: { kind: 'ops_alert', opsAlertId: a.id, sosAlertId: a.sosAlertId } }).catch(() => null);
+        const id = await notifications.send({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title: a.title, body: a.body, data: { kind: 'ops_alert_escalated', opsAlertId: a.id, sosAlertId: a.sosAlertId, level: a.escalationLevel } }).catch(() => null);
         if (id) await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { notificationId: id, deliveredAt: now } }).catch(() => null);
       }
       continue;

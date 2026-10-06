@@ -7,7 +7,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { runWithoutTenant } from '../plugins/tenant-context';
+import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -38,6 +38,7 @@ const alertIds: string[] = [];
 const phoneBase = 592_730_000_000 + Math.floor(Math.random() * 100_000_000);
 const ONCALL = `+5926${String(Date.now()).slice(-6)}1`;
 let seq = 0;
+const SUITE_START = new Date();
 
 const io = { to: () => ({ emit: () => {} }), in: () => ({ fetchSockets: async () => [] }) } as unknown as Server;
 const notifications = () => new NotificationService(app.prisma, io);
@@ -73,6 +74,8 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
+  // Production opens a fresh per-request tenant store before auth (server.ts).
+  app.addHook('onRequest', async () => { beginRequestTenantContext(); });
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
@@ -91,7 +94,7 @@ afterEach(() => { delete process.env['OPS_ONCALL_PHONES']; });
 afterAll(async () => {
   await runWithoutTenant(async () => {
     await app.prisma.opsAlertRecipient.deleteMany({ where: { opsAlertId: { in: alertIds } } }).catch(() => {});
-    await app.prisma.opsAlert.deleteMany({ where: { OR: [{ id: { in: alertIds } }, { title: { contains: RUN } }] } }).catch(() => {});
+    await app.prisma.opsAlert.deleteMany({ where: { OR: [{ id: { in: alertIds } }, { title: { contains: RUN } }, { kind: 'DRILL', createdAt: { gte: SUITE_START } }] } }).catch(() => {});
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
