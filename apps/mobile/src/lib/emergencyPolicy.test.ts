@@ -24,12 +24,15 @@ const served = (over: Partial<Record<string, unknown>> = {}, now = 1_000_000): R
 beforeEach(() => resetEmergencyCountersForTests());
 
 describe('the bundled fallback', () => {
-  it('names Guyana’s police number as the one verified entry and every other number as an unverified candidate', () => {
-    expect(BUNDLED_EMERGENCY_POLICIES['GY']?.police).toEqual({ number: '911', verified: true });
+  it('names Guyana’s three owner-confirmed numbers as verified and every other number as an unverified candidate', () => {
+    // Owner confirmation, 5 Oct 2026: police 911, fire 912, ambulance 913.
+    expect(BUNDLED_EMERGENCY_POLICIES['GY']).toEqual({
+      police: { number: '911', verified: true }, fire: { number: '912', verified: true }, ambulance: { number: '913', verified: true },
+    });
     for (const [country, numbers] of Object.entries(BUNDLED_EMERGENCY_POLICIES)) {
       for (const [service, entry] of Object.entries(numbers)) {
         expect(entry.number, `${country}.${service}`).toMatch(/^\+?[0-9]{2,15}$/);
-        if (!(country === 'GY' && service === 'police')) expect(entry.verified, `${country}.${service} must stay unverified until ops verifies it`).toBe(false);
+        if (country !== 'GY') expect(entry.verified, `${country}.${service} must stay unverified until ops verifies it`).toBe(false);
       }
     }
     expect(Object.isFrozen(BUNDLED_EMERGENCY_POLICIES)).toBe(true);
@@ -79,7 +82,8 @@ describe('precedence: the server’s policy for THIS market wins; then the bundl
 describe('one resolution for every SOS surface', () => {
   it('a verified number auto-dials; an unverified candidate asks; nothing trustworthy is a manual sheet', () => {
     expect(resolveEmergencyDial(bundledPolicyFor('GY'))).toEqual({ kind: 'auto', country: 'GY', number: '911', service: 'police', source: 'bundled' });
-    expect(resolveEmergencyDial(bundledPolicyFor('GY'), 'fire')).toEqual({ kind: 'confirm', country: 'GY', number: '912', service: 'fire', source: 'bundled' });
+    expect(resolveEmergencyDial(bundledPolicyFor('GY'), 'fire')).toEqual({ kind: 'auto', country: 'GY', number: '912', service: 'fire', source: 'bundled' });
+    expect(resolveEmergencyDial(bundledPolicyFor('GY'), 'ambulance')).toEqual({ kind: 'auto', country: 'GY', number: '913', service: 'ambulance', source: 'bundled' });
     expect(resolveEmergencyDial(bundledPolicyFor('TT'))).toEqual({ kind: 'confirm', country: 'TT', number: '999', service: 'police', source: 'bundled' });
     expect(resolveEmergencyDial(null)).toEqual({ kind: 'manual', country: null });
     const noPolice: EmergencyPolicy = { country: 'ZZ', numbers: { fire: { number: '112', verified: true } }, source: 'server' };
