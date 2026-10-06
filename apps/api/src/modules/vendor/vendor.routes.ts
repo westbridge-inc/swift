@@ -559,6 +559,20 @@ const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
+/** [L09 · M026] The store makes what the customer chose: every line carries its
+ *  snapshotted options (group, choice, price) on the board and the detail. */
+const VENDOR_ORDER_ITEMS = {
+  include: { selectedOptions: { select: { optionGroupName: true, optionName: true, markedUpPrice: true } } },
+} as const;
+
+function vendorOrderLine<T extends { selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
+  const { selectedOptions, ...rest } = line;
+  return {
+    ...rest,
+    options: selectedOptions.map((o) => ({ group: o.optionGroupName, name: o.optionName, price: Number(o.markedUpPrice) })),
+  };
+}
+
 async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string) {
   const { vendorIds } = await resolveVendor(app, userId);
   const order = await app.prisma.order.findUnique({
@@ -575,7 +589,7 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
     // Do not assert another path is safe; assert it in handover-secrets.test.ts.
     omit: HANDOVER_SECRETS_OMIT,
     include: {
-      items: true,
+      items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
       customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
@@ -1493,7 +1507,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         // HND-003: strip handover secrets from the vendor board too (see resolveOwnedOrder).
         omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
-          items: true,
+          items: VENDOR_ORDER_ITEMS,
           customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
@@ -1519,7 +1533,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // live order keeps all of it, which is the only thing a handover needs.
     const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
-      items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
+      items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
     }));
 
@@ -1537,7 +1551,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [AF-MOB-006] The store sees the order's recovery case: a return coming
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
-    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy }), custodyRecovery } };
+    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store

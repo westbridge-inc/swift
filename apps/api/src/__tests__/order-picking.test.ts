@@ -662,3 +662,71 @@ describe('stock adjust + low stock', () => {
     expect(ids.every((id: string) => id !== undefined)).toBe(true);
   });
 });
+
+describe('[L09 · M028] the customer sees the actual substitute and decides on it', () => {
+  it('the order projection carries the original, the proposal, the price change and the state, before and after the decision', async () => {
+    const original = await makeItem({ name: `Brand-A Rice ${seq}`, price: 1000, stock: 5, group: `rice-${seq}` });
+    const substitute = await makeItem({ name: `Brand-B Rice ${seq}`, price: 1150, stock: 5, group: `rice-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 2, price: 1000 }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: substitute.id })).statusCode).toBe(200);
+
+    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    expect(pending).toMatchObject({
+      subStatus: 'PENDING',
+      substituteName: substitute.name,
+      substitutePrice: 1150,
+      substitution: {
+        state: 'PENDING',
+        original: { name: original.name, unitPrice: 1000 },
+        proposed: { itemId: substitute.id, name: substitute.name, unitPrice: 1150 },
+        priceDelta: 300,
+      },
+    });
+
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
+    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    expect(decided).toMatchObject({ subStatus: 'APPROVED', substitution: { state: 'APPROVED', proposed: null, priceDelta: null } });
+  });
+
+  it('a line with no substitution says so', async () => {
+    const item = await makeItem({ name: `Plain Salt ${seq}`, price: 200 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 200 }]);
+    const line = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    expect(line).toMatchObject({ subStatus: 'NONE', substitution: null });
+  });
+});
+
+describe('[L09 · M026] the store sees the options the customer chose', () => {
+  it('the order board and the order detail list each line\'s chosen options with their prices', async () => {
+    const item = await makeItem({ name: `Option Burger ${seq}`, price: 1000 });
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `PICK-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId: customer.userId, vendorId,
+        status: 'ACCEPTED', fulfillment: 'PICKUP', deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1450, subtotalMarkup: 0, subtotalCustomer: 1450, deliveryFee: 0, totalAmount: 1450, paymentMethod: 'CASH',
+        items: {
+          create: [{
+            itemId: item.id, name: item.name, quantity: 1, basePrice: 1000, markedUpPrice: 1000, markupAmount: 0,
+            totalBase: 1450, totalMarkup: 0, totalCustomer: 1450, specialInstructions: 'No onions',
+            selectedOptions: { create: [
+              { optionGroupName: 'Size', optionName: 'Large', basePrice: 300, markedUpPrice: 300, markupAmount: 0 },
+              { optionGroupName: 'Extras', optionName: 'Cheese', basePrice: 150, markedUpPrice: 150, markupAmount: 0 },
+            ] },
+          }],
+        },
+      },
+    });
+    const expected = [
+      { group: 'Size', name: 'Large', price: 300 },
+      { group: 'Extras', name: 'Cheese', price: 150 },
+    ];
+    const detail = await inject('GET', `/api/v1/vendor/orders/${order.id}`, owner.token);
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.json().data.items[0].options).toEqual(expect.arrayContaining(expected));
+    expect(detail.json().data.items[0].options).toHaveLength(2);
+    const board = await inject('GET', '/api/v1/vendor/orders?limit=50', owner.token);
+    const row = (board.json().data as Array<{ id: string; items: Array<{ options: unknown[] }> }>).find((o) => o.id === order.id);
+    expect(row?.items[0]?.options).toEqual(expect.arrayContaining(expected));
+  });
+});

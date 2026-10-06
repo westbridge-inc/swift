@@ -2528,6 +2528,22 @@ export async function customerRoutes(app: FastifyInstance) {
           customerPrice: Number(i.markedUpPrice),
           lineTotal: Number(i.totalCustomer),
           specialInstructions: i.specialInstructions,
+          options: i.selectedOptions.map((o) => ({ group: o.optionGroupName, name: o.optionName, price: Number(o.markedUpPrice) })),
+          // [L09 · M028] The store's out-of-stock swap, as the customer decides it:
+          // what was ordered, what is proposed, what it changes, and where it stands.
+          subStatus: i.subStatus,
+          substituteName: i.substituteName,
+          substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
+          substitution: i.subStatus === 'NONE' ? null : {
+            state: i.subStatus,
+            original: { name: i.name, unitPrice: Number(i.markedUpPrice) },
+            proposed: i.subStatus === 'PENDING'
+              ? { itemId: i.substituteItemId, name: i.substituteName, unitPrice: Number(i.substitutePrice ?? 0) }
+              : null,
+            priceDelta: i.subStatus === 'PENDING'
+              ? (Number(i.substitutePrice ?? 0) - Number(i.markedUpPrice)) * i.quantity
+              : null,
+          },
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),
