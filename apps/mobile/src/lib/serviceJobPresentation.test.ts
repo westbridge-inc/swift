@@ -1,73 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   armServiceJobDueWakeup,
-  localServiceJobDateTime,
   parseServiceQuoteInput,
   serviceJobDueDelayMs,
   serviceJobErrorMessage,
-  serviceJobScheduleDays,
   showsServiceJobAgreedPrice,
 } from './serviceJobPresentation';
-
-const NativeDate = Date;
-const GUYANA_BEHIND_UTC_MS = 4 * 60 * 60 * 1000;
-
-/**
- * Exercise the device-local scheduling contract against Guyana wall time
- * without changing the test worker's TZ. Restoration in finally keeps the
- * fake calendar scoped to one assertion.
- */
-function withGuyanaLocalCalendar<T>(run: () => T): T {
-  class GuyanaDate extends NativeDate {
-    constructor(...args: unknown[]) {
-      if (args.length >= 2) {
-        const numbers = args.map(Number);
-        const year = numbers[0]!;
-        const month = numbers[1]!;
-        const day = numbers[2] ?? 1;
-        const hour = numbers[3] ?? 0;
-        const minute = numbers[4] ?? 0;
-        const second = numbers[5] ?? 0;
-        const millisecond = numbers[6] ?? 0;
-        super(NativeDate.UTC(year, month, day, hour, minute, second, millisecond) + GUYANA_BEHIND_UTC_MS);
-      } else if (args.length === 1) {
-        const [value] = args;
-        super(value instanceof NativeDate ? value.getTime() : value as string | number);
-      } else {
-        super();
-      }
-    }
-
-    private wallTime(): Date {
-      return new NativeDate(this.getTime() - GUYANA_BEHIND_UTC_MS);
-    }
-
-    override getFullYear(): number { return this.wallTime().getUTCFullYear(); }
-    override getMonth(): number { return this.wallTime().getUTCMonth(); }
-    override getDate(): number { return this.wallTime().getUTCDate(); }
-    override getHours(): number { return this.wallTime().getUTCHours(); }
-    override getMinutes(): number { return this.wallTime().getUTCMinutes(); }
-
-    override setHours(hour: number, minute?: number, second?: number, millisecond?: number): number {
-      const wallTime = this.wallTime();
-      wallTime.setUTCHours(hour, minute, second, millisecond);
-      return this.setTime(wallTime.getTime() + GUYANA_BEHIND_UTC_MS);
-    }
-
-    override setDate(day: number): number {
-      const wallTime = this.wallTime();
-      wallTime.setUTCDate(day);
-      return this.setTime(wallTime.getTime() + GUYANA_BEHIND_UTC_MS);
-    }
-  }
-
-  vi.stubGlobal('Date', GuyanaDate);
-  try {
-    return run();
-  } finally {
-    vi.unstubAllGlobals();
-  }
-}
+import { serviceJobScheduleSelection, upcomingAppointmentDays } from './appointmentTime';
 
 describe('service-job presentation contract', () => {
   it('keeps the agreed quote visible through every contracted and completed state', () => {
@@ -143,39 +82,30 @@ describe('service-job presentation contract', () => {
     expect(onDue).toHaveBeenCalledOnce();
   });
 
-  describe('local service-job scheduling calendar', () => {
+  // The schedule sheet uses the shared appointment calendar, which is pinned to
+  // Guyana time whatever zone the phone is set to.
+  describe('service-job scheduling calendar (Guyana time on any device)', () => {
     it('keeps Today on the Guyana calendar when UTC has already rolled over', () => {
-      withGuyanaLocalCalendar(() => {
-        const days = serviceJobScheduleDays(new NativeDate('2026-09-21T00:30:00.000Z'));
-
-        expect(days[0]).toMatchObject({ key: '2026-09-20', label: 'Today' });
-        expect(localServiceJobDateTime(days[0]!.key, '21:00').toISOString()).toBe('2026-09-21T01:00:00.000Z');
-      });
+      const now = new Date('2026-09-21T00:30:00.000Z');
+      expect(upcomingAppointmentDays(now)[0]).toMatchObject({ key: '2026-09-20', label: 'Today' });
+      expect(serviceJobScheduleSelection('2026-09-20', '21:00', now).scheduledFor).toBe('2026-09-21T01:00:00.000Z');
     });
 
-    it('preserves the local calendar date at Guyana midnight', () => {
-      withGuyanaLocalCalendar(() => {
-        const days = serviceJobScheduleDays(new NativeDate('2026-09-20T04:00:00.000Z'));
-
-        expect(days.slice(0, 2).map((day) => day.key)).toEqual(['2026-09-20', '2026-09-21']);
-        expect(localServiceJobDateTime(days[0]!.key, '08:00').toISOString()).toBe('2026-09-20T12:00:00.000Z');
-      });
+    it('preserves the calendar date at Guyana midnight', () => {
+      const now = new Date('2026-09-20T04:00:00.000Z');
+      expect(upcomingAppointmentDays(now).slice(0, 2).map((day) => day.key)).toEqual(['2026-09-20', '2026-09-21']);
+      expect(serviceJobScheduleSelection('2026-09-20', '08:00', now).scheduledFor).toBe('2026-09-20T12:00:00.000Z');
     });
 
-    it('is DST-agnostic for Guyana dates on both US DST transition days', () => {
-      withGuyanaLocalCalendar(() => {
-        expect(localServiceJobDateTime('2026-03-08', '08:00').toISOString()).toBe('2026-03-08T12:00:00.000Z');
-        expect(localServiceJobDateTime('2026-11-01', '08:00').toISOString()).toBe('2026-11-01T12:00:00.000Z');
-      });
+    it('is unaffected by US daylight-saving transition days', () => {
+      expect(serviceJobScheduleSelection('2026-03-08', '08:00').scheduledFor).toBe('2026-03-08T12:00:00.000Z');
+      expect(serviceJobScheduleSelection('2026-11-01', '08:00').scheduledFor).toBe('2026-11-01T12:00:00.000Z');
     });
 
-    it('submits the selected daytime local slot unchanged', () => {
-      withGuyanaLocalCalendar(() => {
-        const days = serviceJobScheduleDays(new NativeDate('2026-09-20T12:00:00.000Z'));
-
-        expect(days[0]).toMatchObject({ key: '2026-09-20', label: 'Today' });
-        expect(localServiceJobDateTime(days[0]!.key, '10:00').toISOString()).toBe('2026-09-20T14:00:00.000Z');
-      });
+    it('flags a slot that has already passed', () => {
+      const now = new Date('2026-09-20T15:00:00.000Z');
+      expect(serviceJobScheduleSelection('2026-09-20', '10:00', now)).toEqual({ scheduledFor: '2026-09-20T14:00:00.000Z', isPast: true });
+      expect(serviceJobScheduleSelection('2026-09-20', '12:00', now).isPast).toBe(false);
     });
   });
 });

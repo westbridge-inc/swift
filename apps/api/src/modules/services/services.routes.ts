@@ -24,10 +24,16 @@ import { isServiceCategoryOperational } from './service-catalog';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import {
   assertServiceJobStartDue,
-  serviceQuoteAmountSchema,
   transitionServiceJob,
 } from './service-job-transition';
-import { runTenantBoundServiceJobTransaction } from './service-job-transaction';
+import { executeTenantBoundServiceJobTransaction } from './service-job-transaction';
+import {
+  parseServiceJobLifecycleCommand,
+  quoteSchema,
+  scheduleSchema,
+  scheduledTransitionSchema,
+  transitionGenerationSchema,
+} from './service-job-client-contract';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -55,13 +61,8 @@ const jobRequestSchema = z.object({
   description: z.string().trim().min(10).max(2000),
   photos: z.array(z.string().max(2048)).max(10).optional(),
 });
-const transitionGenerationSchema = z.object({ expectedUpdatedAt: z.coerce.date() });
-const quoteSchema = transitionGenerationSchema.extend({ amount: serviceQuoteAmountSchema });
-const scheduleSchema = transitionGenerationSchema.extend({
-  scheduledFor: z.coerce.date(),
-  expectedQuoteAmount: serviceQuoteAmountSchema,
-});
-const scheduledTransitionSchema = transitionGenerationSchema.extend({ expectedScheduledFor: z.coerce.date() });
+// A number format, not a date: the market-zone rule for times does not apply.
+const QUOTE_AMOUNT = new Intl.NumberFormat('en-GY', { maximumFractionDigits: 2 });
 const rateSchema = z.object({ score: z.number().int().min(1).max(5), comment: z.string().max(1000).optional() });
 
 export async function servicesRoutes(app: FastifyInstance) {
@@ -404,7 +405,7 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.post('/jobs/:id/quote', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { amount, expectedUpdatedAt } = quoteSchema.parse(request.body);
+    const { amount, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, quoteSchema);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can quote');
     if (!['REQUESTED', 'QUOTED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', `Cannot quote a ${job.status.toLowerCase()} job`);
@@ -413,7 +414,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     // expire, be rejected, or be purged between the request and the quote.
     // The write is a state CAS, not a read-then-unconditional update.
     // (Completion/decline of already-contracted work keeps its own policy.)
-    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(tx, async (boundTx) => {
+    const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (boundTx) => {
       const users = await boundTx.$queryRaw<Array<{ id: string; status: string }>>`
         SELECT "id", "status" FROM "users" WHERE "id" = ${request.user.userId} FOR UPDATE
       `;
@@ -440,18 +441,18 @@ export async function servicesRoutes(app: FastifyInstance) {
           userId: job.customerId,
           type: 'ORDER_UPDATE',
           title: 'Quote received',
-          body: `Your provider quoted GYD ${amount.toLocaleString('en-GY')} — review it before choosing a time.`,
+          body: `Your provider quoted GYD ${QUOTE_AMOUNT.format(amount)} — review it before choosing a time.`,
           data: { kind: 'booking_quoted', jobId: id },
         }],
       });
-    }));
+    });
     await publishPersisted(transitioned.notificationIds);
     return { success: true, data: transitioned.job };
   });
 
   app.post('/jobs/:id/schedule', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { scheduledFor, expectedQuoteAmount, expectedUpdatedAt } = scheduleSchema.parse(request.body);
+    const { scheduledFor, expectedQuoteAmount, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduleSchema);
     const job = await jobForUser(id, request.user.userId);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
     if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
@@ -469,7 +470,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     // that left QUOTED while we were reading fails cleanly rather than being
     // silently overwritten.
     // The provider still ACCEPTS the slot (§4.3) — providerConfirmedAt starts null.
-    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(tx, async (boundTx) => {
+    const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (boundTx) => {
       return transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -488,7 +489,7 @@ export async function servicesRoutes(app: FastifyInstance) {
           data: { kind: 'booking_to_confirm', jobId: id },
         }],
       });
-    })).catch((error: unknown) => {
+    }).catch((error: unknown) => {
       // The unique violation IS the double-booking answer — same translation
       // BookingService makes for appointment slots.
       if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
@@ -503,13 +504,13 @@ export async function servicesRoutes(app: FastifyInstance) {
   /** POST /jobs/:id/confirm — the provider accepts the customer's slot (§4.3). */
   app.post('/jobs/:id/confirm', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedScheduledFor, expectedUpdatedAt } = scheduledTransitionSchema.parse(request.body);
+    const { expectedScheduledFor, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduledTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can confirm');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to confirm');
     // [STRAND-8 / EV-ACT-25] Affirming the slot is the last acceptance gate
     // for NEW work — re-prove live authority and bind the state in the write.
-    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(tx, async (boundTx) => {
+    const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (boundTx) => {
       const users = await boundTx.$queryRaw<Array<{ id: string; status: string }>>`
         SELECT "id", "status" FROM "users" WHERE "id" = ${request.user.userId} FOR UPDATE
       `;
@@ -542,7 +543,7 @@ export async function servicesRoutes(app: FastifyInstance) {
           data: { kind: 'booking_confirmed', jobId: id },
         }],
       });
-    }));
+    });
     await publishPersisted(transitioned.notificationIds);
     return { success: true, data: transitioned.job };
   });
@@ -551,12 +552,12 @@ export async function servicesRoutes(app: FastifyInstance) {
    *  returns to QUOTED so the customer picks another slot (never a dead end). */
   app.post('/jobs/:id/decline-slot', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedScheduledFor, expectedUpdatedAt } = scheduledTransitionSchema.parse(request.body);
+    const { expectedScheduledFor, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduledTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can decline');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to decline');
-    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
-      tx,
+    const transitioned = await executeTenantBoundServiceJobTransaction(
+      app.prisma,
       (boundTx) => transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -579,7 +580,7 @@ export async function servicesRoutes(app: FastifyInstance) {
           data: { kind: 'booking_slot_declined', jobId: id },
         }],
       }),
-    ));
+    );
     await publishPersisted(transitioned.notificationIds);
     return { success: true, data: transitioned.job };
   });
@@ -587,13 +588,13 @@ export async function servicesRoutes(app: FastifyInstance) {
   /** The provider explicitly starts confirmed work at or after the agreed time. */
   app.post('/jobs/:id/start', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedScheduledFor, expectedUpdatedAt } = scheduledTransitionSchema.parse(request.body);
+    const { expectedScheduledFor, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduledTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can start');
     const startedAt = new Date();
     assertServiceJobStartDue(expectedScheduledFor, startedAt);
-    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
-      tx,
+    const transitioned = await executeTenantBoundServiceJobTransaction(
+      app.prisma,
       (boundTx) => transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -619,20 +620,20 @@ export async function servicesRoutes(app: FastifyInstance) {
         }],
         now: startedAt,
       }),
-    ));
+    );
     await publishPersisted(transitioned.notificationIds);
     return { success: true, data: transitioned.job };
   });
 
   app.post('/jobs/:id/complete', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedUpdatedAt } = transitionGenerationSchema.parse(request.body);
+    const { expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, transitionGenerationSchema);
     const job = await jobForUser(id, request.user.userId);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can complete');
     if (job.status !== 'IN_PROGRESS') throw new AppError(400, 'BAD_STATE', `Cannot complete a ${job.status.toLowerCase()} job`);
     const completedAt = new Date();
-    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
-      tx,
+    const transitioned = await executeTenantBoundServiceJobTransaction(
+      app.prisma,
       (boundTx) => transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -662,21 +663,21 @@ export async function servicesRoutes(app: FastifyInstance) {
         ],
         now: completedAt,
       }),
-    ));
+    );
     await publishPersisted(transitioned.notificationIds);
     return { success: true, data: transitioned.job };
   });
 
   app.post('/jobs/:id/cancel', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedUpdatedAt } = transitionGenerationSchema.parse(request.body);
+    const { expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, transitionGenerationSchema);
     const job = await jobForUser(id, request.user.userId);
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
     const cancelledByCustomer = job.customerId === request.user.userId;
     const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;
     const cancelledAt = new Date();
-    const transitioned = await app.prisma.$transaction((tx) => runTenantBoundServiceJobTransaction(
-      tx,
+    const transitioned = await executeTenantBoundServiceJobTransaction(
+      app.prisma,
       (boundTx) => transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -703,7 +704,7 @@ export async function servicesRoutes(app: FastifyInstance) {
         }],
         now: cancelledAt,
       }),
-    ));
+    );
     await publishPersisted(transitioned.notificationIds);
     return { success: true, data: transitioned.job };
   });

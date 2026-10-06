@@ -25,64 +25,6 @@ export function serviceJobErrorMessage(error: unknown, fallback: string): string
   return responseData?.error?.message ?? responseData?.message ?? fallback;
 }
 
-export type ServiceJobScheduleDay = Readonly<{
-  key: string;
-  label: string;
-}>;
-
-function localCalendarKey(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-/**
- * The schedule chips describe the customer's local calendar. Keep their
- * identity in that same calendar rather than deriving a UTC date key from a
- * local Date, which changes "Today" after a UTC rollover.
- */
-export function serviceJobScheduleDays(now: Date = new Date()): ServiceJobScheduleDay[] {
-  if (!Number.isFinite(now.getTime())) throw new RangeError('Invalid current date');
-
-  return Array.from({ length: 7 }, (_, index) => {
-    const day = new Date(now);
-    day.setHours(0, 0, 0, 0);
-    day.setDate(day.getDate() + index);
-    return {
-      key: localCalendarKey(day),
-      label: index === 0 ? 'Today' : index === 1 ? 'Tomorrow' : day.toLocaleDateString([], { weekday: 'short', day: 'numeric' }),
-    };
-  });
-}
-
-/** Build the API instant from the selected local calendar day and wall time. */
-export function localServiceJobDateTime(dayKey: string, time: string): Date {
-  const dateParts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dayKey);
-  const timeParts = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(time);
-  if (!dateParts || !timeParts) throw new RangeError('Invalid local service-job slot');
-
-  const [, yearText, monthText, dayText] = dateParts;
-  const [, hourText, minuteText] = timeParts;
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const day = Number(dayText);
-  const hour = Number(hourText);
-  const minute = Number(minuteText);
-  const scheduledFor = new Date(year, month - 1, day, hour, minute, 0, 0);
-
-  if (
-    scheduledFor.getFullYear() !== year
-    || scheduledFor.getMonth() !== month - 1
-    || scheduledFor.getDate() !== day
-    || scheduledFor.getHours() !== hour
-    || scheduledFor.getMinutes() !== minute
-  ) {
-    throw new RangeError('Invalid local service-job slot');
-  }
-  return scheduledFor;
-}
-
 export function serviceJobDueDelayMs(scheduledFor: string, nowMs: number): number {
   const dueAt = new Date(scheduledFor).getTime();
   if (!Number.isFinite(dueAt)) return Number.POSITIVE_INFINITY;

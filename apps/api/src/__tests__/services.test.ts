@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -78,6 +82,7 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
     headers: {
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
     },
   });
 }
@@ -654,7 +659,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     }, customer.token);
     expect(created.statusCode).toBe(201);
     const jobId = created.json().data.id;
-    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000 }, provider.token);
+    const quoted = await inject('POST', `/api/v1/services/jobs/${jobId}/quote`, { amount: 8000, ...await commandState(jobId) }, provider.token);
     expect(quoted.json().data.status).toBe('QUOTED');
 
     const askedToConfirm = async () => (await runWithoutTenant(() =>
@@ -666,7 +671,7 @@ describe('Services — job lifecycle + two-way rating', () => {
 
     // Three days ago, and one minute ago: neither is a time anyone can keep.
     for (const scheduledFor of [new Date(Date.now() - 3 * DAY), new Date(Date.now() - 60_000)]) {
-      const refused = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: scheduledFor.toISOString() }, customer.token);
+      const refused = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: scheduledFor.toISOString(), ...await commandState(jobId) }, customer.token);
       expect(refused.statusCode).toBe(400);
       expect(refused.json().error.code).toBe('SLOT_IN_PAST');
     }
@@ -676,7 +681,7 @@ describe('Services — job lifecycle + two-way rating', () => {
     expect(await askedToConfirm(), 'the provider must never be asked to confirm a time that has passed').toBe(0);
 
     // The refusal is not a dead end: a future time books normally.
-    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString() }, customer.token);
+    const scheduled = await inject('POST', `/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: new Date(Date.now() + 2 * DAY).toISOString(), ...await commandState(jobId) }, customer.token);
     expect(scheduled.statusCode).toBe(200);
     expect(scheduled.json().data.status).toBe('SCHEDULED');
     expect(await askedToConfirm()).toBe(1);

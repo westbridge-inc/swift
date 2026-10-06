@@ -2,6 +2,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -78,6 +82,7 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
     headers: {
       ...(payload !== undefined ? { 'content-type': 'application/json' } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
     },
   });
 }
@@ -454,6 +459,42 @@ describe('Services — closing a job is never silent', () => {
     expect(providerNudge!.body).toContain('Rate your customer');
   });
 
+  it('[M063] start is refused until the provider has confirmed the slot, even once it is due', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+    const started = await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token);
+    expect(started.statusCode).toBe(409);
+    expect(started.json().error.code).toBe('SERVICE_JOB_CHANGED');
+    expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+  });
+
+  it('[M063] start is refused before the confirmed slot is due', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    const started = await inject('POST', `/api/v1/services/jobs/${jobId}/start`, await commandState(jobId), provider.token);
+    expect(started.statusCode).toBe(409);
+    expect(started.json().error.code).toBe('JOB_NOT_DUE');
+    expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+  });
+
+  it('[M063] complete is refused unless the job is in progress', async () => {
+    const provider = await makeVerifiedProvider();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const jobId = await quotedJob(provider, customer);
+    expect((await schedule(jobId, nextSlot(), customer.token)).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/services/jobs/${jobId}/confirm`, await commandState(jobId), provider.token)).statusCode).toBe(200);
+    const completed = await inject('POST', `/api/v1/services/jobs/${jobId}/complete`, await commandState(jobId), provider.token);
+    expect(completed.statusCode).toBe(400);
+    expect(completed.json().error.code).toBe('BAD_STATE');
+    expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+  });
+
   it('simultaneous complete and cancel commands have one terminal winner and never resurrect the job', async () => {
     const provider = await makeVerifiedProvider();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -478,6 +519,22 @@ describe('Services — closing a job is never silent', () => {
 
     const winnerStatus = complete.statusCode === 200 ? 'COMPLETED' : 'CANCELLED';
     expect((await jobRow(jobId)).status).toBe(winnerStatus);
+
+    // [M036] Exactly one receipt: the winner's audit row and notices were
+    // written in its transaction; the loser's never were.
+    const terminalAudits = await runWithoutTenant(() => app.prisma.auditLog.findMany({
+      where: { entity: 'ServiceJob', entityId: jobId, action: { in: ['SERVICE_JOB_COMPLETED', 'SERVICE_JOB_CANCELLED'] } },
+      select: { action: true },
+    }));
+    expect(terminalAudits.map((a) => a.action)).toEqual([winnerStatus === 'COMPLETED' ? 'SERVICE_JOB_COMPLETED' : 'SERVICE_JOB_CANCELLED']);
+    const terminalNotices = await runWithoutTenant(() => app.prisma.notification.findMany({
+      where: { AND: [{ data: { path: ['jobId'], equals: jobId } }] },
+      select: { data: true },
+    }));
+    const kinds = terminalNotices
+      .map((n) => (n.data as Record<string, unknown> | null)?.['kind'])
+      .filter((kind) => kind === 'booking_completed' || kind === 'booking_cancelled');
+    expect(new Set(kinds)).toEqual(new Set([winnerStatus === 'COMPLETED' ? 'booking_completed' : 'booking_cancelled']));
 
     // A delayed copy of the losing command remains stale after the winner.
     const staleRetry = complete.statusCode === 200

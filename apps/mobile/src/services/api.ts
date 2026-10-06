@@ -1,4 +1,8 @@
 import axios, { type AxiosRequestConfig } from 'axios';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import Constants from 'expo-constants';
 import { Platform, TurboModuleRegistry } from 'react-native';
 import {
@@ -794,6 +798,14 @@ export const courierApi = {
 };
 
 // Services (mounted at /api/v1/services)
+function serviceJobLifecycleConfig(): AxiosRequestConfig {
+  return {
+    headers: {
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+    },
+  };
+}
+
 export const servicesApi = {
   providers: (trade: string) => api.get('/services/providers', { params: { trade } }),
   providerMe: (session?: AuthSessionSnapshot) =>
@@ -815,24 +827,24 @@ export const servicesApi = {
   job: (id: string) => api.get(`/services/jobs/${id}`),
   // Customer accepts the provider's quote by scheduling the job.
   scheduleJob: (id: string, input: { scheduledFor: string; expectedUpdatedAt: string; expectedQuoteAmount: number }) =>
-    api.post(`/services/jobs/${id}/schedule`, input),
+    api.post(`/services/jobs/${id}/schedule`, input, serviceJobLifecycleConfig()),
   cancelJob: (id: string, expectedUpdatedAt: string) =>
-    api.post(`/services/jobs/${id}/cancel`, { expectedUpdatedAt }),
+    api.post(`/services/jobs/${id}/cancel`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
   rateJob: (id: string, score: number, comment?: string) => api.post(`/services/jobs/${id}/rate`, { score, comment }),
   // Provider side: send the quote, then accept/decline the customer's slot (§4.3),
   // then close the job out when the work is done (SWIFT-AUD-D8-04: the complete
   // endpoint existed server-side but was never wired, so a ServiceJob stalled
   // forever at SCHEDULED — no completion, no rating, no reputation).
   quoteJob: (id: string, amount: number, expectedUpdatedAt: string) =>
-    api.post(`/services/jobs/${id}/quote`, { amount, expectedUpdatedAt }),
+    api.post(`/services/jobs/${id}/quote`, { amount, expectedUpdatedAt }, serviceJobLifecycleConfig()),
   confirmJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
-    api.post(`/services/jobs/${id}/confirm`, { expectedUpdatedAt, expectedScheduledFor }),
+    api.post(`/services/jobs/${id}/confirm`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
   declineSlot: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
-    api.post(`/services/jobs/${id}/decline-slot`, { expectedUpdatedAt, expectedScheduledFor }),
+    api.post(`/services/jobs/${id}/decline-slot`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
   startJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
-    api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }),
+    api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
   completeJob: (id: string, expectedUpdatedAt: string) =>
-    api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }),
+    api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
 };
 
 // Verification (mounted at /api/v1/verification)
