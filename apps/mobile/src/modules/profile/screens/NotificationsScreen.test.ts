@@ -49,6 +49,8 @@ vi.mock('@react-navigation/native', () => ({
   }),
 }));
 vi.mock('react-native', () => ({ FlatList: 'FlatList', View: 'View' }));
+// [Row 55] The invite card has its own suite (TeamInviteCards.test.ts).
+vi.mock('../components/TeamInviteCards', () => ({ TeamInviteCards: 'TeamInviteCards' }));
 vi.mock('@swift/ui', () => ({ color: { brand: {} }, space: {} }));
 vi.mock('../../../kit', () =>
   Object.fromEntries(

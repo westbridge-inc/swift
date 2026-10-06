@@ -345,6 +345,7 @@ const CENSUS: Case[] = [
   // ── Store / advertiser business surfaces [GAPS].
   { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: null, why: 'GAP: store — the item editor exists and is unrouted' },
   { k: 'staff_added', d: { vendorId: 'v1' }, to: null, why: 'GAP: store team screen' },
+  { k: 'staff_invite', d: { vendorId: 'v1', audience: 'customer' }, to: { screen: 'Notifications' }, why: '[row 55] the invite is answered on the inbox Accept card' },
   { k: 'review_response', d: { ratingId: 'r1', vendorId: 'v1' }, to: null, why: 'GAP: store reviews' },
   { k: 'rating_removed', to: null, why: 'GAP: a rating was removed' },
   { k: 'category_request_resolved', to: null, why: 'GAP: store category request answered' },

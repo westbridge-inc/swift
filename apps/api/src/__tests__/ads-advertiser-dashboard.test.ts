@@ -150,7 +150,7 @@ describe('§14.2/§14.5 member-gated reads', () => {
 });
 
 describe('§14.6 team', () => {
-  it('OWNER adds a MANAGER by phone; MANAGER cannot add; unknown phone 404', async () => {
+  it('OWNER adds a MANAGER by phone; MANAGER cannot add; an unknown phone gets the same reply as a known one [row 55]', async () => {
     const owner = await makeUser();
     const manager = await makeUser();
     const analyst = await makeUser();
@@ -171,7 +171,11 @@ describe('§14.6 team', () => {
     const denied = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: analystPhone, role: 'ANALYST' }, manager.token);
     expect(denied.statusCode).toBe(403);
 
-    const unknown = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: '+5926999999', role: 'ANALYST' }, owner.token);
-    expect(unknown.statusCode).toBe(404);
+    // [Row 55] No "no account" 404 and no user id: a known and an unknown
+    // number answer byte-identically, so the add is not a phone lookup.
+    const unknown = await post(`/api/v1/ads/advertiser/${a.id}/members`, { phone: '+5926999999', role: 'MANAGER' }, owner.token);
+    expect(unknown.statusCode).toBe(200);
+    expect(unknown.body).toBe(added.body);
+    expect(added.body).not.toContain(manager.userId);
   });
 });

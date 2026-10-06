@@ -354,13 +354,17 @@ export async function adsRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     await advertisers.assertMember(request.params.id, request.user.userId, true); // OWNER only
     const invited = await app.prisma.user.findUnique({ where: { phone: body.phone }, select: { id: true } });
-    if (!invited) throw new NotFoundError('User', body.phone);
-    const member = await app.prisma.advertiserMember.upsert({
-      where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
-      create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
-      update: { role: body.role },
-    });
-    return { success: true, data: { userId: member.userId, role: member.role } };
+    // [Row 55] One reply for every number: an unknown phone is no longer a
+    // 404 and a known one no longer hands back its user id. (Invite + accept
+    // for advertiser teams follows after launch; ads are off at launch.)
+    if (invited) {
+      await app.prisma.advertiserMember.upsert({
+        where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
+        create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
+        update: { role: body.role },
+      });
+    }
+    return { success: true, data: { status: 'SENT_IF_ACCOUNT', role: body.role } };
   });
 
   /** §14.4 — the EXACT refund the advertiser will get if they cancel now,

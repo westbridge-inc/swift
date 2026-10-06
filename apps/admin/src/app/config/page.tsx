@@ -117,6 +117,26 @@ export default function ConfigPage() {
           ))}
 
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
+            <h2 className="text-lg font-semibold mb-1">Launch switches</h2>
+            <p className="text-xs text-[var(--muted)] mb-4">
+              Set in the server environment, shown here as this API is running them. Not editable from the console.
+            </p>
+            <div className="p-3 rounded-lg bg-white/5 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">Team invites need the invitee to accept</p>
+                <p className="text-xs text-[var(--muted)] mt-1">
+                  STAFF_INVITE_ACCEPT. Off: a store owner adding a number adds that account straight away. On: the
+                  account gets an invite and joins only after accepting. Turn on once the app build with the Accept
+                  card is live in both stores.
+                </p>
+              </div>
+              <span data-testid="switch-staff-invite-accept" className="text-sm font-semibold ml-4">
+                {data?.switches?.staffInviteAccept === true ? 'ON' : data?.switches?.staffInviteAccept === false ? 'OFF' : 'Unknown'}
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
             <h2 className="text-lg font-semibold mb-1">Not editable here — by design</h2>
             <p className="text-xs text-[var(--muted)] mb-4">
               This page previously showed 20 more fields that saved but were read by nothing. They were

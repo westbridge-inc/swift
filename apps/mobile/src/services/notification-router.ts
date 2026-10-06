@@ -30,6 +30,10 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // data by NotificationService.send. Present on only some payloads today.
   const audience = typeof data['audience'] === 'string' ? (data['audience'] as string) : '';
 
+  // [Row 55] A store team invite is answered on the inbox, where its Accept /
+  // Decline card sits (the invitee joins only by accepting there).
+  if (kind === 'staff_invite') return { screen: 'Notifications' };
+
   // Rides: queue outcomes + anything ride-flavoured lands on the taxi screen
   // (it reads the active ride itself — T21 restore does the rest).
   if (kind === 'ride_queue_matched' || kind === 'ride_queue_expired' || kind.startsWith('ride_')) {

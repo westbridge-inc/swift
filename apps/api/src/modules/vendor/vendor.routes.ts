@@ -18,6 +18,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
+import { decideStaffInvite, deliverStaffInvite, listMyStaffInvites, staffAddReply, staffInviteAcceptEnabled } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -733,8 +734,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: staff };
   });
 
-  /** POST /staff — add an EXISTING Swift account by phone (no ghost invites:
-   *  they must have signed up + done the selfie like everyone else). */
+  /** POST /staff — invite a Swift account to the team by phone. [Row 55]
+   *  Every number gets the SAME reply (staffAddReply): known, unknown, already
+   *  on the team or already invited. With STAFF_INVITE_ACCEPT on, a known
+   *  account gets an invite and joins only when it accepts; with it off (the
+   *  app build without the Accept card) it is added at once, as before. */
   app.post('/staff', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     await requireStepUp(app, request); // [ALG-34] a grant hands the store's board to a phone
@@ -742,35 +746,60 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     const target = await app.prisma.user.findUnique({
       where: { phone: body.phone },
-      select: { id: true, firstName: true, lastName: true },
+      select: { id: true, status: true },
     });
-    if (!target) {
-      throw new AppError(404, 'USER_NOT_FOUND', 'No Swift account with that phone — ask them to download Swift and sign up first');
-    }
-    if (target.id === request.user.userId) {
+    // The owner's own number tells them nothing they do not know.
+    if (target && target.id === request.user.userId) {
       throw new AppError(400, 'SELF_STAFF', 'You already own this store');
     }
-    const existing = await app.prisma.vendorStaff.findUnique({
-      where: { vendorId_userId: { vendorId, userId: target.id } },
-    });
-    if (existing) {
-      throw new AppError(409, 'ALREADY_STAFF', `${target.firstName} is already on this store's team`);
+    const reply = staffAddReply(body.role);
+    if (!target || target.status !== 'ACTIVE') return reply;
+
+    if (staffInviteAcceptEnabled()) {
+      // Off the request path: the reply never waits on whether an invite was due.
+      void deliverStaffInvite(app.prisma, notifications, {
+        vendorId, targetUserId: target.id, role: body.role, inviterId: request.user.userId, now: new Date(),
+      }).catch((err: unknown) => request.log.error({ err, vendorId }, '[row 55] staff invite not delivered'));
+      return reply;
     }
 
-    const member = await app.prisma.vendorStaff.create({
-      data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
-      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
+    const existing = await app.prisma.vendorStaff.findUnique({
+      where: { vendorId_userId: { vendorId, userId: target.id } },
+      select: { id: true },
     });
+    if (!existing) {
+      await app.prisma.vendorStaff.create({
+        data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
+      });
+      void notifications.send({
+        userId: target.id,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'You joined a store team',
+        body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
+        data: { kind: 'staff_added', vendorId },
+      }).catch((err: unknown) => request.log.error({ err, vendorId }, 'staff added notice failed'));
+    }
+    return reply;
+  });
 
-    await notifications.send({
-      userId: target.id,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'You joined a store team',
-      body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
-      data: { kind: 'staff_added', vendorId },
+  /** GET /team-invites — the caller's own live store-team invites. [Row 55] */
+  app.get('/team-invites', auth, async (request) => {
+    return { success: true, data: await listMyStaffInvites(app.prisma, request.user.userId, new Date()) };
+  });
+
+  /** POST /team-invites/:id/accept | /decline — answer one invite. [Row 55] */
+  app.post<{ Params: IdParam }>('/team-invites/:id/accept', auth, async (request) => {
+    if (!staffInviteAcceptEnabled()) throw new AppError(404, 'NOT_FOUND', 'Invite not found');
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: request.params.id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
     });
-
-    return { success: true, data: member };
+    return { success: true, data: result };
+  });
+  app.post<{ Params: IdParam }>('/team-invites/:id/decline', auth, async (request) => {
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: request.params.id, userId: request.user.userId, decision: 'DECLINE', now: new Date(),
+    });
+    return { success: true, data: result };
   });
 
   /** PUT /staff/:id — change a member's role. */

@@ -145,10 +145,13 @@ afterAll(async () => {
 });
 
 describe('Owner manages the team', () => {
-  it('adding an unknown phone fails with a friendly 404', async () => {
+  // [Row 55] An unknown phone and a duplicate add get the same reply as a real
+  // add (no "no account" 404, no "already on the team" 409) and create nothing.
+  it('adding an unknown phone answers like any add and creates nothing', async () => {
     const res = await inject('POST', '/api/v1/vendor/staff', { phone: '+5920000000099', role: 'STAFF' }, owner.token);
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error.code).toBe('USER_NOT_FOUND');
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.status).toBe('SENT_IF_ACCOUNT');
+    expect(await app.prisma.vendorStaff.count({ where: { vendorId } })).toBe(0);
   });
 
   it('owner adds a manager and a staff member by phone', async () => {
@@ -160,8 +163,8 @@ describe('Owner manages the team', () => {
     expect(s.statusCode).toBe(200);
 
     const dupe = await inject('POST', '/api/v1/vendor/staff', { phone: staffUser.phone, role: 'STAFF' }, owner.token);
-    expect(dupe.statusCode).toBe(409);
-    expect(dupe.json().error.code).toBe('ALREADY_STAFF');
+    expect(dupe.statusCode).toBe(200);
+    expect(dupe.body).toBe(s.body);
 
     const list = await inject('GET', '/api/v1/vendor/staff', undefined, owner.token);
     expect(list.json().data).toHaveLength(2);

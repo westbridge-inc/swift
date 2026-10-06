@@ -1216,6 +1216,10 @@ export const vendorApi = {
   qrAnalytics: (range: '7d' | '30d' | '90d' | 'all') => api.get(`/vendor/qr/analytics?range=${range}`),
   qrRegenerate: () => api.post('/vendor/qr/regenerate', {}),
   qrDeactivate: () => api.post('/vendor/qr/deactivate', { confirm: true }),
+  // [Row 55] Store team invites this signed-in person has received
+  teamInvites: () => api.get('/vendor/team-invites'),
+  acceptTeamInvite: (id: string) => api.post(`/vendor/team-invites/${id}/accept`, {}),
+  declineTeamInvite: (id: string) => api.post(`/vendor/team-invites/${id}/decline`, {}),
   // Reviews (manager+ can respond)
   reviews: () => api.get('/vendor/reviews'),
   respondReview: (id: string, response: string) => api.post(`/vendor/reviews/${id}/respond`, { response }),
