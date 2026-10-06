@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, Share, StyleSheet, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -601,6 +602,7 @@ function TaxiBooking({ navigation }: any) {
         backgroundStyle={SHEET_STYLE}
         handleIndicatorStyle={HANDLE_STYLE}
       >
+        <MapCredits routeSource={estimate?.routeSource} />
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
           {!pickupOverride && locationContext.showPrimer ? (
             <LocationPrimerCard
@@ -1539,6 +1541,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
         backgroundStyle={SHEET_STYLE}
         handleIndicatorStyle={HANDLE_STYLE}
       >
+        {hasMapContext ? <MapCredits /> : null}
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: insets.bottom + space['2xl'] }}>
           {d ? (
             <>
