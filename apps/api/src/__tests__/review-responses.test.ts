@@ -194,3 +194,55 @@ describe('Operator replies to a review', () => {
     expect(forbidden.json().error.code).toBe('STAFF_FORBIDDEN');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Row 52 (review half): the store's own review list shows what was said and
+// never who said it, and never lists a review that is not yet released.
+// ---------------------------------------------------------------------------
+describe('Store review list projection', () => {
+  const ALLOWED_KEYS = ['comment', 'createdAt', 'id', 'respondedAt', 'response', 'score', 'tags', 'type'];
+
+  it('returns only the allowlisted fields, no reviewer identity, no unreleased review', async () => {
+    const hidden = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const hiddenOrder = await app.prisma.order.create({
+      data: {
+        orderNumber: `RR-${nanoid(8)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: hidden.userId,
+        vendorId,
+        status: 'DELIVERED',
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 0, totalAmount: 1000, paymentMethod: 'CASH',
+      },
+    });
+    const unreleased = await app.prisma.rating.create({
+      data: {
+        orderId: hiddenOrder.id,
+        raterId: hidden.userId,
+        vendorId,
+        type: 'CUSTOMER_TO_VENDOR',
+        score: 1,
+        comment: 'still inside the blind window',
+        visibleAt: null,
+      },
+    });
+    const released = await app.prisma.rating.findUniqueOrThrow({ where: { id: ratingId } });
+    const reviewer = await app.prisma.user.findUniqueOrThrow({ where: { id: customer.userId } });
+
+    const res = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { data: Array<Record<string, unknown>>; summary: { totalReviews: number } };
+
+    expect(body.data.map((r) => r['id'])).toEqual([ratingId]);
+    expect(body.summary.totalReviews).toBe(1);
+    for (const row of body.data) {
+      expect(Object.keys(row).sort()).toEqual(ALLOWED_KEYS);
+    }
+    const text = res.body;
+    expect(text).not.toContain(unreleased.id);
+    expect(text).not.toContain(customer.userId);
+    expect(text).not.toContain(released.orderId);
+    expect(text).not.toContain(reviewer.lastName as string);
+  });
+});

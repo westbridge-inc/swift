@@ -3597,6 +3597,18 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 9. REVIEWS
   // =========================================================================
 
+  /** The only review fields a store may read about its own reviews. */
+  const VENDOR_REVIEW_PROJECTION = {
+    id: true,
+    type: true,
+    score: true,
+    comment: true,
+    tags: true,
+    response: true,
+    respondedAt: true,
+    createdAt: true,
+  } as const;
+
   /** GET /reviews — Paginated customer reviews for the vendor */
   app.get('/reviews', auth, async (request) => {
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
@@ -3627,11 +3639,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     };
 
     const [reviews, scoreBuckets] = await Promise.all([
+      // Row 52: the store sees what was said, never who said it. An explicit
+      // allowlist (no rater, raterId, orderId or moderation fields) so a new
+      // column can never leak through this list by default.
       app.prisma.rating.findMany({
         where,
-        include: {
-          rater: { select: { id: true, firstName: true, lastName: true, avatar: true } },
-        },
+        select: VENDOR_REVIEW_PROJECTION,
         orderBy: { createdAt: 'desc' },
         skip: pagination.skip,
         take: pagination.limit,
