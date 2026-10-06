@@ -884,7 +884,6 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   app.delete('/account', async (request: AuthRequest, reply) => {
-    await requireRecentOtpOrStepUp(app, request);
     // [DELETION-INTEGRITY] Build 9 (in store review, frozen) says "Your account
     // has been deleted." and signs out on every success except
     // PENDING_DOCUMENT_ERASURE, where it shows this server's message. Newer
@@ -892,6 +891,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // ?receipts=v2. Without it the answer uses build 9's words, so build 9
     // never reports an open account, or an unfinished erasure, as deleted.
     const modernReceipts = (request.query as Record<string, unknown> | undefined)?.['receipts'] === 'v2';
+    await requireRecentOtpOrStepUp(app, request).catch((error: unknown) => {
+      // Build 9 has no code sheet on this screen and shows the message as is:
+      // name the step it can take (a fresh code sign-in counts as step-up).
+      if (!modernReceipts && error instanceof AppError && error.code === 'STEP_UP_REQUIRED') {
+        throw new AppError(403, 'STEP_UP_REQUIRED',
+          'For your security, sign out and sign back in with a code sent to your phone, then delete your account within 10 minutes.', error.details);
+      }
+      throw error;
+    });
     const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
       const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
       if (user?.phone !== `deleted:${request.user.userId}`) throw error;
