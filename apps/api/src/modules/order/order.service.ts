@@ -36,7 +36,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
-import { resolveSelectedOptions, optionsUnitPrice, type ResolvedOption } from './options';
+import { resolveSelectedOptions, optionsUnitPrice, OptionSelectionError, selectionKey, validateSelectedOptions, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
@@ -764,6 +764,19 @@ export class OrderService {
     if (!cart || cart.items.length === 0) {
       throw new AppError(400, 'EMPTY_CART', 'Your cart is empty');
     }
+    // [L09 · M023] The same validator the cart used: a choice that became
+    // unavailable (or a selection the cart never should have held) refuses
+    // the checkout instead of being silently dropped from, or charged on, the order.
+    for (const line of cart.items) {
+      try {
+        validateSelectedOptions(line.item, line.selectedOptions);
+      } catch (error) {
+        if (!(error instanceof OptionSelectionError)) throw error;
+        throw new AppError(409, 'CART_OPTIONS_CHANGED', `${line.item.name}: ${error.message}. Review your cart and try again.`, {
+          itemId: [line.item.id], reason: [error.reason],
+        });
+      }
+    }
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
@@ -1198,20 +1211,44 @@ export class OrderService {
       // removed item could still be ordered. The authoritative generation is
       // the item set (id + quantity) plus the tip; re-read it under the lock
       // and refuse on any drift.
+      // [L09 · M022] Each line's options and note, and the chosen destination,
+      // are part of the reviewed cart too: a change to any of them between
+      // pricing and commit refuses the checkout like a quantity change does.
       const cartSignature = (
-        items: Array<{ id: string; quantity: number }>,
+        items: Array<{ id: string; quantity: number; selectedOptions: unknown; specialInstructions: string | null }>,
         tipAmount: Prisma.Decimal | number,
       ) =>
         JSON.stringify({
-          items: items.map((i) => [i.id, i.quantity]).sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
+          items: items
+            .map((i) => [i.id, i.quantity, selectionKey(i.selectedOptions), i.specialInstructions ?? null] as const)
+            .sort((a, b) => (a[0] < b[0] ? -1 : 1)),
           tip: Number(tipAmount),
         });
       const lockedCart = await tx.cart.findUnique({
         where: { id: cart.id },
-        select: { tipAmount: true, items: { select: { id: true, quantity: true } } },
+        select: {
+          tipAmount: true,
+          deliveryAddressId: true,
+          items: { select: { id: true, quantity: true, selectedOptions: true, specialInstructions: true } },
+        },
       });
-      if (!lockedCart || cartSignature(lockedCart.items, lockedCart.tipAmount) !== cartSignature(cart.items, cart.tipAmount)) {
+      if (
+        !lockedCart
+        || cartSignature(lockedCart.items, lockedCart.tipAmount) !== cartSignature(cart.items, cart.tipAmount)
+      ) {
         throw new AppError(409, 'CART_CHANGED', 'Your cart just changed — review it and place the order again.');
+      }
+      // The priced address is resolved again, the same way (the cart's choice,
+      // else the default), and must be the same address at the same place.
+      const lockedAddress = (lockedCart.deliveryAddressId
+        ? await tx.address.findUnique({ where: { id: lockedCart.deliveryAddressId }, select: { id: true, latitude: true, longitude: true } })
+        : null)
+        ?? await tx.address.findFirst({ where: { userId: input.userId, isDefault: true }, select: { id: true, latitude: true, longitude: true } });
+      if (
+        (lockedAddress?.id ?? null) !== (address?.id ?? null)
+        || (address && lockedAddress && (lockedAddress.latitude !== address.latitude || lockedAddress.longitude !== address.longitude))
+      ) {
+        throw new AppError(409, 'CART_CHANGED', 'Your delivery address just changed — review it and place the order again.');
       }
 
       // [REPORT-013 F-013-06] Authority is proven WHERE IT COMMITS: every

@@ -32,6 +32,7 @@ import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCo
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
+import { normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
@@ -104,6 +105,16 @@ const vendorsBrowseQuerySchema = latLngQuerySchema.extend({
 const itemSlotsQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
 });
+
+/** [M023] Cart add/update validation: the shared validator, refused as a 400 naming the reason. */
+function validatedSelection(item: Parameters<typeof validateSelectedOptions>[0], selected: unknown): OptionSelection {
+  try {
+    return validateSelectedOptions(item, selected).selection;
+  } catch (error) {
+    if (error instanceof OptionSelectionError) throw new ValidationError(error.message, { selectedOptions: [error.reason] });
+    throw error;
+  }
+}
 
 const addCartItemSchema = z.object({
   vendorId: z.string().min(1),
@@ -1813,24 +1824,9 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(400, 'VENDOR_UNAVAILABLE', 'This vendor is not currently available');
     }
 
-    // Validate selected options against option groups
-    const selectedOptions = body.selectedOptions ?? {};
-    for (const group of item.optionGroups) {
-      const raw = (selectedOptions as Record<string, unknown>)[group.id];
-      const chosen = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
-      const validIds = new Set(group.options.map((o) => o.id));
-      for (const id of chosen) {
-        if (typeof id !== 'string' || !validIds.has(id)) {
-          throw new ValidationError(`That option isn't available for "${group.name}"`);
-        }
-      }
-      if (group.isRequired && chosen.length < Math.max(1, group.minSelect)) {
-        throw new ValidationError(`Please choose an option for "${group.name}"`);
-      }
-      if (chosen.length > group.maxSelect) {
-        throw new ValidationError(`Choose at most ${group.maxSelect} for "${group.name}"`);
-      }
-    }
+    // [M023] The one option validator (cart add, cart update and checkout).
+    const selectedOptions = validatedSelection(item, body.selectedOptions);
+    const note = normalizeItemNote(body.specialInstructions);
 
     // Get or create cart. Multi-vendor carts are allowed: checkout
     // splits per vendor; cart.vendorId just tracks the most recent vendor.
@@ -1854,10 +1850,14 @@ export async function customerRoutes(app: FastifyInstance) {
       });
     }
 
-    // Merge if same item + same options already in cart
-    const optionsKey = JSON.stringify(selectedOptions);
+    // [row 70] A line is the item, its options AND its note: the same item
+    // with a different note is its own line (a second note is never dropped);
+    // the same item, options and note merges into the existing line.
+    const optionsKey = selectionKey(selectedOptions);
     const existing = cart.items.find(
-      (ci) => ci.itemId === body.itemId && JSON.stringify(ci.selectedOptions) === optionsKey,
+      (ci) => ci.itemId === body.itemId
+        && selectionKey(ci.selectedOptions) === optionsKey
+        && normalizeItemNote(ci.specialInstructions) === note,
     );
 
     if (existing) {
@@ -1872,7 +1872,7 @@ export async function customerRoutes(app: FastifyInstance) {
           itemId: body.itemId,
           quantity,
           selectedOptions: selectedOptions as never,
-          specialInstructions: body.specialInstructions,
+          specialInstructions: note,
         },
       });
     }
@@ -1907,6 +1907,16 @@ export async function customerRoutes(app: FastifyInstance) {
     if (!cartItem || cartItem.cart.customerId !== userId) {
       throw new NotFoundError('CartItem', id);
     }
+    // [M023] An edited selection passes the same validator as an added one.
+    const editedSelection = body.selectedOptions === undefined || body.quantity <= 0
+      ? undefined
+      : validatedSelection(
+        await app.prisma.item.findUniqueOrThrow({
+          where: { id: cartItem.itemId },
+          select: { optionGroups: { include: { options: true } } },
+        }),
+        body.selectedOptions,
+      );
 
     if (body.quantity <= 0) {
       await app.prisma.cartItem.delete({ where: { id } });
@@ -1924,8 +1934,8 @@ export async function customerRoutes(app: FastifyInstance) {
         where: { id },
         data: {
           quantity,
-          ...(body.selectedOptions !== undefined && { selectedOptions: body.selectedOptions as never }),
-          ...(body.specialInstructions !== undefined && { specialInstructions: body.specialInstructions }),
+          ...(editedSelection !== undefined && { selectedOptions: editedSelection as never }),
+          ...(body.specialInstructions !== undefined && { specialInstructions: normalizeItemNote(body.specialInstructions) }),
         },
       });
     }

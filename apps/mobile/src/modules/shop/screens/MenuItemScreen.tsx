@@ -18,6 +18,7 @@ import {
   CircleChip,
   ErrorState,
   IconChip,
+  LabeledInput,
   LoadingBlock,
   Money,
   PillButton,
@@ -62,6 +63,9 @@ export function MenuItemScreen() {
   const vendor = useVendor<any>(vendorId);
   const addToCart = useAddToCart();
   const [qty, setQty] = useState(addDraft?.quantity ?? 1);
+  // [row 70] A note for the store travels with this line (and through sign-in).
+  const [note, setNote] = useState(addDraft?.notes ?? '');
+  const trimmedNote = note.trim();
   const [added, setAdded] = useState(false);
 
   // Appointment listings book a moment, not a quantity (kit chips reused as
@@ -143,7 +147,7 @@ export function MenuItemScreen() {
   const onAdd = React.useCallback(() => {
     if (!isAuthenticated) {
       requestAuthContinuation({ screen: 'MenuItem', vendorId, itemId,
-        addDraft: { quantity: qty, selectedOptions: selected, dayOffset, slot, visitMode },
+        addDraft: { quantity: qty, selectedOptions: selected, dayOffset, slot, visitMode, ...(trimmedNote ? { notes: trimmedNote } : {}) },
       }, promptLogin);
       // If Auth already owns the root, promptLogin does not change its key.
       if (wantsAuth) navigation.getParent()?.navigate('Auth');
@@ -154,7 +158,10 @@ export function MenuItemScreen() {
     resumedAdd.current = true;
     if (route.params?.addAfterSignIn) navigation.setParams({ addAfterSignIn: undefined, addDraft: undefined });
     addToCart.mutate(
-      { vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined },
+      {
+        vendorId, itemId, quantity: isBooking ? 1 : qty, selectedOptions: Object.keys(selected).length ? selected : undefined,
+        ...(trimmedNote ? { specialInstructions: trimmedNote } : {}),
+      },
       {
         onSuccess: () => {
           if (isBooking && slot) {
@@ -164,7 +171,7 @@ export function MenuItemScreen() {
         },
       },
     );
-  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, promptLogin, navigation, addToCart, isBooking, serviceMode, setAppointment, route.params?.addAfterSignIn]);
+  }, [isAuthenticated, wantsAuth, vendorId, itemId, qty, selected, dayOffset, slot, visitMode, trimmedNote, promptLogin, navigation, addToCart, isBooking, serviceMode, setAppointment, route.params?.addAfterSignIn]);
   React.useEffect(() => {
     if (!route.params?.addAfterSignIn || resumedAdd.current || !isAuthenticated || !item || vendor.isLoading || vendor.isError) return;
     if (outOfStock || item.isAvailable === false || requiredUnmet || addToCart.isPending) return;
@@ -450,6 +457,19 @@ export function MenuItemScreen() {
                 </T>
               ) : null}
             </>
+          ) : null}
+
+          {!isBooking ? (
+            <LabeledInput
+              label="Note for the store"
+              placeholder="e.g. no onions, extra pepper"
+              value={note}
+              onChangeText={setNote}
+              maxLength={500}
+              accessibilityLabel="Note for the store"
+              testID="menu-item-note"
+              containerStyle={{ marginTop: space.xl }}
+            />
           ) : null}
 
           {addErr ? (
