@@ -6,6 +6,7 @@ import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { serveEmergencyPolicy } from '../country/emergency-policy';
 import { emergencyPolicyCounter } from '../../plugins/observability';
+import { adsEnabled } from '../ads/ads-enabled';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -109,6 +110,12 @@ const PUBLIC_WHERE = { status: 'ACTIVE' as const, isVerified: true };
 const resolvePublicTenantId = resolvePublicMarketTenant;
 
 export async function publicRoutes(app: FastifyInstance) {
+  // Guests need the same server truth as authenticated clients. Never cache
+  // an opt-in at the HTTP layer after an operator switches advertising off.
+  app.get('/capabilities', async (_request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    return { success: true, data: { adsEnabled: adsEnabled() } };
+  });
   /** GET /storefronts — the public directory. */
   /**
    * [MOB-018] The market emergency policy — verified local emergency numbers,

@@ -8,6 +8,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, motion, space } from '@swift/ui';
 import { CircleChip, LoadingBlock, PillButton, PinGlyph, T } from '../kit';
 import { rideMapProps } from '../kit/map-style';
+import { MapCredits } from './MapCredits';
 import {
   STORE_PIN_COPY,
   geocodeStoreAddress,
@@ -222,6 +223,7 @@ function PickerBody({
           gap: space.sm,
         }}
       >
+        {opening ? <MapCredits /> : null}
         <T variant="bodyStrong">{STORE_PIN_COPY.instruction}</T>
         <T variant="caption" tone="muted">
           {STORE_PIN_COPY.consequence}
