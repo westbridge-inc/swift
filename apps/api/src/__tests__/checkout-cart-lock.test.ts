@@ -158,6 +158,16 @@ describe('[M023] one option validator for cart add, cart update and checkout', (
     }
   });
 
+  it('a line with no choices for a required group (as a reorder copies it) asks the customer to choose', async () => {
+    const c = await makeCustomer();
+    const cart = await app.prisma.cart.create({ data: { customerId: c.userId, vendorId } });
+    await app.prisma.cartItem.create({ data: { cartId: cart.id, itemId, quantity: 1, selectedOptions: {} } });
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CART_OPTIONS_CHANGED');
+    expect(res.json().error.message).toBe('Choose your options for Lock Burger before you order.');
+  });
+
   it('a valid set is priced exactly and its options are snapshotted on the order', async () => {
     const c = await makeCustomer();
     expect((await add(c.token, { quantity: 2, selectedOptions: { [sizeGroupId]: sizeLarge, [extrasGroupId]: [extraCheese, extraEgg] } })).statusCode).toBe(201);

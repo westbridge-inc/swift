@@ -773,7 +773,11 @@ export class OrderService {
         validateSelectedOptions(line.item, line.selectedOptions);
       } catch (error) {
         if (!(error instanceof OptionSelectionError)) throw error;
-        throw new AppError(409, 'CART_OPTIONS_CHANGED', `${line.item.name}: ${error.message}. Review your cart and try again.`, {
+        // A reordered line copies no choices: say plainly what is needed.
+        const message = error.reason === 'OPTION_REQUIRED'
+          ? `Choose your options for ${line.item.name} before you order.`
+          : `${line.item.name}: ${error.message}. Review your cart and try again.`;
+        throw new AppError(409, 'CART_OPTIONS_CHANGED', message, {
           itemId: [line.item.id], reason: [error.reason],
         });
       }
