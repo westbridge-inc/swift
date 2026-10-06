@@ -10,7 +10,10 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
-import { AccountService } from '../modules/user/account.service';
+import { AccountService, ACCOUNT_CLOSURE_SUBJECT } from '../modules/user/account.service';
+import { SupportService } from '../modules/support/support.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { runWithoutTenant, runWithTenant } from '../plugins/tenant-context';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
@@ -32,6 +35,7 @@ const userIds: string[] = [];
 const vendorIds: string[] = [];
 const orderIds: string[] = [];
 const ticketIds: string[] = [];
+const otherTenants: string[] = [];
 let seq = 0;
 const phoneBase = 592_018_000_000 + Math.floor(Math.random() * 900_000);
 
@@ -96,6 +100,7 @@ afterAll(async () => {
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await runWithoutTenant(() => app.prisma.tenant.deleteMany({ where: { id: { in: otherTenants } } }));
   await app.close();
 });
 
@@ -149,6 +154,31 @@ describe('[DELETION-INTEGRITY] support completes an in-app closure request', () 
     expect(await app.prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ status: 'ACTIVE', firstName: 'Closure' });
   });
 
+  it('refuses a hand-typed ticket that copies the closure request wording', async () => {
+    // Any signed-in person can open a support ticket with any subject and
+    // message. Only the confirmed in-app request (the step-up gated route)
+    // leaves the server-side record that makes a ticket completable here.
+    const user = await makeUser(['VENDOR_OWNER']);
+    const ticket = await new SupportService(app.prisma, new NotificationService(app.prisma, app.io)).createTicket(user.id, {
+      category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
+      message: 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.',
+    });
+    ticketIds.push(ticket.id);
+    const res = await complete(ticket.id);
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('NOT_A_CLOSURE_REQUEST');
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ status: 'ACTIVE', firstName: 'Closure' });
+    expect(await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } })).toMatchObject({ status: 'OPEN', resolvedAt: null });
+
+    // The person then confirms closure in the app: the open ticket is reused
+    // and becomes completable.
+    const receipt = await new AccountService(app).requestClosure(user.id);
+    expect(receipt.ticketId).toBe(ticket.id);
+    const confirmed = await complete(ticket.id);
+    expect(confirmed.statusCode, confirmed.payload).toBe(200);
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: user.id } })).toMatchObject({ status: 'DEACTIVATED', phone: `deleted:${user.id}` });
+  });
+
   it('refuses to close a staff account from the support queue', async () => {
     const staff = await makeUser(['ADMIN']);
     const receipt = await new AccountService(app).requestClosure(staff.id);
@@ -168,5 +198,25 @@ describe('[DELETION-INTEGRITY] support completes an in-app closure request', () 
     const again = await complete(b.ticketId);
     expect(again.statusCode, again.payload).toBe(409);
     expect(again.json().error.code).toBe('ALREADY_RESOLVED');
+  });
+
+  it('an admin cannot complete a closure request from another operator', async () => {
+    // Pins the tenant wall: the ticket and the person are read through the
+    // admin's own tenant, so the erasure can never run for someone outside it.
+    const tenantId = `closure-tenant-b-${nanoid(6)}`;
+    await runWithoutTenant(() => app.prisma.tenant.create({ data: { id: tenantId, name: 'Closure tenant B', slug: tenantId, isActive: true } }));
+    otherTenants.push(tenantId);
+    seq += 1;
+    const user = await runWithoutTenant(() => app.prisma.user.create({ data: {
+      phone: `+${phoneBase + seq}`, firstName: 'Closure', lastName: `Req${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER',
+      isPhoneVerified: true, tenantId,
+    } }));
+    userIds.push(user.id);
+    const receipt = await runWithTenant(tenantId, () => new AccountService(app).requestClosure(user.id));
+    ticketIds.push(receipt.ticketId);
+    const res = await complete(receipt.ticketId);
+    expect(res.statusCode, res.payload).toBe(404);
+    expect(await runWithoutTenant(() => app.prisma.user.findUniqueOrThrow({ where: { id: user.id } }))).toMatchObject({ status: 'ACTIVE', firstName: 'Closure' });
+    expect(await runWithoutTenant(() => app.prisma.supportTicket.findUniqueOrThrow({ where: { id: receipt.ticketId } }))).toMatchObject({ status: 'OPEN', resolvedAt: null });
   });
 });
