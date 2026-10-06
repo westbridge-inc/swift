@@ -38,6 +38,16 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 import { BillingService } from '../modules/billing/billing.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { REVIEW_DEMO_NO_SOS, REVIEW_DEMO_NO_SOS_MESSAGE, REVIEW_DEMO_NO_NEW_ROLES, REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
+
+/** Advertising is closed at launch (ADS_ENABLED); the demo's own refusal sits
+ *  behind that switch, so it is graded with advertising switched on. */
+async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
+  const prior = process.env['ADS_ENABLED'];
+  process.env['ADS_ENABLED'] = '1';
+  try { return await fn(); } finally {
+    if (prior === undefined) delete process.env['ADS_ENABLED']; else process.env['ADS_ENABLED'] = prior;
+  }
+}
 import { grantStepUp } from './helpers/step-up';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
@@ -294,7 +304,7 @@ describe('[seal 3] role grants: refused inside every authority', () => {
       await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ids.customer, role: 'OWNER' } });
       return a;
     });
-    const member = await call('POST', `/api/v1/ads/advertiser/${adv.id}/members`, tokens.customer, { phone: riderPhone, role: 'MANAGER' });
+    const member = await withAdsOn(() => call('POST', `/api/v1/ads/advertiser/${adv.id}/members`, tokens.customer, { phone: riderPhone, role: 'MANAGER' }));
     expect(member.statusCode, member.body).toBe(403);
     expect(member.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
     expect(await system(() => app.prisma.advertiserMember.count({ where: { advertiserId: adv.id, userId: ids.rider } }))).toBe(0);

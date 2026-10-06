@@ -60,6 +60,16 @@ import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange, applyDueMmgLinkC
 import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
 import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
 
+/** Advertising is closed at launch (ADS_ENABLED); the demo's own refusal sits
+ *  behind that switch, so it is graded with advertising switched on. */
+async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
+  const prior = process.env['ADS_ENABLED'];
+  process.env['ADS_ENABLED'] = '1';
+  try { return await fn(); } finally {
+    if (prior === undefined) delete process.env['ADS_ENABLED']; else process.env['ADS_ENABLED'] = prior;
+  }
+}
+
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const REVIEW = `review-partner-${RUN}`;
 const PRODUCTION = 'swift-default';
@@ -761,7 +771,7 @@ describe('[REVIEW-PARTNER · DL-5 · Sol F1] a demo login cannot grow into a mon
     const vehicle = await put('/api/v1/partner/vehicle', tokens.rider, { vehicleType: 'CAR', vehicle: { make: 'Demo', model: 'Car', year: 2020, color: 'Blue', licensePlate: 'H DEMO 9' } });
     expect(vehicle.statusCode, vehicle.body).toBe(403);
     expect(vehicle.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
-    const advertiser = await post('/api/v1/ads/advertiser/register', tokens.customer, { companyName: `Demo Ads ${RUN}`, industry: 'Food & Beverage', contactName: 'Demo', contactEmail: 'demo@example.com', contactPhone: '+5926001234' });
+    const advertiser = await withAdsOn(() => post('/api/v1/ads/advertiser/register', tokens.customer, { companyName: `Demo Ads ${RUN}`, industry: 'Food & Beverage', contactName: 'Demo', contactEmail: 'demo@example.com', contactPhone: '+5926001234' }));
     expect(advertiser.statusCode, advertiser.body).toBe(403);
     expect(advertiser.json().error.code).toBe(REVIEW_DEMO_NO_NEW_ROLES);
     const provider = await post('/api/v1/services/providers', tokens.customer, { trade: 'carpenter' });
