@@ -50,6 +50,7 @@ import { offerEarnings } from './offer-earnings';
 import { canAdjustFare } from '../../../kit';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
+import { RelayTasks } from '../RelayTasks';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -916,6 +917,9 @@ export function MoverHomeScreen({ navigation }: any) {
               ) : null}
             </DCard>
           ) : null}
+
+          {/* [AF-MOB-006] Handoffs Swift asked this rider to take over. Riders only. */}
+          {kind === 'RIDER' ? <RelayTasks enabled={online} onTakenOver={() => active.refetch?.()} /> : null}
 
           {/* Active job / available jobs / states */}
           {activeJob ? (
