@@ -277,6 +277,12 @@ body {
 .mc-result-failed { border-color: rgb(185 28 28 / 30%); background: var(--mc-bad-soft); }
 .mc-result-failed .mc-result-icon { color: var(--mc-bad); }
 .mc-result .mc-btn { min-height: 40px; }
+/* On a phone the words take the full width; the icon sits beside the title only. */
+@media (max-width: 480px) {
+  .mc-result { padding: .75rem .875rem; }
+  .mc-result-icon { grid-row: auto; }
+  .mc-result > :not(.mc-result-icon):not(.mc-result-title):not(.mc-result-dismiss) { grid-column: 1 / -1; }
+}
 
 /* <Truncate>: one line (or a clamp) with an ellipsis; the full text is in the
    DOM for screen readers, in the title for a mouse, and shown in place when
@@ -294,7 +300,7 @@ body {
 .mc-table tr:last-child td { border-bottom: 0; }
 .mc-table tbody tr:hover td { background: var(--mc-surface); }
 .mc-table [data-align=right] { text-align: right; }
-.mc-table .mc-cell-sub { display: block; font-size: .75rem; color: var(--mc-muted); }
+.mc-table .mc-cell-sub { display: block; font-size: .75rem; font-weight: 400; color: var(--mc-muted); }
 .mc-table a { color: var(--mc-ink); font-weight: 650; }
 .mc-table a:hover { color: var(--mc-accent); }
 .mc-table-empty { padding: 2rem 1rem; text-align: center; color: var(--mc-muted); }
@@ -308,6 +314,7 @@ body {
   .mc-table td[data-primary] { display: block; text-align: left; padding-bottom: .4rem; font-size: .875rem; }
   .mc-table td[data-primary]::before { content: none; }
   .mc-table td > * { min-width: 0; }
+  .mc-table td:empty { display: none; }
 }
 
 /* <ReasonDialog>: the in-page panel that replaced window.prompt / confirm. */
@@ -323,6 +330,7 @@ body {
 .admin-modal.mc-dialog .mc-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-top: 1.25rem; }
 .admin-modal.mc-dialog .mc-dialog-actions .mc-btn { min-height: 44px; }
 .admin-modal.mc-dialog .mc-result { margin-top: 1rem; }
+.admin-modal.mc-dialog .mc-result p { margin-bottom: 0; }
 .admin-modal.mc-dialog button.mc-btn { background: var(--mc-card); border: 1px solid var(--mc-line-strong); color: var(--mc-muted-strong); }
 .admin-modal.mc-dialog button.mc-btn-primary { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
 .admin-modal.mc-dialog button.mc-btn-primary:hover:not(:disabled) { background: var(--mc-accent-deep); }
