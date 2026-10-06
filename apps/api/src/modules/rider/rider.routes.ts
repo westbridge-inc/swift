@@ -298,6 +298,12 @@ export async function riderRoutes(app: FastifyInstance) {
   app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId); // authz before validation
+    // [MASTER-008] The order is this rider's BEFORE anything is replayed: a
+    // replay returns a stored result without running the effect, so a check
+    // that lives only inside the effect never runs for it. Answered as the
+    // cash handover itself answers a non-owner: not found.
+    const mine = await app.prisma.order.findFirst({ where: { id, riderId: rider.id }, select: { id: true } });
+    if (!mine) throw new NotFoundError('Order', id);
     const body = handoverSchema.parse(request.body);
     // Idempotent on Idempotency-Key: a network-retried handover returns the
     // original result instead of failing the (now-terminal) transition.
@@ -1564,6 +1570,9 @@ export async function riderRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { ridePin, handoverVersion } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
+    // [MASTER-008] Ownership BEFORE any replay (re-checked inside, at the moment
+    // of the effect): a stored result is never handed to someone else's order.
+    await getOwnedOrder(app, id, rider.id);
     // Idempotent on Idempotency-Key: a retried final step returns the original
     // result instead of failing the now-terminal transition. The whole effect
     // (incl. the transition / payment / PIN checks) runs inside the claim so a
