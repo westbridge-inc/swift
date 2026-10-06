@@ -1,10 +1,9 @@
-import { requireAuthSessionForPrincipal, useAuthStore } from '../stores/authStore';
 import { track } from '../lib/analytics';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { rideApi, type RideClass, type RideRequestBody, type TaxiStopInput, type TieredEstimate } from '../services/api';
 import { customerKeys } from './customer';
 import { rideRequestAttempt } from '../lib/rideRequestAttemptStore';
-import { requireAuthSessionForPrincipal, requireAuthSessionSnapshot } from '../stores/authStore';
+import { requireAuthSessionForPrincipal, requireAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
 type Point = { lat: number; lng: number };
