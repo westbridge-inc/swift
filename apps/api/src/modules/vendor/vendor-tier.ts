@@ -165,7 +165,7 @@ export async function nudgeOwnerOnce(
   now: Date,
 ): Promise<boolean> {
   if (!verdict.nudge) return false;
-  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const dayStart = startOfGuyanaDay(guyanaDayKey(now));
   const already = await db.notification.findFirst({
     where: { data: { path: ['kind'], equals: 'vendor_tier_nudge' }, AND: [{ data: { path: ['vendorId'], equals: vendor.id } }], createdAt: { gte: dayStart } },
     select: { id: true },
