@@ -10,7 +10,7 @@ import { socketPlugin } from '../plugins/socket';
 import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { safetyRoutes } from '../modules/safety/safety.routes';
-import { NotificationService } from '../modules/notification/notification.service';
+import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
 import { pageOps } from '../modules/ops/ops-page';
 import { openOpsAlert, escalateOverdueOpsAlerts, acknowledgeOpsAlert } from '../modules/safety/ops-alert';
 import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/notifications/channels';
@@ -33,6 +33,7 @@ import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/not
 let app: FastifyInstance;
 const RUN = nanoid(6).toLowerCase();
 const TENANT_B = `l10-paging-b-${RUN}`;
+const TENANT_REVIEW = `l10-paging-review-${RUN}`;
 const userIds: string[] = [];
 const alertIds: string[] = [];
 const phoneBase = 592_730_000_000 + Math.floor(Math.random() * 100_000_000);
@@ -83,6 +84,7 @@ beforeAll(async () => {
   await app.register(safetyRoutes, { prefix: '/api/v1/safety' });
   await app.ready();
   await runWithoutTenant(() => app.prisma.tenant.create({ data: { id: TENANT_B, name: 'L10 paging tenant B', slug: TENANT_B, isActive: true } }), 'test-fixture:l10-paging');
+  await runWithoutTenant(() => app.prisma.tenant.create({ data: { id: TENANT_REVIEW, name: 'L10 paging review fiction', slug: TENANT_REVIEW, isActive: true, kind: 'REVIEW' } }), 'test-fixture:l10-paging');
   superAdmin = await makeUser(['SUPER_ADMIN']);
   adminA = await makeUser(['ADMIN']);
   adminB = await makeUser(['ADMIN'], TENANT_B);
@@ -99,6 +101,7 @@ afterAll(async () => {
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
     await app.prisma.tenant.delete({ where: { id: TENANT_B } }).catch(() => {});
+    await app.prisma.tenant.delete({ where: { id: TENANT_REVIEW } }).catch(() => {});
   }, 'test-cleanup:l10-paging');
   await app.close();
 });
@@ -263,5 +266,46 @@ describe('[M076] an acknowledgement is a receipt and the alert, together, or not
     const receipts = row.recipients.filter((r) => r.ackedAt !== null);
     expect(receipts).toHaveLength(1);
     expect(receipts[0]!.userId).toBe(row.acknowledgedBy);
+  });
+});
+
+describe('[GUARDRAILS §3] an app-store reviewer\'s demo SOS never pages real operations', () => {
+  it('a REVIEW-tenant page reaches no SUPER_ADMIN and texts no on-call phone, at open or when overdue', async () => {
+    const reviewAdmin = await makeUser(['ADMIN'], TENANT_REVIEW);
+    const res = await runWithoutTenant(() => openOpsAlert(app.prisma, notifications(), { kind: 'SOS', tenantId: TENANT_REVIEW, title: `L10 review SOS ${RUN}`, body: 'Demo.', data: { kind: 'l10_test' } }), 'test:l10-paging');
+    // (other open alerts may escalate in the same sweep: count only texts about this page)
+    const reviewTexts = () => oncallTexts().filter((t) => ((t as { body?: string }).body ?? '').includes(`L10 review SOS ${RUN}`));
+    expect(oncallTexts()).toHaveLength(0);
+    // (Once the review seal lands, the page is not opened at all; either way no real operator is reached.)
+    if (!res.opsAlertId) return;
+    alertIds.push(res.opsAlertId);
+    const row = await alertRow(res.opsAlertId);
+    expect(row.recipients.map((r) => r.userId)).not.toContain(superAdmin.userId);
+    for (const r of row.recipients) expect(r.userId).toBe(reviewAdmin.userId);
+    await runWithoutTenant(() => app.prisma.opsAlert.update({ where: { id: res.opsAlertId }, data: { ackDeadlineAt: new Date(Date.now() - 60_000) } }), 'test:l10-paging');
+    const esc = await runWithoutTenant(() => escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now: new Date(), limit: 1_000 }), 'test:l10-paging');
+    expect(esc.platformPage).not.toContain(res.opsAlertId);
+    expect(reviewTexts()).toHaveLength(0);
+    const after = await alertRow(res.opsAlertId);
+    expect(after.recipients.map((r) => r.userId)).not.toContain(superAdmin.userId);
+  });
+
+  it('an admin notice about a REVIEW tenant reaches no SUPER_ADMIN', async () => {
+    await makeUser(['ADMIN'], TENANT_REVIEW);
+    await runWithoutTenant(() => notifyAdmins(app.prisma, notifications(), { tenantId: TENANT_REVIEW, title: 'Demo notice', body: 'Demo.', data: { kind: 'sos_marked_safe', probe: RUN } }), 'test:l10-paging');
+    const reached = await app.prisma.notification.count({ where: { userId: superAdmin.userId, data: { path: ['probe'], equals: RUN } } });
+    expect(reached).toBe(0);
+  });
+});
+
+describe('[M009] a platform drill is a platform alert', () => {
+  it('a SUPER_ADMIN\'s drill lands with no tenant, invisible to their own tenant\'s ADMIN', async () => {
+    const res = await request('POST', '/api/v1/safety/ops-alerts/drill', superAdmin.token);
+    expect(res.statusCode).toBe(200);
+    const id = res.json().data.opsAlertId as string;
+    alertIds.push(id);
+    expect((await alertRow(id)).tenantId).toBeNull();
+    const asAdmin = await request('GET', '/api/v1/safety/ops-alerts', adminA.token);
+    expect((asAdmin.json().data as Array<{ id: string }>).map((r) => r.id)).not.toContain(id);
   });
 });

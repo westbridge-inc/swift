@@ -1414,8 +1414,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { getChannels } = await import('../providers/notifications/channels');
           const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
           await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[] }));
-          for (const id of esc.escalated) {
+          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
+          // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+          for (const id of esc.platformPage) {
             await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
               pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
             ).catch(() => {});

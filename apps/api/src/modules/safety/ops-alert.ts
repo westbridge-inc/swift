@@ -1,5 +1,5 @@
 import type { PrismaClient, OpsAlertKind } from '@prisma/client';
-import { NotificationService, adminAudienceWhere } from '../notification/notification.service';
+import { NotificationService, adminAudienceFor } from '../notification/notification.service';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { opsAlertCounter, opsAlertGauge } from '../../plugins/observability';
@@ -31,8 +31,14 @@ export const opsAlertEscalationKilled = (env: Record<string, string | undefined>
 /** The same audience `notifyAdmins` pages [NOC-A F45]: a tenant's ADMINs plus every SUPER_ADMIN; NULL = platform operators only.
  *  One predicate (adminAudienceWhere) so the outbox and notifyAdmins can never disagree [144]. */
 async function adminRecipientIds(prisma: PrismaClient, tenantId: string | null): Promise<string[]> {
-  const admins = await runWithoutTenant(() => prisma.user.findMany({ where: adminAudienceWhere(tenantId), select: { id: true } }));
+  const { where } = await adminAudienceFor(prisma, tenantId);
+  const admins = await runWithoutTenant(() => prisma.user.findMany({ where, select: { id: true } }));
   return admins.map((a) => a.id);
+}
+
+/** [GUARDRAILS §3] The store-review fiction texts no on-call phone: its pages stay inside its own tenant. */
+async function isFiction(prisma: PrismaClient, tenantId: string | null): Promise<boolean> {
+  return (await adminAudienceFor(prisma, tenantId)).review;
 }
 
 /** Anything that can send one text: in production, `getChannels().sms` — the
@@ -57,7 +63,7 @@ export interface OpsResponders {
  * responder role is an open owner question; this is today's behaviour.
  */
 export async function resolveOpsResponders(prisma: PrismaClient, tenantId: string | null, env: Record<string, string | undefined> = process.env): Promise<OpsResponders> {
-  return { userIds: await adminRecipientIds(prisma, tenantId), oncallPhones: onCallPhones(env) };
+  return { userIds: await adminRecipientIds(prisma, tenantId), oncallPhones: (await isFiction(prisma, tenantId)) ? [] : onCallPhones(env) };
 }
 
 async function defaultOpsSms(): Promise<OpsSms | null> {
@@ -70,18 +76,17 @@ async function defaultOpsSms(): Promise<OpsSms | null> {
   }
 }
 
-/** Text every on-call phone once. A failed text is logged and counted, never thrown: the in-app page stands. */
+/** Text every on-call phone once, all at once (each send is bounded by the
+ *  provider deadline, so the page delivery stays inside its worker lease
+ *  however many phones are listed). A failed text is logged and counted,
+ *  never thrown: the in-app page stands. */
 async function textOnCall(sms: OpsSms | null, phones: string[], opsAlertId: string, text: string): Promise<number> {
   if (!sms || phones.length === 0) return 0;
+  const results = await Promise.allSettled(phones.map((phone) => sms.sendSms(phone, text.slice(0, 480))));
   let sent = 0;
-  for (const phone of phones) {
-    try {
-      await sms.sendSms(phone, text.slice(0, 480));
-      sent += 1;
-      opsAlertCounter.labels('oncall_sms').inc();
-    } catch (err) {
-      log().error({ err, opsAlertId }, '[S-19] on-call SMS failed');
-    }
+  for (const r of results) {
+    if (r.status === 'fulfilled') { sent += 1; opsAlertCounter.labels('oncall_sms').inc(); }
+    else log().error({ err: r.reason, opsAlertId }, '[S-19] on-call SMS failed');
   }
   return sent;
 }
@@ -95,6 +100,16 @@ export async function openOpsAlert(
   prisma: PrismaClient,
   notifications: NotificationService,
   input: { kind: OpsAlertKind; tenantId: string | null; sosAlertId?: string | null; title: string; body: string; data: Record<string, unknown>; now?: Date; recipientIds?: string[]; sms?: OpsSms | null; oncallPhones?: string[] },
+): Promise<{ opsAlertId: string; recipients: number; delivered: number; oncallTexted: number }> {
+  // The alert's tenant is the one named here (null = platform), never the
+  // tenant of whatever request happens to open it [M009]: written unscoped.
+  return runWithoutTenant(() => openOpsAlertUnscoped(prisma, notifications, input), 'ops-alert-open');
+}
+
+async function openOpsAlertUnscoped(
+  prisma: PrismaClient,
+  notifications: NotificationService,
+  input: Parameters<typeof openOpsAlert>[2],
 ): Promise<{ opsAlertId: string; recipients: number; delivered: number; oncallTexted: number }> {
   const now = input.now ?? new Date();
   // [R048-006] the recipient set is resolvable by the caller (a test seam; production uses the admin resolver)
@@ -118,7 +133,7 @@ export async function openOpsAlert(
     }
   }
   // [144] The on-call list is texted for every page, through the one SMS seam.
-  const phones = input.oncallPhones ?? onCallPhones();
+  const phones = (await isFiction(prisma, input.tenantId)) ? [] : input.oncallPhones ?? onCallPhones();
   const sms = input.sms !== undefined ? input.sms : phones.length > 0 ? await defaultOpsSms() : null;
   const oncallTexted = await textOnCall(sms, phones, alert.id, `Swift ops: ${input.title}. ${input.body}`);
   opsAlertCounter.labels('opened').inc();
@@ -160,7 +175,8 @@ export async function acknowledgeOpsAlert(
   const alerts = await prisma.opsAlert.findMany({ where: { ...(input.opsAlertId ? { id: input.opsAlertId } : {}), ...(input.sosAlertId ? { sosAlertId: input.sosAlertId } : {}), acknowledgedAt: null }, select: { id: true, tenantId: true } });
   const acknowledged: string[] = []; const refused: string[] = [];
   for (const a of alerts) {
-    const eligible = await runWithoutTenant(() => prisma.user.count({ where: { AND: [{ id: input.userId }, adminAudienceWhere(a.tenantId)] } }));
+    const { where: audience } = await adminAudienceFor(prisma, a.tenantId);
+    const eligible = await runWithoutTenant(() => prisma.user.count({ where: { AND: [{ id: input.userId }, audience] } }));
     try {
       const won = await prisma.$transaction(async (tx) => {
         const receipt = await tx.opsAlertRecipient.updateMany({ where: { opsAlertId: a.id, userId: input.userId }, data: { ackedAt: now, seenAt: now } });
@@ -201,9 +217,11 @@ export async function escalateOverdueOpsAlerts(
   notifications: NotificationService,
   sms: OpsSms | null,
   options: { now?: Date; limit?: number } = {},
-): Promise<{ escalated: string[]; closed: string[] }> {
+): Promise<{ escalated: string[]; closed: string[]; platformPage: string[] }> {
   const now = options.now ?? new Date();
   const escalated: string[] = []; const closed: string[] = [];
+  // Escalations the platform is paged about (queue.ts): never the store-review fiction's.
+  const platformPage: string[] = [];
   const overdue = await prisma.opsAlert.findMany({
     where: { acknowledgedAt: null, closedAt: null, ackDeadlineAt: { lte: now } },
     include: { recipients: true },
@@ -249,14 +267,16 @@ export async function escalateOverdueOpsAlerts(
       await notifications.send({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'ops_alert_escalated', opsAlertId: a.id, sosAlertId: a.sosAlertId, level } }).catch(() => null);
     }
     // The on-call tree: a text per configured phone, once per escalation.
-    await textOnCall(sms, onCallPhones(), a.id, `Swift ops: ${title}. ${a.body}`);
+    const fiction = await isFiction(prisma, a.tenantId);
+    if (!fiction) await textOnCall(sms, onCallPhones(), a.id, `Swift ops: ${title}. ${a.body}`);
     await prisma.opsAlert.update({ where: { id: a.id }, data: { escalationLevel: level, lastEscalatedAt: now } });
     opsAlertCounter.labels('escalated').inc();
     if (level === 1) opsAlertCounter.labels('zero_ack_by_deadline').inc();
     log().error({ opsAlertId: a.id, sosAlertId: a.sosAlertId, level, recipients: a.recipients.length }, '[S-19] ops alert unacknowledged past its deadline — escalated');
     escalated.push(a.id);
+    if (!fiction) platformPage.push(a.id);
   }
-  return { escalated, closed };
+  return { escalated, closed, platformPage };
 }
 
 export interface OpsAlertScan {

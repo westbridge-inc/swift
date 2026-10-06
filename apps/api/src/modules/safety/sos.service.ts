@@ -2,8 +2,8 @@ import type { PrismaClient, SosStatus, SosTriggerSource, SosResolutionCode, Orde
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
-import { warRoomsFor } from './war-room';
+import { NotificationService, notifyAdmins, tenantOfUser, isReviewTenantId } from '../notification/notification.service';
+import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { stageEscalations, drainSosEscalations } from './sos-escalation';
@@ -255,7 +255,10 @@ export class SosService {
           // never by the other person on the ride. The ops page body stays
           // free of them (see sos-escalation.ts: it is pushed to phones and
           // repeated in the on-call SMS).
-          this.io.to(warRoomsFor(live.tenantId)).emit('sos:retrigger', {
+          // [GUARDRAILS §3] the store-review fiction's repeat press stays in its own tenant's room
+          const fiction = live.tenantId ? await runWithoutTenant(() => isReviewTenantId(this.prisma, live.tenantId!)) : false;
+          const rooms = warRoomsFor(live.tenantId).filter((room) => !(fiction && room === OPS_WAR_ROOM));
+          this.io.to(rooms).emit('sos:retrigger', {
             sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId,
             at: now, source, lat: input.lat ?? null, lng: input.lng ?? null,
             retriggerCount: merged.seq, note: input.note ?? null,

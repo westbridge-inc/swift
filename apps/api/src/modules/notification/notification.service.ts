@@ -234,16 +234,38 @@ function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
  * reaches in-app, shared by notifyAdmins and the OpsAlert outbox
  * (safety/ops-alert.ts) so the two can never drift:
  *  - a tenant's notice: that tenant's ACTIVE ADMINs plus every ACTIVE SUPER_ADMIN;
- *  - `null` (platform): every ACTIVE SUPER_ADMIN, and nobody else.
+ *  - `null` (platform): every ACTIVE SUPER_ADMIN, and nobody else;
+ *  - the store-review fiction (a REVIEW tenant): that tenant's own ADMINs and
+ *    NOBODY else — an app-store reviewer's demo never reaches a real operator
+ *    (GUARDRAILS §3).
  * Platform pages ALSO text the configured OPS_ONCALL_PHONES list (ops-alert.ts,
- * coordinator ruling 5 Oct 2026). Whether launch responders keep SUPER_ADMIN or
- * get a narrower responder role is an open owner question; until it is answered
- * this stays today's audience.
+ * coordinator ruling 5 Oct 2026), never for the fiction. Whether launch
+ * responders keep SUPER_ADMIN or get a narrower responder role is an open
+ * owner question; until it is answered this stays today's audience.
  */
-export function adminAudienceWhere(tenantId: string | null): Prisma.UserWhereInput {
+export function adminAudienceWhere(tenantId: string | null, opts: { review?: boolean } = {}): Prisma.UserWhereInput {
+  if (tenantId && opts.review) return { status: 'ACTIVE', tenantId, roles: { has: 'ADMIN' }, NOT: { roles: { has: 'SUPER_ADMIN' } } };
   return tenantId
     ? { status: 'ACTIVE', roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, OR: [{ tenantId }, { roles: { has: 'SUPER_ADMIN' } }] }
     : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } };
+}
+
+/** [REVIEW-PARTNER] Is this the store-review fiction? Tenants are not tenant-scoped rows.
+ *  A lookup that fails answers "no": a real operator page is never lost to a lookup failure. */
+export async function isReviewTenantId(prisma: Pick<PrismaClient, 'tenant'>, tenantId: string): Promise<boolean> {
+  try {
+    const t = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { kind: true } });
+    return t?.kind === 'REVIEW';
+  } catch (err) {
+    log().error({ err }, '[REVIEW-PARTNER] could not read the tenant kind for a page — delivering it');
+    return false;
+  }
+}
+
+/** The audience for a page or notice about `tenantId`, the fiction resolved. */
+export async function adminAudienceFor(prisma: PrismaClient, tenantId: string | null): Promise<{ where: Prisma.UserWhereInput; review: boolean }> {
+  const review = tenantId ? await runWithoutTenant(() => isReviewTenantId(prisma, tenantId)) : false;
+  return { where: adminAudienceWhere(tenantId, { review }), review };
 }
 
 export async function notifyAdmins(
@@ -308,8 +330,9 @@ export async function notifyAdmins(
   // dedup window kept the outage dark for 15 minutes. Paging operators is a
   // sanctioned cross-tenant read; it must not depend on whose request it
   // happens to run inside.
+  const { where: audience } = await adminAudienceFor(prisma, input.tenantId);
   const admins = await runWithoutTenant(() => prisma.user.findMany({
-    where: adminAudienceWhere(input.tenantId),
+    where: audience,
     select: { id: true },
   }));
   // [REPORT-035 F-035-06 · S0 evidence] Count DELIVERIES, not candidates.
