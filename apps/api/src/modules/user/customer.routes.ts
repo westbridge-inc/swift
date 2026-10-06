@@ -1,4 +1,4 @@
-import { requireStepUp } from '../auth/step-up';
+import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
@@ -873,14 +873,14 @@ export async function customerRoutes(app: FastifyInstance) {
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
   app.post('/account/closure-request', async (request: AuthRequest, reply) => {
-    await requireStepUp(app, request);
+    await requireRecentOtpOrStepUp(app, request);
     const result = await account.requestClosure(request.user.userId);
     reply.code(202);
     return { success: true, data: result };
   });
 
   app.delete('/account', async (request: AuthRequest, reply) => {
-    await requireStepUp(app, request);
+    await requireRecentOtpOrStepUp(app, request);
     const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
       const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
       if (user?.phone !== `deleted:${request.user.userId}`) throw error;
