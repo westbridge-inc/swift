@@ -11,6 +11,7 @@ import { runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { EvidenceService } from '../modules/safety/evidence.service';
+import { IncidentService } from '../modules/safety/incident.service';
 
 // ---------------------------------------------------------------------------
 // [M069] An ops-logged case names a subject, and optionally an order and an
@@ -29,7 +30,7 @@ import { EvidenceService } from '../modules/safety/evidence.service';
 let app: FastifyInstance;
 const RUN = nanoid(6).toLowerCase();
 const TENANT_B = `l10-auth-b-${RUN}`;
-const userIds: string[] = []; const orderIds: string[] = []; const alertIds: string[] = []; const bundleIds: string[] = [];
+const userIds: string[] = []; const orderIds: string[] = []; const alertIds: string[] = []; const bundleIds: string[] = []; const driverIds: string[] = [];
 const phoneBase = 592_760_000_000 + Math.floor(Math.random() * 100_000_000);
 let seq = 0;
 
@@ -108,6 +109,7 @@ afterAll(async () => {
     await app.prisma.incidentCase.deleteMany({ where: { id: { in: caseIds } } }).catch(() => {});
     await app.prisma.sosAlert.deleteMany({ where: { id: { in: alertIds } } }).catch(() => {});
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }).catch(() => {});
+    await app.prisma.driver.deleteMany({ where: { id: { in: driverIds } } }).catch(() => {});
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -176,6 +178,30 @@ describe('[M069] the ops intake tuple is validated before any effect', () => {
     expect(same.json().data.id).toBe(firstId);
   });
 
+  it('racing requests with one key and different ids never hand one request the other\'s case', async () => {
+    const order = await makeOrder(subjectA.userId);
+    const key = `l10-race-${RUN}`;
+    const bodies = [{ subjectUserId: subjectA.userId, orderId: order.id }, { subjectUserId: otherA.userId }];
+    const results = await Promise.all(bodies.map((b) => logCase(adminA.token, { ...b, idempotencyKey: key })));
+    results.forEach((res, i) => {
+      if (res.statusCode === 200) expect(res.json().data.subjectUserId, 'a 200 is always the case the request named').toBe(bodies[i]!.subjectUserId);
+      else expect(res.statusCode).toBe(409);
+    });
+    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
+  });
+
+  it('under the subject lock, a source already used for another tuple is refused (the check the race relies on)', async () => {
+    const io = { to: () => ({ emit: () => {} }) } as never;
+    const incidents = new IncidentService(app.prisma, io);
+    const source = { type: 'OPS', id: `l10-lock-${RUN}` };
+    const first = await sys(() => incidents.intake({ category: 'HARASSMENT', severity: 'S3', intake: 'OPS_CREATED', subjectUserId: subjectA.userId, summary: 'Logged by phone.', source }));
+    await expect(sys(() => incidents.intake({ category: 'HARASSMENT', severity: 'S3', intake: 'OPS_CREATED', subjectUserId: otherA.userId, summary: 'Logged by phone.', source })))
+      .rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
+    expect((await sys(() => app.prisma.incidentCase.findUniqueOrThrow({ where: { id: first.id } }))).replayCount).toBe(0);
+    const same = await sys(() => incidents.intake({ category: 'HARASSMENT', severity: 'S3', intake: 'OPS_CREATED', subjectUserId: subjectA.userId, summary: 'Logged by phone.', source }));
+    expect(same.id).toBe(first.id);
+  });
+
   it('a valid tuple logs the case in the SUBJECT\'s tenant, also when a SUPER_ADMIN logs it', async () => {
     const order = await makeOrder(subjectB.userId, TENANT_B);
     const alert = await makeAlert(subjectB.userId, { tenantId: TENANT_B, orderId: order.id });
@@ -229,6 +255,23 @@ describe('[M070] evidence is read only through a parent that still holds', () =>
     const viewed = await sys(() => evidence().view(bundle.id, adminA.userId, 'Reviewing the trail for triage'));
     expect(viewed.items).toHaveLength(1);
     expect(await custodyRows(bundle.id)).toBe(1);
+  });
+
+  it('a closed case\'s bundle takes no new live fixes while its SOS is still live', async () => {
+    const mover = await makeUser(['MOVER']);
+    const driver = await sys(() => app.prisma.driver.create({ data: {
+      userId: mover.userId, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2019, vehicleColor: 'Silver', licensePlate: `L10A ${seq}`,
+      driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', currentLat: 6.81, currentLng: -58.15, lastLocationUpdate: new Date(),
+    } }));
+    driverIds.push(driver.id);
+    const order = await makeOrder(subjectA.userId);
+    await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { driverId: driver.id, status: 'RIDE_IN_PROGRESS' as never } }));
+    const alert = await makeAlert(subjectA.userId, { orderId: order.id });
+    await sys(() => app.prisma.sosAlert.update({ where: { id: alert.id }, data: { status: 'ACTIVE' } }));
+    const kase = await sys(() => app.prisma.incidentCase.create({ data: { caseNumber: `INC-${nanoid(8).toUpperCase()}`, severity: 'S1', category: 'HARASSMENT', intake: 'OPS_CREATED', status: 'CLOSED', closedAt: new Date(), subjectUserId: subjectA.userId, sosAlertId: alert.id, summary: 'synthetic', slaAckBy: new Date(), slaDecideBy: new Date() } }));
+    const bundle = await bundleWith({ sosAlertId: alert.id, caseId: kase.id });
+    await sys(() => evidence().withSweep({ cursorKey: `l10-${RUN}` }).appendLiveFixes());
+    expect(await sys(() => app.prisma.evidenceItem.count({ where: { bundleId: bundle.id, kind: 'LOCATION_FIX' } }))).toBe(0);
   });
 
   it('a closed case is closed to new evidence: nothing is captured and no SOS bundle is attached to it', async () => {

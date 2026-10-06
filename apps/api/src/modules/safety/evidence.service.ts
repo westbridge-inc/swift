@@ -275,9 +275,12 @@ export class EvidenceService {
         await this.observer.beforeAppend?.(alert.id);
       const bundle = await this.prisma.evidenceBundle.findUnique({
         where: { sosAlertId: alert.id },
-        select: { id: true, sealedAt: true },
+        select: { id: true, sealedAt: true, caseId: true },
       });
       if (!bundle || bundle.sealedAt) return;
+      // [M070] A closed case is closed to new evidence, the live trail included:
+      // closing a case does not resolve its SOS, so this tick must check too.
+      if (bundle.caseId && (await this.prisma.incidentCase.findUnique({ where: { id: bundle.caseId }, select: { status: true } }))?.status === 'CLOSED') return;
       const order = await this.prisma.order.findUnique({
         where: { id: alert.orderId! },
         select: {
