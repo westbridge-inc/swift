@@ -310,7 +310,7 @@ describe('D9-05 — account deletion (erasure)', () => {
 // [DELETION-INTEGRITY · owner decision 2026-10-05] A store's rating keeps the
 // reviews a deleted person wrote — score and tags still count — but free text
 // can identify them, so the comment AND the store's reply to it are deleted.
-describe('DELETION-INTEGRITY — reviews the person wrote are kept anonymised', () => {
+describe('DELETION-INTEGRITY — reviews by and about the person are kept anonymised', () => {
   it('keeps the score and tags, deletes the comment and the store reply, and leaves the store rating unchanged', async () => {
     const u = await makeUser(['CUSTOMER']);
     const vendor = await app.prisma.vendor.findFirstOrThrow({ select: { id: true } });
@@ -326,6 +326,15 @@ describe('DELETION-INTEGRITY — reviews the person wrote are kept anonymised', 
       visibleAt: new Date(),
     } });
     await app.prisma.ratingOutbox.create({ data: { ratingId: rating.id, command: 'SYNTHETIC_PAYLOAD', payload: { comment: 'Del here from the blue house', score: 2 } } });
+    // [coordinator ruling 2026-10-05] A rating someone ELSE wrote about the
+    // person can name or describe them too: it keeps its score and tags only.
+    const author = await makeUser(['CUSTOMER']);
+    const about = await app.prisma.rating.create({ data: {
+      orderId: order.id, raterId: author.userId, rateeId: u.userId, type: 'RIDER_TO_CUSTOMER', score: 4,
+      tags: ['friendly'], comment: 'Del was waiting at the blue house gate', response: 'Thanks, Del', respondedAt: new Date(), respondedBy: u.userId,
+      visibleAt: new Date(),
+    } });
+    await app.prisma.ratingOutbox.create({ data: { ratingId: about.id, command: 'SYNTHETIC_PAYLOAD', payload: { comment: 'Del at the gate', score: 4 } } });
     try {
       const reviews = new RatingService(app.prisma);
       const before = await reviews.getVendorReviews(vendor.id, 100);
@@ -338,6 +347,11 @@ describe('DELETION-INTEGRITY — reviews the person wrote are kept anonymised', 
       const outbox = await app.prisma.ratingOutbox.findFirstOrThrow({ where: { ratingId: rating.id } });
       expect(outbox.payload).toEqual({ score: 2 });
 
+      expect(await app.prisma.rating.findUniqueOrThrow({ where: { id: about.id } })).toMatchObject({
+        score: 4, tags: ['friendly'], raterId: author.userId, comment: null, response: null, respondedAt: null, respondedBy: null,
+      });
+      expect((await app.prisma.ratingOutbox.findFirstOrThrow({ where: { ratingId: about.id } })).payload).toEqual({ score: 4 });
+
       const after = await reviews.getVendorReviews(vendor.id, 100);
       expect(after.distribution).toEqual(before.distribution);
       expect(after.total).toBe(before.total);
@@ -346,8 +360,8 @@ describe('DELETION-INTEGRITY — reviews the person wrote are kept anonymised', 
       expect(JSON.stringify(shown)).not.toMatch(/Del\b|blue house/);
       expect(shown.rater).toMatchObject({ firstName: 'Deleted', avatar: null });
     } finally {
-      await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: rating.id } });
-      await app.prisma.rating.deleteMany({ where: { id: rating.id } });
+      await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: { in: [rating.id, about.id] } } });
+      await app.prisma.rating.deleteMany({ where: { id: { in: [rating.id, about.id] } } });
     }
   });
 });
