@@ -87,6 +87,14 @@ function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: 
   });
 }
 
+/** The app already in the stores (build 9): no contract header, old bodies. */
+function injectLegacy(url: string, payload: Record<string, unknown>, token: string) {
+  return app.inject({
+    method: 'POST', url, payload,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+  });
+}
+
 /** A verified provider: profile first (so the canonical checklist knows the
  *  trade), then its documents, then a re-save to project verification. */
 async function makeVerifiedProvider(trade = 'carpenter') {
@@ -493,6 +501,70 @@ describe('Services — closing a job is never silent', () => {
     expect(completed.statusCode).toBe(400);
     expect(completed.json().error.code).toBe('BAD_STATE');
     expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+  });
+
+  describe('[build 9] the installed app keeps working under the same server rules', () => {
+    async function legacyConfirmedJob() {
+      const provider = await makeVerifiedProvider();
+      const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      const created = await inject('POST', '/api/v1/services/jobs', { providerId: provider.providerId, description: 'Fix the gate latch and oil the hinges' }, customer.token);
+      const jobId = created.json().data.id as string;
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/quote`, { amount: 9000 }, provider.token)).statusCode).toBe(200);
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/schedule`, { scheduledFor: nextSlot().toISOString() }, customer.token)).statusCode).toBe(200);
+      return { provider, customer, jobId };
+    }
+
+    it('old bodies run quote → schedule → confirm → complete once the slot is due, through IN_PROGRESS', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token)).statusCode).toBe(200);
+      await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+      const done = await injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+      expect(done.statusCode).toBe(200);
+      expect((await jobRow(jobId)).status).toBe('COMPLETED');
+      const actions = await runWithoutTenant(() => app.prisma.auditLog.findMany({
+        where: { entity: 'ServiceJob', entityId: jobId, action: { in: ['SERVICE_JOB_STARTED', 'SERVICE_JOB_COMPLETED'] } },
+        orderBy: { createdAt: 'asc' }, select: { action: true },
+      }));
+      expect(actions.map((a) => a.action)).toEqual(['SERVICE_JOB_STARTED', 'SERVICE_JOB_COMPLETED']);
+    });
+
+    it('an old-app complete before the agreed time is refused', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token)).statusCode).toBe(200);
+      const early = await injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+      expect(early.statusCode).toBe(409);
+      expect(early.json().error.code).toBe('JOB_NOT_DUE');
+      expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+    });
+
+    it('an old-app complete of a slot the provider never confirmed is refused', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+      const refused = await injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token);
+      expect(refused.statusCode).toBe(409);
+      expect((await jobRow(jobId)).status).toBe('SCHEDULED');
+    });
+
+    it('old-app complete and cancel together still leave exactly one winner', async () => {
+      const { provider, customer, jobId } = await legacyConfirmedJob();
+      expect((await injectLegacy(`/api/v1/services/jobs/${jobId}/confirm`, {}, provider.token)).statusCode).toBe(200);
+      await runWithoutTenant(() => app.prisma.serviceJob.update({ where: { id: jobId }, data: { scheduledFor: new Date(Date.now() - HOUR) } }));
+      const [complete, cancel] = await Promise.all([
+        injectLegacy(`/api/v1/services/jobs/${jobId}/complete`, {}, provider.token),
+        injectLegacy(`/api/v1/services/jobs/${jobId}/cancel`, {}, customer.token),
+      ]);
+      expect([complete.statusCode, cancel.statusCode].filter((code) => code === 200)).toHaveLength(1);
+      expect(['COMPLETED', 'CANCELLED']).toContain((await jobRow(jobId)).status);
+    });
+
+    it('a request naming a different contract is told to update', async () => {
+      const { provider, jobId } = await legacyConfirmedJob();
+      const res = await app.inject({
+        method: 'POST', url: `/api/v1/services/jobs/${jobId}/confirm`, payload: {},
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${provider.token}`, [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: '99' },
+      });
+      expect(res.statusCode).toBe(426);
+    });
   });
 
   it('simultaneous complete and cancel commands have one terminal winner and never resurrect the job', async () => {

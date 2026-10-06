@@ -28,8 +28,12 @@ import {
 } from './service-job-transition';
 import { executeTenantBoundServiceJobTransaction } from './service-job-transaction';
 import {
-  parseServiceJobLifecycleCommand,
+  commandGeneration,
+  legacyQuoteSchema,
+  legacyScheduleSchema,
+  legacyTransitionSchema,
   quoteSchema,
+  readServiceJobLifecycleCommand,
   scheduleSchema,
   scheduledTransitionSchema,
   transitionGenerationSchema,
@@ -117,6 +121,16 @@ export async function servicesRoutes(app: FastifyInstance) {
       throw new AppError(403, 'FORBIDDEN', 'You are not part of this job');
     }
     return job;
+  }
+
+  /** A scheduled-slot command needs the slot it acts on; a job with none has nothing to act on. */
+  function scheduledGeneration(
+    command: Parameters<typeof commandGeneration>[0],
+    job: Parameters<typeof commandGeneration>[1],
+  ): { expectedUpdatedAt: Date; expectedScheduledFor: Date } {
+    const { expectedUpdatedAt, expectedScheduledFor } = commandGeneration(command, job);
+    if (!expectedScheduledFor) throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot for this job');
+    return { expectedUpdatedAt, expectedScheduledFor };
   }
 
   // ─── Provider profile + qualifications ─────────────────────────────────
@@ -405,8 +419,10 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.post('/jobs/:id/quote', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { amount, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, quoteSchema);
+    const command = readServiceJobLifecycleCommand(request, quoteSchema, legacyQuoteSchema);
+    const { amount } = command.body;
     const job = await jobForUser(id, request.user.userId);
+    const { expectedUpdatedAt } = commandGeneration(command, job);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can quote');
     if (!['REQUESTED', 'QUOTED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', `Cannot quote a ${job.status.toLowerCase()} job`);
     // [STRAND-8 / EV-ACT-25] Pricing NEW work re-proves live document
@@ -452,10 +468,12 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.post('/jobs/:id/schedule', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { scheduledFor, expectedQuoteAmount, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduleSchema);
+    const command = readServiceJobLifecycleCommand(request, scheduleSchema, legacyScheduleSchema);
+    const { scheduledFor } = command.body;
     const job = await jobForUser(id, request.user.userId);
+    const { expectedUpdatedAt, expectedQuoteAmount } = commandGeneration(command, job);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
-    if (job.status !== 'QUOTED') throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
+    if (job.status !== 'QUOTED' || expectedQuoteAmount === null) throw new AppError(400, 'BAD_STATE', 'Agree a quote before scheduling');
     // A slot that has already started cannot be kept: the provider would be
     // asked to confirm the impossible and the reminder sweep (which looks
     // forward only) would never fire. Same rule and code as appointments
@@ -504,8 +522,9 @@ export async function servicesRoutes(app: FastifyInstance) {
   /** POST /jobs/:id/confirm — the provider accepts the customer's slot (§4.3). */
   app.post('/jobs/:id/confirm', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedScheduledFor, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduledTransitionSchema);
+    const command = readServiceJobLifecycleCommand(request, scheduledTransitionSchema, legacyTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
+    const { expectedUpdatedAt, expectedScheduledFor } = scheduledGeneration(command, job);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can confirm');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to confirm');
     // [STRAND-8 / EV-ACT-25] Affirming the slot is the last acceptance gate
@@ -552,8 +571,9 @@ export async function servicesRoutes(app: FastifyInstance) {
    *  returns to QUOTED so the customer picks another slot (never a dead end). */
   app.post('/jobs/:id/decline-slot', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedScheduledFor, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduledTransitionSchema);
+    const command = readServiceJobLifecycleCommand(request, scheduledTransitionSchema, legacyTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
+    const { expectedUpdatedAt, expectedScheduledFor } = scheduledGeneration(command, job);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can decline');
     if (job.status !== 'SCHEDULED') throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot to decline');
     const transitioned = await executeTenantBoundServiceJobTransaction(
@@ -588,8 +608,9 @@ export async function servicesRoutes(app: FastifyInstance) {
   /** The provider explicitly starts confirmed work at or after the agreed time. */
   app.post('/jobs/:id/start', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedScheduledFor, expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, scheduledTransitionSchema);
+    const command = readServiceJobLifecycleCommand(request, scheduledTransitionSchema, legacyTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
+    const { expectedUpdatedAt, expectedScheduledFor } = scheduledGeneration(command, job);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can start');
     const startedAt = new Date();
     assertServiceJobStartDue(expectedScheduledFor, startedAt);
@@ -627,17 +648,49 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.post('/jobs/:id/complete', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, transitionGenerationSchema);
+    const command = readServiceJobLifecycleCommand(request, transitionGenerationSchema, legacyTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
+    const { expectedUpdatedAt } = commandGeneration(command, job);
     if (job.provider.userId !== request.user.userId) throw new AppError(403, 'PROVIDER_ONLY', 'Only the provider can complete');
-    if (job.status !== 'IN_PROGRESS') throw new AppError(400, 'BAD_STATE', `Cannot complete a ${job.status.toLowerCase()} job`);
+    // [build-9 compatibility] The installed app has no Start button: its
+    // provider completes a confirmed job straight from SCHEDULED. That single
+    // tap is served as start-then-complete in ONE transaction, under every
+    // start rule (confirmed slot, agreed time reached) and both CAS writes.
+    const legacyFromScheduled = command.legacy && job.status === 'SCHEDULED';
+    if (job.status !== 'IN_PROGRESS' && !legacyFromScheduled) throw new AppError(400, 'BAD_STATE', `Cannot complete a ${job.status.toLowerCase()} job`);
     const completedAt = new Date();
+    const scheduledFor = job.scheduledFor;
+    if (legacyFromScheduled) {
+      if (!scheduledFor) throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot for this job');
+      assertServiceJobStartDue(scheduledFor, completedAt);
+    }
     const transitioned = await executeTenantBoundServiceJobTransaction(
       app.prisma,
-      (boundTx) => transitionServiceJob(boundTx, {
+      async (boundTx) => {
+      let generation = expectedUpdatedAt;
+      if (legacyFromScheduled && scheduledFor) {
+        const started = await transitionServiceJob(boundTx, {
+          jobId: id,
+          actorUserId: request.user.userId,
+          expectedUpdatedAt,
+          from: 'SCHEDULED',
+          to: 'IN_PROGRESS',
+          guard: {
+            provider: { userId: request.user.userId },
+            providerConfirmedAt: { not: null },
+            AND: [{ scheduledFor }, { scheduledFor: { lte: completedAt } }],
+          },
+          action: 'SERVICE_JOB_STARTED',
+          audit: { scheduledFor: scheduledFor.toISOString(), startedAt: completedAt.toISOString(), completedInOneStep: true },
+          notices: [],
+          now: completedAt,
+        });
+        generation = started.job.updatedAt;
+      }
+      return transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
-        expectedUpdatedAt,
+        expectedUpdatedAt: generation,
         from: 'IN_PROGRESS',
         to: 'COMPLETED',
         guard: { provider: { userId: request.user.userId } },
@@ -662,7 +715,8 @@ export async function servicesRoutes(app: FastifyInstance) {
           },
         ],
         now: completedAt,
-      }),
+      });
+      },
     );
     await publishPersisted(transitioned.notificationIds);
     return { success: true, data: transitioned.job };
@@ -670,8 +724,9 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   app.post('/jobs/:id/cancel', auth, async (request) => {
     const { id } = request.params as { id: string };
-    const { expectedUpdatedAt } = parseServiceJobLifecycleCommand(request, transitionGenerationSchema);
+    const command = readServiceJobLifecycleCommand(request, transitionGenerationSchema, legacyTransitionSchema);
     const job = await jobForUser(id, request.user.userId);
+    const { expectedUpdatedAt } = commandGeneration(command, job);
     if (['COMPLETED', 'CANCELLED'].includes(job.status)) throw new AppError(400, 'BAD_STATE', 'This job is already closed');
     const cancelledByCustomer = job.customerId === request.user.userId;
     const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;

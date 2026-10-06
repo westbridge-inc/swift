@@ -16,23 +16,38 @@ export const scheduledTransitionSchema = transitionGenerationSchema.extend({
   expectedScheduledFor: z.coerce.date(),
 });
 
+// [build-9 compatibility] The app already in the stores sends the old bodies
+// with no contract header and no command generation. Those requests are still
+// served, with every server-side safety rule applied; the generation they did
+// not send is taken from the row read in the same request, so the write is
+// still a compare-and-set and a concurrent change still loses cleanly.
+export const legacyQuoteSchema = z.object({ amount: serviceQuoteAmountSchema });
+export const legacyScheduleSchema = z.object({ scheduledFor: z.coerce.date() });
+export const legacyTransitionSchema = z.object({}).passthrough();
+
 interface ServiceJobLifecycleRequest {
   headers: Record<string, string | string[] | undefined>;
   body: unknown;
 }
 
+export type ServiceJobCommand<Current, Legacy> =
+  | { legacy: false; body: Current }
+  | { legacy: true; body: Legacy };
+
 /**
- * The previous mobile release omitted the command generation and accepted
- * quote/slot facts. Refuse it deliberately before body validation instead of
- * returning a generic Zod error or, worse, inferring current authority from
- * the row. Only the exact contract is accepted: a future incompatible client
+ * The current client names its contract and sends every command fact. A
+ * request with no contract header is the store build already installed: it is
+ * served under the same server-side rules (see above). A request naming a
+ * DIFFERENT contract is refused deliberately: a future incompatible client
  * must negotiate its own rollout rather than being assumed compatible.
  */
-export function parseServiceJobLifecycleCommand<Schema extends z.ZodTypeAny>(
+export function readServiceJobLifecycleCommand<Schema extends z.ZodTypeAny, LegacySchema extends z.ZodTypeAny>(
   request: ServiceJobLifecycleRequest,
   schema: Schema,
-): z.infer<Schema> {
+  legacySchema: LegacySchema,
+): ServiceJobCommand<z.infer<Schema>, z.infer<LegacySchema>> {
   const contract = request.headers[SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER];
+  if (contract === undefined) return { legacy: true, body: legacySchema.parse(request.body ?? {}) };
   if (contract !== SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION) {
     throw new AppError(
       426,
@@ -45,5 +60,18 @@ export function parseServiceJobLifecycleCommand<Schema extends z.ZodTypeAny>(
       },
     );
   }
-  return schema.parse(request.body);
+  return { legacy: false, body: schema.parse(request.body) };
+}
+
+/** The facts a lifecycle write is conditioned on: from the command, or (legacy) from the row read now. */
+export function commandGeneration(
+  command: ServiceJobCommand<{ expectedUpdatedAt?: Date; expectedScheduledFor?: Date; expectedQuoteAmount?: number }, unknown>,
+  job: { updatedAt: Date; scheduledFor: Date | null; quoteAmount: unknown },
+): { expectedUpdatedAt: Date; expectedScheduledFor: Date | null; expectedQuoteAmount: number | null } {
+  const sent = command.legacy ? {} : command.body;
+  return {
+    expectedUpdatedAt: sent.expectedUpdatedAt ?? job.updatedAt,
+    expectedScheduledFor: sent.expectedScheduledFor ?? job.scheduledFor,
+    expectedQuoteAmount: sent.expectedQuoteAmount ?? (job.quoteAmount == null ? null : Number(job.quoteAmount)),
+  };
 }
