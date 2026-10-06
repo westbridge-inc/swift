@@ -387,11 +387,13 @@ const TENANT_BIND_STATEMENT = Symbol.for('swift.tenantBindStatement');
 const ITX_ID = Symbol.for('prisma.client.transaction.id');
 
 type RawParams = { args: unknown; query: (a: unknown) => Promise<unknown>; __internalParams?: { transaction?: unknown } };
-/** [L04 · R5 auto-bind] Top-level raw SQL ($queryRaw/$executeRaw and their
- *  Unsafe forms) is bound exactly like a model query: under a request tenant it
- *  runs in one batch after set_config; inside a bound transaction it runs on
- *  that transaction (or is refused if it asks for another tenant). Unbound, it
- *  runs as written — on the walled login that reads nothing (fail closed). */
+/** [L04 · R5 auto-bind] Top-level raw SQL ($queryRaw/$executeRaw) is bound
+ *  exactly like a model query: under a request tenant it runs in one batch
+ *  after set_config; inside a bound transaction it runs on that transaction
+ *  (or is refused if it asks for another tenant). Unbound, it runs as written —
+ *  on the walled login that reads nothing (fail closed). The string-built raw
+ *  forms are not bound here: production source may not use them at all
+ *  (sql-safety-surface.test.ts), and unbound they too read nothing. */
 function rawTenantBinding(params: RawParams, wiring: ScopeWiring): Promise<unknown> {
   const { args, query } = params;
   if (!rlsBindEnabled()) return query(args);
@@ -420,7 +422,7 @@ function rawTenantBinding(params: RawParams, wiring: ScopeWiring): Promise<unkno
 }
 function rawTenantBindingExtension(wiring: ScopeWiring) {
   const bind = (params: RawParams) => rawTenantBinding(params, wiring);
-  return { name: 'rawTenantBinding', query: { $queryRaw: bind, $executeRaw: bind, $queryRawUnsafe: bind, $executeRawUnsafe: bind } } as never;
+  return { name: 'rawTenantBinding', query: { $queryRaw: bind, $executeRaw: bind } } as never;
 }
 
 /** [TEN-03] The bound query: `set_config` and the operation in ONE batch
