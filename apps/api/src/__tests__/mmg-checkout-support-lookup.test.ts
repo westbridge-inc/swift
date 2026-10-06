@@ -553,6 +553,18 @@ describe('2. the detail: the row, a timeline from the observations, and the cred
     expect(detail.timeline.some((e) => e.source === 'LOOKUP' && e.windowCheck === 'INSIDE')).toBe(false);
   });
 
+  it('[option b] a payment MMG stamps with its lookup’s own clock, three minutes after the first reply: confirmed, and support shows INSIDE, as judge() decided', async () => {
+    const rider = await makeRider();
+    const c = await started(rider);
+    const txn = mmgId();
+    // Not a payment time (more than two minutes after the reply), but within five minutes of when Swift asked.
+    mmgAnswers(txn, mmgId(), c.amountGyd, { creationDate: gyStamp(new Date(Date.now() + 3 * 60_000)) });
+    expect((await returnWith(reply(c.row, '0', txn))).json().data.state).toBe('CONFIRMED');
+    const detail = (await asAdmin(`${SEARCH}/${c.ref}`)).json().data as MmgCheckoutSupportDetail;
+    expect(detail).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+    expect(detail.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ mmgTransactionId: txn, transactionStatus: 'successful', windowCheck: 'INSIDE' });
+  });
+
   it('a confirmed payment: the reply (ResultCode 0, in time), the lookup (successful, amount, GYD, ledger number, inside the window), the week it paid and its receipt', async () => {
     const detail = (await asAdmin(`${SEARCH}/${s.confirmed.ref}`)).json().data as MmgCheckoutSupportDetail;
     expect(detail).toMatchObject({ id: s.confirmed.ref, swiftReference: s.confirmed.ours, mmgTransactionId: s.confirmed.txn, mmgTransactionReference: s.confirmed.ledger, status: 'CONFIRMED', timelineTruncated: false });

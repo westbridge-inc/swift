@@ -423,6 +423,87 @@ describe('[option b] MMG’s creationDate: a payment time or the lookup’s cloc
   });
 });
 
+// ---------------------------------------------------------------------------
+// [option b · no widening] Reading MMG's stamp as the lookup's own clock
+// relaxes condition (5) and nothing else. A late lookup (a retry minutes after
+// the reply, a poll late in the window, a check after the checkout closed)
+// credits only when MMG's own lookup says "successful" for the transaction
+// MMG's success answer named, for exactly the amount, in GYD, to our merchant,
+// with its ledger number; and only when that success answer reached Swift while
+// the checkout was open. Every case changes ONE thing from an exact payment and
+// is refused for that thing at every late lookup time, with the same verdict a
+// payment stamped inside the window (the rule before option b) gets.
+// ---------------------------------------------------------------------------
+describe('[option b] the lookup’s clock relaxes condition (5) only: a late lookup credits nothing any other condition refuses', () => {
+  const MIN = 60_000;
+  const replied = new Date(CREATED.getTime() + MIN);
+  const closed = intent.expiresAt;
+  const GYZ = 'GUYANA_WALL_CLOCK' as const;
+  const answersAt = (answers: Array<[string, string, Date]>): SuccessAnswer => successAnswerOf({ ...intent, status: 'CONFIRMING' },
+    answers.map(([detail, transactionId, createdAt]) => ({ detail, body: { merchantTransactionId: REF, transactionId }, createdAt })));
+  /** MMG's success answer naming MMGTX1, received by Swift as the checkout's first reply. */
+  const inTime = answersAt([['MMG_RESULT_0', 'MMGTX1', replied]]);
+  /** When Swift's confirming lookup ran. MMG stamps creationDate with that moment (staging, 6 Oct). */
+  const lateLookups = [
+    ['a retry 3.5 minutes after the reply', new Date(replied.getTime() + 3.5 * MIN)],
+    ['a poll 25 minutes after the reply, inside the window', new Date(replied.getTime() + 25 * MIN)],
+    ['a check an hour after the checkout closed', new Date(closed.getTime() + 60 * MIN)],
+  ] as const;
+  type Change = { patch?: Record<string, unknown>; txnId?: string; success?: SuccessAnswer; others?: string[] };
+  /** The verdict for MMG's lookup answer (MMG's own fields, read as the live adapter reads them) stamped `stamp`. */
+  const decideWith = (stamp: Date, creation: { firstReplyAt: Date; lookedUpAt?: Date }, change: Change) => {
+    const txnId = change.txnId ?? 'MMGTX1';
+    const detail = lookupDetailFrom(uatAnswer({ creationDate: gyStamp(stamp), ...change.patch }), txnId);
+    return judge(intent, txnId, detail, [MERCHANT], change.others ?? [], change.success ?? inTime, { zone: GYZ, ...creation });
+  };
+  /** Option (b): MMG's stamp is the moment of THIS lookup, which ran at `asked`. */
+  const lateLookup = (asked: Date, change: Change = {}) => decideWith(asked, { firstReplyAt: replied, lookedUpAt: asked }, change);
+  /** The rule before option (b): a payment stamped inside the window, before the reply; no lookup clock. */
+  const paymentTimeStamp = (change: Change = {}) => decideWith(new Date(replied.getTime() - 20_000), { firstReplyAt: replied }, change);
+
+  /** [what changes, the change, what MMG's answer then means] — never CONFIRM. */
+  const refusals: Array<[string, Change, Record<string, unknown>]> = [
+    ['MMG’s lookup says "completed", not "successful"', { patch: { transactionStatus: 'completed' } }, { verdict: 'HOLD', reason: 'STATUS_NOT_SUCCESSFUL', decisive: true }],
+    ['MMG’s lookup says the payment is pending', { patch: { transactionStatus: 'pending' } }, { verdict: 'PENDING' }],
+    ['MMG’s lookup says the payment failed', { patch: { transactionStatus: 'failed' } }, { verdict: 'DECLINED', reason: 'MMG_DECLINED' }],
+    ['MMG’s lookup says the payment was reversed', { patch: { transactionStatus: 'reversed' } }, { verdict: 'DECLINED', reason: 'MMG_REVERSED' }],
+    ['one dollar short', { patch: { amount: '1499' } }, { verdict: 'HOLD', reason: 'AMOUNT_MISMATCH', decisive: true }],
+    ['one dollar over', { patch: { amount: '1501' } }, { verdict: 'HOLD', reason: 'AMOUNT_MISMATCH', decisive: true }],
+    ['no amount', { patch: { amount: undefined } }, { verdict: 'HOLD', reason: 'AMOUNT_MISMATCH', decisive: true }],
+    ['another currency', { patch: { currency: 'USD' } }, { verdict: 'HOLD', reason: 'CURRENCY_MISMATCH', decisive: true }],
+    ['no currency', { patch: { currency: undefined } }, { verdict: 'HOLD', reason: 'CURRENCY_MISMATCH', decisive: true }],
+    ['paid to another merchant', { patch: { creditParty: [{ key: 'accountid', value: '5926999999' }] } }, { verdict: 'HOLD', reason: 'MERCHANT_MISMATCH', decisive: true }],
+    ['no merchant named', { patch: { creditParty: [] } }, { verdict: 'HOLD', reason: 'MERCHANT_UNCONFIRMED', decisive: true }],
+    ['no ledger number', { patch: { transactionReference: undefined } }, { verdict: 'HOLD', reason: 'LEDGER_REFERENCE_MISSING', decisive: true }],
+    ['a transaction MMG’s success answer did not name', { txnId: 'MMGTX2' }, { verdict: 'HOLD', reason: 'NOT_THE_ANSWERED_TRANSACTION', decisive: true }],
+    ['no success answer from MMG for this checkout', { success: unanswered }, { verdict: 'HOLD', reason: 'NO_SUCCESS_ANSWER', decisive: true }],
+    ['MMG’s success answer reached Swift after the checkout closed (two minutes’ tolerance)',
+      { success: answersAt([['MMG_RESULT_0', 'MMGTX1', new Date(closed.getTime() + 2 * MIN + 1)]]) }, { verdict: 'HOLD', reason: 'SUCCESS_ANSWER_AFTER_CLOSE', decisive: true }],
+    ['MMG also answered "not paid" for this checkout', { success: answersAt([['MMG_RESULT_0', 'MMGTX1', replied], ['MMG_RESULT_1', 'MMGTX1', replied]]) }, { verdict: 'HOLD', reason: 'MMG_ANSWERS_DISAGREE', decisive: true }],
+    ['MMG answered success for two transactions', { success: answersAt([['MMG_RESULT_0', 'MMGTX1', replied], ['MMG_RESULT_0', 'MMGTX2', replied]]) }, { verdict: 'HOLD', reason: 'MMG_ANSWERS_DISAGREE', decisive: true }],
+    ['MMG ties the payment to another of our checkouts', { others: [OTHER_REF] }, { verdict: 'HOLD', reason: 'REFERENCE_OF_ANOTHER_CHECKOUT', decisive: true }],
+  ];
+
+  it.each(lateLookups)('the exact payment, looked up late (%s), CONFIRMS: the one thing option (b) changes', (_when, asked) => {
+    expect(lateLookup(asked)).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+    // Before option (b), the same lookup's stamp failed condition (5).
+    expect(decideWith(asked, { firstReplyAt: replied }, {})).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_UNCONFIRMED' });
+  });
+
+  for (const [when, asked] of lateLookups) {
+    it.each(refusals)(`${when}: %s is never credited, exactly as a payment stamped inside the window is not`, (_what, change, means) => {
+      const late = lateLookup(asked, change);
+      expect(late.verdict).not.toBe('CONFIRM');
+      expect(late).toMatchObject(means);
+      expect(late).toEqual(paymentTimeStamp(change));
+    });
+  }
+
+  it('the payment-time stamp the refusals are compared with CONFIRMS on its own (the comparison is with a credit, not with a hold)', () => {
+    expect(paymentTimeStamp()).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+  });
+});
+
 describe('the reference MMG’s lookup echoes [F1] (UAT, 1 Oct: no lookup field carries it)', () => {
   it('no field carries it, so no lookup answer, whatever it carries, binds to a checkout', () => {
     expect(MMG_LOOKUP_REFERENCE_FIELDS).toEqual([]);

@@ -273,14 +273,13 @@ export function mmgCreationInstant(stamp: string | null, zone: MmgCreationZone):
 }
 
 /**
- * [DS632] What condition (5) needs beyond MMG's stamp: the zone it is read in
- * (null: unverified, so nothing confirms automatically), and when Swift first
- * observed a reply naming the transaction. MMG cannot have created a payment
- * after Swift heard about it: a stamp later than that (two minutes'
- * tolerance) means MMG's stamps do not match the configured zone. A
- * transaction no reply named cannot be bounded and holds the same way (the
- * service always has the time: every candidate comes from a reply written
- * down first [I9]).
+ * [DS632 · option b] What condition (5) needs beyond MMG's stamp: the zone it
+ * is read in (null: unverified, so nothing confirms automatically); when Swift
+ * first observed a reply naming the transaction (a payment time is no later
+ * than that, two minutes' tolerance; a transaction no reply named cannot be
+ * bounded and holds; the service always has the time, as every candidate comes
+ * from a reply written down first [I9]); and when Swift asked MMG's lookup (the
+ * stamp may be that lookup's own clock).
  */
 export interface CreationCheck {
   zone: MmgCreationZone | null;

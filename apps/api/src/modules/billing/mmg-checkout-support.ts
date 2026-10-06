@@ -99,15 +99,17 @@ export function decodeSupportCursor(cursor: string): { createdAt: Date; id: stri
 /**
  * Condition 5 of the owner's automatic confirmation, as support reads it: the
  * SAME creation-time check judge() credits by (creationCheckOf) [Sol, DS663]:
- * the stamp read in the configured zone (MMG_CHECKOUT_CREATION_ZONE), bounded
- * by the first reply naming the transaction and by the checkout's window.
+ * the stamp read in the configured zone (MMG_CHECKOUT_CREATION_ZONE), as a
+ * payment time (inside the checkout's window, no later than the first reply
+ * naming the transaction) or as the lookup's own clock (within five minutes of
+ * when Swift asked) [option b]; anything else is UNCONFIRMED.
  * Support shows INSIDE exactly when that check would let the payment be
  * credited. No configured zone, or an absent or unreadable stamp, is
  * UNREADABLE (judge holds CREATION_ZONE_UNVERIFIED / CREATION_DATE_UNREADABLE).
  */
 export function windowCheckOf(
   intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
-): 'INSIDE' | 'OUTSIDE' | 'UNCONFIRMED' | 'UNREADABLE' {
+): 'INSIDE' | 'UNCONFIRMED' | 'UNREADABLE' {
   const result = creationCheckOf(intent, stamp, creation);
   return result === 'ZONE_UNVERIFIED' ? 'UNREADABLE' : result;
 }
