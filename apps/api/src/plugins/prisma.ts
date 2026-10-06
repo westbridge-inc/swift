@@ -390,7 +390,8 @@ const TENANT_BIND_STATEMENT = Symbol.for('swift.tenantBindStatement');
 /** Prisma's interactive-transaction client carries its transaction id here.
  *  PINNED to Prisma runtime internals (checked on the locked 6.19.2): this
  *  symbol on the transaction client, and `__internalParams.transaction` as
- *  `{ kind: 'itx' | 'batch', id }` in query extensions. Neither is public API.
+ *  an object with `kind` ("itx" or "batch") and `id` in query extensions.
+ *  Neither is public API.
  *  Both changes were simulated: a different symbol fails closed (a bound
  *  transaction "could not be identified"); a different parameter shape
  *  silently drops the refusal of a query whose transaction is bound to
