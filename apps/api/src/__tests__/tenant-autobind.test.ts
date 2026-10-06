@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { scopedPrisma as prisma, scopedClientFor, TenantSwitchInTransactionError } from '../plugins/prisma';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { tenantBindCounter } from '../plugins/observability';
 
 // [R048-001] the same NOLOGIN probe group and logins the tenant-wall suites use, by raw DDL.
 grantSuiteCapability('ddl');
@@ -143,6 +144,43 @@ describe('[R5 auto-bind] a transaction that begins under a tenant is bound for i
     const attempt = runWithTenant(T, () => walled.$transaction(async (tx) =>
       runWithTenant(U, () => tx.user.findUnique({ where: { id: userU }, select: { id: true } }))));
     await expect(attempt).rejects.toBeInstanceOf(TenantSwitchInTransactionError);
+  });
+});
+
+describe('[R5 auto-bind · review S3-1] the refusal follows the TRANSACTION a query runs on', () => {
+  it('reusing an outer transaction (bound to T) inside a nested transaction under U is refused — raw SQL included', async () => {
+    const attempt = runWithTenant(T, () => walled.$transaction(async (outer) =>
+      runWithTenant(U, () => walled.$transaction(async () => countUser(outer, userT)))));
+    await expect(attempt).rejects.toBeInstanceOf(TenantSwitchInTransactionError);
+  });
+
+  it('system work on a bound transaction’s own client is refused, not run on the tenant connection', async () => {
+    const attempt = runWithTenant(T, () => walled.$transaction(async (tx) =>
+      runAsSystem('test-system-inside-bound', () => countUser(tx, userT))));
+    await expect(attempt).rejects.toThrow();
+  });
+});
+
+describe('[R5 auto-bind · review S3-2] one set_config per bound query, in production and in the probe alike', () => {
+  const kinds = async () => Object.fromEntries((await tenantBindCounter.get()).values.map((v) => [v.labels['kind'], v.value]));
+  it('a top-level bound query and a top-level bound raw query each bind once and are not counted as transactions', async () => {
+    for (const client of [prisma as unknown as PrismaClient, walled]) {
+      const before = await kinds();
+      await runWithTenant(T, async () => {
+        await client.user.findFirst({ where: { id: userT }, select: { id: true } });
+        await countUser(client, userT);
+      });
+      const after = await kinds();
+      expect((after['tenant'] ?? 0) - (before['tenant'] ?? 0)).toBe(2);
+      expect((after['tenant_tx'] ?? 0) - (before['tenant_tx'] ?? 0)).toBe(0);
+    }
+  });
+
+  it('a bound callback transaction counts exactly one transaction bind', async () => {
+    const before = await kinds();
+    await runWithTenant(T, () => walled.$transaction(async (tx) => countUser(tx, userT)));
+    const after = await kinds();
+    expect((after['tenant_tx'] ?? 0) - (before['tenant_tx'] ?? 0)).toBe(1);
   });
 });
 

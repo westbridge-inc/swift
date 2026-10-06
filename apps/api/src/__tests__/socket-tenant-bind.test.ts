@@ -94,11 +94,18 @@ describe('[R5 socket] subscribe handlers read inside the socket’s tenant', () 
 
   it('every database-reading handler is wrapped in the socket’s tenant (source census)', () => {
     const src = readFileSync(join(__dirname, '../plugins/socket.ts'), 'utf8');
+    // Every database access in a handler — not just one of them, and not a
+    // mention in a comment — must be the argument of inSocketTenant(() => …).
+    const count = (text: string, needle: string) => text.split(needle).length - 1;
     for (const event of ['order:subscribe', 'chat:join', 'vendor:subscribe']) {
       const at = src.indexOf(`socket.on('${event}'`);
       expect(at, event).toBeGreaterThan(-1);
-      const body = src.slice(at, src.indexOf('socket.on(', at + 10));
-      expect(body, `${event} runs inside the socket's tenant`).toMatch(/inSocketTenant\(/);
+      const body = src.slice(at, src.indexOf('socket.on(', at + 10))
+        .split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+      const reads = count(body, 'app.prisma.') + count(body, 'assertRoomAccess(');
+      const wrapped = count(body, 'inSocketTenant(() => app.prisma.') + count(body, 'inSocketTenant(() => assertRoomAccess(');
+      expect(reads, `${event} reads the database`).toBeGreaterThan(0);
+      expect(wrapped, `${event}: every database read runs inside the socket's tenant`).toBe(reads);
     }
   });
 });

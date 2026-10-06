@@ -18,10 +18,10 @@ export interface TenantStore {
    *  cross-tenant work that names itself), or nothing at all. */
   mode?: 'request' | 'system';
   capability?: string;
-  /** [L04 · R5 auto-bind] The tenant the CURRENT transaction was bound to when
-   *  it began (set only by the transaction wrapper in plugins/prisma.ts). A
-   *  query inside that transaction asking for another tenant is refused. */
-  txTenant?: string;
+  /** [L04 · R5 auto-bind] Set only by the transaction wrapper in
+   *  plugins/prisma.ts: the tenant a BATCH transaction is bound to. (An
+   *  interactive transaction's tenant is keyed by its own id there.) */
+  batchTenant?: string;
 }
 
 export type TenantMode = 'request' | 'system' | 'unbound';
@@ -113,7 +113,5 @@ export async function runAsSystem<T>(capability: string, fn: () => Promise<T>): 
 
 /** Run a function scoped to a specific tenant (tests, targeted system tasks). */
 export async function runWithTenant<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
-  // A bound transaction's tenant travels with it, so a switch inside it is seen.
-  const txTenant = tenantContext.getStore()?.txTenant;
-  return tenantContext.run({ tenantId, mode: 'request', ...(txTenant ? { txTenant } : {}) }, async () => await fn());
+  return tenantContext.run({ tenantId, mode: 'request' }, async () => await fn());
 }

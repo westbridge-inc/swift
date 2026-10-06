@@ -360,12 +360,31 @@ function tenantScope(params: ScopeParams, connection: Connection, wiring: ScopeW
   return bindTenant(query, args, tenantId, wiring.batch());
 }
 
-/** The tenant the caller's transaction was bound to at BEGIN, when this query
- *  belongs to one; undefined otherwise (or for a transaction begun unbound). */
+/** [R5 review S3-1] The tenant each bound INTERACTIVE transaction was bound
+ *  to, keyed by the transaction's own id — not by the async context, so a
+ *  query on an outer transaction's client is judged by THAT transaction even
+ *  inside a nested one begun for another tenant. Entries live exactly as long
+ *  as their transaction. */
+const boundInteractiveTransactions = new Map<string, string>();
+type TxRef = { kind?: string; id?: string | number };
+const txRefOf = (params: { __internalParams?: { transaction?: unknown } }): TxRef | undefined =>
+  params.__internalParams?.transaction as TxRef | undefined;
+
+/** The tenant the transaction this query belongs to was bound to at BEGIN;
+ *  undefined when it belongs to none (or to one begun unbound). A batch is
+ *  pre-built and cannot be re-entered, so its binding rides the context. */
 function boundTransactionTenant(params: { __internalParams?: { transaction?: unknown } }): string | undefined {
-  if (!params.__internalParams?.transaction) return undefined;
-  return tenantContext.getStore()?.txTenant;
+  const tx = txRefOf(params);
+  if (!tx) return undefined;
+  if (tx.kind === 'itx' && tx.id !== undefined) return boundInteractiveTransactions.get(String(tx.id));
+  return tenantContext.getStore()?.batchTenant;
 }
+
+/** Marks the set_config statement of a bound query's own batch, so the
+ *  transaction wrapper does not prepend a second one (review S3-2). */
+const TENANT_BIND_STATEMENT = Symbol.for('swift.tenantBindStatement');
+/** Prisma's interactive-transaction client carries its transaction id here. */
+const ITX_ID = Symbol.for('prisma.client.transaction.id');
 
 type RawParams = { args: unknown; query: (a: unknown) => Promise<unknown>; __internalParams?: { transaction?: unknown } };
 /** [L04 · R5 auto-bind] Top-level raw SQL ($queryRaw/$executeRaw and their
@@ -378,6 +397,13 @@ function rawTenantBinding(params: RawParams, wiring: ScopeWiring): Promise<unkno
   if (!rlsBindEnabled()) return query(args);
   const ctx = getTenantContext();
   if (!ctx.tenantId) {
+    // System work on a bound transaction's client would run on that tenant's
+    // connection while claiming to be system work: refused by name, as a
+    // model query in the same position is.
+    if (boundTransactionTenant(params) !== undefined) {
+      tenantBindCounter.labels('tenant_switch_refused').inc();
+      return Promise.reject(new TenantSwitchInTransactionError('raw SQL (no tenant)'));
+    }
     tenantBindCounter.labels(ctx.mode === 'system' ? 'raw_system' : 'raw_unbound').inc();
     return query(args);
   }
@@ -405,10 +431,9 @@ function rawTenantBindingExtension(wiring: ScopeWiring) {
  *  NOBYPASSRLS login an unbound transaction sees ZERO rows (fail closed). */
 async function bindTenant(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, tenantId: string, client: BatchClient): Promise<unknown> {
   try {
-    const [, result] = await client.$transaction([
-      client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)` as never,
-      query(args) as never,
-    ]);
+    const bind = client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)` as unknown as Record<symbol, boolean>;
+    bind[TENANT_BIND_STATEMENT] = true;
+    const [, result] = await client.$transaction([bind as never, query(args) as never]);
     tenantBindCounter.labels('tenant').inc();
     return result;
   } catch (err) {
@@ -501,19 +526,30 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
     // transaction (commit or rollback), never reaching the next user of the
     // pooled connection. The tenant is recorded so a switch inside is refused.
     const tenantId = ctx.tenantId;
-    if (rlsBindEnabled() && tenantId) {
-      const store = { ...(tenantContext.getStore() ?? { mode: 'request' as const }), tenantId, txTenant: tenantId };
-      tenantBindCounter.labels('tenant_tx').inc();
+    // A bound query's own [set_config, query] batch is already bound.
+    const ownBind = Array.isArray(input) && !!(input[0] as Record<symbol, unknown> | undefined)?.[TENANT_BIND_STATEMENT];
+    if (rlsBindEnabled() && tenantId && !ownBind) {
+      const current = tenantContext.getStore() ?? { tenantId, mode: 'request' as const };
       if (typeof input === 'function') {
+        tenantBindCounter.labels('tenant_tx').inc();
         const fn = input as (tx: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> }) => Promise<unknown>;
-        return tenantContext.run(store, () => own(async (tx: Parameters<typeof fn>[0]) => {
+        let txId: string | undefined;
+        const run = own(async (tx: Parameters<typeof fn>[0]) => {
+          // Prisma's own id for this interactive transaction — the same id every
+          // query on it carries. Fail closed: an unidentified transaction is not run.
+          const id = (tx as unknown as Record<symbol, unknown>)[ITX_ID];
+          if (id === undefined || id === null) throw new Error('[R5] a tenant-bound transaction could not be identified');
+          txId = String(id);
+          boundInteractiveTransactions.set(txId, tenantId);
           await tx.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
           return fn(tx);
-        }, options));
+        }, options) as Promise<unknown>;
+        return run.finally(() => { if (txId !== undefined) boundInteractiveTransactions.delete(txId); });
       }
       if (Array.isArray(input)) {
+        tenantBindCounter.labels('tenant_tx').inc();
         const bindFirst = (client as unknown as BatchClient).$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
-        return tenantContext.run(store, async () => ((await own([bindFirst, ...input], options)) as unknown[]).slice(1));
+        return tenantContext.run({ ...current, batchTenant: tenantId }, async () => ((await own([bindFirst, ...input], options)) as unknown[]).slice(1));
       }
     }
     return own(input, options);
