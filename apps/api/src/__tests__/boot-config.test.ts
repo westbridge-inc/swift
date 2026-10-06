@@ -85,6 +85,30 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it.each([
+    ['CONSENT_REQUIRED', '0'],
+    ['ADMIN_CAPABILITY_MODE', 'shadow'],
+    ['PREVIEW_MODE', '1'],
+  ])('launch bypass %s=%s is refused by production', (name, value) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: value })).toThrow(name);
+  });
+
+  it.each(['development', 'test'])('launch bypass fixtures remain available in %s', (mode) => {
+    expect(() => assertSafeBootConfig({
+      NODE_ENV: mode,
+      CONSENT_REQUIRED: '0',
+      ADMIN_CAPABILITY_MODE: 'shadow',
+      PREVIEW_MODE: '1',
+    })).not.toThrow();
+  });
+
+  it('launch bypass defaults keep production admission open', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, CONSENT_REQUIRED: '1', ADMIN_CAPABILITY_MODE: 'enforce', PREVIEW_MODE: '0',
+    })).not.toThrow();
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
   it('boots with the card rail explicitly disabled and no card credentials', () => {
     expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
   });

@@ -528,6 +528,8 @@ export interface TieredEstimate {
   currencyCode: string;
   distanceKm: number;
   durationMin: number;
+  /** Server routing provenance, separate from the native basemap provider. */
+  routeSource?: 'osrm' | 'haversine';
   /** Present on a quote WITH stops only (the multi-stop contract). */
   legs?: EstimateLeg[];
   maxStops?: number;
@@ -902,6 +904,19 @@ export const partnerApi = {
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
 export const riderApi = {
   profile: () => api.get('/rider/profile'),
+  // [AF-MOB-006] Custody recovery after pickup. The holder reports a problem
+  // and reads the case (with the handoff code while a relay is pending); a
+  // relay rider reads their handoffs and completes one with the holder's code.
+  // The transfer carries an Idempotency-Key so an offline retry replays the
+  // original answer instead of spending a second attempt.
+  recovery: (orderId: string) => api.get(`/rider/orders/${orderId}/recovery`),
+  reportProblem: (orderId: string, body: { reason: string; note?: string; gps?: { lat: number; lng: number } }, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/orders/${orderId}/recovery`, body, capturedAuthConfig(session)),
+  relayTasks: () => api.get('/rider/recovery/relays'),
+  transferCustody: (caseId: string, body: { code: string; gps: { lat: number; lng: number }; version?: number }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/recovery/${caseId}/transfer`, body, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
+  // An absent reason is dropped by JSON; the server accepts a decline with or without one.
+  declineRelay: (caseId: string, reason?: string) => api.post(`/rider/recovery/${caseId}/decline`, { reason }),
   standing: () => api.get('/rider/standing'),
   currentOffer: () => api.get('/rider/offers/current'),
   offerSeen: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/seen', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
@@ -1099,6 +1114,8 @@ export const vendorApi = {
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
+  /** [AF-MOB-006] The store confirms returned goods are back (closes the return). */
+  returnReceived: (id: string) => api.post(`/vendor/orders/${id}/recovery/return-received`, {}),
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
