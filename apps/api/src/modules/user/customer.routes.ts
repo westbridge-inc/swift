@@ -1,3 +1,4 @@
+import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
@@ -2581,6 +2582,9 @@ export async function customerRoutes(app: FastifyInstance) {
         estimatedDeliveryTime: order.estimatedDeliveryTime,
         // [ALG-12] The promise and its range — what a countdown reads (L7).
         promise: promiseView(order),
+        // [AF-MOB-006] After pickup, a delivery problem is an owned case: the
+        // customer sees its state and a plain sentence, never only "call support".
+        custodyRecovery: mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'CUSTOMER', order) : null,
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
           lastName: order.rider.user?.lastName,
