@@ -14,7 +14,14 @@ const paddedTwilioIdentities = ([
   { name, value: `${valid}${whitespace}`, position: 'trailing', whitespace: JSON.stringify(whitespace) },
 ]));
 
+// [L04 · SMS allowlist] Outside production the real adapter texts only the
+// numbers on SMS_RECIPIENT_ALLOWLIST. This suite tests the adapter itself, so
+// it lists the numbers it texts; the swallow is graded below and in
+// sms-recipient-allowlist.test.ts.
+const LISTED = '+5926000000,+5927000000';
+
 function configure() {
+  vi.stubEnv('SMS_RECIPIENT_ALLOWLIST', LISTED);
   vi.stubEnv('NOTIFICATION_PROVIDER', 'twilio');
   vi.stubEnv('TWILIO_ACCOUNT_SID', accountSid);
   vi.stubEnv('TWILIO_API_KEY_SID', keySid);
@@ -30,6 +37,14 @@ afterEach(() => {
 });
 
 describe('Twilio outbound SMS credentials and error boundary', () => {
+  it('outside production, a number not on the allowlist never reaches the adapter', async () => {
+    configure();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await getChannels().sms.sendSms('+5928000000', 'test body')).toEqual({ ref: 'not-allowlisted' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('does not require Twilio secrets when the dev SMS adapter is selected', () => {
     vi.stubEnv('NOTIFICATION_PROVIDER', 'dev');
     vi.stubEnv('PUSH_PROVIDER', 'expo');

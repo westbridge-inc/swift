@@ -1,3 +1,5 @@
+import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
+import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
@@ -604,6 +606,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   const menu = new VendorMenuService(app.prisma);
   const dispatch = makeDispatchService(app);
   const notifications = new NotificationService(app.prisma, app.io);
+  const custodyDeps = { prisma: app.prisma, io: app.io, notifications };
   const settlementLedger = new DeliveryCashSettlementService(app.prisma, notifications);
   const picking = new PickingService(app.prisma, app.io);
   const verification = new VerificationService(
@@ -1547,7 +1550,24 @@ export async function vendorRoutes(app: FastifyInstance) {
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
     // [S1 response-shaping] same redaction as the board — closed order, no
     // customer contact, rider contact, or delivery destination.
-    return { success: true, data: redactCustomerContact({ ...order, respondBy }) };
+    // [AF-MOB-006] The store sees the order's recovery case: a return coming
+    // back to it, another rider taking over, or support holding it.
+    const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
+    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy }), custodyRecovery } };
+  });
+
+  /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
+   *  confirms the goods came back. Closes the return (RETURNED) through the
+   *  canonical seam, which resolves the case and frees the rider. */
+  app.post<{ Params: IdParam }>('/orders/:id/recovery/return-received', auth, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    if (order.orderType === 'COURIER') {
+      throw new AppError(409, 'NOT_A_STORE_RETURN', 'A courier parcel goes back to its sender, not to a store.');
+    }
+    const kase = await confirmReturn({ ...custodyDeps, orderService }, {
+      orderId: order.id, actor: { userId: request.user.userId, role: 'VENDOR' },
+    });
+    return { success: true, data: { orderId: order.id, caseId: kase.id, state: kase.state } };
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
