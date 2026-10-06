@@ -99,7 +99,15 @@ describe('[DELETION-INTEGRITY] a fresh OTP sign-in counts as step-up for deletio
     const res = await build9Delete(p.token);
     expect(res.statusCode, res.payload).toBe(403);
     expect(res.json().error.code).toBe('STEP_UP_REQUIRED');
+    // Build 9 shows this message and has no code sheet on this screen: it must
+    // name the step build 9 can take, never promise a code it will not ask for.
+    expect(res.json().error.message).toMatch(/sign back in with a code.*within 10 minutes/);
     expect(await app.prisma.user.findUniqueOrThrow({ where: { id: p.userId } })).toMatchObject({ status: 'ACTIVE', firstName: 'Fresh' });
+    // Build 10+ opens its code sheet on this refusal.
+    const modern = await build10Delete(p.token);
+    expect(modern.statusCode, modern.payload).toBe(403);
+    expect(modern.json().error).toMatchObject({ code: 'STEP_UP_REQUIRED', details: { stepUp: { send: 'POST /auth/step-up' } } });
+    expect(modern.json().error.message).toMatch(/^Confirm it/);
   });
 
   it('a fresh session that no code sign-in created still needs a step-up', async () => {
