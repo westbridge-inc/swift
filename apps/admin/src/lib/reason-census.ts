@@ -85,6 +85,11 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /billing/agent-payments/:id/refund-flag', helper: 'flagAgentPaymentRefund', args: ['pay_1'], requiredBodyKeys: ['note'] },
   { route: 'POST /billing/settlement-batches/:id/confirm-deposit', helper: 'confirmSettlementDeposit', args: ['batch_1', { depositedGyd: 500, depositedAt: '2026-01-01T00:00:00Z', bankRef: 'MMG-BANK-REF-1' }], requiredBodyKeys: ['depositedGyd', 'depositedAt', 'bankRef'] },
 
+  // ── Custody recovery [AF-MOB-006] ──────────────────────────────────────
+  { route: 'POST /custody-cases/:id/direct', helper: 'directCustodyCase', args: ['cc_1', 'RELAY_REQUIRED'], requiredBodyKeys: ['outcome'] },
+  { route: 'POST /custody-cases/:id/relay', helper: 'assignCustodyRelay', args: ['cc_1', 'rdr_1'], requiredBodyKeys: ['riderId'] },
+  { route: 'POST /custody-cases/:id/confirm-return', helper: 'confirmCustodyReturn', args: ['cc_1'] },
+
   // ── Returns ────────────────────────────────────────────────────────────
   { route: 'PUT /returns/:id/resolve', helper: 'resolveReturn', args: ['ret_1', 'APPROVED', undefined], requiredBodyKeys: ['status'] },
   { route: 'PUT /returns/:id/refund-settled', helper: 'settleReturnRefund', args: ['ret_1', 'REF-1', 500, undefined], requiredBodyKeys: ['reference', 'amount'] },
