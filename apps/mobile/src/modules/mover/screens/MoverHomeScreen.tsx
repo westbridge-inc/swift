@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -746,6 +747,7 @@ export function MoverHomeScreen({ navigation }: any) {
         backgroundStyle={{ backgroundColor: dk.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20 }}
         handleIndicatorStyle={{ backgroundColor: dk.faint }}
       >
+        <MapCredits />
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}>
           {/* Status header */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>

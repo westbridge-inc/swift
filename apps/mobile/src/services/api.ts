@@ -528,6 +528,8 @@ export interface TieredEstimate {
   currencyCode: string;
   distanceKm: number;
   durationMin: number;
+  /** Server routing provenance, separate from the native basemap provider. */
+  routeSource?: 'osrm' | 'haversine';
   /** Present on a quote WITH stops only (the multi-stop contract). */
   legs?: EstimateLeg[];
   maxStops?: number;

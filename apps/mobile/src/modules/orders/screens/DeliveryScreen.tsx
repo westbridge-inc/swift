@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
@@ -981,6 +982,7 @@ export function DeliveryScreen() {
           ...elevation.raised,
         }}
       >
+        {initialRegion ? <MapCredits /> : null}
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
           {/* The "#NNNN · held" caption moved onto the map as the reference's
               floating chip — one statement of the state, where it belongs. */}
