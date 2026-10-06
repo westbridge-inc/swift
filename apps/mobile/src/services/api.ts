@@ -569,8 +569,11 @@ export const safetyApi = {
     api.post(`/safety/trips/${orderId}/share`, sendToPhone ? { sendToPhone } : {}),
   revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
   /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
-  monitoringPreference: () => api.get('/safety/monitoring-preference'),
-  setMonitoringPreference: (enabled: boolean) => api.put('/safety/monitoring-preference', { enabled }),
+  monitoringPreference: (session?: AuthSessionSnapshot) => api.get('/safety/monitoring-preference', capturedAuthConfig(session)),
+  setMonitoringPreference: (enabled: boolean, session?: AuthSessionSnapshot) => api.put('/safety/monitoring-preference', { enabled }, capturedAuthConfig(session)),
+  ownedActiveSos: (cursor: string | null, session?: AuthSessionSnapshot) => api.get('/safety/sos/owned-active', capturedAuthConfig(session, { params: cursor ? { cursor } : {} })),
+  getSos: (id: string, session?: AuthSessionSnapshot) => api.get(`/safety/sos/${id}`, capturedAuthConfig(session)),
+  markSafeSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/mark-safe`, {}, capturedAuthConfig(session)),
   listEmergencyContacts: () => api.get('/safety/emergency-contacts'),
   addEmergencyContact: (data: { name: string; phoneE164: string; relationship?: string; priority?: number }) =>
     api.post('/safety/emergency-contacts', data),
@@ -637,13 +640,13 @@ export const safetyApi = {
     lng?: number;
     accuracyM?: number;
     clientIdempotencyKey: string;
-  }) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }),
+  }, session?: AuthSessionSnapshot) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }, capturedAuthConfig(session)),
   /** [REPORT-035 F-035-01] TRIGGER_PENDING → ACTIVE now — "I need help NOW".
    *  The raise opens a short server-side cancel grace; this is the owner's way
    *  to skip the wait instead of depending on the promotion worker. */
-  confirmSos: (id: string) => api.post(`/safety/sos/${id}/confirm`, {}),
+  confirmSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/confirm`, {}, capturedAuthConfig(session)),
   /** Slide-to-cancel during the grace window only; 409 after. */
-  cancelSos: (id: string) => api.post(`/safety/sos/${id}/cancel`, {}),
+  cancelSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/cancel`, {}, capturedAuthConfig(session)),
 };
 
 /** [B15/STORE-001] In-app UGC reporting — Apple 1.2 / Google UGC+CSAE launch
@@ -704,8 +707,8 @@ export const rideApi = {
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
   /** [E19] The passenger's own eyes override the driver-arrival GPS gate. */
   confirmDriverArrival: (id: string) => api.post(`/rides/${id}/confirm-driver-arrival`, {}),
-  sos: (id: string, coords?: { lat: number; lng: number }) =>
-    api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}),
+  sos: (id: string, coords?: { lat: number; lng: number }, session?: AuthSessionSnapshot) =>
+    api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}, capturedAuthConfig(session)),
 };
 
 // Places (mounted at /api/v1/places) — "Where to?" search behind the server-side

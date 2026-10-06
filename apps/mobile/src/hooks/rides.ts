@@ -1,3 +1,4 @@
+import { requireAuthSessionForPrincipal, useAuthStore } from '../stores/authStore';
 import { track } from '../lib/analytics';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { rideApi, type RideClass, type RideRequestBody, type TaxiStopInput, type TieredEstimate } from '../services/api';
@@ -241,8 +242,15 @@ export function useConfirmDriverArrival() {
  *  the local emergency number; this records the incident and pages ops so a
  *  panic is never just a dropped call. Coords help ops locate the rider. */
 export function useRideSos() {
+  const { user, sessionGeneration } = useAuthStore();
+  const owner = { userId: user?.id ?? '', generation: sessionGeneration };
+  const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, coords }: { id: string; coords?: { lat: number; lng: number } }) => unwrap(rideApi.sos(id, coords)),
-    onSuccess: () => track('ride_sos', {}),
+    mutationFn: async ({ id, coords }: { id: string; coords?: { lat: number; lng: number } }) => {
+      const result = await unwrap(rideApi.sos(id, coords, requireAuthSessionForPrincipal(owner)));
+      requireAuthSessionForPrincipal(owner);
+      return result;
+    },
+    onSuccess: () => { track('ride_sos', {}); void qc.invalidateQueries({ queryKey: ['safety'] }); },
   });
 }

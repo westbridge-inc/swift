@@ -278,11 +278,12 @@ export function TonePill({ label, tone = 'neutral', dark }: { label: string; ton
 }
 
 /** Brand-tracked switch (settings rows). */
-export function BrandSwitch({ value, onChange, disabled }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+export function BrandSwitch({ value, onChange, disabled, accessibilityLabel }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean; accessibilityLabel?: string }) {
   return (
     <Switch
       value={value}
       onValueChange={onChange}
+      accessibilityLabel={accessibilityLabel}
       disabled={disabled}
       trackColor={{ true: color.brand[500], false: color.border.subtle }}
       thumbColor={color.white}

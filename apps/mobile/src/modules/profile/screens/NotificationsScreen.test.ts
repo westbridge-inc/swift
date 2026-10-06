@@ -152,6 +152,9 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     ['an order update', { orderId: 'o1', orderNumber: 'SW-1', status: 'ACCEPTED' }, 'Delivery'],
     ['a ride update', { kind: 'ride_queue_matched', orderId: 'o2', audience: 'customer' }, 'Taxi'],
     ['a service-job update', { kind: 'booking_confirmed', jobId: 'j1' }, 'ServiceJobs'],
+    // [73] the taxi watchdog's own payloads (pre-pickup release, in-custody warning)
+    ['a taxi watchdog release', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'PENDING' }, 'Taxi'],
+    ['a taxi watchdog custody warning', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'RIDE_IN_PROGRESS' }, 'Taxi'],
   ])('%s row is a button that navigates through the push table', (_label, data, screen) => {
     const button = pressTheRow(renderRow(row(data)));
     expect(button.props['accessibilityRole']).toBe('button');
