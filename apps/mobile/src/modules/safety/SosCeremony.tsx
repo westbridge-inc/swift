@@ -81,7 +81,9 @@ function SosCeremonyBody({
   const confirm = useConfirmSos();
   const cancel = useCancelSos();
 
-  const { user, sessionGeneration } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   const owner = { userId: user?.id ?? '', generation: sessionGeneration };
   const [alert, setAlert] = useState<SosRaised | null>(null);
   const recovery = useOwnedSosAlert(resumeAlertId ?? alert?.id ?? '');
@@ -351,7 +353,8 @@ function SosCeremonyBody({
 /** Remount presentation at the principal or job boundary. Old callbacks can
  * finish only against the unmounted owner; captured API sessions reject them. */
 export function SosCeremony(props: Parameters<typeof SosCeremonyBody>[0]) {
-  const { user, sessionGeneration } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   const contextId = 'orderId' in props.context ? props.context.orderId : props.context.serviceJobId;
   return <SosCeremonyBody key={`${user?.id ?? 'guest'}:${sessionGeneration}:${contextId}:${props.resumeAlertId ?? ''}`} {...props} />;
 }

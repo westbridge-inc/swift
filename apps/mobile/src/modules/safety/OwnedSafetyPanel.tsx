@@ -44,6 +44,8 @@ function SignedInSafetyPanel() {
   </>;
 }
 export function OwnedSafetyPanel() {
-  const { isAuthenticated, user, sessionGeneration } = useAuthStore();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   return isAuthenticated && user ? <SignedInSafetyPanel key={`${user.id}:${sessionGeneration}`} /> : null;
 }

@@ -241,7 +241,8 @@ export function useConfirmDriverArrival() {
  *  the local emergency number; this records the incident and pages ops so a
  *  panic is never just a dropped call. Coords help ops locate the rider. */
 export function useRideSos() {
-  const { user, sessionGeneration } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   const owner = { userId: user?.id ?? '', generation: sessionGeneration };
   const qc = useQueryClient();
   return useMutation({

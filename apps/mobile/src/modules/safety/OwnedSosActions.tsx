@@ -28,6 +28,7 @@ function OwnedSosActionsBody({ id }: { id: string }) {
 }
 
 export function OwnedSosActions({ id }: { id: string }) {
-  const { user, sessionGeneration } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   return <OwnedSosActionsBody key={`${user?.id ?? 'guest'}:${sessionGeneration}:${id}`} id={id} />;
 }

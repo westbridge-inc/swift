@@ -42,7 +42,10 @@ vi.mock('../../lib/openExternal', () => ({ openExternal: vi.fn() }));
 vi.mock('../../lib/haptics', () => ({ haptic: vi.fn() }));
 vi.mock('../../lib/payLink', () => ({ openPayLink: vi.fn() }));
 vi.mock('../../lib/appQueryPolicy', () => ({ retryRead: () => true }));
-vi.mock('../../stores/authStore', () => ({ useAuthStore: () => ({ isAuthenticated: true, user: { id: 'synthetic-owner' }, sessionGeneration: 1 }), requireAuthSessionForPrincipal: (owner: unknown) => owner }));
+vi.mock('../../stores/authStore', () => {
+  const state = { isAuthenticated: true, user: { id: 'synthetic-owner' }, sessionGeneration: 1 };
+  return { useAuthStore: (select?: (s: typeof state) => unknown) => (select ? select(state) : state), requireAuthSessionForPrincipal: (owner: unknown) => owner };
+});
 vi.mock('../../hooks/customer', () => ({ useProfile: () => ({ data: {}, isLoading: false }), useMyRating: () => ({ data: null }), useLiveOrders: () => ({ data: { total: 0 } }) }));
 vi.mock('../../services/emergencyPolicy', () => ({ useEmergencyPolicy: () => ({ country: 'GY', dial: { kind: 'manual' } }), emergencyDialFor: () => ({ kind: 'manual' }), emergencyDialCopy: () => 'Call your local emergency number.' }));
 vi.mock('../../lib/emergencyPolicy', () => ({ locationAccuracyBand: () => 'none', recordSosLocation: vi.fn(), recordSosTransition: vi.fn(), telUrl: (n: string) => `tel:${n}` }));

@@ -39,6 +39,7 @@ function MonitoringControlBody() {
 }
 
 export function MonitoringControl() {
-  const { user, sessionGeneration } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   return <MonitoringControlBody key={`${user?.id ?? 'guest'}:${sessionGeneration}`} />;
 }

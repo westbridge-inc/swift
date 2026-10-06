@@ -21,7 +21,9 @@ export function ownedSosResult(value: unknown, owner: AuthPrincipalBoundary, id?
   return row;
 }
 function useSafetyOwner() {
-  const { user, sessionGeneration, isAuthenticated } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   return { owner: { userId: user?.id ?? '', generation: sessionGeneration }, enabled: isAuthenticated && !!user?.id };
 }
 export function useMonitoringPreference() {

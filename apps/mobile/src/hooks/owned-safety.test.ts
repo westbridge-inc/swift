@@ -5,7 +5,10 @@ const host = vi.hoisted(() => ({
   refetch: vi.fn(), get: vi.fn(), mark: vi.fn(), list: vi.fn(), read: vi.fn(), write: vi.fn(), invalidate: vi.fn(),
 }));
 vi.mock('../stores/authStore', () => ({
-  useAuthStore: () => ({ user: { id: host.userId }, sessionGeneration: host.generation, isAuthenticated: true }),
+  useAuthStore: (select?: (s: { user: { id: string }; sessionGeneration: number; isAuthenticated: boolean }) => unknown) => {
+    const state = { user: { id: host.userId }, sessionGeneration: host.generation, isAuthenticated: true };
+    return select ? select(state) : state;
+  },
   requireAuthSessionForPrincipal: (owner: { userId: string; generation: number }) => {
     if (owner.userId !== host.userId || owner.generation !== host.generation) throw new Error('Account changed');
     return { ...owner };

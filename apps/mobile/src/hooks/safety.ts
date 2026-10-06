@@ -16,7 +16,8 @@ import { createSosKeyStore } from '../lib/sosKey';
  * everyone else had nothing.
  */
 function useSosPrincipal() {
-  const { user, sessionGeneration } = useAuthStore();
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   return { userId: user?.id ?? '', generation: sessionGeneration };
 }
 
