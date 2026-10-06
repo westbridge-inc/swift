@@ -427,13 +427,37 @@ async function resolveVendor(app: FastifyInstance, userId: string, requestedVend
 }
 
 /** Gate an action on the caller's store role. */
-function requireRole(access: VendorAccess, min: 'MANAGER' | 'OWNER') {
+function requireRole(access: { role: VendorAccessRole }, min: 'MANAGER' | 'OWNER') {
   if (ROLE_RANK[access.role] < ROLE_RANK[min]) {
     throw new AppError(403, 'STAFF_FORBIDDEN',
       min === 'OWNER'
         ? 'Only the store owner can do this'
         : 'This needs a manager — ask the store owner to upgrade your role');
   }
+}
+
+/**
+ * [Row 52] The caller's membership in the store that OWNS this order — not the
+ * store selected in the header — so a manager of one store who is only staff
+ * at another cannot borrow the higher role. resolveOwnedOrder has already
+ * proved the order belongs to one of the caller's stores.
+ */
+async function orderStoreMember(
+  app: FastifyInstance,
+  userId: string,
+  vendorId: string,
+): Promise<{ role: VendorAccessRole; memberId: string }> {
+  const owner = await app.prisma.vendorOwner.findFirst({
+    where: { userId, vendors: { some: { id: vendorId } } },
+    select: { id: true },
+  });
+  if (owner) return { role: 'OWNER', memberId: owner.id };
+  const staff = await app.prisma.vendorStaff.findUnique({
+    where: { vendorId_userId: { vendorId, userId } },
+    select: { id: true, role: true },
+  });
+  if (!staff) throw new AppError(403, 'STAFF_FORBIDDEN', 'You are not a member of this store');
+  return { role: staff.role as VendorAccessRole, memberId: staff.id };
 }
 
 /** The verification gate belongs to the BUSINESS (its owner), not to whoever
@@ -1949,6 +1973,11 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  only (cash is settled at handover). Idempotent. */
   app.post<{ Params: IdParam }>('/orders/:id/confirm-payment', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // [Row 52] Coordinator ruling 5 Oct: OWNER and MANAGER may confirm an MMG
+    // payment; STAFF may not. Checked first, before any read-back or write, so
+    // a refused tap leaves the order exactly as it was.
+    const member = await orderStoreMember(app, request.user.userId, order.vendorId!);
+    requireRole(member, 'MANAGER');
     if (order.paymentMethod !== 'MOBILE_MONEY') {
       throw new AppError(400, 'NOT_MMG', 'Only MMG orders are confirmed here — cash is handled at handover.');
     }
@@ -2058,7 +2087,11 @@ export async function vendorRoutes(app: FastifyInstance) {
         // [DOC-1 §31.6] Every money event is somebody's assertion: who claimed what, when, on what evidence.
         await tx.auditLog.create({ data: {
           userId: request.user.userId, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entity: 'Order', entityId: order.id,
-          changes: { reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor' },
+          changes: {
+            reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor',
+            // [Row 52] who confirmed it, as a store member
+            memberId: member.memberId, memberRole: member.role,
+          },
         } });
         // [S1-6] The disagreement's evidence and the durable notice obligation
         // commit with the claim; the customer is told what the STORE said.
@@ -2101,7 +2134,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /cash-settlements/:id/confirm — "we handed the rider their delivery
    *  fee". First confirm marks the store's half; the rider's confirm settles
-   *  it. Idempotent; any staff can confirm (same as the payment-received button). */
+   *  it. Idempotent; any staff can confirm. */
   app.post<{ Params: IdParam }>('/cash-settlements/:id/confirm', auth, async (request) => {
     const access = await resolveVendor(app, request.user.userId);
     // [W-26] The confirmer states the amount they handed over; the ledger
