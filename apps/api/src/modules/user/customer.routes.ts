@@ -39,7 +39,7 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
-import { AccountService } from './account.service';
+import { AccountService, closesByRequest } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
@@ -812,6 +812,9 @@ export async function customerRoutes(app: FastifyInstance) {
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
         roles: user.roles,
+        // [DELETION-INTEGRITY] What Delete starts for this person: erasure, or a
+        // closure request the support team completes (store or advertiser).
+        accountClosure: await closesByRequest(app.prisma, userId, user.roles) ? 'REQUEST' : 'DELETE',
         customer: {
           id: customer.id,
           totalOrders: customer.totalOrders,
@@ -882,6 +885,13 @@ export async function customerRoutes(app: FastifyInstance) {
 
   app.delete('/account', async (request: AuthRequest, reply) => {
     await requireRecentOtpOrStepUp(app, request);
+    // [DELETION-INTEGRITY] Build 9 (in store review, frozen) says "Your account
+    // has been deleted." and signs out on every success except
+    // PENDING_DOCUMENT_ERASURE, where it shows this server's message. Newer
+    // builds show every receipt by its own message and say so with
+    // ?receipts=v2. Without it the answer uses build 9's words, so build 9
+    // never reports an open account, or an unfinished erasure, as deleted.
+    const modernReceipts = (request.query as Record<string, unknown> | undefined)?.['receipts'] === 'v2';
     const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
       const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
       if (user?.phone !== `deleted:${request.user.userId}`) throw error;
@@ -912,6 +922,15 @@ export async function customerRoutes(app: FastifyInstance) {
         },
       })
       .catch(() => {});
+    if (!modernReceipts && result.status === 'CLOSURE_REQUESTED') {
+      // Not a success to build 9: the account stays open and signed in, and the
+      // request (already recorded) is described in the server's own words.
+      throw new AppError(409, 'ACCOUNT_CLOSURE_REQUESTED', result.message, { status: result.status, ticketId: result.ticketId });
+    }
+    if (!modernReceipts && !result.deleted && result.status !== 'PENDING_DOCUMENT_ERASURE') {
+      // Closed, with some erasure still pending: build 9's own word for that.
+      return { success: true, data: { ...result, status: 'PENDING_DOCUMENT_ERASURE' as const, pendingReason: result.status } };
+    }
     return { success: true, data: result };
   });
 

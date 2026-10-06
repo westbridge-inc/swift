@@ -91,7 +91,7 @@ type Partner = { owner: Actor; vendorId: string; subId: string; san: string };
  * permanent wind-down whose money invariants these journeys exercise. */
 async function closeBusinessAccount(p: Partner) {
   await grantStepUp(app, p.owner.token);
-  const requested = await call('DELETE', '/api/v1/customer/account', p.owner.token);
+  const requested = await call('DELETE', '/api/v1/customer/account?receipts=v2', p.owner.token);
   expect(requested.statusCode, requested.body).toBe(202);
   expect(requested.json().data).toMatchObject({ deleted: false, status: 'CLOSURE_REQUESTED', ticketId: expect.any(String) });
   expect(await sys(() => app.prisma.supportTicket.findUnique({ where: { id: requested.json().data.ticketId } })))

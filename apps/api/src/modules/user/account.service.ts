@@ -39,6 +39,19 @@ export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
  *  only a ticket that carries it. */
 export const ACCOUNT_CLOSURE_CONFIRMED = 'ACCOUNT_CLOSURE_CONFIRMED_IN_APP';
 
+/** The server, not a navigation flag or active role, chooses the business
+ *  closure flow: anyone who owns a store or belongs to an advertiser closes
+ *  through a request the support team completes, keeping sign-in until
+ *  listings, campaigns and obligations are resolved. The profile reports the
+ *  same answer so the app's confirmation copy matches what Delete does. */
+export async function closesByRequest(
+  db: Pick<Prisma.TransactionClient, 'vendorOwner' | 'advertiserMember'>, userId: string, roles: readonly string[],
+): Promise<boolean> {
+  return roles.includes('VENDOR_OWNER')
+    || !!await db.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
+    || !!await db.advertiserMember.findFirst({ where: { userId }, select: { advertiserId: true } });
+}
+
 export class AccountService {
   constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
@@ -194,9 +207,7 @@ export class AccountService {
 
       // The server, not a navigation flag or active role, chooses the business
       // closure flow. Keep sign-in until the support team resolves obligations.
-      if (selfServe && (user.roles.includes('VENDOR_OWNER')
-        || await tx.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
-        || await tx.advertiserMember.findFirst({ where: { userId }, select: { advertiserId: true } }))) {
+      if (selfServe && await closesByRequest(tx, userId, user.roles)) {
         const ticket = await this.closureTicket(tx, userId);
         return { closureTicketId: ticket.id, hold: null, avatarOrphanId: null };
       }

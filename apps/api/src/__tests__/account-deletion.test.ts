@@ -242,7 +242,7 @@ describe('D9-05 — account deletion (erasure)', () => {
       },
     });
 
-    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+    const res = await inject('DELETE', '/api/v1/customer/account?receipts=v2', u.token);
     expect(res.statusCode).toBe(202);
     expect(res.json().data.status).toBe('CLOSURE_REQUESTED');
     expect(await app.prisma.session.count({ where: { userId: u.userId } })).toBe(1);
@@ -272,7 +272,7 @@ describe('D9-05 — account deletion (erasure)', () => {
     });
     advertiserIds.push(adv.id);
 
-    expect((await inject('DELETE', '/api/v1/customer/account', owner.token)).statusCode).toBe(202);
+    expect((await inject('DELETE', '/api/v1/customer/account?receipts=v2', owner.token)).statusCode).toBe(202);
     await new AccountService(app).deleteAccount(owner.userId);
 
     const afterAdv = await app.prisma.advertiser.findUnique({ where: { id: adv.id } });
