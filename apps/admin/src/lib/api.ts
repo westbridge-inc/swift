@@ -1,3 +1,4 @@
+import type { MmgCheckoutSupportDetail, MmgCheckoutSupportPage, MmgCheckoutSupportStatus } from '@swift/types';
 import type { RejectionReasonCode } from './rejection-reasons';
 
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
@@ -334,6 +335,10 @@ export const resolveSupportTicket = (
     method: 'PUT',
     body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
   });
+/** [DELETION-INTEGRITY] Completes an in-app account closure request: the
+ *  server runs the same erasure checks as a person's own deletion. */
+export const completeAccountClosure = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/support/${id}/complete-account-closure`, { method: 'POST', body: JSON.stringify({ reason }), reason });
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.
@@ -812,3 +817,24 @@ export const recordCollectionContact = (
     method: 'POST',
     body: JSON.stringify(body),
   });
+
+// ── MMG payments: support lookup [MMG-CHECKOUT-API.md section 11] ───────────
+// Support finds a partner's MMG weekly-fee payment by the Swift reference,
+// MMG's transaction ID, MMG's reference number or the partner's phone. Both
+// reads are C1: the server records each one (who, which identifier matched,
+// the checkout ids). The shapes are the shared contract in @swift/types.
+export interface MmgCheckoutSearch {
+  q?: string;
+  status?: MmgCheckoutSupportStatus | '';
+  cursor?: string | null;
+}
+export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success: boolean } & MmgCheckoutSupportPage> => {
+  const params = new URLSearchParams();
+  if (search.q?.trim()) params.set('q', search.q.trim());
+  if (search.status) params.set('status', search.status);
+  if (search.cursor) params.set('cursor', search.cursor);
+  const query = params.toString();
+  return apiFetch(`/api/v1/admin/billing/mmg-checkouts${query ? `?${query}` : ''}`);
+};
+export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);

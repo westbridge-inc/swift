@@ -214,7 +214,18 @@ describe('[5.1.1v] a partner deletes their own account', () => {
   it('does not claim completion when partner wind-down fails after cutoff', async () => {
     const p = await makePartner(['MOVER']);
     await app.prisma.deviceToken.create({ data: { userId: p.userId, token: `synthetic-${nanoid(16)}`, platform: 'test' } });
-    const failure = vi.spyOn(app.prisma.vendorOwner, 'findUnique').mockRejectedValueOnce(new Error('synthetic cleanup outage'));
+    // The wind-down runs in its own transaction (main #1393), so the outage is
+    // injected into that transaction's first owner lookup, as before.
+    const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let failed = false;
+    const outage = (tx: any) => new Proxy(tx, { get: (target, key) => key !== 'vendorOwner' ? target[key] : new Proxy(target.vendorOwner, {
+      get: (delegate, method) => method === 'findUnique' && !failed
+        ? () => { failed = true; return Promise.reject(new Error('synthetic cleanup outage')); }
+        : delegate[method],
+    }) });
+    const failure = vi.spyOn(app.prisma, '$transaction').mockImplementation(((work: unknown, options?: unknown) => typeof work === 'function'
+      ? realTransaction((tx: unknown) => (work as (tx: unknown) => unknown)(outage(tx)), options)
+      : realTransaction(work, options)) as never);
     try {
       await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toThrow('synthetic cleanup outage');
     } finally { failure.mockRestore(); }

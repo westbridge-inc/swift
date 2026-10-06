@@ -80,7 +80,7 @@ export const ADMIN_ACTION_CLASSES: Record<AdminActionClass, AdminActionMeaning> 
  * [C-01] The model columns a snapshot may select on. A CLOSED set: adding one
  * is a deliberate edit here, never a string inferred from a route.
  */
-export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code'] as const;
+export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code', 'userId'] as const;
 export type SnapshotUniqueField = (typeof SNAPSHOT_UNIQUE_FIELDS)[number];
 
 export interface AdminRouteEntity {
@@ -147,6 +147,7 @@ const E = {
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
   // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
+  moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
@@ -161,6 +162,7 @@ const E = {
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
   adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
+  paymentConfirmation: { model: 'paymentConfirmationHold', fields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionEvidence'] },
   agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
@@ -177,6 +179,8 @@ const E = {
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
+  // A ticket has no tenant column: its requester must be the caller's tenant.
+  supportTicket: { model: 'supportTicket', fields: ['status', 'resolution', 'resolvedAt', 'resolvedById'], tenantVia: ['user'] },
 } as const satisfies Record<string, AdminRouteEntity>;
 
 /**
@@ -332,7 +336,15 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/agent-payments': c('C0', 'billing.read'),
   'GET /billing/agent-payments/unmatched': c('C0', 'billing.read'),
   'GET /billing/agent-cash-config': c('C0', 'billing.read'),
+  'GET /billing/confirmations': c('C0', 'billing.read'),
+  // [MMG support lookup] A partner's payment, found by any of its ids or the partner's phone: identity, so C1.
+  'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),
+  'GET /billing/mmg-checkouts/:id': c('C1', 'billing.mmg.read'),
+  'POST /billing/confirmations/:id/resolve': c('C4', 'billing.payment.attach', E.paymentConfirmation),
   'GET /billing/collections': c('C0', 'billing.read'),
+  'GET /billing/mover-fees': c('C0', 'billing.read'),
+  'GET /billing/mover-fees/:userId': c('C0', 'billing.read'),
+  'POST /billing/mover-fees/:userId/resolve': c('C4', 'billing.payment.attach', E.moverFee),
   'GET /billing/cash-journal': c('C0', 'billing.read'),
   'GET /billing/settlement-batches': c('C0', 'billing.read'),
   'GET /billing/cash-kpis': c('C0', 'billing.read'),
@@ -416,6 +428,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /audit-logs': c('C1', 'audit.read'),
   'GET /support': c('C1', 'support.read'),
   'PUT /support/:id/resolve': c('C2', 'support.resolve'),
+  // [DELETION-INTEGRITY] Completes an in-app closure request: the account is
+  // closed and de-identified. Consequential and irreversible, so a reason is owed.
+  'POST /support/:id/complete-account-closure': c('C3', 'user.close', E.supportTicket),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),
