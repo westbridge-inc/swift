@@ -882,7 +882,8 @@ export async function driverRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Driver Found!',
-      body: 'Your driver is heading to pick you up. Open your ride to view their details.',
+      // [73 · owner ruling] Car and plate stay in the push: checking the plate before getting in is a safety step.
+      body: `${driver.user.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
       data: taxiNotificationData(id, { status: 'DRIVER_ASSIGNED' }),
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'direct taxi assignment notification failed after commit'));
 

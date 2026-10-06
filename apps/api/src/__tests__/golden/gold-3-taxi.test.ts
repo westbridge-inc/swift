@@ -512,6 +512,12 @@ describe('GOLD-3 · TAXI-02 — accept → en-route → arrived', () => {
     const order = await orderRow(ride.id);
     expect({ status: order.status, driver: order.driverId }).toEqual({ status: 'DRIVER_ASSIGNED', driver: winner.driverId });
     expect((await logs(ride.id)).filter((l) => l.status === 'DRIVER_ASSIGNED')).toHaveLength(1);
+    // [73 · owner ruling] The rider's "Driver Found!" push names the car and its plate: checking the
+    // plate before getting in is a safety step, and the push goes only to this rider about their driver.
+    const found = await sys(() => app.prisma.notification.findFirst({ where: { userId: customer.userId, title: 'Driver Found!' } }));
+    expect(found?.body).toContain('Silver Toyota Allion');
+    expect(found?.body).toContain(winner.plate);
+    expect(found?.data).toMatchObject({ orderType: 'TAXI', rideId: ride.id, orderId: ride.id, audience: 'customer', status: 'DRIVER_ASSIGNED' });
     expect({ pointer: (await driverRow(winner.driverId)).currentRideId, available: (await driverRow(winner.driverId)).isAvailable })
       .toEqual({ pointer: ride.id, available: false });
     expect({ pointer: (await driverRow(other.driverId)).currentRideId, available: (await driverRow(other.driverId)).isAvailable })
