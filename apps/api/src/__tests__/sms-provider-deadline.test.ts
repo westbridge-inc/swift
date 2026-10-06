@@ -11,6 +11,9 @@ import { getChannels } from '../providers/notifications/channels';
 const accountSid = `AC${'a'.repeat(32)}`;
 
 function configure() {
+  // [L04 · SMS allowlist] Outside production the real adapter texts only listed
+  // numbers. This suite tests the adapter's deadline, so it lists the number it texts.
+  vi.stubEnv('SMS_RECIPIENT_ALLOWLIST', '+5926000000');
   vi.stubEnv('NOTIFICATION_PROVIDER', 'twilio');
   vi.stubEnv('TWILIO_ACCOUNT_SID', accountSid);
   vi.stubEnv('TWILIO_API_KEY_SID', `SK${'b'.repeat(32)}`);
