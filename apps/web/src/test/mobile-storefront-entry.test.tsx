@@ -22,6 +22,8 @@ vi.mock('../../../mobile/src/navigation/CustomerStack', () => ({ CustomerStack: 
 vi.mock('../../../mobile/src/modules/mover/MoverStack', () => ({ MoverStack: () => null }));
 vi.mock('../../../mobile/src/modules/vendor/VendorStack', () => ({ VendorStack: () => null }));
 vi.mock('../../../mobile/src/modules/advertiser/AdvertiserStack', () => ({ AdvertiserStack: () => null }));
+// The signed-in safety panel (an owner's live SOS) is native UI mounted beside the navigator.
+vi.mock('../../../mobile/src/modules/safety/OwnedSafetyPanel', () => ({ OwnedSafetyPanel: () => null }));
 vi.mock('../../../mobile/node_modules/@react-navigation/native', () => ({ NavigationContainer: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 vi.mock('../../../mobile/node_modules/@react-navigation/native-stack', () => ({ createNativeStackNavigator: () => ({
   Navigator: ({ children }: { children: React.ReactNode }) => <div data-testid="routes">{children}</div>,
