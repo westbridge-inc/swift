@@ -674,9 +674,11 @@ export async function vendorRoutes(app: FastifyInstance) {
     // real divergence here: this copy was missing the grace-lapse check, so a
     // PAST_DUE vendor whose grace had run out kept working orders until the
     // billing sweep flipped them SUSPENDED. Now all three actor gates agree.
-    // The subscription arm is billing's: it gates NEW work only.
-    if (work === 'IN_FLIGHT') return;
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
+    // The subscription arm is billing's: it gates NEW work only. (Read either
+    // way, so every order step keeps one shape between its order read and its
+    // write; the golden race suites hold the route at this read.)
+    if (work === 'IN_FLIGHT') return;
     const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
