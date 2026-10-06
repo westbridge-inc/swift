@@ -33,6 +33,31 @@ Twilio configuration. `deploy/preflight.sh` reads a candidate env file (and
 the store with `--secrets-dir`) and runs that same boot guard, but cannot prove
 credentials are valid or that delivery is enabled at Twilio.
 
+## Non-production: the recipient allowlist
+
+On any deployment that is not production (staging, loadtest) the real Twilio
+adapter texts **only** the numbers in `SMS_RECIPIENT_ALLOWLIST` (E.164,
+separated by commas, spaces or new lines). A text to any other number is not
+sent; the API answers as if it were, and the counter
+`swift_sms_recipient_not_allowlisted_total` goes up (the number is never
+logged). This keeps automated testers, crawlers and store reviewers from making
+a test deployment text strangers.
+
+- Store the list in the encrypted store (`sudo swift-secrets set
+  SMS_RECIPIENT_ALLOWLIST`) and wire `SMS_RECIPIENT_ALLOWLIST_FILE=/run/secrets/SMS_RECIPIENT_ALLOWLIST`
+  in the deployment's `deploy/.env`. Phone numbers are personal data: never put
+  them in an env file, the repository or a ticket.
+- **Empty or unset = SMS is OFF.** The boot log then says `SMS is OFF: no
+  allowlisted recipients`; with a list it says how many numbers (never which).
+  Check that line after every staging deploy.
+- A malformed entry stops boot (the message gives its position, not its value).
+- **Production refuses to boot** while either `SMS_RECIPIENT_ALLOWLIST` or its
+  `_FILE` form is set, so this can never silently stop real users' codes.
+- Known non-production property: an allowlisted number takes a real Twilio
+  round trip (and gets the ordinary "couldn't send" error if Twilio fails),
+  while any other number answers at once. On a test deployment the allowlist is
+  the test team, so this is accepted; production has no allowlist at all.
+
 ## Messaging Service setup
 
 A Messaging Service bundles a sender pool, its own geographic permissions and

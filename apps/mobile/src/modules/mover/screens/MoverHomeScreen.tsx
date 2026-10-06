@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -50,6 +51,7 @@ import { offerEarnings } from './offer-earnings';
 import { canAdjustFare } from '../../../kit';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
+import { RelayTasks } from '../RelayTasks';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -745,6 +747,7 @@ export function MoverHomeScreen({ navigation }: any) {
         backgroundStyle={{ backgroundColor: dk.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20 }}
         handleIndicatorStyle={{ backgroundColor: dk.faint }}
       >
+        <MapCredits />
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}>
           {/* Status header */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -916,6 +919,9 @@ export function MoverHomeScreen({ navigation }: any) {
               ) : null}
             </DCard>
           ) : null}
+
+          {/* [AF-MOB-006] Handoffs Swift asked this rider to take over. Riders only. */}
+          {kind === 'RIDER' ? <RelayTasks enabled={online} onTakenOver={() => active.refetch?.()} /> : null}
 
           {/* Active job / available jobs / states */}
           {activeJob ? (
