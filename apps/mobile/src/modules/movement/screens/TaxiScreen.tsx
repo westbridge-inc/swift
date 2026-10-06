@@ -1675,9 +1675,14 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               A live location link with no stated end is one a person forgets
               they created — so the window and the stop control sit together,
               because they answer the same worry. */}
-          <View style={{ marginTop: space.md, gap: space.sm }}>
+          {activeShare || ownedShares.data?.length ? (
+            <View style={{ marginTop: space.md, gap: space.sm }}>
               {activeShare ? <T variant="caption" tone="muted">{shareStatusLine(activeShare)}</T> : null}
-              {ownedShares.data?.length ? <T variant="caption" tone="muted">{ownedShares.data.length} active links for this ride.</T> : null}
+              {ownedShares.data?.length ? (
+                <T variant="caption" tone="muted">
+                  {ownedShares.data.length === 1 ? '1 live link for this ride.' : `${ownedShares.data.length} live links for this ride.`}
+                </T>
+              ) : null}
               <PillButton
                 label="Stop all sharing"
                 variant="outline"
@@ -1686,6 +1691,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
                 onPress={() => revokeMutation.mutate()}
               />
             </View>
+          ) : null}
           {shareError ? (
             <T variant="caption" tone="error" style={{ marginTop: space.sm }}>{shareError}</T>
           ) : null}
