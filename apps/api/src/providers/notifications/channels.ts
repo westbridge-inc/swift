@@ -10,6 +10,7 @@ import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio
 import { SmtpEmailProvider } from './smtp-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
 import { sealReviewChannels } from './review-seal';
+import { guardNonProductionSms } from './sms-recipient-allowlist';
 
 export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
 export interface SmsOptions { handoff?: NotificationHandoff }
@@ -455,7 +456,9 @@ export function getChannels(): NotificationChannels {
     case 'dev':
       return sealReviewChannels({ sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() });
     case 'twilio':
-      return sealReviewChannels({ sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: getEmailProvider() });
+      // [L04 · SMS allowlist] Outside production a real provider texts only allowlisted numbers.
+      // The review seal stays the outermost layer every send passes.
+      return sealReviewChannels({ sms: guardNonProductionSms(new TwilioSmsProvider()), push: withPushRetry(getPushProvider()), email: getEmailProvider() });
     default:
       throw new Error('Unknown NOTIFICATION_PROVIDER');
   }

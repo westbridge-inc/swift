@@ -335,6 +335,21 @@ export const resolveSupportTicket = (
     method: 'PUT',
     body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
   });
+// [AF-MOB-006] Custody recovery after pickup: the operations side of an owned
+// case. Directing, naming the relay rider and confirming a return are C3 —
+// each carries the operator's stated reason on the one reason transport.
+export const fetchCustodyCases = (open = true) =>
+  apiFetch(`/api/v1/admin/custody-cases?open=${open ? 'true' : 'false'}`);
+export const fetchCustodyCase = (id: string) => apiFetch(`/api/v1/admin/custody-cases/${id}`);
+export const claimCustodyCase = (id: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/claim`, { method: 'POST', body: '{}' });
+export const directCustodyCase = (id: string, outcome: 'SUPPORT_HOLD' | 'RELAY_REQUIRED' | 'RETURN_REQUIRED', reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/direct`, { method: 'POST', body: JSON.stringify({ outcome }), reason });
+export const assignCustodyRelay = (id: string, riderId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/relay`, { method: 'POST', body: JSON.stringify({ riderId }), reason });
+export const confirmCustodyReturn = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/confirm-return`, { method: 'POST', body: '{}', reason });
+
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.

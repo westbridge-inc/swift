@@ -10,7 +10,13 @@ import { getChannels } from '../providers/notifications/channels';
 
 const accountSid = `AC${'a'.repeat(32)}`;
 
+// Outside production the real adapter texts only allowlisted numbers
+// (sms-recipient-allowlist.ts). This suite tests the adapter's deadline, so it
+// lists the number it texts.
+const RECIPIENT = '+5926000000';
+
 function configure() {
+  vi.stubEnv('SMS_RECIPIENT_ALLOWLIST', RECIPIENT);
   vi.stubEnv('NOTIFICATION_PROVIDER', 'twilio');
   vi.stubEnv('TWILIO_ACCOUNT_SID', accountSid);
   vi.stubEnv('TWILIO_API_KEY_SID', `SK${'b'.repeat(32)}`);
@@ -60,7 +66,7 @@ describe('Twilio SMS whole-request deadline', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       let outcome = 'still pending';
-      const send = getChannels().sms.sendSms('+5926000000', 'test')
+      const send = getChannels().sms.sendSms(RECIPIENT, 'test')
         .then(() => { outcome = 'unexpected success'; }, (error: Error) => { outcome = error.message; });
       await vi.waitUntil(() => headersReceived, { timeout: 2_000, interval: 5 });
       expect(headersSent).toBe(true);
@@ -88,7 +94,7 @@ describe('Twilio SMS whole-request deadline', () => {
     });
     vi.stubGlobal('fetch', fetchStub);
     let outcome = 'still pending';
-    const send = getChannels().sms.sendSms('+5926000000', 'test')
+    const send = getChannels().sms.sendSms(RECIPIENT, 'test')
       .then(() => { outcome = 'unexpected success'; }, (error: Error) => { outcome = error.message; });
     await untilAdapterReached(fetchStub);
     await vi.advanceTimersByTimeAsync(7_999);
@@ -110,7 +116,7 @@ describe('Twilio SMS whole-request deadline', () => {
     else if (outcome === 'invalid body') fetchStub.mockResolvedValue(new Response('not json', { status: 201 }));
     else fetchStub.mockResolvedValue(new Response(JSON.stringify({ sid: `SM${'a'.repeat(32)}` }), { status: 201 }));
     vi.stubGlobal('fetch', fetchStub);
-    const send = getChannels().sms.sendSms('+5926000000', 'test');
+    const send = getChannels().sms.sendSms(RECIPIENT, 'test');
     if (outcome === 'success') await expect(send).resolves.toEqual({ ref: `SM${'a'.repeat(32)}` });
     else await expect(send).rejects.toThrow(/^Twilio SMS /);
     expect(vi.getTimerCount()).toBe(0);
