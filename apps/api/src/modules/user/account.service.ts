@@ -424,18 +424,24 @@ export class AccountService {
       });
     }
 
-    // 2. [Owner decision 2026-10-05] Reviews this person wrote stay counted —
-    //    score and tags keep every store's rating and averages unchanged — but
-    //    free text can identify them and automatic redaction is unreliable, so
-    //    the comment AND the store's reply to it are deleted, as is any queued
-    //    copy of the comment. Idempotent, so a re-sweep repeats it safely.
+    // 2. [Owner decision + coordinator ruling 2026-10-05] Ratings this person
+    //    wrote, and ratings others wrote about them, stay counted — score and
+    //    tags keep every rating, average and history unchanged — but free text
+    //    can name or describe them and automatic redaction is unreliable, so
+    //    the comment AND any reply to it are deleted, as is any queued copy of
+    //    the comment. Idempotent, so a re-sweep repeats it safely.
     await prisma.rating.updateMany({
-      where: { raterId: userId, OR: [{ comment: { not: null } }, { response: { not: null } }, { respondedBy: { not: null } }] },
+      where: {
+        AND: [
+          { OR: [{ raterId: userId }, { rateeId: userId }] },
+          { OR: [{ comment: { not: null } }, { response: { not: null } }, { respondedBy: { not: null } }] },
+        ],
+      },
       data: { comment: null, response: null, respondedAt: null, respondedBy: null },
     });
     await prisma.$executeRaw`
       UPDATE rating_outbox SET payload = payload - 'comment'
-      WHERE "ratingId" IN (SELECT id FROM ratings WHERE "raterId" = ${userId})
+      WHERE "ratingId" IN (SELECT id FROM ratings WHERE "raterId" = ${userId} OR "rateeId" = ${userId})
         AND jsonb_typeof(payload) = 'object' AND payload ? 'comment'
       /* account-erasure-review-text */
     `;
