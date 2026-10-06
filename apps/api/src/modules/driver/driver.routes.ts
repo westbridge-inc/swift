@@ -1,5 +1,6 @@
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import type { FastifyInstance } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
@@ -880,8 +881,8 @@ export async function driverRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Driver Found!',
-      body: `${driver.user.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
-      data: { orderId: id, status: 'DRIVER_ASSIGNED' },
+      body: 'Your driver is heading to pick you up. Open your ride to view their details.',
+      data: taxiNotificationData(id, { status: 'DRIVER_ASSIGNED' }),
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'direct taxi assignment notification failed after commit'));
 
     return { success: true, data: responseOrder };
@@ -1050,7 +1051,7 @@ export async function driverRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Finding you another driver',
       body: 'Your driver had to cancel — we’re matching you with the nearest available driver now.',
-      data: { orderId: id, status: 'PENDING' },
+      data: taxiNotificationData(id, { status: 'PENDING' }),
     });
 
     let reDispatched = false;
@@ -1108,7 +1109,7 @@ export async function driverRoutes(app: FastifyInstance) {
       body: etaMinutes
         ? `Your driver is on the way. Arriving in ~${etaMinutes} minutes.`
         : 'Your driver is on the way to pick you up.',
-      data: { orderId: id, status: 'DRIVER_EN_ROUTE', eta: etaMinutes },
+      data: taxiNotificationData(id, { status: 'DRIVER_EN_ROUTE', ...(etaMinutes !== null ? { eta: etaMinutes } : {}) }),
     });
 
     return { success: true, data: updatedOrder };
@@ -1182,7 +1183,7 @@ export async function driverRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Driver Arrived',
       body: `Your driver has arrived. Please share your ride PIN to begin the trip.`,
-      data: { orderId: id, status: 'DRIVER_ARRIVED' },
+      data: taxiNotificationData(id, { status: 'DRIVER_ARRIVED' }),
     });
 
     return { success: true, data: updatedOrder };
@@ -1298,7 +1299,7 @@ export async function driverRoutes(app: FastifyInstance) {
       body: previous.taxiDuration
         ? `Your ride has started. Estimated arrival in ~${previous.taxiDuration} minutes.`
         : 'Your ride has started. Enjoy the trip!',
-      data: { orderId: id, status: 'RIDE_IN_PROGRESS' },
+      data: taxiNotificationData(id, { status: 'RIDE_IN_PROGRESS' }),
     });
 
     return { success: true, data: updatedOrder };
@@ -1370,7 +1371,7 @@ export async function driverRoutes(app: FastifyInstance) {
           type: 'ORDER_UPDATE',
           title: 'Ride Complete',
           body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
-          data: { orderId: id, status: 'DELIVERED' },
+          data: taxiNotificationData(id, { status: 'DELIVERED' }),
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
       }
     }
@@ -1436,7 +1437,7 @@ export async function driverRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Ride Complete',
       body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
-      data: { orderId: id, status: 'DELIVERED' },
+      data: taxiNotificationData(id, { status: 'DELIVERED' }),
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
 
     return { success: true, data: updatedOrder };

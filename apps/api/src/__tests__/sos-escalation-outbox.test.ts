@@ -41,7 +41,7 @@ beforeAll(async () => { await prisma.$connect(); sos = new SosService(prisma, io
 beforeEach(() => { resetDevChannelLog(); sos.observer = {}; });
 afterAll(async () => {
   await prisma.evidenceBundle.deleteMany({ where: { sosAlertId: { in: alertIds } } }).catch(() => {});
-  await prisma.notification.deleteMany({ where: { data: { path: ['sosAlertId'], string_contains: '' }, title: { contains: 'SOS' } } }).catch(() => {});
+  await prisma.notification.deleteMany({ where: { OR: alertIds.map((id) => ({ data: { path: ['sosAlertId'], equals: id } })) } }).catch(() => {});
   await prisma.sosAlert.deleteMany({ where: { id: { in: alertIds } } });
   await prisma.emergencyContact.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
