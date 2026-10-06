@@ -11,7 +11,7 @@ import { ACCESS_COOKIE, REFRESH_COOKIE, SIGNUP_CONTINUATION_COOKIE, resetBrowser
 import { devChannelLog } from '../providers/notifications/channels';
 import { loginWithOtp } from './helpers/otp';
 import { grantStepUp } from './helpers/step-up';
-import { PASSWORD_FAILURES_PER_ACCOUNT } from '../modules/auth/password-attempts';
+import { PASSWORD_FAILURES_PER_ACCOUNT, passwordPausedNoticeKeys, resetPasswordAttemptBudget } from '../modules/auth/password-attempts';
 import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
@@ -37,8 +37,9 @@ const SPRAY_PHONE = `${PREFIX}005`;
 const FOREIGN_PHONE = '+447700900414';
 const OUTAGE_PHONE = `${PREFIX}006`;
 const SLOW_NOTICE_PHONE = `${PREFIX}007`;
+const REPEAT_PHONE = `${PREFIX}008`;
 const OUTAGE_UNKNOWN_PHONE = `${PREFIX}099`;
-const ALL_PHONES = [LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE, OUTAGE_PHONE, SLOW_NOTICE_PHONE];
+const ALL_PHONES = [LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE, OUTAGE_PHONE, SLOW_NOTICE_PHONE, REPEAT_PHONE];
 const PASSWORD = 'credentials-password-1';
 const NEW_PASSWORD = 'credentials-password-2';
 const ATTACKER_IP = '203.0.113.7';
@@ -173,7 +174,8 @@ describe('[MASTER-054 × MASTER-056] the ceiling-trip attempt is not slower than
       const trip = post('password/login', { phone: SLOW_NOTICE_PHONE, password: 'slow-last-wrong' }, { remoteAddress: '198.19.9.9' });
       const answered = await Promise.race([trip.then((r) => r.statusCode), new Promise((resolve) => setTimeout(() => resolve('held'), 2000))]);
       expect(answered).toBe(401);
-      expect(held).toHaveBeenCalledTimes(1);
+      // The notice is on its way (it reaches the held delivery after the answer was given).
+      await expect.poll(() => held.mock.calls.length, { timeout: 2000 }).toBe(1);
     } finally {
       release();
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -181,6 +183,39 @@ describe('[MASTER-054 × MASTER-056] the ceiling-trip attempt is not slower than
     }
     await expect.poll(async () => (await app.prisma.notification.findMany({ where: { userId: user.id } }))
       .filter((n) => (n.data as { kind?: string } | null)?.kind === 'password_sign_in_paused').length, { timeout: 5000 }).toBe(1);
+  });
+});
+
+describe('[MASTER-056 · review r2 S3-1] the pause notice cannot be used to keep sounding a phone', () => {
+  it('pauses re-tripped within a day give no further notice; a later one lands in the inbox without a push', async () => {
+    const user = await createUser(REPEAT_PHONE);
+    const notices = async () => (await app.prisma.notification.findMany({ where: { userId: user.id } }))
+      .filter((n) => (n.data as { kind?: string } | null)?.kind === 'password_sign_in_paused');
+    const send = vi.spyOn(NotificationService.prototype, 'send');
+    const trip = async (round: number) => {
+      // A fresh budget generation stands in for the 15-minute pause expiring.
+      await resetPasswordAttemptBudget(app.redis, user.id);
+      for (let i = 0; i < PASSWORD_FAILURES_PER_ACCOUNT; i += 1) {
+        const attempt = await post('password/login', { phone: REPEAT_PHONE, password: `repeat-${round}-${i}-wrong` }, { remoteAddress: `198.20.${round}.${i + 1}` });
+        expect(attempt.statusCode).toBe(401);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    };
+    try {
+      await trip(1);
+      await expect.poll(async () => (await notices()).length, { timeout: 5000 }).toBe(1);
+      await trip(2);
+      await trip(3);
+      expect(await notices()).toHaveLength(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      // A day later (its daily mark gone), a new pause is recorded quietly: an inbox row, no push.
+      await app.redis.del(passwordPausedNoticeKeys(user.id).daily);
+      await trip(4);
+      await expect.poll(async () => (await notices()).length, { timeout: 5000 }).toBe(2);
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      send.mockRestore();
+    }
   });
 });
 

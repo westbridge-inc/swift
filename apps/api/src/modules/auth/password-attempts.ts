@@ -143,3 +143,9 @@ export async function resetPasswordAttemptBudget(redis: Redis, userId: string): 
   // Outlives every count and lock it supersedes (both are at most 15 minutes).
   await redis.expire(generationKey(userId), 24 * 60 * 60);
 }
+
+/** [review r2 S3-1] Marks that limit the pause notice: at most one per account
+ *  per day, and only the first in a month makes a sound. */
+export function passwordPausedNoticeKeys(userId: string): { daily: string; recent: string } {
+  return { daily: `pwauth:{${userId}}:paused-notice:day`, recent: `pwauth:{${userId}}:paused-notice:month` };
+}

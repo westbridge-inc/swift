@@ -43,8 +43,8 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 import {
   clearPasswordFailures,
   isPasswordSignInLocked,
+  passwordPausedNoticeKeys,
   passwordBudgetSubject,
-  PASSWORD_ACCOUNT_LOCK_S,
   recordPasswordFailure,
   resetPasswordAttemptBudget,
 } from './password-attempts';
@@ -607,17 +607,30 @@ export class AuthService {
     void this.sendPasswordPausedNotice(userId);
   }
 
+  /**
+   * [review r2 S3-1] Anyone who knows a number can re-trip the pause every 15
+   * minutes, so the notice is limited: at most ONE per account per day, and
+   * only the first in a month is a pushed (sounding) notice — later ones are a
+   * quiet inbox row with no push. A budget-store failure sends nothing.
+   */
   private async sendPasswordPausedNotice(userId: string): Promise<void> {
+    const title = 'Password sign-in paused';
+    const body = 'We paused password sign-in on your account for 15 minutes after many wrong attempts. You can still sign in with a code.';
     try {
-      const { NotificationService } = await import('../notification/notification.service');
-      await new NotificationService(this.app.prisma, this.app.io).send({
-        userId,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Password sign-in paused',
-        body: 'We paused password sign-in on your account for 15 minutes after many wrong attempts. You can still sign in with a code.',
-        data: { kind: 'password_sign_in_paused' },
-        dedupeKey: `password-sign-in-paused:${Math.floor(Date.now() / (PASSWORD_ACCOUNT_LOCK_S * 1000))}`,
-      });
+      const keys = passwordPausedNoticeKeys(userId);
+      if ((await this.app.redis.set(keys.daily, '1', 'EX', 24 * 60 * 60, 'NX')) !== 'OK') return;
+      const loud = (await this.app.redis.set(keys.recent, '1', 'EX', 30 * 24 * 60 * 60, 'NX')) === 'OK';
+      if (loud) {
+        const { NotificationService } = await import('../notification/notification.service');
+        await new NotificationService(this.app.prisma, this.app.io).send({
+          userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' },
+        });
+      } else {
+        // Inbox only: persisted, never fanned out to a push.
+        await this.app.prisma.notification.create({
+          data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } },
+        });
+      }
     } catch (error) {
       this.app.log.error({ err: error, userId }, 'password-sign-in-paused notice failed');
     }
