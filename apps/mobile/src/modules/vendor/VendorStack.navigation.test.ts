@@ -285,6 +285,16 @@ describe('SX383 real navigation container and vendor handoffs', () => {
     expect(newInput.value).toBe('08:00');
   });
 
+  it('[DELETION-INTEGRITY] the Account row opens personal data and closure in the real navigator', async () => {
+    await mount(); await openAccount();
+    expect(host.querySelector('personaldatascreen')).toBeNull();
+    await act(async () => button('Personal data & account closure').click());
+    const route = navigation.getCurrentRoute()!;
+    expect(route.name).toBe('PersonalData');
+    expect(route.params).toEqual({ closureRequest: true });
+    expect(host.querySelector('personaldatascreen')).not.toBeNull();
+  });
+
   it.each([
     ['Replace code', '/vendor/qr/regenerate', false], ['Turn off', '/vendor/qr/deactivate', false],
     ['Replace code', '/vendor/qr/regenerate', true], ['Turn off', '/vendor/qr/deactivate', true],

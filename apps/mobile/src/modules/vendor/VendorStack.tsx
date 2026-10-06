@@ -166,7 +166,6 @@ function MenuStackNav() {
       <Stack.Screen name="VendorMenu" component={VendorMenuScreen} />
       {canEdit ? <Stack.Screen name="VendorItemEditor" component={VendorItemEditorScreen} /> : null}
       {canEdit ? <Stack.Screen name="VendorBulkImport" component={VendorBulkImportScreen} /> : null}
-      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }
@@ -251,6 +250,10 @@ export function VendorStack() {
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO
           route to a human. Registration, not a rewrite. */}
       <Stack.Screen name="GetHelp" component={GetHelpScreen} />
+      {/* [DELETION-INTEGRITY] Personal data and account closure, reached from
+          the Account tab. Registered on THIS stack: a screen inside the Menu
+          tab's nested stack is not reachable from a sibling tab. */}
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }
