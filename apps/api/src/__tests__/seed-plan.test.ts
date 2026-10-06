@@ -252,6 +252,34 @@ describe('[R048-005] a production target is a ceremony', () => {
     }
   });
 
+  it('[PROD-PATH] a used approval cannot come back in another form: armored, or re-signed with another hash, it is the same approval', async () => {
+    await setIdentity('production');
+    try {
+      const desired = desiredFor(40);
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const plan = await buildSeedPlan(prisma, URL_, desired);
+      const request = planApprovalRequest(plan);
+      const bare = both(request);
+      expect(await applySeedPlan(prisma, URL_, desired, plan, { approvals: bare, approverKeys: PINNED })).toMatchObject({ applied: 1 });
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const again = await buildSeedPlan(prisma, URL_, desired);
+      // The same signatures exactly as `ssh-keygen -Y sign` prints them: armored.
+      const armored = (name: string, hashAlg?: string): SignedApproval => ({
+        approver: name,
+        request: Buffer.from(request, 'utf8').toString('base64'),
+        signature: execFileSync('ssh-keygen', ['-q', '-Y', 'sign', '-f', join(KEYDIR, name), '-n', 'swift-seed-approval', ...(hashAlg ? ['-O', `hashalg=${hashAlg}`] : [])], { input: request, encoding: 'utf8' }),
+      });
+      const armoredLines = [armored('alice'), armored('bob')];
+      expect(armoredLines[0]!.signature).toContain('-----BEGIN SSH SIGNATURE-----');
+      await expect(applySeedPlan(prisma, URL_, desired, again, { approvals: armoredLines, approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_REPLAYED' });
+      // Re-signed with sha256 instead of sha512: a different valid signature, the same approval.
+      await expect(applySeedPlan(prisma, URL_, desired, again, { approvals: [armored('alice', 'sha256'), armored('bob', 'sha256')], approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_REPLAYED' });
+      expect(await prisma.platformConfig.findUnique({ where: { key: KEY } })).toBeNull();
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
   it('[PROD-PATH] approvals expire, at most 72 hours ahead, and bind the plan and the database', async () => {
     await setIdentity('production');
     try {

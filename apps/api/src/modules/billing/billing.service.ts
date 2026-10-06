@@ -13,6 +13,7 @@ import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription }
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider, mmgDisabled, mmgRailPaused } from '../../providers/mmg/mmg-provider';
+import { consumeMmgReactivation, mmgReactivationPeriodEnd } from './mmg-pause';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
@@ -90,7 +91,6 @@ type InstrumentLookup =
   | { status: 'not_found' }
   | { status: 'unknown'; reason: string }
   | { status: 'held' };
-const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 /** Local request review threshold. It cannot expire an authorized provider
  * instruction: only a confirmed terminal provider outcome can do that. */
 const MMG_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
@@ -912,6 +912,9 @@ export class BillingService {
    * Returns null in that case.
    */
   private async reserveMmgIntent(sub: SubWithRelations, amount: number, reference: string, now = new Date()): Promise<{ id: string } | null> {
+    // [PROD-PATH] The period the fee buys is fixed on the intent (a payment's
+    // period is immutable once a confirmation is attached).
+    const { periodEnd: intentPeriodEnd } = await mmgReactivationPeriodEnd(this.prisma as unknown as Prisma.TransactionClient, sub.id, sub.nextBillingDate);
     try {
       return await this.prisma.subscriptionPayment.create({
         data: {
@@ -923,7 +926,7 @@ export class BillingService {
           failureRaw: { providerEffect: 'NOT_SENT', providerRail: sub.billingMethod },
           expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
           periodStart: sub.nextBillingDate,
-          periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+          periodEnd: intentPeriodEnd,
         },
         select: { id: true },
       });
@@ -1239,7 +1242,7 @@ export class BillingService {
             instrumentId,
             expiresAt: new Date(now.getTime() + MMG_REQUEST_TTL_MS),
             periodStart: sub.nextBillingDate,
-            periodEnd: new Date(sub.nextBillingDate.getTime() + WEEK_MS),
+            periodEnd: (await mmgReactivationPeriodEnd(tx, sub.id, sub.nextBillingDate)).periodEnd,
             ...(maySend
               ? { status: 'UNKNOWN' as const, failureRaw: { providerEffect: 'AUTHORIZED', providerRail: 'CARD', authorizedAt: now.toISOString() } }
               : {
@@ -2072,7 +2075,15 @@ export class BillingService {
     if (!this.successfulChargeAuthorityAllowsAdvance(authority, sub)) return 'skipped';
     const current = { ...sub, status: authority.status } as SubWithRelations;
     const periodStart = sub.nextBillingDate;
-    const periodEnd = new Date(periodStart.getTime() + WEEK_MS);
+    // [PROD-PATH] Owner ruling: the first fee after MMG comes back covers the
+    // weeks MMG was off and the week in progress — only that week is billed.
+    // A settled intent keeps the period fixed when it was reserved.
+    const coverage = await mmgReactivationPeriodEnd(tx, sub.id, periodStart);
+    const reactivated = coverage.reactivated;
+    const settledRow = settlePaymentId
+      ? await tx.subscriptionPayment.findUnique({ where: { id: settlePaymentId }, select: { periodStart: true, periodEnd: true } })
+      : null;
+    const periodEnd = settledRow && settledRow.periodStart.getTime() === periodStart.getTime() ? settledRow.periodEnd : coverage.periodEnd;
 
     // THE PREPAID SPEND — first, and inside this transaction, so the money and
     // the week it buys share one fate [PAY-1 M0 S0]. Still the atomic
@@ -2145,6 +2156,7 @@ export class BillingService {
     // The obligation advances on the success record just booked, in the
     // currency this settlement was pinned to (never relabelled).
     await advanceDunningObligation(tx, sub.id, periodEnd, now, sub.currencyCode);
+    if (reactivated) await consumeMmgReactivation(tx, sub.id);
 
     if (amount > 0) {
       const rail = paymentRef === 'prepaid' ? 'prepaid' : sub.billingMethod === 'CARD' ? 'CARD' : 'EXTERNAL';
@@ -3569,6 +3581,8 @@ export class BillingService {
    * snapshot), so a repeat with the same snapshot lands the same row.
    */
   private async finishExhaustedGrace(sub: SubWithRelations, now: Date): Promise<'pending' | 'suspended' | null> {
+    // [PROD-PATH] Nothing suspends an MMG-rail partner while MMG is off.
+    if (mmgRailPaused(sub)) return 'pending';
     const result = await this.prisma.$transaction(async (tx) => {
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
       const clock = await currentDunningClock(tx, sub.id, now);
@@ -3595,6 +3609,10 @@ export class BillingService {
     periodKey: string,
   ): Promise<FailureOutcome> {
     await requireBillingEffectsReady(tx);
+    // [PROD-PATH] The one place a failure is recorded, dunned or suspended:
+    // never for an MMG-rail partner while MMG is off. Every caller is already
+    // walled; this refusal rolls back whatever transaction reached it.
+    if (mmgRailPaused(sub)) throw new AppError(409, 'MMG_DISABLED', 'MMG is switched off: an MMG-rail weekly fee is paused, never failed.');
     const failedKey = `failed:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: failedKey }, select: { id: true } });
     if (!recorded) {

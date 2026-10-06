@@ -884,7 +884,7 @@ describe('[PROD-PATH] production needs an on-call phone and an email sender', ()
     expect(() => assertSafeBootConfig({ ...good, [name]: undefined })).toThrow(new RegExp(name));
   });
 
-  it.each(['SMTP_HOST', 'SMTP_USER', 'EMAIL_FROM'])('refuses a blank %s (spaces only), by name', (name) => {
+  it.each(['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM'])('refuses a blank %s (spaces only), by name', (name) => {
     for (const blank of [' ', '   ', '\t']) {
       expect(() => assertSafeBootConfig({ ...good, [name]: blank }), JSON.stringify(blank)).toThrow(new RegExp(name));
     }

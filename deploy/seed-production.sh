@@ -48,6 +48,15 @@ env_value() { grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA (the exact revision pilot-up.sh deployed)"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
+# [PROD-PATH] One reading of deploy/.env. Compose takes the LAST of two lines
+# for the same name and honours `export NAME=` lines; every check here reads
+# the first plain `NAME=` line. So the file must be plain: each line blank, a
+# comment, or `NAME=value` at the start of the line, and each name once.
+# Anything else is refused (the line number or name, never a value).
+env_shape="$(awk '{ l = $0; sub(/^[ \t]+/, "", l); if (l == "" || substr(l, 1, 1) == "#") next
+  if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*=/) { print "line " NR " is not a plain NAME=value setting (no export, no indentation)"; exit }
+  k = $0; sub(/=.*/, "", k); if (seen[k]++) { print k " is set twice (Compose would take the last)"; exit } }' "$HERE/.env")"
+[ -z "$env_shape" ] || die "deploy/.env: $env_shape; fix the file so it has one plain setting per name"
 # [PROD-PATH] One configuration: Compose fills ${NAME} from this shell before
 # deploy/.env, and the checks here read deploy/.env. Only the ceremony's own
 # inputs (SEED_*) and SWIFT_TAG (set below) may come from the shell.

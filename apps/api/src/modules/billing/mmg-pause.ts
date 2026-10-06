@@ -26,6 +26,42 @@ import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, proje
 // ---------------------------------------------------------------------------
 
 export const MMG_PAUSE_CLOCKS_KEY = 'billing.mmg_pause.clocks';
+/** Per subscription: the instant MMG came back for it (owner ruling, 5 Oct). */
+export const MMG_REACTIVATED_PREFIX = 'billing.mmg_pause.reactivated:';
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Owner ruling (5 Oct 2026): on MMG reactivation only the CURRENT week is
+// billed. The weeks while MMG was off — when Swift could not take payment —
+// are not back-billed. When the pause releases a clock it records, per
+// subscription, the instant MMG came back. The next settled weekly fee for
+// that subscription is ONE fee whose period runs from the obligation's due
+// date to the first weekly boundary after that instant (so it covers the
+// off weeks and the week in progress), and the record is consumed in the
+// same transaction. The obligation clock accepts exactly that shape: a paid
+// period that starts at its due date and covers it (billing_obligation_proof).
+// ---------------------------------------------------------------------------
+
+/** The period end one settled fee buys: a week, or — the first time after an
+ *  MMG reactivation — through the week in progress at reactivation. */
+export async function mmgReactivationPeriodEnd(tx: Tx, subscriptionId: string, periodStart: Date): Promise<{ periodEnd: Date; reactivated: boolean }> {
+  let periodEnd = new Date(periodStart.getTime() + WEEK_MS);
+  const row = await tx.platformConfig.findUnique({ where: { key: `${MMG_REACTIVATED_PREFIX}${subscriptionId}` }, select: { value: true } });
+  const at = typeof row?.value === 'string' ? new Date(row.value) : null;
+  if (!at || !Number.isFinite(at.getTime())) return { periodEnd, reactivated: false };
+  while (periodEnd.getTime() <= at.getTime()) periodEnd = new Date(periodEnd.getTime() + WEEK_MS);
+  return { periodEnd, reactivated: true };
+}
+
+/** The reactivation record is used once, by the fee that settled with it. */
+export async function consumeMmgReactivation(tx: Tx, subscriptionId: string): Promise<void> {
+  await tx.platformConfig.deleteMany({ where: { key: `${MMG_REACTIVATED_PREFIX}${subscriptionId}` } });
+}
+
+async function recordReactivation(tx: Tx, subscriptionId: string, now: Date): Promise<void> {
+  const key = `${MMG_REACTIVATED_PREFIX}${subscriptionId}`;
+  await tx.platformConfig.upsert({ where: { key }, update: { value: now.toISOString() }, create: { key, value: now.toISOString() } });
+}
 
 export interface MmgPauseTick { paused: boolean; pausedNow: number; resumedNow: number; held: number }
 
@@ -92,6 +128,9 @@ export async function syncMmgPauseClock(
           const row = await tx.billingDunningClock.findUnique({ where: { id: clockId }, select: { subscriptionId: true } });
           const forget = async () => writeHeld(tx, (await heldClocks(tx)).filter((c) => c !== clockId));
           if (!row) { await forget(); return 0; }
+          // Whatever happens to the clock below, MMG is back for this
+          // subscription now: its next fee covers only the current week.
+          await recordReactivation(tx, row.subscriptionId, now);
           const clock = await currentDunningClock(tx, row.subscriptionId, now);
           if (clock.id !== clockId || !clock.pausedAt) { await forget(); return 0; }
           const otherHold = clock.authorityHoldReason

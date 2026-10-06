@@ -37,9 +37,9 @@ export function smtpConfigFromEnv(env: Record<string, string | undefined> = proc
   const pass = env['SMTP_PASS'] ?? '';
   const from = env['EMAIL_FROM'] ?? '';
   const mode = (env['SMTP_TLS'] ?? (port === 465 ? 'implicit' : 'starttls')) as SmtpConfig['tls'];
-  // [PROD-PATH] Blank is missing: a host, user or sender of only spaces
+  // [PROD-PATH] Blank is missing: a host, user, password or sender of only spaces
   // cannot send anything, so it is refused like an unset one.
-  const missing = [!host.trim() && 'SMTP_HOST', !(Number.isInteger(port) && port > 0 && port < 65536) && 'SMTP_PORT', !user.trim() && 'SMTP_USER', !pass && 'SMTP_PASS', !from.trim() && 'EMAIL_FROM'].filter(Boolean);
+  const missing = [!host.trim() && 'SMTP_HOST', !(Number.isInteger(port) && port > 0 && port < 65536) && 'SMTP_PORT', !user.trim() && 'SMTP_USER', !pass.trim() && 'SMTP_PASS', !from.trim() && 'EMAIL_FROM'].filter(Boolean);
   if (missing.length) throw new Error(`EMAIL_PROVIDER=smtp needs ${missing.join(', ')}`);
   if (!['implicit', 'starttls', 'none'].includes(mode)) throw new Error(`SMTP_TLS must be implicit, starttls or none (got ${mode})`);
   if (mode === 'none' && isProduction(env)) throw new Error('SMTP_TLS=none is refused in production — the mailbox password would cross the wire in clear');

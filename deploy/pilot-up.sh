@@ -43,6 +43,15 @@ env_setting() {
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
+# [PROD-PATH] One reading of deploy/.env. Compose takes the LAST of two lines
+# for the same name and honours `export NAME=` lines; every check here reads
+# the first plain `NAME=` line. So the file must be plain: each line blank, a
+# comment, or `NAME=value` at the start of the line, and each name once.
+# Anything else is refused (the line number or name, never a value).
+env_shape="$(awk '{ l = $0; sub(/^[ \t]+/, "", l); if (l == "" || substr(l, 1, 1) == "#") next
+  if ($0 !~ /^[A-Za-z_][A-Za-z0-9_]*=/) { print "line " NR " is not a plain NAME=value setting (no export, no indentation)"; exit }
+  k = $0; sub(/=.*/, "", k); if (seen[k]++) { print k " is set twice (Compose would take the last)"; exit } }' "$HERE/.env")"
+[ -z "$env_shape" ] || die "deploy/.env: $env_shape; fix the file so it has one plain setting per name"
 # [PROD-PATH] One configuration. Compose fills every ${NAME} in its files
 # from THIS shell before deploy/.env, but every check below reads deploy/.env.
 # A name exported here (NODE_ENV=development, WEB_HOST, …) would make Compose
@@ -184,6 +193,15 @@ if [ "$PILOT_ENV" = production ]; then
     case "$(lower "$served_name")" in
       *staging*) die "PILOT_ENV=production refuses the staging name $served_name: a production stack never answers a staging name" ;;
     esac
+    # Nor a test-environment name: a label that is (or starts) uat, test,
+    # sandbox, dev, qa or demo.
+    read -r -a name_labels <<< "$(lower "$served_name" | tr '.' ' ')"
+    for name_label in "${name_labels[@]}"; do
+      case "$name_label" in
+        uat | uat-* | uat[0-9]* | test | test-* | test[0-9]* | testing | sandbox | sandbox-* | dev | dev-* | dev[0-9]* | qa | qa-* | demo | demo-*)
+          die "PILOT_ENV=production refuses the test-environment name $served_name" ;;
+      esac
+    done
   done
   case "$(env_setting STORAGE_PROVIDER)" in
     s3 | r2) ;;

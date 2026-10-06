@@ -178,7 +178,12 @@ export function verifyApprovals(
     if (expiresAt - now.getTime() > APPROVAL_MAX_LIFETIME_MS) throw new ApprovalRefused('APPROVAL_TOO_LONG', `approval by ${a.approver} is valid for more than 72 hours`);
     const signer = verifySshSig(a.signature, Buffer.from(requestText, 'utf8'));
     if (!signer.equals(who.keyBlob)) throw new ApprovalRefused('APPROVAL_INVALID', `approval by ${a.approver} is not signed with ${a.approver}'s pinned key`);
-    out.push({ approver: who.name, fingerprint: who.fingerprint, consumption: `approval:${sha256hex(Buffer.from(a.signature.replace(/\s+/g, ''), 'base64'))}`, expires: req.expires, nonce: req.nonce });
+    // Single use is keyed on WHAT was approved and BY WHOM — the signer's
+    // pinned key and the exact request (which carries its random nonce) —
+    // never on the text the operator pasted: an armored, re-wrapped or
+    // re-hashed (sha256 vs sha512) form of the same approval is the same
+    // approval, and is consumed once.
+    out.push({ approver: who.name, fingerprint: who.fingerprint, consumption: `approval:${sha256hex(`${who.fingerprint}\n${requestText}`)}`, expires: req.expires, nonce: req.nonce });
   }
   if (new Set(out.map((v) => v.fingerprint)).size < 2 || new Set(out.map((v) => v.approver)).size < 2) {
     throw new ApprovalRefused('APPROVERS_NOT_DISTINCT', 'the approvals must come from two different people (two different pinned keys)');

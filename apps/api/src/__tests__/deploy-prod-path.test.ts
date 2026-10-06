@@ -299,6 +299,66 @@ describe('[PROD-PATH] pilot-up.sh checks the configuration Compose will actually
   });
 });
 
+describe('[PROD-PATH] deploy/.env is read once, the way Compose reads it: one plain line per name', () => {
+  const asFile = (lines: string[]) => lines.join('\n') + '\n';
+  const PROD_LINES = Object.entries(PRODUCTION).map(([k, v]) => `${k}=${v}`);
+  function runPilotRaw(text: string, opts: { args?: string[] } = {}) {
+    const here = preparePilot();
+    writeFileSync(join(here, '.env'), text);
+    const res = spawnSync('bash', [join(here, 'pilot-up.sh'), ...(opts.args ?? [SHA])], {
+      encoding: 'utf8', timeout: 120_000,
+      env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, GIT_HEAD: SHA, STORE_NAMES: STORE.join(' '),
+        HOST_IPS: `${HOST_IP} `, DNS_MAP: `${PROD_HOST}=${HOST_IP}` },
+    });
+    return { ...res, calls: calls() };
+  }
+  it.each([
+    ['a duplicate NODE_ENV (Compose takes the last)', [...PROD_LINES, 'NODE_ENV=development'], 'NODE_ENV is set twice'],
+    ['an export line', [...PROD_LINES, 'export WEB_ALLOW_SITE_TOKENS=1'], 'is not a plain NAME=value setting'],
+    ['an indented setting', [...PROD_LINES, '  WEB_HOST=staging.example.org'], 'is not a plain NAME=value setting'],
+    ['a YAML-style setting', [...PROD_LINES, 'WEB_HOST: staging.example.org'], 'is not a plain NAME=value setting'],
+  ])('pilot-up refuses %s, before anything runs, naming no value', (_what, lines, message) => {
+    const r = runPilotRaw(asFile(lines));
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(message);
+    expect(r.stderr).not.toContain('development');
+    expect(r.calls).toEqual([]);
+  });
+  it('comments, blank and indented comment lines are fine', () => {
+    const r = runPilotRaw(asFile(['# settings', '', '   # indented comment', ...PROD_LINES]));
+    expect(r.status, r.stderr).toBe(0);
+  });
+  it('seed-production refuses a duplicate or exported setting too', () => {
+    for (const extra of ['NODE_ENV=development', 'export NODE_ENV=development']) {
+      writeFileSync(log, '');
+      const here = join(tmp, 'repo', 'deploy');
+      mkdirSync(here, { recursive: true });
+      for (const f of ['seed-production.sh', 'docker-compose.seed.yml', 'docker-compose.yml']) copyFileSync(join(DEPLOY, f), join(here, f));
+      writeFileSync(join(here, '.env'), asFile(['PILOT_ENV=production', 'NODE_ENV=production', extra]));
+      const r = spawnSync('bash', [join(here, 'seed-production.sh'), SHA], { encoding: 'utf8', env: {
+        PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, GIT_HEAD: SHA, SEED_ADMIN_PHONE: '+5920400000', SEED_FX_GYD_PER_USD: '209' } });
+      expect(r.status, extra).not.toBe(0);
+      expect(r.stderr, extra).toMatch(/is set twice|is not a plain NAME=value setting/);
+      expect(calls(), extra).toEqual([]);
+    }
+  });
+  it.each(['uat.example.org', 'api.test.example.org', 'sandbox-api.example.org', 'dev.example.org', 'api.qa.example.org', 'demo-1.example.org'])(
+    'production refuses the test-environment name %s', (name) => {
+      const r = runPilot({ ...PRODUCTION, API_HOST: name }, { env: { DNS_MAP: `${name}=${HOST_IP}` } });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain('test-environment name');
+      expect(r.calls).toEqual([]);
+    },
+  );
+  it('ordinary production names are not mistaken for test ones', () => {
+    for (const name of ['api.example.org', 'contest.example.org', 'developer-api.example.org']) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, API_HOST: name }, { env: { DNS_MAP: `${name}=${HOST_IP}` } });
+      expect(r.status, `${name}: ${r.stderr}`).toBe(0);
+    }
+  });
+});
+
 describe('[PROD-PATH] pilot-up.sh --data-only: the database without the API', () => {
   it('migrates on production before DNS, and never starts, stops or builds the API, worker, website or Caddy', () => {
     const r = runPilot({ ...PRODUCTION, WEB_HOST: 'example.org' }, { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } });

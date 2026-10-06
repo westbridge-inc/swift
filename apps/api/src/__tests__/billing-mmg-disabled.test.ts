@@ -172,6 +172,42 @@ describe('[PROD-PATH] MMG_DRIVER=disabled: the weekly fee on the MMG rail is pau
     expect(after).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
   });
 
+  it('owner ruling: after weeks with MMG off, reactivation bills ONE fee that covers the off weeks and the current week', async () => {
+    sandboxResetMmg();
+    const due = new Date(Date.now() - 20 * DAY); // three weeks fell due while MMG was off
+    const subId = await makeVendorSub(due);
+    await whileOff(async () => {
+      await syncMmgPauseClock(app.prisma, new Date(), OFF);
+      await billing.runBillingCycle();
+    });
+    const reactivatedAt = new Date();
+    await syncMmgPauseClock(app.prisma, reactivatedAt, ON);
+    for (let i = 0; i < 4; i += 1) {
+      await billing.runBillingCycle();
+      await billing.pollPendingMmgCharges();
+    }
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({ status: 'CAPTURED', periodStart: due, periodEnd: new Date(due.getTime() + 21 * DAY) });
+    expect(Number(payments[0]!.amount)).toBe(12000);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_SUCCESS' } })).toBe(1);
+    const after = await sub(subId);
+    expect(after.nextBillingDate.getTime()).toBe(due.getTime() + 21 * DAY);
+    expect(after.nextBillingDate.getTime()).toBeGreaterThan(reactivatedAt.getTime());
+    expect(await app.prisma.billingDunningClock.findUnique({ where: { subscriptionId: subId } })).toMatchObject({ dueAt: new Date(due.getTime() + 21 * DAY) });
+    // The reactivation is used once: the next fee is an ordinary week.
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: `billing.mmg_pause.reactivated:${subId}` } })).toBeNull();
+  });
+
+  it('nothing records a failure for an MMG-rail store while MMG is off, even a path past the walls', async () => {
+    const due = new Date(Date.now() - 60_000);
+    const subId = await makeVendorSub(due);
+    await expect(whileOff(async () => (billing as any).applyFailedCharge(await subWithRelations(subId), 12000, 'declined', new Date(), due.toISOString().slice(0, 10))))
+      .rejects.toMatchObject({ code: 'MMG_DISABLED' });
+    expect(await sub(subId)).toMatchObject({ status: 'ACTIVE', failedAttempts: 0 });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } })).toBe(0);
+  });
+
   it('spends no prepaid balance while paused, and spends it once MMG is on', async () => {
     const due = new Date(Date.now() - 60_000);
     const subId = await makeVendorSub(due);

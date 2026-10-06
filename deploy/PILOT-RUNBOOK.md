@@ -508,7 +508,10 @@ name is never identity: a signature must verify under the key pinned for that
 name, and two approvals need two different pinned keys. Approvals expire (24
 hours as printed, never more than 72) and are single-use: each one used is
 recorded in the append-only privileged-change audit, so replaying it is
-refused even after the data is rolled back.
+refused even after the data is rolled back, in any encoding of the same
+signature (keyed on the signer and the request, not the pasted text).
+Replacing the whole database with an older backup would also bring back
+approvals consumed since; the expiry (72 hours at most) bounds that window.
 
 1. Once per approver, on their own computer (choose a passphrase):
 
@@ -535,6 +538,8 @@ refused even after the data is rolled back.
        ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < request.txt
 
    Never sign for someone else: the control is two people with two keys.
+   Never export SEED_APPROVE_YES in a shell: it skips the typed yes and is
+   for the tests only.
 
 4. The operator re-runs with both lines, against the same deployment (the
    request is bound to this database's fingerprint, which includes the
@@ -774,10 +779,12 @@ explicitly off. Beyond the earlier guards:
 - **MMG.** `MMG_DRIVER=live` with every credential and the verified
   reference round-trip, or exactly `MMG_DRIVER=disabled` with
   `MMG_CHECKOUT_ENABLED=0`. With MMG off, the weekly fee on the MMG rail is
-  deferred, the way a card is while the card rail is off. Nothing is
-  charged, failed or dunned, and the week is billed once MMG is switched on.
-  The poller leaves every row untouched, and any other MMG call refuses with
-  MMG_DISABLED.
+  paused: nothing is charged (not even prepaid balance), failed, dunned,
+  suspended, nudged or churned, and the partner's grace does not run (its
+  dunning clock is paused). When MMG is switched on, only the current week
+  is billed: one fee covers the weeks MMG was off and the week in progress
+  (owner ruling, 5 Oct). The poller leaves every row untouched, and any MMG
+  call refuses with MMG_DISABLED.
 - **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
