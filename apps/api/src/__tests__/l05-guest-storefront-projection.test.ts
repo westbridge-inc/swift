@@ -11,13 +11,14 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // Row 77. The public storefront (GET /customer/vendors/:id) is a guest read.
 // Categories, items, options, images and hours ship an explicit allowlist:
 // no tenant ids, owner ids, exact stock counts or thresholds, SKUs, barcodes,
-// the internal load integer, sales counters or audit timestamps.
+// the internal load integer or audit timestamps. (Per-item `totalOrdered`
+// stays: the app build under store review sorts its best-seller row by it.)
 // ---------------------------------------------------------------------------
 
 const CATEGORY_KEYS = ['description', 'id', 'imageUrl', 'items', 'name', 'sortOrder'];
 const ITEM_KEYS = [
   'allergens', 'basePrice', 'bookingConfig', 'customerPrice', 'description', 'dietaryTags', 'fulfillment',
-  'id', 'imageUrl', 'isAvailable', 'isPopular', 'name', 'optionGroups', 'sortOrder', 'stockQuantity', 'unit',
+  'id', 'imageUrl', 'isAvailable', 'isPopular', 'name', 'optionGroups', 'sortOrder', 'stockQuantity', 'totalOrdered', 'unit',
 ];
 const OPTION_GROUP_KEYS = ['id', 'isRequired', 'maxSelect', 'minSelect', 'name', 'options', 'sortOrder'];
 const OPTION_KEYS = ['additionalPrice', 'id', 'isAvailable', 'isDefault', 'name', 'sortOrder'];
@@ -31,6 +32,8 @@ let vendorId: string;
 let tenantId: string;
 let countedItemId: string;
 let soldOutItemId: string;
+let hiddenCategoryId: string;
+let hiddenItemId: string;
 
 const SKU = `SKU-${nanoid(8)}`;
 const BARCODE = `BC${nanoid(10)}`;
@@ -77,6 +80,11 @@ beforeAll(async () => {
   await app.prisma.option.create({ data: { optionGroupId: group.id, name: 'Large', additionalPrice: 200, isDefault: false } });
   await app.prisma.vendorImage.create({ data: { vendorId, url: 'https://example.invalid/shelf.jpg', caption: 'Front' } });
   await app.prisma.operatingHours.create({ data: { vendorId, dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' } });
+  const hiddenCat = await app.prisma.category.create({ data: { vendorId, name: 'Switched Off Shelf', sortOrder: 1, isActive: false } });
+  hiddenCategoryId = hiddenCat.id;
+  hiddenItemId = (await app.prisma.item.create({
+    data: { vendorId, categoryId: hiddenCat.id, name: 'Hidden Shelf Item', basePrice: 500, isAvailable: true },
+  })).id;
 });
 
 afterAll(async () => {
@@ -128,7 +136,7 @@ describe('[row 77] guest storefront projection', () => {
     for (const secret of [tenantId, SKU, BARCODE, 'rice-internal', vendorOwnerId, userId]) {
       expect(text, secret).not.toContain(secret);
     }
-    for (const key of ['tenantId', 'vendorId', 'categoryId', 'sku', 'barcode', 'bulkUnits', 'lowStockThreshold', 'totalOrdered', 'autoHiddenAt', 'substitutionGroup', 'createdAt', 'updatedAt', 'optionGroupId', 'itemId']) {
+    for (const key of ['tenantId', 'vendorId', 'categoryId', 'sku', 'barcode', 'bulkUnits', 'lowStockThreshold', 'autoHiddenAt', 'substitutionGroup', 'createdAt', 'updatedAt', 'optionGroupId', 'itemId']) {
       expect(text, key).not.toContain(`"${key}"`);
     }
 
@@ -139,5 +147,13 @@ describe('[row 77] guest storefront projection', () => {
     expect(soldOut.stockQuantity).toBe(0);
     expect(counted.basePrice).toBe(1200);
     expect(counted.customerPrice).toBe(1200);
+  });
+
+  it('a category the store switched off, and its items, are not on the public page', async () => {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/customer/vendors/${vendorId}` });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toContain(hiddenCategoryId);
+    expect(res.body).not.toContain(hiddenItemId);
+    expect(res.body).not.toContain('Switched Off Shelf');
   });
 });

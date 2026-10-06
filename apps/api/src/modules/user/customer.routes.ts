@@ -1489,8 +1489,9 @@ export async function customerRoutes(app: FastifyInstance) {
       : false;
 
     // [Row 77] Field-by-field guest allowlist (storefront-projection.ts) —
-    // never a spread of the raw category/item rows.
-    const categories = vendor.categories.map(publicStorefrontCategory);
+    // never a spread of the raw category/item rows. A category the store has
+    // switched off is not on its public page.
+    const categories = vendor.categories.filter((cat) => cat.isActive).map(publicStorefrontCategory);
 
     // Distance & ETA
     let distanceKm: number | null = null;

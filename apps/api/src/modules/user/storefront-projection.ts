@@ -5,7 +5,7 @@
  * used to spread raw category and item rows into the response, which shipped
  * tenant ids, exact stock counts and alert thresholds, SKUs and barcodes, the
  * internal load integer (`bulkUnits`, which the item schema says never crosses
- * the wire), sales counts and audit timestamps. Every row below is built field
+ * the wire) and audit timestamps. Every row below is built field
  * by field, so a column added to the schema later stays private until someone
  * decides to publish it here.
  */
@@ -49,6 +49,7 @@ interface ItemRow {
   stockQuantity: number | null;
   dietaryTags: string[];
   allergens: string[];
+  totalOrdered: number;
   sortOrder: number;
   optionGroups: OptionGroupRow[];
 }
@@ -108,6 +109,11 @@ export function publicStorefrontItem(item: ItemRow) {
     stockQuantity: publicStockQuantity(item.stockQuantity),
     dietaryTags: item.dietaryTags,
     allergens: item.allergens,
+    // Kept on purpose: the store app build under review (1.0.0 build 9) sorts
+    // its "Best sellers" row by this field. The store-level `totalOrders` is
+    // already public on the same page. Replace with a rank once build 9 is
+    // superseded.
+    totalOrdered: item.totalOrdered,
     sortOrder: item.sortOrder,
     optionGroups: item.optionGroups.map(publicOptionGroup),
   };
