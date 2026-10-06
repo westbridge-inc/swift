@@ -361,8 +361,11 @@ export const customerApi = {
     api.get('/customer/account/export', capturedAuthConfig(session)),
   requestAccountClosure: (session?: AuthSessionSnapshot) =>
     api.post('/customer/account/closure-request', {}, capturedAuthConfig(session)),
+  // receipts=v2: this app shows every deletion receipt by its own message, so
+  // the server may answer a closure request or a pending erasure as such. An
+  // app that does not declare it is answered in the older build's words.
   deleteAccount: (session?: AuthSessionSnapshot) =>
-    api.delete('/customer/account', capturedAuthConfig(session)),
+    api.delete('/customer/account', capturedAuthConfig(session, { params: { receipts: 'v2' } })),
   switchRole: (role: string, session?: AuthSessionSnapshot) =>
     api.post('/customer/switch-role', { role }, capturedAuthConfig(session)),
   // In-app support / dispute channel.

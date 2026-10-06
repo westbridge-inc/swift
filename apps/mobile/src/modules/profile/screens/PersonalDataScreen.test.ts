@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   owner: { userId: 'subject-a', generation: 1 },
   deleteAccount: vi.fn(), requestAccountClosure: vi.fn(), logout: vi.fn(), success: vi.fn(),
+  profile: { firstName: 'Synthetic', lastName: 'Subject' } as Record<string, unknown>,
 }));
 vi.mock('react', async (original) => ({
   ...await original<object>(), useEffect: () => undefined, useState: (value: unknown) => [value, vi.fn()],
@@ -16,7 +17,7 @@ vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({}),
   useMutation: (options: { mutationFn: () => unknown }) => ({ mutate: options.mutationFn }),
 }));
-vi.mock('../../../hooks/customer', () => ({ useProfile: () => ({ data: { firstName: 'Synthetic', lastName: 'Subject' } }) }));
+vi.mock('../../../hooks/customer', () => ({ useProfile: () => ({ data: mocks.profile }) }));
 vi.mock('../../../services/api', () => ({ customerApi: { deleteAccount: mocks.deleteAccount, requestAccountClosure: mocks.requestAccountClosure } }));
 vi.mock('../../../stores/authStore', () => ({
   AuthSessionBoundaryError: class extends Error {},
@@ -33,7 +34,14 @@ function button(node: any): any {
   if (node.type === 'PillButton' && ['Delete my account', 'Request account closure'].includes(node.props.label)) return node;
   for (const child of [node.props?.children].flat(Infinity)) { const found = button(child); if (found) return found; }
 }
-beforeEach(() => vi.clearAllMocks());
+/** Every string rendered inside nodes of this kit type. */
+function textOf(node: any, type: string, inside = false): string[] {
+  if (typeof node === 'string') return inside ? [node] : [];
+  if (!node || typeof node !== 'object') return [];
+  const here = inside || node.type === type;
+  return [node.props?.children].flat(Infinity).flatMap((child) => textOf(child, type, here));
+}
+beforeEach(() => { vi.clearAllMocks(); mocks.profile = { firstName: 'Synthetic', lastName: 'Subject' }; });
 
 describe('account deletion confirmation', () => {
   it('shows the pending erasure response and closes the local session', async () => {
@@ -70,5 +78,29 @@ describe('account deletion confirmation', () => {
     await button(PersonalDataScreen()).props.onPress();
     expect(mocks.success).toHaveBeenCalledExactlyOnceWith('Your account has been deleted.');
     expect(mocks.logout).toHaveBeenCalledExactlyOnceWith(mocks.owner);
+  });
+
+  it('a store or advertiser owner on the customer profile is asked to confirm a closure request, not a deletion', async () => {
+    // [DS744 S3] The server opens a closure request for them and keeps the
+    // account; the confirmation must not promise erasure that will not happen.
+    mocks.profile = { ...mocks.profile, accountClosure: 'REQUEST' };
+    const message = 'Your account closure request is received. Track it in Get help.';
+    mocks.requestAccountClosure.mockResolvedValue({ data: { data: { deleted: false, status: 'CLOSURE_REQUESTED', message } } });
+    const navigate = vi.fn();
+    const tree = PersonalDataScreen({ navigation: { navigate } });
+    expect(textOf(tree, 'PopupTitle')).toEqual(['Request account closure?']);
+    expect(textOf(tree, 'PopupCard').join(' ')).not.toMatch(/cannot be undone|starts erasing/);
+    await button(tree).props.onPress();
+    expect(mocks.requestAccountClosure).toHaveBeenCalledWith(mocks.owner);
+    expect(mocks.deleteAccount).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith('GetHelp');
+    expect(mocks.logout).not.toHaveBeenCalled();
+  });
+
+  it('a person whose Delete erases the account sees the deletion wording', () => {
+    mocks.profile = { ...mocks.profile, accountClosure: 'DELETE' };
+    const tree = PersonalDataScreen();
+    expect(textOf(tree, 'PopupTitle')).toEqual(['Delete your account?']);
+    expect(textOf(tree, 'PopupCard').join(' ')).toMatch(/cannot be undone/);
   });
 });

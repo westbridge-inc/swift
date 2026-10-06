@@ -23,10 +23,14 @@ const GUTTER = space['2xl'];
 // Kit Personal Data (50): avatar, labeled fields, save. Phone is the account
 // key (read-only); the avatar comes from the mandatory signup selfie.
 export function PersonalDataScreen({ route, navigation }: any = {}) {
-  const closureRequest = route?.params?.closureRequest === true;
   const qc = useQueryClient();
   const stepUp = useStepUp();
   const profile = useProfile<any>();
+  // A store or advertiser owner closes by a request the support team
+  // completes. The server says so on the profile (the same rule its delete
+  // applies), so the customer profile's confirmation never promises erasure
+  // that will not happen. The business screens also pass the flag.
+  const closureRequest = route?.params?.closureRequest === true || profile.data?.accountClosure === 'REQUEST';
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const logoutIfCurrent = useAuthStore((s) => s.logoutIfCurrent);
 
