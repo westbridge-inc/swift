@@ -460,6 +460,26 @@ async function orderStoreMember(
   return { role: staff.role as VendorAccessRole, memberId: staff.id };
 }
 
+/** [Row 52] Coordinator ruling 5 Oct: OWNER and MANAGER confirm MMG payments. */
+const CONFIRM_PAYMENT_MIN_ROLE = 'MANAGER' as const;
+
+/** The flag the board and the order screen read to show the confirm button. */
+function canConfirmPayment(role: VendorAccessRole | undefined): boolean {
+  return role !== undefined && ROLE_RANK[role] >= ROLE_RANK[CONFIRM_PAYMENT_MIN_ROLE];
+}
+
+/** The caller's role at each of their stores, for per-order flags on a board
+ *  that may span several stores (an owner owns them all; staff roles differ
+ *  store by store). */
+async function storeRoles(app: FastifyInstance, userId: string, access: VendorAccess): Promise<Map<string, VendorAccessRole>> {
+  if (access.ownerId) return new Map(access.vendorIds.map((id) => [id, 'OWNER' as const]));
+  const rows = await app.prisma.vendorStaff.findMany({
+    where: { userId, vendorId: { in: access.vendorIds } },
+    select: { vendorId: true, role: true },
+  });
+  return new Map(rows.map((r) => [r.vendorId, r.role as VendorAccessRole]));
+}
+
 /** The verification gate belongs to the BUSINESS (its owner), not to whoever
  *  is logged in — a verified store stays verified when staff work in it. */
 async function vendorOwnerUserId(app: FastifyInstance, vendorId: string): Promise<string> {
@@ -1535,6 +1555,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The response-SLA deadline rides on the read so the board's accept-clock
     // drains toward the auto-cancel cut-off the server actually enforces.
     const respondOpts = { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 };
+    const roles = await storeRoles(app, request.user.userId, access);
     // [S1 response-shaping] a terminal order no longer hands floor staff the
     // customer's phone, the rider's phone, or the delivery address/GPS — the
     // live order keeps all of it, which is the only thing a handover needs.
@@ -1542,6 +1563,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
       respondBy: vendorRespondBy(order, respondOpts),
+      canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
     }));
 
     return { success: true, ...paginatedResponse(data, total, pagination) };
@@ -1555,7 +1577,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const respondBy = vendorRespondBy(order, { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 });
     // [S1 response-shaping] same redaction as the board — closed order, no
     // customer contact, rider contact, or delivery destination.
-    return { success: true, data: redactCustomerContact({ ...order, respondBy }) };
+    const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
+    return { success: true, data: redactCustomerContact({ ...order, respondBy, canConfirmPayment: canConfirmPayment(role) }) };
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
@@ -1977,7 +2000,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // payment; STAFF may not. Checked first, before any read-back or write, so
     // a refused tap leaves the order exactly as it was.
     const member = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    requireRole(member, 'MANAGER');
+    requireRole(member, CONFIRM_PAYMENT_MIN_ROLE);
     if (order.paymentMethod !== 'MOBILE_MONEY') {
       throw new AppError(400, 'NOT_MMG', 'Only MMG orders are confirmed here — cash is handled at handover.');
     }

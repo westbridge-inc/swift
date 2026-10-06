@@ -246,3 +246,42 @@ describe('[row 52] who may confirm an MMG payment', () => {
     expect((await confirm(managed.id, mixed.token, freshRef('MIX'))).statusCode).toBe(200);
   });
 });
+
+describe('[row 52] the board and the order screen say who may confirm', () => {
+  const boardFlag = async (token: string, orderId: string) => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/vendor/orders?limit=100',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const row = (res.json().data as Array<{ id: string; canConfirmPayment?: unknown }>).find((o) => o.id === orderId);
+    expect(row, 'order on the board').toBeTruthy();
+    return row!.canConfirmPayment;
+  };
+  const detailFlag = async (token: string, orderId: string) => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/vendor/orders/${orderId}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    return res.json().data.canConfirmPayment;
+  };
+
+  it('owner and manager read true, staff read false, per the store that owns each order', async () => {
+    const mixed = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await addMember(mixed.id, vendorId, 'STAFF');
+    await addMember(mixed.id, otherVendorId, 'MANAGER');
+    const staffSide = await makeOrder(vendorId);
+    const managerSide = await makeOrder(otherVendorId);
+
+    expect(await boardFlag(owner.token, staffSide.id)).toBe(true);
+    expect(await detailFlag(owner.token, staffSide.id)).toBe(true);
+
+    expect(await boardFlag(mixed.token, staffSide.id)).toBe(false);
+    expect(await boardFlag(mixed.token, managerSide.id)).toBe(true);
+    expect(await detailFlag(mixed.token, staffSide.id)).toBe(false);
+    expect(await detailFlag(mixed.token, managerSide.id)).toBe(true);
+  });
+});
