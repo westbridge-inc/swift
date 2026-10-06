@@ -25,6 +25,7 @@ import {
   VENDOR_TIER_CAPS_DEFAULTS, assertPromotable, assertWithinTierCaps, judgeTierCap, promoteIfRegistered, tierUsage, vendorTierCapsFor,
 } from '../modules/vendor/vendor-tier';
 import { CountryConfigService } from '../modules/country/country-config.service';
+import { guyanaWallClockParts } from '../utils/guyana-day';
 import { EXTRA_DOC_TYPES, BUCKET_OF, DECLARATION_DOC_TYPE, REGISTRATION_DOC_TYPES } from '../modules/verification/doc-registry';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
@@ -123,12 +124,25 @@ describe('[DOC-1 P3-2] the micro-vendor tier is capped, not bypassed', () => {
     await placedOrder(999_999, new Date(now.getTime() - 2 * 3_600_000), 'CANCELLED');
     await placedOrder(40_000, new Date(now.getTime() - 9 * 86_400_000));
     const usage = await system(() => tierUsage(app.prisma, vendorId, now));
-    expect(usage.ordersToday).toBe(now.getUTCHours() >= 2 ? 1 : 0);
+    // An order two hours ago is today's unless the GUYANA day began less than two hours ago.
+    expect(usage.ordersToday).toBe(guyanaWallClockParts(now).hour >= 2 ? 1 : 0);
     expect(usage.grossThisWeek).toBe(50_000);
     const v = await vendor();
     const verdict = await system(() => assertWithinTierCaps(app.prisma, v, VENDOR_TIER_CAPS_DEFAULTS, 1000, now));
     expect(verdict?.allowed).toBe(true);
     await expect(system(() => assertWithinTierCaps(app.prisma, v, VENDOR_TIER_CAPS_DEFAULTS, 100_001, now))).rejects.toMatchObject({ code: 'VENDOR_TIER_CAP' });
+  });
+
+  it('"today" is the GUYANA day: orders on either side of 20:00 in Guyana (00:00 UTC) count as the same day, and the previous Guyana evening does not', async () => {
+    // 20:30 in Guyana on 9 March 2030 = 00:30 UTC on the 10th. A UTC day would
+    // start 30 minutes ago and drop the evening's earlier orders.
+    const now = new Date('2030-03-10T00:30:00.000Z');
+    await placedOrder(1000, new Date('2030-03-09T23:30:00.000Z')); // 19:30 GYT on the 9th: today
+    await placedOrder(1000, new Date('2030-03-10T00:10:00.000Z')); // 20:10 GYT on the 9th: today
+    await placedOrder(1000, new Date('2030-03-09T03:30:00.000Z')); // 23:30 GYT on the 8th: yesterday
+    const usage = await system(() => tierUsage(app.prisma, vendorId, now));
+    expect(usage.dayStart.toISOString()).toBe('2030-03-09T04:00:00.000Z');
+    expect(usage.ordersToday).toBe(2);
   });
 
   it('the checkout path itself refuses the order that would cross the day cap for an unregistered store, and accepts the same cart once the store is registered', async () => {
