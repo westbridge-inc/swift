@@ -2,11 +2,15 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const source = (file: string) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+/** The source with comments removed: a navigate call left in a comment is a
+ *  dead control. This census is static; each role's real-navigator test
+ *  (MoverStack/VendorStack/AdvertiserStack *.navigation.test.ts) presses the row. */
+const code = (file: string) => source(file).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 /** The body of the role's root stack function: the navigator every profile tab
  *  is nested in. A registration inside another tab's nested stack is unreachable
  *  from the profile tab (the vendor Menu-stack registration was exactly that). */
 const rootStack = (file: string, name: string) => {
-  const text = source(file);
+  const text = code(file);
   const start = text.search(new RegExp(`\\n(?:export )?function ${name}\\(`)) + 1;
   expect(start, name).toBeGreaterThan(0);
   const next = text.slice(start + 1).search(/\n(?:export )?function /);
@@ -23,6 +27,6 @@ describe('deletion is reachable in every role profile', () => {
     ['modules/advertiser/AdvertiserStack.tsx', 'EnabledAdvertiserStack', 'modules/advertiser/screens/AdvertiserTeamScreen.tsx'],
   ])('%s registers the profile destination on the root stack', (stack, name, profile) => {
     expect(rootStack(stack, name)).toMatch(/name="PersonalData" component=\{PersonalDataScreen\}/);
-    expect(source(profile)).toMatch(/navigate\??\.?(?:\.)?\(?'PersonalData'|navigate\('PersonalData'/);
+    expect(code(profile)).toMatch(/onPress=\{\(\) => navigation\.navigate\('PersonalData'/);
   });
 });
