@@ -1,3 +1,4 @@
+import type { MmgCheckoutSupportDetail, MmgCheckoutSupportPage, MmgCheckoutSupportStatus } from '@swift/types';
 import type { RejectionReasonCode } from './rejection-reasons';
 
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
@@ -334,6 +335,21 @@ export const resolveSupportTicket = (
     method: 'PUT',
     body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
   });
+// [AF-MOB-006] Custody recovery after pickup: the operations side of an owned
+// case. Directing, naming the relay rider and confirming a return are C3 —
+// each carries the operator's stated reason on the one reason transport.
+export const fetchCustodyCases = (open = true) =>
+  apiFetch(`/api/v1/admin/custody-cases?open=${open ? 'true' : 'false'}`);
+export const fetchCustodyCase = (id: string) => apiFetch(`/api/v1/admin/custody-cases/${id}`);
+export const claimCustodyCase = (id: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/claim`, { method: 'POST', body: '{}' });
+export const directCustodyCase = (id: string, outcome: 'SUPPORT_HOLD' | 'RELAY_REQUIRED' | 'RETURN_REQUIRED', reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/direct`, { method: 'POST', body: JSON.stringify({ outcome }), reason });
+export const assignCustodyRelay = (id: string, riderId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/relay`, { method: 'POST', body: JSON.stringify({ riderId }), reason });
+export const confirmCustodyReturn = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/custody-cases/${id}/confirm-return`, { method: 'POST', body: '{}', reason });
+
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.
@@ -812,3 +828,24 @@ export const recordCollectionContact = (
     method: 'POST',
     body: JSON.stringify(body),
   });
+
+// ── MMG payments: support lookup [MMG-CHECKOUT-API.md section 11] ───────────
+// Support finds a partner's MMG weekly-fee payment by the Swift reference,
+// MMG's transaction ID, MMG's reference number or the partner's phone. Both
+// reads are C1: the server records each one (who, which identifier matched,
+// the checkout ids). The shapes are the shared contract in @swift/types.
+export interface MmgCheckoutSearch {
+  q?: string;
+  status?: MmgCheckoutSupportStatus | '';
+  cursor?: string | null;
+}
+export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success: boolean } & MmgCheckoutSupportPage> => {
+  const params = new URLSearchParams();
+  if (search.q?.trim()) params.set('q', search.q.trim());
+  if (search.status) params.set('status', search.status);
+  if (search.cursor) params.set('cursor', search.cursor);
+  const query = params.toString();
+  return apiFetch(`/api/v1/admin/billing/mmg-checkouts${query ? `?${query}` : ''}`);
+};
+export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);

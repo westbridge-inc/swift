@@ -75,6 +75,7 @@ import {
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '../cartPayment';
+import { touchTarget } from '../../../kit/touch-target';
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
@@ -108,7 +109,7 @@ function CartHeader({ onBack, onMenu }: { onBack?: () => void; onMenu?: () => vo
         {onBack ? (
           // A plain glyph, no filled circle — hitSlop keeps the tap target at
           // 44pt, which is the whole reason the chip existed.
-          <Pressable onPress={onBack} hitSlop={14} accessibilityRole="button" accessibilityLabel="Back">
+          <Pressable onPress={onBack} hitSlop={14} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(24)}>
             {({ pressed }) => (
               <View style={{ opacity: pressed ? 0.6 : 1 }}>
                 <Feather name="chevron-left" size={24} color={color.text.primary} />
@@ -120,7 +121,7 @@ function CartHeader({ onBack, onMenu }: { onBack?: () => void; onMenu?: () => vo
           Cart
         </T>
         {onMenu ? (
-          <Pressable onPress={onMenu} hitSlop={14} accessibilityRole="button" accessibilityLabel="Cart options">
+          <Pressable onPress={onMenu} hitSlop={14} accessibilityRole="button" accessibilityLabel="Cart options" style={touchTarget(22)}>
             {({ pressed }) => (
               <View style={{ opacity: pressed ? 0.6 : 1 }}>
                 <Feather name="more-horizontal" size={22} color={color.text.primary} />
@@ -822,6 +823,7 @@ export function CartScreen() {
                           hitSlop={14}
                           accessibilityRole="button"
                           accessibilityLabel={`Remove ${it.name}`}
+                          style={touchTarget(18)}
                         >
                           {({ pressed }) => (
                             <View style={{ opacity: pressed ? 0.6 : 1 }}>
@@ -920,7 +922,7 @@ export function CartScreen() {
                     Jumps the dispatch queue · +{money(c.expressSurcharge)} — all of it goes to your rider.
                   </T>
                 </View>
-                <BrandSwitch value={express} onChange={() => setExpress((v) => !v)} />
+                <BrandSwitch label="Express delivery" value={express} onChange={() => setExpress((v) => !v)} />
               </View>
               <View style={RULE} />
             </View>

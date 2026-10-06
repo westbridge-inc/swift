@@ -128,6 +128,8 @@ const TENANT_QUERY_EXTENSIONS = {
   rideQueueEntry: scoped,
   // [TAXI multi-stop] The intermediate stops of a ride belong to its operator, like the ride.
   taxiTripStop: scoped,
+  // [AF-MOB-006] A custody recovery case belongs to its order's operator.
+  custodyRecoveryCase: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
   supplyWatch: scoped,
@@ -434,6 +436,29 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
     return own(input, options);
   };
   Object.defineProperty(client, '$transaction', { value: begin, writable: true, configurable: true, enumerable: false });
+  // [#1444 review S3-1] A client derived with `$extends` is a NEW proxy and does
+  // not carry the property above, so its transactions would open on the
+  // request connection and a system transaction would be refused there. Every
+  // derived client — and every client derived from it — is routed by this same
+  // function: ONE `begin` decides where every transaction starts. Its system
+  // transaction runs on the system connection extended the SAME way, so the
+  // derived client's own extensions also apply inside that transaction.
+  const ownExtends = (client as unknown as { $extends?: (...args: unknown[]) => object }).$extends?.bind(client);
+  if (ownExtends) {
+    const derive = (...args: unknown[]) => {
+      let memo: { base: PrismaClient; derived: PrismaClient } | null = null;
+      const derivedSystem = (): PrismaClient | null => {
+        const sys = system();
+        if (!sys) return null;
+        if (!memo || memo.base !== sys) {
+          memo = { base: sys, derived: (sys as unknown as { $extends: (...a: unknown[]) => PrismaClient }).$extends(...args) };
+        }
+        return memo.derived;
+      };
+      return routeSystemTransactions(ownExtends(...args), derivedSystem);
+    };
+    Object.defineProperty(client, '$extends', { value: derive, writable: true, configurable: true, enumerable: false });
+  }
   return client;
 }
 
