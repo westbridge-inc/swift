@@ -23,6 +23,8 @@ interface TripView {
   } | null;
   location: { lat: number; lng: number; at: string | null } | null;
   emergencyNote: string;
+  /** [L10 §2] The verified number from the market's emergency setting, or null. */
+  emergencyDial?: string | null;
 }
 
 export function TripShareClient({ token }: { token: string }) {
@@ -190,9 +192,11 @@ export function TripShareClient({ token }: { token: string }) {
             <div className="mt-3 rounded-2xl border border-[#EAE2E1] bg-white p-4 text-sm shadow-sm">
               <p className="font-semibold text-[#DC2626]">Emergency?</p>
               <p className="mt-1 text-[#786C6C]">{view.emergencyNote}</p>
-              <a href="tel:911" className="mt-2 inline-block rounded-full bg-[#DC2626] px-4 py-2 text-sm font-semibold text-white">
-                Call 911
-              </a>
+              {view.emergencyDial ? (
+                <a href={`tel:${view.emergencyDial}`} className="mt-2 inline-block rounded-full bg-[#DC2626] px-4 py-2 text-sm font-semibold text-white">
+                  Call {view.emergencyDial}
+                </a>
+              ) : null}
             </div>
           </>
         )}
