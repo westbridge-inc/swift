@@ -1,15 +1,19 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { AppError } from '../../utils/errors';
-import { adminAudienceFor } from '../notification/notification.service';
+import { adminAudienceWhere } from '../notification/notification.service';
 import { ackDeadlineSeconds } from '../safety/ops-alert';
 import { gyd } from './door-cash';
 
 /** Resolve the existing operations audience without inheriting a rider's
  * tenant filter. Store-review fiction must never page real operators. */
 export async function doorCashHoldAudience(prisma: PrismaClient, tenantId: string) {
-  const { where, review } = await adminAudienceFor(prisma, tenantId);
-  if (review) return { tenantId, suppressed: true, userIds: [] as string[] };
+  // Classification must succeed before any page can be staged. A lookup error
+  // must not turn a review tenant's fictional cash into a real operations page.
+  const tenant = await runWithoutTenant(() => prisma.tenant.findUnique({ where: { id: tenantId }, select: { kind: true } }), 'cash-return-tenant');
+  if (!tenant) throw new AppError(503, 'CASH_OPERATIONS_UNAVAILABLE', 'Cash return could not be recorded. Try again.');
+  if (tenant.kind === 'REVIEW') return { tenantId, suppressed: true, userIds: [] as string[] };
+  const where = adminAudienceWhere(tenantId);
   const users = await runWithoutTenant(() => prisma.user.findMany({ where, select: { id: true } }), 'cash-return-ops-audience');
   return { tenantId, suppressed: false, userIds: users.map((user) => user.id) };
 }
