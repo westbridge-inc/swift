@@ -19,6 +19,8 @@ import { Modal } from '@/components/modal';
 import { signInPath } from '@/lib/customer-routes';
 import { cartItemCount, customerCartKey, readShellCart } from '@/lib/shell-data';
 import { parseAmount } from '@/lib/money';
+import { fromPage, vendorDetailKey } from '@/lib/browse-keys';
+import { useStoreSeed } from '@/components/browse-seed';
 
 /** The store, reopened at one item: `?item=` from Home's popular rail, the
  *  Market, or a guest coming back from signing in to add it. */
@@ -58,7 +60,10 @@ export default function VendorPage() {
   const session = useCustomerSession();
   // [Q7b] Cached per store, so going back to it is instant; refreshed in the
   // background. A menu is the same for everyone who opens it.
-  const store = useQuery<VendorDetail>({ queryKey: ['customer', 'vendor', id], queryFn: () => getVendor(id) });
+  // [W2] The server drew this menu into the page (layout.tsx); it is the
+  // first answer, re-read here once it is a few seconds old.
+  const seed = useStoreSeed(id);
+  const store = useQuery<VendorDetail>({ queryKey: vendorDetailKey(id), queryFn: () => getVendor(id), ...fromPage(seed) });
   const v = store.data ?? null;
   const [modal, setModal] = useState<MenuItem | null>(null);
   const [sel, setSel] = useState<Record<string, string>>({});

@@ -65,7 +65,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'booking_confirmed', 'booking_slot_declined', 'booking_completed', 'booking_cancelled',
     'booking_reminder', 'booking_rescheduled',
     // Safety of the person receiving it (the driver confirm is a job update)
-    'guardian_checkin', 'trip_share_rotated', 'liveness_midshift_missed', 'liveness_locked',
+    'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',
     // Money a partner must act on (billing_suspended_nudge is about a suspension,
     // not a marketing nudge, so it stays loud)
@@ -79,6 +79,9 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_forced_offline', 'verification_vehicle_lapsed',
     'verification_l2', 'trust_l3', 'compliance_review_failed',
+    // Account security: the password changed and other devices were signed out;
+    // password sign-in paused after many wrong attempts
+    'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
     'low_stock', 'staff_added', 'review_response', 'rating_removed', 'category_request_resolved',
     'category_backfill_review', 'vendor_tier_promoted', 'support_update', 'store_pin_moved',
