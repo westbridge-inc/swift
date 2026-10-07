@@ -1,14 +1,12 @@
 'use client';
 
 import { useState, useId, cloneElement } from 'react';
-import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchZoneFares, createZoneFare, updateZoneFare, deleteZoneFare,
   type FareZone, type ZoneFare,
 } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
-import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 import { fareProblem, gyd, ZONE_FARE_MAX, ZONE_FARE_MIN } from '@/lib/zoneFares';
 
 // ---------------------------------------------------------------------------
@@ -21,7 +19,13 @@ import { fareProblem, gyd, ZONE_FARE_MAX, ZONE_FARE_MIN } from '@/lib/zoneFares'
 // it in the approvals queue, and only then does it happen — so this screen
 // never shows a change as made until the server says it was. A change prices
 // NEW quotes only; a ride already requested keeps the fare it was booked at.
+//
+// [MISSION CONTROL · PR-3b] The reason is asked in the page, not a browser
+// prompt; a refusal stays in the panel with the reason still typed, and
+// "sent for a second admin's approval" stays on screen with its link.
 // ---------------------------------------------------------------------------
+
+type FareBody = { fromZoneId: string; toZoneId: string; fare: number };
 
 export default function ZonesPage() {
   const { data, isLoading, error } = useQuery({ queryKey: ['zone-fares'], queryFn: fetchZoneFares });
@@ -86,58 +90,50 @@ function ZoneTable({ zones, loading }: { zones: FareZone[]; loading: boolean }) 
 
 function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZone[]; loading: boolean }) {
   const qc = useQueryClient();
-  const [outcome, setOutcome] = useState<MoneyActionOutcome | null>(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ZoneFare | null>(null);
-
-  const settled = (message: string) => {
-    setOutcome({ kind: 'done', message });
+  // A pricing change answers 202 APPROVAL_REQUIRED: the panel reads it as "sent
+  // for a second admin's approval" and the form closes; a refusal keeps it open.
+  const actions = useActionRunner(() => {
     setAdding(false);
     setEditing(null);
     void qc.invalidateQueries({ queryKey: ['zone-fares'] });
-  };
-  // A pricing change answers 202 APPROVAL_REQUIRED, which the transport THROWS:
-  // the error path is where "queued for a second admin" is recognised.
-  const failed = (e: unknown) => setOutcome(outcomeOfThrown(e));
+  });
+  const zoneName = (id: string) => zones.find((z) => z.id === id)?.name ?? id;
+  const pending = <p>A fixed fare is platform pricing: nothing changes until a second admin approves it. It prices new quotes only — a ride already requested keeps its fare.</p>;
 
-  const create = useMutation({
-    mutationFn: (v: { body: { fromZoneId: string; toZoneId: string; fare: number }; reason: string }) => createZoneFare(v.body, v.reason),
-    onSuccess: () => settled('Fixed fare added. It prices new quotes from now.'),
-    onError: failed,
+  const send = (body: FareBody, row: ZoneFare | null) => void actions.run({
+    title: row
+      ? `Change the fixed fare ${zoneName(body.fromZoneId)} → ${zoneName(body.toZoneId)} to ${gyd(body.fare)}?`
+      : `Add a fixed fare of ${gyd(body.fare)} for ${zoneName(body.fromZoneId)} → ${zoneName(body.toZoneId)}?`,
+    body: pending,
+    confirmLabel: 'Send for approval',
+    submit: ({ reason }) => (row ? updateZoneFare(row.id, body, reason) : createZoneFare(body, reason)),
+    success: () => (row ? 'Fixed fare changed. It prices new quotes from now.' : 'Fixed fare added. It prices new quotes from now.'),
   });
-  const update = useMutation({
-    mutationFn: (v: { id: string; body: { fromZoneId: string; toZoneId: string; fare: number }; reason: string }) => updateZoneFare(v.id, v.body, v.reason),
-    onSuccess: () => settled('Fixed fare changed. It prices new quotes from now.'),
-    onError: failed,
-  });
-  const remove = useMutation({
-    mutationFn: (v: { row: ZoneFare; reason: string }) => deleteZoneFare(v.row.id, { fromZoneId: v.row.fromZoneId, toZoneId: v.row.toZoneId }, v.reason),
-    onSuccess: () => settled('Fixed fare removed. Trips between these zones price by the formula from the next quote.'),
-    onError: failed,
-  });
-  const busy = create.isPending || update.isPending || remove.isPending;
 
-  const onDelete = (row: ZoneFare) => {
-    const reason = askReason({ action: 'remove this fixed fare', subject: `${row.fromZoneName} → ${row.toZoneName}` });
-    if (!reason) return;
-    setOutcome(null);
-    remove.mutate({ row, reason });
-  };
+  const onDelete = (row: ZoneFare) => void actions.run({
+    title: `Remove the fixed fare ${row.fromZoneName} → ${row.toZoneName}?`,
+    body: <p>Once a second admin approves, trips between these zones price by the formula and the zones&apos; rates from the next quote.</p>,
+    confirmLabel: 'Send for approval',
+    submit: ({ reason }) => deleteZoneFare(row.id, { fromZoneId: row.fromZoneId, toZoneId: row.toZoneId }, reason),
+    success: () => 'Fixed fare removed. Trips between these zones price by the formula from the next quote.',
+  });
 
   return (
     <section>
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold">Fixed fares</h2>
         <button
-          onClick={() => { setOutcome(null); setEditing(null); setAdding(true); }}
-          disabled={busy || zones.length === 0}
+          onClick={() => { actions.clear(); setEditing(null); setAdding(true); }}
+          disabled={zones.length === 0}
           className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80 disabled:opacity-50"
         >
           Add fixed fare
         </button>
       </div>
 
-      {outcome && <Outcome outcome={outcome} />}
+      {actions.banner}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-x-auto">
         <table className="w-full text-sm">
@@ -163,8 +159,8 @@ function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZ
                   {!f.zonesActive && <span className="block text-xs text-amber-500">a zone is inactive — this prices nothing</span>}
                 </td>
                 <td className="p-4 text-right whitespace-nowrap">
-                  <button onClick={() => { setOutcome(null); setAdding(false); setEditing(f); }} disabled={busy} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50 mr-2">Edit</button>
-                  <button onClick={() => onDelete(f)} disabled={busy} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50">Delete</button>
+                  <button onClick={() => { actions.clear(); setAdding(false); setEditing(f); }} aria-label={`Edit ${f.fromZoneName} → ${f.toZoneName}`} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50 mr-2">Edit</button>
+                  <button onClick={() => onDelete(f)} aria-label={`Delete ${f.fromZoneName} → ${f.toZoneName}…`} className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50">Delete…</button>
                 </td>
               </tr>
             ))}
@@ -179,25 +175,19 @@ function FixedFares({ fares, zones, loading }: { fares: ZoneFare[]; zones: FareZ
           key={editing ? `edit-${editing.id}` : 'add'}
           zones={zones}
           editing={editing}
-          busy={busy}
           onCancel={() => { setAdding(false); setEditing(null); }}
-          onSubmit={(body, reason) => {
-            setOutcome(null);
-            if (editing) update.mutate({ id: editing.id, body, reason });
-            else create.mutate({ body, reason });
-          }}
+          onSubmit={(body) => { actions.clear(); send(body, editing); }}
         />
       )}
     </section>
   );
 }
 
-function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
+function FareForm({ zones, editing, onCancel, onSubmit }: {
   zones: FareZone[];
   editing: ZoneFare | null;
-  busy: boolean;
   onCancel: () => void;
-  onSubmit: (_body: { fromZoneId: string; toZoneId: string; fare: number }, _reason: string) => void;
+  onSubmit: (_body: FareBody) => void;
 }) {
   const [fromZoneId, setFrom] = useState(editing?.fromZoneId ?? '');
   const [toZoneId, setTo] = useState(editing?.toZoneId ?? '');
@@ -214,10 +204,7 @@ function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
 
   const submit = () => {
     if (problem) return;
-    const verb = editing ? 'change this fixed fare' : 'add this fixed fare';
-    const reason = askReason({ action: `${verb} to ${gyd(Number(fare))}`, subject: `${name(fromZoneId)} → ${name(toZoneId)}` });
-    if (!reason) return;
-    onSubmit({ fromZoneId, toZoneId, fare: Number(fare) }, reason);
+    onSubmit({ fromZoneId, toZoneId, fare: Number(fare) });
   };
 
   return (
@@ -247,21 +234,11 @@ function FareForm({ zones, editing, busy, onCancel, onSubmit }: {
       {problem && (fromZoneId || toZoneId || fare) ? <p className="mt-3 text-xs text-amber-500">{problem}</p> : null}
       <div className="flex justify-end gap-3 mt-5">
         <button onClick={onCancel} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
-        <button onClick={submit} disabled={busy || !!problem} className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
-          {busy ? 'Sending…' : 'Send for approval'}
+        <button onClick={submit} disabled={!!problem} className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
+          Send for approval…
         </button>
       </div>
     </div>
-  );
-}
-
-function Outcome({ outcome }: { outcome: MoneyActionOutcome }) {
-  if (outcome.kind === 'error') return <p role="alert" className="text-sm mb-3" style={{ color: 'var(--bad)' }}>{outcome.message}</p>;
-  return (
-    <p role="status" className={`text-sm mb-3 ${outcome.kind === 'queued' ? 'text-amber-500' : 'text-[var(--muted)]'}`}>
-      {outcome.message}
-      {outcome.approvalId && (<> <Link href="/approvals" className="underline">Open the approvals queue</Link></>)}
-    </p>
   );
 }
 

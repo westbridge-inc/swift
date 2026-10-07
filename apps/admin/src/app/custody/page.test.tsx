@@ -1,5 +1,5 @@
-import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
 import CustodyCasesPage from './page';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -37,24 +37,54 @@ describe('custody cases console', () => {
     expect(await screen.findByText('OVERDUE')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: /Order SW-77/ }));
     expect(await screen.findByText(/Ana Rider/)).toBeTruthy();
+    // [MC-PR3b] the holder's phone is masked; the full number is on their page
+    expect(screen.getByText(/Ana Rider · ••• ••• 0000/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('+5926000000');
     expect(screen.getByText(/Swift never holds order money/)).toBeTruthy();
     expect(screen.getByText(/opened/)).toBeTruthy();
   });
 
-  it('a decision carries the operator’s reason, and a cancelled prompt sends nothing', async () => {
-    const prompt = vi.fn().mockReturnValueOnce(null).mockReturnValueOnce('  Rider cannot move, nearest rider is two minutes away  ');
-    vi.stubGlobal('prompt', prompt);
+  it('a decision carries the operator’s reason, and a cancelled panel sends nothing', async () => {
     const fetchMock = mockApi(handler);
     const { user } = renderWithQuery(<CustodyCasesPage />);
     await user.click(await screen.findByRole('button', { name: /Order SW-77/ }));
-    const relayButton = await screen.findByRole('button', { name: 'Relay to another rider' });
+    const relayButton = await screen.findByRole('button', { name: 'Relay to another rider…' });
     await user.click(relayButton);
+    let dialog = screen.getByRole('dialog', { name: 'Relay to another rider — order SW-77?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
     await user.click(relayButton);
+    dialog = screen.getByRole('dialog', { name: 'Relay to another rider — order SW-77?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), '  Rider cannot move, nearest rider is two minutes away  ');
+    await user.click(within(dialog).getByRole('button', { name: 'Relay to another rider' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(String(url)).toContain('/api/v1/admin/custody-cases/case-1/direct');
     expect(JSON.parse(String(init?.body))).toEqual({ outcome: 'RELAY_REQUIRED' });
     expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe('Rider cannot move, nearest rider is two minutes away');
+    expect((await screen.findByRole('status')).textContent).toContain('order SW-77: relay to another rider.');
+  });
+
+  it('[MC-PR3b] naming the relay rider asks for their id and the reason in ONE panel — the id is required', async () => {
+    const relayCase = { ...detail, state: 'RELAY_REQUIRED' };
+    const fetchMock = mockApi((request: ApiRequest) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/custody-cases/case-1') return { body: { success: true, data: relayCase } };
+      if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/custody-cases/case-1/relay') return { body: { success: true, data: {} } };
+      return handler(request);
+    });
+    const { user } = renderWithQuery(<CustodyCasesPage />);
+    await user.click(await screen.findByRole('button', { name: /Order SW-77/ }));
+    await user.click(await screen.findByRole('button', { name: 'Name the relay rider…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Name the relay rider for order SW-77?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), 'Nearest online rider agreed to take the parcel');
+    await user.click(within(dialog).getByRole('button', { name: 'Name relay rider' }));
+    expect(within(dialog).getByText('Enter relay rider id.')).toBeTruthy();
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    await user.type(within(dialog).getByRole('textbox', { name: 'Relay rider id' }), 'rider-b');
+    await user.click(within(dialog).getByRole('button', { name: 'Name relay rider' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(String(url)).toContain('/api/v1/admin/custody-cases/case-1/relay');
+    expect(JSON.parse(String(init?.body))).toMatchObject({ riderId: 'rider-b' });
   });
 });

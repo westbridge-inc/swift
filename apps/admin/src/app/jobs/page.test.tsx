@@ -1,6 +1,6 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import JobsPage from './page';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -84,16 +84,18 @@ describe('discard is permanent, so it asks first', () => {
     renderWithQuery(<JobsPage />);
     await screen.findByText('process-settlements');
 
-    await userEvent.click(screen.getAllByRole('button', { name: 'Discard' })[0]!);
+    await userEvent.click(screen.getByRole('button', { name: 'Discard process-settlements…' }));
 
     // The confirmation NAMES the job — a permanent action that says only
-    // "are you sure?" is a coin flip, not a decision.
-    expect(await screen.findByText(/Yes, discard process-settlements/)).toBeTruthy();
+    // "are you sure?" is a coin flip, not a decision. [MC-PR3b] It is the
+    // in-page panel, and cancelling it sends nothing.
+    const dialog = await screen.findByRole('dialog', { name: 'Discard process-settlements permanently?' });
+    expect(within(dialog).getByRole('button', { name: 'Discard process-settlements' })).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'DELETE')).toHaveLength(0);
   });
 
-  it('deletes only after the named confirmation', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('The job has exhausted its retries and is safe to discard'));
+  it('deletes only after the named confirmation and a reason', async () => {
     const fetchMock = mockApi(
       handler((r) =>
         r.url.pathname === '/api/v1/admin/dlq/settlement/910' && r.method === 'DELETE'
@@ -104,13 +106,19 @@ describe('discard is permanent, so it asks first', () => {
     renderWithQuery(<JobsPage />);
     await screen.findByText('process-settlements');
 
-    await userEvent.click(screen.getAllByRole('button', { name: 'Discard' })[0]!);
-    await userEvent.click(await screen.findByRole('button', { name: /Yes, discard process-settlements/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Discard process-settlements…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Discard process-settlements permanently?' });
+    // no reason, no delete
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Discard process-settlements' }));
+    expect(requestsByMethod(fetchMock, 'DELETE')).toHaveLength(0);
+    await userEvent.type(within(dialog).getByRole('textbox', { name: 'Reason' }), 'The job has exhausted its retries and is safe to discard');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Discard process-settlements' }));
 
     await waitFor(() => {
       const deletes = requestsByMethod(fetchMock, 'DELETE');
       expect(deletes.some(([input]) => String(input).includes('/dlq/settlement/910'))).toBe(true);
     });
+    expect(await screen.findByText('process-settlements is discarded. It will never run.')).toBeTruthy();
   });
 });
 

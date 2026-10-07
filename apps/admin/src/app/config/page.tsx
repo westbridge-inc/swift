@@ -1,9 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchConfig, updateConfig } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { errorStatus, fetchConfig, updateConfig } from '@/lib/api';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 // EVERY FIELD ON THIS PAGE MUST BE READ BY PRODUCTION CODE.
 //
@@ -40,6 +40,8 @@ const SECTIONS: { title: string; items: { key: string; label: string; hint?: str
   },
 ];
 
+const SETTING_LABEL: Record<string, string> = Object.fromEntries(SECTIONS.flatMap((sec) => sec.items.map((i) => [i.key, i.label])));
+
 // Rendered as information, not as inputs — so the page stays honest about
 // where these numbers actually live and how to change them.
 const NOT_EDITABLE_HERE: { title: string; body: string }[] = [
@@ -61,28 +63,29 @@ export default function ConfigPage() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['config'], queryFn: fetchConfig });
   const [edits, setEdits] = useState<Record<string, string>>({});
-  const [status, setStatus] = useState<string | null>(null);
 
   const rows: { key: string; value: unknown }[] = data?.data ?? [];
   const values = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 
-  const save = useMutation({
-    mutationFn: async (reason: string) => {
-      await Promise.all(Object.entries(edits).map(([key, v]) => updateConfig(key, Number(v), reason)));
-    },
-    onSuccess: () => {
-      setStatus('Saved.');
-      setEdits({});
-      qc.invalidateQueries({ queryKey: ['config'] });
-    },
-    onError: (e) => setStatus((e as Error).message || 'Save failed.'),
-  });
+  // Every setting is sent; a refusal outranks a queued approval, which outranks success,
+  // so the answer on screen is the one that needs the admin's attention.
+  const sendAll = async (reason: string) => {
+    const settled = await Promise.allSettled(Object.entries(edits).map(([key, v]) => updateConfig(key, Number(v), reason)));
+    const failed = settled.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    const refused = failed.find((r) => errorStatus(r.reason) !== 202);
+    if (refused) throw refused.reason;
+    if (failed[0]) throw failed[0].reason;
+  };
 
   const dirty = Object.keys(edits).length > 0;
+  // [MC-PR3b] A platform change asks why in the page and takes a second admin: the answer
+  // ("sent for a second admin's approval", or the refusal) stays on screen.
+  const actions = useActionRunner(() => { setEdits({}); void qc.invalidateQueries({ queryKey: ['config'] }); });
 
   return (
     <div>
       <h1 className="text-2xl font-bold mb-6">Platform Configuration</h1>
+      {actions.banner}
 
       {isLoading ? (
         <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
@@ -102,8 +105,9 @@ export default function ConfigPage() {
                         type="number"
                         step="any"
                         value={edits[item.key] ?? String(values[item.key] ?? '')}
+                        aria-label={item.label}
                         onChange={(e) => {
-                          setStatus(null);
+                          actions.clear();
                           setEdits((prev) => ({ ...prev, [item.key]: e.target.value }));
                         }}
                         className="bg-[var(--panel-2)] text-white px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none w-32 text-right"
@@ -133,19 +137,23 @@ export default function ConfigPage() {
           </div>
 
           <div className="flex items-center justify-end gap-4">
-            {status && <span className="text-sm text-[var(--muted)]">{status}</span>}
             <button
-              onClick={() => {
-                const reason = askReason({
-                  action: `change ${Object.keys(edits).length === 1 ? 'this configuration' : 'these configurations'}`,
-                  subject: Object.keys(edits).join(', '),
-                });
-                if (reason) save.mutate(reason);
-              }}
-              disabled={!dirty || save.isPending}
+              onClick={() => void actions.run({
+                title: `Change ${Object.keys(edits).length === 1 ? 'this setting' : `these ${Object.keys(edits).length} settings`}?`,
+                body: (
+                  <>
+                    <ul>{Object.entries(edits).map(([key, v]) => <li key={key}>{SETTING_LABEL[key] ?? key}: {String(values[key] ?? '—')} → {v}</li>)}</ul>
+                    <p>A platform setting changes Swift for everyone, so a second admin must approve each change before it takes effect.</p>
+                  </>
+                ),
+                confirmLabel: 'Send for approval',
+                submit: ({ reason }) => sendAll(reason),
+                success: () => 'Saved.',
+              })}
+              disabled={!dirty}
               className="px-6 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
             >
-              {save.isPending ? 'Saving…' : 'Save Configuration'}
+              Save configuration…
             </button>
           </div>
         </div>
