@@ -20,6 +20,7 @@ import { runWithoutTenant } from '../plugins/tenant-context';
 import { tenantUnscopedAccessCounter } from '../plugins/observability';
 import {
   PREAUTH_IDENTITY_CAPABILITY,
+  PUBLIC_SIGNUP_TENANT_ID,
   resolveIdentityByEmail,
   resolveIdentityById,
   resolveIdentityByPhone,
@@ -61,7 +62,9 @@ afterAll(async () => {
 describe('[L04 · R1] the pre-auth identity capability answers who and which tenant — nothing else', () => {
   it('by phone, by email and by id: exactly {id, tenantId}; an unknown one is null', async () => {
     const byPhone = await resolveIdentityByPhone(app.prisma, PHONE);
-    expect(byPhone).toEqual({ id: userId, tenantId: 'swift-default' });
+    // The fixture account was created with the schema's default tenant: the
+    // public sign-up tenant must BE that default (a drift turns this red).
+    expect(byPhone).toEqual({ id: userId, tenantId: PUBLIC_SIGNUP_TENANT_ID });
     expect(Object.keys(byPhone!).sort()).toEqual(['id', 'tenantId']);
     const byEmail = await resolveIdentityByEmail(app.prisma, EMAIL);
     expect(Object.keys(byEmail!).sort()).toEqual(['id', 'tenantId']);

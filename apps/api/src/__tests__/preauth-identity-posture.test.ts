@@ -185,6 +185,20 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     expect([facts.isSuperuser, facts.hasBypassRls, facts.isBypassRoleMember]).toEqual([false, false, false]);
   });
 
+  it('the DATABASE wall holds through the app’s own client: a raw read of a review account sees it only when bound to review', async () => {
+    const reviewer = await account('REVIEW');
+    const { runWithTenant } = await import('../plugins/tenant-context');
+    const { bindTenantTransaction } = prismaModule!;
+    // Raw SQL carries no application filter: only the row-level policy decides.
+    const rawRead = () => app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      return (await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "users" WHERE "id" = ${reviewer.id}`).length;
+    });
+    expect(await rawRead()).toBe(0); // unbound: nothing
+    expect(await runWithTenant(PRODUCTION, rawRead)).toBe(0); // a production caller: nothing
+    expect(await runWithTenant(REVIEW, rawRead)).toBe(1); // its own tenant: the row
+  });
+
   it.each(TENANTS)('%s: OTP verify signs the account in — 200, tokens, exactly one new session', async (tenant) => {
     const who = await account(tenant, { reviewCredential: tenant === 'REVIEW' });
     let code = '246813';
