@@ -336,8 +336,15 @@ describe('[DS632] condition (5) is read in the configured zone, MMG_CHECKOUT_CRE
       .toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_UNCONFIRMED', decisive: true });
   });
 
-  it('CREATION_UNCONFIRMED: MMG’s stamp may be at most two minutes after Swift first saw a reply naming the transaction', () => {
+  it('CREATION_UNCONFIRMED: read as a payment time (the default, and production), MMG’s stamp may be at most two minutes after Swift first saw a reply naming the transaction, even when Swift asked MMG at that very moment', () => {
     expect(verdictFor(guyanaTime(new Date(replied.getTime() + 120_000)), 'GUYANA_WALL_CLOCK').verdict).toBe('CONFIRM');
+    // [#1500 review S3-2] Swift's own lookup time does not change that unless the staging/UAT setting is on.
+    const late = new Date(replied.getTime() + 120_001);
+    const lookedUp = (lookupClock?: boolean) => judge(uat, 'MMGTX1', found({ createdAt: guyanaTime(late) }), [MERCHANT], [], answered,
+      { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: replied, lookedUpAt: late, ...(lookupClock === undefined ? {} : { lookupClock }) });
+    expect(lookedUp()).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_UNCONFIRMED', decisive: true });
+    expect(lookedUp(false)).toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_UNCONFIRMED', decisive: true });
+    expect(lookedUp(true).verdict).toBe('CONFIRM');
     expect(verdictFor(guyanaTime(new Date(replied.getTime() + 120_001)), 'GUYANA_WALL_CLOCK'))
       .toEqual({ verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_UNCONFIRMED', decisive: true });
     expect(verdictFor(trueUtc(new Date(replied.getTime() + 120_001)), 'UTC')).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_UNCONFIRMED' });
@@ -361,14 +368,14 @@ describe('[DS632] condition (5) is read in the configured zone, MMG_CHECKOUT_CRE
 // held as CREATION_UNCONFIRMED: MMG's time could not be confirmed against
 // Swift's records.
 // ---------------------------------------------------------------------------
-describe('[option b] MMG’s creationDate: a payment time or the lookup’s clock; the window is OUR first reply', () => {
+describe('[option b · staging/UAT setting on] MMG’s creationDate: a payment time or the lookup’s clock; the window is OUR first reply', () => {
   const opened = new Date('2026-10-01T19:38:19Z');
   const uat = { merchantTransactionId: REF, amount: new Prisma.Decimal(1500), currencyCode: 'GYD', createdAt: opened, expiresAt: new Date(opened.getTime() + 30 * 60_000) };
   const replied = new Date('2026-10-01T19:39:05Z');
   const ms = (at: Date, delta: number) => new Date(at.getTime() + delta);
   const MIN = 60_000;
   const verdict = (stamp: string, reply: Date | null, lookedUpAt: Date | null, zone: 'GUYANA_WALL_CLOCK' | 'UTC' = 'GUYANA_WALL_CLOCK', success: SuccessAnswer = answered) =>
-    judge(uat, 'MMGTX1', found({ createdAt: stamp }), [MERCHANT], [], success, { zone, firstReplyAt: reply, lookedUpAt });
+    judge(uat, 'MMGTX1', found({ createdAt: stamp }), [MERCHANT], [], success, { zone, firstReplyAt: reply, lookedUpAt, lookupClock: true });
   const CONFIRMED = { verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' };
 
   it('the lookup’s clock: a retry 3.5 minutes after the first reply, its stamp = when Swift asked, CONFIRMS', () => {
@@ -434,7 +441,7 @@ describe('[option b] MMG’s creationDate: a payment time or the lookup’s cloc
 // is refused for that thing at every late lookup time, with the same verdict a
 // payment stamped inside the window (the rule before option b) gets.
 // ---------------------------------------------------------------------------
-describe('[option b] the lookup’s clock relaxes condition (5) only: a late lookup credits nothing any other condition refuses', () => {
+describe('[option b · staging/UAT setting on] the lookup’s clock relaxes condition (5) only: a late lookup credits nothing any other condition refuses', () => {
   const MIN = 60_000;
   const replied = new Date(CREATED.getTime() + MIN);
   const closed = intent.expiresAt;
@@ -451,13 +458,13 @@ describe('[option b] the lookup’s clock relaxes condition (5) only: a late loo
   ] as const;
   type Change = { patch?: Record<string, unknown>; txnId?: string; success?: SuccessAnswer; others?: string[] };
   /** The verdict for MMG's lookup answer (MMG's own fields, read as the live adapter reads them) stamped `stamp`. */
-  const decideWith = (stamp: Date, creation: { firstReplyAt: Date; lookedUpAt?: Date }, change: Change) => {
+  const decideWith = (stamp: Date, creation: { firstReplyAt: Date; lookedUpAt?: Date; lookupClock?: boolean }, change: Change) => {
     const txnId = change.txnId ?? 'MMGTX1';
     const detail = lookupDetailFrom(uatAnswer({ creationDate: gyStamp(stamp), ...change.patch }), txnId);
     return judge(intent, txnId, detail, [MERCHANT], change.others ?? [], change.success ?? inTime, { zone: GYZ, ...creation });
   };
   /** Option (b): MMG's stamp is the moment of THIS lookup, which ran at `asked`. */
-  const lateLookup = (asked: Date, change: Change = {}) => decideWith(asked, { firstReplyAt: replied, lookedUpAt: asked }, change);
+  const lateLookup = (asked: Date, change: Change = {}) => decideWith(asked, { firstReplyAt: replied, lookedUpAt: asked, lookupClock: true }, change);
   /** The rule before option (b): a payment stamped inside the window, before the reply; no lookup clock. */
   const paymentTimeStamp = (change: Change = {}) => decideWith(new Date(replied.getTime() - 20_000), { firstReplyAt: replied }, change);
 
@@ -501,6 +508,55 @@ describe('[option b] the lookup’s clock relaxes condition (5) only: a late loo
 
   it('the payment-time stamp the refusals are compared with CONFIRMS on its own (the comparison is with a credit, not with a hold)', () => {
     expect(paymentTimeStamp()).toEqual({ verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [#1500 review S2-1] The lookup-clock reading DOES widen condition (5): if MMG
+// sends a real payment time, a stamp near Swift's lookup is not proof the
+// payment was made during this checkout. So it is a staging/UAT setting
+// (MMG_CHECKOUT_CREATION_LOOKUP_CLOCK=1), off by default and refused in
+// production, until MMG confirms what its production lookup sends. Even on, a
+// lookup only ever follows a reply, so a stamp before Swift first heard of the
+// payment never reads as the lookup's clock.
+// ---------------------------------------------------------------------------
+describe('[#1500 review S2-1] the lookup’s clock is a staging/UAT setting, off by default; even on, it never reaches back before the first reply', () => {
+  const MIN = 60_000;
+  const replied = new Date(CREATED.getTime() + MIN);
+  const decide = (stamp: Date, asked: Date, lookupClock?: boolean) => judge(intent, 'MMGTX1', found({ createdAt: gyStamp(stamp) }), [MERCHANT], [], answered,
+    { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: replied, lookedUpAt: asked, ...(lookupClock === undefined ? {} : { lookupClock }) });
+  const HELD = { verdict: 'HOLD', txnId: 'MMGTX1', reason: 'CREATION_UNCONFIRMED', decisive: true };
+  const CONFIRMED = { verdict: 'CONFIRM', txnId: 'MMGTX1', ledgerReference: 'MMGLEDGER1' };
+
+  it('review probe 1: a stamp ten minutes after the first reply, looked up three minutes later, is HELD by default (a payment made after Swift heard of it is not this checkout’s)', () => {
+    const stamp = new Date(replied.getTime() + 10 * MIN);
+    const asked = new Date(stamp.getTime() + 3 * MIN);
+    expect(decide(stamp, asked)).toEqual(HELD);
+    expect(decide(stamp, asked, false)).toEqual(HELD);
+    // Staging/UAT, where MMG's stamp is the lookup's moment: three minutes from when Swift asked fits.
+    expect(decide(stamp, asked, true)).toEqual(CONFIRMED);
+  });
+
+  it('review probe 2: a stamp 3.5 minutes before the checkout opened, looked up right after the reply, is HELD by default AND with the setting on', () => {
+    const stamp = new Date(CREATED.getTime() - 3.5 * MIN);
+    const asked = new Date(replied.getTime() + 5_000);
+    expect(decide(stamp, asked)).toEqual(HELD);
+    expect(decide(stamp, asked, true)).toEqual(HELD);
+  });
+
+  it('with the setting on, a stamp from before the checkout opened never reads as the lookup’s clock, however close to when Swift asked', () => {
+    // MMG answered ten seconds after the checkout opened; Swift asked ten seconds later.
+    const early = (stamp: Date) => judge(intent, 'MMGTX1', found({ createdAt: gyStamp(stamp) }), [MERCHANT], [], answered,
+      { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: new Date(CREATED.getTime() + 10_000), lookedUpAt: new Date(CREATED.getTime() + 20_000), lookupClock: true });
+    expect(early(new Date(CREATED.getTime() - 2 * MIN - 1))).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_UNCONFIRMED' });
+    // The window's own two minutes' tolerance still holds (a payment time).
+    expect(early(new Date(CREATED.getTime() - 2 * MIN))).toEqual(CONFIRMED);
+  });
+
+  it('the staging retry (3.5 minutes after the reply, stamp = when Swift asked) is HELD by default and CONFIRMS only with the setting on', () => {
+    const asked = new Date(replied.getTime() + 3.5 * MIN);
+    expect(decide(asked, asked)).toEqual(HELD);
+    expect(decide(asked, asked, true)).toEqual(CONFIRMED);
   });
 });
 

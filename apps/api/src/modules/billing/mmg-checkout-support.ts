@@ -12,7 +12,7 @@ import { bindTenantTransaction } from '../../plugins/prisma';
 import { normalizePhone } from '../../utils/phone';
 import { maskPhone } from '../auth/step-up';
 import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, creationCheckOf, firstReplyNaming, type CreationCheck } from './mmg-checkout.service';
-import { mmgCreationZone } from '../../providers/mmg/mmg-checkout';
+import { mmgCreationLookupClock, mmgCreationZone } from '../../providers/mmg/mmg-checkout';
 
 // ---------------------------------------------------------------------------
 // [MMG support lookup] Support finds an MMG weekly-fee payment by any id MMG or
@@ -101,8 +101,9 @@ export function decodeSupportCursor(cursor: string): { createdAt: Date; id: stri
  * SAME creation-time check judge() credits by (creationCheckOf) [Sol, DS663]:
  * the stamp read in the configured zone (MMG_CHECKOUT_CREATION_ZONE), as a
  * payment time (inside the checkout's window, no later than the first reply
- * naming the transaction) or as the lookup's own clock (within five minutes of
- * when Swift asked) [option b]; anything else is UNCONFIRMED.
+ * naming the transaction) or, where MMG_CHECKOUT_CREATION_LOOKUP_CLOCK is on
+ * (staging/UAT), as the lookup's own clock (within five minutes of when Swift
+ * asked, never before the first reply) [option b]; anything else is UNCONFIRMED.
  * Support shows INSIDE exactly when that check would let the payment be
  * credited. No configured zone, or an absent or unreadable stamp, is
  * UNREADABLE (judge holds CREATION_ZONE_UNVERIFIED / CREATION_DATE_UNREADABLE).
@@ -396,10 +397,13 @@ export async function mmgCheckoutSupportDetail(db: PrismaClient, input: { tenant
     }),
   ]);
   const zone = mmgCreationZone();
+  // [#1500 review S2-1] The same staging/UAT setting judge() reads.
+  const lookupClock = mmgCreationLookupClock();
   const creationFor = (o: ObservationForTimeline): CreationCheck => ({
     zone, firstReplyAt: o.source === 'LOOKUP' && o.detail ? firstReplyNaming(answers, o.detail) : null,
     // [option b] A lookup is written down the moment its answer arrives: that is when Swift asked.
     lookedUpAt: o.source === 'LOOKUP' ? o.createdAt : null,
+    lookupClock,
   });
   return {
     ...rows[0]!,

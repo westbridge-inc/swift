@@ -114,14 +114,25 @@ describe('the window support sees is the window judge() decides with', () => {
     expect(window === 'INSIDE').toBe(decided === 'CONFIRM');
   });
 
-  it('[option b] MMG’s stamp as the lookup’s own clock: support says INSIDE exactly when judge() confirms, within five minutes of when Swift asked', () => {
+  it('[option b · staging/UAT setting on] MMG’s stamp as the lookup’s own clock: support says INSIDE exactly when judge() confirms, within five minutes of when Swift asked', () => {
     const asked = at(replied.getTime() + 10 * 60_000);
     for (const [delta, window, decided] of [[0, 'INSIDE', 'CONFIRM'], [5 * 60_000, 'INSIDE', 'CONFIRM'], [5 * 60_000 + 1, 'UNCONFIRMED', 'CREATION_UNCONFIRMED']] as const) {
       const detail = answerAt(gyStamp(at(asked.getTime() + delta)));
-      const creation = { zone: GY, firstReplyAt: replied, lookedUpAt: asked };
+      const creation = { zone: GY, firstReplyAt: replied, lookedUpAt: asked, lookupClock: true };
       const verdict = judge(intent, '20402048536279', detail, ['0000000'], [], success, creation);
       expect(verdict.verdict === 'CONFIRM' ? 'CONFIRM' : verdict.verdict === 'HOLD' ? verdict.reason : verdict.verdict).toBe(decided);
       expect(windowCheckOf(intent, detail.createdAt, creation)).toBe(window);
+    }
+  });
+
+  it('[#1500 review S2-1] with the setting off (the default), the same stamps are UNCONFIRMED in support exactly as judge() holds them', () => {
+    const asked = at(replied.getTime() + 10 * 60_000);
+    for (const delta of [0, 5 * 60_000]) {
+      const detail = answerAt(gyStamp(at(asked.getTime() + delta)));
+      const creation = { zone: GY, firstReplyAt: replied, lookedUpAt: asked };
+      const verdict = judge(intent, '20402048536279', detail, ['0000000'], [], success, creation);
+      expect(verdict).toMatchObject({ verdict: 'HOLD', reason: 'CREATION_UNCONFIRMED' });
+      expect(windowCheckOf(intent, detail.createdAt, creation)).toBe('UNCONFIRMED');
     }
   });
 

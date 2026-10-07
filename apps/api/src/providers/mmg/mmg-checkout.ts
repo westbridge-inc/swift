@@ -432,6 +432,22 @@ export function mmgCreationZone(env: Record<string, string | undefined> = proces
   return setting === 'INVALID' ? null : setting;
 }
 
+/**
+ * [option b · #1500 review S2-1] MMG_CHECKOUT_CREATION_LOOKUP_CLOCK: whether
+ * MMG's lookup `creationDate` may ALSO be read as the lookup's own clock.
+ * MMG's UAT lookup stamps it with the moment of the lookup, not of the payment
+ * (staging, 6 Oct); MMG's production lookup has not been observed and MMG has
+ * not said. Exactly '1' (staging and UAT): a stamp within five minutes of when
+ * Swift asked, and never before Swift first heard of the payment, fits.
+ * Unset or '0' (the default, and the only value production starts with): the
+ * stamp is a payment time only, inside the checkout's window and no later than
+ * the first reply naming the transaction. Any other value refuses to start.
+ */
+export const MMG_CREATION_LOOKUP_CLOCK_SETTING = 'MMG_CHECKOUT_CREATION_LOOKUP_CLOCK';
+export function mmgCreationLookupClock(env: Record<string, string | undefined> = process.env): boolean {
+  return env[MMG_CREATION_LOOKUP_CLOCK_SETTING] === '1';
+}
+
 export interface MmgCheckoutConfig {
   /** The MMG hosted-checkout page (checkoutPageUrl). */
   checkoutPage: string;
@@ -590,6 +606,15 @@ export function assertMmgCheckoutConfig(env: Record<string, string | undefined> 
   // at, whatever the switch says.
   if (creationZoneSetting(env['MMG_CHECKOUT_CREATION_ZONE']) === 'INVALID') {
     throw new Error(`FATAL: MMG_CHECKOUT_CREATION_ZONE must be exactly ${MMG_CREATION_ZONES.join(' or ')}, or unset (then no MMG payment is confirmed automatically) — a misspelled zone is not guessed at. Refusing to start.`);
+  }
+  // [#1500 review S2-1] The lookup-clock reading is a staging/UAT setting until
+  // MMG confirms what its production lookup sends: exactly 0 or 1, never 1 in production.
+  const lookupClock = env[MMG_CREATION_LOOKUP_CLOCK_SETTING];
+  if (lookupClock !== undefined && lookupClock !== '' && lookupClock !== '0' && lookupClock !== '1') {
+    throw new Error(`FATAL: ${MMG_CREATION_LOOKUP_CLOCK_SETTING} must be exactly 0 or 1 — a misspelled setting is not guessed at. Refusing to start.`);
+  }
+  if (lookupClock === '1' && isProduction(env)) {
+    throw new Error(`FATAL: ${MMG_CREATION_LOOKUP_CLOCK_SETTING}=1 in production: reading MMG's creationDate as the lookup's clock is for staging and UAT until MMG confirms what its production lookup sends. Refusing to start.`);
   }
   if (flag !== '1') return;
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
