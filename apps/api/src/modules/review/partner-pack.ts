@@ -150,10 +150,22 @@ async function partnerAccounts(db: Db, tenantId: string) {
   return accounts;
 }
 
+/**
+ * [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] The documents a pack partner presents: what the vehicle
+ * requires, plus the identity document a mover MAY add. A motorised mover's national ID became optional (the
+ * licence is photo ID); the fixture partner still presents one, so it stays identity-verified (L2) as before.
+ */
+export async function packPartnerDocuments(db: Db, countryCode: string, vehicleType: VehicleType): Promise<string[]> {
+  const countries = new CountryConfigService(db);
+  const required = await countries.getMoverChecklist(countryCode, vehicleType);
+  const identity = (await countries.getMoverOptionalDocuments(countryCode, vehicleType)).filter((t) => IDENTITY_DOC_TYPES.includes(t));
+  return [...required, ...identity];
+}
+
 /** What the checklist still lacks for this account now — by THE evidence query the gates read. */
 async function missingEvidence(db: Db, role: PartnerRole, userId: string, countryCode: string, now: Date): Promise<string[]> {
   const spec = REVIEW_PACK_PARTNERS[role];
-  const checklist = await new CountryConfigService(db).getMoverChecklist(countryCode, spec.vehicleType);
+  const checklist = await packPartnerDocuments(db, countryCode, spec.vehicleType);
   const rows = await approvedEvidenceFor(db, userId, checklist, now);
   const held = new Set(rows.map((r) => r.docType));
   const missing = checklist.filter((t) => !held.has(t));
@@ -264,7 +276,7 @@ export async function seedReviewPartners(db: Db, tenantId: string, now = new Dat
     }
     // An approved identity document is L2, exactly as the approval path promotes it.
     if (user.trustLevel === 'L1') {
-      const checklist = await new CountryConfigService(db).getMoverChecklist(user.countryCode, spec.vehicleType);
+      const checklist = await packPartnerDocuments(db, user.countryCode, spec.vehicleType);
       if (checklist.some((t) => IDENTITY_DOC_TYPES.includes(t))) await db.user.update({ where: { id: user.id }, data: { trustLevel: 'L2' } });
     }
   }

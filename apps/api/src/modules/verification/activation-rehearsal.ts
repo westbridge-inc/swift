@@ -77,8 +77,10 @@ export async function rehearseActivation(
   const afterList = new Map<string, string[]>();
   const setsThatSwitch: SetSwitch[] = [];
   for (const set of sets) {
-    if (set.items.length === 0 || !set.items.every((i) => activeAfter.has(i.docType.code))) continue;
-    const registryList = set.items.map((i) => i.docType.legacyCode);
+    // [VERIFY-DOCS] A set's checklist is its BLOCKING items (registryChecklist); optional items never gate.
+    const blocking = set.items.filter((i) => i.isBlocking);
+    if (blocking.length === 0 || !set.items.every((i) => activeAfter.has(i.docType.code))) continue;
+    const registryList = blocking.map((i) => i.docType.legacyCode);
     const jsonList = json[set.actorRole] ?? [];
     afterList.set(set.actorRole, registryList);
     setsThatSwitch.push({ actorRole: set.actorRole, registryList, jsonList, same: same(registryList, jsonList) });

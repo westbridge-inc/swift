@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { emptyChecklistCopy, faceMatchedDocTypes } from './documentChecklistPresentation';
+import { emptyChecklistCopy, faceMatchedDocTypes, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 
 describe('empty verification checklist', () => {
   it('explains a service policy hold without claiming approval or a 24-hour review', () => {
@@ -36,5 +36,26 @@ describe('the face-match line follows the server', () => {
     ]) {
       expect(faceMatchedDocTypes(status as never).size, JSON.stringify(status)).toBe(0);
     }
+  });
+});
+
+describe('[VERIFY-DOCS] optional documents follow the server', () => {
+  it('lists exactly the server\'s optional types, after dropping any the checklist already requires', () => {
+    expect(optionalDocTypes({ checklist: ['drivers_licence'], optional: ['national_id', 'police_clearance'] })).toEqual(['national_id', 'police_clearance']);
+    expect(optionalDocTypes({ checklist: ['national_id'], optional: ['national_id', 'police_clearance'] })).toEqual(['police_clearance']);
+    expect(optionalDocTypes({ checklist: [], optional: ['police_clearance', 'police_clearance'] })).toEqual(['police_clearance']);
+  });
+
+  it('shows none for an older server (no `optional`) or anything that is not a list of types', () => {
+    for (const status of [{}, null, undefined, { optional: true }, { optional: 'police_clearance' }, { optional: [1, null, ''] }]) {
+      expect(optionalDocTypes(status as never), JSON.stringify(status)).toEqual([]);
+    }
+  });
+
+  it('says what the optional police clearance is for, and never that it is required', () => {
+    // [VERIFY-DOCS] No screen shows a Police-cleared badge yet: the hint says what really happens, and promises no badge.
+    expect(optionalDocHint('police_clearance')).toMatch(/^Optional\. If Swift approves a current one, your account is recorded as police-cleared\./);
+    expect(optionalDocHint('police_clearance')).not.toMatch(/badge|profile/i);
+    for (const t of ['police_clearance', 'national_id', 'anything']) expect(optionalDocHint(t)).not.toMatch(/required|must/i);
   });
 });

@@ -47,7 +47,8 @@ export interface VehicleClass {
   /** Services this vehicle is eligible to perform. */
   services: MoverService[];
   /** Extra document-checklist keys beyond the base MOVER list (keys into
-   *  CountryConfig.documentChecklists — unseeded keys resolve to no extra docs). */
+   *  CountryConfig.documentChecklists — unseeded keys resolve to no extra docs).
+   *  A key's `<KEY>_OPTIONAL` list, when present, names documents that vehicle MAY add. */
   docProfiles: string[];
   /** Display / capability order, small → large. */
   order: number;
@@ -66,8 +67,10 @@ const SIZE_RANK: Record<string, number> = { SMALL: 1, MEDIUM: 2, LARGE: 3, EXTRA
  */
 export const VEHICLE_CLASSES: Record<VehicleType, VehicleClass> = {
   BICYCLE: {
+    // [VERIFY-DOCS · ruling 4] No driver's licence on a bicycle, so the national ID is the
+    // rider's photo ID and stays required; every motorised class proves identity by licence.
     type: 'BICYCLE', label: 'Bicycle', maxPackageSize: 'MEDIUM', seats: 0,
-    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: [], order: 1, feeBand: 'STANDARD',
+    rideClass: null, services: ['COURIER', 'DELIVERY'], docProfiles: ['MOVER_NO_LICENCE'], order: 1, feeBand: 'STANDARD',
   },
   MOTORCYCLE: {
     type: 'MOTORCYCLE', label: 'Motorbike', maxPackageSize: 'LARGE', seats: 0,

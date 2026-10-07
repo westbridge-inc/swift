@@ -21,7 +21,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
-import { CATEGORY_GATES, EXTRA_DOC_TYPES, FIELD_CATALOGUE, BUCKET_OF, registryCode, seedDocRegistry } from '../modules/verification/doc-registry';
+import { CATEGORY_GATES, EXTRA_DOC_TYPES, FIELD_CATALOGUE, BUCKET_OF, REGISTRY_EFFECTIVE_FROM, REGISTRY_TIER, registryCode, seedDocRegistry } from '../modules/verification/doc-registry';
 import { custodyNarrative } from '../modules/verification/custody';
 import { exportDocumentsFor } from '../modules/verification/dsar';
 import { ownedVerificationFixture } from './helpers/verification-object';
@@ -171,6 +171,46 @@ describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
       await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: stored } });
       // A run that failed (a mutation that let the type in) must not leave it behind for the next suite.
       const medical = registryCode('GY', 'medical_certificate');
+      await system(async () => {
+        await app.prisma.requirementItem.deleteMany({ where: { docTypeCode: medical } });
+        await app.prisma.docField.deleteMany({ where: { docTypeCode: medical } });
+        await app.prisma.docType.deleteMany({ where: { code: medical } });
+      });
+    }
+  });
+
+  it('a stored OPTIONAL list naming one never reaches the registry: the boot-time seed completes and mints or lists nothing for it', async () => {
+    // The registry builds ONE requirement set per role from its required list AND its `<KEY>_OPTIONAL` list
+    // (optional items are non-blocking). A medical type named in either must be skipped there too: a
+    // requirement item for a type that was never minted is a foreign-key error inside the seed, which runs
+    // at every boot — the API would not start.
+    const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
+    const stored = gy.documentChecklists as Record<string, string[]>;
+    const optional = [...(stored['MOVER_OPTIONAL'] ?? DEFAULT_DOCUMENT_CHECKLISTS['MOVER_OPTIONAL'] ?? [])];
+    expect(optional.length, 'the movers keep an optional list to add the medical type to').toBeGreaterThan(0);
+    const medical = registryCode('GY', 'medical_certificate');
+    await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: { ...stored, MOVER_OPTIONAL: [...optional, 'medical_certificate'] } } });
+    try {
+      await expect(system(() => seedDocRegistry(app.prisma))).resolves.toMatchObject({ docTypes: expect.any(Number) });
+      expect(await app.prisma.docType.count({ where: { code: medical } })).toBe(0);
+      expect(await app.prisma.requirementItem.count({ where: { docTypeCode: medical } })).toBe(0);
+      // ... while every other document of that optional list is still in the movers' set.
+      const items = await app.prisma.requirementItem.findMany({
+        where: { requirementSet: { countryCode: 'GY', actorRole: 'MOVER', tier: REGISTRY_TIER, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
+        select: { docTypeCode: true },
+      });
+      for (const code of optional) expect(items.map((i) => i.docTypeCode), code).toContain(registryCode('GY', code));
+      // ... and an upload of it is still refused before anything is recorded (an optional type is otherwise submittable).
+      const m = await rider();
+      const res = await app.inject({
+        method: 'POST', url: '/api/v1/verification/documents', headers: { authorization: `Bearer ${m.token}` },
+        payload: { role: 'MOVER', docType: 'medical_certificate', fileUrl: await ownedVerificationFixture(app.prisma, m.userId, 'medical-optional'), consent: true, privacyNoticeVersion: 'v1' },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('DOC_TYPE_NOT_ACCEPTED');
+      expect(await app.prisma.verificationDocument.count({ where: { userId: m.userId, docType: 'medical_certificate' } })).toBe(0);
+    } finally {
+      await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: stored } });
       await system(async () => {
         await app.prisma.requirementItem.deleteMany({ where: { docTypeCode: medical } });
         await app.prisma.docField.deleteMany({ where: { docTypeCode: medical } });
