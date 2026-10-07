@@ -193,7 +193,7 @@ describe('the resolver decision table over HTTP', () => {
     expect(unknown.headers['location']).toBe(malformed.headers['location']);
   });
 
-  it('suspended vendor → the unavailable page, with zero reason leakage', async () => {
+  it('suspended vendor → the missing-code page, with zero existence or reason leakage', async () => {
     const owner = await makeOwner();
     const vendor = await makeVendor(owner.userId);
     const code = (await vendorGet(owner.token)).json().data.shortCode as string;
@@ -201,15 +201,17 @@ describe('the resolver decision table over HTTP', () => {
 
     const res = await scan(code);
     expect(res.statusCode).toBe(302);
-    expect(res.headers['location']).toBe(`${WEB}/qr/unavailable`);
+    expect(res.headers['location']).toBe(`${WEB}/qr/not-found`);
+    expect(res.payload).toBe((await scan('ZZZZZZZZZZ')).payload);
   });
 
-  it('unverified (doc-lapsed) vendor is equally just "unavailable"', async () => {
+  it('unverified (doc-lapsed) vendor is equally missing', async () => {
     const owner = await makeOwner();
     await makeVendor(owner.userId, { isVerified: false });
     const code = (await vendorGet(owner.token)).json().data.shortCode as string;
     const res = await scan(code);
-    expect(res.headers['location']).toBe(`${WEB}/qr/unavailable`);
+    expect(res.headers['location']).toBe(`${WEB}/qr/not-found`);
+    expect(res.payload).toBe((await scan('ZZZZZZZZZZ')).payload);
   });
 });
 
@@ -334,11 +336,12 @@ describe('app-side twins: JSON resolve + APP_OPEN report', () => {
 
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { status: 'SUSPENDED' } });
     const dead = (await app.inject({ method: 'GET', url: `/api/v1/public/qr/${code}` })).json().data;
-    expect(dead).toEqual({ verdict: 'UNAVAILABLE_PAGE', vendorId: null, slug: null });
+    expect(dead).toEqual({ verdict: 'NOT_FOUND', vendorId: null, slug: null });
 
     const unknown = (await app.inject({ method: 'GET', url: '/api/v1/public/qr/BCDFGHJKMN' })).json().data;
     const malformed = (await app.inject({ method: 'GET', url: '/api/v1/public/qr/NOPE' })).json().data;
     expect(unknown).toEqual({ verdict: 'NOT_FOUND', vendorId: null, slug: null });
+    expect(dead).toEqual(unknown);
     expect(malformed).toEqual(unknown); // one shared shape — no oracle
   });
 

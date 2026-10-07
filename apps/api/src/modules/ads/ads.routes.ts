@@ -8,6 +8,7 @@ import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
 import { mondayOfDate, weekSpan, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { adsEnabled } from './ads-enabled';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
@@ -354,10 +355,14 @@ export async function adsRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     await advertisers.assertMember(request.params.id, request.user.userId, true); // OWNER only
     const invited = await app.prisma.user.findUnique({ where: { phone: body.phone }, select: { id: true } });
+    // [REVIEW-PARTNER] No membership is granted by a demo account (about the
+    // caller alone, so it says nothing about the number typed).
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
     // [Row 55] One reply for every number: an unknown phone is no longer a
     // 404 and a known one no longer hands back its user id. (Invite + accept
     // for advertiser teams follows after launch; ads are off at launch.)
-    if (invited) {
+    // A demo account is never granted one either; same reply.
+    if (invited && !(await isReviewAccount(app.prisma, invited.id))) {
       await app.prisma.advertiserMember.upsert({
         where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
         create: { advertiserId: request.params.id, userId: invited.id, role: body.role },
