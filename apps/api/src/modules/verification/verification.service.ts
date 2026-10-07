@@ -32,7 +32,7 @@ import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApp
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
-import { holdActivationForUnpaidFee } from '../billing/billing-access';
+import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../billing/billing-access';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
@@ -1524,6 +1524,7 @@ export class VerificationService {
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
       return this.projectVendorActivation(tx, userId);
     });
+    await lockVendorActivationBilling(db, userId);
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
       include: {

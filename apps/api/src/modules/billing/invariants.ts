@@ -83,12 +83,17 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
         // (admin, safety, wind-down, or none recorded), awaiting approval or
         // closed keeps that state: the subscription is healed, the store is not
         // opened, and the report names it [#1516 review S3: never a silent skip].
-        const reopened = sub.vendor ? await restoreBillingAccess(tx, sub.vendor.id) : false;
-        const storeHeld = sub.vendor != null && !reopened && sub.vendor.status !== 'ACTIVE';
+        // Admin suspension does not take the billing payer lock. Lock the
+        // store too, then read the resulting state rather than classifying
+        // the earlier subscription relation snapshot.
+        if (sub.vendor) await tx.$queryRaw`SELECT id FROM vendors WHERE id = ${sub.vendor.id} FOR UPDATE`;
+        if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
+        const store = sub.vendor ? await tx.vendor.findUniqueOrThrow({ where: { id: sub.vendor.id } }) : null;
+        const storeHeld = store != null && store.status !== 'ACTIVE';
         await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REINSTATED',
           idempotencyKey: `wrongful-heal:${sub.id}:${now.toISOString().slice(0, 10)}`,
           note: storeHeld
-            ? `wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority restored, store left held (${sub.vendor!.status}, source ${sub.vendor!.suspensionSource ?? 'none recorded'})`
+            ? `wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority restored, store left held (${store!.status}, source ${store!.suspensionSource ?? 'none recorded'})`
             : 'wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority and store access restored',
         } });
         return storeHeld ? 'HEALED_STORE_HELD' as const : 'HEALED' as const;

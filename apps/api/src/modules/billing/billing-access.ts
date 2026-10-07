@@ -1,5 +1,20 @@
 import type { Prisma } from '@prisma/client';
 
+/** Serialize document projection with settlement before any store write.
+ * The payer comes first, then its vendor subscriptions in stable order, just
+ * like billing. Lock even an owner without a subscription: activation may
+ * create that first subscription in this transaction. */
+export async function lockVendorActivationBilling(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+  await tx.$queryRaw`
+    SELECT s.id FROM subscriptions s
+    JOIN vendors v ON v.id = s."vendorId"
+    JOIN vendor_owners o ON o.id = v."ownerId"
+    WHERE o."userId" = ${userId}
+    ORDER BY s.id FOR UPDATE OF s
+  `;
+}
+
 /**
  * Give back what a BILLING suspension took from a store, and nothing more
  * [REPORT-013 F-013-07; SUSPENSION-HEAL, AUD-L8b-003]. The one restore used by
@@ -39,7 +54,8 @@ export async function restoreBillingAccess(tx: Prisma.TransactionClient, vendorI
  *
  * Billing never holds a store awaiting approval itself (billing.service
  * suspendAccessRows touches open stores only), so this is the one place a
- * pending store takes billing's hold: on its activation edge, decided at write
+ * pending store takes billing's hold: on its activation edge, after the caller
+ * locks its payer and subscription before any vendor write, decided at write
  * time against the live subscription row, inside the activation transaction.
  * Returns true when the store was held.
  */

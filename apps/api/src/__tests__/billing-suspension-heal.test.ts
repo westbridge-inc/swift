@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type Prisma } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { runBillingInvariants } from '../modules/billing/invariants';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
@@ -104,6 +104,43 @@ describe('SUSPENSION-HEAL — the wrongful-suspension heal reopens the store it 
     const heal = await prisma.billingEvent.findFirstOrThrow({ where: { subscriptionId: s.subId, type: 'REINSTATED' } });
     expect(heal.note).toContain('store left held');
     expect(heal.note).not.toContain('store access restored');
+  });
+
+  it('reports the authoritative ADMIN hold when the store changes after the subscription snapshot', async () => {
+    const s = await wronglySuspendedStore({ status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
+    let interleaved = false;
+    const racing = new Proxy(prisma, {
+      get(target, key) {
+        if (key !== '$transaction') return Reflect.get(target, key);
+        return (work: (tx: Prisma.TransactionClient) => Promise<unknown>) => target.$transaction(async (tx) => work(new Proxy(tx, {
+          get(transaction, field) {
+            if (field !== 'subscription') return Reflect.get(transaction, field);
+            return new Proxy(transaction.subscription, {
+              get(delegate, method) {
+                if (method !== 'findUniqueOrThrow') return Reflect.get(delegate, method);
+                return async (args: Prisma.SubscriptionFindUniqueOrThrowArgs) => {
+                  const snapshot = await delegate.findUniqueOrThrow(args);
+                  if (!interleaved && args.where.id === s.subId && args.include?.vendor === true) {
+                    interleaved = true;
+                    await prisma.vendor.update({ where: { id: s.vendorId }, data: { status: 'SUSPENDED', suspensionSource: 'ADMIN', acceptingOrders: false } });
+                  }
+                  return snapshot;
+                };
+              },
+            });
+          },
+        })));
+      },
+    });
+    const report = await runBillingInvariants(racing);
+    expect(interleaved).toBe(true);
+    expect(report.wrongfulSuspensions).toContain(s.subId);
+    expect(report.healedWithStoreStillHeld).toContain(s.subId);
+    expect(await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } }))
+      .toMatchObject({ status: 'SUSPENDED', suspensionSource: 'ADMIN', acceptingOrders: false });
+    const event = await prisma.billingEvent.findFirstOrThrow({ where: { subscriptionId: s.subId, type: 'REINSTATED' } });
+    expect(event.note).toContain('store left held (SUSPENDED, source ADMIN)');
+    expect(event.note).not.toContain('store access restored');
   });
 
   it('a store whose documents lapsed comes back ACTIVE but NOT taking orders', async () => {
