@@ -1,5 +1,6 @@
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
+import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
@@ -401,9 +402,13 @@ async function buildCartResponse(
       where: { userId: cart.customerId, isDefault: true },
     });
   }
-  const promoCodeRecord = cart.promoCodeId
+  const storedPromoCode = cart.promoCodeId
     ? await app.prisma.promoCode.findUnique({ where: { id: cart.promoCodeId } })
     : null;
+  // Old carts can predate the attachment wall. Their saved pointer grants
+  // neither access to another tenant's terms nor a discount on this quote.
+  const promoCodeRecord = storedPromoCode && await promoBelongsToCallerTenant(app.prisma, storedPromoCode, userId)
+    ? storedPromoCode : null;
   // The fee is about where the order is GOING: the chosen delivery address
   // wins over device coords (those are only a fallback before an address is
   // set). Same routing source as checkout, so the quote equals the final fee.
@@ -3315,7 +3320,12 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { code: code.toUpperCase().trim() },
     });
 
-    if (!promo) throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    // [L04] A code of another tenant (a platform code for anyone outside
+    // production, or another tenant's store code) is answered exactly as an
+    // unknown code — and is never attached to this cart.
+    if (!(await promoBelongsToCallerTenant(app.prisma, promo, userId)) || !promo) {
+      throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
+    }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
 
     const now = new Date();
