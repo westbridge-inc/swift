@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { Prisma, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -531,5 +531,104 @@ describe('[M022] options, notes and destination are part of the locked cart', ()
     const svc = new OrderService(app.prisma, app.io);
     const res = await svc.checkout({ userId: c.userId, paymentMethod: 'CASH' });
     expect(res.orders).toHaveLength(1);
+  });
+});
+
+// Duplicate assertions are invalid input, before checkout holds any cart/store lock.
+describe('expected-price request bounds', () => {
+  it('duplicate line IDs do not reach the service transaction', async () => {
+    const c = await makeCustomer();
+    expect((await add(c.token, { selectedOptions: validOptions() })).statusCode).toBe(201);
+    const line = (await lines(c.userId))[0]!;
+    let reached = false;
+    await expect(new OrderService(app.prisma, app.io).checkout({
+      userId: c.userId, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' },
+      expectedPrices: { lines: [{ lineId: line.id, unitPrice: 0 }, { lineId: line.id, unitPrice: 1 }] },
+      beforeTransaction: async () => { reached = true; },
+    })).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_EXPECTED_PRICES' });
+    expect(reached).toBe(false);
+  });
+
+  it('refuses duplicate line IDs even when their prices disagree', async () => {
+    const c = await makeCustomer();
+    expect((await add(c.token, { selectedOptions: validOptions() })).statusCode).toBe(201);
+    const line = (await lines(c.userId))[0]!;
+    const response = await inject('POST', '/api/v1/customer/checkout', {
+      paymentMethod: 'CASH', expectedLines: [{ lineId: line.id, unitPrice: 0 }, { lineId: line.id, unitPrice: 1 }],
+    }, c.token);
+    expect(response.statusCode, response.body).toBe(400);
+    expect(response.json().error.code).toBe('VALIDATION_ERROR');
+    expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+  });
+});
+
+// [L09 · price lock, Sol S3] The store's menu edits and checkout's final
+// menu read are serialized: checkout locks the basket's items, option groups
+// and options (stable id order) before that read, so an edit either lands
+// first and the checkout sees it, or waits for the order to commit.
+describe('menu changes serialize with the checkout snapshot', () => {
+  type MenuEdit = (db: Prisma.TransactionClient) => Promise<unknown>;
+  it.each<[string, MenuEdit, MenuEdit, string]>([
+    ['a choice sold out', (db) => db.option.update({ where: { id: sizeLarge }, data: { isAvailable: false } }),
+      (db) => db.option.update({ where: { id: sizeLarge }, data: { isAvailable: true } }), 'ITEM_UNAVAILABLE'],
+    ['the item hidden', (db) => db.item.update({ where: { id: itemId }, data: { isAvailable: false } }),
+      (db) => db.item.update({ where: { id: itemId }, data: { isAvailable: true } }), 'ITEM_UNAVAILABLE'],
+    ['the item repriced', (db) => db.item.update({ where: { id: itemId }, data: { basePrice: BASE + 100 } }),
+      (db) => db.item.update({ where: { id: itemId }, data: { basePrice: BASE } }), 'CART_CHANGED'],
+    ['a group that now needs two choices', (db) => db.optionGroup.update({ where: { id: extrasGroupId }, data: { minSelect: 2 } }),
+      (db) => db.optionGroup.update({ where: { id: extrasGroupId }, data: { minSelect: 0 } }), 'CART_OPTIONS_CHANGED'],
+  ])('a store edit still in flight when checkout locks the menu (%s) is waited for, and the checkout is refused', async (_name, edit, undo, code) => {
+    const c = await makeCustomer();
+    expect((await add(c.token, { selectedOptions: validOptions() })).statusCode).toBe(201);
+    let vendorHasRow!: () => void;
+    const rowHeld = new Promise<void>((resolve) => { vendorHasRow = resolve; });
+    let vendorEdit: Promise<unknown> | undefined;
+    try {
+      await expect(new OrderService(app.prisma, app.io).checkout({
+        userId: c.userId, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' },
+        afterCartLock: async () => {
+          // The store's edit holds its row and commits only after checkout has
+          // reached the menu lock.
+          vendorEdit = app.prisma.$transaction(async (tx) => {
+            await edit(tx);
+            vendorHasRow();
+            await new Promise((resolve) => setTimeout(resolve, 400));
+          });
+          await rowHeld;
+        },
+      })).rejects.toMatchObject({ statusCode: 409, code });
+      await vendorEdit;
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await vendorEdit?.catch(() => undefined);
+      await app.prisma.$transaction(async (tx) => { await undo(tx); });
+    }
+  });
+
+  it('an option cannot be marked sold out after validation and before commit', async () => {
+    const c = await makeCustomer();
+    expect((await add(c.token, { selectedOptions: validOptions() })).statusCode).toBe(201);
+    let updateBlocked = false;
+    const service = new OrderService(app.prisma, app.io);
+    try {
+      const placed = await service.checkout({ userId: c.userId, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' }, afterDurableTail: async () => {
+        // The order is written but not committed: the store's edit must wait.
+        try {
+          await app.prisma.$transaction(async (tx) => {
+            await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '300ms'");
+            await tx.option.update({ where: { id: sizeLarge }, data: { isAvailable: false } });
+          });
+        } catch (error) {
+          updateBlocked = /55P03|lock timeout/i.test(String(error));
+        }
+      } });
+      expect(placed.orders).toHaveLength(1);
+      expect(updateBlocked).toBe(true);
+      // After the checkout commits the same edit completes, rather than being lost.
+      await app.prisma.option.update({ where: { id: sizeLarge }, data: { isAvailable: false } });
+      expect((await app.prisma.option.findUniqueOrThrow({ where: { id: sizeLarge } })).isAvailable).toBe(false);
+    } finally {
+      await app.prisma.option.update({ where: { id: sizeLarge }, data: { isAvailable: true } });
+    }
   });
 });

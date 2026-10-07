@@ -180,6 +180,7 @@ const checkoutSchema = z.object({
   // in the cart it already loaded (no query per entry).
   expectedLines: z
     .array(z.object({ lineId: z.string().min(1).max(64), unitPrice: z.number().nonnegative().max(1_000_000_000) }))
+    .refine((lines) => new Set(lines.map((line) => line.lineId)).size === lines.length, 'Expected-price line IDs must be unique')
     .optional(),
 });
 

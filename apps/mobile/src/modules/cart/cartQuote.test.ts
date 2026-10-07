@@ -240,3 +240,12 @@ describe('[L09 · price lock] Place order carries the prices the customer saw', 
     expect(checkoutErrorMessage(refused)).toBe('Prices changed since you last looked: Roti GYD 800 → GYD 900. Review your cart and place the order again.');
   });
 });
+
+it('[L09 · price lock] CART_CHANGED refuses a stale snapshot and re-quotes the cart', () => {
+  const error = { response: { data: { error: { code: 'CART_CHANGED', message: 'Review your cart and place the order again.' } } } };
+  expect(cartStaleCheckoutCode(error)).toBe('CART_CHANGED');
+  expect(checkoutErrorMessage(error)).toBe('Review your cart and place the order again.');
+  // Without a server message it says what happened, not a stock message.
+  expect(checkoutErrorMessage({ response: { data: { error: { code: 'CART_CHANGED' } } } }))
+    .toBe('Your cart just changed — review it and place the order again.');
+});

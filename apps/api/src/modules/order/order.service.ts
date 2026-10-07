@@ -165,8 +165,10 @@ const sameMoney = (a: number, b: number) => Math.round(a * 100) === Math.round(b
  * what the customer saw: a line's unit price or the total. Only what the
  * client sent is compared (an older app sends nothing and is not refused).
  * A line the customer saw that is no longer in the cart is a cart change.
+ * The refusal is bounded however large the cart: the message names five
+ * lines and the details carry fifty, with the full count beside them.
  */
-function assertPricesAsSeen(
+export function assertPricesAsSeen(
   expected: NonNullable<CheckoutInput['expectedPrices']>,
   lines: ReadonlyArray<{ id: string; item: { name: string }; unitPrice: number }>,
   total: number,
@@ -182,13 +184,14 @@ function assertPricesAsSeen(
   }
   const totalChanged = expected.total != null && !sameMoney(total, expected.total);
   if (changed.length === 0 && !totalChanged) return;
-  const parts = changed.map((c) => `${c.name} ${gyd(c.seen)} → ${gyd(c.now)}`);
+  const parts = changed.slice(0, 5).map((c) => `${c.name} ${gyd(c.seen)} → ${gyd(c.now)}`);
+  if (changed.length > 5) parts.push(`and ${changed.length - 5} other lines`);
   if (totalChanged) parts.push(`total ${gyd(expected.total!)} → ${gyd(total)}`);
   throw new AppError(
     409,
     'PRICE_CHANGED',
     `Prices changed since you last looked: ${parts.join('; ')}. Review your cart and place the order again.`,
-    { lines: changed, total: totalChanged ? { seen: expected.total, now: total } : null },
+    { lines: changed.slice(0, 50), changedLineCount: changed.length, total: totalChanged ? { seen: expected.total, now: total } : null },
   );
 }
 
@@ -821,6 +824,10 @@ export class OrderService {
   }
 
   async checkout(input: CheckoutInput) {
+    const assertions = input.expectedPrices?.lines;
+    if (assertions && new Set(assertions.map((line) => line.lineId)).size !== assertions.length) {
+      throw new AppError(400, 'INVALID_EXPECTED_PRICES', 'Expected-price line IDs must be unique.');
+    }
     const now = input.now ?? new Date();
 
     const cart = await this.prisma.cart.findUnique({
@@ -1361,6 +1368,15 @@ export class OrderService {
         }
       }
       const basketItemIds = plans.flatMap((p) => p.orderItems.map((oi) => oi.itemId));
+      // Freeze the menu snapshot through commit. Item/group locks also block
+      // inserting a new child choice through its foreign key. All rows use a
+      // stable lock order, shared with stock writers.
+      const menuItemIds = [...new Set(basketItemIds)].sort();
+      if (menuItemIds.length > 0) {
+        await tx.$queryRaw`SELECT id FROM "items" WHERE id IN (${Prisma.join(menuItemIds)}) ORDER BY id FOR UPDATE`;
+        await tx.$queryRaw`SELECT id FROM "option_groups" WHERE "itemId" IN (${Prisma.join(menuItemIds)}) ORDER BY id FOR UPDATE`;
+        await tx.$queryRaw`SELECT o.id FROM "options" o JOIN "option_groups" g ON g.id = o."optionGroupId" WHERE g."itemId" IN (${Prisma.join(menuItemIds)}) ORDER BY o.id FOR UPDATE OF o`;
+      }
       const darkItem = await tx.item.findFirst({
         where: { id: { in: basketItemIds }, isAvailable: false },
         select: { name: true },
