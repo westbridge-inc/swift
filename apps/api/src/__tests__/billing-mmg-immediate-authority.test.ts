@@ -1723,6 +1723,18 @@ describe('R13 final notice renewal result freshness at the real SMS boundary', (
 });
 
 describe('R5 affirmative MMG evidence and fair card reconciliation', () => {
+  it('push history query carries the payment deadline without authorizing an effect', async () => {
+    const h = harness('prior_lookup');
+    const createdAt = new Date(due.getTime() - 5 * 60_000);
+    const expiresAt = new Date(due.getTime() + 10 * 60_000);
+    Object.assign(h.state.payment!, { status: 'UNKNOWN', externalRef: null, createdAt, expiresAt, lastPolledAt: null, failureRaw: { providerEffect: 'AUTHORIZED' } });
+    const history = vi.spyOn(SandboxMmgProvider.prototype, 'transactionHistory').mockResolvedValue([]);
+    expect(await h.billing.pollPendingMmgCharges(due)).toMatchObject({ settled: 0, banked: 0, adopted: 0, failed: 0, stillPending: 1 });
+    expect(history).toHaveBeenCalledWith({ from: createdAt, to: expiresAt, limit: 100 });
+    expect(h.state.payment).toMatchObject({ status: 'UNKNOWN', externalRef: null });
+    expect(ledger.keys).toEqual([]);
+  });
+
   it.each([
     ['missing', undefined],
     ['empty', ''],

@@ -25,6 +25,8 @@ import { payInfo } from './agent-cash.service';
 import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
+import { MMG_HISTORY_CLOCK_TOLERANCE_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
+export { MMG_HISTORY_ROWS, MMG_HISTORY_MARGIN_MS, mmgStampOf } from '../../providers/mmg/mmg-history';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
@@ -76,7 +78,7 @@ const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_
  *  for the payment ([7 Oct] its history record's modificationDate), and for
  *  when MMG's success answer reached us. [DS632] Also how far MMG's time may
  *  run past the first reply naming it. */
-export const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
+export const CHECKOUT_CLOCK_TOLERANCE_MS = MMG_HISTORY_CLOCK_TOLERANCE_MS;
 /** An MMG transaction id or ledger number as MMG writes it. */
 export const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
@@ -330,22 +332,8 @@ export function creationZoneInUse(checkout: () => MmgCheckoutProvider | null): M
 // dates are read the same way, and its `offset` is a row COUNT, oldest first.
 // ---------------------------------------------------------------------------
 
-/** How many history rows Swift asks for (MMG's `offset`). An answer this long may have been cut short. */
-export const MMG_HISTORY_ROWS = 100;
-/** How far beyond the accepted bounds the query reaches, so a payment just outside them is seen and held as outside. */
-export const MMG_HISTORY_MARGIN_MS = 10 * 60_000;
 /** The one transactionStatus history writes for a finished payment (UAT, 7 Oct). Anything else holds. */
 export const MMG_HISTORY_SUCCESS: readonly string[] = ['completed'];
-
-/** An instant written the way MMG reads (and writes) its times, to the whole
- *  second: the inverse of mmgCreationInstant for the configured zone. */
-export function mmgStampOf(instant: number, zone: MmgCreationZone, round: 'floor' | 'ceil' = 'floor'): string {
-  const second = (round === 'ceil' ? Math.ceil(instant / 1000) : Math.floor(instant / 1000)) * 1000;
-  if (zone === 'UTC') return new Date(second).toISOString();
-  // Guyana wall clock: the face whose wall-clock reading is this instant.
-  const shift = instantOfGuyanaWallClock(new Date(second)).getTime() - second;
-  return new Date(second - shift).toISOString();
-}
 
 /** The history query for one checkout: every row from two minutes and the
  *  margin before it opened, to two minutes and the margin after the first
@@ -354,9 +342,8 @@ export function mmgStampOf(instant: number, zone: MmgCreationZone, round: 'floor
 export function historyQueryFor(
   intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, firstReplyAt: Date, zone: MmgCreationZone, now: Date,
 ): MmgHistoryQuery {
-  const from = intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS - MMG_HISTORY_MARGIN_MS;
-  const bound = Math.min(intent.expiresAt.getTime(), firstReplyAt.getTime()) + CHECKOUT_CLOCK_TOLERANCE_MS + MMG_HISTORY_MARGIN_MS;
-  return { fromdate: mmgStampOf(from, zone), todate: mmgStampOf(Math.min(bound, now.getTime()), zone, 'ceil'), rows: MMG_HISTORY_ROWS };
+  const bound = new Date(Math.min(intent.expiresAt.getTime(), firstReplyAt.getTime()));
+  return mmgHistoryQueryFor(intent.createdAt, bound, zone, now);
 }
 
 /** The history rows that name this transaction: transactionReference or
@@ -1170,7 +1157,7 @@ export class MmgCheckoutService {
     mmgCheckoutLookupsCounter.labels(`history_${answer.outcome}`).inc();
     const naming = answer.outcome === 'rows' ? rowsNaming(answer.rows, txnId) : [];
     const record = answer.outcome === 'rows'
-      ? { body: { query, rowsReturned: answer.rows.length, truncated: answer.rows.length >= query.rows, naming }, failure: naming.length === 0 ? 'HISTORY_NOT_FOUND' : null }
+      ? { body: { query, rowsReturned: answer.rows.length, truncated: mmgHistoryTruncated(answer.rows.length, query), naming }, failure: naming.length === 0 ? 'HISTORY_NOT_FOUND' : null }
       : { body: { query, error: answer.reason }, failure: HISTORY_FAILED };
     const body = redactedObject(record.body);
     await this.observe({
