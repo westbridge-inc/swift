@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 
 export function WeeklyFee({ family }: { family: FeeFamily }) {
   const storeId = useStoreId();
@@ -53,9 +53,14 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
     <h2 className="text-lg font-bold">Recent checkouts</h2>
-    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
-      <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
-      <p>{checkoutWords(c.ref === view.checkout?.ref ? view.checkout : c, c.ref === view.checkout?.ref && view.returned)}</p>
-    </div>) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
+    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
+      const shown = c.ref === view.checkout?.ref ? view.checkout : c;
+      return <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
+        <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
+        <p>{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</p>
+        {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
+        {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
+      </div>;
+    }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
   </section>;
 }

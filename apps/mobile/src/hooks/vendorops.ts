@@ -424,6 +424,16 @@ export function useRetryDispatch() {
   });
 }
 
+/** [AF-MOB-006] The store confirms a returned order is back. The server closes
+ *  the return (and its recovery case); both order reads are refreshed. */
+export function useReturnReceived() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.returnReceived(id)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+  });
+}
+
 /** The server owns custody. This only records the eligible store's requested
  * delivery owner and immediately re-reads both its detail and every order list
  * after a success or a race refusal. */

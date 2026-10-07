@@ -62,6 +62,7 @@ import { subscriptionOperability } from '../subscription/operate-gate';
 import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
+import { syncCaseOnOrderTransition } from '../custody/custody-case';
 
 interface CheckoutInput {
   userId: string;
@@ -2013,6 +2014,12 @@ export class OrderService {
       data.courierProofPhotoUrl = input.terminalMetadata.courierProofPhotoUrl;
     }
     await tx.order.update({ where: { id: input.orderId }, data });
+
+    // [AF-MOB-006] The custody recovery case moves WITH its order, on this
+    // lock, in this commit: a return is owned the moment it starts, and an
+    // open case resolves the moment its order ends. Costs no query unless the
+    // order is entering RETURNING or leaving rider custody for a terminal.
+    await syncCaseOnOrderTransition(tx, source, input.target, input.changedBy, input.note);
 
     // A REFUNDED transition after CANCELLED/DELIVERED/COMPLETED is accounting
     // only. Replaying operational cleanup here could cancel historical booking
