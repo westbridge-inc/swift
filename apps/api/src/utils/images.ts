@@ -94,7 +94,29 @@ function stripJpeg(buf: Buffer): Buffer | null {
   if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
   const out: Buffer[] = [buf.subarray(0, 2)]; // SOI
   let i = 2;
+  let inScan = false;
   while (i < buf.length) {
+    if (inScan) {
+      const start = i;
+      // Entropy-coded bytes escape 0xFF as 0xFF00. Restart/TEM markers
+      // belong to the scan too; every other marker resumes segment parsing.
+      // Progressive JPEGs can carry APP1/COM between ANY pair of scans.
+      while (i < buf.length) {
+        if (buf[i] !== 0xff) { i += 1; continue; }
+        let next = i + 1;
+        while (next < buf.length && buf[next] === 0xff) next += 1;
+        if (next >= buf.length) return null;
+        const marker = buf[next]!;
+        if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+          i = next + 1;
+          continue;
+        }
+        break;
+      }
+      if (i >= buf.length) return null; // no complete EOI
+      out.push(buf.subarray(start, i));
+      inScan = false;
+    }
     if (buf[i] !== 0xff) return null; // not on a segment boundary — refuse
     // Skip fill bytes (a legal run of 0xFF before a marker).
     let m = i + 1;
@@ -107,8 +129,13 @@ function stripJpeg(buf: Buffer): Buffer | null {
       i = m + 1;
       continue;
     }
-    if (marker === 0xd9) { out.push(buf.subarray(i)); return Buffer.concat(out); } // EOI
-    if (marker === 0xda) { out.push(buf.subarray(i)); return Buffer.concat(out); } // SOS → entropy data to the end
+    if (marker === 0xd9) {
+      // EOI ends the image. Appended metadata or another payload is never
+      // part of the published photo, even when a decoder ignores it.
+      out.push(buf.subarray(i, m + 1));
+      return Buffer.concat(out);
+    }
+    if (marker === 0x00 || marker === 0xd8) return null;
     if (m + 2 >= buf.length) return null;
     const len = buf.readUInt16BE(m + 1);
     if (len < 2) return null;
@@ -116,8 +143,11 @@ function stripJpeg(buf: Buffer): Buffer | null {
     if (end > buf.length) return null;
     if (!JPEG_DROP_MARKERS.has(marker)) out.push(buf.subarray(i, end));
     i = end;
+    // DNL may define the height inside an entropy-coded scan; its payload
+    // has a length word and the scan resumes immediately after it.
+    inScan = marker === 0xda || marker === 0xdc;
   }
-  return Buffer.concat(out);
+  return null; // an unfinished container cannot establish safe stripping
 }
 
 function stripPng(buf: Buffer): Buffer | null {
@@ -132,9 +162,9 @@ function stripPng(buf: Buffer): Buffer | null {
     if (len > buf.length || end > buf.length) return null;
     if (!PNG_DROP_CHUNKS.has(type)) out.push(buf.subarray(i, end));
     i = end;
-    if (type === 'IEND') break;
+    if (type === 'IEND') return len === 0 ? Buffer.concat(out) : null;
   }
-  return Buffer.concat(out);
+  return null; // includes an incomplete trailing chunk or a missing IEND
 }
 
 function stripWebp(buf: Buffer): Buffer | null {

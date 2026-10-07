@@ -3,13 +3,14 @@ import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { buildApp } from '../app';
 import { tenantUnscopedAccessCounter } from '../plugins/observability';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { windDownPartner } from '../modules/user/partner-wind-down';
 import { stripImageMetadata, stripImageMetadataStrict } from '../utils/images';
+import { PROGRESSIVE_JPEG, PROGRESSIVE_SCAN_OFFSETS, SYNTHETIC_CAMERA_TAG, progressiveWithMetadata } from './fixtures/progressive-jpeg';
 
 // ---------------------------------------------------------------------------
 // [PUBLIC-PHOTOS] Stores' own photos are served by the API, whatever the
@@ -455,6 +456,20 @@ describe('[PUBLIC-PHOTOS] only a store a guest may see — the public catalogue\
 });
 
 describe('[PUBLIC-PHOTOS] a shop\'s location never leaves inside a photo', () => {
+  it.each([PROGRESSIVE_SCAN_OFFSETS[1], PROGRESSIVE_JPEG.length])('a progressive JPEG tagged at %i is stripped on upload and when serving an older stored photo', async (offset) => {
+    const camera = progressiveWithMetadata(offset);
+    const item = await addItem(storeA.vendorId, storeA.categoryId, null);
+    const stored = await uploadPhoto(app, storeA, item.id, 'shop.png', 'image/png', camera);
+    expect(bucket.get(stored)!.body.equals(PROGRESSIVE_JPEG), 'object-storage upload kept metadata').toBe(true);
+    // Older stored bytes must be repaired at the public address too.
+    bucket.set(stored, { body: camera, contentType: 'image/jpeg' });
+    const res = await get(`/${stored}`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['content-type']).toBe('image/jpeg');
+    expect(res.rawPayload.includes(SYNTHETIC_CAMERA_TAG)).toBe(false);
+    expect(res.rawPayload.equals(PROGRESSIVE_JPEG)).toBe(true);
+  });
+
   it('a camera photo with its GPS tags, uploaded under the wrong type, is stored and served without them', async () => {
     const item = await addItem(storeA.vendorId, storeA.categoryId, null);
     const camera = jpeg(30, [exifSegment()]);
@@ -663,6 +678,23 @@ describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
     expect(res.rawPayload.equals(png(11))).toBe(true);
     const orphan = await local!.inject({ method: 'GET', url: `/${orphanKey}` });
     expect(orphan.statusCode).toBe(404);
+  });
+
+  it.each([PROGRESSIVE_SCAN_OFFSETS[1], PROGRESSIVE_JPEG.length])('the local upload and both photo addresses strip a progressive JPEG tagged at %i', async (offset) => {
+    const camera = progressiveWithMetadata(offset);
+    const item = await addItem(storeB.vendorId, storeB.categoryId, null);
+    const stored = await uploadPhoto(local!, storeB, item.id, 'shop.jpg', 'image/jpeg', camera);
+    const relative = stored.replace(/^\/uploads\//, '');
+    expect((await readFile(path.join(dir, relative))).equals(PROGRESSIVE_JPEG), 'local upload kept metadata').toBe(true);
+    await writeFile(path.join(dir, relative), camera);
+    for (const address of [stored, `/${relative}`]) {
+      await app.prisma.item.update({ where: { id: item.id }, data: { imageUrl: address === stored ? stored : relative } });
+      const res = await local!.inject({ method: 'GET', url: address });
+      expect(res.statusCode, address).toBe(200);
+      expect(res.headers['content-type']).toBe('image/jpeg');
+      expect(res.rawPayload.includes(SYNTHETIC_CAMERA_TAG)).toBe(false);
+      expect(res.rawPayload.equals(PROGRESSIVE_JPEG)).toBe(true);
+    }
   });
 
   it('the address a real local upload returns (/uploads/items/…) is served while the store uses the photo, and not after', async () => {

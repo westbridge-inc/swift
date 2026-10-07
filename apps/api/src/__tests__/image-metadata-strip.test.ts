@@ -2,8 +2,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { stripImageMetadata } from '../utils/images';
+import { stripImageMetadata, stripImageMetadataStrict } from '../utils/images';
 import { LocalStorageProvider } from '../providers/storage/storage-provider';
+import { PROGRESSIVE_JPEG, PROGRESSIVE_SCAN_OFFSETS, SYNTHETIC_CAMERA_TAG, progressiveWithMetadata } from './fixtures/progressive-jpeg';
 
 // ---------------------------------------------------------------------------
 // [S8/C4] Uploads arrive straight off a phone camera and carry EXIF: GPS to
@@ -150,6 +151,57 @@ describe('stripImageMetadata — the camera metadata never reaches storage', () 
     expect(() => stripImageMetadata(junk, 'image/jpeg')).not.toThrow();
     expect(stripImageMetadata(junk, 'image/jpeg').equals(junk)).toBe(true);
     const truncated = BASE_PNG.subarray(0, 20);
+    expect(stripImageMetadata(truncated, 'image/png').equals(truncated)).toBe(true);
+  });
+});
+
+describe('JPEG metadata after a scan begins', () => {
+  it.each(PROGRESSIVE_SCAN_OFFSETS)('removes EXIF before the scan at offset %i without changing any image byte', (offset) => {
+    expect(PROGRESSIVE_JPEG.subarray(offset, offset + 2)).toEqual(Buffer.from([0xff, 0xda]));
+    const dirty = progressiveWithMetadata(offset);
+    expect(dirty.includes(SYNTHETIC_CAMERA_TAG)).toBe(true);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')?.equals(PROGRESSIVE_JPEG)).toBe(true);
+    expect(stripImageMetadata(dirty, 'image/png').equals(PROGRESSIVE_JPEG)).toBe(true);
+  });
+
+  it.each([0xed, 0xfe])('removes the non-rendering marker %i between scans', (marker) => {
+    const dirty = progressiveWithMetadata(PROGRESSIVE_SCAN_OFFSETS[1], marker);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')?.equals(PROGRESSIVE_JPEG)).toBe(true);
+  });
+
+  it('discards metadata and arbitrary payload after EOI', () => {
+    const dirty = Buffer.concat([progressiveWithMetadata(PROGRESSIVE_JPEG.length), Buffer.from('synthetic-trailing-payload')]);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')?.equals(PROGRESSIVE_JPEG)).toBe(true);
+    expect(stripImageMetadata(dirty, 'image/jpeg').equals(PROGRESSIVE_JPEG)).toBe(true);
+  });
+
+  it('refuses a metadata segment with a length past the file between scans', () => {
+    const offset = PROGRESSIVE_SCAN_OFFSETS[1];
+    const dirty = Buffer.concat([PROGRESSIVE_JPEG.subarray(0, offset), Buffer.from([0xff, 0xe1, 0xff, 0xff]), PROGRESSIVE_JPEG.subarray(offset)]);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')).toBeNull();
+    expect(stripImageMetadata(dirty, 'image/jpeg').equals(dirty)).toBe(true);
+  });
+
+  it('refuses an unfinished scan and an invalid scan header', () => {
+    expect(stripImageMetadataStrict(PROGRESSIVE_JPEG.subarray(0, -2), 'image/jpeg')).toBeNull();
+    const dirty = Buffer.from(PROGRESSIVE_JPEG);
+    dirty.writeUInt16BE(1, PROGRESSIVE_SCAN_OFFSETS[1] + 2);
+    expect(stripImageMetadataStrict(dirty, 'image/jpeg')).toBeNull();
+  });
+
+  it('keeps stuffed entropy bytes, restart markers and marker fill bytes', () => {
+    const scan = Buffer.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x08, 1, 1, 0, 0, 0x3f, 0]);
+    const entropy = Buffer.from([0x12, 0xff, 0x00, 0xe1, 0xff, 0xd0, 0x34, 0xff, 0xff, 0xd7, 0x56]);
+    const clean = Buffer.concat([scan, entropy, Buffer.from([0xff, 0xff, 0xd9])]);
+    expect(stripImageMetadataStrict(clean, 'image/jpeg')?.equals(clean)).toBe(true);
+  });
+});
+
+describe('a published PNG must have a complete container', () => {
+  it.each([8, BASE_PNG.length - 12, BASE_PNG.length - 4])('refuses a PNG truncated at byte %i', (end) => {
+    const truncated = BASE_PNG.subarray(0, end);
+    expect(stripImageMetadataStrict(truncated, 'image/png')).toBeNull();
+    // Private document uploads retain their established fail-open behavior.
     expect(stripImageMetadata(truncated, 'image/png').equals(truncated)).toBe(true);
   });
 });

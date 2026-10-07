@@ -58,7 +58,8 @@ const STORE_ID = /^[A-Za-z0-9_-]{1,64}$/;
  *  whatever it was ("photo.jpg-large", "dish.jpeg_large_export"). The name is
  *  only ever compared with what a store's row holds, exactly, so the extension
  *  may be any printable text up to 64 characters — but never another dot, a
- *  separator or a control character. */
+ *  separator or an ASCII control character. The stored name is never used
+ *  as a response header or as HTML. */
 const PHOTO_ID = /^[A-Za-z0-9_-]{16}$/;
 function photoNameAccepted(file: string): boolean {
   const dot = file.indexOf('.');
