@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AppState, RefreshControl, ScrollView, View } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
@@ -22,6 +22,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const resolvingStore = useStoreSwitcher((s) => s.feeContextPending);
   const contextError = useStoreSwitcher((s) => s.feeContextError);
   contextPending = contextPending || resolvingStore;
+  const navigation = useNavigation<any>();
   const principal = useAuthStore((s) => s.user?.id);
   const generation = useAuthStore((s) => s.sessionGeneration);
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
@@ -78,6 +79,20 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
           {view.returned && !checkout ? <T variant="body">Waiting for MMG…</T> : null}
           {view.error ? <T variant="caption" tone="error" style={{ marginTop: space.md }}>{view.error}</T> : null}
           <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.lg }} onPress={() => { void refresh(); if (!contextPending) session.focus(undefined, checkoutRef); }} />
+          {/* [NO-DEAD-ENDS] A payment held for checking took the Pay button away
+              and promised "Support will contact you", with no way to ask. The
+              door opens a ticket that already carries the Swift reference. */}
+          {checkout?.status === 'HELD' ? <PillButton
+            testID="weekly-fee-held-help"
+            label="Ask Swift support about this payment"
+            variant="soft"
+            style={{ marginTop: space.md }}
+            onPress={() => navigation?.navigate?.('GetHelp', {
+              category: 'PAYMENT',
+              subject: 'My weekly fee payment is being checked',
+              ...(checkout.swiftReference ? { message: `Swift reference: ${checkout.swiftReference}` } : {}),
+            })}
+          /> : null}
         </Card>
         {action && !blocked && card ? <T variant="heading" accessibilityRole="header">Choose how to pay</T> : null}
         {action && !blocked ? <Card>
