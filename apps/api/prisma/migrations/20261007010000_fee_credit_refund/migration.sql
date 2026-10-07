@@ -1,0 +1,15 @@
+-- [Owner ruling 2026-10-07] Unused prepaid weekly-fee credit is refunded before
+-- an account can be deleted. Swift never moves the money: an admin pays it
+-- back outside Swift (MMG or bank transfer), types the reference, and two
+-- people approve. The refund is recorded as a PREPAID_REFUND billing event
+-- (the wallet's provable history: balance = top-ups - prepaid charges -
+-- refunds) together with a balanced ledger movement.
+--
+-- FORWARD: one enum value. No existing row changes.
+--
+-- ROLLBACK (honest scope). PostgreSQL cannot drop a value from an enum without
+-- rebuilding the type, so a rollback leaves PREPAID_REFUND in
+-- "BillingEventType" (inert while no row uses it). PRECONDITION for running
+-- the previous application: no billing_events row may carry PREPAID_REFUND,
+-- because the previous Prisma client cannot read that value.
+ALTER TYPE "BillingEventType" ADD VALUE IF NOT EXISTS 'PREPAID_REFUND';

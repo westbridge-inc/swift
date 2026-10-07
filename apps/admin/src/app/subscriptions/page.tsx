@@ -3,7 +3,7 @@
 import { Fragment, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, fetchBillingEvents } from '@/lib/api';
+import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, refundSubscriptionCredit, fetchBillingEvents } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
 
@@ -71,6 +71,14 @@ export default function SubscriptionsPage() {
       attempts.current.delete(attempt);
       return res;
     },
+    onSuccess: invalidate,
+  });
+
+  // [Owner ruling 2026-10-07] Refund the whole unused credit, paid back outside
+  // Swift; the reference is the proof. A second admin approves.
+  const refund = useMutation({
+    mutationFn: ({ id, amount, method, reference, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; reason: string }) =>
+      refundSubscriptionCredit(id, amount, method, reference, reason),
     onSuccess: invalidate,
   });
 
@@ -164,6 +172,25 @@ export default function SubscriptionsPage() {
                           >
                             Top up
                           </button>
+                          {Number(s.prepaidBalance?.balance ?? 0) > 0 && (
+                            <button
+                              onClick={() => {
+                                const credit = Number(s.prepaidBalance.balance);
+                                const how = window.prompt(`Refund ${h.name}'s unused credit of GY$${credit.toLocaleString()}. Paid back by MMG or BANK? (Swift does not send the money: pay it first, then record it here.)`, 'MMG');
+                                const method = how?.trim().toUpperCase() === 'BANK' ? 'BANK_TRANSFER' : how?.trim().toUpperCase() === 'MMG' ? 'MMG' : null;
+                                if (!method) return;
+                                const reference = window.prompt('Reference of the refund you paid (MMG or bank). It is the proof the money went back:');
+                                if (!reference) return;
+                                if (!window.confirm(`Record a GY$${credit.toLocaleString()} refund to ${h.name} by ${method === 'MMG' ? 'MMG' : 'bank transfer'} (${reference})? Their credit becomes zero.`)) return;
+                                const reason = askReason({ action: 'record this credit refund', subject: `${h.name} (${reference})` });
+                                if (reason) refund.mutate({ id: s.id, amount: credit, method, reference, reason });
+                              }}
+                              disabled={refund.isPending}
+                              className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                            >
+                              Refund credit
+                            </button>
+                          )}
                           {!s.feeWaived && (
                             <button
                               onClick={() => {

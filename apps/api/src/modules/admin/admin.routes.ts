@@ -3511,6 +3511,8 @@ export async function adminRoutes(app: FastifyInstance) {
           rider: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           driver: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           vendor: { select: { id: true, name: true } },
+          // The unused credit a refund would pay back (the console shows the action only then).
+          prepaidBalance: { select: { balance: true, currencyCode: true } },
         },
         skip,
         take: limit,
@@ -3643,6 +3645,44 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, replayed, data: { balance: result.balance, currencyCode: result.currencyCode } };
+  });
+
+  /**
+   * [Owner ruling 2026-10-07] Refund unused prepaid fee credit. Swift never
+   * moves the money: the admin pays it back outside Swift (MMG or bank
+   * transfer) and enters its reference; a second admin approves (C4). The
+   * whole credit is refunded, recorded once, and the account can then be
+   * deleted.
+   */
+  const refundCreditSchema = z.object({
+    amount: z.number().positive().max(10_000_000),
+    method: z.enum(['MMG', 'BANK_TRANSFER']),
+    reference: z.string().max(200),
+  });
+  app.post('/subscriptions/:id/refund-credit', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const body = refundCreditSchema.parse(request.body);
+    const subscription = await app.prisma.subscription.findFirst({
+      where: { id, ...subscriptionTenantScope(tenantId) },
+      select: { id: true },
+    });
+    if (!subscription) throw new NotFoundError('Subscription', id);
+    const reference = normaliseReference(body.reference, {
+      required: 'Enter the MMG or bank reference of the refund you paid. It is the only proof the money went back.',
+      invalid: 'That does not look like a transfer reference. Copy it from the MMG or bank record.',
+    }, 'REFUND_REFERENCE');
+    const result = await billing.refundPrepaidCredit({
+      adminId: request.user.userId,
+      subscriptionId: id,
+      amount: body.amount,
+      method: body.method,
+      reference,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    });
+    return { success: true, replayed: result.replayed, data: { refunded: result.refunded, currencyCode: result.currencyCode, balance: 0 } };
   });
 
   /** Billing audit trail for one subscription. */

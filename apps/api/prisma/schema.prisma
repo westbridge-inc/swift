@@ -3321,6 +3321,10 @@ enum BillingEventType {
   REMINDER
   TIER_CHANGE
   CHURNED
+  /// [Owner ruling 2026-10-07] Unused prepaid fee credit paid back to the payer
+  /// outside Swift (MMG or bank transfer) and recorded by an admin; `amount` is
+  /// the credit removed from the wallet, `paymentRef` the refund's reference.
+  PREPAID_REFUND
 }
 
 /// An inbound platform-fee payment [san spec PART 4] — every channel, one

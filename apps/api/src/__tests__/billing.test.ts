@@ -18,6 +18,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { runBillingInvariants } from '../modules/billing/invariants';
 
 // ---------------------------------------------------------------------------
 // the revenue engine. Hardest paths: idempotency under
@@ -790,5 +791,95 @@ describe('[A-07] a subscription is charged its own price', () => {
     const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
     expect(payments).toHaveLength(1);
     expect(Number(payments[0]!.amount)).toBe(8_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded, then the
+// account can be deleted. Swift never moves the money: an admin pays it back
+// outside Swift (MMG or bank), types the reference, a second admin approves,
+// and Swift records it once: wallet to zero, the refund event, the balanced
+// ledger movement and the audit row, in one transaction.
+// ---------------------------------------------------------------------------
+describe('fee credit refund — recorded once, two people, books balanced', () => {
+  let adminToken: string;
+  const headers = (key = `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`) => ({
+    'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': key,
+  });
+  const ref = (tag: string) => `${tag}${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`;
+  async function storeWithCredit(credit: number) {
+    // Due in five days: the top-up only accumulates, nothing is billed.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() + 5 * DAY) });
+    if (credit > 0) {
+      const topup = await injectWithApproval(app, { method: 'POST', url: `/api/v1/admin/subscriptions/${fx.subId}/topup`, payload: { amount: credit, reference: ref('CREDIT') }, headers: headers() });
+      expect(topup.statusCode, topup.payload).toBe(200);
+    }
+    return fx;
+  }
+  const refund = (subId: string, payload: Record<string, unknown>) =>
+    injectWithApproval(app, { method: 'POST', url: `/api/v1/admin/subscriptions/${subId}/refund-credit`, payload, headers: headers() });
+  const wallet = async (subId: string) => Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance);
+  const walletLedger = async (subId: string) => {
+    const rows = await app.prisma.ledgerEntry.findMany({ where: { accountCode: 'WALLET_LIABILITY', subledgerId: subId } });
+    return rows.reduce((sum, r) => sum + Number(r.credit) - Number(r.debit), 0);
+  };
+
+  beforeAll(async () => { adminToken = (await makeUserWithSession(['ADMIN'], 'ADMIN')).token; });
+
+  it.each(['MMG', 'BANK_TRANSFER'] as const)('refunding by %s zeroes the credit once, records the reference, and the nightly checks agree', async (method) => {
+    const fx = await storeWithCredit(15000);
+    expect(await wallet(fx.subId)).toBe(15000);
+    const reference = ref('REFUND');
+    const res = await refund(fx.subId, { amount: 15000, method, reference });
+    expect(res.statusCode, res.payload).toBe(200);
+    expect(res.json().data).toMatchObject({ refunded: 15000, balance: 0 });
+    expect(await wallet(fx.subId)).toBe(0);
+    const events = await app.prisma.billingEvent.findMany({ where: { subscriptionId: fx.subId, type: 'PREPAID_REFUND' as never } });
+    expect(events).toHaveLength(1);
+    // Stored the way every manual-rail reference is: trimmed and upper-cased.
+    const stored = reference.toUpperCase();
+    expect(events[0]).toMatchObject({ paymentRef: stored });
+    expect(Number(events[0]!.amount)).toBe(15000);
+    expect(await walletLedger(fx.subId)).toBe(0);
+    const out = await app.prisma.ledgerEntry.findFirst({ where: { accountCode: method === 'MMG' ? 'CLEARING_MMG' : 'BANK_LOCAL', credit: 15000, transaction: { idempotencyKey: { contains: fx.subId } } } });
+    expect(out).not.toBeNull();
+    // One audit row, written in the refund's own transaction, naming what was paid back.
+    expect(await app.prisma.auditLog.count({ where: { entityId: fx.subId, action: { contains: 'refund-credit' }, changes: { path: ['reference'], equals: stored } } })).toBe(1);
+    const report = await runBillingInvariants(app.prisma);
+    expect(report.walletMismatches.filter((m) => m.subscriptionId === fx.subId)).toEqual([]);
+    expect(report.ledgerWalletMismatches.filter((m) => m.subscriptionId === fx.subId)).toEqual([]);
+
+    // The same refund recorded again (same reference) changes nothing.
+    const again = await refund(fx.subId, { amount: 15000, method, reference });
+    expect(again.statusCode, again.payload).toBe(200);
+    expect(again.json()).toMatchObject({ replayed: true });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: fx.subId, type: 'PREPAID_REFUND' as never } })).toBe(1);
+    expect(await walletLedger(fx.subId)).toBe(0);
+  });
+
+  it('one admin alone cannot refund: the request waits for a second person and nothing changes', async () => {
+    const fx = await storeWithCredit(5000);
+    const alone = await app.inject({ method: 'POST', url: `/api/v1/admin/subscriptions/${fx.subId}/refund-credit`, payload: { amount: 5000, method: 'MMG', reference: ref('ALONE') }, headers: headers() });
+    expect(alone.statusCode, alone.payload).toBe(202);
+    expect(await wallet(fx.subId)).toBe(5000);
+    const unexplained = await app.inject({ method: 'POST', url: `/api/v1/admin/subscriptions/${fx.subId}/refund-credit`, payload: { amount: 5000, method: 'MMG', reference: ref('NOREASON') }, headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' } });
+    expect(unexplained.statusCode, unexplained.payload).toBe(400);
+    expect(await wallet(fx.subId)).toBe(5000);
+  });
+
+  it('refunds exactly the credit: another amount is refused and nothing changes', async () => {
+    const fx = await storeWithCredit(8000);
+    const res = await refund(fx.subId, { amount: 5000, method: 'MMG', reference: ref('PARTIAL') });
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('FEE_CREDIT_CHANGED');
+    expect(await wallet(fx.subId)).toBe(8000);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: fx.subId, type: 'PREPAID_REFUND' as never } })).toBe(0);
+  });
+
+  it('there is nothing to refund when there is no credit', async () => {
+    const fx = await storeWithCredit(0);
+    const res = await refund(fx.subId, { amount: 100, method: 'MMG', reference: ref('NOTHING') });
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('NO_FEE_CREDIT');
   });
 });

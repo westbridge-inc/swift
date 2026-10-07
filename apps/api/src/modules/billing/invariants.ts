@@ -32,11 +32,12 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
     ledgerTrialImbalance: null, ledgerWalletMismatches: [],
   };
 
-  // 1. Balance provability: PrepaidBalance == Σ(PREPAID_TOPUP) − Σ(prepaid-settled charges).
+  // 1. Balance provability: PrepaidBalance == Σ(PREPAID_TOPUP) − Σ(prepaid-settled charges)
+  //    − Σ(PREPAID_REFUND: unused credit paid back outside Swift).
   const wallets = await prisma.prepaidBalance.findMany({ select: { subscriptionId: true, balance: true } });
   for (const w of wallets) {
     report.walletsChecked += 1;
-    const [topups, settles] = await Promise.all([
+    const [topups, settles, refunds] = await Promise.all([
       prisma.billingEvent.aggregate({
         where: { subscriptionId: w.subscriptionId, type: 'PREPAID_TOPUP' },
         _sum: { amount: true },
@@ -45,8 +46,12 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
         where: { subscriptionId: w.subscriptionId, status: 'CAPTURED', externalRef: 'prepaid' },
         _sum: { amount: true },
       }),
+      prisma.billingEvent.aggregate({
+        where: { subscriptionId: w.subscriptionId, type: 'PREPAID_REFUND' },
+        _sum: { amount: true },
+      }),
     ]);
-    const ledger = Number(topups._sum.amount ?? 0) - Number(settles._sum.amount ?? 0);
+    const ledger = Number(topups._sum.amount ?? 0) - Number(settles._sum.amount ?? 0) - Number(refunds._sum.amount ?? 0);
     if (Math.abs(ledger - Number(w.balance)) > 0.009) {
       report.walletMismatches.push({ subscriptionId: w.subscriptionId, ledger, balance: Number(w.balance) });
     }

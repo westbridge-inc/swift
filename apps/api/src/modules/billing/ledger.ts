@@ -114,6 +114,16 @@ export function topupPostings(subscriptionId: string, amount: number, rail: 'EXT
   ];
 }
 
+/** Unused wallet credit paid back to the payer. Swift never moves the money:
+ *  an admin refunds it outside Swift and records the reference, so the money
+ *  leaves the account it would have come from (MMG clearing, or the bank). */
+export function refundPostings(subscriptionId: string, amount: number, method: 'MMG' | 'BANK_TRANSFER'): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: method === 'BANK_TRANSFER' ? 'BANK_LOCAL' : 'CLEARING_MMG', credit: amount },
+  ];
+}
+
 /** A weekly fee was collected. `rail` decides where the debit lands: prepaid
  *  consumes the wallet; external rails hit their clearing account. */
 export function chargeSuccessPostings(

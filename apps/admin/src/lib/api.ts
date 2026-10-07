@@ -311,6 +311,16 @@ export const topUpSubscription = (id: string, amount: number, reference: string,
     headers: { 'Idempotency-Key': idempotencyKey },
     reason,
   });
+// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded before an
+// account is deleted. Swift never moves the money: the admin pays it back
+// outside Swift and records the reference here; the whole credit, approved by
+// a second admin (the server answers 202 until then).
+export const refundSubscriptionCredit = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, method, reference }),
+    reason,
+  });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
 export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
 export const processSettlement = (id: string, reference: string | undefined, reason: string) =>
