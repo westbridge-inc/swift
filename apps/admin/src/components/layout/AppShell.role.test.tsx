@@ -27,7 +27,7 @@ describe('admin shell role authority', () => {
   const Workspace = workspace;
   const view=render(<AppShell><Workspace label="First workspace" /></AppShell>);
   await screen.findByText('First workspace');
-  let resolve!: (value: unknown) => void;
+  let resolve!: (_value: unknown) => void;
   fx.probe.mockImplementationOnce(() => new Promise((done) => { resolve=done; }));
   fx.pathname='/orders';
   workspace.mockClear();

@@ -20,7 +20,7 @@ it('returning from login cannot reuse the old workspace approval while a new ses
   expect(screen.getByText('Public login')).toBeTruthy();
   expect(fx.probe).toHaveBeenCalledOnce();
 
-  let resolve!: (value: unknown) => void;
+  let resolve!: (_value: unknown) => void;
   fx.probe.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
   fx.pathname = '/verification';
   workspace.mockClear();
