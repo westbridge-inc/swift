@@ -24,6 +24,8 @@ import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { CATEGORY_GATES, EXTRA_DOC_TYPES, FIELD_CATALOGUE, BUCKET_OF, REGISTRY_EFFECTIVE_FROM, REGISTRY_TIER, registryCode, seedDocRegistry } from '../modules/verification/doc-registry';
 import { custodyNarrative } from '../modules/verification/custody';
 import { exportDocumentsFor } from '../modules/verification/dsar';
+import { CountryConfigService } from '../modules/country/country-config.service';
+import { providerChecklist } from '../modules/services/services.service';
 import { ownedVerificationFixture } from './helpers/verification-object';
 
 const DAY = 86_400_000;
@@ -53,6 +55,7 @@ afterAll(async () => {
   if (!app) return;
   if (users.length) {
     await system(async () => {
+      await app.prisma.rectificationRequest.deleteMany({ where: { userId: { in: users } } });
       await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
       await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
       await app.prisma.user.deleteMany({ where: { id: { in: users } } });
@@ -74,15 +77,15 @@ async function rider() {
 }
 
 /** A submission an older build extracted: the registry then declared sex and nationality, so the run left EMPTY placeholders for them. */
-async function olderExtraction(userId: string) {
+async function olderExtraction(userId: string, docType = 'national_id', fields = ['doc_number', 'sex', 'nationality', 'full_name']) {
   return system(async () => {
     const doc = await app.prisma.verificationDocument.create({ data: {
-      userId, role: 'MOVER', docType: 'national_id', fileUrl: `/uploads/verification/${userId}/older-${nanoid(6)}.enc`, status: 'PENDING',
+      userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/${userId}/older-${nanoid(6)}.enc`, status: 'PENDING',
       consentAt: new Date(), privacyNoticeVersion: 'v1',
     } });
     await app.prisma.extractionRun.create({ data: {
       submissionId: doc.id, profileCode: 'UNPROFILED', engineName: 'older-build', engineVersion: '1', startedAt: new Date(), finishedAt: new Date(), outcome: 'PARTIAL',
-      fields: { create: ['doc_number', 'sex', 'nationality', 'full_name'].map((fieldCode) => ({ submissionId: doc.id, fieldCode, valueCt: null, source: 'PROVIDER' as const })) },
+      fields: { create: fields.map((fieldCode) => ({ submissionId: doc.id, fieldCode, valueCt: null, source: 'PROVIDER' as const })) },
     } });
     return doc.id;
   });
@@ -136,9 +139,84 @@ describe('[VERIFY-DOCS] the registry no longer declares sex, nationality or a th
     expect(extracted).not.toContain('sex:');
     expect(extracted).not.toContain('nationality:');
   });
+
+  it('a retired field cannot collect a new correction note through its historical placeholder', async () => {
+    const m = await rider();
+    const documentId = await olderExtraction(m.userId);
+    for (const fieldCode of ['sex', 'nationality']) {
+      const res = await app.inject({ method: 'POST', url: '/api/v1/verification/dsar/documents/rectify',
+        headers: { authorization: `Bearer ${m.token}` },
+        payload: { documentId, fieldCode, note: 'Synthetic correction value that must not be collected' } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('UNKNOWN_FIELD');
+    }
+    expect(await app.prisma.rectificationRequest.count({ where: { submissionId: documentId } })).toBe(0);
+    const registration = await olderExtraction(m.userId, 'vehicle_registration', ['owner_name', 'registration_mark']);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/verification/dsar/documents/rectify',
+      headers: { authorization: `Bearer ${m.token}` },
+      payload: { documentId: registration, fieldCode: 'owner_name', note: 'Synthetic third-party correction that must not be collected' } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('UNKNOWN_FIELD');
+    expect(await app.prisma.rectificationRequest.count({ where: { submissionId: registration } })).toBe(0);
+  });
 });
 
 describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
+  it.each(['health_report', 'clinic_report', 'hospital_letter'])('the medical alias %s is refused before it is minted or submitted', async (docType) => {
+    const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
+    const stored = gy.documentChecklists as Record<string, string[]>;
+    await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: { ...stored, MOVER_OPTIONAL: [docType] } } });
+    try {
+      const m = await rider();
+      const res = await app.inject({ method: 'POST', url: '/api/v1/verification/documents', headers: { authorization: `Bearer ${m.token}` },
+        payload: { role: 'MOVER', docType, fileUrl: await ownedVerificationFixture(app.prisma, m.userId, 'medical-alias'), consent: true, privacyNoticeVersion: 'v1' } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('DOC_TYPE_NOT_ACCEPTED');
+      expect(await app.prisma.verificationDocument.count({ where: { userId: m.userId, docType } })).toBe(0);
+      await system(() => seedDocRegistry(app.prisma));
+      expect(await app.prisma.docType.count({ where: { code: registryCode('GY', docType) } })).toBe(0);
+    } finally {
+      await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: stored } });
+      await system(async () => {
+        await app.prisma.requirementItem.deleteMany({ where: { docTypeCode: registryCode('GY', docType) } });
+        await app.prisma.docField.deleteMany({ where: { docTypeCode: registryCode('GY', docType) } });
+        await app.prisma.docType.deleteMany({ where: { code: registryCode('GY', docType) } });
+      });
+    }
+  });
+
+  it('stored medical requirements never reach a checklist, while identity, police and trade gates remain required', async () => {
+    const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
+    const stored = gy.documentChecklists as Record<string, string[]>;
+    const medical = 'medical_certificate';
+    await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: {
+      ...stored,
+      MOVER: [medical], MOVER_NO_LICENCE: ['national_id', medical],
+      MOVER_OPTIONAL: ['police_clearance', medical],
+      VENDOR: ['business_registration', medical], VENDOR_UNREGISTERED: ['owner_national_id', medical],
+      VENDOR_OPTIONAL: ['police_clearance', medical],
+      SERVICE_PROVIDER: ['national_id', 'police_clearance', medical],
+      SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence', medical],
+    } } });
+    try {
+      const m = await rider();
+      await app.prisma.serviceProvider.create({ data: { userId: m.userId, trade: 'ELECTRICIAN', portfolioPhotos: [] } });
+      const country = new CountryConfigService(app.prisma);
+      expect(await country.getDocumentChecklist('GY', 'VENDOR')).toEqual(['business_registration']);
+      expect(await country.getDocumentChecklist('GY', 'VENDOR', 'UNREGISTERED')).toEqual(['owner_national_id']);
+      expect(await country.getOptionalDocuments('GY', 'VENDOR', ['business_registration'])).toEqual(['police_clearance']);
+      expect(await country.getMoverChecklist('GY', 'BICYCLE')).toEqual(['national_id']);
+      expect(await country.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual(['police_clearance']);
+      expect(await providerChecklist(app.prisma, m.userId)).toEqual(['national_id', 'police_clearance', 'gei_electrical_licence']);
+      const status = await app.inject({ method: 'GET', url: '/api/v1/verification/status?role=MOVER', headers: { authorization: `Bearer ${m.token}` } });
+      expect(status.statusCode).toBe(200);
+      expect(status.json().data.checklist).toEqual(['national_id']);
+      expect(status.json().data.optional).toEqual(['police_clearance']);
+    } finally {
+      await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: stored } });
+    }
+  });
+
   const MEDICAL = /medic|health|doctor|physician|clinic|hospital/i;
   it('no checklist, category gate or registry type names a medical document', () => {
     const codes = new Set([

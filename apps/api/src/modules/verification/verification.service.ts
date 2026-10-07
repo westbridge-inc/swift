@@ -1307,10 +1307,19 @@ export class VerificationService {
    * gate apply a stricter MOTORCYCLE default for the null case.
    */
   private async getMoverVehicleType(userId: string): Promise<VehicleType | null> {
-    const driver = await this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } });
-    if (driver) return driver.vehicleType;
-    const rider = await this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } });
-    return rider?.vehicleType ?? null;
+    const [user, rider, driver] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
+      this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
+    if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
+    if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+      if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
+      if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
+    }
+    // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+    return rider?.vehicleType ?? driver?.vehicleType ?? null;
   }
 
   /**
@@ -1791,7 +1800,15 @@ export class VerificationService {
     if (role !== 'MOVER' && role !== 'RIDER' && role !== 'DRIVER') return false;
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
-    return !(await this.checklistFor(userId, user.countryCode, 'MOVER')).includes(docType);
+    const [rider, driver] = await Promise.all([
+      this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    ]);
+    const vehicles = [rider?.vehicleType, driver?.vehicleType].filter((type): type is VehicleType => !!type);
+    if (vehicles.length === 0) return false;
+    // Expiry can stop either retained profile, even while the other surface is active.
+    const required = await Promise.all(vehicles.map((type) => this.countryConfig.getMoverChecklist(user.countryCode, type)));
+    return required.every((list) => !list.includes(docType));
   }
 
   /** One reminder per document, 30 days before expiry. */

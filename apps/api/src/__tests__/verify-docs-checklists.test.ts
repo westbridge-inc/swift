@@ -141,6 +141,41 @@ const goOnline = (token: string) => app.inject({
   method: 'POST', url: '/api/v1/rider/go-online', headers: { authorization: `Bearer ${token}` }, payload: { latitude: 6.8, longitude: -58.15 },
 });
 
+describe('[VERIFY-DOCS] a retained taxi profile never hides the current bicycle requirements', () => {
+  it('a bicycle national ID lapse is never described as optional beside a retained taxi profile', async () => {
+    const m = await mover('BICYCLE');
+    await app.prisma.user.update({ where: { id: m.userId }, data: { activeRole: 'DRIVER', lastMoverRole: 'DRIVER', roles: ['RIDER', 'DRIVER', 'CUSTOMER'] } });
+    await app.prisma.driver.create({ data: { userId: m.userId, vehicleType: 'CAR', vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2020,
+      vehicleColor: 'Grey', licensePlate: `HD-${nanoid(6)}`, driverLicenseUrl: 'storage://synthetic/dl.jpg', vehicleInsuranceUrl: 'storage://synthetic/ins.jpg' } });
+    const doc = await app.prisma.verificationDocument.create({ data: { userId: m.userId, role: 'MOVER', docType: 'national_id', fileUrl: '',
+      status: 'APPROVED', state: 'COMMITTED', expiresAt: new Date(Date.now() - DAY), reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1' } });
+    await service.expireLapsedDocuments();
+    const notices = await app.prisma.notification.findMany({ where: { userId: m.userId, data: { path: ['docId'], equals: doc.id } } });
+    expect(notices.length).toBeGreaterThan(0);
+    for (const notice of notices) {
+      expect(notice.body).not.toMatch(/optional|keep working/i);
+      expect(notice.body).toMatch(/Upload a new one to keep operating/);
+    }
+  });
+
+  it.each(['RIDER', 'MOVER', 'CUSTOMER'] as const)('uses current or remembered Rider authority from %s', async (activeRole) => {
+    const m = await mover('BICYCLE');
+    await app.prisma.user.update({ where: { id: m.userId }, data: { activeRole, lastMoverRole: 'RIDER', roles: ['RIDER', 'DRIVER', 'CUSTOMER', 'MOVER'] } });
+    await app.prisma.driver.create({ data: { userId: m.userId, vehicleType: 'CAR', vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2020,
+      vehicleColor: 'Grey', licensePlate: `HD-${nanoid(6)}`, driverLicenseUrl: 'storage://synthetic/dl.jpg', vehicleInsuranceUrl: 'storage://synthetic/ins.jpg' } });
+    for (const docType of TAXI) await app.prisma.verificationDocument.create({ data: {
+      userId: m.userId, role: 'MOVER', docType, fileUrl: '', status: 'APPROVED', state: 'COMMITTED',
+      expiresAt: new Date(Date.now() + 300 * DAY), reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1',
+    } });
+    const data = await service.getStatus(m.userId, 'MOVER');
+    expect(data.vehicleType).toBe('BICYCLE');
+    expect(data.checklist).toEqual(BICYCLE);
+    expect(data.optional).toEqual(['police_clearance']);
+    expect(data.missing).toEqual(['national_id']);
+    expect(data.roleVerified).toBe(false);
+  });
+});
+
 describe('[VERIFY-DOCS] the code defaults ARE the rulings (what every fresh install and the next seed plan writes)', () => {
   const expected: Record<string, { required: string[]; optional: string[] }> = {
     BICYCLE: { required: BICYCLE, optional: ['police_clearance'] },

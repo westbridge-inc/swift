@@ -1,5 +1,5 @@
 import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
-import { OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
 import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
@@ -375,11 +375,11 @@ export class CountryConfigService {
     // a role with no such list is not offered the tier and keeps its standard set.
     const unregistered = tier === UNREGISTERED_TIER;
     const fromRegistry = await registryChecklist(this.prisma, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
-    if (fromRegistry) return fromRegistry;
+    if (fromRegistry) return fromRegistry.filter((docType) => !isNeverAcceptedDocType(docType));
     const config = await this.getByCode(code);
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
-    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!;
-    return lists[roleKey] ?? [];
+    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
+    return (lists[roleKey] ?? []).filter((docType) => !isNeverAcceptedDocType(docType));
   }
 
   /**
@@ -429,11 +429,11 @@ export class CountryConfigService {
 export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: VehicleType): string[] {
   const base = lists['MOVER'] ?? [];
   const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
-  return [...new Set([...base, ...extra])];
+  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
 }
 
 /** The union of the keys' `_OPTIONAL` lists, without anything already required. */
 export function optionalFrom(lists: Record<string, string[]>, keys: readonly string[], required: readonly string[]): string[] {
   const optional = keys.flatMap((key) => lists[`${key}${OPTIONAL_LIST_SUFFIX}`] ?? []);
-  return [...new Set(optional)].filter((docType) => !required.includes(docType));
+  return [...new Set(optional)].filter((docType) => !required.includes(docType) && !isNeverAcceptedDocType(docType));
 }

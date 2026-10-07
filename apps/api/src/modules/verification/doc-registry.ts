@@ -551,7 +551,7 @@ export function isRetiredPlaceholder(legacyCode: string, fieldCode: string, valu
  */
 export const NEVER_ACCEPTED_DOC_TYPES: ReadonlySet<string> = new Set(['medical_certificate', 'health_certificate', 'medical_report', 'doctors_note', 'fitness_to_work_certificate']);
 export function isNeverAcceptedDocType(code: string): boolean {
-  return NEVER_ACCEPTED_DOC_TYPES.has(code) || /medical|doctor|physician|health_cert/i.test(code);
+  return NEVER_ACCEPTED_DOC_TYPES.has(code) || /medic|health|doctor|physician|clinic|hospital/i.test(code);
 }
 
 /** The field a processor's generic `documentNumber` lands in for a type: a declared `doc_number` first (the legacy convention), else the type's identifier. */
