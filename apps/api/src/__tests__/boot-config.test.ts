@@ -749,6 +749,22 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     }
   });
 
+  it('[#1500 review S2-1] MMG_CHECKOUT_CREATION_LOOKUP_CLOCK is exactly 0 or 1, or unset; production refuses 1 until MMG confirms what its production lookup sends', () => {
+    for (const value of ['true', 'yes', 'on', '1 ', 'ON']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_LOOKUP_CLOCK: value }), value).toThrow(/MMG_CHECKOUT_CREATION_LOOKUP_CLOCK must be exactly 0 or 1/);
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_LOOKUP_CLOCK: value }), value).toThrow(/MMG_CHECKOUT_CREATION_LOOKUP_CLOCK must be exactly 0 or 1/);
+    }
+    expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_LOOKUP_CLOCK: '1' })).toThrow(/MMG_CHECKOUT_CREATION_LOOKUP_CLOCK=1 in production/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_CREATION_LOOKUP_CLOCK: '1' })).toThrow(/MMG_CHECKOUT_CREATION_LOOKUP_CLOCK=1 in production/);
+    for (const value of [undefined, '', '0']) {
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_LOOKUP_CLOCK: value }), String(value)).not.toThrow();
+    }
+    // Staging runs in development mode against MMG UAT: there it may be on.
+    for (const value of [undefined, '', '0', '1']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_LOOKUP_CLOCK: value }), String(value)).not.toThrow();
+    }
+  });
+
   it('production boots with a complete checkout configuration, and never with the UAT page', () => {
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))

@@ -11,6 +11,7 @@ import {
   MERCHANT_TRANSACTION_ID_SHAPE,
   describeShape,
   getMmgCheckoutProvider,
+  mmgCreationLookupClock,
   newMerchantTransactionId,
   type MmgCheckoutProvider,
   type MmgCreationZone,
@@ -274,18 +275,22 @@ export function mmgCreationInstant(stamp: string | null, zone: MmgCreationZone):
 }
 
 /**
- * [DS632] What condition (5) needs beyond MMG's stamp: the zone it is read in
- * (null: unverified, so nothing confirms automatically), and when Swift first
- * observed a reply naming the transaction. MMG cannot have created a payment
- * after Swift heard about it: a stamp later than that (two minutes'
- * tolerance) means MMG's stamps do not match the configured zone. A
- * transaction no reply named cannot be bounded and holds the same way (the
- * service always has the time: every candidate comes from a reply written
- * down first [I9]).
+ * [DS632 · option b] What condition (5) needs beyond MMG's stamp: the zone it
+ * is read in (null: unverified, so nothing confirms automatically); when Swift
+ * first observed a reply naming the transaction (a payment time is no later
+ * than that, two minutes' tolerance; a transaction no reply named cannot be
+ * bounded and holds; the service always has the time, as every candidate comes
+ * from a reply written down first [I9]); and when Swift asked MMG's lookup (the
+ * stamp may be that lookup's own clock).
  */
 export interface CreationCheck {
   zone: MmgCreationZone | null;
   firstReplyAt: Date | null;
+  /** [option b] When Swift asked MMG's lookup for this answer (its own clock). */
+  lookedUpAt?: Date | null;
+  /** [#1500 review S2-1] MMG_CHECKOUT_CREATION_LOOKUP_CLOCK (mmgCreationLookupClock): only when
+   *  true may the stamp be read as the lookup's own clock. Absent or false: a payment time only. */
+  lookupClock?: boolean;
 }
 const UNVERIFIED: CreationCheck = { zone: null, firstReplyAt: null };
 
@@ -300,13 +305,30 @@ export function firstReplyNaming(answers: ReadonlyArray<{ body: unknown; created
   return first;
 }
 
+/** [option b] How far MMG's stamp may sit from the moment Swift asked, when it reads as the lookup's own clock. */
+export const MMG_CREATION_LOOKUP_TOLERANCE_MS = 5 * 60_000;
+
 /**
- * [owner, 1 Oct · condition 5 · DS632] Where MMG's creationDate stands for
- * one checkout: the ONE check judge() credits by and the support console
- * shows [Sol, DS663 · #1422]. In order: no configured zone, nothing is
- * verified; an unreadable stamp; a stamp more than two minutes after Swift
- * first heard of the payment (MMG's stamps do not match the zone), or no reply
- * named it; outside the checkout's window (two minutes either side).
+ * [owner, 1 Oct · condition 5 · DS632 · option b, 6 Oct] Whether MMG's
+ * creationDate fits this checkout: the ONE check judge() credits by and the
+ * support console shows [Sol, DS663 · #1422].
+ *
+ * MMG's UAT lookup was observed (staging, 6 Oct) to stamp creationDate with the
+ * moment of the LOOKUP, not of the payment. The window is therefore anchored
+ * to OUR clock by condition (1): MMG's success answer naming the transaction
+ * must reach Swift while the checkout is open (successAnswerOf; a late one is
+ * held as SUCCESS_ANSWER_AFTER_CLOSE). Here MMG's stamp, read in the
+ * configured zone, is accepted when it reads EITHER as a payment time (inside
+ * the window, and not after Swift's first reply naming it) OR, only where the
+ * staging/UAT setting MMG_CHECKOUT_CREATION_LOOKUP_CLOCK is on, as the
+ * lookup's own clock (within five minutes of when Swift asked, and never
+ * before Swift first heard of the payment: a lookup only follows a reply).
+ * The lookup-clock reading relaxes condition (5) and is safe only where MMG's
+ * stamp really is the lookup's moment, so it is off by default and production
+ * refuses it [#1500 review S2-1]. Anything else, or a transaction no reply
+ * named, is UNCONFIRMED: MMG's time could not be confirmed against Swift's
+ * records. Conditions 1 and 6 still bind the transaction to this checkout and
+ * to one credit.
  */
 /** [DS632 · Fable S3-1] The creation zone of the checkout provider in use:
  *  null when there is none (switched off) or it cannot be built. verify() and
@@ -318,22 +340,25 @@ export function creationZoneInUse(checkout: () => MmgCheckoutProvider | null): M
     return null;
   }
 }
-export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNREADABLE' | 'AFTER_REPLY' | 'OUTSIDE';
+export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNREADABLE' | 'UNCONFIRMED';
 export function creationCheckOf(
   intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
 ): CreationCheckResult {
   if (creation.zone === null) return 'ZONE_UNVERIFIED';
   const created = mmgCreationInstant(stamp, creation.zone);
   if (created === null) return 'UNREADABLE';
-  if (creation.firstReplyAt === null || created > creation.firstReplyAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'AFTER_REPLY';
-  if (created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'OUTSIDE';
-  return 'INSIDE';
+  if (creation.firstReplyAt === null) return 'UNCONFIRMED';
+  const inWindow = created >= intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS && created <= intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS;
+  const paymentTime = inWindow && created <= creation.firstReplyAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS;
+  const lookupClock = creation.lookupClock === true && !!creation.lookedUpAt
+    && created >= creation.firstReplyAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS
+    && Math.abs(created - creation.lookedUpAt.getTime()) <= MMG_CREATION_LOOKUP_TOLERANCE_MS;
+  return paymentTime || lookupClock ? 'INSIDE' : 'UNCONFIRMED';
 }
 const CREATION_HOLDS: Record<Exclude<CreationCheckResult, 'INSIDE'>, string> = {
   ZONE_UNVERIFIED: 'CREATION_ZONE_UNVERIFIED',
   UNREADABLE: 'CREATION_DATE_UNREADABLE',
-  AFTER_REPLY: 'CREATION_AFTER_REPLY',
-  OUTSIDE: 'OUTSIDE_CHECKOUT_WINDOW',
+  UNCONFIRMED: 'CREATION_UNCONFIRMED',
 };
 
 /** MMG's success answer for one checkout, or why there is none. */
@@ -418,8 +443,8 @@ export function judge(
     // (3) Paid to this checkout's merchant: every "accountid" credit party is it.
     if (!detail.creditAccounts || detail.creditAccounts.length === 0) return hold('MERCHANT_UNCONFIRMED', tied);
     if (!detail.creditAccounts.every((account) => merchantIds.some((merchant) => sameMsisdn(merchant, account)))) return hold('MERCHANT_MISMATCH', tied);
-    // (5) Created inside this checkout's window, the stamp read in the
-    // configured zone [DS632], never after Swift first heard of the payment:
+    // (5) MMG's time fits this checkout, read in the configured zone [DS632]:
+    // a payment time inside the window, or the lookup's own clock [option b];
     // the one creation-time check support shows too (creationCheckOf).
     const created = creationCheckOf(intent, detail.createdAt, creation);
     if (created !== 'INSIDE') return hold(CREATION_HOLDS[created], tied);
@@ -440,7 +465,9 @@ export function judge(
  *  MMG's creationDate is read. */
 const HOLD_GUIDANCE: Readonly<Record<string, string>> = {
   CREATION_ZONE_UNVERIFIED: ' MMG_CHECKOUT_CREATION_ZONE is not set to GUYANA_WALL_CLOCK or UTC, so the time MMG gives for the payment cannot be checked against the checkout, and no MMG payment is confirmed automatically. Set it to GUYANA_WALL_CLOCK (MMG writes Guyana time; owner ruling, 4 Oct).',
-  CREATION_AFTER_REPLY: ' MMG says this payment was made after Swift had already received the MMG reply naming it, so the creationDate stamps from MMG may not match the configured MMG_CHECKOUT_CREATION_ZONE. Check that setting against a real payment before trusting any automatic confirmation.',
+  CREATION_UNCONFIRMED: ' MMG’s time for this payment could not be confirmed against Swift’s records, so it was not credited automatically. Check the payment against the MMG statement before confirming it.',
+  // Held before 6 Oct (option b); kept for those rows.
+  CREATION_AFTER_REPLY: ' MMG’s payment time could not be confirmed against Swift’s records (held before 6 Oct, when it had to be no later than two minutes after the first reply). Check the payment against the MMG statement before confirming it.',
 };
 
 const HOLD_REASON: Record<ProviderIdentityCode, string> = {
@@ -981,6 +1008,8 @@ export class MmgCheckoutService {
     const merchantIds = this.merchantIds(provider);
     // [DS632] Condition (5) is read in the configured zone; with none, nothing confirms.
     const zone = creationZoneInUse(() => provider);
+    // [#1500 review S2-1] The lookup-clock reading: a staging/UAT setting, off by default.
+    const lookupClock = mmgCreationLookupClock();
     const lookup = this.lookup();
     // [owner, 1 Oct · condition 1] MMG's own answers for this checkout, through
     // either door, and [DS632] when each transaction was first named.
@@ -992,6 +1021,8 @@ export class MmgCheckoutService {
     const verdicts: Verdict[] = [];
     for (const txnId of intent.candidates.slice(0, MAX_CANDIDATES)) {
       const detail = await lookup.transactionLookupDetail(txnId);
+      // [option b] When Swift asked: MMG may stamp creationDate with this moment.
+      const lookedUpAt = new Date();
       mmgCheckoutLookupsCounter.labels(detail.outcome).inc();
       await this.observe({
         tenantId: intent.tenantId,
@@ -1003,7 +1034,7 @@ export class MmgCheckoutService {
         failure: detail.outcome === 'not_found' ? 'LOOKUP_NOT_FOUND' : detail.outcome === 'error' ? 'LOOKUP_FAILED' : null,
       });
       const others = detail.outcome === 'found' ? await this.otherCheckoutRefsIn(detail.raw, intent) : [];
-      verdicts.push(judge(intent, txnId, detail, merchantIds, others, success, { zone, firstReplyAt: firstReplyNaming(answers, txnId) }));
+      verdicts.push(judge(intent, txnId, detail, merchantIds, others, success, { zone, firstReplyAt: firstReplyNaming(answers, txnId), lookedUpAt, lookupClock }));
     }
 
     const confirmed = verdicts.find((v): v is Extract<Verdict, { verdict: 'CONFIRM' }> => v.verdict === 'CONFIRM');

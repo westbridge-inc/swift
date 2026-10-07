@@ -193,6 +193,18 @@ async function answeredAt(row: { id: string; merchantTransactionId: string; tena
     body: { merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0' },
   } });
 }
+/** [#1500 review S2-1] Runs `fn` with MMG_CHECKOUT_CREATION_LOOKUP_CLOCK=1 (the staging/UAT reading of MMG's
+ *  creationDate as the lookup's own clock), restoring the setting after. Unset is the default and production. */
+async function withLookupClock<T>(fn: () => Promise<T>): Promise<T> {
+  const before = process.env['MMG_CHECKOUT_CREATION_LOOKUP_CLOCK'];
+  process.env['MMG_CHECKOUT_CREATION_LOOKUP_CLOCK'] = '1';
+  try {
+    return await fn();
+  } finally {
+    if (before === undefined) delete process.env['MMG_CHECKOUT_CREATION_LOOKUP_CLOCK'];
+    else process.env['MMG_CHECKOUT_CREATION_LOOKUP_CLOCK'] = before;
+  }
+}
 /** The operator pages of one kind about one checkout. */
 const pagesAbout = async (operatorId: string, checkoutId: string, alert: string) => (await app.prisma.notification.findMany({
   where: { userId: operatorId, data: { path: ['checkoutId'], equals: checkoutId } },
@@ -1995,8 +2007,8 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     ['[DS632] an "accountid" entry with no value beside ours', { creditParty: [{ key: 'accountid' }, { key: 'accountid', value: SANDBOX_MERCHANT_ID }] }, 'MERCHANT_MISMATCH'],
     ['one dollar short', { amount: '2099' }, 'AMOUNT_MISMATCH'],
     ['another currency', { currency: 'USD' }, 'CURRENCY_MISMATCH'],
-    ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'OUTSIDE_CHECKOUT_WINDOW'],
-    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'CREATION_AFTER_REPLY'],
+    ['created an hour before the checkout opened', { creationDate: gyStamp(new Date(Date.now() - 3_600_000)) }, 'CREATION_UNCONFIRMED'],
+    ['a creationDate that is really UTC, read as Guyana time four hours late', { creationDate: new Date().toISOString() }, 'CREATION_UNCONFIRMED'],
     ['no creationDate', { creationDate: undefined }, 'CREATION_DATE_UNREADABLE'],
     ['no ledger number', { transactionReference: undefined }, 'LEDGER_REFERENCE_MISSING'],
   ] as const)('%s: HELD for a person, nothing credited, the pause kept, operators alerted once', async (_label, answer, reason) => {
@@ -2519,7 +2531,7 @@ describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
     const early = tx(`DSEARLY${zone === 'UTC' ? 'U' : 'G'}`);
     approved(early, 2100, {}, { creationDate: stampOf(new Date(row.createdAt.getTime() - (3 * 60 + 48) * 60_000)) });
     expect(await codeReply(row, '0', early)).toBe('CONFIRMING');
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'OUTSIDE_CHECKOUT_WINDOW' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
     expect(await topups(s.subId)).toHaveLength(0);
     expect(await identityOf(early)).toBeNull();
     expect(await identityOf(ledgerOf(early))).toBeNull();
@@ -2533,22 +2545,22 @@ describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
     expect(await identityOf(paid)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${paidRow.id}` });
   });
 
-  it('CREATION_AFTER_REPLY: a true-UTC stamp read as Guyana time is HELD, nothing credited, and operators are told once that MMG’s stamps may not match the configured zone', async () => {
+  it('CREATION_UNCONFIRMED: a true-UTC stamp read as Guyana time is HELD, nothing credited, and operators are told once that MMG’s time could not be confirmed against Swift’s records', async () => {
     const s = await makeSub();
     const operator = await operatorFor();
     const row = await intentOf((await start(s)).checkout.ref);
     const txn = tx('TRUEUTCREADASGY');
     approved(txn, 2100, {}, { creationDate: new Date().toISOString() });
     expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
     expect(await codeReply(row, '0', txn, 'RETURN')).toBe('CONFIRMING');
     expect(await topups(s.subId)).toHaveLength(0);
     expect(await identityOf(txn)).toBeNull();
     expect(await identityOf(ledgerOf(txn))).toBeNull();
     const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
     expect(pages).toHaveLength(1);
-    expect(pages[0]!.body).toMatch(/may not match/);
-    expect(pages[0]!.body).toMatch(/MMG_CHECKOUT_CREATION_ZONE/);
+    expect(pages[0]!.body).toMatch(/could not be confirmed against Swift/i);
+    expect(pages[0]!.body).not.toMatch(/MMG_CHECKOUT_CREATION_ZONE|zone setting/);
   });
 
   it('the bound is the FIRST reply naming the transaction, whichever door brought it', async () => {
@@ -2564,9 +2576,126 @@ describe('[DS632] MMG’s creationDate is read in the configured zone', () => {
     // reply, but after the first one plus two minutes.
     approved(txn, 2100, {}, { creationDate: gyStamp(new Date(opened.getTime() + 10 * 60_000)) });
     await service.pollIntents(new Date());
-    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
     expect(await topups(s.subId)).toHaveLength(0);
     expect(await identityOf(txn)).toBeNull();
+  });
+
+  it('[#1500 review S2-1] by default (and in production) the same late retry is HELD as CREATION_UNCONFIRMED: MMG’s stamp near Swift’s lookup is not read as the lookup’s clock, nothing is credited', async () => {
+    expect(process.env['MMG_CHECKOUT_CREATION_LOOKUP_CLOCK']).toBeUndefined();
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 5 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('LATEDEFAULT');
+    await answeredAt(row, txn, new Date(Date.now() - 3.5 * 60_000), 'RETURN');
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date()) });
+    await service.pollIntents(new Date());
+    expect(lookedUp).toContain(txn);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED', mmgTransactionId: null });
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+  });
+
+  it('[option b] a late retry CONFIRMS: MMG answers only 3.5 minutes after its reply, with its stamp = when Swift asked (staging, 6 Oct)', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 5 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('LATERETRY');
+    // MMG's success reply reached Swift 3.5 minutes ago; its lookup could not answer then.
+    await answeredAt(row, txn, new Date(Date.now() - 3.5 * 60_000), 'RETURN');
+    // Now it answers: successful, and its creationDate is the moment of THIS lookup (Guyana time).
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date()) });
+    await withLookupClock(() => service.pollIntents(new Date()));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-held')).toHaveLength(0);
+  });
+
+  // [option b · no widening] The same late retry, with ONE thing in MMG's lookup
+  // changed: MMG's stamp still reads as the lookup's own clock, so condition (5)
+  // passes, and the payment is refused for that one thing. Nothing is credited.
+  it.each([
+    ['MMG’s word for it is not "successful"', { transactionStatus: 'completed' }, 'STATUS_NOT_SUCCESSFUL'],
+    ['one dollar short', { amount: '2099' }, 'AMOUNT_MISMATCH'],
+    ['one dollar over', { amount: '2101' }, 'AMOUNT_MISMATCH'],
+    ['another currency', { currency: 'USD' }, 'CURRENCY_MISMATCH'],
+    ['the money went to another merchant', { creditParty: [{ key: 'accountid', value: '5926999999' }] }, 'MERCHANT_MISMATCH'],
+    ['no ledger number', { transactionReference: undefined }, 'LEDGER_REFERENCE_MISSING'],
+  ] as const)('[option b] a late retry credits only what MMG’s lookup says exactly: %s is HELD, nothing credited', async (_label, answer, reason) => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 5 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx(`LATEONE${reason.replace(/_/g, '')}${seq += 1}`);
+    await answeredAt(row, txn, new Date(Date.now() - 3.5 * 60_000), 'RETURN');
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date()), ...answer });
+    await withLookupClock(() => service.pollIntents(new Date()));
+    expect(lookedUp).toContain(txn);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason, mmgTransactionId: null });
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+  });
+
+  it('[option b] MMG’s success answer that reached Swift after the checkout closed is HELD, even when MMG’s stamp is the lookup’s own clock', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    // Closed ten minutes ago; MMG's success answer first reached Swift one minute ago (past the two minutes' tolerance).
+    const opened = new Date(Date.now() - 40 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('LATEANSWERCLOCK');
+    await answeredAt(row, txn, new Date(Date.now() - 60_000), 'RETURN');
+    // MMG's lookup is exact and its creationDate is the moment of this lookup: condition (5) passes.
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date()) });
+    await withLookupClock(() => service.pollIntents(new Date()));
+    expect(lookedUp).toContain(txn);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'SUCCESS_ANSWER_AFTER_CLOSE', mmgTransactionId: null });
+    expect(await topups(s.subId)).toHaveLength(0);
+    expect(await identityOf(txn)).toBeNull();
+    expect(await identityOf(ledgerOf(txn))).toBeNull();
+    expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-held')).toHaveLength(1);
+  });
+
+  it('[option b] a check after the checkout closed, for MMG’s success answer received while it was open, CONFIRMS once with the lookup’s clock', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const opened = new Date(Date.now() - 40 * 60_000);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: row.id }, data: { createdAt: opened, expiresAt: new Date(opened.getTime() + MMG_CHECKOUT_TTL_MS) } });
+    const txn = tx('CLOSEDCHECKCLOCK');
+    await answeredAt(row, txn, new Date(opened.getTime() + 60_000), 'RETURN');
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date()) });
+    await withLookupClock(() => service.pollIntents(new Date()));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
+    expect(await topups(s.subId)).toHaveLength(1);
+    expect(await identityOf(txn)).toMatchObject({ status: 'CREDITED', creditedPaymentId: `mco:${row.id}` });
+    // Asked again, nothing is credited twice.
+    await withLookupClock(() => service.pollIntents(new Date()));
+    expect(await topups(s.subId)).toHaveLength(1);
+  });
+
+  it('[option b] a hold on MMG’s time says what is known: it could not be confirmed against Swift’s records, never blaming the zone setting', async () => {
+    const s = await makeSub();
+    const operator = await operatorFor();
+    const row = await intentOf((await start(s)).checkout.ref);
+    const txn = tx('UNCONFIRMEDTIME');
+    // A payment-time stamp three hours before the checkout, looked up now: neither a payment in the window nor the lookup's clock.
+    approved(txn, 2100, {}, { creationDate: gyStamp(new Date(Date.now() - 3 * 3_600_000)) });
+    expect(await codeReply(row, '0', txn, 'NOTIFY')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'CREATION_UNCONFIRMED' });
+    expect(await topups(s.subId)).toHaveLength(0);
+    const pages = await pagesAbout(operator.id, row.id, 'mmg-checkout-held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toMatch(/could not be confirmed against Swift/i);
+    expect(pages[0]!.body).not.toMatch(/MMG_CHECKOUT_CREATION_ZONE|zone setting/);
+    // [#1500 review S3-1] Only what is true in every case this reason covers (a transaction no reply named,
+    // a stamp inside the window after the reply, a lookup-clock mismatch): no claim about where the stamp lies.
+    expect(pages[0]!.body).toContain('MMG’s time for this payment could not be confirmed against Swift’s records, so it was not credited automatically.');
+    expect(pages[0]!.body).not.toMatch(/neither inside|window \(before Swift/);
   });
 
   it('the 1 Oct UAT round trip, at its exact times, still confirms with GUYANA_WALL_CLOCK', async () => {
