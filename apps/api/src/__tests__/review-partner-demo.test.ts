@@ -45,12 +45,11 @@ import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { devChannelLog } from '../providers/notifications/channels';
 import { provisionReviewTenant, reviewStatus } from '../modules/review/provision';
 import { seedReviewContentPack, planReviewContentPack, reviewContentPackFacts } from '../modules/review/content-pack';
-import { seedReviewPartners, REVIEW_PACK_PARTNERS, REVIEW_PACK_REVIEWER, partnerPortraitUrl } from '../modules/review/partner-pack';
+import { seedReviewPartners, REVIEW_PACK_PARTNERS, REVIEW_PACK_REVIEWER, partnerPortraitUrl, packPartnerDocuments } from '../modules/review/partner-pack';
 import { REVIEW_DEMO_NO_ORDERS, REVIEW_DEMO_NO_BOOKINGS_MESSAGE, REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
 import { hasStepUp, reviewStepUpKey } from '../modules/auth/step-up';
 import { hashReviewCode } from '../modules/review/credentials';
 import { PACK_IMAGE_WIDTH, PACK_IMAGE_HEIGHT } from '../modules/review/pack-image';
-import { CountryConfigService } from '../modules/country/country-config.service';
 import { commitReviewFixtureDocument } from '../modules/verification/verification.service';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
@@ -59,6 +58,7 @@ import { servicesRoutes } from '../modules/services/services.routes';
 import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange, applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
 import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
+import { CountryConfigService } from '../modules/country/country-config.service';
 
 /** Advertising is closed at launch (ADS_ENABLED); the demo's own refusal sits
  *  behind that switch, so it is graded with advertising switched on. */
@@ -98,6 +98,9 @@ let prodSeq = 0;
 /** The country's mover checklists for the pack's two vehicles — the lists the go-online gate reads. */
 let riderChecklist: string[] = [];
 let driverChecklist: string[] = [];
+/** [VERIFY-DOCS] what each vehicle REQUIRES (the app's checklist); the pack partners present these plus an identity document. */
+let riderRequired: string[] = [];
+let driverRequired: string[] = [];
 
 const auth = (token: string, extra: Record<string, string> = {}) => ({ authorization: `Bearer ${token}`, ...extra });
 const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: auth(token) });
@@ -157,9 +160,11 @@ beforeAll(async () => {
   registerPublicUploads(app, UPLOAD_DIR);
   await app.ready();
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
-  const countries = new CountryConfigService(app.prisma);
-  riderChecklist = await system(() => countries.getMoverChecklist('GY', REVIEW_PACK_PARTNERS.RIDER.vehicleType));
-  driverChecklist = await system(() => countries.getMoverChecklist('GY', REVIEW_PACK_PARTNERS.DRIVER.vehicleType));
+  // [VERIFY-DOCS] what each pack partner presents: its vehicle's required documents plus the optional identity document
+  riderChecklist = await system(() => packPartnerDocuments(app.prisma, 'GY', REVIEW_PACK_PARTNERS.RIDER.vehicleType));
+  driverChecklist = await system(() => packPartnerDocuments(app.prisma, 'GY', REVIEW_PACK_PARTNERS.DRIVER.vehicleType));
+  riderRequired = await system(() => new CountryConfigService(app.prisma).getMoverChecklist('GY', REVIEW_PACK_PARTNERS.RIDER.vehicleType));
+  driverRequired = await system(() => new CountryConfigService(app.prisma).getMoverChecklist('GY', REVIEW_PACK_PARTNERS.DRIVER.vehicleType));
 
   // The operator's command: the tenant, a session, and three logins.
   const provisioned = await system(() => provisionReviewTenant(app.prisma, { slug: REVIEW, phonePrefix: '+59200093' }));
@@ -273,7 +278,10 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
     expect(first.state).toBe('PRESENT');
     expect(first.partners).toMatchObject({ RIDER: { credentials: 1, ready: 1 }, DRIVER: { credentials: 1, ready: 1 }, profiles: 2 });
     // GY: a motorbike rider's checklist (identity, police, licence, registration, insurance) and a taxi's (+ hire permit, plate, car photos, fitness).
-    expect(riderChecklist).toEqual(expect.arrayContaining(['national_id', 'police_clearance', 'vehicle_insurance']));
+    // [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] a motorbike rider proves identity by the licence; the
+    // national ID is optional and the pack partner still presents it (so it stays L2); no police clearance.
+    expect(riderChecklist).toEqual(expect.arrayContaining(['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance']));
+    expect(riderChecklist).not.toContain('police_clearance');
     expect(driverChecklist).toEqual(expect.arrayContaining(['vehicle_insurance', 'hire_car_permit']));
     expect(first.partnerDocumentsCommitted).toBe(riderChecklist.length + driverChecklist.length);
     const again = await system(() => seedReviewContentPack(app.prisma, { slug: REVIEW }));
@@ -320,7 +328,8 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
 
   it('a lapsed document is renewed by re-seeding (the newer fixture supersedes it) and a drifted vehicle heals back to the pack', async () => {
     await system(async () => {
-      const lapsed = await app.prisma.verificationDocument.findFirstOrThrow({ where: { userId: review.riderUserId, docType: 'police_clearance', state: 'COMMITTED' } });
+      // [VERIFY-DOCS] police clearance is optional for movers, so the pack does not present one: the licence lapses instead
+      const lapsed = await app.prisma.verificationDocument.findFirstOrThrow({ where: { userId: review.riderUserId, docType: 'drivers_licence', state: 'COMMITTED' } });
       await app.prisma.verificationDocument.update({ where: { id: lapsed.id }, data: { state: 'EXPIRED' } });
       await app.prisma.rider.update({ where: { id: review.riderId }, data: { vehicleType: 'BICYCLE' } });
     });
@@ -329,7 +338,7 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
     expect([healed.state, healed.partnerDocumentsCommitted]).toEqual(['PRESENT', 1]);
     await system(async () => {
       expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: review.riderId } })).vehicleType).toBe('MOTORCYCLE');
-      const police = await app.prisma.verificationDocument.findMany({ where: { userId: review.riderUserId, docType: 'police_clearance' }, include: { record: true } });
+      const police = await app.prisma.verificationDocument.findMany({ where: { userId: review.riderUserId, docType: 'drivers_licence' }, include: { record: true } });
       expect(police.map((d) => d.record?.status).sort()).toEqual(['EXPIRED', 'VALID']);
     });
   });
@@ -482,10 +491,10 @@ describe('[REVIEW-PARTNER] going online works for both, exactly as in production
   it('the app reads both partners as verified: every checklist type approved, nothing missing', async () => {
     const r = (await get('/api/v1/verification/status?role=MOVER', tokens.rider)).json().data;
     expect([r.roleVerified, r.missing, r.vehicleType]).toEqual([true, [], 'MOTORCYCLE']);
-    expect([...r.checklist].sort()).toEqual([...riderChecklist].sort());
+    expect([...r.checklist].sort()).toEqual([...riderRequired].sort());
     const d = (await get('/api/v1/verification/status?role=MOVER', tokens.driver)).json().data;
     expect([d.roleVerified, d.missing, d.vehicleType]).toEqual([true, [], 'CAR']);
-    expect([...d.checklist].sort()).toEqual([...driverChecklist].sort());
+    expect([...d.checklist].sort()).toEqual([...driverRequired].sort());
   });
 
   it('the rider goes online, streams location, sees an honestly EMPTY board and no offer, and goes offline', async () => {
