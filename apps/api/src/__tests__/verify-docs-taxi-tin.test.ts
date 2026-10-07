@@ -126,10 +126,13 @@ async function legacyTaxi(permitDays = 300) {
   for (const t of ['drivers_licence', 'vehicle_registration', 'vehicle_insurance', 'vehicle_exterior_photo', 'fitness_cert']) {
     const r = await submit(m, t); expect(r.statusCode, t).toBe(201); await approve(r.json().data.id, t);
   }
-  // the permit is no longer on any list; it exists as the approved document the driver already holds
+  // the permit is no longer on any list; it exists as the approved document the driver already holds,
+  // about the same registered car as the driver's registration (a vehicle document is bound to its car)
+  const registration = await app.prisma.verificationDocument.findFirstOrThrow({ where: { userId: m.userId, docType: 'vehicle_registration' }, select: { subjectId: true } });
+  expect(registration.subjectId, 'the registration is bound to the car').not.toBeNull();
   const permit = await app.prisma.verificationDocument.create({ data: {
     userId: m.userId, role: 'MOVER', docType: 'hire_car_permit', status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1',
-    fileUrl: await ownedVerificationFixture(app.prisma, m.userId, 'v5-permit'),
+    fileUrl: await ownedVerificationFixture(app.prisma, m.userId, 'v5-permit'), subjectId: registration.subjectId,
   } });
   await approve(permit.id, 'hire_car_permit', permitDays);
   return { ...m, permitId: permit.id };
