@@ -18,6 +18,7 @@ import { autoCancelUnresponsiveOrder, enqueueVendorAlertFollowup, releaseHeldOrd
 import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
 import { guyanaDayKey, startOfGuyanaDay } from '../utils/guyana-day';
+import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
 
 // ---------------------------------------------------------------------------
 // Q12 · THE FIVE-MINUTE WINDOW NEVER REACHES THE STORE. The owner, 2026-09-24:
@@ -370,6 +371,10 @@ async function waitFor(what: string, predicate: () => boolean, ms = 5_000) {
 }
 
 const priorHoldMinutes = process.env['ORDER_HOLD_MINUTES'];
+
+// "Five minutes later" moves an order back, and the store's counters read the
+// Guyana day: never run across Guyana midnight (helpers/guyana-day-clock).
+beforeAll(waitClearOfGuyanaMidnight, GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
