@@ -46,6 +46,7 @@ export interface PageMeta {
 export function rangeText(meta: PageMeta | undefined, shown: number): string {
   if (!meta) return '';
   if (meta.total === 0) return 'Nothing matches.';
+  if (shown === 0) return `No records on this page. ${meta.total.toLocaleString('en-GY')} matching records.`;
   const from = (meta.page - 1) * meta.limit + 1;
   return `Showing ${from.toLocaleString('en-GY')}–${(from + shown - 1).toLocaleString('en-GY')} of ${meta.total.toLocaleString('en-GY')}`;
 }
