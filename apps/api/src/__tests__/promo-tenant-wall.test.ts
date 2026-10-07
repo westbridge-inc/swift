@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { promoBelongsToCallerTenant } from '../modules/promo/promo-tenant';
-import { runAsSystem } from '../plugins/tenant-context';
+import { beginRequestTenantContext, runAsSystem } from '../plugins/tenant-context';
 
 // ---------------------------------------------------------------------------
 // [L04 · R0 promo finding] A platform-wide promo code (no vendor) is Swift's
@@ -103,6 +103,9 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  // As the app wires every request (app.ts): a fresh tenant store per request,
+  // so the tenant authentication binds is the one the route reads under.
+  app.addHook('onRequest', async () => { beginRequestTenantContext(); });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.ready();
   await cleanup();
