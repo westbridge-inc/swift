@@ -10,6 +10,7 @@ import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
 import { PickingService } from '../order/picking.service';
+import { lineOptionsAsMade } from '../order/substitution-view';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
@@ -603,17 +604,16 @@ const ITEM_MONEY_FIELDS = ['basePrice'] as const;
 const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
 
 /** [L09 · M026] The store makes what the customer chose: every line carries its
- *  snapshotted options (group, choice, price) on the board and the detail. */
+ *  snapshotted options (group, choice, price) on the board and the detail —
+ *  and none once an approved substitute replaced the line, because the swap is
+ *  charged without them (order/substitution-view.ts). */
 const VENDOR_ORDER_ITEMS = {
   include: { selectedOptions: { select: { optionGroupName: true, optionName: true, markedUpPrice: true } } },
 } as const;
 
-function vendorOrderLine<T extends { selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
+function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
   const { selectedOptions, ...rest } = line;
-  return {
-    ...rest,
-    options: selectedOptions.map((o) => ({ group: o.optionGroupName, name: o.optionName, price: Number(o.markedUpPrice) })),
-  };
+  return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
 }
 
 /**

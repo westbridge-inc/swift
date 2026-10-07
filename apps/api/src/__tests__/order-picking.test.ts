@@ -61,11 +61,13 @@ async function makeItem(opts: { name: string; price?: number; stock?: number | n
 }
 
 async function makeOrderWithLines(
-  lines: Array<{ itemId: string; name: string; qty: number; price: number }>,
+  lines: Array<{ itemId: string; name: string; qty: number; price: number; options?: Array<{ group: string; name: string; price: number }> }>,
   status = 'PREPARING',
   pay: { method?: 'CASH' | 'MOBILE_MONEY'; status?: 'PENDING' | 'CAPTURED' } = {},
 ) {
-  const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0);
+  // A line's total is its unit price (item + chosen options) × quantity, as checkout writes it.
+  const unit = (l: (typeof lines)[number]) => l.price + (l.options ?? []).reduce((s, o) => s + o.price, 0);
+  const subtotal = lines.reduce((s, l) => s + l.qty * unit(l), 0);
   return app.prisma.order.create({
     data: {
       orderNumber: `PICK-${nanoid(8)}`,
@@ -83,7 +85,10 @@ async function makeOrderWithLines(
         create: lines.map((l) => ({
           itemId: l.itemId, name: l.name, quantity: l.qty,
           basePrice: l.price, markedUpPrice: l.price, markupAmount: 0,
-          totalBase: l.qty * l.price, totalMarkup: 0, totalCustomer: l.qty * l.price,
+          totalBase: l.qty * unit(l), totalMarkup: 0, totalCustomer: l.qty * unit(l),
+          ...(l.options?.length ? { selectedOptions: { create: l.options.map((o) => ({
+            optionGroupName: o.group, optionName: o.name, basePrice: o.price, markedUpPrice: o.price, markupAmount: 0,
+          })) } } : {}),
         })),
       },
     },
@@ -686,7 +691,47 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
 
     expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
     const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
-    expect(decided).toMatchObject({ subStatus: 'APPROVED', substitution: { state: 'APPROVED', proposed: null, priceDelta: null } });
+    // Decided: the line itself is now the substitute; "original" would name the
+    // substitute (approval rewrites the line), so a decided swap carries its state only.
+    expect(decided).toMatchObject({ subStatus: 'APPROVED', substitution: { state: 'APPROVED', original: null, proposed: null, priceDelta: null } });
+  });
+
+  it('a line with paid options: the price change shown is the one approving makes, and the options do not come with the swap', async () => {
+    const original = await makeItem({ name: `Brand-A Burger ${seq}`, price: 1000, stock: 5, group: `burger-${seq}` });
+    const substitute = await makeItem({ name: `Brand-B Burger ${seq}`, price: 1150, stock: 5, group: `burger-${seq}` });
+    const chosen = [{ group: 'Size', name: 'Large', price: 300 }, { group: 'Extras', name: 'Cheese', price: 150 }];
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1000, options: chosen }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: substitute.id })).statusCode).toBe(200);
+
+    // Pending: the customer is shown the line as ordered (options included) and
+    // what approving moves: 1150 replaces 1450, so the total goes DOWN by 300.
+    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    expect(pending.substitution).toEqual({
+      state: 'PENDING',
+      original: { name: original.name, unitPrice: 1450, options: chosen },
+      proposed: { itemId: substitute.id, name: substitute.name, unitPrice: 1150 },
+      priceDelta: -300,
+    });
+    expect(pending.options).toEqual(chosen);
+    // The store still sees what was ordered while the customer decides.
+    const storePending = (await inject('GET', `/api/v1/vendor/orders/${order.id}`, owner.token)).json().data.items[0];
+    expect(storePending.options).toEqual(expect.arrayContaining(chosen));
+
+    const totalBefore = Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount);
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
+    const totalAfter = Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount);
+    expect(totalAfter - totalBefore).toBe(pending.substitution.priceDelta);
+
+    // Approved: the line is the substitute at 1150 with no options, for the
+    // customer and for the store alike, so nothing unpaid-for is made.
+    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    expect(decided).toMatchObject({ subStatus: 'APPROVED', lineTotal: 1150, options: [], substitution: { state: 'APPROVED', original: null, proposed: null, priceDelta: null } });
+    const storeDetail = (await inject('GET', `/api/v1/vendor/orders/${order.id}`, owner.token)).json().data.items[0];
+    expect(storeDetail).toMatchObject({ subStatus: 'APPROVED', options: [] });
+    const board = await inject('GET', '/api/v1/vendor/orders?limit=50', owner.token);
+    const row = (board.json().data as Array<{ id: string; items: Array<{ options: unknown[] }> }>).find((o) => o.id === order.id);
+    expect(row?.items[0]?.options).toEqual([]);
   });
 
   it('a line with no substitution says so', async () => {

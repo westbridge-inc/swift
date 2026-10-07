@@ -6,6 +6,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
+import { substitutionLineChange } from './substitution-view';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -365,8 +366,10 @@ export class PickingService {
       }
 
       const substitutePrice = Number(fresh.substitutePrice ?? 0);
-      const newLineTotal = substitutePrice * fresh.quantity;
-      const delta = newLineTotal - Number(fresh.totalCustomer);
+      // [L09 · M028] The one formula, also what the customer was shown before
+      // deciding (substitution-view.ts): the substitute's price × quantity
+      // replaces the line's total, paid options included.
+      const { newLineTotal, delta } = substitutionLineChange(fresh);
 
       // [F-006-02] On MMG, a dearer substitute records money never collected
       // and a cheaper one an unrecorded refund — any payment status. Only a
