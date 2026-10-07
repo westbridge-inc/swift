@@ -9,7 +9,7 @@ import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
-import { publishLegalDocument, recordConsent } from '../legal/consent.service';
+import { publishLegalDocument, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import {
   completeMoverSessionRevocation,
   emptyMoverSessionRevocationCleanup,
@@ -340,6 +340,8 @@ export class AuthService {
      *  for anything but SOFT signals (households/CGNAT never punish alone). */
     deviceId?: string | null;
     ipAddress?: string | null;
+    /** [F-021-21] The surface the Terms and Privacy consent was given on (the route reads it from the client). */
+    surface: ConsentSurface;
   }) {
     // Consume caller authority before any account lookup or write. This is a
     // single Redis script: two callers presenting the same proof cannot both
@@ -421,7 +423,7 @@ export class AuthService {
             documentType,
             version: LEGAL_VERSION,
             action: 'granted',
-            surface: 'mobile',
+            surface: data.surface,
             ip: data.ipAddress,
             evidence: { control: 'accept_terms_checkbox', path: 'auth/register', role: signupRole },
           });
