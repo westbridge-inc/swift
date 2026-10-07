@@ -31,6 +31,8 @@ export type HandoverPermission =
 export interface HandoverAuthority {
   /** [F-106-01] The rule set that produced this answer; the client rejects an unknown one. */
   policy: string;
+  /** [review] The ORDERED policy; the client accepts `>= its known minimum`. */
+  policyVersion: number;
   rail: PaymentRail;
   paymentState: string;
   custodyState: string;
@@ -85,20 +87,47 @@ export const PAYMENT_STATE_INCONSISTENT_BLOCK = 'PAYMENT_STATE_INCONSISTENT';
  * update, that is the same open door by another route.
  *
  * So the authority carries the policy that produced it, and the client refuses
- * one it does not recognise. Bump this whenever the door's RULES change, never
- * for a refactor.
+ * one it cannot vouch for.
  *
- * ⚠️ BUMPING THIS ALONE BLOCKS EVERY MOBILE-MONEY HANDOVER IN THE FLEET. The
- * rider app refuses an unrecognised policy, and it refuses ON THE DEVICE, so
- * no server metric moves and cash orders keep working — the dashboards look
- * normal while every rider on a mobile-money order is stuck at a door. In the
- * SAME change, add the new value to the FRONT of `ACCEPTED_HANDOVER_POLICIES`
- * in `apps/mobile/src/lib/handoverAuthority.ts` and keep the previous one for
- * a release, so adjacent releases interoperate through a rollout AND a
- * rollback. `handover-policy-contract.test.ts` fails the build otherwise —
- * that is why this warning can be trusted rather than merely believed.
+ * ── WHY THIS IS A NUMBER NOW, AND WHY THE WARNING IS GONE ────────────────────
+ *
+ * It was an opaque string matched against a list the DEVICE carried, with a
+ * warning saying that bumping it alone would black out every mobile-money
+ * handover in the fleet. The warning was true, and a warning is not a control:
+ * the doc comment INSTRUCTED the bump, the contract test FORCED both edits into
+ * one commit, and neither could change where the grace list lived. Mobile
+ * builds are never atomic with an API deploy — this repo has no `expo-updates`,
+ * so a JS-only change still needs an EAS build, store review and a user
+ * upgrade. The side holding the compatibility window was the side that updates
+ * LAST, which is the one side that cannot hold it.
+ *
+ * The asymmetry the discriminator actually protects against is one-directional.
+ * The danger is an authority computed by a server that PREDATES a rule — it is
+ * syntactically perfect and will happily say DELIVER_NO_CASH on a disputed
+ * order. A server AHEAD of the client is not that: it has strictly more rules,
+ * it has already decided `permitted`, and the client only renders that
+ * decision. A genuinely new decision shape still fails closed, because
+ * `PERMISSIONS` is a closed set and the parser refuses an unknown value.
+ *
+ * So the policy is an ORDERED version and the client's rule is
+ * `served >= the minimum this build knows`. Bumping it here is now SAFE for
+ * every installed app, and an older server is still refused. The failure mode
+ * is inverted rather than documented.
+ *
+ * ROLLOUT NOTE, and it is why `HANDOVER_POLICY` still exists: an already-
+ * installed app matches the legacy STRING. Removing that field would be the
+ * very outage this change exists to prevent, so both are served. The string may
+ * be retired only once no build matching it is still in the field.
  */
 export const HANDOVER_POLICY = 'mismatch-1';
+
+/**
+ * [review] The ordered policy. MONOTONIC — only ever increases, and only when
+ * the door's RULES change (never for a refactor). The rider app accepts any
+ * version at or above the minimum its build knows, so bumping this does not
+ * require a matching mobile release and cannot strand the fleet.
+ */
+export const HANDOVER_POLICY_VERSION = 1;
 
 /**
  * [F-106-xx] What the RIDER is told for each reason the door can refuse.
@@ -168,6 +197,7 @@ export function handoverAuthorityFor(order: HandoverOrderLike): HandoverAuthorit
   const rail = paymentRailOf(order.paymentMethod);
   const base = {
     policy: HANDOVER_POLICY,
+    policyVersion: HANDOVER_POLICY_VERSION,
     rail,
     paymentState: order.paymentStatus,
     custodyState: order.status,
