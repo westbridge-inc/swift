@@ -1,6 +1,7 @@
 import { activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS, lockBillingAuthority } from './dunning-clock';
 import type { PrismaClient } from '@prisma/client';
 import { log } from '../../utils/logger';
+import { restoreBillingAccess } from './billing-access';
 
 // Nightly invariants [san spec 24.2 mapped onto the real engine]. The DB
 // testifies; any failure pages. The wrongful-suspension detector AUTO-HEALS:
@@ -71,11 +72,15 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
           || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded
           || (sub.vendor && sub.vendor.suspensionSource !== 'BILLING')) return false;
         await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 } });
-        if (sub.vendor) await tx.vendor.updateMany({ where: { id: sub.vendor.id, status: 'SUSPENDED', suspensionSource: 'BILLING' },
-          data: { status: 'ACTIVE', suspensionSource: null } });
+        // [SUSPENSION-HEAL · AUD-L8b-003 · owner ruling] The heal gives back
+        // everything the billing suspension took, in this transaction: the
+        // store's ACTIVE status AND its order intake (the same restore a real
+        // payment runs, billing-access.ts). An admin/safety/moderation hold is
+        // never a BILLING suspension and is refused above.
+        if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
         await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REINSTATED',
           idempotencyKey: `wrongful-heal:${sub.id}:${now.toISOString().slice(0, 10)}`,
-          note: 'wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority restored',
+          note: 'wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority and store access restored',
         } });
         return true;
       });
