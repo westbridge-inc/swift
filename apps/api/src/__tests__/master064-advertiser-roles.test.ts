@@ -22,6 +22,11 @@ import { registerErrorHandler } from '../middleware/error-handler';
 //   team     — OWNER                     (add members)
 // and the money operations re-check the member's CURRENT role inside their own
 // transaction, so a downgrade or removal that commits first is obeyed.
+//
+// Advertising is OFF at launch (the server switch refuses every ads route
+// before authentication). The role matrix is graded with the switch explicitly
+// ON, the way every other ads suite runs; the last case turns it OFF again and
+// proves no role, not even the OWNER, reaches a money action.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -71,6 +76,7 @@ const setRole = (userId: string, role: 'OWNER' | 'MANAGER' | 'ANALYST') =>
 const campaignBody = () => ({ advertiserId, placementId: '', name: 'New one', startWeek: '2026-11-02', endWeek: '2026-11-02' });
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);
@@ -93,6 +99,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   // Refund intents/outbox are immutable and RESTRICT their campaign — fixtures stay; ids are unique per run.
   await app.prisma.advertiserMember.deleteMany({ where: { advertiserId: { in: advertiserIds } } });
@@ -183,5 +190,35 @@ describe('[MASTER-064] the advertiser role matrix', () => {
       spy.mockRestore();
       await setRole(owner.userId, 'OWNER');
     }
+  });
+
+  it('with advertising switched OFF, not even the OWNER reaches a money or campaign action, and nothing changes', async () => {
+    const draft = await draftCampaign();
+    const paid = await paidCampaign();
+    const live = await paidCampaign('LIVE');
+    const p = await placement();
+    vi.stubEnv('ADS_ENABLED', '0');
+    try {
+      for (const [url, body] of [
+        [`/api/v1/ads/campaigns/${draft.id}/reserve`, {}],
+        [`/api/v1/ads/campaigns/${draft.id}/checkout`, {}],
+        [`/api/v1/ads/campaigns/${paid.id}/cancel`, {}],
+        [`/api/v1/ads/campaigns/${live.id}/pause`, {}],
+        ['/api/v1/ads/campaigns', { ...campaignBody(), placementId: p.id }],
+      ] as const) {
+        const res = await call('POST', url, owner, body);
+        expect(res.statusCode, url).toBe(403);
+        expect(res.json().error.code, url).toBe('ADS_DISABLED');
+      }
+    } finally {
+      vi.stubEnv('ADS_ENABLED', '1');
+    }
+    expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: draft.id } })).status).toBe('DRAFT');
+    expect(await app.prisma.adBooking.count({ where: { campaignId: draft.id } })).toBe(0);
+    expect(await app.prisma.adInvoice.count({ where: { campaignId: draft.id } })).toBe(0);
+    expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: paid.id } })).status).toBe('SCHEDULED');
+    expect(await app.prisma.adRefundIntent.count({ where: { campaignId: paid.id } })).toBe(0);
+    expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: live.id } })).status).toBe('LIVE');
+    expect(await app.prisma.adCampaign.count({ where: { placementId: p.id } })).toBe(0);
   });
 });
