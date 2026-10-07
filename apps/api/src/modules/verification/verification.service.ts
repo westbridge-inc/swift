@@ -997,13 +997,18 @@ export class VerificationService {
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
       const driver = await tx.driver.findUnique({ where: { userId: doc.userId } });
       if (rider && driver) throw moverProfileRequired();
-      const profile = driver ?? rider;
-      vehicleType = profile?.vehicleType ?? null;
-      plate = profile?.licensePlate ?? null;
-      taxi = driver !== null;
+      if (driver) {
+        throw new AppError(400, 'VEHICLE_SUBJECT_REQUIRED',
+          'This taxi document has no registered vehicle. Ask the applicant to submit it again so its H-series registration can be reviewed.');
+      }
+      // Non-taxi legacy delivery evidence keeps its exemption. A profile plate
+      // never supplies registration authority for a taxi approval.
+      vehicleType = rider?.vehicleType ?? null;
+      plate = null;
+      taxi = false;
     }
-    if (taxi && plate && plateClassOf(plate) !== 'H') {
-      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi must carry an H registration mark. Reject the document as WRONG_PLATE_CLASS.');
+    if (taxi && plateClassOf(plate ?? '') !== 'H') {
+      throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi needs an H-series registration mark on its registered vehicle. A missing or different plate cannot be approved.');
     }
     if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
