@@ -24,6 +24,9 @@ const DOC_LABELS: Record<string, string> = {
   vehicle_registration: 'Vehicle Registration',
   vehicle_insurance: 'Vehicle Insurance',
   hire_car_permit: 'Hire-Car Permit',
+  // [VERIFY-DOCS · ruling 8] the two licences that replace the permit: the person's and the car's
+  hire_car_driver_licence: "Hire Car Driver's Licence",
+  hire_car_vehicle_licence: "Car's Hire Licence (yearly, shown on the car)",
   road_service_licence: 'Road Service Licence',
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',

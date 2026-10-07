@@ -50,7 +50,8 @@ const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'verify-docs-ch
 
 const BICYCLE = ['national_id'];
 const MOTOR = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
-const TAXI = [...MOTOR, 'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert'];
+// [VERIFY-DOCS · ruling 8, a DELIBERATE change] the person's and the car's hire licences replace the single permit
+const TAXI = [...MOTOR, 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'];
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -399,6 +400,7 @@ describe('[VERIFY-DOCS] services and stores keep their lists until the home-visi
   it('SERVICE, SERVICE_PROVIDER and the store lists are unchanged by this change', () => {
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE']).toEqual(['owner_national_id', 'police_clearance']);
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER']).toEqual(['national_id', 'police_clearance']);
-    expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT']).toEqual(['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo']);
+    // [VERIFY-DOCS · ruling 7] the TIN certificate left every store list
+    expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT']).toEqual(['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo']);
   });
 });

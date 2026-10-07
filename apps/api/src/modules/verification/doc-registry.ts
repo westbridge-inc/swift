@@ -57,6 +57,9 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   business_registration: 'BUSINESS', tin_certificate: 'BUSINESS', gra_restaurant_licence: 'BUSINESS', storefront_photo: 'BUSINESS',
   vehicle_registration: 'VEHICLE', vehicle_insurance: 'VEHICLE', hire_car_permit: 'VEHICLE', vehicle_plate_photo: 'VEHICLE',
   vehicle_exterior_photo: 'VEHICLE', fitness_cert: 'VEHICLE', road_service_licence: 'VEHICLE',
+  // [VERIFY-DOCS · ruling 8, 6 Oct 2026] The two licences that replace `hire_car_permit`: the PERSON's
+  // Hire Car Driver's Licence (s.80) and the CAR's yearly hire licence (s.79, exhibited on the car).
+  hire_car_driver_licence: 'PERSONAL', hire_car_vehicle_licence: 'VEHICLE',
   // [DOC-1 §18.1] the addendum's Guyana types (seeded by EXTRA_DOC_TYPES, not by any checklist)
   liquor_licence: 'BUSINESS', sanitary_certificate: 'BUSINESS', trade_licence: 'BUSINESS', pharmacy_authorisation: 'BUSINESS',
   nis_employer_reg: 'BUSINESS', digital_id: 'PERSONAL',
@@ -77,7 +80,11 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   police_clearance: 365,   // Certificate of Character — commonly re-issued yearly
   fitness_cert: 365,       // annual fitness
   vehicle_insurance: 365,  // annual policy
-  hire_car_permit: 365,    // annual occupational permit
+  hire_car_permit: 365,    // annual occupational permit (replaced by the two below; kept for approvals already held)
+  // [VERIFY-DOCS · ruling 8] The person's Hire Car Driver's Licence is issued for 3 years; the car's hire
+  // licence is in force 1 year (s.79(3)). Printed dates win; these are the fallbacks and the ceilings.
+  hire_car_driver_licence: 3 * 365,
+  hire_car_vehicle_licence: 365,
   road_service_licence: 365, // annual commercial road-service licence
   food_handler_cert: 365,  // annual health cert
   gra_restaurant_licence: 365,
@@ -85,7 +92,8 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   liquor_licence: 365,
   sanitary_certificate: 365,
   trade_licence: 365,
-  drivers_licence: 3 * 365,
+  // [VERIFY-DOCS · ruling 8] A Guyana driver's licence is valid 5 years (GRA).
+  drivers_licence: 5 * 365,
   vehicle_registration: 3 * 365,
   // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
   self_declaration_unregistered: 365,
@@ -96,9 +104,19 @@ const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSO
  * the insurance certificate — covers_hire_and_reward is a wording judgement a model must not
  * make alone. PERSONAL types and anything needing a specimen are always-review by rule.
  */
-export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set(['vehicle_insurance']);
+// [VERIFY-DOCS · ruling 8] The certificate of fitness has no fixed length in law: its PRINTED date decides,
+// so a person always reads it (an unreadable one is never given a 365-day guess by an automatic approval).
+export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set(['vehicle_insurance', 'fitness_cert']);
 
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
+
+/**
+ * [VERIFY-DOCS · owner rulings 5, 7 and 8, 6 Oct 2026] Types no checklist asks for any more: the separate
+ * plate photo (merged into the car photo), the TIN certificate (dropped) and the single hire-car permit
+ * (split into the person's and the car's licences). Documents of them already exist, so the registry
+ * keeps describing them — never as a requirement.
+ */
+export const RETIRED_DOC_TYPES: readonly string[] = ['vehicle_plate_photo', 'tin_certificate', 'hire_car_permit'];
 const humanize = (code: string) => code.split('_').map((w) => (w === 'id' || w === 'tin' || w === 'gra' || w === 'gei' ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1))).join(' ');
 
 export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number; validators: number; extraDocTypes: number; categoryGates: number }
@@ -136,7 +154,10 @@ export const VALIDATOR_CATALOGUE: readonly ValidatorRow[] = [
   // Corporate Yellow"; the H plate stays — V_PLATE_CLASS). Declared, never blocking, never implemented:
   // the row stays only so validation results written before the ruling still name a known rule.
   { code: 'V_VEHICLE_COLOUR', scope: 'FIELD', isBlocking: false, detailCode: 'VEHICLE_COLOUR_NON_COMPLIANT' },
-  { code: 'V_LICENCE_CLASS', scope: 'FIELD', isBlocking: true, detailCode: 'LICENCE_CLASS_MISMATCH', docTypeLegacy: 'drivers_licence' , implRef: 'validators#V_LICENCE_CLASS' },
+  // RETIRED by the owner's ruling of 6 Oct 2026 (ruling 8): the hire right is the person's Hire Car Driver's
+  // Licence, a separate document — not a class printed on the ordinary licence. Declared, never blocking, never
+  // implemented: the row stays only so validation results written before the ruling still name a known rule.
+  { code: 'V_LICENCE_CLASS', scope: 'FIELD', isBlocking: false, detailCode: 'LICENCE_CLASS_MISMATCH', docTypeLegacy: 'drivers_licence' },
   { code: 'V_INSURANCE_SCOPE', scope: 'FIELD', isBlocking: true, detailCode: 'INSURANCE_SCOPE_INSUFFICIENT', docTypeLegacy: 'vehicle_insurance', implRef: 'validators#V_INSURANCE_SCOPE' },
   { code: 'V_FIELD_CONFIDENCE', scope: 'FIELD', isBlocking: false, detailCode: 'UNREADABLE_CAPTURE' },
   // §7.3 document-level
@@ -314,7 +335,9 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   for (const c of countries) {
     // Code defaults under the stored JSON (P3-2): a list added in code is seeded everywhere; an edited stored list wins.
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
-    const legacyCodes = [...new Set(Object.values(lists).flat())];
+    // [VERIFY-DOCS] A type no list asks for any more keeps its registry row: documents of it already
+    // exist (approved permits, TIN certificates) and their bucket and retention still have to be read.
+    const legacyCodes = [...new Set([...Object.values(lists).flat(), ...RETIRED_DOC_TYPES])];
     for (const legacyCode of legacyCodes) {
       const bucket = BUCKET_OF[legacyCode] ?? 'PERSONAL';
       const validity = AUTO_APPROVE_EXPIRY_DAYS[legacyCode];
@@ -446,12 +469,23 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
     { fieldCode: 'licence_number', dataType: 'text', isPii: true, blind: true, identifier: true },
     { fieldCode: 'holder_name', dataType: 'text', isPii: true },
     { fieldCode: 'dob', dataType: 'date', isPii: true, validatorRef: 'V_DOB_ADULT' },
-    { fieldCode: 'classes', dataType: 'text', validatorRef: 'V_LICENCE_CLASS' },
+    { fieldCode: 'classes', dataType: 'text' }, // recorded, never judged (ruling 8: no "H class" check)
     ...DATES(),
   ],
   hire_car_permit: [
     { fieldCode: 'licence_number', dataType: 'text', isPii: true, blind: true, identifier: true },
     { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+    ...DATES(),
+  ],
+  // [VERIFY-DOCS · ruling 8] The person's licence (same name as the driver's licence) and the car's (plate matches).
+  hire_car_driver_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', isPii: true, blind: true, identifier: true },
+    { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+    ...DATES(),
+  ],
+  hire_car_vehicle_licence: [
+    { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
+    { fieldCode: 'registration_mark', dataType: 'text', validatorRef: 'V_PLATE_CROSS_MATCH' },
     ...DATES(),
   ],
   police_clearance: [], // routed by IDV-1; DOC-1 declares nothing (§3.7)

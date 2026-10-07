@@ -220,21 +220,23 @@ describe('Checklists drive from config', () => {
     expect(res.json().error.code).toBe('INVALID_DOC_TYPE');
   });
 
-  it('commerce checklists carry the Guyana-real docs (TIN, GRA licence, storefront)', async () => {
+  // [VERIFY-DOCS · owner ruling 7, 6 Oct 2026 — a DELIBERATE change] no TIN certificate on any list:
+  // no law found requires Swift to hold it; a VAT-registered store types its VAT number instead.
+  it('commerce checklists carry the Guyana-real docs (registration, GRA licence, storefront) — no TIN certificate', async () => {
     const restaurant = await inject('GET', '/api/v1/verification/status?role=RESTAURANT', undefined, vendorToken);
     expect(restaurant.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate',
+      'owner_national_id', 'business_registration',
       'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo',
     ]);
 
     const supermarket = await inject('GET', '/api/v1/verification/status?role=SUPERMARKET', undefined, vendorToken);
     expect(supermarket.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
     const store = await inject('GET', '/api/v1/verification/status?role=STORE', undefined, vendorToken);
     expect(store.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
     const service = await inject('GET', '/api/v1/verification/status?role=SERVICE', undefined, vendorToken);
@@ -596,10 +598,11 @@ describe('Document storage & DPA compliance', () => {
 
 describe('Taxi checklist merge + auto-KYC audit', () => {
   it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
-    // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // hire_car_vehicle_licence lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // ([VERIFY-DOCS · ruling 8] it and the person's licence replace the single hire-car permit)
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'hire_car_permit',
+      docType: 'hire_car_vehicle_licence',
       fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'auto-approve-hire-permit'),
       consent: true,
       privacyNoticeVersion: 'v1',
@@ -620,7 +623,8 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
   // because the live gate ALSO requires hire permit / exterior photo / fitness
   // cert. What onboarding shows must equal what gates. [VERIFY-DOCS] The plate
   // photo is merged into the exterior photo (it shows the plate).
-  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert'];
+  // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
+  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'];
   let taxiToken: string;
   let bicycleToken: string;
 
@@ -661,7 +665,8 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_driver_licence');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
@@ -691,13 +696,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const data = res.json().data;
     // A box truck is a commercial goods vehicle, not a hire car.
     expect(data.checklist).toEqual([...MOVER_DOCS, 'road_service_licence', 'fitness_cert']);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
   });
 
   it('asks a bus for the hire extras AND commercial docs — fitness cert only once', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER&vehicleType=BUS_15', undefined, taxiToken);
     const data = res.json().data;
-    expect(data.checklist).toContain('hire_car_permit'); // it carries passengers
+    expect(data.checklist).toContain('hire_car_vehicle_licence'); // it carries passengers
     expect(data.checklist).toContain('road_service_licence'); // it is commercial
     // fitness_cert is in both the taxi and commercial profiles — deduped to one.
     expect(data.checklist.filter((d: string) => d === 'fitness_cert')).toHaveLength(1);
@@ -947,7 +952,7 @@ describe('Taxi hire-class insurance — the manual 5-point check is enforced', (
   let taxiUserId: string;
   const TAXI_CHECKLIST = [
     'drivers_licence', 'vehicle_registration',
-    'vehicle_insurance', 'hire_car_permit', 'vehicle_exterior_photo', 'fitness_cert',
+    'vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert',
   ];
 
   beforeAll(async () => {
@@ -1085,7 +1090,7 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
   const past = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   it('knows which types carry a printed expiry, from the one map', () => {
-    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'fitness_cert']) {
+    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'fitness_cert']) {
       expect(docTypeExpires(t), t).toBe(true);
     }
     expect(docTypeExpires('business_registration')).toBe(false);

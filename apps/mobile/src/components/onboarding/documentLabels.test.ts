@@ -35,6 +35,11 @@ describe('[owner ruling 2026-10-01] the exterior photo asks for the plate, never
     expect(docLabels()['owner_national_id']).toBe('Owner National ID or Digital ID card');
   });
 
+  it('[VERIFY-DOCS · ruling 8] the two licences that replace the hire-car permit are named for what the driver holds', () => {
+    expect(docLabels()['hire_car_driver_licence']).toBe("Hire Car Driver's Licence");
+    expect(docLabels()['hire_car_vehicle_licence']).toBe("Car's Hire Licence (yearly, shown on the car)");
+  });
+
   it('no document label asks for a colour', () => {
     for (const [docType, label] of Object.entries(docLabels())) {
       expect(label, docType).not.toMatch(/yellow|colou?r/i);

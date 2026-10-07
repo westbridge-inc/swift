@@ -38,7 +38,6 @@ const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const REASON = `Decision ${RUN}: taxi documents reviewed`;
 const TAXI: ValidatorContext = { taxi: true, registrationMark: `HB${NUM}`, docType: 'vehicle_registration', bucket: 'VEHICLE' };
-const TAXI_LICENCE: ValidatorContext = { ...{ taxi: true, registrationMark: `HB${NUM}`, docType: 'drivers_licence', bucket: 'PERSONAL' } };
 const DELIVERY: ValidatorContext = { taxi: false, registrationMark: `PAB${NUM}`, docType: 'vehicle_registration', bucket: 'VEHICLE' };
 
 let app: FastifyInstance;
@@ -119,16 +118,18 @@ describe('[DOC-1 P3-3] the taxi validators judge what was read, SKIP what was no
     expect(run('V_PLATE_CROSS_MATCH', { registration_mark: 'HB 1' }, { ...TAXI, bucket: 'PERSONAL', docType: 'national_id' })).toEqual({ status: 'SKIP', detailCode: 'NOT_APPLICABLE' });
     expect(run('V_PLATE_CROSS_MATCH', {}, TAXI)).toEqual({ status: 'SKIP', detailCode: 'UNDETERMINABLE' });
   });
-  it('V_LICENCE_CLASS: the hire-car class must be among the classes for a taxi; delivery and unread are SKIPs', () => {
-    expect(run('V_LICENCE_CLASS', { classes: 'B, H' }, TAXI_LICENCE)).toEqual({ status: 'PASS' });
-    expect(run('V_LICENCE_CLASS', { classes: 'B' }, TAXI_LICENCE)).toEqual({ status: 'FAIL' });
-    expect(run('V_LICENCE_CLASS', { classes: 'B' }, { ...TAXI_LICENCE, taxi: false })).toEqual({ status: 'SKIP', detailCode: 'NOT_APPLICABLE' });
-    expect(run('V_LICENCE_CLASS', {}, TAXI_LICENCE)).toEqual({ status: 'SKIP', detailCode: 'UNDETERMINABLE' });
+  // [VERIFY-DOCS · owner ruling 8, 6 Oct 2026 — a DELIBERATE change] There is no "H class" rule on the
+  // ordinary licence any more: the hire right is the person's Hire Car Driver's Licence, a separate
+  // document on the taxi checklist. V_LICENCE_CLASS is retired the way V_VEHICLE_COLOUR was: declared,
+  // never blocking, never implemented — a licence with no hire class is no longer failed for it.
+  it('V_LICENCE_CLASS is retired: no implementation judges a licence class, and its row blocks nothing', () => {
+    expect(VALIDATOR_IMPLEMENTATIONS['validators#V_LICENCE_CLASS']).toBeUndefined();
+    expect(VALIDATOR_CATALOGUE.find((v) => v.code === 'V_LICENCE_CLASS')).toMatchObject({ isBlocking: false, detailCode: 'LICENCE_CLASS_MISMATCH', docTypeLegacy: 'drivers_licence' });
+    expect(VALIDATOR_CATALOGUE.find((v) => v.code === 'V_LICENCE_CLASS')!.implRef).toBeUndefined();
   });
-  it('the catalogue rows are blocking, carry the spec reasons, resolve to these implementations, and the licence rule is scoped to the licence by the registry', () => {
-    expect(VALIDATOR_CATALOGUE.find((v) => v.code === 'V_LICENCE_CLASS')!.docTypeLegacy).toBe('drivers_licence');
-    // (V_VEHICLE_COLOUR is retired by the owner's ruling of 2026-10-01 — graded in its own block below.)
-    for (const [code, detail] of [['V_PLATE_CLASS', 'WRONG_PLATE_CLASS'], ['V_LICENCE_CLASS', 'LICENCE_CLASS_MISMATCH'], ['V_PLATE_CROSS_MATCH', 'PLATE_CROSS_MISMATCH']] as const) {
+  it('the catalogue rows are blocking, carry the spec reasons, resolve to these implementations', () => {
+    // (V_VEHICLE_COLOUR and V_LICENCE_CLASS are retired by the owner's rulings of 2026-10-01 and 2026-10-06.)
+    for (const [code, detail] of [['V_PLATE_CLASS', 'WRONG_PLATE_CLASS'], ['V_PLATE_CROSS_MATCH', 'PLATE_CROSS_MISMATCH']] as const) {
       expect(VALIDATOR_CATALOGUE.find((v) => v.code === code), code).toMatchObject({ isBlocking: true, detailCode: detail, implRef: `validators#${code}` });
     }
     expect(REJECTION_REASON_CODES).toContain('WRONG_PLATE_CLASS');

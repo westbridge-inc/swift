@@ -1023,6 +1023,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
+        // [VERIFY-DOCS] The hire-car permit split's 60 days: reminders, then the end of the stand-in.
+        await verification.hirePermitGraceSweep();
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {

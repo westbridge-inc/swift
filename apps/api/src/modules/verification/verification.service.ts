@@ -7,7 +7,8 @@ import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClass
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
-import { approvedEvidenceFor, type EvidenceRow } from './evidence';
+import { approvedEvidenceFor, hirePermitGraceUntil, type EvidenceRow } from './evidence';
+import { HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPES, hirePermitGraceEnd, hireSplitStartedAt } from './hire-permit-grace';
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
@@ -1388,6 +1389,18 @@ export class VerificationService {
         .filter((d) => d.status === 'APPROVED' && (!d.expiresAt || d.expiresAt > new Date()))
         .map((d) => d.docType),
     );
+    // [VERIFY-DOCS · hire-car permit split] While an approved permit stands in for the two new
+    // licences, the checklist shows them as done (build 9 keeps the driver on the home screen) and
+    // says until when; uploading the new licences stays open the whole time.
+    let hirePermitGrace: { until: Date } | undefined;
+    const splitPending = HIRE_SPLIT_DOC_TYPES.filter((docType) => checklist.includes(docType) && !approved.has(docType));
+    if (splitPending.length > 0) {
+      const until = await hirePermitGraceUntil(this.prisma, userId, new Date());
+      if (until) {
+        for (const docType of splitPending) approved.add(docType);
+        hirePermitGrace = { until };
+      }
+    }
     const missing = checklist.filter((docType) => !approved.has(docType));
 
     // The mover's saved vehicle (null until they provision one) — lets the
@@ -1430,6 +1443,7 @@ export class VerificationService {
       // the one evidence rule, so the flag survives the image being deleted after review.
       // Only asked where this person's lists name the document at all.
       policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
+      ...(hirePermitGrace ? { hirePermitGrace } : {}),
     };
   }
 
@@ -1816,6 +1830,57 @@ export class VerificationService {
       sent += 1;
     }
     return sent;
+  }
+
+  /**
+   * [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] The hire-car permit split's 60 days, run by the
+   * daily document sweep. A taxi driver whose approved permit is standing in for the two new licences
+   * is told what to upload — when the window opens, and again with 30 and 7 days left (once each) —
+   * and when the window has closed, taken offline if the permit was all they had (GO refuses them from
+   * then on anyway). A permit that expires first is the ordinary expiry sweep's work.
+   */
+  async hirePermitGraceSweep(now = new Date()): Promise<number> {
+    const started = await hireSplitStartedAt(this.prisma);
+    if (!started) return 0;
+    const end = hirePermitGraceEnd(started);
+    const permits = await this.prisma.documentRecord.findMany({
+      where: { docType: HIRE_PERMIT_DOC_TYPE, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
+      select: { accountId: true, submissionId: true },
+      orderBy: { approvedAt: 'desc' },
+    });
+    const seen = new Set<string>();
+    let touched = 0;
+    for (const permit of permits) {
+      if (seen.has(permit.accountId)) continue;
+      seen.add(permit.accountId);
+      if (!(await this.prisma.driver.findUnique({ where: { userId: permit.accountId }, select: { id: true } }))) continue;
+      const held = await this.prisma.documentRecord.findMany({
+        where: { accountId: permit.accountId, docType: { in: [...HIRE_SPLIT_DOC_TYPES] }, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }] },
+        select: { docType: true },
+      });
+      if (HIRE_SPLIT_DOC_TYPES.every((docType) => held.some((r) => r.docType === docType))) continue;
+      if (now.getTime() >= end.getTime()) {
+        if (await this.forceMoverOfflineIfNotLive(permit.accountId,
+          'Your hire-car permit no longer counts on its own. Upload your Hire Car Driver’s Licence and your car’s hire licence in Documents to go back online.')) touched += 1;
+        continue;
+      }
+      const daysLeft = Math.max(1, Math.ceil((end.getTime() - now.getTime()) / 86_400_000));
+      const title = daysLeft <= 7 ? '7 days left to add your hire-car licences'
+        : daysLeft <= 30 ? '30 days left to add your hire-car licences'
+          : 'Add your new hire-car licences';
+      const already = await this.prisma.notification.findFirst({ where: { userId: permit.accountId, title, createdAt: { gte: started } }, select: { id: true } });
+      if (already) continue;
+      await this.notifications.send({
+        userId: permit.accountId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title,
+        body: `Swift now asks taxi drivers for two licences instead of the hire-car permit: your Hire Car Driver’s Licence and your car’s hire licence (the yearly one shown on the car). Upload both in Documents by ${end.toISOString().slice(0, 10)}. Until then your permit still counts, so you can keep working.`,
+        audience: 'earner',
+        data: { kind: 'verification_expiry_reminder', docId: permit.submissionId, daysLeft },
+      });
+      touched += 1;
+    }
+    return touched;
   }
 
   // -------------------------------------------------------------------------

@@ -44,7 +44,8 @@ async function verifiedStore(docTypes: string[], lapsed = false) {
     addressLine1: '1 Rehearsal Row', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, minOrderAmount: 0,
   } }));
   vendorIds.push(vendor.id);
-  for (const t of docTypes) await doc(ownerUserId, t, lapsed && t === 'tin_certificate' ? { expiresAt: new Date(Date.now() - DAY) } : {});
+  // [VERIFY-DOCS · ruling 7] no TIN certificate on the store list; the lapsed store's registration is the one that lapsed
+  for (const t of docTypes) await doc(ownerUserId, t, lapsed && t === 'business_registration' ? { expiresAt: new Date(Date.now() - DAY) } : {});
   return { ownerUserId, vendorId: vendor.id };
 }
 
@@ -70,7 +71,7 @@ afterAll(async () => {
 
 describe('[DOC-1 P10-4] the activation rehearsal', () => {
   it('E2E-DOC-10 (scaled): a verified store with its full checklist KEEPs; one already lapsed is named as such and not counted; the recheck date is activation + 90 days; nothing is written', async () => {
-    const STORE = ['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo'];
+    const STORE = ['owner_national_id', 'business_registration', 'storefront_photo'];
     const kept = await verifiedStore(STORE);
     const lapsed = await verifiedStore(STORE, true);
     const riderUserId = await user('RIDER');
@@ -108,7 +109,7 @@ describe('[DOC-1 P10-4] the activation rehearsal', () => {
     const extra = registryCode('GY', 'food_handler_cert');
     await system(() => app.prisma.requirementItem.create({ data: { requirementSetId: set.id, docTypeCode: extra, isBlocking: true, minCount: 1, sortOrder: 99 } }));
     try {
-      const store = await verifiedStore(['owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo']);
+      const store = await verifiedStore(['owner_national_id', 'business_registration', 'storefront_photo']);
       const report = await system(() => rehearseActivation(app.prisma, service, { countryCode: 'GY', legacyCodes: 'ALL' }));
       expect(report.registry.setsThatSwitch.find((s) => s.actorRole === 'STORE')).toMatchObject({ same: false });
       const v = report.actors.verdicts.find((x) => x.actorId === store.vendorId)!;
