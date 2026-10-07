@@ -118,6 +118,11 @@ function capturedVendorAuthConfig(
 
 // Request interceptor to attach auth token
 api.interceptors.request.use((config) => {
+  // Weak mobile links need more time for reads. Writes keep their existing
+  // timeout/retry contracts, and explicit endpoint timeouts remain intact.
+  if ((config.method === 'get' || config.method === 'head') && config.timeout === 10000) {
+    config.timeout = 20000;
+  }
   if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);

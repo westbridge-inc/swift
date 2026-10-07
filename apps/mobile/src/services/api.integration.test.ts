@@ -731,3 +731,29 @@ describe('weekly fee MMG transport', () => {
     auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
   });
 });
+
+
+describe('weak-network read lifetime', () => {
+  it('allows 20 seconds for reads while preserving write and explicit request timeouts', async () => {
+    const seen: number[] = [];
+    setAdapter(async (config) => { seen.push(config.timeout!); return response(config, 200, { data: 'success' }); });
+    await api.get('/customer/home');
+    await api.head('/customer/home');
+    await api.post('/ordinary-write', {});
+    await api.get('/explicit-read', { timeout: 45000 });
+    expect(seen).toEqual([20000, 20000, 10000, 45000]);
+  });
+  it('allows a slow successful read to finish instead of timing out at ten seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      setAdapter((config) => new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new AxiosError('timeout', 'ECONNABORTED', config)), config.timeout);
+        setTimeout(() => { clearTimeout(timeout); resolve(response(config, 200, { data: 'slow success' })); }, 15000);
+      }));
+      const result = api.get('/customer/home');
+      const observed = result.then((value) => value.data.data, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(await observed).toBe('slow success');
+    } finally { vi.useRealTimers(); }
+  });
+});
