@@ -69,6 +69,7 @@ async function fixture(substitute = false) {
       orderNumber: `L02-CANCEL-${nanoid(10)}`, orderType: 'FOOD_DELIVERY',
       tenantId: vendor.tenantId, customerId: customer.id, vendorId: vendor.id,
       status: 'PENDING', paymentMethod: 'CASH', paymentStatus: 'PENDING',
+      deliveryAddress: 'Cancellation fixture', deliveryLat: 6.8, deliveryLng: -58.15,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 0, totalAmount: 2000,
       items: { create: [
         { ...line, itemId: substitute ? live.id : item.id,
