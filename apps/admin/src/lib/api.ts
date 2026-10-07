@@ -311,6 +311,29 @@ export const topUpSubscription = (id: string, amount: number, reference: string,
     headers: { 'Idempotency-Key': idempotencyKey },
     reason,
   });
+// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded in order:
+// set it aside, pay it outside Swift, then record the payout with its transfer
+// reference. Each step is a money action a second admin approves (the server
+// answers 202 APPROVAL_REQUIRED until then). A set-aside that cannot be paid
+// is released back to the credit.
+export const setAsideSubscriptionCredit = (id: string, amount: number, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/set-aside`, {
+    method: 'POST',
+    body: JSON.stringify({ amount }),
+    reason,
+  });
+export const recordSubscriptionRefundPaid = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/paid`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, method, reference }),
+    reason,
+  });
+export const releaseSubscriptionRefund = (id: string, amount: number, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/release`, {
+    method: 'POST',
+    body: JSON.stringify({ amount }),
+    reason,
+  });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
 export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
 export const processSettlement = (id: string, reference: string | undefined, reason: string) =>

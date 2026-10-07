@@ -3321,6 +3321,16 @@ enum BillingEventType {
   REMINDER
   TIER_CHANGE
   CHURNED
+  /// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded in three
+  /// recorded steps, each approved by two admins. RESERVED: the whole credit
+  /// leaves the wallet into REFUND_PAYABLE (set aside, nothing paid yet).
+  /// PREPAID_REFUND: the set-aside amount was paid back outside Swift (MMG or
+  /// bank); `paymentRef` is that transfer's reference, recorded once across
+  /// every account. RELEASED: a set-aside that could not be paid goes back to
+  /// the wallet. Open set-aside = RESERVED - PREPAID_REFUND - RELEASED.
+  PREPAID_REFUND_RESERVED
+  PREPAID_REFUND
+  PREPAID_REFUND_RELEASED
 }
 
 /// An inbound platform-fee payment [san spec PART 4] — every channel, one

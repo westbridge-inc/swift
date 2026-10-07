@@ -38,7 +38,7 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/billing/billing-confirmation-backfill.ts': { sites: 2, role: 'JOB_PENDING' },
   'modules/billing/billing-notice-delivery.ts': { sites: 5, role: 'JOB_PENDING' },
   'modules/billing/billing.service.ts': { sites: 2, role: 'SHARED' },
-  'modules/billing/invariants.ts': { sites: 2, role: 'JOB_PENDING' },
+  'modules/billing/invariants.ts': { sites: 3, role: 'JOB_PENDING' },
   'modules/billing/provider-identity-backfill.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/billing/receipts.ts': { sites: 1, role: 'SHARED' },
   'modules/billing/sales-components.ts': { sites: 1, role: 'SHARED' },
@@ -65,6 +65,7 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // isFiction (store-review demo check): reached only from authenticated requests — document
   // submission (vendor, verification routes) and an admin's approval (admin routes).
   'modules/subscription/subscription.service.ts': { sites: 1, role: 'REQUEST' },
+  'modules/user/account.service.ts': { sites: 1, role: 'SHARED' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
   'modules/verification/mover-document-authority.ts': { sites: 2, role: 'SHARED' },

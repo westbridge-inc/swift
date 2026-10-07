@@ -136,7 +136,7 @@ describe('[5.1.1v] the verdict, without a database', () => {
     // Told one at a time, a person clears a blocker, tries again, and is
     // refused for a different reason they were never shown. That is the
     // "contact Support" dead end with extra steps.
-    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250, openClaimCount: 1, pendingFeePaymentCount: 1, feeCreditCount: 1 });
+    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250, openClaimCount: 1, pendingFeePaymentCount: 1, feeCreditCount: 1, feeRefundPendingCount: 1 });
     expect(all.blockers).toHaveLength(PARTNER_BLOCKERS.length);
     for (const b of PARTNER_BLOCKERS) expect(refusalMessage(all.blockers)).toContain(BLOCKER_MESSAGE[b]);
   });
@@ -421,7 +421,7 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
       checkoutUrlSealed: Buffer.alloc(40), checkoutUrlDek: Buffer.alloc(60), expiresAt: new Date(Date.now() + 600_000), ...data,
     } });
   }
-  const refused = async (userId: string, blocker: 'FEE_PAYMENT_PENDING' | 'FEE_CREDIT') => {
+  const refused = async (userId: string, blocker: 'FEE_PAYMENT_PENDING' | 'FEE_CREDIT' | 'FEE_REFUND_PENDING') => {
     const error = await new AccountService(app).deleteAccount(userId).then(() => null, (e: unknown) => e);
     expect(error, 'deletion must be refused while fee money is unsettled').toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
     // The fixed words after any amount the person's message fills in.
@@ -549,5 +549,29 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
     await untouched(p.userId);
     await app.prisma.prepaidBalance.update({ where: { subscriptionId: sub.id }, data: { balance: 0 } });
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('[Owner ruling 2026-10-07] credit set aside for a refund blocks deletion until the payout is recorded: the person must still be reachable to be paid', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    // Set aside: the wallet is empty, the money is owed back (REFUND_PAYABLE).
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 0 } });
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RESERVED', amount: 1500, idempotencyKey: `credit-refund-reserve:test-${sub.id}` } });
+    await refused(p.userId, 'FEE_REFUND_PENDING');
+    await untouched(p.userId);
+    // Paid back and recorded: nothing is owed any more.
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND', amount: 1500, paymentRef: `REF${sub.id}`.toUpperCase(), idempotencyKey: `credit-refund-paid:test-${sub.id}` } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('a released set-aside is credit again, and blocks as credit', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 1500 } });
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RESERVED', amount: 1500, idempotencyKey: `credit-refund-reserve:test-${sub.id}` } });
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RELEASED', amount: 1500, idempotencyKey: `credit-refund-release:test-${sub.id}` } });
+    const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
+    expect(error?.message).toContain('unused weekly-fee credit. Open Get help');
+    expect(error?.message).not.toContain('Swift is paying back');
   });
 });

@@ -28,6 +28,7 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CHARGEBACK_RESERVE: { name: 'Card dispute reserve', type: 'LIABILITY' },
   CHARGEBACK_LOSS: { name: 'Lost chargebacks', type: 'EXPENSE' },
   SUSPENSE_LIABILITY: { name: 'Unmatched money held — never rejected (SO-6)', type: 'LIABILITY' },
+  REFUND_PAYABLE: { name: 'Fee credit set aside for a refund, not yet paid back (subledger = subscriptionId)', type: 'LIABILITY' },
   FX_VARIANCE: { name: 'Settlement-vs-conversion FX differences', type: 'REVENUE' },
   OPENING_BALANCES: { name: 'Ledger-epoch opening balances', type: 'CONTRA' },
 };
@@ -110,6 +111,33 @@ export async function postLedger(
 export function topupPostings(subscriptionId: string, amount: number, rail: 'EXTERNAL' | 'CARD' = 'EXTERNAL'): LedgerPosting[] {
   return [
     { account: rail === 'CARD' ? 'CLEARING_CARD' : 'CLEARING_MMG', debit: amount },
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** Unused wallet credit set aside for a refund: it is no longer the payer's
+ *  to spend on fees, and is owed back to them until it is paid or released. */
+export function refundSetAsidePostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, debit: amount },
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, credit: amount },
+  ];
+}
+
+/** A set-aside refund paid back outside Swift. Swift never moves the money: an
+ *  admin pays it and records the reference, so it leaves the account it would
+ *  have come from (MMG clearing, or the bank). */
+export function refundPaidPostings(subscriptionId: string, amount: number, method: 'MMG' | 'BANK_TRANSFER'): LedgerPosting[] {
+  return [
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
+    { account: method === 'BANK_TRANSFER' ? 'BANK_LOCAL' : 'CLEARING_MMG', credit: amount },
+  ];
+}
+
+/** A set-aside refund that could not be paid goes back to the payer's wallet. */
+export function refundReleasePostings(subscriptionId: string, amount: number): LedgerPosting[] {
+  return [
+    { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
     { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
   ];
 }

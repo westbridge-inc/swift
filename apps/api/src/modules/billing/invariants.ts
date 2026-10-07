@@ -24,19 +24,25 @@ export interface InvariantReport {
   ledgerTrialImbalance: { debits: number; credits: number } | null;
   /** PrepaidBalance ≠ its WALLET_LIABILITY subledger — S0, a credit path bypassed the ledger [tollgate M-13]. */
   ledgerWalletMismatches: { subscriptionId: string; ledgerBalance: number; walletBalance: number }[];
+  /** A refund set-aside whose REFUND_PAYABLE subledger disagrees with its
+   *  events (set aside − paid − released): money owed back that the books
+   *  and the record do not agree on. */
+  refundPayableMismatches: { subscriptionId: string; ledgerBalance: number; openSetAside: number }[];
 }
 
 export async function runBillingInvariants(prisma: PrismaClient, now = new Date()): Promise<InvariantReport> {
   const report: InvariantReport = {
     walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [], receiptGaps: [],
-    ledgerTrialImbalance: null, ledgerWalletMismatches: [],
+    ledgerTrialImbalance: null, ledgerWalletMismatches: [], refundPayableMismatches: [],
   };
 
-  // 1. Balance provability: PrepaidBalance == Σ(PREPAID_TOPUP) − Σ(prepaid-settled charges).
+  // 1. Balance provability: PrepaidBalance == Σ(PREPAID_TOPUP) − Σ(prepaid-settled charges)
+  //    − Σ(credit set aside for a refund) + Σ(set-asides released back unpaid).
+  //    A set-aside that is PAID leaves REFUND_PAYABLE, not the wallet (check 7).
   const wallets = await prisma.prepaidBalance.findMany({ select: { subscriptionId: true, balance: true } });
   for (const w of wallets) {
     report.walletsChecked += 1;
-    const [topups, settles] = await Promise.all([
+    const [topups, settles, setAside, released] = await Promise.all([
       prisma.billingEvent.aggregate({
         where: { subscriptionId: w.subscriptionId, type: 'PREPAID_TOPUP' },
         _sum: { amount: true },
@@ -45,8 +51,17 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
         where: { subscriptionId: w.subscriptionId, status: 'CAPTURED', externalRef: 'prepaid' },
         _sum: { amount: true },
       }),
+      prisma.billingEvent.aggregate({
+        where: { subscriptionId: w.subscriptionId, type: 'PREPAID_REFUND_RESERVED' },
+        _sum: { amount: true },
+      }),
+      prisma.billingEvent.aggregate({
+        where: { subscriptionId: w.subscriptionId, type: 'PREPAID_REFUND_RELEASED' },
+        _sum: { amount: true },
+      }),
     ]);
-    const ledger = Number(topups._sum.amount ?? 0) - Number(settles._sum.amount ?? 0);
+    const ledger = Number(topups._sum.amount ?? 0) - Number(settles._sum.amount ?? 0)
+      - Number(setAside._sum.amount ?? 0) + Number(released._sum.amount ?? 0);
     if (Math.abs(ledger - Number(w.balance)) > 0.009) {
       report.walletMismatches.push({ subscriptionId: w.subscriptionId, ledger, balance: Number(w.balance) });
     }
@@ -153,9 +168,35 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
     }
   }
 
+  // 7. Refund set-asides: the REFUND_PAYABLE subledger equals, per
+  //    subscription, Σ(set aside) − Σ(paid back) − Σ(released) from the events.
+  const payable = await prisma.$queryRaw<{ subscriptionId: string; bal: number }[]>`
+    SELECT "subledgerId" AS "subscriptionId", COALESCE(SUM(credit - debit), 0)::float8 AS bal
+    FROM ledger_entries
+    WHERE "accountCode" = 'REFUND_PAYABLE' AND "subledgerId" IS NOT NULL
+    GROUP BY "subledgerId"`;
+  const refundEvents = await prisma.billingEvent.groupBy({
+    by: ['subscriptionId', 'type'],
+    where: { type: { in: ['PREPAID_REFUND_RESERVED', 'PREPAID_REFUND', 'PREPAID_REFUND_RELEASED'] } },
+    _sum: { amount: true },
+  });
+  const openBySub = new Map<string, number>();
+  for (const e of refundEvents) {
+    const sign = e.type === 'PREPAID_REFUND_RESERVED' ? 1 : -1;
+    openBySub.set(e.subscriptionId, (openBySub.get(e.subscriptionId) ?? 0) + sign * Number(e._sum.amount ?? 0));
+  }
+  const payableBySub = new Map(payable.map((r) => [r.subscriptionId, r.bal]));
+  for (const subscriptionId of new Set([...openBySub.keys(), ...payableBySub.keys()])) {
+    const ledgerBalance = payableBySub.get(subscriptionId) ?? 0;
+    const openSetAside = openBySub.get(subscriptionId) ?? 0;
+    if (Math.abs(ledgerBalance - openSetAside) > 0.009) {
+      report.refundPayableMismatches.push({ subscriptionId, ledgerBalance, openSetAside });
+    }
+  }
+
   const broken =
     report.walletMismatches.length + report.wrongfulSuspensions.length + report.earlyBillingSuspensions.length + report.enforcementLeaks.length +
-    report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
+    report.receiptGaps.length + report.ledgerWalletMismatches.length + report.refundPayableMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
   if (broken > 0) {
     log().error({ report }, 'billing invariants: FAILURES detected (wrongful suspensions auto-healed)');
   }

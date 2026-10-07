@@ -82,6 +82,7 @@ export const ENUM_LABELS = {
     CHARGE_SUCCESS: 'Weekly fee paid', CHARGE_FAILED: 'Weekly fee not paid', PREPAID_TOPUP: 'Prepaid top-up',
     SUSPENDED: 'Suspended for an unpaid fee', REINSTATED: 'Reinstated', REMINDER: 'Reminder sent',
     TIER_CHANGE: 'Plan changed', CHURNED: 'Left Swift',
+    PREPAID_REFUND_RESERVED: 'Credit set aside for a refund', PREPAID_REFUND: 'Refund paid back', PREPAID_REFUND_RELEASED: 'Refund set-aside returned to credit',
   },
   EarningType: {
     DELIVERY_FEE: 'Delivery fee', COURIER_FEE: 'Courier fee', TAXI_FARE: 'Taxi fare', TIP: 'Tip',

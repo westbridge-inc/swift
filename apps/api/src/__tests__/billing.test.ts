@@ -2,7 +2,9 @@ import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
+import { withSuiteCapability } from '../lib/test-target-lock';
+import { recordCreditRefundPaid } from '../modules/billing/credit-refund';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -18,6 +20,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { runBillingInvariants } from '../modules/billing/invariants';
 
 // ---------------------------------------------------------------------------
 // the revenue engine. Hardest paths: idempotency under
@@ -821,5 +824,319 @@ describe('[A-07] a subscription is charged its own price', () => {
     const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: subId } });
     expect(payments).toHaveLength(1);
     expect(Number(payments[0]!.amount)).toBe(8_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded, then the
+// account can be deleted. Swift never moves the money. Every step is a money
+// action a second admin approves, in this order: SET ASIDE (the whole credit
+// leaves the wallet; nothing is paid before), PAY outside Swift, RECORD THE
+// PAYOUT (one transfer reference, one refund, across every account); RELEASE
+// returns a set-aside that could not be paid. Books balanced at every step.
+// ---------------------------------------------------------------------------
+describe('fee credit refund — set aside, then paid, recorded once, two people, books balanced', () => {
+  let admin: { userId: string; token: string };
+  let other: { userId: string; token: string };
+  const headersFor = (token: string, key = `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`) => ({
+    'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${token}`, 'content-type': 'application/json', 'idempotency-key': key,
+  });
+  const headers = (key?: string) => headersFor(admin.token, key);
+  const ref = (tag: string) => `${tag}${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}`;
+  const topUp = async (subId: string, amount: number, reference = ref('CREDIT')) => {
+    const res = await injectWithApproval(app, { method: 'POST', url: `/api/v1/admin/subscriptions/${subId}/topup`, payload: { amount, reference }, headers: headers() });
+    expect(res.statusCode, res.payload).toBe(200);
+    return reference;
+  };
+  async function storeWithCredit(credit: number) {
+    // Due in five days: the top-up only accumulates, nothing is billed.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() + 5 * DAY) });
+    const creditRef = credit > 0 ? await topUp(fx.subId, credit) : null;
+    return { ...fx, creditRef };
+  }
+  const url = (subId: string, step: 'set-aside' | 'paid' | 'release') => `/api/v1/admin/subscriptions/${subId}/refund-credit/${step}`;
+  const setAside = (subId: string, amount: number) => injectWithApproval(app, { method: 'POST', url: url(subId, 'set-aside'), payload: { amount }, headers: headers() });
+  const paid = (subId: string, payload: Record<string, unknown>) => injectWithApproval(app, { method: 'POST', url: url(subId, 'paid'), payload, headers: headers() });
+  const release = (subId: string, amount: number) => injectWithApproval(app, { method: 'POST', url: url(subId, 'release'), payload: { amount }, headers: headers() });
+  /** The real two-person path with chosen people: `asker` asks, `approver` approves, `asker` re-sends. */
+  async function twoPeople(asker: { token: string }, approver: { token: string }, method: 'POST', target: string, payload: Record<string, unknown>, between?: () => Promise<void>) {
+    const first = await app.inject({ method, url: target, payload, headers: headersFor(asker.token) });
+    expect(first.statusCode, first.payload).toBe(202);
+    const approvalId = first.json().error.details.approvalId as string;
+    if (between) await between();
+    const decided = await app.inject({ method: 'POST', url: `/api/v1/admin/approvals/${approvalId}/decide`, payload: { approve: true, note: 'second person' }, headers: headersFor(approver.token) });
+    expect(decided.statusCode, decided.payload).toBe(200);
+    return app.inject({ method, url: target, payload, headers: { ...headersFor(asker.token), 'x-swift-approval': approvalId } });
+  }
+  const wallet = async (subId: string) => Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance);
+  const subledger = async (account: 'WALLET_LIABILITY' | 'REFUND_PAYABLE', subId: string) => {
+    const rows = await app.prisma.ledgerEntry.findMany({ where: { accountCode: account, subledgerId: subId } });
+    return rows.reduce((sum, r) => sum + Number(r.credit) - Number(r.debit), 0);
+  };
+  const events = (subId: string, type: string) => app.prisma.billingEvent.findMany({ where: { subscriptionId: subId, type: type as never } });
+  /** Every nightly money check agrees for this subscription, and the whole ledger balances. */
+  const booksAgree = async (subId: string) => {
+    const report = await runBillingInvariants(app.prisma);
+    expect(report.walletMismatches.filter((m) => m.subscriptionId === subId)).toEqual([]);
+    expect(report.ledgerWalletMismatches.filter((m) => m.subscriptionId === subId)).toEqual([]);
+    expect(report.refundPayableMismatches.filter((m) => m.subscriptionId === subId)).toEqual([]);
+    expect(report.ledgerTrialImbalance).toBeNull();
+  };
+
+  beforeAll(async () => {
+    admin = await makeUserWithSession(['ADMIN'], 'ADMIN');
+    other = await makeUserWithSession(['ADMIN'], 'ADMIN');
+  });
+
+  it.each(['MMG', 'BANK_TRANSFER'] as const)('set aside, then paid by %s: the credit leaves once, the reference is recorded, the books agree at every step', async (method) => {
+    const fx = await storeWithCredit(15000);
+    expect(await wallet(fx.subId)).toBe(15000);
+
+    const aside = await setAside(fx.subId, 15000);
+    expect(aside.statusCode, aside.payload).toBe(200);
+    expect(aside.json().data).toMatchObject({ amount: 15000, balance: 0, refundSetAside: 15000 });
+    expect(await wallet(fx.subId)).toBe(0);
+    expect(await subledger('WALLET_LIABILITY', fx.subId)).toBe(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(15000);
+    expect(await events(fx.subId, 'PREPAID_REFUND_RESERVED')).toHaveLength(1);
+    await booksAgree(fx.subId);
+
+    const reference = ref('REFUND');
+    const res = await paid(fx.subId, { amount: 15000, method, reference });
+    expect(res.statusCode, res.payload).toBe(200);
+    expect(res.json().data).toMatchObject({ amount: 15000, balance: 0, refundSetAside: 0 });
+    const done = await events(fx.subId, 'PREPAID_REFUND');
+    expect(done).toHaveLength(1);
+    // Stored the way every manual-rail reference is: trimmed and upper-cased.
+    const stored = reference.toUpperCase();
+    expect(done[0]).toMatchObject({ paymentRef: stored });
+    expect(Number(done[0]!.amount)).toBe(15000);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(0);
+    const out = await app.prisma.ledgerEntry.findFirst({ where: { accountCode: method === 'MMG' ? 'CLEARING_MMG' : 'BANK_LOCAL', credit: 15000, transaction: { idempotencyKey: { contains: stored } } } });
+    expect(out).not.toBeNull();
+    // One audit row per step, written in that step's own transaction.
+    expect(await app.prisma.auditLog.count({ where: { entityId: fx.subId, action: { contains: 'refund-credit/paid' }, changes: { path: ['reference'], equals: stored } } })).toBe(1);
+    expect(await app.prisma.auditLog.count({ where: { entityId: fx.subId, action: { contains: 'refund-credit/set-aside' } } })).toBe(1);
+    await booksAgree(fx.subId);
+
+    // The same payout recorded again changes nothing.
+    const again = await paid(fx.subId, { amount: 15000, method, reference });
+    expect(again.statusCode, again.payload).toBe(200);
+    expect(again.json()).toMatchObject({ replayed: true });
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(1);
+    await booksAgree(fx.subId);
+  });
+
+  it('a set-aside that cannot be paid is released back to the wallet, books balanced; the credit can then be set aside again', async () => {
+    const fx = await storeWithCredit(9000);
+    expect((await setAside(fx.subId, 9000)).statusCode).toBe(200);
+    const back = await release(fx.subId, 9000);
+    expect(back.statusCode, back.payload).toBe(200);
+    expect(back.json().data).toMatchObject({ amount: 9000, balance: 9000, refundSetAside: 0 });
+    expect(await wallet(fx.subId)).toBe(9000);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(0);
+    expect(await subledger('WALLET_LIABILITY', fx.subId)).toBe(9000);
+    expect(await events(fx.subId, 'PREPAID_REFUND_RELEASED')).toHaveLength(1);
+    await booksAgree(fx.subId);
+    // Nothing is set aside now, so there is nothing to pay or release.
+    expect((await paid(fx.subId, { amount: 9000, method: 'MMG', reference: ref('LATE') })).json().error.code).toBe('NO_REFUND_SET_ASIDE');
+    expect((await release(fx.subId, 9000)).json().error.code).toBe('NO_REFUND_SET_ASIDE');
+    expect((await setAside(fx.subId, 9000)).statusCode).toBe(200);
+    await booksAgree(fx.subId);
+  });
+
+  it('[Sol S1] one transfer reference records one refund across every account: a second account cannot use it, in any letter case', async () => {
+    const a = await storeWithCredit(15000);
+    const b = await storeWithCredit(15000);
+    expect((await setAside(a.subId, 15000)).statusCode).toBe(200);
+    expect((await setAside(b.subId, 15000)).statusCode).toBe(200);
+    const reference = ref('ONETRANSFER');
+    expect((await paid(a.subId, { amount: 15000, method: 'MMG', reference })).statusCode).toBe(200);
+    for (const reuse of [reference, reference.toLowerCase()]) {
+      const second = await paid(b.subId, { amount: 15000, method: 'MMG', reference: reuse });
+      expect(second.statusCode, second.payload).toBe(409);
+      expect(second.json().error.code).toBe('REFUND_REFERENCE_REUSED');
+    }
+    // B is still owed its refund: nothing was recorded for it.
+    expect(await events(b.subId, 'PREPAID_REFUND')).toHaveLength(0);
+    expect(await subledger('REFUND_PAYABLE', b.subId)).toBe(15000);
+    await booksAgree(b.subId);
+  });
+
+  it('a reference Swift received as a payment is not proof of a refund sent', async () => {
+    const fx = await storeWithCredit(7000);
+    expect((await setAside(fx.subId, 7000)).statusCode).toBe(200);
+    const res = await paid(fx.subId, { amount: 7000, method: 'MMG', reference: fx.creditRef! });
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('REFUND_REFERENCE_IS_A_PAYMENT');
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
+  });
+
+  it('a permanent inbound payment alias is refused as a refund transfer', async () => {
+    const fx = await storeWithCredit(7000);
+    expect((await setAside(fx.subId, 7000)).statusCode).toBe(200);
+    const historical = ref('HISTORICAL');
+    const inbound = await app.prisma.providerPayment.create({ data: {
+      provider: 'MMG', providerTxnId: ref('CURRENT'), amount: 7000, currencyCode: 'GYD', status: 'CREDITED', subscriptionId: fx.subId,
+    } });
+    // Historical aliases can only be created by the migration. Install one
+    // in a rolled-back owner fixture, restore its immutable trigger BEFORE
+    // exercising the real refund service, and roll back all DDL and writes.
+    const approval = await app.prisma.privilegedApproval.create({ data: {
+      action: 'POST /subscriptions/:id/refund-credit/paid', cls: 'C4', capability: 'subscription.refund',
+      entityId: fx.subId, fingerprint: ref('FINGERPRINT'), requestedBy: admin.userId, approvedBy: other.userId,
+      status: 'APPLIED', reason: TEST_ADMIN_REASON, expiresAt: new Date(Date.now() + DAY),
+    } });
+    const rollback = new Error('ROLLBACK_REFUND_ALIAS_FIXTURE');
+    try {
+      await app.prisma.$transaction(async (tx) => {
+        await withSuiteCapability('ddl', async () => {
+          await tx.$executeRawUnsafe('ALTER TABLE provider_payment_aliases DISABLE TRIGGER provider_payment_aliases_immutable');
+          await tx.providerPaymentAlias.create({ data: { provider: 'MMG', aliasKey: historical.toUpperCase(), providerPaymentId: inbound.id } });
+          await tx.$executeRawUnsafe('ALTER TABLE provider_payment_aliases ENABLE TRIGGER provider_payment_aliases_immutable');
+        });
+        const [guard] = await tx.$queryRaw<Array<{ enabled: boolean }>>`SELECT tgenabled = 'O' AS enabled FROM pg_trigger WHERE tgname = 'provider_payment_aliases_immutable'`;
+        expect(guard?.enabled).toBe(true);
+        const db = new Proxy(tx, { get(target, key) {
+          if (key === '$transaction') return (work: (client: Prisma.TransactionClient) => unknown) => work(tx);
+          return Reflect.get(target, key);
+        } }) as PrismaClient;
+        const error = await recordCreditRefundPaid(db, {
+          adminId: admin.userId, approvalId: approval.id, subscriptionId: fx.subId,
+          amount: 7000, method: 'MMG', reference: historical.toLowerCase(),
+        }).then(() => null, (e: unknown) => e);
+        expect(error).toMatchObject({ code: 'REFUND_REFERENCE_IS_A_PAYMENT' });
+        expect(await tx.billingEvent.count({ where: { subscriptionId: fx.subId, type: 'PREPAID_REFUND' } })).toBe(0);
+        throw rollback;
+      });
+    } catch (error) { if (error !== rollback) throw error; }
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(7000);
+    await booksAgree(fx.subId);
+  });
+
+  it.each([150_000_000.02, 9_999_999_999.97, 9_999_999_999.99])('refunds a valid large balance with cents (%s)', async (amount) => {
+    const fx = await storeWithCredit(0);
+    // Existing balances can have cents even though the manual top-up form
+    // accepts whole dollars. Seed through the transaction credit seam.
+    await app.prisma.$transaction((tx) => billing.recordTopUpInTransaction(tx, {
+      subscriptionId: fx.subId, amount, recordedBy: 'refund-cent-fixture', eventKey: `cent-fixture:${fx.subId}`,
+    }));
+    const aside = await setAside(fx.subId, amount);
+    expect(aside.statusCode, aside.payload).toBe(200);
+    expect(aside.json().data.refundSetAside).toBe(amount);
+    const result = await paid(fx.subId, { amount, method: 'BANK_TRANSFER', reference: ref('LARGECENTS') });
+    expect(result.statusCode, result.payload).toBe(200);
+    expect(result.json().data.refundSetAside).toBe(0);
+    expect(await wallet(fx.subId)).toBe(0);
+    await booksAgree(fx.subId);
+  });
+
+  it('[Sol S1] once set aside, the amount is frozen: credit that arrives while the payout record waits for approval never makes the payout unrecordable', async () => {
+    const fx = await storeWithCredit(15000);
+    expect((await setAside(fx.subId, 15000)).statusCode).toBe(200);
+    const res = await twoPeople(admin, other, 'POST', url(fx.subId, 'paid'), { amount: 15000, method: 'MMG', reference: ref('WAITED') },
+      async () => { await topUp(fx.subId, 5000); });
+    expect(res.statusCode, res.payload).toBe(200);
+    // The answer is today's truth: the new credit is the person's, nothing is set aside.
+    expect(res.json().data).toMatchObject({ amount: 15000, balance: 5000, refundSetAside: 0 });
+    await booksAgree(fx.subId);
+  });
+
+  it('a set-aside asked for while the credit then changed is refused when applied, and nothing is set aside (nothing has been paid yet)', async () => {
+    const fx = await storeWithCredit(15000);
+    const res = await twoPeople(admin, other, 'POST', url(fx.subId, 'set-aside'), { amount: 15000 },
+      async () => { await topUp(fx.subId, 5000); });
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('FEE_CREDIT_CHANGED');
+    expect(await wallet(fx.subId)).toBe(20000);
+    expect(await events(fx.subId, 'PREPAID_REFUND_RESERVED')).toHaveLength(0);
+  });
+
+  it('[coordinator] the admin who asked for the set-aside cannot be the one who approves its payout record', async () => {
+    const fx = await storeWithCredit(6000);
+    // `admin` asks for the set-aside and `other` approves it.
+    expect((await twoPeople(admin, other, 'POST', url(fx.subId, 'set-aside'), { amount: 6000 })).statusCode).toBe(200);
+    // `other` then records the payout and `admin` approves: refused.
+    const crossed = await twoPeople(other, admin, 'POST', url(fx.subId, 'paid'), { amount: 6000, method: 'MMG', reference: ref('CROSSED') });
+    expect(crossed.statusCode, crossed.payload).toBe(403);
+    expect(crossed.json().error.code).toBe('REFUND_SAME_PERSON');
+    expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(6000);
+    // `admin` records it and `other` approves: recorded.
+    const ok = await twoPeople(admin, other, 'POST', url(fx.subId, 'paid'), { amount: 6000, method: 'MMG', reference: ref('STRAIGHT') });
+    expect(ok.statusCode, ok.payload).toBe(200);
+    await booksAgree(fx.subId);
+  });
+
+  it('a payout is recorded only for what is set aside, and only one set-aside is open at a time', async () => {
+    const fx = await storeWithCredit(8000);
+    const none = await paid(fx.subId, { amount: 8000, method: 'MMG', reference: ref('EARLY') });
+    expect(none.statusCode, none.payload).toBe(409);
+    expect(none.json().error.code).toBe('NO_REFUND_SET_ASIDE');
+    expect((await setAside(fx.subId, 8000)).statusCode).toBe(200);
+    const wrong = await paid(fx.subId, { amount: 5000, method: 'MMG', reference: ref('WRONG') });
+    expect(wrong.statusCode, wrong.payload).toBe(409);
+    expect(wrong.json().error.code).toBe('REFUND_AMOUNT_MISMATCH');
+    await topUp(fx.subId, 3000);
+    const twice = await setAside(fx.subId, 3000);
+    expect(twice.statusCode, twice.payload).toBe(409);
+    expect(twice.json().error.code).toBe('REFUND_ALREADY_SET_ASIDE');
+    expect(await wallet(fx.subId)).toBe(3000);
+    await booksAgree(fx.subId);
+  });
+
+  it('[Sol S2] any balance a wallet can hold can be refunded whole (a GY$15,000,000 top-up is refundable); a third decimal place is refused', async () => {
+    const fx = await storeWithCredit(15_000_000);
+    const res = await setAside(fx.subId, 15_000_000);
+    expect(res.statusCode, res.payload).toBe(200);
+    expect(res.json().data).toMatchObject({ amount: 15_000_000, refundSetAside: 15_000_000 });
+    const fine = await release(fx.subId, 15_000_000.001);
+    expect(fine.statusCode, fine.payload).toBe(400);
+  });
+
+  it('[Sol S2] a replayed payout reports the wallet as it is now, not zero', async () => {
+    const fx = await storeWithCredit(15000);
+    expect((await setAside(fx.subId, 15000)).statusCode).toBe(200);
+    const reference = ref('REPLAY');
+    expect((await paid(fx.subId, { amount: 15000, method: 'MMG', reference })).statusCode).toBe(200);
+    await topUp(fx.subId, 5000);
+    const again = await paid(fx.subId, { amount: 15000, method: 'MMG', reference });
+    expect(again.statusCode, again.payload).toBe(200);
+    expect(again.json()).toMatchObject({ replayed: true, data: { amount: 15000, balance: 5000, refundSetAside: 0 } });
+  });
+
+  it('the nightly check names a set-aside the books do not agree with', async () => {
+    const fx = await storeWithCredit(0);
+    // A set-aside recorded with no matching REFUND_PAYABLE movement: drift.
+    const stray = await app.prisma.billingEvent.create({ data: { subscriptionId: fx.subId, type: 'PREPAID_REFUND_RESERVED' as never, amount: 100, idempotencyKey: `credit-refund-reserve:stray-${fx.subId}` } });
+    try {
+      const report = await runBillingInvariants(app.prisma);
+      expect(report.refundPayableMismatches).toContainEqual({ subscriptionId: fx.subId, ledgerBalance: 0, openSetAside: 100 });
+    } finally {
+      await app.prisma.billingEvent.delete({ where: { id: stray.id } });
+    }
+  });
+
+  it('one admin alone cannot set credit aside: the request waits for a second person and nothing changes', async () => {
+    const fx = await storeWithCredit(5000);
+    const alone = await app.inject({ method: 'POST', url: url(fx.subId, 'set-aside'), payload: { amount: 5000 }, headers: headers() });
+    expect(alone.statusCode, alone.payload).toBe(202);
+    expect(await wallet(fx.subId)).toBe(5000);
+    const unexplained = await app.inject({ method: 'POST', url: url(fx.subId, 'set-aside'), payload: { amount: 5000 }, headers: { authorization: `Bearer ${admin.token}`, 'content-type': 'application/json' } });
+    expect(unexplained.statusCode, unexplained.payload).toBe(400);
+    expect(await wallet(fx.subId)).toBe(5000);
+  });
+
+  it('sets aside exactly the credit: another amount is refused and nothing changes; with no credit there is nothing to set aside', async () => {
+    const fx = await storeWithCredit(8000);
+    const res = await setAside(fx.subId, 5000);
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('FEE_CREDIT_CHANGED');
+    expect(await wallet(fx.subId)).toBe(8000);
+    expect(await events(fx.subId, 'PREPAID_REFUND_RESERVED')).toHaveLength(0);
+    const empty = await storeWithCredit(0);
+    const nothing = await setAside(empty.subId, 100);
+    expect(nothing.statusCode, nothing.payload).toBe(409);
+    expect(nothing.json().error.code).toBe('NO_FEE_CREDIT');
   });
 });
