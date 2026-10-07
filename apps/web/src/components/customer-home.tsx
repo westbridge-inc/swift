@@ -12,6 +12,7 @@ import { signInPath } from '@/lib/customer-routes';
 import { useCustomerSession } from '@/components/customer-session';
 import { Avatar, MoreButton, MoreMenu, PRESS } from '@/components/customer-shell';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
+import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
 import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSquareCard, VENDOR_GRID } from '@/components/order-ui';
@@ -336,19 +337,16 @@ function PopularRail({ items }: { items: PopularItem[] }) {
 
 function ScanHelp({ onClose }: { onClose: () => void }) {
   return (
-    <div className="sw-scrim" onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}>
-      <button type="button" aria-label="Close" tabIndex={-1} onClick={onClose} className="absolute inset-0 cursor-default" />
-      <div role="dialog" aria-modal="true" aria-labelledby="scan-help-title" className="sw-sheet relative bg-[var(--swift-card)] px-6 pb-6 pt-5">
+    <Modal labelledBy="scan-help-title" onClose={onClose} className="bg-[var(--swift-card)] px-6 pb-6 pt-5">
         <div className="flex items-start gap-3">
           <span className="grid h-12 w-12 flex-none place-items-center rounded-2xl bg-[var(--swift-red-50)] text-[var(--swift-red-600)]"><Pictogram name="scan" size={24} /></span>
           <div className="flex-1">
             <h2 id="scan-help-title" className="sw-title">Scan a store’s Swift code</h2>
             <p className="sw-caption mt-1 text-[15px] leading-[22px]">Point your phone’s camera at the Swift code on a store’s counter or flyer. It opens that store here, ready to order.</p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" autoFocus className="sw-icon-btn"><X size={20} aria-hidden /></button>
+          <button type="button" onClick={onClose} aria-label="Close" data-modal-initial-focus className="sw-icon-btn"><X size={20} aria-hidden /></button>
         </div>
         <button type="button" onClick={onClose} className="sw-btn sw-btn-block mt-5">Got it</button>
-      </div>
-    </div>
+    </Modal>
   );
 }

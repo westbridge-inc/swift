@@ -12,7 +12,7 @@
   align-items: start;
 }
 
-@media (min-width: 47.5rem) {
+@media (min-width: 72rem) {
   .page {
     grid-template-columns: minmax(0, 1fr) 380px;
     grid-auto-flow: row dense;

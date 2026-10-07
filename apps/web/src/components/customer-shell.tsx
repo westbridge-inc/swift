@@ -1,6 +1,7 @@
 'use client';
 
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { createContext, useContext, useLayoutEffect, type ReactNode } from 'react';
+import { Modal } from '@/components/modal';
 import Link from 'next/link';
 import { Check, ChevronLeft, Menu, RefreshCw, X } from 'lucide-react';
 import { SwiftLogo } from '@/components/swift-logo';
@@ -96,10 +97,14 @@ export function useSwitchApp(): () => void {
 }
 export const ShellNavProvider = ShellNavContext.Provider;
 
-/** For a page that draws its own back button where its design puts it. */
-export function useOwnBackButton(): void {
+/**
+ * For a page that draws its own back button where its design puts it. Pass
+ * `false` while the page is in a state that does not draw it (loading, an
+ * error, empty): the shell's own Back row stays until the page's does.
+ */
+export function useOwnBackButton(drawn = true): void {
   const { claimBack } = useContext(ShellNavContext);
-  useLayoutEffect(() => claimBack(), [claimBack]);
+  useLayoutEffect(() => (drawn ? claimBack() : undefined), [claimBack, drawn]);
 }
 
 export function BackButton({ className = '' }: { className?: string }) {
@@ -269,23 +274,12 @@ export function TabBar({ activeTab, marketVisible, cartCount }: { activeTab: Cus
 
 // ── Dialogs ────────────────────────────────────────────────────────────────
 
-function useDialogFocus(onClose: () => void) {
-  const first = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => { first.current?.focus(); }, []);
-  const onKeyDown = (event: React.KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
-  return { first, onKeyDown };
-}
-
-function Sheet({ label, onClose, children }: { label: string; onClose: () => void; children: (_first: React.RefObject<HTMLButtonElement | null>) => ReactNode }) {
-  const { first, onKeyDown } = useDialogFocus(onClose);
+function Sheet({ label, onClose, children }: { label: string; onClose: () => void; children: ReactNode }) {
   return (
-    <div className="sw-scrim" onKeyDown={onKeyDown}>
-      <button type="button" aria-label="Close" tabIndex={-1} onClick={onClose} className="absolute inset-0 cursor-default" />
-      <div role="dialog" aria-modal="true" aria-label={label} className="sw-sheet relative bg-[var(--swift-card)] px-6 pb-6 pt-3">
-        <span aria-hidden className="mx-auto mb-4 block h-1 w-10 rounded-full bg-[var(--swift-border-strong)] wide:hidden" />
-        {children(first)}
-      </div>
-    </div>
+    <Modal label={label} onClose={onClose} className="bg-[var(--swift-card)] px-6 pb-6 pt-3">
+      <span aria-hidden className="mx-auto mb-4 block h-1 w-10 rounded-full bg-[var(--swift-border-strong)] wide:hidden" />
+      {children}
+    </Modal>
   );
 }
 
@@ -300,14 +294,13 @@ const SWITCH_ROLES: { key: string; label: string; sub: string; pictogram: Pictog
 export function SwitchAppSheet({ onClose }: { onClose: () => void }) {
   return (
     <Sheet label="Switch app" onClose={onClose}>
-      {(first) => (
-        <>
+      <>
           <div className="flex items-start gap-3">
             <div className="flex-1">
               <h2 className="sw-title">Switch app</h2>
               <p className="sw-caption mt-0.5">One account — choose how you’re using Swift right now.</p>
             </div>
-            <button ref={first} type="button" onClick={onClose} aria-label="Close" className="sw-icon-btn"><X size={20} aria-hidden /></button>
+            <button type="button" onClick={onClose} aria-label="Close" data-modal-initial-focus className="sw-icon-btn"><X size={20} aria-hidden /></button>
           </div>
           <ul className="mt-4">
             {SWITCH_ROLES.map((role) => {
@@ -337,8 +330,7 @@ export function SwitchAppSheet({ onClose }: { onClose: () => void }) {
               );
             })}
           </ul>
-        </>
-      )}
+      </>
     </Sheet>
   );
 }
@@ -347,11 +339,10 @@ export function SwitchAppSheet({ onClose }: { onClose: () => void }) {
 export function MoreMenu({ guest, returnPath, onClose }: { guest: boolean; returnPath: () => string; onClose: () => void }) {
   return (
     <Sheet label="More from Swift" onClose={onClose}>
-      {(first) => (
-        <>
+      <>
           <div className="flex items-center justify-between">
             <SwiftLogo />
-            <button ref={first} type="button" onClick={onClose} aria-label="Close" className="sw-icon-btn"><X size={20} aria-hidden /></button>
+            <button type="button" onClick={onClose} aria-label="Close" data-modal-initial-focus className="sw-icon-btn"><X size={20} aria-hidden /></button>
           </div>
           <ul className="mt-3">
             {MORE_LINKS.map((link) => (
@@ -364,8 +355,7 @@ export function MoreMenu({ guest, returnPath, onClose }: { guest: boolean; retur
               <Link href={signUpPath(returnPath())} onClick={onClose} className="sw-btn sw-btn-block sw-btn-outline">Create an account</Link>
             </div>
           ) : null}
-        </>
-      )}
+      </>
     </Sheet>
   );
 }

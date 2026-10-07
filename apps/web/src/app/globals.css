@@ -24,6 +24,11 @@
    from 760 px the side rail. `wide:` in markup, 47.5rem here. */
 @theme {
   --breakpoint-wide: 47.5rem;
+  /* Two-column pages (cart, tracking, send) split only from 72rem (1152 px):
+     beside the 280 px rail, 80 px of gutters, a 380 px side column and its
+     gap, that is the first width that leaves the main column real room
+     (>= 360 px). Between 760 and 1152 px they stay one column. */
+  --breakpoint-split: 72rem;
   --font-sans: 'Hanken Grotesk', system-ui, sans-serif;
   --font-display: 'Bricolage Grotesque', 'Hanken Grotesk', system-ui, sans-serif;
 }

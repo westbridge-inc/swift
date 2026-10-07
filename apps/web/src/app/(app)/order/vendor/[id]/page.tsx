@@ -14,6 +14,8 @@ import { BackButton, useOwnBackButton } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { Photo, ratingText } from '@/components/order-ui';
 import { accountApi } from '@/components/account/account-api';
+import { useAccountQuery } from '@/components/account/account-frame';
+import { Modal } from '@/components/modal';
 import { signInPath } from '@/lib/customer-routes';
 import { cartItemCount, customerCartKey, readShellCart } from '@/lib/shell-data';
 import { parseAmount } from '@/lib/money';
@@ -59,15 +61,19 @@ export default function VendorPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [section, setSection] = useState<string | null>(null);
   const queryClient = useQueryClient();
-  useOwnBackButton();
+  // Back sits over the store's photo once the store is drawn; while it loads
+  // or fails, the shell's own Back row stays.
+  useOwnBackButton(v !== null);
   // [WEB-REDESIGN] The cart bar shows the account's real cart — the count and
   // subtotal the server holds — not a tally of this visit's taps.
   const signedIn = session.status === 'signed-in';
   const cart = useQuery({ queryKey: customerCartKey(session.scope, session.epoch), queryFn: readShellCart, enabled: signedIn, staleTime: 30_000, retry: false });
   const cartCount = signedIn ? cartItemCount(cart.data) : 0;
   const cartSubtotal = parseAmount(cart.data?.subtotalCustomer);
-  // The heart is the account's favourites list (the same one Account shows).
-  const favourites = useQuery({ queryKey: ['customer', 'favourites', session.scope, session.epoch], queryFn: accountApi.favourites, enabled: signedIn, staleTime: 60_000, retry: false });
+  // The heart is the account's favourites list — the SAME query Account's
+  // Favourites page reads and refreshes (one key, never cached as fresh), so a
+  // change made there is the state shown here.
+  const favourites = useAccountQuery('favourites', accountApi.favourites);
   const saved = Boolean(favourites.data?.some((f) => f.id === id));
   const [savingFav, setSavingFav] = useState(false);
   // Service booking (fulfillment=APPOINTMENT)
@@ -150,11 +156,20 @@ export default function VendorPage() {
   async function toggleFavourite() {
     if (!v || savingFav) return;
     if (!(await session.ensureSignedIn())) { router.push(signInPath(`/order/vendor/${encodeURIComponent(id)}`)); return; }
+    // What the person asked for is the opposite of the heart they see. The
+    // write is chosen from the server's list read NOW, never from a cached one:
+    // a stale "saved" would send a removal for a store they meant to save.
+    const wantSaved = !saved;
     setSavingFav(true);
     try {
-      await accountApi.favourite(v.id, saved);
-      await queryClient.invalidateQueries({ queryKey: ['customer', 'favourites'] });
-      flash(saved ? 'Removed from favourites' : 'Saved to favourites');
+      const fresh = await favourites.refetch();
+      if (fresh.isError || !fresh.data) throw new Error('Could not check your favourites. Try again.');
+      const isSaved = fresh.data.some((f) => f.id === v.id);
+      if (isSaved !== wantSaved) {
+        await accountApi.favourite(v.id, isSaved);
+        await queryClient.invalidateQueries({ queryKey: ['account'] });
+      }
+      flash(wantSaved ? 'Saved to favourites' : 'Removed from favourites');
     } catch (e: any) { flash(e.message || 'Could not update your favourites'); }
     finally { setSavingFav(false); }
   }
@@ -192,7 +207,7 @@ export default function VendorPage() {
         <div className="absolute inset-x-0 top-3 flex items-center gap-3 px-6 wide:px-10">
           <BackButton />
           <div className="flex-1" />
-          <button type="button" onClick={() => void toggleFavourite()} disabled={savingFav} aria-pressed={saved} aria-label={saved ? 'Remove from favourites' : 'Save to favourites'} className="sw-icon-btn border-0 shadow-[var(--swift-elevation-card)]">
+          <button type="button" onClick={() => void toggleFavourite()} disabled={savingFav || (signedIn && favourites.isFetching)} aria-pressed={saved} aria-label={saved ? 'Remove from favourites' : 'Save to favourites'} className="sw-icon-btn border-0 shadow-[var(--swift-elevation-card)]">
             <Heart size={20} className={saved ? 'fill-[var(--swift-red)] text-[var(--swift-red)]' : 'text-[var(--swift-muted-soft)]'} aria-hidden />
           </button>
           <button type="button" onClick={() => void shareStore()} aria-label="Share" className="sw-icon-btn"><Share2 size={20} aria-hidden /></button>
@@ -306,12 +321,10 @@ export default function VendorPage() {
       ) : null}
 
       {modal && (
-        <div className="sw-scrim" onKeyDown={(event) => { if (event.key === 'Escape') setModal(null); }}>
-          <button type="button" aria-label="Close" tabIndex={-1} onClick={() => setModal(null)} className="absolute inset-0 cursor-default" />
-          <div role="dialog" aria-modal="true" aria-label={modal.name} className="sw-sheet relative">
+        <Modal label={modal.name} onClose={() => setModal(null)}>
             <div className="relative">
               <Photo src={modal.imageUrl} vendorType={v.vendorType} name={modal.name} sizes="480px" className="aspect-[4/3] max-h-[300px] w-full rounded-none" iconSize={40} />
-              <button type="button" onClick={() => setModal(null)} aria-label="Close" autoFocus className="sw-icon-btn absolute right-3 top-3"><X size={20} aria-hidden /></button>
+              <button type="button" onClick={() => setModal(null)} aria-label="Close" data-modal-initial-focus className="sw-icon-btn absolute right-3 top-3"><X size={20} aria-hidden /></button>
             </div>
             <div className="flex flex-col gap-4 px-6 pb-6 pt-5">
               <div>
@@ -343,20 +356,17 @@ export default function VendorPage() {
                 </button>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {book && (
-        <div className="sw-scrim" onKeyDown={(event) => { if (event.key === 'Escape') setBook(null); }}>
-          <button type="button" aria-label="Close" tabIndex={-1} onClick={() => setBook(null)} className="absolute inset-0 cursor-default" />
-          <div role="dialog" aria-modal="true" aria-label={`Book ${book.name}`} className="sw-sheet relative px-6 pb-6 pt-5">
+        <Modal label={`Book ${book.name}`} onClose={() => setBook(null)} className="px-6 pb-6 pt-5">
             <div className="flex items-start gap-3">
               <div className="flex-1">
                 <h3 className="sw-title">Book {book.name}</h3>
                 <p className="sw-money-lg mt-1">{money(book.customerPrice ?? book.basePrice)}</p>
               </div>
-              <button type="button" onClick={() => setBook(null)} aria-label="Close" autoFocus className="sw-icon-btn"><X size={20} aria-hidden /></button>
+              <button type="button" onClick={() => setBook(null)} aria-label="Close" data-modal-initial-focus className="sw-icon-btn"><X size={20} aria-hidden /></button>
             </div>
             <p className="sw-heading mt-5">Pick a day</p>
             <div className="sw-chip-row mt-2 pb-1">
@@ -371,8 +381,7 @@ export default function VendorPage() {
                   {slots.map((slotStart) => <button key={slotStart} type="button" aria-pressed={slot === slotStart} onClick={() => setSlot(slotStart)} className="sw-chip w-full">{formatAppointmentClock(slotStart)}</button>)}
                 </div>}
             <button type="button" onClick={confirmBook} disabled={busy || !slot} className="sw-btn sw-btn-block mt-6">{busy ? 'Booking…' : !slot ? 'Choose a time' : session.status === 'guest' ? 'Sign in to book' : 'Add booking to cart'}</button>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {toast && <div role="status" className="sw-toast">{toast}</div>}
