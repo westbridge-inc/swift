@@ -2,6 +2,7 @@ import { runtimeMode } from './runtime-mode';
 import { malformedAllowlistPositions } from '../providers/notifications/sms-recipient-allowlist';
 import { firstInvalidTwilioConfig } from './twilio-identity';
 import { assertDisabledCardRailConfig } from './card-rail';
+import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
@@ -149,10 +150,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   assertDisabledCardRailConfig(env);
   // [PT-1 · C10] Card rail v2. The card simulator is a test page with no real
   // money: production refuses to start while it is even named — whatever the
-  // flag says. And this build has no production-capable v2 provider (the
-  // first real one is written from its provider's own documentation), so
-  // production refuses to switch the rail on rather than fail at a partner's
-  // first tap. The flag is 1 or 0 (or unset = 0), never a guess.
+  // flag says. The flag is 1 or 0 (or unset = 0), never a guess.
   if (env['CARD_RAIL_PROVIDER'] === 'simulator') {
     throw new Error('FATAL: CARD_RAIL_PROVIDER=simulator in production — the card simulator is a test page with no real money. Refusing to start.');
   }
@@ -160,18 +158,27 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (cardRailV2 !== undefined && cardRailV2 !== '' && cardRailV2 !== '0' && cardRailV2 !== '1') {
     throw new Error('FATAL: CARD_RAIL_V2 must be 1 or 0 in production. Refusing to start.');
   }
-  if (cardRailV2 === '1') {
-    throw new Error('FATAL: CARD_RAIL_V2=1 in production, but this build has no production card rail v2 provider (only the simulator, which production refuses). Refusing to start.');
-  }
   // [AX297 F5] Draining v2 after it was switched off is its own switch, held
-  // to the same rules: 1 or 0, and never 1 while production has no v2 provider
-  // (v2 has never run there, so there is nothing to drain).
+  // to the same rules.
   const cardRailV2Drain = env['CARD_RAIL_V2_DRAIN'];
   if (cardRailV2Drain !== undefined && cardRailV2Drain !== '' && cardRailV2Drain !== '0' && cardRailV2Drain !== '1') {
     throw new Error('FATAL: CARD_RAIL_V2_DRAIN must be 1 or 0 in production. Refusing to start.');
   }
-  if (cardRailV2Drain === '1') {
-    throw new Error('FATAL: CARD_RAIL_V2_DRAIN=1 in production, but this build has no production card rail v2 provider, so there is nothing to drain. Refusing to start.');
+  // [PT-4] Production runs card rail v2 (or drains it) only on the real
+  // provider, fully set up for LIVE cards: a non-test HTTPS API root (the
+  // guide gives production its own address), its credentials from the
+  // secrets store, the hosted payment page, and Swift's HTTPS public origin.
+  // Anything less refuses to start rather than fail at a partner's first tap.
+  if (cardRailV2 === '1' || cardRailV2Drain === '1') {
+    const which = cardRailV2 === '1' ? 'CARD_RAIL_V2=1' : 'CARD_RAIL_V2_DRAIN=1';
+    if (env['CARD_RAIL_PROVIDER'] !== 'powertranz') {
+      throw new Error(`FATAL: ${which} in production needs CARD_RAIL_PROVIDER=powertranz (the only real card provider). Refusing to start.`);
+    }
+    try {
+      powerTranzConfigFromEnv(env);
+    } catch (err) {
+      throw new Error(`FATAL: ${which} in production, but the card provider is not fully set up for live cards: ${(err as Error).message}. Refusing to start.`);
+    }
   }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');

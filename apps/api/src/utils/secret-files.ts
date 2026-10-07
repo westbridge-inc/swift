@@ -57,6 +57,11 @@ export const SECRET_FILE_NAMES = [
   'PAYMENT_GATEWAY_KEY',
   'PAYMENT_GATEWAY_SECRET',
   'STRIPE_SECRET_KEY',
+  // [PT-4] The real card provider's credentials (its guide, sec. 4): the
+  // merchant id and password, and the gateway key once the provider issues one.
+  'POWERTRANZ_ID',
+  'POWERTRANZ_PASSWORD',
+  'POWERTRANZ_GATEWAY_KEY',
   // Object storage (documents, and the backup bucket).
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY',

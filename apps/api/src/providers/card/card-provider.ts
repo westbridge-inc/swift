@@ -199,6 +199,14 @@ export interface CardRailProvider {
   /** Read what the browser brought back. Pure: no network, no write, no money. */
   parseReturn(params: Readonly<Record<string, string>>): CardReturnObservation;
 
+  /** [PT-4] Optional. Called by the service for a session's FIRST VALID return
+   *  only (state, binding, window already checked), after its observation is
+   *  recorded. A provider whose server-side completion depends on what the
+   *  browser brought back (a 3-D Secure result) keeps its own decision here.
+   *  It never moves money and never makes `confirm` succeed by itself: it can
+   *  only make the provider decline to complete. */
+  noteReturn?(input: { binding: CardRailBinding; providerSessionRef: string; params: Readonly<Record<string, string>> }): Promise<void>;
+
   /** The provider's server-side answer about a hosted session. */
   confirm(input: { binding: CardRailBinding; providerSessionRef: string; purpose: CardSessionPurpose }): Promise<CardSessionOutcome>;
 
@@ -222,6 +230,10 @@ export interface CardRailProvider {
     currencyCode: string;
     idempotencyKey: string;
   }): Promise<CardRefundOutcome>;
+
+  /** [PT-4] Optional: cancel an approved payment before it settles, the whole
+   *  amount only. Same four outcomes and the same one-call-per-key rule as refund. */
+  voidPayment?(input: { binding: CardRailBinding; providerRef: string; idempotencyKey: string }): Promise<CardRefundOutcome>;
 }
 
 /** Where a v2 provider comes from, resolved lazily: only v2 work ever asks. */

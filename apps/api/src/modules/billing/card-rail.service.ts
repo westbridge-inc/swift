@@ -70,7 +70,7 @@ export interface CardSessionDto {
   /** PAY_NOW only: what the server priced, in the subscription's currency. */
   amount?: number;
   currencyCode?: string;
-  /** [C10] True on the simulator: a test page, no real card, no real money. */
+  /** [C10] True on the simulator and on a provider's sandbox: a test, no real money. */
   testMode: boolean;
   testModeLabel?: string;
 }
@@ -96,8 +96,19 @@ function stateMatches(state: string, stateHash: string): boolean {
   return got.length === want.length && timingSafeEqual(got, want);
 }
 
+/** [PT-4] A real provider's TEST system: test cards only, no real money. Labelled like the simulator. */
+export const CARD_SANDBOX_TEST_LABEL = 'TEST — the bank\'s test system. Use a test card; no real money moves.';
+
+/** [C10 · PT-4] What a session says about itself: a simulator page or a sandbox is a test, and says so. */
+export function cardTestLabel(s: Pick<CardSession, 'provider' | 'environment'>): string | undefined {
+  if (s.provider === SIMULATOR_PROVIDER) return SIMULATOR_PAGE.testModeLabel;
+  if (s.environment === 'sandbox') return CARD_SANDBOX_TEST_LABEL;
+  return undefined;
+}
+
 function sessionDto(s: CardSession): CardSessionDto {
-  const testMode = s.provider === SIMULATOR_PROVIDER;
+  const testModeLabel = cardTestLabel(s);
+  const testMode = testModeLabel !== undefined;
   return {
     sessionId: s.id,
     purpose: s.purpose,
@@ -106,7 +117,7 @@ function sessionDto(s: CardSession): CardSessionDto {
     expiresAt: s.expiresAt.toISOString(),
     ...(s.purpose === 'PAY_NOW' ? { amount: Number(s.amount), currencyCode: s.currencyCode ?? undefined } : {}),
     testMode,
-    ...(testMode ? { testModeLabel: SIMULATOR_PAGE.testModeLabel } : {}),
+    ...(testModeLabel ? { testModeLabel } : {}),
   };
 }
 
@@ -264,11 +275,19 @@ export class CardRailService {
       created = { status: 'unknown', reason: 'provider call failed', rawSha256: rawDigest({ failed: session.id }) };
     }
     if (created.status !== 'succeeded') {
-      // An ambiguous create response is not proof that the provider created nothing.
-      await this.prisma.cardSession.updateMany({
-        where: { id: session.id, status: 'OPEN' },
-        data: { status: input.purpose === 'PAY_NOW' ? 'UNKNOWN' : 'CANCELLED', failureCode: 'PROVIDER_PAGE_UNAVAILABLE', confirmedAt: now },
-      });
+      if (created.status === 'failed' || input.purpose === 'ENROLL') {
+        // [PT-4] The provider answers definitively that it made no page (or this
+        // is an enrolment, which moves no money): nothing can ever be paid on
+        // it. It closes, and a Pay now's confirmation is resolved as having had
+        // no effect, so the fee's other ways to pay reopen at once.
+        await this.cancelUnopened(session, created.rawSha256, now);
+      } else {
+        // An ambiguous create response is not proof that the provider created nothing.
+        await this.prisma.cardSession.updateMany({
+          where: { id: session.id, status: 'OPEN' },
+          data: { status: 'UNKNOWN', failureCode: 'PROVIDER_PAGE_UNAVAILABLE', confirmedAt: now },
+        });
+      }
       throw new AppError(502, 'CARD_SESSION_UNAVAILABLE', 'The card page could not be opened. Please try again in a moment.');
     }
     const opened = await this.prisma.cardSession.update({
@@ -276,6 +295,20 @@ export class CardRailService {
       data: { providerSessionRef: created.providerSessionRef, hostedUrl: created.hostedUrl },
     });
     return this.handoffSession(opened, input.userId);
+  }
+
+  /** [PT-4] A session whose page was never made: CANCELLED, and — for a Pay
+   *  now — its confirmation resolved PROVEN_NO_EFFECT under the same locks
+   *  every other resolution takes. */
+  private async cancelUnopened(session: CardSession, evidence: string, now: Date): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const fresh = await this.lockSession(tx, session.id);
+      if (!fresh || fresh.status !== 'OPEN') return;
+      await tx.cardSession.update({ where: { id: fresh.id }, data: { status: 'CANCELLED', failureCode: 'PROVIDER_PAGE_UNAVAILABLE', confirmedAt: now } });
+      if (fresh.purpose === 'PAY_NOW') {
+        await resolveConfirmationInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'PROVEN_NO_EFFECT', { actor: 'card-provider', reference: evidence }, now);
+      }
+    });
   }
 
   private async replayOf(userId: string, subscriptionId: string, purpose: CardSessionPurpose, idempotencyKey: string): Promise<CardSessionDto | null> {
@@ -371,6 +404,11 @@ export class CardRailService {
       }
       await recordCardObservation(tx, this.observation(session, 'RETURN', observed.rawSha256, observedStatus(observed.claimedStatus), verdict));
     });
+    // [PT-4] The first valid return only: a provider that completes on the
+    // browser's 3-D Secure result keeps its own decision (never money).
+    if (verdict === 'ACCEPTED' && session.providerSessionRef && provider.noteReturn) {
+      await provider.noteReturn({ binding: provider.binding, providerSessionRef: session.providerSessionRef, params: providerParams });
+    }
     return { accepted: verdict === 'ACCEPTED', verdict, sessionId: session.id, purpose: session.purpose };
   }
 

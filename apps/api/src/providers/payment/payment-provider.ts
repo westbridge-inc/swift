@@ -1,6 +1,5 @@
 import { toProviderMinor } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
-import { randomUUID } from 'node:crypto';
 import { isProduction } from '../../utils/runtime-mode';
 import { assertDisabledCardRailConfig } from '../../utils/card-rail';
 import { AppError } from '../../utils/errors';
@@ -170,17 +169,21 @@ function stripeRefundErrorReason(data: Record<string, unknown>): string | undefi
 }
 
 /**
- * PowerTranz/FAC adapter. Only `chargeToken` is on the billing hot path
- * (recurring weekly fees on a stored card token), so — exactly like the
- * sandbox — it NEVER throws: transport errors, timeouts, non-OK responses and
- * declines all resolve to a ChargeResult, leaving the billing retry/suspend
- * logic in control. Outcomes that may have taken effect at the gateway are
- * `unknown`, never declines: billing must reconcile them before another
- * instruction is issued.
- *
- * Card capture/tokenization is done through PowerTranz's hosted SPI/3-DS flow
- * (PCI) — raw PAN never touches our servers — so tokenizeCard is unsupported
- * here; the client stores the resulting token on the subscription.
+ * PowerTranz on the LEGACY seam, corrected to PowerTranz's own "Ecommerce API
+ * Guide v2.7" [PT-4]. Card payments run on card rail v2
+ * (providers/card/powertranz-provider.ts); this adapter keeps the legacy
+ * interface honest:
+ *   - chargeToken NEVER calls the gateway. The guide documents no charge on a
+ *     stored card without the cardholder: a token charge still runs 3-D Secure
+ *     in the cardholder's browser (sec. 7.8). The earlier "Sale with
+ *     ThreeDSecure false and Source = token" was never in the guide. It is a
+ *     LOCAL refusal (CARD_RAIL_DISABLED), so billing never duns on it;
+ *   - refund follows sec. 5.2 / 7.5: POST <root>/api/refund with Refund true,
+ *     the ORIGINAL TransactionIdentifier, TotalAmount and CurrencyCode;
+ *   - like the sandbox it never throws: transport errors, timeouts and non-OK
+ *     answers resolve to a ChargeResult, and anything that may have taken
+ *     effect is `unknown`, never a decline.
+ * Raw card data never touches Swift: tokenizeCard is unsupported.
  */
 export class PowerTranzPaymentProvider implements PaymentProvider {
   constructor(
@@ -201,35 +204,33 @@ export class PowerTranzPaymentProvider implements PaymentProvider {
     );
   }
 
-  async chargeToken(input: {
+  async chargeToken(_input: {
     token: string;
     amount: number;
     currencyCode: string;
     idempotencyKey: string;
     description?: string;
   }): Promise<ChargeResult> {
+    // Never sent: the guide documents no stored-card charge without the cardholder (sec. 7.8).
+    return {
+      status: 'failed',
+      providerRef: '',
+      code: 'CARD_RAIL_DISABLED',
+      reason: 'A saved-card charge without the cardholder is not offered; cards are paid on the hosted card page',
+    };
+  }
+
+  async refund(input: { providerRef: string; amount: number; currencyCode: string; idempotencyKey: string }): Promise<ChargeResult> {
     const currency = CURRENCY_NUMERIC[input.currencyCode.toUpperCase()];
     if (!currency) {
       return { status: 'failed', providerRef: '', reason: `Unsupported currency ${input.currencyCode}` };
     }
-
-    // Merchant-initiated sale against a stored token; no 3-DS on recurring.
-    return this.post('/api/spi/Sale', {
-      TransactionIdentifier: randomUUID(),
+    // sec. 5.2 / 7.5: the original transaction, the amount, Refund true.
+    return this.post('/api/refund', {
+      Refund: true,
+      TransactionIdentifier: input.providerRef,
       TotalAmount: Number(input.amount.toFixed(2)),
       CurrencyCode: currency,
-      ThreeDSecure: false,
-      Source: input.token,
-      OrderIdentifier: input.idempotencyKey,
-    });
-  }
-
-  async refund(input: { providerRef: string; amount: number; currencyCode: string; idempotencyKey: string }): Promise<ChargeResult> {
-    return this.post('/api/spi/Refund', {
-      TransactionIdentifier: randomUUID(),
-      OriginalTransactionIdentifier: input.providerRef,
-      TotalAmount: Number(input.amount.toFixed(2)),
-      OrderIdentifier: input.idempotencyKey,
     });
   }
 
