@@ -77,9 +77,10 @@ function vendorVerdict(c: VendorActivationChecklist, name: string): { tone: Tone
     case 'CAN_ACTIVATE':
       return { tone: 'info', text: 'Every required document is approved, but the store is not live yet. You can activate it now.' };
     case 'CAN_REINSTATE':
-      return c.suspensionSource === 'BILLING'
-        ? { tone: 'warn', text: 'Suspended for an unpaid weekly fee. It comes back by itself when the fee is paid through MMG checkout.' }
-        : { tone: 'info', text: 'Suspended. Its documents are approved and current, so it can be reinstated.' };
+      return { tone: 'info', text: 'Suspended. Its documents are approved and current, so it can be reinstated.' };
+    case 'FEE_UNPAID':
+      // [MC-AD2] Billing lifts a fee hold when a payment is confirmed; the console never does.
+      return { tone: 'warn', text: 'Suspended, and its weekly fee is unpaid or its billing is stopped. It comes back by itself when the fee is paid through MMG checkout.' };
     case 'ACCOUNT_CLOSED':
       return { tone: 'bad', text: 'The owner closed their Swift account. The store stays closed and cannot be reopened from the console.' };
     case 'CLOSED':
@@ -151,7 +152,8 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     body: (
       <p>
         Every required document is approved. Swift runs the same activation it runs when the last document is approved:
-        the store goes live and its free trial starts.
+        the store goes live and its free trial starts. Only this store is activated; the owner&apos;s other stores are not
+        changed.
       </p>
     ),
     confirmLabel: 'Activate store',
@@ -180,8 +182,8 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     title: `Suspend ${v.name}?`,
     body: (
       <p>
-        It stops taking orders immediately and leaves search. The owner is sent your reason. The console cannot undo a
-        suspension yet.
+        It stops taking orders immediately and leaves search. The owner is sent your reason. You can reinstate it from
+        this page later, once its required documents are approved and current.
       </p>
     ),
     confirmLabel: 'Suspend store',
@@ -241,7 +243,7 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
           {c?.next === 'CAN_ACTIVATE' ? (
             <button type="button" className="mc-btn mc-btn-primary" onClick={activate}>Activate now…</button>
           ) : null}
-          {c?.next === 'CAN_REINSTATE' && c.suspensionSource !== 'BILLING' ? (
+          {c?.next === 'CAN_REINSTATE' ? (
             <button type="button" className="mc-btn mc-btn-primary" onClick={reinstate}>Reinstate…</button>
           ) : null}
         </div>

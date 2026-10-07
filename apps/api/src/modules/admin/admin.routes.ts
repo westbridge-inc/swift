@@ -65,7 +65,7 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
-import { vendorActivationNext, disclosureMissingWords } from './vendor-activation';
+import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 
@@ -1367,12 +1367,13 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
-      select: { id: true, status: true, suspensionSource: true, isVerified: true, activationValidUntil: true, owner: { select: { userId: true, user: { select: { status: true } } } } },
+      select: { id: true, status: true, suspensionSource: true, isVerified: true, activationValidUntil: true, owner: { select: { userId: true, user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     const goLive = await verification.vendorGoLive(id);
     if (!goLive) throw new NotFoundError('Vendor', id);
-    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status }, goLive);
+    const subscription = vendor.subscription ?? null;
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription }, goLive);
     return {
       success: true,
       data: {
@@ -1381,6 +1382,8 @@ export async function adminRoutes(app: FastifyInstance) {
         storeStatus: vendor.status,
         suspensionSource: vendor.suspensionSource,
         ownerAccountStatus: vendor.owner.user.status,
+        subscriptionStatus: subscription?.status ?? null,
+        feeOperable: feeOperable(subscription),
         isVerified: vendor.isVerified,
         activationValidUntil: vendor.activationValidUntil,
         role: goLive.role,
@@ -1407,6 +1410,13 @@ export async function adminRoutes(app: FastifyInstance) {
    *  - suspended with every rule met → reinstated by CAS, carrying the same
    *    expiry the projection would write [Fable #1481 S4-2: the suspension
    *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - suspended while its subscription cannot operate (the vendor gate's
+   *    rule: fee unpaid or billing stopped) → refused 409 FEE_UNPAID [MC-AD2]:
+   *    only a confirmed payment (or billing's own heal) lifts a fee hold, and
+   *    the owner is pushed nothing;
+   *  - the reinstate decides again inside its transaction, under the owner's
+   *    account lock and the store row lock [Opus S3-1], so a deletion or a
+   *    document decision racing it cannot be undone by it;
    *  - otherwise refused with what is missing, and nothing changes.
    */
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -1414,56 +1424,53 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
-      include: { owner: { include: { user: { select: { status: true } } } } },
+      include: { owner: { include: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
 
     const goLive = await verification.vendorGoLive(id);
     if (!goLive) throw new NotFoundError('Vendor', id);
-    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status }, goLive);
-    switch (next) {
-      case 'CLOSED':
-        throw new AppError(409, 'STORE_CLOSED', `${vendor.name} is closed. A closed store is not reopened from the console.`);
-      case 'ACCOUNT_CLOSED':
-        throw new AppError(409, 'ACCOUNT_CLOSED', `${vendor.name}'s owner has closed their Swift account, so the store stays closed. It cannot be reopened from the console.`);
-      case 'NEEDS_DOCUMENTS':
-        throw new AppError(
-          409,
-          'CHECKLIST_INCOMPLETE',
-          `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
-        );
-      case 'NEEDS_DISCLOSURE':
-        throw new AppError(
-          409,
-          'DISCLOSURE_INCOMPLETE',
-          `${vendor.name}'s documents are complete, but its storefront supplier information is not: missing ${disclosureMissingWords(goLive.disclosure.missing)}. It goes live by itself once that is complete.`,
-          { missing: goLive.disclosure.missing },
-        );
-      default:
-        break;
-    }
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status, subscription: vendor.subscription ?? null }, goLive);
+    const refused = vendorActivationRefusal(next, vendor.name, goLive);
+    if (refused) throw refused;
 
     let updated;
     if (next === 'CAN_ACTIVATE') {
       // The one authority that makes a store live, on every path (review,
-      // auto-approval, the reconcile belt — and now this button). It prices the
-      // store and starts its trial in the same transaction, or refuses with the
-      // config error and leaves it pending.
-      await verification.activateOwnerStores(goLive.ownerUserId);
+      // auto-approval, the reconcile belt — and now this button), run for this
+      // store only [DS816 S3]. It prices the store and starts its trial in the
+      // same transaction, or refuses with the config error and leaves it pending.
+      await verification.activateStore(goLive.ownerUserId, id);
       updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
       if (updated.status !== 'ACTIVE') {
-        throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: its documents or details changed while approving. Refresh and check its checklist.`);
+        throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
     } else {
       // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
       // market that cannot price this store refuses here and it stays suspended.
       updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
+        // [MC-PR2 · Opus S3-1] Decide again under the locks the competing writers take, so nothing that
+        // commits after the first read can be reopened: the owner's account row (account deletion and the
+        // partner wind-down take it; so do document decisions, revocations and expiry), then the store row.
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR UPDATE /* admin-reinstate-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-reinstate-store */`;
+        const fresh = await tx.vendor.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, suspensionSource: true, owner: { select: { user: { select: { status: true } } } }, subscription: { select: OPERABILITY_SELECT } },
+        });
+        const freshGoLive = await verification.vendorGoLive(id, tx);
+        if (!freshGoLive) throw new NotFoundError('Vendor', id);
+        const again = vendorActivationNext({ status: fresh.status, suspensionSource: fresh.suspensionSource, ownerAccountStatus: fresh.owner.user.status, subscription: fresh.subscription ?? null }, freshGoLive);
+        const refusedNow = again === 'CAN_REINSTATE' ? null
+          : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
+        if (refusedNow) throw refusedNow;
         const activationValidUntil = await verification.checklistEvidenceValidUntil(goLive.ownerUserId, goLive.role, tx);
         // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
-        // suspension source survives it for a later heal or payment to act on.
+        // suspension source survives it for a later heal or payment to act on. The CAS names the exact
+        // suspension decided above, under the lock.
         const won = await tx.vendor.updateMany({
-          where: { id, status: 'SUSPENDED' },
+          where: { id, status: 'SUSPENDED', suspensionSource: fresh.suspensionSource },
           data: { status: 'ACTIVE', isVerified: true, suspensionSource: null, activationValidUntil },
         });
         if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
@@ -1474,7 +1481,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
 
-    await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
+    await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status, previousSuspensionSource: vendor.suspensionSource, verdict: next }, request);
 
     await notifications.send({
       userId: vendor.owner.userId,

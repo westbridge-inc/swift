@@ -300,7 +300,7 @@ export interface ActivationChecklistItem {
   /** Approved, and a newer submission of the same type is waiting for review. */
   renewalPending: boolean;
 }
-export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'ACCOUNT_CLOSED' | 'CLOSED';
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'CLOSED';
 export interface VendorActivationChecklist {
   vendorId: string;
   /** The owner's user id: the Review Center's applicant. */
@@ -308,6 +308,10 @@ export interface VendorActivationChecklist {
   storeStatus: string;
   suspensionSource: string | null;
   ownerAccountStatus: string | null;
+  /** The store's weekly-fee subscription state (null before it has one). */
+  subscriptionStatus?: string | null;
+  /** May the store's subscription operate now (the vendor gate's rule)? A suspended store whose fee cannot operate reads FEE_UNPAID. */
+  feeOperable?: boolean;
   isVerified: boolean;
   activationValidUntil: string | null;
   role: string;
