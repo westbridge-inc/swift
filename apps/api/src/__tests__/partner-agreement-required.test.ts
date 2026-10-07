@@ -15,6 +15,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { partnerRoutes, AGREEMENT_REQUIRED } from '../modules/partner/partner.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 
 const NUM = String(Date.now()).slice(-5);
@@ -29,10 +30,17 @@ async function customer(n: number) {
   await app.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(24), deviceId: `agr-${NUM}-${n}`, deviceType: 'test', expiresAt: new Date(Date.now() + 3_600_000) } as never });
   return { id: u.id, token };
 }
-const become = (token: string, payload: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/partner/become', payload, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+const become = (token: string, payload: Record<string, unknown>, extra: Record<string, string> = {}) => app.inject({ method: 'POST', url: '/api/v1/partner/become', payload, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...extra } });
+/** The web app's request: the HttpOnly session cookie, the browser client header and an allowed origin — no Bearer. */
+const WEB_ORIGIN = 'http://localhost:3001';
+const savedCorsOrigin = process.env['CORS_ORIGIN'];
+const becomeFromWeb = (token: string, payload: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/partner/become', payload, headers: { 'content-type': 'application/json', 'x-swift-client': 'web', origin: WEB_ORIGIN, cookie: `${ACCESS_COOKIE}=${token}` } });
+const surfaceOf = (userId: string, documentType: 'driver_agreement' | 'vendor_agreement') => system(async () => (await app.prisma.consentRecord.findFirstOrThrow({ where: { subjectId: userId, documentType, action: 'granted' }, select: { surface: true } })).surface);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
+  process.env['CORS_ORIGIN'] = WEB_ORIGIN;
+  resetBrowserOriginsForTests();
   app = Fastify({ logger: false }); registerErrorHandler(app);
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(authPlugin); await app.register(socketPlugin);
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
@@ -46,6 +54,8 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   });
   await app.close();
+  if (savedCorsOrigin === undefined) delete process.env['CORS_ORIGIN']; else process.env['CORS_ORIGIN'] = savedCorsOrigin;
+  resetBrowserOriginsForTests();
 });
 
 describe('[TA-S1-008] the agreement is a precondition of the authority', () => {
@@ -68,5 +78,20 @@ describe('[TA-S1-008] the agreement is a precondition of the authority', () => {
     expect([200, 201]).toContain(res.statusCode);
     expect(await system(() => app.prisma.rider.count({ where: { userId: c.id } }))).toBe(1);
     expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: c.id, documentType: 'driver_agreement', action: 'granted' } }))).toBe(1);
+  });
+
+  it('the consent row names the surface it was given on: the web for the web app, the platform a native app names, mobile otherwise', async () => {
+    const web = await customer(3);
+    const res = await becomeFromWeb(web.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true });
+    expect([200, 201], res.body).toContain(res.statusCode);
+    expect(await surfaceOf(web.id, 'driver_agreement')).toBe('web');
+
+    const android = await customer(4);
+    expect([200, 201]).toContain((await become(android.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true }, { 'x-client-platform': 'android' })).statusCode);
+    expect(await surfaceOf(android.id, 'driver_agreement')).toBe('android');
+
+    const unnamed = await customer(5);
+    expect([200, 201]).toContain((await become(unnamed.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true })).statusCode);
+    expect(await surfaceOf(unnamed.id, 'driver_agreement')).toBe('mobile');
   });
 });

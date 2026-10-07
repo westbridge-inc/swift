@@ -1,7 +1,7 @@
 import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { slotBlocked, slotFitsConfig, type ExceptionWindow } from './availability';
+import { slotBlocked, slotFitsConfig, type ExceptionWindow, canonicalSlotStart } from './availability';
 import { guyanaWallClockParts } from '../../utils/guyana-day';
 
 /** Shape stored in Item.bookingConfig for SERVICE listings. */
@@ -38,6 +38,11 @@ export function isTransactionConflict(error: unknown): boolean {
 // exactly one winner, no matter how the requests interleave.
 // ---------------------------------------------------------------------------
 
+/** Parent order states in which an appointment can still be moved. */
+const LIVE_APPOINTMENT_ORDER_STATUSES: ReadonlySet<string> = new Set(['PENDING', 'ACCEPTED']);
+/** Parent order states that mean the appointment happened. */
+const FINISHED_APPOINTMENT_ORDER_STATUSES: ReadonlySet<string> = new Set(['COMPLETED', 'DELIVERED']);
+
 export class BookingService {
   /** io is optional and never load-bearing (spec 2.6): mutations nudge the
    *  vendor room so calendars/pickers refetch instantly; the 20s poll stays
@@ -55,7 +60,8 @@ export class BookingService {
    *  ONE availability computation: window/stride/lead-time via availability.ts
    *  and the SAME exception subtraction the picker applies — a stale picker
    *  can never book into a blocked window. */
-  async validateSlot(itemId: string, slotStart: Date): Promise<BookingConfig> {
+  async validateSlot(itemId: string, requestedSlotStart: Date): Promise<BookingConfig> {
+    const slotStart = canonicalSlotStart(requestedSlotStart);
     const item = await this.prisma.item.findUnique({
       where: { id: itemId },
       select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
@@ -117,6 +123,7 @@ export class BookingService {
     orderId?: string,
     db?: Prisma.TransactionClient,
   ) {
+    slotStart = canonicalSlotStart(slotStart);
     const config = await this.validateSlot(itemId, slotStart);
     const slotEnd = new Date(slotStart.getTime() + config.durationMinutes * 60_000);
 
@@ -146,7 +153,8 @@ export class BookingService {
    *  subtraction the picker makes — instead of a request the provider can
    *  never confirm waiting up to a day for its auto-decline. Two open requests
    *  for a FREE slot still both wait for the provider; acceptance decides. */
-  async assertSlotFree(itemId: string, slotStart: Date): Promise<void> {
+  async assertSlotFree(itemId: string, requestedSlotStart: Date): Promise<void> {
+    const slotStart = canonicalSlotStart(requestedSlotStart);
     const held = await this.prisma.booking.findFirst({
       where: { itemId, slotStart, status: { not: 'CANCELLED' } },
       select: { id: true },
@@ -181,6 +189,7 @@ export class BookingService {
     newSlotStart: Date,
     actor: { customerId?: string; vendorId?: string },
   ) {
+    newSlotStart = canonicalSlotStart(newSlotStart);
     const booking = await this.prisma.booking.findUnique({
       where: { id: bookingId },
       include: { item: { select: { id: true, vendorId: true, name: true } } },
@@ -206,7 +215,20 @@ export class BookingService {
         // cancellation of the same order, so it waits on the order row BEFORE
         // it touches a booking; the guarded write below then sees whatever
         // that cancellation committed.
-        if (booking.orderId) await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${booking.orderId} FOR UPDATE`;
+        if (booking.orderId) {
+          await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${booking.orderId} FOR UPDATE`;
+          // [L09 · M018] A finished appointment is not reopened by moving its
+          // booking: read the parent under its own lock and refuse.
+          const parent = await tx.order.findUniqueOrThrow({ where: { id: booking.orderId }, select: { status: true } });
+          if (FINISHED_APPOINTMENT_ORDER_STATUSES.has(parent.status)) {
+            throw new AppError(400, 'NOT_RESCHEDULABLE', 'This appointment is completed and cannot be moved');
+          }
+          // A cancellation (or any other exit) committed while we waited on
+          // the lock: the same answer the lost race has always had.
+          if (!LIVE_APPOINTMENT_ORDER_STATUSES.has(parent.status)) {
+            throw new AppError(409, 'BOOKING_MOVED', 'This booking just changed — reload and try again');
+          }
+        }
         const created = await tx.booking.create({
           data: {
             itemId: booking.itemId,
