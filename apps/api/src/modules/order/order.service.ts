@@ -20,6 +20,7 @@ import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { isFreeCancellation, LATE_CANCEL_FEE } from './cancel-policy';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
+import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { stackVerdict } from '../dispatch/stack-eligibility';
 import {
@@ -776,7 +777,11 @@ export class OrderService {
     const now = input.now ?? new Date();
 
     const cart = await this.prisma.cart.findUnique({
-      where: { customerId: input.userId },
+      // A stale multi-store cart must pass as a whole before any hidden
+      // vendor name, price or radius enters validation. Never purchase only
+      // the visible subset of a command the customer sent for the full cart.
+      where: { customerId: input.userId, vendor: vendorTenantForCaller(),
+        items: { every: { item: { vendor: vendorTenantForCaller() } } } },
       include: { items: { include: { item: { include: { vendor: true, optionGroups: { include: { options: true } } } } } } },
     });
     if (!cart || cart.items.length === 0) {
