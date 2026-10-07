@@ -59,3 +59,18 @@ describe('[W-25] the store screen asks the shared predicate, and sends the refer
     expect(client).toMatch(/\{ reference \}/);
   });
 });
+
+describe('[row 52] only the owner or a manager of the order\'s store is offered the button', () => {
+  it('the button and the reference field render only when the server says this caller may confirm', () => {
+    expect(screen).toMatch(/const canConfirm = attestable && order\.canConfirmPayment === true;/);
+    expect(screen).toMatch(/\{canConfirm \? \(/);
+    // the input + button block is the canConfirm branch, never the bare attestable one
+    const branch = screen.slice(screen.indexOf('{canConfirm ? ('), screen.indexOf("onAction('confirm-payment', mmgRef.trim())"));
+    expect(branch).toMatch(/MMG transaction reference/);
+    expect(screen).not.toMatch(/\{attestable \? \(\s*<>/);
+  });
+
+  it('staff are told who can confirm instead of seeing a button that would be refused', () => {
+    expect(screen).toMatch(/\) : attestable \? \(\s*<T[^>]*>\s*Only the owner or a manager can confirm MMG payments\./);
+  });
+});

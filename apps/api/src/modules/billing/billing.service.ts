@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { hasMmgTerminalProof, isMmgTerminalStatus, matchesLookupGeneration, mmgNegativeMatches, mmgPaymentRaw, mmgTerminalProof, paymentFacts, type MmgLookupObservation } from './mmg-terminal-evidence';
 import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus, SubscriptionType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isReviewSubscription, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
@@ -15,6 +16,7 @@ import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
+import { restoreBillingAccess } from './billing-access';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
@@ -3192,6 +3194,8 @@ export class BillingService {
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
     }
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail to choose (before any write).
+    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     let resumedFromPause = false;
     // The instant charge below is anchored to exactly this due date (DS213 F2-1).
     const resumedAt = new Date();
@@ -3318,6 +3322,8 @@ export class BillingService {
    * actor, matching the billing module's top-up precedent.
    */
   async stopBilling(subscriptionId: string, actorUserId: string) {
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no weekly billing to stop.
+    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     return this.prisma.$transaction(async (tx) => {
       const payer = await lockSubscriptionPayer(tx, subscriptionId);
       if (payer.userId !== actorUserId) throw new AppError(403, 'FORBIDDEN', 'This weekly fee belongs to another payer.');
@@ -3893,30 +3899,9 @@ export class BillingService {
   }
 
   private async reinstateRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string) {
-    if (sub.vendor) {
-      // [REPORT-013 F-013-07] Payment restores ONLY what billing took. The
-      // lifecycle CAS matches a billing-caused suspension exclusively — an
-      // admin/safety suspension survives payment. Commerce reopens only
-      // where the projection-maintained document truth (isVerified, kept
-      // in-generation by every evidence path since v10) still stands: a
-      // store whose documents died mid-suspension comes back ACTIVE but
-      // closed, never a blind acceptingOrders=true.
-      // Transition rule: a pre-migration suspension has a null source; the
-      // only AUTOMATED suspender has always been billing, so null lifts with
-      // payment (an admin can always re-suspend, which stamps ADMIN).
-      await tx.vendor.updateMany({
-        where: {
-          id: sub.vendor.id,
-          status: 'SUSPENDED',
-          OR: [{ suspensionSource: 'BILLING' }, { suspensionSource: null }],
-        },
-        data: { status: 'ACTIVE', suspensionSource: null },
-      });
-      await tx.vendor.updateMany({
-        where: { id: sub.vendor.id, status: 'ACTIVE', isVerified: true },
-        data: { acceptingOrders: true },
-      });
-    }
+    // [REPORT-013 F-013-07] Payment restores ONLY what billing took: the one
+    // shared restore (billing-access.ts), also used by the wrongful-suspension heal.
+    if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
 
     await tx.billingEvent.create({
       data: {

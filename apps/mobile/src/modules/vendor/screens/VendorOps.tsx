@@ -102,6 +102,9 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   // recaptured a refund. The words live in lib/orderStatus (one vocabulary),
   // and the server enforces the same matrix.
   const attestable = isMmg && canAttestPayment(order.paymentStatus) && !terminal;
+  // [Row 52] Only the owner or a manager of THIS order's store confirms; the
+  // server says which on every order (and refuses staff regardless).
+  const canConfirm = attestable && order.canConfirmPayment === true;
   const payBlockedReason = isMmg && !mmgPaid && !attestable ? paymentAttestBlockedReason(order.paymentStatus) : null;
   const [mmgRef, setMmgRef] = useState('');
   const items = order.itemCount ?? order.items?.length ?? 0;
@@ -226,7 +229,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
               plausibly landed and nothing has reversed it — and only with the
               reference from its own wallet message, which is what a later
               reconciliation matches on. The server enforces the same matrix. */}
-          {attestable ? (
+          {canConfirm ? (
             <>
               <LabeledInput
                 label="MMG transaction reference"
@@ -245,6 +248,10 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
                 onPress={() => onAction('confirm-payment', mmgRef.trim())}
               />
             </>
+          ) : attestable ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+              Only the owner or a manager can confirm MMG payments.
+            </T>
           ) : payBlockedReason ? (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
               {payBlockedReason}

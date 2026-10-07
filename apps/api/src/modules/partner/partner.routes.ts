@@ -9,8 +9,10 @@ import {
   transitionUserRoleAuthorityInTransaction,
 } from '../mover-authority';
 import { requireStepUp } from '../auth/step-up';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -72,8 +74,9 @@ export async function partnerRoutes(app: FastifyInstance) {
         request.user.userId,
         targetRole,
       ),
-      // [DCR-1] Ledger context for the role-agreement consent row.
-      { accepted: body.acceptAgreement === true, ip: request.ip },
+      // [DCR-1] Ledger context for the role-agreement consent row: the surface is the
+      // client's own (the web app's clickwrap is the web, not the app).
+      { accepted: body.acceptAgreement === true, ip: request.ip, surface: consentSurfaceOf(request) },
     );
     await completeUserRoleAuthorityTransition(app, authorityCleanup);
     reply.code(result.created ? 201 : 200);
@@ -101,6 +104,8 @@ export async function partnerRoutes(app: FastifyInstance) {
    * onboarding changes freely.
    */
   app.put('/vehicle', auth, async (request) => {
+    // [REVIEW-PARTNER] Answered before the step-up below; the service (changeVehicleWithAuthority) is the authority.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
     const body = changeVehicleSchema.parse(request.body);
     const userId = request.user.userId;
     const [rider, driver] = await Promise.all([
