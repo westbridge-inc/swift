@@ -125,13 +125,18 @@ export const VEHICLE_TYPES_IN_ORDER: VehicleType[] = Object.values(VEHICLE_CLASS
  * (canters and box trucks) are NOT offered at launch. They stay in the taxonomy and
  * the enum, so switching them on later is this one set, but no one can register,
  * switch to, or go online with one until they are offered. Everything else is
- * offered: bicycle and motorbike for delivery riders; car, wagon (estate) car and
- * both buses for drivers. The mobile picker mirrors this set
+ * offered: bicycle and motorbike for delivery riders; car and wagon (estate) car for
+ * drivers (buses hidden too since the owner's ruling of 6 Oct 2026). The mobile picker mirrors this set
  * (apps/mobile/src/lib/vehicleOffer.ts; a test keeps the two equal) and follows
  * each quote's `offered` flag once the price list has loaded.
  */
 export const LAUNCH_HIDDEN_VEHICLE_TYPES: ReadonlySet<VehicleType> = new Set<VehicleType>([
   'CANTER_SHORT', 'CANTER_LONG', 'BOX_TRUCK_SHORT', 'BOX_TRUCK_LONG',
+  // [VERIFY-DOCS · owner ruling 9, 6 Oct 2026] Buses (Group rides) are hidden at launch: a hired
+  // 9- or 15-seater may be neither a hire car nor a route bus (B plates fail the taxi H-plate rule),
+  // so they come back only after the lawyer confirms the licence. Airport trips at launch use cars and
+  // wagon cars (up to 7 passengers, hired as a whole).
+  'BUS_9', 'BUS_15',
 ]);
 
 /** Error code for a vehicle Swift does not take on yet (registration, change, GO). */
@@ -202,7 +207,11 @@ export function servedRideClassesOf(table: Record<string, Pick<VehicleClass, 'ri
   for (const v of Object.values(table)) if (v.rideClass) set.add(v.rideClass);
   return set;
 }
-export const SERVED_RIDE_CLASSES: ReadonlySet<RideClass> = servedRideClassesOf(VEHICLE_CLASSES);
+// [VERIFY-DOCS · ruling 9] Served by an OFFERED vehicle: a class only hidden vehicles serve (GROUP, while
+// buses are hidden) leaves the riders' tiers and the fare estimate with them.
+export const SERVED_RIDE_CLASSES: ReadonlySet<RideClass> = servedRideClassesOf(
+  Object.fromEntries(Object.entries(VEHICLE_CLASSES).filter(([type]) => !LAUNCH_HIDDEN_VEHICLE_TYPES.has(type as VehicleType))),
+);
 export function isRideClassServed(rideClass: RideClass): boolean {
   return SERVED_RIDE_CLASSES.has(rideClass);
 }

@@ -108,6 +108,40 @@ async function requestRide(customerToken: string) {
   return ride;
 }
 
+const GROUP_REQUEST = {
+  pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 },
+  pickupAddress: 'Stabroek Market', dropoffAddress: 'Camp Street',
+  rideClass: 'GROUP', passengerCount: 10,
+};
+
+/**
+ * [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] The request route no longer sells GROUP
+ * (both buses are hidden at launch): it answers 400 INVALID_RIDE_CLASS. A GROUP ride requested BEFORE the
+ * ruling can still be PENDING, though, so every accept path keeps its seat check. That ride is written here
+ * with the fields the request route wrote for it; the seat proofs below run on it unchanged.
+ */
+async function preRulingGroupRide(customerToken: string, customerId: string): Promise<string> {
+  const refused = await app.inject({
+    method: 'POST', url: '/api/v1/rides/request',
+    headers: { authorization: `Bearer ${customerToken}`, 'content-type': 'application/json' },
+    payload: GROUP_REQUEST,
+  });
+  expect(refused.statusCode, refused.body).toBe(400);
+  expect(refused.json().error.code).toBe('INVALID_RIDE_CLASS');
+  const ride = await app.prisma.order.create({ data: {
+    orderNumber: `SW-GRP-${nanoid(8)}`, orderType: 'TAXI', customerId, status: 'PENDING',
+    pickupAddress: GROUP_REQUEST.pickupAddress, pickupLat: GROUP_REQUEST.pickup.lat, pickupLng: GROUP_REQUEST.pickup.lng,
+    deliveryAddress: GROUP_REQUEST.dropoffAddress, deliveryLat: GROUP_REQUEST.dropoff.lat, deliveryLng: GROUP_REQUEST.dropoff.lng,
+    taxiPickupAddress: GROUP_REQUEST.pickupAddress, taxiDropoffAddress: GROUP_REQUEST.dropoffAddress,
+    taxiPassengerCount: GROUP_REQUEST.passengerCount, rideClass: 'GROUP',
+    taxiDistance: 1.9, billableKm: 1.92, billableKmSource: 'haversine', taxiDuration: 5, taxiFareTotal: 4800, currencyCode: 'GYD',
+    subtotalBase: 4800, subtotalMarkup: 0, subtotalCustomer: 4800, deliveryFee: 0, totalAmount: 4800,
+    paymentMethod: 'CASH', ridePin: '4827',
+  } });
+  orderIds.push(ride.id);
+  return ride.id;
+}
+
 const driverPut = (token: string, id: string, leg: string, body: Record<string, unknown> = {}) =>
   app.inject({
     method: 'PUT',
@@ -264,17 +298,8 @@ describe('the current taxi contract (characterization — must stay green all en
       where: { id: nine.driverId },
       data: { vehicleType: 'BUS_9', rideClass: 'GROUP', vehicleCapacity: 9 },
     });
-    const res = await app.inject({
-      method: 'POST', url: '/api/v1/rides/request',
-      headers: { authorization: `Bearer ${customer.token}`, 'content-type': 'application/json' },
-      payload: {
-        pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 },
-        pickupAddress: 'Stabroek Market', dropoffAddress: 'Camp Street',
-        rideClass: 'GROUP', passengerCount: 10,
-      },
-    });
-    expect(res.statusCode).toBe(201);
-    const rideId = res.json().data.id ?? res.json().data.order?.id ?? res.json().data.ride?.id;
+    // [VERIFY-DOCS · ruling 9] refused at the request route; a ride requested before the ruling (see preRulingGroupRide).
+    const rideId = await preRulingGroupRide(customer.token, customer.userId);
 
     // The open board hides it from the 9-seater…
     const board = await app.inject({
@@ -308,12 +333,18 @@ describe('the current taxi contract (characterization — must stay green all en
     expect(fresh.status).toBe('PENDING');
     await app.redis.del(`dispatch:offer:${rideId}`, `dispatch:mover-offer:${nine.driverId}`, `dispatch:declined:${rideId}`);
 
-    // A 15-seater serves it fine.
+    // A 15-seater serves it fine — and sees it on its board, so the 9-seater's empty board is the seat rule.
     const fifteen = await makeDriver('BUS_15');
     await app.prisma.driver.update({
       where: { id: fifteen.driverId },
       data: { vehicleType: 'BUS_15', rideClass: 'GROUP', vehicleCapacity: 15 },
     });
+    const board15 = await app.inject({
+      method: 'GET', url: '/api/v1/driver/rides/available',
+      headers: { authorization: `Bearer ${fifteen.token}` },
+    });
+    expect(board15.statusCode).toBe(200);
+    expect(board15.json().data.some((r: { id: string }) => r.id === rideId)).toBe(true);
     const accept15 = await app.inject({
       method: 'POST', url: `/api/v1/driver/rides/${rideId}/accept`,
       headers: { authorization: `Bearer ${fifteen.token}`, 'content-type': 'application/json' },
@@ -331,17 +362,8 @@ describe('the current taxi contract (characterization — must stay green all en
       where: { id: forger.driverId },
       data: { vehicleType: 'CAR', rideClass: 'GROUP', vehicleCapacity: 14 },
     });
-    const res = await app.inject({
-      method: 'POST', url: '/api/v1/rides/request',
-      headers: { authorization: `Bearer ${customer.token}`, 'content-type': 'application/json' },
-      payload: {
-        pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 },
-        pickupAddress: 'Stabroek Market', dropoffAddress: 'Camp Street',
-        rideClass: 'GROUP', passengerCount: 10,
-      },
-    });
-    expect(res.statusCode).toBe(201);
-    const rideId = res.json().data.id ?? res.json().data.order?.id ?? res.json().data.ride?.id;
+    // [VERIFY-DOCS · ruling 9] refused at the request route; a ride requested before the ruling (see preRulingGroupRide).
+    const rideId = await preRulingGroupRide(customer.token, customer.userId);
     // The locked claim derives seats from vehicleType=CAR (4) via the taxonomy,
     // not the forged column — a forged offer-card accept is refused.
     await app.redis.set(`dispatch:offer:${rideId}`, forger.driverId, 'EX', 40);
