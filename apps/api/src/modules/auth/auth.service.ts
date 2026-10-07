@@ -658,9 +658,12 @@ export class AuthService {
 
     const candidate = await this.app.prisma.user.findUnique({
       where: { phone },
-      select: { id: true },
+      select: { id: true, tenant: { select: { kind: true } } },
     });
-    if (!candidate) {
+    // [REVIEW-PARTNER] A store-review demo login is shared: its password is
+    // never reset — answered exactly as for no account (no reset code is ever
+    // texted to a demo identifier; this holds even if one were stored).
+    if (!candidate || candidate.tenant.kind === 'REVIEW') {
       // Do NOT reveal account existence on password reset — return the same
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.

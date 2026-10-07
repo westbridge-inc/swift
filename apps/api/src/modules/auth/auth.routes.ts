@@ -7,6 +7,7 @@ import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
@@ -381,6 +382,8 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.post('/password/set', { preHandler: [app.authenticate] }, async (request, reply) => {
+    // [REVIEW-PARTNER] A store-review demo login is shared: its password is never set or changed.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
     const body = setPasswordSchema.parse(request.body);
     const sessionId = request.authSessionId;
     if (!sessionId) {
