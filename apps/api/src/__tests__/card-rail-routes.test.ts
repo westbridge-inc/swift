@@ -1542,6 +1542,36 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
       expect(await rowOf(session.sessionId)).toMatchObject({ status: 'FAILED', failureCode: 'VOIDED_UNPROVEN', providerVoidState: 'VOIDED', paymentId: null });
     });
 
+    it('a confirmation while another one\'s void is in flight sends no second void: the database claim holds, not only the provider\'s own', async () => {
+      payment = approve({ RiskManagement: undefined });
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const txnId = (await heldOf(session.sessionId))['txnId']!;
+      const service = serviceOf();
+      const provider = (service as unknown as { rail: () => CardRailProvider }).rail();
+      const realVoid = provider.voidPayment!.bind(provider);
+      let calls = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      provider.voidPayment = async (input) => { calls += 1; if (calls === 1) await gate; return realVoid(input); };
+      try {
+        const first = bankFramePosts(session.sessionId, 'Y'); // its confirmation claims the void, then waits inside the provider call
+        for (let i = 0; i < 100 && (await rowOf(session.sessionId)).providerVoidState !== 'SENDING'; i += 1) await new Promise((r) => setTimeout(r, 20));
+        expect((await rowOf(session.sessionId)).providerVoidState).toBe('SENDING');
+        await service.confirm(session.sessionId);
+        await service.confirm(session.sessionId, { now: new Date(Date.now() + 30_000) });
+        expect(calls).toBe(1);
+        release();
+        expect(pageState((await first).body)).toBe('FAILED');
+      } finally {
+        release();
+        provider.voidPayment = realVoid;
+      }
+      expect(calls).toBe(1);
+      expect(voids(txnId)).toBe(1);
+      expect(await rowOf(session.sessionId)).toMatchObject({ status: 'FAILED', failureCode: 'VOIDED_UNPROVEN', providerVoidState: 'VOIDED' });
+    });
+
     it('two refund decisions racing on one held payment: ONE refund call', async () => {
       const finance = await makeFinance();
       const p = await makeStore();
