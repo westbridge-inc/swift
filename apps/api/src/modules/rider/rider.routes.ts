@@ -186,7 +186,7 @@ async function getOwnedOrder(app: FastifyInstance, orderId: string, riderId: str
  * rider disagree, and a log that records a claim as a fact is worse than one
  * that records nothing.
  */
-const STATUS_TRANSITIONS: Record<string, { from: string[]; to: string; note: string }> = {
+const STATUS_TRANSITIONS: Record<string, { from: OrderStatus[]; to: OrderStatus; note: string }> = {
   'en-route-pickup': { from: ['RIDER_ASSIGNED'], to: 'RIDER_EN_ROUTE_PICKUP', note: 'Rider started the run to pickup' },
   'arrived-pickup':  { from: ['RIDER_EN_ROUTE_PICKUP'], to: 'RIDER_ARRIVED_PICKUP', note: 'Rider reported arriving at pickup' },
   'picked-up':       { from: [...RIDER_PICKUP_FROM], to: 'PICKED_UP', note: 'Rider confirmed collecting the order' },
@@ -1552,11 +1552,12 @@ export async function riderRoutes(app: FastifyInstance) {
         }
       }
 
-      const updated = await orderService.updateStatus(
+      const updated = await orderService.updateRiderStatus(
         id,
         to,
         request.user.userId,
         evidence ? `${note} — ${evidence}` : note,
+        { riderId: rider.id, assignmentVersion: order.riderAssignmentVersion, allowedFrom: from },
       );
 
       return {

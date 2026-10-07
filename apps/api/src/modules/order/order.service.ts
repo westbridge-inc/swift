@@ -527,6 +527,7 @@ export interface CanonicalOrderTransitionInput {
    * ownership pre-read cannot survive a watchdog release or reassignment
    * committing before the lock — this can. */
   expectedRiderId?: string | null;
+  expectedRiderAssignmentVersion?: number;
   /** Optional locked-row custody predicates for role-specific commands. A
    * route pre-read is authorization UX only; physical ownership is proved
    * again here, in the same transaction as the state transition. */
@@ -1919,6 +1920,11 @@ export class OrderService {
       throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
         'This job is no longer assigned to you — it was released or reassigned.');
     }
+    if (input.expectedRiderAssignmentVersion !== undefined
+        && source.riderAssignmentVersion !== input.expectedRiderAssignmentVersion) {
+      throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
+        'This assignment changed while the action was in progress. Refresh the order before continuing.');
+    }
     if (input.expectedDriverId !== undefined && source.driverId !== input.expectedDriverId) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
     }
@@ -2461,6 +2467,21 @@ export class OrderService {
     return { message: freeCancellation ? `${noun} cancelled — no charge` : `${noun} cancelled`, cancellationFee };
   }
 
+  /** Rider lifecycle commands must carry the authority and allowed states they observed. */
+  async updateRiderStatus(
+    orderId: string,
+    status: OrderStatus,
+    changedBy: string,
+    note: string,
+    authority: { riderId: string; assignmentVersion: number; allowedFrom: readonly OrderStatus[] },
+  ) {
+    return this.updateStatus(orderId, status, changedBy, note, {
+      expectedRiderId: authority.riderId,
+      expectedRiderAssignmentVersion: authority.assignmentVersion,
+      allowedFrom: authority.allowedFrom,
+    });
+  }
+
   async updateStatus(
     orderId: string,
     status: string,
@@ -2471,6 +2492,7 @@ export class OrderService {
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
       expectedRiderId?: string | null;
+      expectedRiderAssignmentVersion?: number;
       expectedDriverId?: string | null;
       expectedFulfillment?: FulfillmentType;
       expectedFulfillmentMode?: FulfillmentMode;
@@ -2493,6 +2515,7 @@ export class OrderService {
       serializeIdentity: opts?.serializeIdentity,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
+      ...(opts?.expectedRiderAssignmentVersion !== undefined ? { expectedRiderAssignmentVersion: opts.expectedRiderAssignmentVersion } : {}),
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
       ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
       ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
