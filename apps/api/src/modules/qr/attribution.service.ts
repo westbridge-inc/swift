@@ -2,7 +2,8 @@ import type { PrismaClient } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { classifyScan } from './qr-codes';
 import { QrService } from './qr.service';
-import { enqueueScanEvent, hashScanIp, hashUa, parseUserAgent } from './scan-log';
+import { runAsSystem } from '../../plugins/tenant-context';
+import { recordScanEvent, hashScanIp, hashUa, parseUserAgent } from './scan-log';
 import {
   ATTRIB_MAX_OPEN_PER_FP,
   ATTRIB_TTL_MINUTES,
@@ -43,104 +44,127 @@ export class AttributionService {
     return { path: `/store/${qr.entity.slug}`, qrCodeId: qr.id, tenantId: qr.tenantId };
   }
 
+  /** Receipts and iOS candidates are evidence, never authority to expose a
+   *  stale slug or a store that is no longer public. Bind both id and tenant
+   *  before resolving through the same public lookup as a fresh scan. */
+  private async destinationForReceipt(qrCodeId: string | null, tenantId: string) {
+    if (!qrCodeId) return null;
+    const code = await this.prisma.qrCode.findFirst({ where: { id: qrCodeId, tenantId }, select: { shortCode: true } });
+    const destination = code ? await this.destinationFor(code.shortCode) : null;
+    return destination?.tenantId === tenantId && destination.qrCodeId === qrCodeId ? destination : null;
+  }
+
+  private async replay(receipt: { qrCodeId: string | null; tenantId: string; destinationPath: string | null; outcome: string }): Promise<ClaimResult> {
+    if (!receipt.destinationPath) return { destination: null, tenantHint: null, outcome: receipt.outcome as ClaimResult['outcome'] };
+    const dest = await this.destinationForReceipt(receipt.qrCodeId, receipt.tenantId);
+    return dest
+      ? { destination: dest.path, tenantHint: dest.tenantId, outcome: receipt.outcome as ClaimResult['outcome'] }
+      : { destination: null, tenantHint: null, outcome: 'none' };
+  }
+
   /** Web install-CTA tap: record an iOS candidate (server-computed fingerprint,
    *  capped per fp with oldest-out) and return the platform store URL. */
   async intent(
     shortCode: string,
     request: { ip: string; ua: string | undefined; isIos: boolean },
   ): Promise<{ created: boolean; destinationPath: string } | null> {
-    const dest = await this.destinationFor(shortCode);
-    if (!dest) return null;
+    return runAsSystem('public-qr-attribution', async () => {
+      const dest = await this.destinationFor(shortCode);
+      if (!dest) return null;
 
-    // Every install-CTA tap leaves a funnel artifact on the scan spine — this
-    // is how Android taps (which write no candidate row) stay countable.
-    const now0 = new Date();
-    const { osFamily, deviceClass } = parseUserAgent(request.ua);
-    enqueueScanEvent({
-      tenantId: dest.tenantId,
-      qrCodeId: dest.qrCodeId,
-      occurredAt: now0,
-      decision: 'INSTALL_TAP',
-      src: 'web',
-      osFamily,
-      deviceClass,
-      uaHash: request.ua ? hashUa(request.ua) : null,
-      ipHash: request.ip ? hashScanIp(request.ip, now0) : null,
-    });
-
-    if (!request.isIos) return { created: false, destinationPath: dest.path };
-
-    const fpHash = computeFpHash(request.ip, request.ua);
-    const now = new Date();
-    const open = await this.prisma.pendingAttribution.findMany({
-      where: { fpHash, expiresAt: { gt: now }, claimedAt: null },
-      orderBy: { createdAt: 'asc' },
-    });
-    if (open.length >= ATTRIB_MAX_OPEN_PER_FP) {
-      await this.prisma.pendingAttribution.deleteMany({
-        where: { id: { in: open.slice(0, open.length - ATTRIB_MAX_OPEN_PER_FP + 1).map((r) => r.id) } },
-      });
-    }
-    await this.prisma.pendingAttribution.create({
-      data: {
+      // Every install-CTA tap leaves a funnel artifact on the scan spine — this
+      // is how Android taps (which write no candidate row) stay countable.
+      const now0 = new Date();
+      const { osFamily, deviceClass } = parseUserAgent(request.ua);
+      recordScanEvent(() => ({
         tenantId: dest.tenantId,
         qrCodeId: dest.qrCodeId,
-        destinationPath: dest.path,
-        platform: 'ios',
-        fpHash,
-        expiresAt: new Date(now.getTime() + ATTRIB_TTL_MINUTES * 60_000),
-      },
+        occurredAt: now0,
+        decision: 'INSTALL_TAP',
+        src: 'web',
+        osFamily,
+        deviceClass,
+        uaHash: request.ua ? hashUa(request.ua) : null,
+        ipHash: request.ip ? hashScanIp(request.ip, now0) : null,
+      }));
+
+      if (!request.isIos) return { created: false, destinationPath: dest.path };
+
+      const fpHash = computeFpHash(request.ip, request.ua);
+      const now = new Date();
+      const open = await this.prisma.pendingAttribution.findMany({
+        where: { fpHash, expiresAt: { gt: now }, claimedAt: null },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (open.length >= ATTRIB_MAX_OPEN_PER_FP) {
+        await this.prisma.pendingAttribution.deleteMany({
+          where: { id: { in: open.slice(0, open.length - ATTRIB_MAX_OPEN_PER_FP + 1).map((r) => r.id) } },
+        });
+      }
+      await this.prisma.pendingAttribution.create({
+        data: {
+          tenantId: dest.tenantId,
+          qrCodeId: dest.qrCodeId,
+          destinationPath: dest.path,
+          platform: 'ios',
+          fpHash,
+          expiresAt: new Date(now.getTime() + ATTRIB_TTL_MINUTES * 60_000),
+        },
+      });
+      return { created: true, destinationPath: dest.path };
     });
-    return { created: true, destinationPath: dest.path };
   }
 
   /** First-launch claim. Deterministic on Android referrer; single-candidate
-   *  fingerprint match on iOS; receipt-idempotent per installId always. */
+   *  fingerprint match on iOS; receipt-idempotent per installId always.
+   *
+   *  [AX8] Consuming the iOS candidate and writing the receipt are ONE
+   *  transaction, serialized per installId: a receipt that fails to insert
+   *  leaves the candidate unclaimed (the compare-and-set rolls back with it),
+   *  and a concurrent claim for the same install waits for the first and then
+   *  replays its receipt — never a second, empty outcome. */
   async claim(
     installId: string,
     platform: string,
     referrer: string | undefined,
     request: { ip: string; ua: string | undefined },
   ): Promise<ClaimResult> {
-    const existing = await this.prisma.attributionClaim.findUnique({ where: { installId } });
-    if (existing) {
-      return {
-        destination: existing.destinationPath,
-        tenantHint: existing.destinationPath ? existing.tenantId : null,
-        outcome: existing.outcome as ClaimResult['outcome'],
-      };
-    }
+    return runAsSystem('qr-attribution-claim', async () => {
+      const existing = await this.prisma.attributionClaim.findUnique({ where: { installId } });
+      if (existing) return this.replay(existing);
 
-    const resolved = await this.resolveClaim(installId, platform, referrer, request);
-    try {
-      await this.prisma.attributionClaim.create({
-        data: {
-          tenantId: resolved.tenantId ?? 'swift-default',
-          installId,
-          platform,
-          qrCodeId: resolved.qrCodeId,
-          destinationPath: resolved.destination,
-          outcome: resolved.outcome,
-        },
-      });
-    } catch (e) {
-      if (!isUniqueViolation(e)) throw e;
-      // Two concurrent claims for one installId: the receipt is the truth.
-      const winner = await this.prisma.attributionClaim.findUniqueOrThrow({ where: { installId } });
-      return {
-        destination: winner.destinationPath,
-        tenantHint: winner.destinationPath ? winner.tenantId : null,
-        outcome: winner.outcome as ClaimResult['outcome'],
-      };
-    }
-    return {
-      destination: resolved.destination,
-      tenantHint: resolved.destination ? (resolved.tenantId ?? null) : null,
-      outcome: resolved.outcome,
-    };
+      let receipt: { qrCodeId: string | null; tenantId: string; destinationPath: string | null; outcome: string };
+      try {
+        receipt = await this.prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`qr-claim:${installId}`}, 0))`;
+          const won = await tx.attributionClaim.findUnique({ where: { installId } });
+          if (won) return won;
+          const resolved = await this.resolveClaim(tx, installId, platform, referrer, request);
+          // The receipt's tenant is the stored candidate's / code's
+          // (attribution_claims_tenant_matches_code holds it to the code).
+          return tx.attributionClaim.create({
+            data: {
+              tenantId: resolved.tenantId ?? 'swift-default',
+              installId,
+              platform,
+              qrCodeId: resolved.qrCodeId,
+              destinationPath: resolved.destination,
+              outcome: resolved.outcome,
+            },
+          });
+        });
+      } catch (e) {
+        if (!isUniqueViolation(e)) throw e;
+        // A writer outside this lock (another process before the lock
+        // existed): the receipt is the truth.
+        receipt = await this.prisma.attributionClaim.findUniqueOrThrow({ where: { installId } });
+      }
+      return this.replay(receipt);
+    });
   }
 
   private async resolveClaim(
+    tx: Prisma.TransactionClient,
     installId: string,
     platform: string,
     referrer: string | undefined,
@@ -156,19 +180,22 @@ export class AttributionService {
 
     // iOS: recompute the fingerprint from THIS request.
     const fpHash = computeFpHash(request.ip, request.ua);
-    const candidates = await this.prisma.pendingAttribution.findMany({
+    const candidates = await tx.pendingAttribution.findMany({
       where: { fpHash, expiresAt: { gt: new Date() }, claimedAt: null },
     });
     if (candidates.length !== 1) {
       return { destination: null, tenantId: null, qrCodeId: null, outcome: candidates.length === 0 ? 'none' : 'ambiguous' };
     }
     const candidate = candidates[0]!;
-    const won = await this.prisma.pendingAttribution.updateMany({
-      where: { id: candidate.id, claimedAt: null }, // race guard
+    const dest = await this.destinationForReceipt(candidate.qrCodeId, candidate.tenantId);
+    if (!dest) return { destination: null, tenantId: null, qrCodeId: null, outcome: 'none' };
+    // Compare-and-set, inside the receipt's transaction: rolled back with it.
+    const won = await tx.pendingAttribution.updateMany({
+      where: { id: candidate.id, claimedAt: null },
       data: { claimedAt: new Date(), claimedInstallId: installId },
     });
     return won.count === 1
-      ? { destination: candidate.destinationPath, tenantId: candidate.tenantId, qrCodeId: candidate.qrCodeId, outcome: 'matched' }
+      ? { destination: dest.path, tenantId: candidate.tenantId, qrCodeId: candidate.qrCodeId, outcome: 'matched' }
       : { destination: null, tenantId: null, qrCodeId: null, outcome: 'none' };
   }
 

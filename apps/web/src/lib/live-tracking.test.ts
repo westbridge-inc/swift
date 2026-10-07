@@ -153,7 +153,11 @@ describe('[W-47] both public pages use it', () => {
     it(`the ${name} page sends only a coarsened point, with no referer`, () => {
       expect(page).toMatch(/mapEmbedUrl\(/);
       expect(page).toMatch(/mapLinkUrl\(/);
-      expect(page.match(/referrerPolicy="no-referrer"/g) ?? []).toHaveLength(2);
+      // The map frame and the map link each carry no referer. (The trip page may
+      // carry more no-referrer elements, its driver photo [M053]; never fewer.)
+      const mapTags = page.match(/<iframe[\s\S]*?\/>|<a(?:(?!<a)[\s\S])*?href=\{mapLinkUrl\([\s\S]*?>/g) ?? [];
+      expect(mapTags).toHaveLength(2);
+      for (const tag of mapTags) expect(tag).toMatch(/referrerPolicy="no-referrer"/);
       // no hand-built OpenStreetMap URL carrying raw coordinates
       expect(page).not.toMatch(/openstreetmap\.org\/export\/embed\.html\?bbox=\$\{/);
       expect(page).not.toMatch(/openstreetmap\.org\/\?mlat=\$\{/);

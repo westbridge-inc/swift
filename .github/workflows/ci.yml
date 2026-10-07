@@ -284,6 +284,10 @@ jobs:
         env:
           NEXT_PUBLIC_ALLOW_SITE_TOKENS: '1'
           NEXT_PUBLIC_API_URL: https://api.swiftgy.com
+      # [W2] What a phone downloads before a page can run (its scripts and its
+      # layouts' scripts, gzip) may not grow past the page's ceiling.
+      - name: Size budget (first-load JavaScript per page)
+        run: node apps/web/scripts/perf-budget.mjs
       # [GRD-1 §2 / WS-15] See the admin job: the inlining happens at build
       # time, so the artefact is the only place the leak is real.
       # [SCR-006] What the build IS: its manifest (every file's digest, the entrypoints, the commit), so the gate
@@ -436,6 +440,20 @@ jobs:
             if [ "$found" != "1" ]; then echo "::error::MISSING ledger trigger: $t (raw-SQL migration did not apply)"; exit 1; fi
             echo "ok: $t present"
           done
+      # Row 106 (#1217): QR tenant lineage, store-tenant immutability and the
+      # permanent printed-token identity registry are raw SQL — a printed code
+      # becoming reissuable, or a store becoming movable, must go RED.
+      - name: QR identity and vendor-edge lineage triggers exist
+        run: |
+          DB="postgresql://swift:swift@localhost:5432/swift_migrate"
+          for t in qr_codes_tenant_matches_vendor slug_redirects_tenant_matches_vendor pending_attributions_tenant_matches_code attribution_claims_tenant_matches_code scan_events_tenant_matches_code scan_daily_rollups_tenant_matches_code orders_tenant_matches_attribution_code vendors_tenant_immutable qr_codes_token_reserve qr_codes_token_retire qr_codes_identity_immutable vendors_qr_target_identity vendors_qr_target_retire token_identities_immutable token_identities_no_truncate; do
+            found=$(psql "$DB" -tAc "SELECT 1 FROM pg_trigger WHERE tgname='$t' AND NOT tgisinternal")
+            if [ "$found" != "1" ]; then echo "::error::MISSING QR identity/lineage trigger: $t (raw-SQL migration did not apply)"; exit 1; fi
+            echo "ok: $t present"
+          done
+          grants=$(psql "$DB" -tAc "SELECT count(*) FROM pg_namespace n WHERE n.nspname='swift_qr' AND (has_schema_privilege('swift_app', n.oid, 'USAGE') OR has_schema_privilege('swift_bypass_rls', n.oid, 'USAGE'))")
+          if [ "$grants" != "0" ]; then echo "::error::swift_qr must not be usable by application roles"; exit 1; fi
+          echo "ok: swift_qr has no application grants"
       # DCR-1 NR-1: the consent ledger's append-only trigger is raw SQL too —
       # consent history silently becoming rewritable must go RED.
       - name: Consent append-only trigger exists

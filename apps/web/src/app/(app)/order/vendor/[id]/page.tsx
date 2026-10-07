@@ -4,15 +4,23 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useParams, useRouter } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
-import { Star, Clock, Plus, X, Minus } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Bike, Clock, Heart, Info, MapPin, Minus, Plus, Share2, Star, X } from 'lucide-react';
 import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem } from '@/lib/customer';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay, formatAppointmentSlot } from '@/lib/appointmentTime';
 import { useCustomerSession } from '@/components/customer-session';
-import { MenuSkeleton } from '@/components/customer-skeletons';
-import { PRESS } from '@/components/customer-shell';
+import { MenuSkeleton, STORE_HERO } from '@/components/customer-skeletons';
+import { BackButton, useOwnBackButton } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { Photo, ratingText } from '@/components/order-ui';
+import { accountApi } from '@/components/account/account-api';
+import { useAccountQuery } from '@/components/account/account-frame';
+import { Modal } from '@/components/modal';
 import { signInPath } from '@/lib/customer-routes';
+import { cartItemCount, customerCartKey, readShellCart } from '@/lib/shell-data';
+import { parseAmount } from '@/lib/money';
+import { fromPage, vendorDetailKey } from '@/lib/browse-keys';
+import { useStoreSeed } from '@/components/browse-seed';
 
 /** The store, reopened at one item: `?item=` from Home's popular rail, the
  *  Market, or a guest coming back from signing in to add it. */
@@ -46,14 +54,33 @@ export default function VendorPage() {
   const session = useCustomerSession();
   // [Q7b] Cached per store, so going back to it is instant; refreshed in the
   // background. A menu is the same for everyone who opens it.
-  const store = useQuery<VendorDetail>({ queryKey: ['customer', 'vendor', id], queryFn: () => getVendor(id) });
+  // [W2] The server drew this menu into the page (layout.tsx); it is the
+  // first answer, re-read here once it is a few seconds old.
+  const seed = useStoreSeed(id);
+  const store = useQuery<VendorDetail>({ queryKey: vendorDetailKey(id), queryFn: () => getVendor(id), ...fromPage(seed) });
   const v = store.data ?? null;
   const [modal, setModal] = useState<MenuItem | null>(null);
   const [sel, setSel] = useState<Record<string, string>>({});
   const [qty, setQty] = useState(1);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [added, setAdded] = useState(0);
+  const [section, setSection] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  // Back sits over the store's photo once the store is drawn; while it loads
+  // or fails, the shell's own Back row stays.
+  useOwnBackButton(v !== null);
+  // [WEB-REDESIGN] The cart bar shows the account's real cart — the count and
+  // subtotal the server holds — not a tally of this visit's taps.
+  const signedIn = session.status === 'signed-in';
+  const cart = useQuery({ queryKey: customerCartKey(session.scope, session.epoch), queryFn: readShellCart, enabled: signedIn, staleTime: 30_000, retry: false });
+  const cartCount = signedIn ? cartItemCount(cart.data) : 0;
+  const cartSubtotal = parseAmount(cart.data?.subtotalCustomer);
+  // The heart is the account's favourites list — the SAME query Account's
+  // Favourites page reads and refreshes (one key, never cached as fresh), so a
+  // change made there is the state shown here.
+  const favourites = useAccountQuery('favourites', accountApi.favourites);
+  const saved = Boolean(favourites.data?.some((f) => f.id === id));
+  const [savingFav, setSavingFav] = useState(false);
   // Service booking (fulfillment=APPOINTMENT)
   const [book, setBook] = useState<MenuItem | null>(null);
   const [bday, setBday] = useState(() => appointmentDayKey(new Date()));
@@ -97,7 +124,8 @@ export default function VendorPage() {
       if (!(await signedInToOrder(book))) return;
       await addToCart({ vendorId: v.id, itemId: book.id, quantity: 1 });
       savePendingAppointment({ itemId: book.id, slotStart: slot, label: `${book.name} — ${formatAppointmentSlot(slot)}` });
-      setAdded((n) => n + 1); setBook(null); setToast('Booking added to your cart');
+      setBook(null); setToast('Booking added to your cart');
+      void queryClient.invalidateQueries({ queryKey: ['customer', 'cart'] });
       setTimeout(() => setToast(null), 2500);
     } catch (e: any) { setToast(e.message || 'Could not book'); }
     finally { setBusy(false); }
@@ -123,125 +151,245 @@ export default function VendorPage() {
     try {
       if (!(await signedInToOrder(modal))) return;
       await addToCart({ vendorId: v.id, itemId: modal.id, quantity: qty, selectedOptions: sel });
-      setAdded((n) => n + qty); setModal(null); setToast('Added to your cart');
+      setModal(null); setToast('Added to your cart');
+      void queryClient.invalidateQueries({ queryKey: ['customer', 'cart'] });
       setTimeout(() => setToast(null), 2500);
     } catch (e: any) { setToast(e.message || 'Could not add item'); }
     finally { setBusy(false); }
   }
 
-  if (!v && store.isError) return <DataUnavailable what="this store" error={store.error} onRetry={() => void store.refetch()} />;
+  async function toggleFavourite() {
+    if (!v || savingFav) return;
+    if (!(await session.ensureSignedIn())) { router.push(signInPath(`/order/vendor/${encodeURIComponent(id)}`)); return; }
+    // What the person asked for is the opposite of the heart they see. The
+    // write is chosen from the server's list read NOW, never from a cached one:
+    // a stale "saved" would send a removal for a store they meant to save.
+    const wantSaved = !saved;
+    setSavingFav(true);
+    try {
+      const fresh = await favourites.refetch();
+      if (fresh.isError || !fresh.data) throw new Error('Could not check your favourites. Try again.');
+      const isSaved = fresh.data.some((f) => f.id === v.id);
+      if (isSaved !== wantSaved) {
+        await accountApi.favourite(v.id, isSaved);
+        await queryClient.invalidateQueries({ queryKey: ['account'] });
+      }
+      flash(wantSaved ? 'Saved to favourites' : 'Removed from favourites');
+    } catch (e: any) { flash(e.message || 'Could not update your favourites'); }
+    finally { setSavingFav(false); }
+  }
+
+  async function shareStore() {
+    if (!v) return;
+    const url = `${window.location.origin}/order/vendor/${encodeURIComponent(v.id)}`;
+    try {
+      if (navigator.share) { await navigator.share({ title: v.name, url }); return; }
+      await navigator.clipboard.writeText(url);
+      flash('Link copied');
+    } catch { /* the person closed the share sheet */ }
+  }
+
+  function flash(message: string) {
+    setToast(message);
+    setTimeout(() => setToast(null), 2500);
+  }
+
+  if (!v && store.isError) return <div className="pt-2"><DataUnavailable what="this store" error={store.error} onRetry={() => void store.refetch()} /></div>;
   if (!v) return <MenuSkeleton />;
 
+  const items = v.categories.flatMap((category) => category.items);
+  const picks = items.filter((item) => item.isAvailable).slice(0, 5);
+  const shown = v.categories.filter((category) => category.items.length > 0 && (!section || section === category.id));
+  const minutes = v.etaMin ?? v.estimatedPrepTime;
+  const deliveryFee = v.deliveryFee != null ? parseAmount(v.deliveryFee) : null;
+
   return (
-    <div className="space-y-6 pb-24">
-      <div className="relative h-44 overflow-hidden rounded-2xl bg-[var(--swift-subtle)] md:h-56">
-        {v.coverImageUrl && <Image src={v.coverImageUrl} alt={v.name} fill unoptimized sizes="(min-width: 1152px) 1120px, calc(100vw - 32px)" priority className="object-cover" />}
-      </div>
-      <div className="swift-menu-heading">
-        <h1 className="text-2xl font-extrabold md:text-3xl">{v.name}</h1>
-        <p className="mt-1 flex flex-wrap items-center gap-3 text-sm text-[var(--swift-muted)]">
-          <span className="flex items-center gap-1"><Star className="h-4 w-4 fill-amber-400 text-amber-400" />{v.displayRating === null ? 'New' : `${v.displayRating.toFixed(1)} ${v.ratingBucket}`}</span>
-          <span className="flex items-center gap-1"><Clock className="h-4 w-4" />~{v.estimatedPrepTime} min</span>
-          {v.deliveryFee != null && <span>· {money(Number(v.deliveryFee))} delivery</span>}
-          {!v.isCurrentlyOpen && <span className="font-bold text-[var(--swift-red)]">· Closed now</span>}
-        </p>
-        {v.description && <p className="mt-2 max-w-2xl text-[var(--swift-muted)]">{v.description}</p>}
-      </div>
-
-      {v.categories.map((cat) => (
-        <section key={cat.id}>
-          <h2 className="mb-3 text-lg font-extrabold">{cat.name}</h2>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {cat.items.map((it) => (
-              <button key={it.id} onClick={() => openItem(it)} disabled={!it.isAvailable}
-                className={`swift-menu-item flex items-center gap-3 rounded-2xl border border-black/5 bg-white p-3 text-left transition-shadow ${it.isAvailable ? `hover:shadow-md ${PRESS}` : 'opacity-50'}`}>
-                <div className="min-w-0 flex-1">
-                  <p className="line-clamp-1 font-bold">{it.name}</p>
-                  <p className="h-10 line-clamp-2 text-sm leading-5 text-[var(--swift-muted)]">{it.description}</p>
-                  <p className="mt-1 font-semibold text-[var(--swift-red)]">{money(it.customerPrice ?? it.basePrice)}{!it.isAvailable && ' · sold out'}</p>
-                </div>
-                <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-[var(--swift-subtle)]">
-                  {it.imageUrl && <Image src={it.imageUrl} alt={it.name} fill unoptimized sizes="80px" loading="lazy" className="object-cover" />}
-                  {it.isAvailable && <span className="absolute bottom-1 right-1 grid h-7 w-7 place-items-center rounded-full bg-[var(--swift-red)] text-white shadow"><Plus className="h-4 w-4" /></span>}
-                </div>
-              </button>
-            ))}
-          </div>
-        </section>
-      ))}
-
-      {/* Above the app's dock on phones (--swift-dock), above the home bar
-          from md up. */}
-      {added > 0 && (
-        <Link href="/cart" className={`fixed inset-x-0 bottom-[calc(var(--swift-dock,0px)_+_1rem)] z-30 mx-auto flex w-[92%] max-w-md items-center justify-between rounded-full bg-[var(--swift-red)] px-5 py-3.5 font-bold text-white shadow-lg ${PRESS}`}>
-          <span>View cart</span><span>{added} item{added > 1 ? 's' : ''}</span>
-        </Link>
-      )}
-
-      {modal && (
-        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4" onClick={() => setModal(null)}>
-          <div role="dialog" aria-modal="true" aria-label={modal.name} className="max-h-[85vh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl bg-white p-5 pb-[calc(1.25rem_+_env(safe-area-inset-bottom))] sm:rounded-3xl sm:pb-5" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between">
-              <h3 className="text-xl font-extrabold">{modal.name}</h3>
-              <button onClick={() => setModal(null)} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><X className="h-5 w-5" /></button>
-            </div>
-            {modal.description && <p className="mt-1 text-sm text-[var(--swift-muted)]">{modal.description}</p>}
-            {(modal.optionGroups ?? []).map((g) => (
-              <div key={g.id} className="mt-4">
-                <p className="font-bold">{g.name} {g.isRequired && <span className="text-sm font-semibold text-[var(--swift-red)]">Required</span>}</p>
-                <div className="mt-2 space-y-1.5">
-                  {g.options.filter((o) => o.isAvailable).map((o) => (
-                    <label key={o.id} className="flex cursor-pointer items-center justify-between rounded-xl border border-black/10 px-3 py-2.5 has-[:checked]:border-[var(--swift-red)] has-[:checked]:bg-[var(--swift-red-50)]">
-                      <span className="flex items-center gap-2.5">
-                        <input type="radio" name={g.id} checked={sel[g.id] === o.id} onChange={() => setSel((s) => ({ ...s, [g.id]: o.id }))} className="accent-[var(--swift-red)]" />
-                        {o.name}
-                      </span>
-                      {Number(o.additionalPrice) > 0 && <span className="text-sm text-[var(--swift-muted)]">+{money(Number(o.additionalPrice))}</span>}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            ))}
-            <div className="mt-5 flex items-center gap-3">
-              <div className="flex items-center gap-3 rounded-full border border-black/10 px-2 py-1">
-                <button onClick={() => setQty((q) => Math.max(1, q - 1))} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><Minus className="h-4 w-4" /></button>
-                <span className="w-5 text-center font-bold">{qty}</span>
-                <button onClick={() => setQty((q) => q + 1)} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><Plus className="h-4 w-4" /></button>
-              </div>
-              <button onClick={confirmAdd} disabled={busy} className={`flex-1 rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-60 ${PRESS}`}>
-                {busy ? 'Adding…' : `${session.status === 'guest' ? 'Sign in to add' : 'Add'} · ${money(itemPrice(modal, sel) * qty)}`}
-              </button>
-            </div>
+    <div className="pb-24">
+      <div className={STORE_HERO}>
+        <Photo src={v.coverImageUrl} alt={v.name} vendorType={v.vendorType} sizes="(min-width: 760px) 1200px, 100vw" priority className="absolute inset-0 rounded-none" iconSize={34} />
+        <span aria-hidden className="absolute inset-x-0 top-0 h-24" style={{ background: 'linear-gradient(180deg, rgba(33,26,26,0.45), rgba(33,26,26,0))' }} />
+        <span aria-hidden className="absolute inset-x-0 bottom-0 h-[170px]" style={{ background: 'linear-gradient(180deg, rgba(33,26,26,0), rgba(33,26,26,0.62))' }} />
+        <div className="absolute inset-x-0 top-3 flex items-center gap-3 px-6 wide:px-10">
+          <BackButton />
+          <div className="flex-1" />
+          <button type="button" onClick={() => void toggleFavourite()} disabled={savingFav || (signedIn && favourites.isFetching)} aria-pressed={saved} aria-label={saved ? 'Remove from favourites' : 'Save to favourites'} className="sw-icon-btn border-0 shadow-[var(--swift-elevation-card)]">
+            <Heart size={20} className={saved ? 'fill-[var(--swift-red)] text-[var(--swift-red)]' : 'text-[var(--swift-muted-soft)]'} aria-hidden />
+          </button>
+          <button type="button" onClick={() => void shareStore()} aria-label="Share" className="sw-icon-btn"><Share2 size={20} aria-hidden /></button>
+        </div>
+        <div className="swift-menu-heading absolute inset-x-0 bottom-9 flex flex-col gap-2 px-6 wide:px-10">
+          <h1 className="sw-title text-[var(--swift-white)]">{v.name}</h1>
+          <div className="flex flex-wrap gap-2">
+            {v.isCurrentlyOpen ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-[9px] py-[3px] text-[11px] font-bold uppercase leading-[14px] tracking-[0.6px] text-[var(--swift-success)]"><span aria-hidden className="h-1.5 w-1.5 rounded-full bg-[var(--swift-success)]" />Open</span>
+            ) : (
+              <span className="rounded-full bg-[var(--swift-red-600)] px-[9px] py-[3px] text-[11px] font-bold uppercase leading-[14px] tracking-[0.6px] text-[var(--swift-white)]">Closed right now</span>
+            )}
+            <span className="inline-flex items-center gap-1 rounded-full bg-white/90 px-[9px] py-[3px] text-[11px] font-bold leading-[14px] text-[var(--swift-ink)]"><Star size={11} className="fill-[var(--swift-star)] text-[var(--swift-star)]" aria-hidden />{ratingText(v)}</span>
+            {v.cuisineTypes?.[0] ? <span className="rounded-full bg-white/90 px-[9px] py-[3px] text-[11px] font-semibold uppercase leading-[14px] tracking-[0.6px] text-[var(--swift-ink)]">{v.cuisineTypes[0]}</span> : null}
           </div>
         </div>
+      </div>
+
+      <div className="relative -mx-6 -mt-5 rounded-t-[20px] bg-[var(--swift-canvas)] px-6 pt-6 wide:-mx-10 wide:px-10">
+        <dl className="flex">
+          <div className="flex flex-1 flex-col gap-1 border-r border-[var(--swift-border)] pr-2">
+            <dt className="order-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">{v.ratingCount > 0 ? `${v.ratingCount} rating${v.ratingCount === 1 ? '' : 's'}` : 'Rating'}</dt>
+            <dd className="flex items-center gap-1 text-[13px] font-semibold leading-[18px]"><Star size={14} className="text-[var(--swift-star)]" aria-hidden />{v.displayRating === null ? 'New' : `${ratingText(v)} ${v.ratingBucket ?? ''}`.trim()}</dd>
+          </div>
+          {v.distanceKm != null ? (
+            <div className="flex flex-1 flex-col gap-1 border-r border-[var(--swift-border)] px-2">
+              <dt className="order-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">Distance</dt>
+              <dd className="flex items-center gap-1 text-[13px] font-semibold leading-[18px]"><MapPin size={14} className="text-[var(--swift-red)]" aria-hidden />{Number(v.distanceKm).toFixed(1)} km</dd>
+            </div>
+          ) : null}
+          <div className="flex flex-1 flex-col gap-1 border-r border-[var(--swift-border)] px-2 last:border-r-0">
+            <dt className="order-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">Prep time</dt>
+            <dd className="flex items-center gap-1 text-[13px] font-semibold leading-[18px]"><Clock size={14} className="text-[var(--swift-red)]" aria-hidden />~{minutes} min</dd>
+          </div>
+          {deliveryFee !== null ? (
+            <div className="flex flex-1 flex-col gap-1 px-2">
+              <dt className="order-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">Delivery</dt>
+              <dd className="flex items-center gap-1 text-[13px] font-semibold leading-[18px]"><Bike size={14} className="text-[var(--swift-red)]" aria-hidden />{money(deliveryFee)}</dd>
+            </div>
+          ) : null}
+        </dl>
+        {v.description ? <p className="mt-4 max-w-2xl text-[13px] leading-[18px] text-[var(--swift-muted)]">{v.description}</p> : null}
+        {!v.isCurrentlyOpen ? (
+          <p className="sw-note mt-5"><Info size={16} className="mt-px flex-none" aria-hidden />Closed right now — browse the menu; ordering opens with the store.</p>
+        ) : null}
+
+        {picks.length > 1 ? (
+          <section aria-labelledby="picks-title" className="mt-8">
+            <h2 id="picks-title" className="sw-heading">From the menu</h2>
+            <ul className="sw-bleed sw-rail-scroll auto-cols-[200px] pt-4">
+              {picks.map((item) => (
+                <li key={item.id}>
+                  <button type="button" onClick={() => openItem(item)} className="flex w-[200px] cursor-pointer flex-col border-0 bg-transparent p-0 text-left text-[var(--swift-ink)] active:opacity-85">
+                    <Photo src={item.imageUrl} vendorType={v.vendorType} name={item.name} sizes="200px" className="h-[200px] w-[200px]" />
+                    <span className="truncate pt-2 text-[13px] font-semibold leading-[18px]">{item.name}</span>
+                    <span className="sw-money mt-1">{money(item.customerPrice ?? item.basePrice)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {v.categories.length > 1 ? (
+          <nav aria-label="Menu sections" className="sw-bleed sticky top-0 z-10 mt-6 flex gap-3 overflow-x-auto bg-[var(--swift-canvas)] py-2 [scrollbar-width:none]">
+            <button type="button" aria-pressed={section === null} onClick={() => setSection(null)} className="sw-chip">Full menu</button>
+            {v.categories.filter((category) => category.items.length > 0).map((category) => (
+              <button key={category.id} type="button" aria-pressed={section === category.id} onClick={() => setSection(category.id)} className="sw-chip">{category.name}</button>
+            ))}
+          </nav>
+        ) : null}
+
+        <div className="grid grid-cols-1 items-start gap-x-6 wide:grid-cols-2">
+          {shown.map((cat) => (
+            <section key={cat.id} aria-labelledby={`menu-${cat.id}`}>
+              <h2 id={`menu-${cat.id}`} className="sw-heading mt-6">{cat.name}</h2>
+              <div className="sw-panel mt-3 px-4">
+                {cat.items.map((it) => (
+                  <button key={it.id} type="button" onClick={() => openItem(it)} disabled={!it.isAvailable}
+                    className="swift-menu-item flex w-full cursor-pointer gap-3 border-0 border-b border-[var(--swift-border)] bg-transparent py-4 text-left text-[var(--swift-ink)] last:border-b-0 active:opacity-85 disabled:cursor-not-allowed disabled:opacity-50">
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="text-[17px] font-semibold leading-6">{it.name}</span>
+                      {it.description ? <span className="line-clamp-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">{it.description}</span> : null}
+                      {it.imageUrl ? <span className="relative mt-2 block h-16 w-16 overflow-hidden rounded-xl"><Image src={it.imageUrl} alt="" fill unoptimized sizes="64px" loading="lazy" className="object-cover" /></span> : null}
+                    </span>
+                    <span className="flex flex-col items-end justify-between gap-2">
+                      <span className="sw-money text-[var(--swift-red)]">{money(it.customerPrice ?? it.basePrice)}</span>
+                      {it.isAvailable ? (
+                        <span aria-hidden className="grid h-8 w-8 place-items-center rounded-full bg-[var(--swift-red)] text-[var(--swift-white)]"><Plus size={16} /></span>
+                      ) : (
+                        <span className="sw-eyebrow text-[var(--swift-warning)]">Sold out</span>
+                      )}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </div>
+
+      {/* Above the app's dock on phones (--swift-dock), above the home bar
+          from 760 px up. */}
+      {cartCount > 0 && !modal && !book ? (
+        <div className="pointer-events-none fixed inset-x-0 bottom-[calc(var(--swift-dock,0px)_+_16px)] z-30 flex justify-center px-6 wide:left-[280px]">
+          <Link href="/cart" className="pointer-events-auto flex h-[52px] w-full max-w-[520px] items-center justify-between rounded-full bg-[var(--swift-red)] px-5 text-[15px] font-bold leading-[22px] text-[var(--swift-white)] shadow-[var(--swift-elevation-floating)] active:scale-[0.98]">
+            <span>View cart</span>
+            <span className="flex items-center gap-1">{cartCount} item{cartCount === 1 ? '' : 's'}{cartSubtotal !== null ? <> · <span className="sw-money">{money(cartSubtotal)}</span></> : null}</span>
+          </Link>
+        </div>
+      ) : null}
+
+      {modal && (
+        <Modal label={modal.name} onClose={() => setModal(null)}>
+            <div className="relative">
+              <Photo src={modal.imageUrl} vendorType={v.vendorType} name={modal.name} sizes="480px" className="aspect-[4/3] max-h-[300px] w-full rounded-none" iconSize={40} />
+              <button type="button" onClick={() => setModal(null)} aria-label="Close" data-modal-initial-focus className="sw-icon-btn absolute right-3 top-3"><X size={20} aria-hidden /></button>
+            </div>
+            <div className="flex flex-col gap-4 px-6 pb-6 pt-5">
+              <div>
+                <h3 className="sw-title">{modal.name}</h3>
+                {modal.description ? <p className="mt-1 text-[15px] leading-[22px] text-[var(--swift-muted)]">{modal.description}</p> : null}
+                <p className="sw-money-lg mt-2">{money(itemPrice(modal, sel))}</p>
+                <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">{v.name}</p>
+              </div>
+              {(modal.optionGroups ?? []).map((g) => (
+                <fieldset key={g.id}>
+                  <legend className="sw-heading">{g.name} {g.isRequired ? <span className="text-[13px] font-semibold text-[var(--swift-red)]">Required</span> : null}</legend>
+                  {g.options.filter((o) => o.isAvailable).map((o) => (
+                    <label key={o.id} className="flex min-h-14 cursor-pointer items-center gap-3 border-b border-[var(--swift-border)] py-2">
+                      <input type="radio" name={g.id} checked={sel[g.id] === o.id} onChange={() => setSel((cur) => ({ ...cur, [g.id]: o.id }))} className="h-5 w-5 accent-[var(--swift-red)]" />
+                      <span className="flex-1 text-[15px] font-semibold leading-5">{o.name}</span>
+                      <span className="text-[13px] leading-[18px] text-[var(--swift-muted)]">{Number(o.additionalPrice) > 0 ? `+${money(Number(o.additionalPrice))}` : 'Included'}</span>
+                    </label>
+                  ))}
+                </fieldset>
+              ))}
+              <div className="flex items-center gap-3">
+                <span className="flex items-center gap-3">
+                  <button type="button" onClick={() => setQty((q) => Math.max(1, q - 1))} aria-label="Decrease quantity" className="sw-icon-btn border-[var(--swift-border-strong)]"><Minus size={16} aria-hidden /></button>
+                  <span className="min-w-5 text-center text-[15px] font-semibold leading-[22px]" aria-live="polite">{qty}</span>
+                  <button type="button" onClick={() => setQty((q) => q + 1)} aria-label="Increase quantity" className="sw-icon-btn border-[var(--swift-border-strong)]"><Plus size={18} aria-hidden /></button>
+                </span>
+                <button type="button" onClick={confirmAdd} disabled={busy} className="sw-btn flex-1">
+                  {busy ? 'Adding…' : `${session.status === 'guest' ? 'Sign in to add' : 'Add'} · ${money(itemPrice(modal, sel) * qty)}`}
+                </button>
+              </div>
+            </div>
+        </Modal>
       )}
 
       {book && (
-        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4" onClick={() => setBook(null)}>
-          <div role="dialog" aria-modal="true" aria-label={`Book ${book.name}`} className="max-h-[85vh] w-full max-w-md overflow-y-auto overscroll-contain rounded-t-3xl bg-white p-5 pb-[calc(1.25rem_+_env(safe-area-inset-bottom))] sm:rounded-3xl sm:pb-5" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between">
-              <h3 className="text-xl font-extrabold">Book {book.name}</h3>
-              <button onClick={() => setBook(null)} className="grid h-8 w-8 place-items-center rounded-full hover:bg-[var(--swift-subtle)]"><X className="h-5 w-5" /></button>
+        <Modal label={`Book ${book.name}`} onClose={() => setBook(null)} className="px-6 pb-6 pt-5">
+            <div className="flex items-start gap-3">
+              <div className="flex-1">
+                <h3 className="sw-title">Book {book.name}</h3>
+                <p className="sw-money-lg mt-1">{money(book.customerPrice ?? book.basePrice)}</p>
+              </div>
+              <button type="button" onClick={() => setBook(null)} aria-label="Close" data-modal-initial-focus className="sw-icon-btn"><X size={20} aria-hidden /></button>
             </div>
-            <p className="mt-1 font-semibold text-[var(--swift-red)]">{money(book.customerPrice ?? book.basePrice)}</p>
-            <p className="mt-4 font-bold">Pick a day</p>
-            <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+            <p className="sw-heading mt-5">Pick a day</p>
+            <div className="sw-chip-row mt-2 pb-1">
               {nextDays(7).map((d) => (
-                <button key={d.key} onClick={() => setBday(d.key)} className={`shrink-0 rounded-xl border px-3 py-2 text-sm font-semibold ${bday === d.key ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-black/10'}`}>{d.label}</button>
+                <button key={d.key} type="button" aria-pressed={bday === d.key} onClick={() => setBday(d.key)} className="sw-chip">{d.label}</button>
               ))}
             </div>
-            <p className="mt-4 font-bold">Pick a time</p>
-            {slots === null ? <p className="mt-2 text-sm text-[var(--swift-muted)]">Loading times…</p>
-              : slots.length === 0 ? <p className="mt-2 text-sm text-[var(--swift-muted)]">No times available on this day — try another.</p>
+            <p className="sw-heading mt-5">Pick a time</p>
+            {slots === null ? <p className="sw-caption mt-2">Loading times…</p>
+              : slots.length === 0 ? <p className="sw-caption mt-2">No times available on this day — try another.</p>
               : <div className="mt-2 grid grid-cols-3 gap-2">
-                  {slots.map((s) => <button key={s} onClick={() => setSlot(s)} className={`rounded-xl border py-2 text-sm font-semibold ${slot === s ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-black/10'}`}>{formatAppointmentClock(s)}</button>)}
+                  {slots.map((slotStart) => <button key={slotStart} type="button" aria-pressed={slot === slotStart} onClick={() => setSlot(slotStart)} className="sw-chip w-full">{formatAppointmentClock(slotStart)}</button>)}
                 </div>}
-            <button onClick={confirmBook} disabled={busy || !slot} className={`mt-5 w-full rounded-full bg-[var(--swift-red)] py-3 font-bold text-white disabled:opacity-50 ${PRESS}`}>{busy ? 'Booking…' : !slot ? 'Choose a time' : session.status === 'guest' ? 'Sign in to book' : 'Add booking to cart'}</button>
-          </div>
-        </div>
+            <button type="button" onClick={confirmBook} disabled={busy || !slot} className="sw-btn sw-btn-block mt-6">{busy ? 'Booking…' : !slot ? 'Choose a time' : session.status === 'guest' ? 'Sign in to book' : 'Add booking to cart'}</button>
+        </Modal>
       )}
 
-      {toast && <div role="status" className="fixed bottom-[calc(var(--swift-dock,0px)_+_5.5rem)] left-1/2 z-50 -translate-x-1/2 rounded-full bg-[var(--swift-ink)] px-4 py-2.5 text-sm font-semibold text-white shadow-lg">{toast}</div>}
+      {toast && <div role="status" className="sw-toast">{toast}</div>}
     </div>
   );
 }

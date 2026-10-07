@@ -67,6 +67,10 @@ const BEHAVIOUR_FLAGS: Array<{ name: string; whenUnset: string; what: string }> 
   { name: 'CARD_RAIL_V2', whenUnset: '0', what: 'whether partners can add a card and pay the weekly fee by card (card rail v2)' },
   // [AX297 F5] Unset reads as OFF (utils/card-rail.ts cardRailV2DrainEnabled); production refuses 1.
   { name: 'CARD_RAIL_V2_DRAIN', whenUnset: '0', what: 'whether the worker still settles card rail v2 work already in flight after v2 is switched off' },
+  // [PT-2] Unset reads as OFF (utils/card-rail.ts cardEnrollEnabled): Pay now by card only.
+  { name: 'CARD_RAIL_ENROLL', whenUnset: '0', what: 'whether partners may save a card for the weekly fee' },
+  // [PT-2] Unset reads as OFF (utils/card-rail.ts cardSimulatorLiveEnabled); production refuses any other value.
+  { name: 'CARD_RAIL_SIMULATOR_LIVE', whenUnset: '0', what: 'whether a test server shows the simulator card choice' },
 ];
 
 /**

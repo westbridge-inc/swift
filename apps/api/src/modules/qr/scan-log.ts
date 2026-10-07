@@ -1,9 +1,9 @@
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import type { FastifyRequest } from 'fastify';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { QrLookup, ScanVerdict } from './qr-codes';
 import { sanitizeSrc, sanitizeTemplate } from './qr-codes';
-import { isProduction } from '../../utils/runtime-mode';
+import { qrSalt } from './qr-config';
 
 // ---------------------------------------------------------------------------
 // Scan logging — the analytics spine, fire-and-forget by construction. A scan
@@ -15,18 +15,15 @@ import { isProduction } from '../../utils/runtime-mode';
 // derivation (unlinkable across days — DPA), hashed UA, coarse device fields.
 // ---------------------------------------------------------------------------
 
-const QUEUE_MAX = Math.max(100, Number(process.env['SCAN_LOG_QUEUE_MAX'] ?? 10_000));
+const configuredMax = Number(process.env['SCAN_LOG_QUEUE_MAX'] ?? 10_000);
+const QUEUE_MAX = Number.isSafeInteger(configuredMax) && configuredMax >= 100 ? configuredMax : 10_000;
 const FLUSH_INTERVAL_MS = 2_000;
 const FLUSH_BATCH = 500;
+const WRITE_ATTEMPTS = 3;
 
 /** Mirrors the identitySalt() contract: required in production, fixed in dev. */
 function scanIpSalt(): string {
-  const salt = process.env['SCAN_IP_SALT'];
-  if (!salt) {
-    if (isProduction()) throw new Error('SCAN_IP_SALT is required in production');
-    return 'dev-scan-ip-salt';
-  }
-  return salt;
+  return qrSalt('SCAN_IP_SALT');
 }
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -55,10 +52,14 @@ export function parseUserAgent(ua: string | undefined): { osFamily: string; devi
 
 type PendingScanEvent = Prisma.ScanEventCreateManyInput;
 
-let queue: PendingScanEvent[] = [];
+type BufferedScan = { event: PendingScanEvent; attempts: number };
+let queue: BufferedScan[] = [];
 let lostTotal = 0;
 let timer: ReturnType<typeof setInterval> | null = null;
 let client: PrismaClient | null = null;
+let draining: Promise<void> | null = null;
+let inFlight = 0;
+let stopping = false;
 
 /** Observability hook (Part 17): qr_scan_events_lost_total. */
 export function scanEventsLostTotal(): number {
@@ -92,38 +93,93 @@ export function buildScanEvent(
 
 /** Fire-and-forget enqueue. Never throws, never awaits, sheds above the cap. */
 export function enqueueScanEvent(event: PendingScanEvent): void {
-  if (queue.length >= QUEUE_MAX) {
+  if (stopping || queue.length + inFlight >= QUEUE_MAX) {
     lostTotal += 1;
     return;
   }
-  queue.push(event);
+  // Retries after an unknown commit reuse the same ID. scan_events has no
+  // other unique key; ON CONFLICT therefore only deduplicates this event.
+  queue.push({ event: { ...event, id: randomUUID() }, attempts: 0 });
+}
+
+/** Construction can throw before enqueue (e.g. a broken hash setting).
+ * Keep that failure separate from destination/candidate determination. */
+export function recordScanEvent(build: () => PendingScanEvent): void {
+  try { enqueueScanEvent(build()); } catch { lostTotal += 1; }
+}
+
+function isRowRefusal(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: string }).code;
+  // A connection/timeout/unknown-commit failure is never evidence that a
+  // particular row is bad. Only definite data refusals may be subdivided.
+  return code === 'P2003' || code === 'P2011' || code === 'P2014'
+    || error.message.includes('[STA-1 lineage]') || error.message.includes('STA-1 lineage refused');
+}
+
+async function writeBatch(prisma: PrismaClient, batch: BufferedScan[]): Promise<BufferedScan[]> {
+  try {
+    // createMany is one atomic statement. A rejected statement persists none
+    // of its rows; each retry keeps the original tenant and physical QR ID.
+    await prisma.scanEvent.createMany({ data: batch.map(row => row.event), skipDuplicates: true });
+    return [];
+  } catch (error) {
+    if (isRowRefusal(error)) {
+      if (batch.length === 1) { lostTotal += 1; return []; }
+      const middle = Math.floor(batch.length / 2);
+      // Sequential subdivision also prevents unbounded writer concurrency.
+      return [...await writeBatch(prisma, batch.slice(0, middle)), ...await writeBatch(prisma, batch.slice(middle))];
+    }
+    return batch.filter(row => {
+      row.attempts += 1;
+      if (row.attempts < WRITE_ATTEMPTS) return true;
+      lostTotal += 1;
+      return false;
+    });
+  }
 }
 
 async function flush(): Promise<void> {
-  if (!client || queue.length === 0) return;
+  const prisma = client;
+  if (!prisma || queue.length === 0) return;
   const batch = queue.splice(0, FLUSH_BATCH);
+  inFlight = batch.length;
   try {
-    await client.scanEvent.createMany({ data: batch });
-  } catch {
-    // Analytics never takes the request path down with it; a failed batch is
-    // shed-and-counted exactly like queue overflow.
-    lostTotal += batch.length;
+    const retry = await writeBatch(prisma, batch);
+    queue.unshift(...retry);
+  } finally { inFlight = 0; }
+}
+
+async function drain(all: boolean): Promise<void> {
+  if (draining) {
+    await draining;
+    // Another waiter may already have started the next write and removed its
+    // rows from queue. Shutdown must wait for that in-flight write as well.
+    if (all) await drain(true);
+    return;
   }
+  const work = (async () => {
+    do { await flush(); } while (all && client && queue.length > 0);
+  })();
+  draining = work;
+  try { await work; } finally { if (draining === work) draining = null; }
 }
 
 export function startScanLog(prisma: PrismaClient): void {
   client = prisma;
+  stopping = false;
   if (timer) return;
-  timer = setInterval(() => { void flush(); }, FLUSH_INTERVAL_MS);
+  timer = setInterval(() => { if (!draining) void drain(false); }, FLUSH_INTERVAL_MS);
   timer.unref();
 }
 
 /** Drains everything now — tests and shutdown call this for determinism. */
 export async function flushScanLog(): Promise<void> {
-  while (client && queue.length > 0) await flush();
+  await drain(true);
 }
 
 export async function stopScanLog(): Promise<void> {
+  stopping = true;
   if (timer) { clearInterval(timer); timer = null; }
   await flushScanLog();
   client = null;
@@ -133,4 +189,5 @@ export async function stopScanLog(): Promise<void> {
 export function resetScanLogForTests(): void {
   queue = [];
   lostTotal = 0;
+  stopping = false;
 }

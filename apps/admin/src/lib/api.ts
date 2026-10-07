@@ -1,5 +1,6 @@
 import type { MmgCheckoutSupportDetail, MmgCheckoutSupportPage, MmgCheckoutSupportStatus } from '@swift/types';
 import type { RejectionReasonCode } from './rejection-reasons';
+import { headerSafe, normaliseReason } from './reason-rules';
 
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 /** The header the server reads first for the reason law (ADM-006). */
@@ -63,7 +64,18 @@ export async function logout(): Promise<void> {
  * field (the vendor-visible waiver reason, the ban's record, …).
  */
 async function apiFetch(path: string, options?: RequestInit & { reason?: string }) {
-  const { reason, ...requestOptions } = options ?? {};
+  const { reason: stated, ...requestOptions } = options ?? {};
+  // [MC-PR1] A header can carry only Latin-1. iPhone keyboards type ’ “ ” – —
+  // by default, and fetch() refuses such a header before anything is sent —
+  // the click did nothing and nothing said why. Smart punctuation travels as
+  // its plain equivalent; anything else that cannot travel is refused here,
+  // with a code the outcome layer turns into words, instead of a TypeError.
+  const reason = stated ? normaliseReason(stated) : stated;
+  if (reason && !headerSafe(reason)) {
+    const error = new Error('The reason has characters that cannot be sent. Use letters, numbers and ordinary punctuation.') as Error & { code?: string };
+    error.code = 'REASON_UNSENDABLE';
+    throw error;
+  }
   const doFetch = () =>
     fetch(`${API_URL}${path}`, {
       ...requestOptions,
@@ -83,7 +95,11 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
       if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
         window.location.href = '/login';
       }
-      throw new Error('Session expired. Please sign in again.');
+      // [MC-PR1] status + code, so the outcome layer can say so in words
+      const expired = new Error('Session expired. Please sign in again.') as Error & { code?: string; status?: number };
+      expired.code = 'SESSION_EXPIRED';
+      expired.status = 401;
+      throw expired;
     }
   }
   const json = await res.json().catch(() => ({}));
@@ -335,6 +351,10 @@ export const resolveSupportTicket = (
     method: 'PUT',
     body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
   });
+/** [DELETION-INTEGRITY] Completes an in-app account closure request: the
+ *  server runs the same erasure checks as a person's own deletion. */
+export const completeAccountClosure = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/support/${id}/complete-account-closure`, { method: 'POST', body: JSON.stringify({ reason }), reason });
 // [AF-MOB-006] Custody recovery after pickup: the operations side of an owned
 // case. Directing, naming the relay rider and confirming a return are C3 —
 // each carries the operator's stated reason on the one reason transport.

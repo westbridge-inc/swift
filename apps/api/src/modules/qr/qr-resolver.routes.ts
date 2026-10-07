@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { classifyScan, normalizeShortCode, publicWebBase, redirectTargetFor, sanitizeTemplate } from './qr-codes';
 import { QrService } from './qr.service';
-import { buildScanEvent, enqueueScanEvent, startScanLog, stopScanLog } from './scan-log';
+import { buildScanEvent, recordScanEvent, startScanLog, stopScanLog } from './scan-log';
 
 // ---------------------------------------------------------------------------
 // GET /s/:code — the public short-link resolver, registered at the ROOT path
@@ -33,7 +33,7 @@ export async function qrResolverRoutes(app: FastifyInstance) {
       const verdict = classifyScan(qr, new Date(), graceDays);
 
       // Fire-and-forget: the redirect never waits on analytics.
-      enqueueScanEvent(buildScanEvent(request, qr, verdict));
+      recordScanEvent(() => buildScanEvent(request, qr, verdict));
 
       const target = redirectTargetFor(verdict, qr, {
         base: publicWebBase(),

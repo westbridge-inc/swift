@@ -55,8 +55,12 @@ export class QrAnalyticsService {
   constructor(private prisma: PrismaClient) {}
 
   async forVendor(vendorId: string, range: QrAnalyticsRange): Promise<QrAnalyticsResponse> {
+    // Bound to the vendor's own tenant. Matching on entityId alone counts a
+    // stale code from a tenant this vendor has left — the same cross-tenant
+    // match the resolver was fixed for, one service over.
+    const vendor = await this.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { tenantId: true } });
     const codes = await this.prisma.qrCode.findMany({
-      where: { entityType: 'VENDOR', entityId: vendorId },
+      where: { entityType: 'VENDOR', entityId: vendorId, tenantId: vendor.tenantId },
       select: { id: true },
     });
     const ids = codes.map((c) => c.id);
@@ -67,12 +71,12 @@ export class QrAnalyticsService {
 
     const countDecisions = (decisions: ScanDecision[]) =>
       this.prisma.scanEvent.count({
-        where: { qrCodeId: { in: ids }, occurredAt: { gte: since }, decision: { in: decisions } },
+        where: { tenantId: vendor.tenantId, qrCodeId: { in: ids }, occurredAt: { gte: since }, decision: { in: decisions } },
       });
     const rollupSum = async (decisions: ScanDecision[]) =>
       (await this.prisma.scanDailyRollup.aggregate({
         _sum: { count: true },
-        where: { qrCodeId: { in: ids }, date: { gte: since }, decision: { in: decisions } },
+        where: { tenantId: vendor.tenantId, qrCodeId: { in: ids }, date: { gte: since }, decision: { in: decisions } },
       }))._sum.count ?? 0;
 
     const [scansRaw, scansRolled, appOpensRaw, appOpensRolled, storeViewsRaw, storeViewsRolled, installTapsRaw, installTapsRolled] =
@@ -87,10 +91,10 @@ export class QrAnalyticsService {
       // [Q12] Only orders the store can see — never one still held in the
       // customer's free-cancel window, nor one cancelled inside it.
       this.prisma.order.count({
-        where: { attributionQrCodeId: { in: ids }, channel: 'WEB', placedAt: { gte: since }, AND: [vendorVisibleFilter(this.prisma)] },
+        where: { tenantId: vendor.tenantId, vendorId, attributionQrCodeId: { in: ids }, channel: 'WEB', placedAt: { gte: since }, AND: [vendorVisibleFilter(this.prisma)] },
       }),
       this.prisma.attributionClaim.count({
-        where: { qrCodeId: { in: ids }, destinationPath: { not: null }, createdAt: { gte: since } },
+        where: { tenantId: vendor.tenantId, qrCodeId: { in: ids }, destinationPath: { not: null }, createdAt: { gte: since } },
       }),
     ]);
 
@@ -99,7 +103,8 @@ export class QrAnalyticsService {
     const uniqueRows = await this.prisma.$queryRaw<{ n: bigint }[]>(Prisma.sql`
       SELECT COUNT(DISTINCT to_char("occurredAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') || '|' || COALESCE("ipHash", '')) AS n
       FROM "scan_events"
-      WHERE "qrCodeId" IN (${Prisma.join(ids)})
+      WHERE "tenantId" = ${vendor.tenantId}
+        AND "qrCodeId" IN (${Prisma.join(ids)})
         AND "occurredAt" >= ${since}
         AND "decision" = ANY(ARRAY[${Prisma.join(SCAN_DECISIONS)}]::"ScanDecision"[])
     `);
@@ -108,7 +113,8 @@ export class QrAnalyticsService {
     const scanByDay = await this.prisma.$queryRaw<{ day: string; n: bigint }[]>(Prisma.sql`
       SELECT to_char("occurredAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day, COUNT(*) AS n
       FROM "scan_events"
-      WHERE "qrCodeId" IN (${Prisma.join(ids)})
+      WHERE "tenantId" = ${vendor.tenantId}
+        AND "qrCodeId" IN (${Prisma.join(ids)})
         AND "occurredAt" >= ${since}
         AND "decision" = ANY(ARRAY[${Prisma.join(SCAN_DECISIONS)}]::"ScanDecision"[])
       GROUP BY 1
@@ -116,13 +122,13 @@ export class QrAnalyticsService {
     const rollupByDay = await this.prisma.scanDailyRollup.groupBy({
       by: ['date'],
       _sum: { count: true },
-      where: { qrCodeId: { in: ids }, date: { gte: since }, decision: { in: SCAN_DECISIONS } },
+      where: { tenantId: vendor.tenantId, qrCodeId: { in: ids }, date: { gte: since }, decision: { in: SCAN_DECISIONS } },
     });
     // [Q12] The per-day web orders follow the board's visibility rule too —
     // read through the one Prisma rule, never restated in SQL — and bucket by
     // UTC date exactly as the scan series above does.
     const visibleWebOrders = await this.prisma.order.findMany({
-      where: { attributionQrCodeId: { in: ids }, channel: 'WEB', placedAt: { gte: since }, AND: [vendorVisibleFilter(this.prisma)] },
+      where: { tenantId: vendor.tenantId, vendorId, attributionQrCodeId: { in: ids }, channel: 'WEB', placedAt: { gte: since }, AND: [vendorVisibleFilter(this.prisma)] },
       select: { placedAt: true },
     });
     const orderByDay = [...visibleWebOrders.reduce((days, o) => {
@@ -145,12 +151,12 @@ export class QrAnalyticsService {
     const templateRaw = await this.prisma.scanEvent.groupBy({
       by: ['template'],
       _count: { _all: true },
-      where: { qrCodeId: { in: ids }, occurredAt: { gte: since }, decision: { in: SCAN_DECISIONS }, template: { not: null } },
+      where: { tenantId: vendor.tenantId, qrCodeId: { in: ids }, occurredAt: { gte: since }, decision: { in: SCAN_DECISIONS }, template: { not: null } },
     });
     const templateRolled = await this.prisma.scanDailyRollup.groupBy({
       by: ['template'],
       _sum: { count: true },
-      where: { qrCodeId: { in: ids }, date: { gte: since }, decision: { in: SCAN_DECISIONS }, template: { not: null } },
+      where: { tenantId: vendor.tenantId, qrCodeId: { in: ids }, date: { gte: since }, decision: { in: SCAN_DECISIONS }, template: { not: null } },
     });
     const templateMap = new Map<string, number>();
     for (const r of templateRaw) templateMap.set(r.template!, (templateMap.get(r.template!) ?? 0) + r._count._all);

@@ -6,6 +6,7 @@ import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { serveEmergencyPolicy } from '../country/emergency-policy';
 import { emergencyPolicyCounter } from '../../plugins/observability';
+import { PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
 import { adsEnabled } from '../ads/ads-enabled';
 
 /**
@@ -161,7 +162,7 @@ export async function publicRoutes(app: FastifyInstance) {
     // web's 300s fetch cache stretched that race into a real stale window.
     // The relational predicate makes liveness part of the SAME read.
     const vendors = await app.prisma.vendor.findMany({
-      where: { ...where, tenant: { isActive: true } },
+      where: { ...where, ...PUBLIC_VENDOR_TENANT },
       select: PUBLIC_VENDOR_SELECT,
       orderBy: [{ isFeatured: 'desc' }, { averageRating: 'desc' }, { totalRatings: 'desc' }],
       take: 200,
@@ -192,7 +193,7 @@ export async function publicRoutes(app: FastifyInstance) {
     // client can correct its URL. The write side arrives with the rename feature; until
     // then this costs one indexed miss on a 404 that was already a 404.
     const bySlug = (slug: string) => app.prisma.vendor.findFirst({
-      where: { slug, ...PUBLIC_WHERE, tenantId, tenant: { isActive: true } },
+      where: { slug, ...PUBLIC_WHERE, tenantId, ...PUBLIC_VENDOR_TENANT },
       select: {
         ...PUBLIC_VENDOR_SELECT,
         // The app already shows guests the street address (pickup needs it);
@@ -234,7 +235,7 @@ export async function publicRoutes(app: FastifyInstance) {
       });
       if (redirect) {
         const current = await app.prisma.vendor.findFirst({
-          where: { id: redirect.entityId, ...PUBLIC_WHERE, tenantId, tenant: { isActive: true } },
+          where: { id: redirect.entityId, ...PUBLIC_WHERE, tenantId, ...PUBLIC_VENDOR_TENANT },
           select: { slug: true },
         });
         if (current) vendor = await bySlug(current.slug);
