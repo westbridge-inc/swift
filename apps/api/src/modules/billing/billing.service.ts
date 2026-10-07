@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { hasMmgTerminalProof, isMmgTerminalStatus, matchesLookupGeneration, mmgNegativeMatches, mmgPaymentRaw, mmgTerminalProof, paymentFacts, type MmgLookupObservation } from './mmg-terminal-evidence';
 import type { PrismaClient, Subscription, SubscriptionPayment, Prisma, SubscriptionStatus, SubscriptionType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isReviewSubscription, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
@@ -3192,6 +3193,8 @@ export class BillingService {
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
     }
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail to choose (before any write).
+    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     let resumedFromPause = false;
     // The instant charge below is anchored to exactly this due date (DS213 F2-1).
     const resumedAt = new Date();
@@ -3318,6 +3321,8 @@ export class BillingService {
    * actor, matching the billing module's top-up precedent.
    */
   async stopBilling(subscriptionId: string, actorUserId: string) {
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no weekly billing to stop.
+    if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
     return this.prisma.$transaction(async (tx) => {
       const payer = await lockSubscriptionPayer(tx, subscriptionId);
       if (payer.userId !== actorUserId) throw new AppError(403, 'FORBIDDEN', 'This weekly fee belongs to another payer.');

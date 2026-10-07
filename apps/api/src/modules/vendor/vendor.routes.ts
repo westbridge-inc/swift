@@ -39,6 +39,7 @@ import { parseMenuText } from '../../utils/menu-text-parse';
 import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { ReviewDemoMoneyRefusedError, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
@@ -750,6 +751,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (target.id === request.user.userId) {
       throw new AppError(400, 'SELF_STAFF', 'You already own this store');
     }
+    // [REVIEW-PARTNER] No store membership is granted by, or to, a demo account.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, target.id);
     const existing = await app.prisma.vendorStaff.findUnique({
       where: { vendorId_userId: { vendorId, userId: target.id } },
     });
@@ -780,6 +783,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const body = updateStaffSchema.parse(request.body);
     const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
+    // [REVIEW-PARTNER] No store membership is raised by, or for, a demo account.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, existing.userId);
 
     const member = await app.prisma.vendorStaff.update({
       where: { id: request.params.id },
@@ -1165,6 +1170,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;
     const body = updateVendorProfileSchema.parse(request.body);
+    // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
+    // refused before it is even read, and before any step-up, write or owner notice.
+    if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     // [Q8] A moved pin is held to the same market rule as a new store, before anything is written.
     const pin = body.latitude !== undefined && body.longitude !== undefined ? { latitude: body.latitude, longitude: body.longitude } : null;
     if (pin) assertStorePinInMarket(pin.latitude, pin.longitude);
@@ -3599,6 +3607,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     await requireStepUp(app, request);
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId } });
     if (!sub) throw new NotFoundError('Subscription');
