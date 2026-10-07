@@ -85,6 +85,13 @@ describe('email confirmation on the web', () => {
     expect(writes()).toHaveLength(1);
     expect(screen.queryByText('Your details are saved.')).toBeNull();
   });
+  it.each(['account', 'same-account-login'])('%s dismisses pending confirmation before another request can be sent', async (change) => {
+    await begin();
+    await act(async () => { adoptSession(change === 'account' ? 'other-owner' : profile.id); });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(calls.filter((r) => r.url.pathname.includes('/auth/step-up'))).toHaveLength(0);
+    expect(writes()).toHaveLength(1);
+  });
   it('a second step-up refusal is shown without a retry loop or false success', async () => {
     const { user } = await begin(); rejectRetry = true; await enterCode(user);
     await screen.findByRole('alert'); expect(writes()).toHaveLength(2);
