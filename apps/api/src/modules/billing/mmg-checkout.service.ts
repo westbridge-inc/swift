@@ -67,7 +67,9 @@ import { partnerReceiptIds } from './mmg-checkout-receipt';
 export const MMG_CHECKOUT_TTL_MS = 30 * 60_000;
 /** A reply is checked for a day; after that a late confirmation is still looked for, for a week. */
 const CONFIRM_WINDOW_MS = 24 * 3_600_000;
-const LATE_WINDOW_MS = 7 * 24 * 3_600_000;
+/** How long after a checkout (or its last reply) a late MMG answer is still
+ *  looked for and credited. Account deletion waits for it to close. */
+export const LATE_WINDOW_MS = 7 * 24 * 3_600_000;
 const LATE_CHECK_MS = 6 * 3_600_000;
 const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_000] as const;
 /** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's time
