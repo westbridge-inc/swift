@@ -1,4 +1,5 @@
 import { SITE_DOMAIN } from '../site.domain';
+import { MAP_EMBED_ORIGIN } from './live-tracking';
 
 /**
  * [SWX-DEV-WEB-076 · integrated] ONE authority for the origin the browser
@@ -143,6 +144,10 @@ export function buildBrowserContentSecurityPolicy(
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
     `connect-src ${connectSources.join(' ')}`,
+    // [WEB-GUARDS] The public trip/parcel pages frame an approximate map. With
+    // no frame-src the browser fell back to default-src 'self' and blocked it.
+    // Exactly the one map origin those pages embed; nothing broader.
+    `frame-src ${MAP_EMBED_ORIGIN}`,
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",

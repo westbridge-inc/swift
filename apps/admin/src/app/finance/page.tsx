@@ -12,6 +12,7 @@ import {
 } from '@/lib/api';
 import { askReason } from '@/lib/ask-reason';
 import { MutationError } from '@/components/MutationError';
+import { DataUnavailable, METRIC_UNAVAILABLE } from '@/components/dashboard/DataUnavailable';
 
 /**
  * `Number(n || 0)` rendered a MISSING amount as `$0` — and on a finance page a
@@ -42,6 +43,12 @@ const gyd = (n: unknown) => {
  * Anything that is not a `YYYY-MM-DD` renders as an em-dash: a wrong date is a
  * lie, a missing one is only missing.
  */
+/** A count: a real number prints as itself; anything absent prints an em-dash, never 0. */
+const count = (n: unknown) => {
+  const v = typeof n === 'string' && n.trim() !== '' ? Number(n) : n;
+  return typeof v === 'number' && Number.isFinite(v) ? v.toLocaleString() : '—';
+};
+
 const gyDay = (ymd: unknown) =>
   typeof ymd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ymd)
     ? new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC' })
@@ -75,6 +82,10 @@ function MmgSection() {
   });
 
   const mix = mixQ.data?.data;
+  // [ADMIN-TRUTH] A failed read renders "unavailable", never the zero or the
+  // empty state an empty ledger would show.
+  const mixBlind = mixQ.isError && !mix;
+  const ledgerBlind = ledgerQ.isError && !ledgerQ.data;
   const rows = ledgerQ.data?.data ?? [];
   const summary = ledgerQ.data?.summary ?? {};
   const outstanding = (['OWED', 'RIDER_CONFIRMED', 'STORE_CONFIRMED'] as const).reduce(
@@ -89,6 +100,10 @@ function MmgSection() {
           <p className="text-[var(--muted)] text-sm">Payment mix (30d, completed)</p>
           {mixQ.isLoading ? (
             <p className="text-3xl font-bold mt-1">—</p>
+          ) : mixBlind ? (
+            <div className="mt-2">
+              <DataUnavailable what="Payment mix" notAnAllClear="This is not zero orders — the mix could not be read." onRetry={() => void mixQ.refetch()} />
+            </div>
           ) : (
             <div className="mt-2 space-y-1">
               {(mix?.byMethod ?? []).map((m) => (
@@ -105,12 +120,14 @@ function MmgSection() {
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Store → rider fees outstanding</p>
-          <p className="text-3xl font-bold mt-1">{ledgerQ.isLoading ? '—' : gyd(outstanding.total)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">{outstanding.count} unsettled handovers (MMG orders)</p>
+          <p className="text-3xl font-bold mt-1">{ledgerQ.isLoading ? '—' : ledgerBlind ? METRIC_UNAVAILABLE : gyd(outstanding.total)}</p>
+          <p className="text-[var(--muted)] text-xs mt-1">
+            {ledgerBlind ? 'unsettled handovers unknown — the ledger could not be read' : `${outstanding.count} unsettled handovers (MMG orders)`}
+          </p>
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">MMG deliveries unconfirmed</p>
-          <p className="text-3xl font-bold mt-1">{mixQ.isLoading ? '—' : Number(mix?.mmgUnconfirmed ?? 0).toLocaleString()}</p>
+          <p className="text-3xl font-bold mt-1">{mixQ.isLoading ? '—' : mixBlind ? METRIC_UNAVAILABLE : count(mix?.mmgUnconfirmed)}</p>
           <p className="text-[var(--muted)] text-xs mt-1">delivered, vendor never marked the payment received</p>
         </div>
       </div>
@@ -138,6 +155,8 @@ function MmgSection() {
         </p>
         {ledgerQ.isLoading ? (
           <p className="text-[var(--muted)] text-sm">Loading…</p>
+        ) : ledgerBlind ? (
+          <DataUnavailable what="The MMG cash ledger" notAnAllClear="This is not an empty ledger — it could not be read." onRetry={() => void ledgerQ.refetch()} />
         ) : rows.length === 0 ? (
           <p className="text-[var(--muted)] text-sm">Nothing here — no {filter === 'ALL' ? '' : `${LEDGER_STATUS[filter as CashSettlementRow['status']].label.toLowerCase()} `}entries.</p>
         ) : (
@@ -167,12 +186,20 @@ function MmgSection() {
  *  is acknowledged as reviewed — it is a record, never a payout. */
 function SettlementsSection() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
+  const { data, isLoading, isError, refetch } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
   const process = useMutation({
     mutationFn: ({ id, reference, reason }: { id: string; reference?: string; reason: string }) => processSettlement(id, reference, reason),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settlements'] }),
   });
   const rows: any[] = data?.data ?? [];
+  // [ADMIN-TRUTH] A failed read is shown; only a real empty list is hidden.
+  if (isError && !data) {
+    return (
+      <div className="mb-6">
+        <DataUnavailable what="Vendor sales digests" notAnAllClear="Digests may be waiting for review — the list could not be read." onRetry={() => void refetch()} />
+      </div>
+    );
+  }
   if (!isLoading && rows.length === 0) return null; // nothing pending → no noise
 
   return (
@@ -220,8 +247,10 @@ function SettlementsSection() {
 }
 
 export default function FinancePage() {
-  const { data, isLoading } = useQuery({ queryKey: ['revenue'], queryFn: fetchRevenue });
+  const { data, isLoading, isError, refetch } = useQuery({ queryKey: ['revenue'], queryFn: fetchRevenue });
   const summary = data?.data?.summary;
+  // [ADMIN-TRUTH] A failed revenue read says so; it never prints a zero.
+  const blind = isError && !data;
   const daily = data?.data?.dailyRevenue ?? [];
 
   return (
@@ -232,20 +261,30 @@ export default function FinancePage() {
         commission, no markup, no customer fees.
       </p>
 
+      {blind && (
+        <div className="mb-6">
+          <DataUnavailable
+            what="Revenue"
+            notAnAllClear="These figures are not zero — they are unknown."
+            onRetry={() => void refetch()}
+          />
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Weekly Subscription Revenue</p>
-          <p className="text-3xl font-bold mt-1">{isLoading ? '—' : gyd(summary?.weeklySubscriptionRevenue)}</p>
+          <p className="text-3xl font-bold mt-1">{isLoading ? '—' : blind ? METRIC_UNAVAILABLE : gyd(summary?.weeklySubscriptionRevenue)}</p>
           <p className="text-[var(--muted)] text-xs mt-1">GYD / week</p>
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Monthly Subscription Revenue</p>
-          <p className="text-3xl font-bold mt-1">{isLoading ? '—' : gyd(summary?.monthlySubscriptionRevenue)}</p>
+          <p className="text-3xl font-bold mt-1">{isLoading ? '—' : blind ? METRIC_UNAVAILABLE : gyd(summary?.monthlySubscriptionRevenue)}</p>
           <p className="text-[var(--muted)] text-xs mt-1">GYD / month (approx.)</p>
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Active Subscriptions</p>
-          <p className="text-3xl font-bold mt-1">{isLoading ? '—' : Number(summary?.activeSubscriptions || 0).toLocaleString()}</p>
+          <p className="text-3xl font-bold mt-1">{isLoading ? '—' : blind ? METRIC_UNAVAILABLE : count(summary?.activeSubscriptions)}</p>
           <p className="text-[var(--muted)] text-xs mt-1">paying participants</p>
         </div>
       </div>
@@ -265,7 +304,7 @@ export default function FinancePage() {
         </p>
         <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
           <span className="text-sm">Delivery fees (mover earnings, 30d)</span>
-          <span className="text-sm font-semibold">{isLoading ? '—' : `${gyd(summary?.thirtyDayDeliveryFees)} GYD`}</span>
+          <span className="text-sm font-semibold">{isLoading ? '—' : blind ? METRIC_UNAVAILABLE : `${gyd(summary?.thirtyDayDeliveryFees)} GYD`}</span>
         </div>
       </div>
 
@@ -277,6 +316,8 @@ export default function FinancePage() {
         </p>
         {isLoading ? (
           <p className="text-[var(--muted)] text-sm">Loading…</p>
+        ) : blind ? (
+          <p className="text-[var(--muted)] text-sm">{METRIC_UNAVAILABLE}</p>
         ) : daily.length === 0 ? (
           <p className="text-[var(--muted)] text-sm">No completed orders in the last 30 days.</p>
         ) : (

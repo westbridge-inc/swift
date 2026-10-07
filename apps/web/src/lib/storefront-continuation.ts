@@ -1,3 +1,5 @@
+import { safeInternalPath } from './safe-return-path';
+
 // A tab-scoped Add intent, never a cart or a source of prices. The live menu
 // supplies every name, price and available choice when this is reopened.
 const KEY = 'swift_storefront_add';
@@ -101,5 +103,5 @@ export function storefrontAuthReturn(requested: string | null): string {
     clearStorefrontContinuation();
   }
   const path = requested ?? intent?.returnPath ?? '';
-  return /^\/(?!\/)/.test(path) && !path.includes('..') && !/[\\\r\n]/.test(path) ? path : '';
+  return safeInternalPath(path) ?? '';
 }

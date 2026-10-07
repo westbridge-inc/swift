@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
 import { askReason } from '@/lib/ask-reason';
+import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
 
 /**
  * The liability shield. Three panels:
@@ -33,6 +34,10 @@ export default function CompliancePage() {
   });
 
   const d = q.data?.data;
+  // [ADMIN-TRUTH] A failed read is not a clean audit. Without this the three
+  // empty-state sentences below ("Nobody is operating outside the rules…")
+  // printed on a timeout or a 403, exactly as they do after a clean run.
+  const blind = q.isError && !d;
   const runs: any[] = d?.runs ?? [];
   const violations: any[] = d?.openViolations ?? [];
   const queue: any[] = d?.reviewQueue ?? [];
@@ -54,6 +59,18 @@ export default function CompliancePage() {
         An unlicensed or uninsured mover operating here is a lawsuit — this page is where that never happens.
       </p>
 
+      {q.isPending ? (
+        // [ADMIN-TRUTH] An unanswered read (first load, retries, a hung query)
+        // is not a clean audit either: no count and no all-clear until it lands.
+        <p className="text-[var(--muted)] text-sm">Loading compliance…</p>
+      ) : blind ? (
+        <DataUnavailable
+          what="Compliance data"
+          notAnAllClear="This is not an all-clear: no violation, review case or audit run could be read."
+          onRetry={() => void q.refetch()}
+        />
+      ) : (
+      <>
       {/* Open violations */}
       <h2 className="font-semibold mb-2">
         Open violations{' '}
@@ -188,6 +205,8 @@ export default function CompliancePage() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
     </div>
   );
 }
