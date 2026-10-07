@@ -141,16 +141,17 @@ if [ "$which" = card ] || [ "$which" = both ]; then
     -e POWERTRANZ_ID_FILE=/run/secrets/POWERTRANZ_ID -e POWERTRANZ_PASSWORD_FILE=/run/secrets/POWERTRANZ_PASSWORD)
   ENV_LINES+=("CARD_RAIL_PROVIDER=powertranz" "CARD_RAIL_ENVIRONMENT=$env_choice" "CARD_RAIL_ACCOUNT=$account" "API_PUBLIC_URL=$public_url" "POWERTRANZ_PAGE_SET=$page_set" "POWERTRANZ_PAGE_NAME=$page_name"
     "POWERTRANZ_ID_FILE=/run/secrets/POWERTRANZ_ID" "POWERTRANZ_PASSWORD_FILE=/run/secrets/POWERTRANZ_PASSWORD")
-  # Only a gateway key entered in THIS run is used: one left from an earlier
-  # (for example, test-system) run is never carried into this setup.
-  if [ "$gateway_key_saved" = 1 ]; then
-    CHECK_ENV+=(-e POWERTRANZ_GATEWAY_KEY_FILE=/run/secrets/POWERTRANZ_GATEWAY_KEY)
-    ENV_LINES+=("POWERTRANZ_GATEWAY_KEY_FILE=/run/secrets/POWERTRANZ_GATEWAY_KEY")
-  fi
-  if [ -n "$api_url" ]; then
-    CHECK_ENV+=(-e "POWERTRANZ_API_URL=$api_url")
-    ENV_LINES+=("POWERTRANZ_API_URL=$api_url")
-  fi
+  # Only a gateway key entered in THIS run is used, and only this run's address.
+  # Both are ALWAYS passed to the check, empty when not given: the one-off
+  # container also reads the server's deploy/.env, so a value left there by an
+  # earlier run (a test-system key, a live address) would otherwise be checked
+  # in their place. An empty value means "none" to the server. The settings
+  # lines below carry the same empty values, so the server's deploy/.env loses
+  # the stale ones too: the check certifies exactly what will run.
+  gateway_key_file=""
+  if [ "$gateway_key_saved" = 1 ]; then gateway_key_file=/run/secrets/POWERTRANZ_GATEWAY_KEY; fi
+  CHECK_ENV+=(-e "POWERTRANZ_GATEWAY_KEY_FILE=$gateway_key_file" -e "POWERTRANZ_API_URL=$api_url")
+  ENV_LINES+=("POWERTRANZ_GATEWAY_KEY_FILE=$gateway_key_file" "POWERTRANZ_API_URL=$api_url")
   PARTS+=(card)
 fi
 

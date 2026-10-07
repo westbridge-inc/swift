@@ -891,10 +891,18 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
     const alive = await this.call(PATH.alive, { method: 'GET', headers: { accept: 'application/json' } });
     out.push({ check: 'gateway reachable', ok: alive.shape !== 'transport' && alive.status >= 200 && alive.status < 300 });
     const probe = await this.call(PATH.riskMgmt, { method: 'POST', headers: this.headers(true), body: '{}' });
-    const refusedCredentials = probe.shape === 'transport'
-      || probe.status === 401 || probe.status === 403
-      || (probe.shape === 'json' && isObject(probe.json) && (str(probe.json['IsoResponseCode']) === '89' || errorCodes(probe.json).includes('312')));
-    out.push({ check: 'credentials accepted', ok: !refusedCredentials });
+    const refusedCredentials = probe.shape !== 'transport' && (probe.status === 401 || probe.status === 403
+      || (probe.shape === 'json' && isObject(probe.json) && (str(probe.json['IsoResponseCode']) === '89' || errorCodes(probe.json).includes('312'))));
+    // [DS845 S3] Accepted ONLY on a readable gateway answer (2xx, a JSON object,
+    // not a system-error code — Appendix 1) that is not the credentials refusal:
+    // the gateway authenticated, then refused the empty body by design. No answer,
+    // another HTTP status (404, 5xx), an unreadable body or a system error says
+    // nothing about the credentials: FAIL, "could not tell".
+    const readable = probe.shape === 'json' && probe.status >= 200 && probe.status < 300 && isObject(probe.json)
+      && !AMBIGUOUS_ISO.has(str(probe.json['IsoResponseCode']) ?? '');
+    out.push(refusedCredentials || readable
+      ? { check: 'credentials accepted', ok: !refusedCredentials }
+      : { check: 'credentials accepted (could not tell: the gateway gave no readable answer)', ok: false });
     if (opts.preprocess && this.binding.environment === 'sandbox') {
       const created = await this.createSession({
         binding: this.binding, sessionRef: `selfcheck-${randomBytes(6).toString('hex')}`, purpose: 'PAY_NOW',

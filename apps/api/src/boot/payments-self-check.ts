@@ -1,6 +1,5 @@
 import './secret-files';
-import Redis from 'ioredis';
-import { formatSelfCheck, runPaymentsSelfCheck, type SelfCheckPart } from '../modules/billing/payments-self-check';
+import { connectSelfCheckRedis, formatSelfCheck, runPaymentsSelfCheck, type SelfCheckPart } from '../modules/billing/payments-self-check';
 
 /**
  * [PT-5] `node dist/boot/payments-self-check.js [card] [mmg]` — run on the
@@ -11,15 +10,14 @@ import { formatSelfCheck, runPaymentsSelfCheck, type SelfCheckPart } from '../mo
 async function main(): Promise<number> {
   const asked = process.argv.slice(2).filter((a): a is SelfCheckPart => a === 'card' || a === 'mmg');
   const parts: SelfCheckPart[] = asked.length ? asked : ['card', 'mmg'];
-  const redisUrl = process.env['REDIS_URL'];
-  const redis = redisUrl ? new Redis(redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 5_000 }) : undefined;
+  const redis = parts.includes('card') ? await connectSelfCheckRedis(process.env['REDIS_URL']) : undefined;
   try {
     const lines = await runPaymentsSelfCheck(parts, process.env, redis ? { redis } : {});
     // eslint-disable-next-line no-console
     console.log(formatSelfCheck(lines));
     return lines.every((l) => l.ok) ? 0 : 1;
   } finally {
-    await redis?.quit().catch(() => undefined);
+    redis?.disconnect();
   }
 }
 

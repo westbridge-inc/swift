@@ -1,4 +1,4 @@
-import type Redis from 'ioredis';
+import Redis from 'ioredis';
 import {
   MMG_CHECKOUT_PRODUCT_DESCRIPTION,
   buildCheckoutRequest,
@@ -38,6 +38,24 @@ export interface SelfCheckDeps {
   fetch?: typeof fetch;
   /** The MMG merchant login (tests pass a fake). */
   mmgLogin?: () => Promise<{ token: string }>;
+}
+
+/**
+ * [DS845 S4] The self-check's Redis, connected up front: a Redis that cannot be
+ * reached is the plain FAIL line "the self-check reaches Redis", never an
+ * unhandled client error printed with its stack into the container's logs.
+ */
+export async function connectSelfCheckRedis(url: string | undefined): Promise<Redis | undefined> {
+  if (!url) return undefined;
+  const redis = new Redis(url, { lazyConnect: true, maxRetriesPerRequest: 1, connectTimeout: 5_000, enableOfflineQueue: false, retryStrategy: () => null });
+  redis.on('error', () => undefined);
+  try {
+    await redis.connect();
+    return redis;
+  } catch {
+    redis.disconnect();
+    return undefined;
+  }
 }
 
 /** What a FAIL may say about configuration: the names of the settings it mentions, nothing else. */
