@@ -12,6 +12,7 @@ import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { type VendorMemberRole, TabHeader, VendorBillingNotice } from '../shared';
+import { HeldStoreOrders } from './HeldStoreOrders';
 
 export function VendorBillingSuspended({ store, stores, myRole }: { store: any; stores: any[]; myRole?: VendorMemberRole }) {
   const navigation = useNavigation<any>();
@@ -25,6 +26,8 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
   const pull = usePullToRefresh(() => Promise.all([
     isOwner ? subQ.refetch() : undefined,
     qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    // The accepted orders listed below reload with the pull too.
+    qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   ]));
   const sub = subQ.data ?? (isOwner ? store?.subscription : null);
   const blockedSub = ['SUSPENDED', 'CHURNED'].includes(String(sub?.status ?? '').toUpperCase());
@@ -77,8 +80,8 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
           </T>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             {isOwner
-              ? 'The weekly fee needs attention. Open Weekly fee to view your checkout; a credited payment clears the billing hold. Any separate verification hold still needs its own fix.'
-              : 'The store’s weekly fee needs attention. Ask the owner to open Weekly fee; only the owner can access billing.'}
+              ? 'The weekly fee needs attention. Open Weekly fee to view your checkout; a credited payment clears the billing hold. Orders you already accepted can still be finished below. Any separate verification hold still needs its own fix.'
+              : 'The store’s weekly fee needs attention. Ask the owner to open Weekly fee; only the owner can access billing. Orders already accepted can still be finished below.'}
           </T>
         </View>
 
@@ -115,10 +118,14 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
               Owner action required
             </T>
             <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-              You can return to the queue when the owner’s payment is confirmed and the store is active again.
+              New orders come back when the owner’s payment is confirmed and the store is active again. Until then, finish the orders already accepted.
             </T>
           </Card>
         )}
+
+        {/* [NO-DEAD-ENDS · owner ruling 1 Oct] Accepted orders are completed;
+            new ones wait to be declined. The server allows exactly this. */}
+        <HeldStoreOrders canFinishAccepted navigation={navigation} />
 
         <T variant="caption" tone="muted" center>
           Swift never takes commission. The weekly fee is separate from customer order money.
