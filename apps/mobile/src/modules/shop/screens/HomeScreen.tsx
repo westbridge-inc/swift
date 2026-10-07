@@ -1,3 +1,5 @@
+import { isOfflineSnapshot } from '../../../lib/offlineQueryCache';
+import { SavedOrderSummary } from '../../../components/SavedOrderSummary';
 /** @jsxImportSource react */
 import { HOME_RAIL_WINDOW } from '../../../lib/listPerformance';
 import React, { useState } from 'react';
@@ -197,6 +199,8 @@ function LiveOrderCard({ order, navigation, statusNote }: { order: LiveOrderProj
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [holdRunning]);
+
+  if (isOfflineSnapshot(order)) return <SavedOrderSummary order={order} onOpen={() => navigation.navigate('Delivery', { orderId: order.id })} />;
 
   const hold = holdRingWindow(order.holdExpiresAt, order.placedAt, now, false);
   const remaining = hold ? Math.ceil(hold.remainingMs / 1000) : 0;

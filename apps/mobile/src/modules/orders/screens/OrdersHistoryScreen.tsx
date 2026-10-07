@@ -1,3 +1,4 @@
+import { isOfflineSnapshot } from '../../../lib/offlineQueryCache';
 /** @jsxImportSource react */
 import React, { useEffect } from 'react';
 import { FlatList, Pressable, RefreshControl, View } from 'react-native';
@@ -87,7 +88,7 @@ function statusPill(o: OrderVerticalFacts & { status: string }): { label: string
   return {
     // The server's declared vertical (SERVICE for a booking), else the
     // persisted type — one helper, shared with Home's live card.
-    label: orderStatusLabel(o.status, presentedVertical(o)),
+    label: `${isOfflineSnapshot(o) ? 'Saved: ' : ''}${orderStatusLabel(o.status, presentedVertical(o))}`,
     tone: STATUS_TONE[o.status] ?? 'neutral',
   };
 }
@@ -449,7 +450,7 @@ export function OrdersHistoryScreen() {
           {headerBlock}
           <LoadingBlock />
         </>
-      ) : orders.isError && live.length === 0 ? (
+      ) : orders.isError && !orders.data && live.length === 0 ? (
         // Only when there is genuinely nothing to show. A history failure must
         // not blank out live orders that loaded fine — those are the ones the
         // customer opened this tab for.

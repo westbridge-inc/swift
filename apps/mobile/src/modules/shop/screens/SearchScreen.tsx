@@ -228,7 +228,7 @@ export function SearchScreen() {
   const dishes: any[] = engineMode ? (engine.data?.items ?? []) : [];
   const suggestions: any[] = (suggestionsQ.data ?? []).filter((s: any) => s.text?.toLowerCase() !== text.toLowerCase()).slice(0, 6);
   const resultsBusy = engineMode ? engine.isLoading : vendors.isLoading;
-  const resultsError = engineMode ? engine.isError : vendors.isError;
+  const resultsError = engineMode ? engine.isError : vendors.isError && !vendors.data;
   const retryResults = () => (engineMode ? engine.refetch() : vendors.refetch());
 
   const results: any[] = places;
