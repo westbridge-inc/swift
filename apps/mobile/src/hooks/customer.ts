@@ -937,7 +937,9 @@ export function useDecideSubstitution(orderId: string) {
   return useMutation({
     mutationFn: ({ lineId, approve }: { lineId: string; approve: boolean }) =>
       customerApi.decideSubstitution(orderId, lineId, approve),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
+    // [L09 · M028] The order screen reads customerKeys.order(id); refreshing
+    // any other key left it showing the old proposal after a decision.
+    onSuccess: () => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }
 

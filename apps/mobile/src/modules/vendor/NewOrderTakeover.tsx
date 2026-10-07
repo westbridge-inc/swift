@@ -8,6 +8,7 @@ import { T, Money, PillButton } from '../../kit';
 import { haptic } from '../../lib/haptics';
 import { useVendorOrder, useOrderAction } from '../../hooks/vendorops';
 import { rejectReasonsFor } from './rejectReasons';
+import { orderLineOptionsText } from './orderLineOptions';
 import { acceptClockLabel, takeoverSettled } from './acceptClock';
 
 /**
@@ -182,9 +183,17 @@ export function NewOrderTakeover({
           {items.map((i) => (
             <View key={i.id} style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.md }}>
               <T variant="numM">{i.quantity}×</T>
-              <T variant="heading" style={{ flex: 1 }} numberOfLines={2}>
-                {i.name}
-              </T>
+              <View style={{ flex: 1 }}>
+                <T variant="heading" numberOfLines={2}>
+                  {i.name}
+                </T>
+                {/* [L09 · M026] What the customer chose, so the right item is made. */}
+                {orderLineOptionsText(i.options) ? (
+                  <T variant="label" weight="semibold" numberOfLines={3}>
+                    {orderLineOptionsText(i.options)}
+                  </T>
+                ) : null}
+              </View>
               {/* [Wave 3 vs reference 22] "pepper on the side" · "cold" — the
                   customer's own words, right-aligned and muted, exactly where
                   the kitchen's eye lands after the dish. The snapshot column

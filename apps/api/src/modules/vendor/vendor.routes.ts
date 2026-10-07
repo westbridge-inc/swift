@@ -557,9 +557,6 @@ const ORDER_ITEM_MONEY_FIELDS = [
 const ITEM_MONEY_FIELDS = ['basePrice'] as const;
 const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
 
-/**
- * Verify that the given order belongs to one of the user's vendors and return it.
- */
 /** [L09 · M026] The store makes what the customer chose: every line carries its
  *  snapshotted options (group, choice, price) on the board and the detail. */
 const VENDOR_ORDER_ITEMS = {
@@ -574,6 +571,9 @@ function vendorOrderLine<T extends { selectedOptions: Array<{ optionGroupName: s
   };
 }
 
+/**
+ * Verify that the given order belongs to one of the user's vendors and return it.
+ */
 async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: string) {
   const { vendorIds } = await resolveVendor(app, userId);
   const order = await app.prisma.order.findUnique({
