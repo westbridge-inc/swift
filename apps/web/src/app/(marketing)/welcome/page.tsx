@@ -91,7 +91,7 @@ export default function WelcomePage() {
                 launch config says works. No dead paths, no coming-soon buttons
                 dressed as live ones. [Item 7] Which is decided per site: the
                 pre-launch switch closes ordering on the public site only. */}
-            <OrderOnTheWeb className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]" />
+            <OrderOnTheWeb className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]" />
             <Link
               href="/vendors"
               className="rounded-full border border-[var(--swift-border-strong)] px-6 py-3 font-semibold transition-colors hover:bg-[var(--swift-subtle)]"
@@ -122,7 +122,7 @@ export default function WelcomePage() {
         <ul className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {VERTICALS.filter((v) => launch.verticals[v.key] !== 'soon').map(
             ({ icon: Icon, label, blurb }) => (
-              <li key={label} className="rounded-2xl bg-white p-6 shadow-sm">
+              <li key={label} className="rounded-2xl bg-[var(--swift-card)] p-6 shadow-[var(--swift-elevation-card)]">
                 <Icon className="h-6 w-6 text-[var(--swift-red)]" aria-hidden />
                 <h3 className="mt-4 font-bold">{label}</h3>
                 <p className="mt-1 text-sm text-[var(--swift-muted)]">{blurb}</p>
@@ -157,7 +157,7 @@ export default function WelcomePage() {
         <h2 className="text-2xl font-bold tracking-tight md:text-3xl">Why it works this way</h2>
         <ul className="mt-8 grid gap-4 md:grid-cols-3">
           {PROMISES.map(({ icon: Icon, title, body }) => (
-            <li key={title} className="rounded-2xl bg-white p-6 shadow-sm">
+            <li key={title} className="rounded-2xl bg-[var(--swift-card)] p-6 shadow-[var(--swift-elevation-card)]">
               <Icon className="h-6 w-6 text-[var(--swift-red)]" aria-hidden />
               <h3 className="mt-4 font-bold">{title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-[var(--swift-muted)]">{body}</p>
@@ -167,7 +167,7 @@ export default function WelcomePage() {
       </Section>
 
       <Section>
-        <div className="rounded-3xl bg-[var(--swift-red)] px-8 py-12 text-white md:px-14 md:py-16">
+        <div className="rounded-3xl bg-[var(--swift-red)] px-8 py-12 text-[var(--swift-white)] md:px-14 md:py-16">
           <h2 className="max-w-2xl text-3xl font-extrabold leading-tight tracking-tight md:text-4xl">
             Run a business? The commission line simply is not there.
           </h2>
@@ -178,13 +178,13 @@ export default function WelcomePage() {
           <div className="mt-8 flex flex-wrap gap-3">
             <Link
               href="/vendors"
-              className="rounded-full bg-white px-6 py-3 font-semibold text-[var(--swift-red)] transition-opacity hover:opacity-90"
+              className="rounded-full bg-[var(--swift-card)] px-6 py-3 font-semibold text-[var(--swift-red)] transition-opacity hover:opacity-90"
             >
               See what you get
             </Link>
             <Link
               href="/pricing"
-              className="rounded-full border border-white/40 px-6 py-3 font-semibold text-white transition-colors hover:bg-white/10"
+              className="rounded-full border border-white/40 px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-white/10"
             >
               What it costs
             </Link>
