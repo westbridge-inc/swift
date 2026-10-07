@@ -201,7 +201,7 @@ describe('the actual /store/[slug] QR arrival', () => {
     const place = await screen.findByRole('button', { name: 'Place cash order' });
     await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(place);
-    await waitFor(() => expect(customer.checkout).toHaveBeenCalledWith({ paymentMethod: 'CASH', tipAmount: 0 }, expect.any(String)));
+    await waitFor(() => expect(customer.checkout).toHaveBeenCalledWith({ paymentMethod: 'CASH', tipAmount: 0, expectedTotal: 1000, expectedLines: [{ lineId: 'line', unitPrice: 800 }] }, expect.any(String)));
     expect(nav.push).toHaveBeenCalledWith('/orders/qr-order');
     expect(screen.getByText(copy)).toBeTruthy();
   });

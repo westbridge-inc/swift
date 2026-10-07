@@ -483,6 +483,9 @@ export function CartScreen() {
     if (pickupQuote.isFetching || pickupQuote.isPlaceholderData || !pickupQuote.data || pickupConfirmShown.current) return;
     const pickupTotal = Number(pickupQuote.data.totalAmount);
     if (!Number.isFinite(pickupTotal)) return;
+    // Capture the quote the alert displays before a reconnect can replace it.
+    const confirmedPrices = pricesAsSeen(pickupQuote.data);
+    const storeIds = quoteStoreIds(pickupQuote.data.items);
     pickupConfirmShown.current = true;
     Alert.alert(
       'Order for pickup instead?',
@@ -496,9 +499,8 @@ export function CartScreen() {
             // [E01] Every store in the basket collects — not just the one
             // `cart.vendor` happens to track (the rest would still wait for a
             // rider).
-            const storeIds = quoteStoreIds(c?.items);
             if (storeIds.length === 0) return;
-            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
+            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])), ...confirmedPrices });
           },
         },
       ],

@@ -109,11 +109,13 @@ export const CHECKOUT_PROMO_REFUSAL_CODES = [
 
 /** [E07] Checkout refusal codes that mean the CART went stale — an item was
  *  86'd (`isAvailable` flipped) or its stock ran out between the last quote
- *  and this order. The phone maps these to a named recovery message and
- *  re-quotes the cart so the line marks itself unavailable. The exact codes
+ *  and this order, or (CART_CHANGED) the cart itself changed on another
+ *  device, so the prices sent with the order describe a cart that is gone.
+ *  The phone maps these to a named recovery message and re-quotes the cart
+ *  so the line marks itself unavailable. The exact codes
  *  come from order.service.ts (the pre-lock inventory guard and its
  *  post-lock twin, both 409). */
-export const CART_STALE_CHECKOUT_CODES = ['ITEM_UNAVAILABLE', 'INSUFFICIENT_STOCK', 'CART_OPTIONS_CHANGED', 'PRICE_CHANGED'] as const;
+export const CART_STALE_CHECKOUT_CODES = ['ITEM_UNAVAILABLE', 'INSUFFICIENT_STOCK', 'CART_OPTIONS_CHANGED', 'PRICE_CHANGED', 'CART_CHANGED'] as const;
 
 /** The code when a checkout refusal means an item changed under the customer
  *  — available when quoted, gone by the time the order was placed. Everything
@@ -137,6 +139,7 @@ export function checkoutErrorMessage(err: unknown): string {
     if (message) return message;
     if (stale === 'CART_OPTIONS_CHANGED') return 'The choices for one of your items need updating — remove it and add it again.';
     if (stale === 'PRICE_CHANGED') return 'Prices changed since you last looked — review your cart and place the order again.';
+    if (stale === 'CART_CHANGED') return 'Your cart just changed — review it and place the order again.';
     return stale === 'ITEM_UNAVAILABLE'
       ? 'One of your items is no longer available — remove it to continue.'
       : 'One of your items is not available in that quantity — adjust the quantity or remove it.';
