@@ -1390,7 +1390,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // the store stays pending — never ACTIVE and searchable with no
     // subscription, which a failure after the CAS below used to leave behind.
     const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true } });
+      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
+      // suspension source survives it for a later heal or payment to act on.
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
       if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });

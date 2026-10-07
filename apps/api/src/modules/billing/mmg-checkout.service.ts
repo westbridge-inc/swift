@@ -83,6 +83,7 @@ const POLL_BATCH = 50;
  *  many rows each read takes. */
 export const MMG_UNAPPLIED_RECONCILE_LOOKBACK_MS = 14 * 24 * 3_600_000;
 const UNAPPLIED_READ_BATCH = 200;
+const UNAPPLIED_PAGE_SEARCH_SLACK_MS = 24 * 3_600_000;
 const CLIENT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
 /** Creating a checkout re-reads after a lost race; it never spins. */
 const CREATE_ATTEMPTS = 3;
@@ -307,6 +308,16 @@ export function firstReplyNaming(answers: ReadonlyArray<{ body: unknown; created
  * first heard of the payment (MMG's stamps do not match the zone), or no reply
  * named it; outside the checkout's window (two minutes either side).
  */
+/** [DS632 · Fable S3-1] The creation zone of the checkout provider in use:
+ *  null when there is none (switched off) or it cannot be built. verify() and
+ *  the support console both read it here, so they never disagree. */
+export function creationZoneInUse(checkout: () => MmgCheckoutProvider | null): MmgCreationZone | null {
+  try {
+    return checkout()?.creationZone ?? null;
+  } catch {
+    return null;
+  }
+}
 export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNREADABLE' | 'AFTER_REPLY' | 'OUTSIDE';
 export function creationCheckOf(
   intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
@@ -873,21 +884,29 @@ export class MmgCheckoutService {
     if (options.onlyIfUnpaged) {
       // The reconcile pages only what no operator was ever paged about. A page
       // is only ever written once the checkout is CONFIRMED.
-      const since = new Date((intent.confirmedAt ?? intent.createdAt).getTime() - CHECKOUT_CLOCK_TOLERANCE_MS);
+      // [Fable S4-4] The page's saved time comes from the database's clock, the
+      // credit's from the app's: a day of slack, so clock skew never hides a
+      // saved page (and the createdAt index still bounds the read).
+      const since = new Date((intent.confirmedAt ?? intent.createdAt).getTime() - UNAPPLIED_PAGE_SEARCH_SLACK_MS);
       // Operators' inboxes live in their own tenants: read across them, as notifyAdmins pages across them.
       const paged = await runAsSystem('mmg-checkout-unapplied-reconcile', () => this.prisma.notification.findFirst({ where: { dedupeKey, createdAt: { gte: since } }, select: { id: true } }));
       if (paged) return false;
     }
     mmgCheckoutEventsCounter.labels('reply_unapplied').inc();
     log().error({ checkoutId: intent.id, source }, '[MMG checkout] MMG answered success for a confirmed checkout naming another transaction: money received and not applied');
-    await notifyAdmins(this.prisma, this.notifications, {
+    const reached = await notifyAdmins(this.prisma, this.notifications, {
       tenantId: intent.tenantId,
       title: 'MMG checkout: money received and not applied',
       body: `MMG answered success for checkout ${intent.id}, which is already paid, naming MMG transaction ${reply.transactionId}, which was not credited. Nothing was credited for it. Reconcile it against the MMG statement.`,
       data: { kind: 'billing_invariants', alert: 'mmg-checkout-unapplied', checkoutId: intent.id, transactionId: reply.transactionId, source },
       dedupeKey,
-    }).catch((err) => log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about money not applied'));
-    return true;
+    }).catch((err) => {
+      log().error({ err, checkoutId: intent.id }, '[MMG checkout] operators could not be paged about money not applied');
+      return 0;
+    });
+    // [Fable S4-3] Sent only if an operator's inbox holds it; otherwise the
+    // reconcile tries again on the next poll.
+    return reached > 0;
   }
 
   /** [F3] The answer a key already has, if it has one: the checkout it was
@@ -961,7 +980,7 @@ export class MmgCheckoutService {
     }
     const merchantIds = this.merchantIds(provider);
     // [DS632] Condition (5) is read in the configured zone; with none, nothing confirms.
-    const zone = provider?.creationZone ?? null;
+    const zone = creationZoneInUse(() => provider);
     const lookup = this.lookup();
     // [owner, 1 Oct · condition 1] MMG's own answers for this checkout, through
     // either door, and [DS632] when each transaction was first named.
