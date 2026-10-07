@@ -13,9 +13,11 @@ import { NotificationService } from '../notification/notification.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getCardRailProvider } from '../../providers/card/card-rail-factory';
 import type { CardRailProvider, CardRailSource } from '../../providers/card/card-provider';
+import type { OnAudit } from '../../lib/audit-writer';
 import { SIMULATOR_PAGE, SimulatorCardRailProvider, SimulatorRefusal } from '../../providers/card/simulator-provider';
+import { PowerTranzCardRailProvider, type PowerTranzHostedPage } from '../../providers/card/powertranz-provider';
 import { BillingService } from './billing.service';
-import { CARD_ON_FILE_CONSENT_VERSION, CardRailService, INSTRUMENT_DTO_SELECT, type CardSessionDto, type PaymentInstrumentDto } from './card-rail.service';
+import { CARD_ON_FILE_CONSENT_VERSION, CARD_RESOLVE_ACTIONS, CARD_SANDBOX_TEST_LABEL, CardRailService, INSTRUMENT_DTO_SELECT, cardTestLabel, type CardSessionDto, type PaymentInstrumentDto } from './card-rail.service';
 import { CARD_OFF, cardPayAction, cardSessionsAllowed, type CardPayAction } from './card-pay-action';
 import { clientPlatform, type PayAction } from './fee-pay-actions';
 
@@ -29,6 +31,7 @@ import { clientPlatform, type PayAction } from './fee-pay-actions';
 //   GET    /api/v1/{family}/subscription/card-sessions/:id      follow one
 //   GET|POST /api/v1/billing/card/return                        the provider's return (public)
 //   GET|POST /api/v1/billing/card/simulator/:ref                the simulator's test page (never production)
+//   GET    /api/v1/billing/card/pay/:ref                        [PT-4] Swift's page around the bank's card form
 //   GET    /api/v1/admin/billing/card-sessions[/:id]            admin read views
 //   GET    /api/v1/admin/billing/subscriptions/:id/cards
 //
@@ -58,6 +61,7 @@ const IDEMPOTENCY_KEY_SHAPE = /^[A-Za-z0-9_-]{8,128}$/;
 const ID_SHAPE = /^[A-Za-z0-9_-]{1,64}$/;
 const STATE_SHAPE = /^[A-Za-z0-9_-]{16,128}$/;
 const SIM_REF_SHAPE = /^sim_[0-9a-f]{24}$/;
+const PAY_REF_SHAPE = /^ptz_[0-9a-f]{24}$/;
 
 /** Over a limit is the contract's `429 RATE_LIMITED`, with the wait in seconds. */
 const rateLimited = {
@@ -319,7 +323,7 @@ async function cardSessionView(
 ): Promise<CardSessionView | null> {
   const s = await prisma.cardSession.findFirst({
     where: { id: input.sessionId, subscriptionId: input.subscription.id, userId: input.userId },
-    select: { id: true, purpose: true, status: true, expiresAt: true, amount: true, currencyCode: true, instrumentId: true, paymentId: true, provider: true, failureCode: true },
+    select: { id: true, purpose: true, status: true, expiresAt: true, amount: true, currencyCode: true, instrumentId: true, paymentId: true, provider: true, environment: true, failureCode: true },
   });
   if (!s) return null;
   const card = s.instrumentId
@@ -329,7 +333,8 @@ async function cardSessionView(
   const settlement = s.purpose === 'PAY_NOW' && s.status === 'SUCCEEDED' && s.paymentId
     ? ((await prisma.billingEvent.findUnique({ where: { idempotencyKey: `bank:${s.paymentId}` }, select: { id: true } })) ? 'banked' as const : 'advanced' as const)
     : undefined;
-  const testMode = s.provider === 'simulator';
+  const testModeLabel = cardTestLabel(s);
+  const testMode = testModeLabel !== undefined;
   return {
     sessionId: s.id,
     purpose: s.purpose,
@@ -341,7 +346,7 @@ async function cardSessionView(
     ...(cardSessionFailure(s.status, s.failureCode) ? { failure: cardSessionFailure(s.status, s.failureCode)! } : {}),
     subscriptionStatus: input.subscription.status,
     testMode,
-    ...(testMode ? { testModeLabel: SIMULATOR_PAGE.testModeLabel } : {}),
+    ...(testModeLabel ? { testModeLabel } : {}),
   };
 }
 
@@ -413,6 +418,7 @@ function page(title: string, inner: string): string {
     + `<meta name="robots" content="noindex"><title>${escapeHtml(title)}</title>`
     + `<style>body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px;background:#fff;color:#111;max-width:480px}`
     + `h1{font-size:22px}p{font-size:16px;line-height:1.5}.test{background:#fff3cd;border:2px solid #b8860b;padding:12px;font-weight:700}`
+    + `.brand{font-weight:800;font-size:18px;letter-spacing:.02em}iframe.card{display:block;width:100%;min-height:560px;border:1px solid #ddd;border-radius:12px}`
     + `button{display:block;width:100%;margin:12px 0;padding:14px;font-size:16px;border-radius:10px;border:1px solid #111;background:#f6f6f6}`
     + `a{color:#111;font-weight:600}</style></head><body>${inner}</body></html>`;
 }
@@ -509,6 +515,68 @@ function simulatorOf(runtime: CardRailRuntime): SimulatorCardRailProvider | null
   }
 }
 
+/** [PT-4] The real provider, when it is this server's provider (and v2 is on or draining). */
+function powerTranzOf(runtime: CardRailRuntime): PowerTranzCardRailProvider | null {
+  if (!cardRailV2Enabled() && !cardRailV2DrainEnabled()) return null;
+  try {
+    const provider = runtime.rail();
+    return provider instanceof PowerTranzCardRailProvider ? provider : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * [PT-4] Swift's own page around the bank's card form (guide v2.7 sec. 2.2
+ * 1.5, Appendix 2): the provider's RedirectData is bound into an iframe, where
+ * the card is typed and the bank's 3-D Secure check runs. Swift's page only
+ * frames it: its words name "your bank" and the card, never the provider.
+ */
+export const CARD_FRAME_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-popups allow-top-navigation-by-user-activation';
+
+function hostedCardPageHtml(facts: PowerTranzHostedPage): string {
+  const price = formatAmount(fromMinor(facts.amountMinor, facts.currencyCode));
+  const test = facts.sandbox ? `<p class="test">${escapeHtml(CARD_SANDBOX_TEST_LABEL)}</p>` : '';
+  const head = `${test}<p class="brand">Swift</p><h1>${escapeHtml(`Pay ${price} by card`)}</h1>`;
+  if (facts.expired || facts.finished) {
+    return page('Swift card payment', `${head}<p>This card page has ended. Open the Swift app to see your weekly fee, or start again there.</p>`
+      + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`);
+  }
+  return page('Swift card payment', `${head}`
+    + `<p>Type your card on your bank's secure form below. Swift never sees your card number or security code.</p>`
+    // [Review S3] Sandboxed: scripts and forms run (the self-posting form, the
+    // bank's 3-D Secure pages), same-origin is kept so the bank's pages keep
+    // their own cookies, popups for a bank that opens one; the frame can move
+    // this page only when the partner taps (the return page's links).
+    + `<iframe class="card" title="Your bank's secure card form" sandbox="${CARD_FRAME_SANDBOX}" srcdoc="${escapeHtml(facts.redirectData)}" allow="payment"></iframe>`
+    + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Cancel and go back to the Swift app</a></p>`);
+}
+
+/** The card provider's own origins (its API is pinned to ptranz.com, guide sec. 2.3). */
+const CARD_PROVIDER_ORIGINS = 'https://*.ptranz.com';
+
+/**
+ * [PT-4 · review S3] The page's own policy. The bank's form runs inside the
+ * iframe (a srcdoc frame inherits this policy): only the provider's scripts
+ * may run there and its form may post only to the provider; the frame may
+ * then navigate to the provider's hosted page, the card's bank (3-D Secure
+ * challenge pages live on each bank's own host) and back to Swift; nothing on
+ * this page may call Swift's API or be framed by another site.
+ */
+export const HOSTED_CARD_PAGE_CSP = [
+  "default-src 'none'",
+  `script-src 'unsafe-inline' ${CARD_PROVIDER_ORIGINS}`,
+  `style-src 'unsafe-inline' ${CARD_PROVIDER_ORIGINS}`,
+  'img-src data: https:',
+  `font-src data: ${CARD_PROVIDER_ORIGINS}`,
+  "frame-src 'self' https:",
+  `form-action ${CARD_PROVIDER_ORIGINS}`,
+  "connect-src 'none'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
+
 function simulatorPageHtml(ref: string, facts: NonNullable<Awaited<ReturnType<SimulatorCardRailProvider['pageFor']>>>): string {
   const what = facts.purpose === 'ENROLL'
     ? 'Add a card'
@@ -530,6 +598,17 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
       done(null, formFields(body as string));
     } catch (err) {
       done(err as Error, undefined);
+    }
+  });
+
+  // [PT-4] The bank's frame posts its result "as Json" (guide v2.7 Appendix 2);
+  // a form can only send it as text. A text body is read as JSON or not at all.
+  app.addContentTypeParser('text/plain', { parseAs: 'string', bodyLimit: CARD_RETURN_BODY_LIMIT }, (_request, body, done) => {
+    try {
+      const value: unknown = JSON.parse(body as string);
+      done(null, value && typeof value === 'object' && !Array.isArray(value) ? value : body);
+    } catch {
+      done(null, body);
     }
   });
 
@@ -565,6 +644,17 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
   const simulatorMissing = (reply: FastifyReply, status = 404, words = 'There is no such test page.') =>
     privatePage(reply).status(status).send(page(SIMULATOR_PAGE.title, `<h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(words)}</p>`));
 
+  /** [PT-4] Swift's page around the bank's card form. Never logged, never cached; its own strict policy. */
+  app.get<{ Params: { ref: string } }>('/pay/:ref', simulatorOptions, async (request, reply) => {
+    const provider = powerTranzOf(rt());
+    const facts = provider && PAY_REF_SHAPE.test(request.params.ref) ? await provider.hostedPageFor(request.params.ref) : null;
+    if (!facts) {
+      return privatePage(reply).status(404).send(page('Swift card payment', '<p class="brand">Swift</p><h1>There is no such card page</h1>'
+        + `<p>Open the Swift app to see your weekly fee.</p><p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`));
+    }
+    return privatePage(reply).header('content-security-policy', HOSTED_CARD_PAGE_CSP).send(hostedCardPageHtml(facts));
+  });
+
   /** The simulator's page: four buttons, no inputs, a TEST PAGE label. */
   app.get<{ Params: { ref: string } }>('/simulator/:ref', simulatorOptions, async (request, reply) => {
     const sim = simulatorOf(rt());
@@ -599,7 +689,9 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
 // (its census reads that file), so its admin gate, capability decision and
 // tenant binding run first; these are their queries. Nothing here
 // returns a vault token, the state or its hash, a page address, a provider
-// session reference or anything else that could move money.
+// session reference or anything else that could move money. [PT-4] The
+// provider's transaction reference is shown to finance: it names a payment
+// to look up in the provider's portal and cannot move money by itself.
 // ---------------------------------------------------------------------------
 
 const ADMIN_SESSION_SELECT = {
@@ -609,6 +701,8 @@ const ADMIN_SESSION_SELECT = {
   expiresAt: true, returnedAt: true, confirmedAt: true, lastCheckedAt: true,
   consentVersion: true, consentAt: true, failureCode: true,
   instrumentId: true, paymentId: true, createdAt: true,
+  // [Review S2-2] What finance needs to look a held payment up and resolve it.
+  providerTransactionRef: true, providerVoidState: true, providerRefundState: true, bookClaimedAt: true, resolution: true, resolvedBy: true, resolvedAt: true,
 } as const;
 
 const ADMIN_CARD_SELECT = {
@@ -655,6 +749,35 @@ export async function adminCardSession(prisma: PrismaClient, id: string) {
     select: { source: true, parsedStatus: true, verdict: true, rawSha256: true, createdAt: true },
   });
   return { session: withAmount(session), observations };
+}
+
+const resolveBody = z.object({
+  action: z.enum(CARD_RESOLVE_ACTIONS),
+  providerReference: z.string().trim().min(1).max(64),
+  amount: z.number().positive().max(99_999_999),
+  /** The stated reason may come in the body as well as the header (ADM-006). */
+  reason: z.string().trim().max(2000).optional(),
+}).strict();
+
+/**
+ * [Review S2-2] POST /billing/card-sessions/:id/resolve — finance decides a
+ * HELD card payment after checking the provider's portal: book it (exactly
+ * this week's price), refund it (one refund, durably claimed), record a
+ * refund made in the portal, or record that nothing was taken. Declared C4 in
+ * admin-authority.ts: two people. The session must be in the admin's tenant.
+ */
+export async function adminResolveCardSession(app: FastifyInstance, id: string, body: unknown, adminUserId: string, onAudit?: OnAudit) {
+  if (!ID_SHAPE.test(id)) throw notFound('CARD_SESSION_NOT_FOUND', 'There is no such card session.');
+  const parsed = resolveBody.safeParse(body ?? {});
+  if (!parsed.success) throw new AppError(400, 'INVALID_RESOLUTION', `Send { action: ${CARD_RESOLVE_ACTIONS.join(' | ')}, providerReference, amount }.`);
+  const tenantId = boundTenant();
+  const owned = await app.prisma.cardSession.findFirst({ where: { id, tenantId }, select: { id: true } });
+  if (!owned) throw notFound('CARD_SESSION_NOT_FOUND', 'There is no such card session.');
+  const { action, providerReference, amount } = parsed.data;
+  return mapNotFound(
+    cardRailRuntimeOf(app).service.resolveHeld({ sessionId: id, tenantId, action, providerReference, amount, adminUserId, ...(onAudit ? { onAudit } : {}) }),
+    'CARD_SESSION_NOT_FOUND', 'There is no such card session.',
+  );
 }
 
 /** GET /billing/subscriptions/:subscriptionId/cards — the bound setup, consent and how each card left service. */
