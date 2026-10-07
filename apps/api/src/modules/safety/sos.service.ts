@@ -1,4 +1,5 @@
 import type { PrismaClient, SosStatus, SosTriggerSource, SosResolutionCode, OrderType } from '@prisma/client';
+import { ReviewDemoSosError } from '../review/demo-policy';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -309,6 +310,11 @@ export class SosService {
       return null;
     });
     const tenantId = subjectTenant ?? (await tenantOfUser(this.prisma, input.actorUserId));
+    // [REVIEW-PARTNER] An SOS in the store-review fiction is a demonstration: nothing is written,
+    // no operator, safety team or emergency contact is paged, and the reviewer is told so plainly.
+    // Decided on the tenant this alert would route to, before the insert; a lookup that fails
+    // answers "not the fiction" (isReviewTenantId), so a real cry for help is never blocked by it.
+    if (tenantId && await isReviewTenantId(this.prisma, tenantId)) throw new ReviewDemoSosError();
     if (!tenantId) {
       // [F-028-04] This used to say "falling back to the platform tenant" while
       // the insert OMITTED the column — so the row took the schema default and
@@ -553,12 +559,14 @@ export class SosService {
     const contacts = authority.contacts;
     if (contacts.length === 0) return;
     const { getChannels } = await import('../../providers/notifications/channels');
+    const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
     const sms = getChannels().sms;
     const who = authority.who || 'the person you were alerted about';
     const body = `✅ Update from Swift: the emergency alert involving ${who} has been closed by our safety team. If you're still concerned, please reach out to them directly.`;
     const notice: Array<{ id: string; ok: boolean }> = [];
     for (const c of contacts) {
-      try { await sms.sendSms(c.phoneE164, body); notice.push({ id: c.id, ok: true }); }
+      // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
+      try { await sendOnBehalfOf(alert.tenantId, () => sms.sendSms(c.phoneE164, body)); notice.push({ id: c.id, ok: true }); }
       catch { notice.push({ id: c.id, ok: false }); }
     }
     const existing = (alert.deliveryReceipts as Record<string, unknown> | null) ?? {};

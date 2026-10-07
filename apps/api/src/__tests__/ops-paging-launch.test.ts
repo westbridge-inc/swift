@@ -14,7 +14,8 @@ import { NotificationService, notifyAdmins } from '../modules/notification/notif
 import { pageOps } from '../modules/ops/ops-page';
 import { openOpsAlert, escalateOverdueOpsAlerts, acknowledgeOpsAlert } from '../modules/safety/ops-alert';
 import { SosService } from '../modules/safety/sos.service';
-import { drainSosEscalations } from '../modules/safety/sos-escalation';
+import { drainSosEscalations, stageEscalations } from '../modules/safety/sos-escalation';
+import { ReviewDemoSosError } from '../modules/review/demo-policy';
 import { OPS_WAR_ROOM, tenantWarRoom } from '../modules/safety/war-room';
 import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/notifications/channels';
 
@@ -273,23 +274,23 @@ describe('[M076] an acknowledgement is a receipt and the alert, together, or not
 });
 
 describe('[GUARDRAILS §3] an app-store reviewer\'s demo SOS never pages real operations', () => {
-  it('a REVIEW-tenant page reaches no SUPER_ADMIN and texts no on-call phone, at open or when overdue', async () => {
+  it('a REVIEW-tenant page reaches no SUPER_ADMIN and texts no on-call phone: a new one is never opened (the review seal); one that already exists is never texted, escalated to the platform or given a SUPER_ADMIN', async () => {
     const reviewAdmin = await makeUser(['ADMIN'], TENANT_REVIEW);
     const res = await runWithoutTenant(() => openOpsAlert(app.prisma, notifications(), { kind: 'SOS', tenantId: TENANT_REVIEW, title: `L10 review SOS ${RUN}`, body: 'Demo.', data: { kind: 'l10_test' } }), 'test:l10-paging');
+    expect(res).toEqual({ opsAlertId: '', recipients: 0, delivered: 0, oncallTexted: 0 });
+    expect(oncallTexts()).toHaveLength(0);
+    // A demo page that already exists (opened before the seal), overdue with nobody attached:
+    // the sweep re-resolves its recipients and escalates it, but only inside the demo tenant.
     // (other open alerts may escalate in the same sweep: count only texts about this page)
     const reviewTexts = () => oncallTexts().filter((t) => ((t as { body?: string }).body ?? '').includes(`L10 review SOS ${RUN}`));
-    expect(oncallTexts()).toHaveLength(0);
-    // (Once the review seal lands, the page is not opened at all; either way no real operator is reached.)
-    if (!res.opsAlertId) return;
-    alertIds.push(res.opsAlertId);
-    const row = await alertRow(res.opsAlertId);
-    expect(row.recipients.map((r) => r.userId)).not.toContain(superAdmin.userId);
-    for (const r of row.recipients) expect(r.userId).toBe(reviewAdmin.userId);
-    await runWithoutTenant(() => app.prisma.opsAlert.update({ where: { id: res.opsAlertId }, data: { ackDeadlineAt: new Date(Date.now() - 60_000) } }), 'test:l10-paging');
+    const existing = await runWithoutTenant(() => app.prisma.opsAlert.create({ data: { tenantId: TENANT_REVIEW, kind: 'SOS', title: `L10 review SOS ${RUN}`, body: 'Demo.', ackDeadlineAt: new Date(Date.now() - 60_000) } }), 'test-fixture:l10-paging');
+    alertIds.push(existing.id);
     const esc = await runWithoutTenant(() => escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now: new Date(), limit: 1_000 }), 'test:l10-paging');
-    expect(esc.platformPage).not.toContain(res.opsAlertId);
+    expect(esc.escalated).toContain(existing.id);
+    expect(esc.platformPage).not.toContain(existing.id);
     expect(reviewTexts()).toHaveLength(0);
-    const after = await alertRow(res.opsAlertId);
+    const after = await alertRow(existing.id);
+    expect(after.recipients.map((r) => r.userId)).toContain(reviewAdmin.userId);
     expect(after.recipients.map((r) => r.userId)).not.toContain(superAdmin.userId);
   });
 
@@ -300,7 +301,7 @@ describe('[GUARDRAILS §3] an app-store reviewer\'s demo SOS never pages real op
     expect(reached).toBe(0);
   });
 
-  it('a REVIEW-tenant SOS stays in its own war room (sos:active and a repeat press\'s sos:retrigger never reach the platform room); a real tenant\'s reaches both', async () => {
+  it('a store-review demo SOS never reaches the platform war room: a new one is refused before it exists; one that already exists, and its repeat press, stay in the demo room; a real tenant\'s reach both', async () => {
     // A socket server that records every room an emit is addressed to.
     const emits: Array<{ event: string; rooms: string[]; sosAlertId: unknown }> = [];
     const capture = {
@@ -310,21 +311,31 @@ describe('[GUARDRAILS §3] an app-store reviewer\'s demo SOS never pages real op
     const sos = new SosService(app.prisma, capture);
     const raised: Record<string, string> = {};
     try {
-      for (const tenantId of [TENANT_REVIEW, TENANT_B]) {
-        const person = await makeUser(['CUSTOMER'], tenantId);
-        const alert = await sos.create({ actorUserId: person.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.8, lng: -58.15 });
-        raised[tenantId] = alert.id;
-        await drainSosEscalations(app.prisma, capture, { alertIds: [alert.id] });
-        // A repeat press on the live alert, from a new position.
-        await sos.create({ actorUserId: person.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.81, lng: -58.16 });
-      }
+      // 1. The demo disposition: a reviewer's new SOS is refused before anything is written or emitted.
+      const reviewer = await makeUser(['CUSTOMER'], TENANT_REVIEW);
+      await expect(sos.create({ actorUserId: reviewer.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.8, lng: -58.15 })).rejects.toBeInstanceOf(ReviewDemoSosError);
+      expect(await runWithoutTenant(() => app.prisma.sosAlert.count({ where: { actorUserId: reviewer.userId } }), 'test-read:l10-paging')).toBe(0);
+      expect(emits).toHaveLength(0);
+      // 2. A demo alert that already exists (raised before the seal): its live board event and a repeat press.
+      const existing = await runWithoutTenant(() => app.prisma.sosAlert.create({ data: { actorUserId: reviewer.userId, actorRole: 'CUSTOMER', status: 'ACTIVE', triggerSource: 'BUTTON', triggeredAt: new Date(), tenantId: TENANT_REVIEW, triggerLat: 6.8, triggerLng: -58.15 } }), 'test-fixture:l10-paging');
+      raised[TENANT_REVIEW] = existing.id;
+      await runWithoutTenant(() => app.prisma.$transaction((tx) => stageEscalations(tx, existing)), 'test-fixture:l10-paging');
+      await drainSosEscalations(app.prisma, capture, { alertIds: [existing.id] });
+      await sos.create({ actorUserId: reviewer.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.81, lng: -58.16 });
+      // 3. A real tenant's SOS and its repeat press.
+      const person = await makeUser(['CUSTOMER'], TENANT_B);
+      const real = await sos.create({ actorUserId: person.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.8, lng: -58.15 });
+      raised[TENANT_B] = real.id;
+      await drainSosEscalations(app.prisma, capture, { alertIds: [real.id] });
+      await sos.create({ actorUserId: person.userId, actorRole: 'CUSTOMER', immediate: true, lat: 6.81, lng: -58.16 });
+
       const roomsFor = (tenantId: string, event: string) => emits.filter((e) => e.sosAlertId === raised[tenantId] && e.event === event).flatMap((e) => e.rooms);
-      // Positive control: a real tenant's SOS reaches its own room AND the platform room, on both events.
       for (const event of ['sos:active', 'sos:retrigger']) {
+        // Positive control: a real tenant's SOS reaches its own room AND the platform room.
         expect(roomsFor(TENANT_B, event), `real tenant ${event}`).toEqual(expect.arrayContaining([tenantWarRoom(TENANT_B), OPS_WAR_ROOM]));
-        // The demo: never the platform room (and, once the review seal lands, possibly no emit at all).
+        // The demo: only its own room, never the platform room.
+        expect(roomsFor(TENANT_REVIEW, event), `review tenant ${event}`).toContain(tenantWarRoom(TENANT_REVIEW));
         expect(roomsFor(TENANT_REVIEW, event), `review tenant ${event}`).not.toContain(OPS_WAR_ROOM);
-        for (const room of roomsFor(TENANT_REVIEW, event)) expect(room).toBe(tenantWarRoom(TENANT_REVIEW));
       }
     } finally {
       await runWithoutTenant(async () => {

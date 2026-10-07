@@ -1,5 +1,5 @@
 import type { PrismaClient, OpsAlertKind } from '@prisma/client';
-import { NotificationService, adminAudienceFor } from '../notification/notification.service';
+import { NotificationService, adminAudienceFor, isReviewTenantId } from '../notification/notification.service';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { opsAlertCounter, opsAlertGauge } from '../../plugins/observability';
@@ -112,6 +112,11 @@ async function openOpsAlertUnscoped(
   input: Parameters<typeof openOpsAlert>[2],
 ): Promise<{ opsAlertId: string; recipients: number; delivered: number; oncallTexted: number }> {
   const now = input.now ?? new Date();
+  // [REVIEW-PARTNER] The store-review fiction pages no real operator: no obligation, no recipients.
+  if (input.tenantId && await isReviewTenantId(prisma, input.tenantId)) {
+    log().info({ kind: input.kind }, 'review-tenant send suppressed: ops alert');
+    return { opsAlertId: '', recipients: 0, delivered: 0, oncallTexted: 0 };
+  }
   // [R048-006] the recipient set is resolvable by the caller (a test seam; production uses the admin resolver)
   const userIds = input.recipientIds ?? (await adminRecipientIds(prisma, input.tenantId));
   const ackDeadlineAt = userIds.length === 0 ? now : new Date(now.getTime() + ackDeadlineSeconds() * 1000);
@@ -133,7 +138,8 @@ async function openOpsAlertUnscoped(
     }
   }
   // [144] The on-call list is texted for every page, through the one SMS seam.
-  const phones = (await isFiction(prisma, input.tenantId)) ? [] : input.oncallPhones ?? onCallPhones();
+  // (The store-review fiction returned above: its pages text nobody.)
+  const phones = input.oncallPhones ?? onCallPhones();
   const sms = input.sms !== undefined ? input.sms : phones.length > 0 ? await defaultOpsSms() : null;
   const oncallTexted = await textOnCall(sms, phones, alert.id, `Swift ops: ${input.title}. ${input.body}`);
   opsAlertCounter.labels('opened').inc();

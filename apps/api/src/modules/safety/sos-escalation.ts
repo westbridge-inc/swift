@@ -155,7 +155,9 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       const { getChannels } = await import('../../providers/notifications/channels');
       const who = authority.who || 'Someone you know';
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';
-      await getChannels().sms.sendSms(contact.phoneE164, `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`);
+      // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
+      const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
+      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
       return { status: 'SENT', receipt: { id: contact.id, ok: true, ...(authority.fromEscrow ? { source: 'safety-escrow' } : {}) } };
     }
     case 'EVIDENCE': {
