@@ -452,7 +452,7 @@ describe('GOLD-3 · COUR-01 — courier "Send": create → offer → collect →
     //    no longer anyone's business ─────────────────────────────────────────
     const done = await track(trackingToken);
     expect(done.json().data.status).toBe('DELIVERED');
-    expect(done.json().data.rider).toEqual({ currentLat: null, currentLng: null, lastLocationUpdate: null, user: { firstName: 'Kofi' } });
+    expect(done.json().data).toEqual({ orderNumber: placed.orderNumber, status: 'DELIVERED', rider: null });
   });
 });
 
