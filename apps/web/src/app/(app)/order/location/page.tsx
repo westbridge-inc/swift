@@ -100,14 +100,14 @@ export default function LocationPage() {
 
   return (
     <div className="mx-auto max-w-lg space-y-4">
-      <h1 className="text-2xl font-extrabold">Delivery addresses</h1>
+      <h1 className="sw-title">Delivery addresses</h1>
 
       {listError !== null && (
         <DataUnavailable what="your saved addresses" error={listError} onRetry={() => void refresh()} />
       )}
 
       {rows.map((a) => (
-        <div key={String(a['id'])} className="flex items-center gap-3 rounded-2xl border border-black/5 bg-white p-4">
+        <div key={String(a['id'])} className="flex items-center gap-3 sw-card p-4">
           <MapPin className="h-5 w-5 text-[var(--swift-red)]" />
           <div>
             <p className="font-bold">
@@ -122,25 +122,25 @@ export default function LocationPage() {
       ))}
 
       {adding ? (
-        <div className="space-y-2 rounded-2xl border border-black/5 bg-white p-4">
-          <input placeholder="Label (Home, Work…)" value={form.label} onChange={(e) => edit({ label: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
-          <input placeholder="Street + number" value={form.addressLine1} onChange={(e) => edit({ addressLine1: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
-          <input placeholder="City" value={form.city} onChange={(e) => edit({ city: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
-          <input placeholder="Region" value={form.region} onChange={(e) => edit({ region: e.target.value })} className="w-full rounded-xl border border-black/10 px-3 py-2" />
+        <div className="space-y-2 sw-card p-4">
+          <input placeholder="Label (Home, Work…)" value={form.label} onChange={(e) => edit({ label: e.target.value })} className="sw-input" />
+          <input placeholder="Street + number" value={form.addressLine1} onChange={(e) => edit({ addressLine1: e.target.value })} className="sw-input" />
+          <input placeholder="City" value={form.city} onChange={(e) => edit({ city: e.target.value })} className="sw-input" />
+          <input placeholder="Region" value={form.region} onChange={(e) => edit({ region: e.target.value })} className="sw-input" />
 
           {/* [W-08] Capturing the location is its own deliberate step, and it is
               captured FOR the address above. Editing the address clears it. */}
           <button
             onClick={locate}
             disabled={locating || !form.addressLine1.trim()}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--swift-red)] py-2.5 font-bold text-[var(--swift-red)] disabled:opacity-60"
+            className="sw-btn sw-btn-md sw-btn-block sw-btn-outline"
           >
             <Crosshair className="h-4 w-4" />
             {locating ? 'Getting your location…' : place ? 'Update the pin' : 'I am at this address — set the pin'}
           </button>
 
           {place ? (
-            <p role="status" className="rounded-xl bg-green-50 px-3 py-2 text-sm font-semibold text-green-800">
+            <p role="status" className="rounded-xl bg-[var(--swift-soft-success)] px-3 py-2 text-sm font-semibold text-[var(--swift-success)]">
               Pinned to about {Math.round(place.accuracyM)} m for “{form.addressLine1}, {form.city}”.
             </p>
           ) : (
@@ -154,13 +154,13 @@ export default function LocationPage() {
           <button
             onClick={save}
             disabled={busy || !ready}
-            className="w-full rounded-full bg-[var(--swift-red)] py-2.5 font-bold text-white disabled:opacity-60"
+            className="sw-btn sw-btn-block"
           >
             {busy ? 'Saving…' : 'Save address'}
           </button>
         </div>
       ) : (
-        <button onClick={() => { setAdding(true); setPlace(null); }} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-[var(--swift-red)] py-3 font-bold text-[var(--swift-red)]">
+        <button onClick={() => { setAdding(true); setPlace(null); }} className="sw-btn sw-btn-block sw-btn-outline">
           <Plus className="h-4 w-4" /> Add an address
         </button>
       )}
