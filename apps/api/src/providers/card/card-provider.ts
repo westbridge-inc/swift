@@ -123,7 +123,11 @@ export type CardSessionOutcome = Evidence & (
   | { status: 'requires_action'; reason: string }
   /** Nothing has happened on the page yet. */
   | { status: 'pending' }
-  | { status: 'unknown'; reason: string }
+  /** [PT-4] `voidable`: the provider may have TAKEN money that Swift cannot
+   *  book (an approval without its proof, for another amount or transaction,
+   *  or an answer that was lost). The service voids it at once under a
+   *  durable claim, and holds it for a person when the void is not confirmed. */
+  | { status: 'unknown'; reason: string; voidable?: { providerRef: string } }
 );
 
 /** What the provider says it charged. Swift compares it with the intent

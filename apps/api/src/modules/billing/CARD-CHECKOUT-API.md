@@ -79,7 +79,7 @@ Otherwise it is `off`. Reading the subscription never fails because of the card 
 - `cardOnFile` is `null`;
 - an Add card session is refused with `409 ADD_CARD_OFF` (section 5).
 
-**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. The simulator moves no money, yet its "Approve" books a paid week, so it serves **only the test subscriptions listed by id** in `CARD_RAIL_SIMULATOR_SUBSCRIPTIONS`; for every other partner the card routes answer `409 PAY_ACTION_OFF` and `CARD` is `off`. It never runs on the public API host (the server refuses to start). `payActions` shows `CARD` as `off` even for a listed test subscription unless the server also sets `CARD_RAIL_SIMULATOR_LIVE=1`: then `CARD` is `live` with `testMode: true` and `testModeLabel`, so a normal build shows the whole card choice end to end. Every screen must show `testModeLabel` whenever `testMode` is true. The store-review demo never sees a card choice, test or real.
+**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. The simulator moves no money, yet its "Approve" books a paid week, so it — like any card TEST system, including the provider's sandbox — serves **only the test subscriptions listed by id** in `CARD_RAIL_TEST_SUBSCRIPTIONS`; for every other partner the card routes answer `409 PAY_ACTION_OFF` and `CARD` is `off`. It never runs on the public API host (the server refuses to start). `payActions` shows `CARD` as `off` even for a listed test subscription unless the server also sets `CARD_RAIL_SIMULATOR_LIVE=1`: then `CARD` is `live` with `testMode: true` and `testModeLabel`, so a normal build shows the whole card choice end to end. Every screen must show `testModeLabel` whenever `testMode` is true. The store-review demo never sees a card choice, test or real.
 
 **`payNow`** buttons read `Pay <currency> <amount, grouped> by card`.
 - When a week is owed, the amount is that week.
@@ -226,7 +226,7 @@ type CardSessionView = {
 | `FAILED` | the bank declined, or the card has expired | "The card was not added." / "The payment didn't go through. You can try again." |
 | `EXPIRED` | the page ran out of time with nothing done | "This page expired. You can start again." |
 | `CANCELLED` | the provider could not open the page | "Try again in a moment." |
-| `HELD` | the provider's answer does not match (amount, currency or wallet); a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
+| `HELD` | the provider's answer does not match (amount, currency or wallet), or the bank may have taken a payment Swift could not confirm and its cancellation could not be confirmed either; a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
 
 Never say "paid" or "added" before `SUCCEEDED`.
 
@@ -273,7 +273,7 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
 
 Pressing a button sends the browser to the return page, exactly as a real provider would.
 
-## 8. Admin (read only)
+## 8. Admin
 
 | Route | Returns |
 |---|---|
@@ -281,8 +281,16 @@ Pressing a button sends the browser to the return page, exactly as a real provid
 | `GET /api/v1/admin/billing/card-sessions/{id}` | one session and its evidence: every observation's source, parsed status, verdict and raw-payload SHA-256 |
 | `GET /api/v1/admin/billing/subscriptions/{subscriptionId}/cards` | the subscription's cards: brand, last 4, expiry, status, the provider setup it is bound to, consent, and how it left service |
 
-- No view ever returns a vault token, the session's state or hash, a provider page address, or anything else that could move money.
-- Reversal and manual resolution of a `HELD` session are not in this contract yet (section 11).
+| `POST /api/v1/admin/billing/card-sessions/{id}/resolve` | finance's decision on a `HELD` Pay now, after checking the provider's portal (money: a second admin approves) |
+
+- No view ever returns a vault token, the session's state or hash, a provider page address, or anything else that could move money. Views show the provider's transaction reference (what finance looks up) and the session's void, refund, booking-claim and resolution markers.
+- **Resolve** body: `{ action, providerReference, amount }`. `providerReference` must be the transaction recorded on the session. `action`:
+  - `BOOK` books exactly this week's price once — never after a void or refund that may have worked, and never on a card test system for a partner who is not a listed test subscription;
+  - `REFUND` sends one refund of that transaction (never resent; never once the week is booked);
+  - `REFUNDED_IN_PORTAL` records a refund made in the provider's portal;
+  - `NOTHING_TAKEN` records that the provider shows nothing taken.
+  Each decision is taken once, under the session's lock; a booking and a refund can never both happen. The general payment-confirmation review refuses to close such a card payment as unpaid (`409 CARD_SESSION_RESOLVE_REQUIRED`).
+- **A payment Swift cannot book** (the provider's answer lacks its own 3-D Secure proof, names another transaction, order, type or amount, or was lost) is voided at once — one void, durably claimed. Voided: the session is `FAILED` (no `failure` category). The void refused or unanswered: `HELD`, and admins are paged with the provider's transaction reference.
 
 ## 9. Operations
 
@@ -324,7 +332,6 @@ Pressing a button sends the browser to the return page, exactly as a real provid
   - whether the hosted page works inside an iframe in iPhone Safari (third-party cookies) and Android in-app browsers;
   - the production API root (the guide says it is provided after staging is validated);
   - enabling `PanToken` on a Pay now.
-- Admin reversal / manual resolution of a `HELD` session, and refunds.
 - The UI (a separate lane builds it against this contract and the simulator).
 - The credential setup tool (PT-5, for MMG and the card provider together): `deploy/owner/swift-payments-setup.command`.
 

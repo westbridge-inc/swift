@@ -44,6 +44,8 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  SCAN_IP_SALT: 'synthetic-scan-boot-salt',
+  ATTRIB_SALT: 'synthetic-attribution-boot-salt',
 };
 
 const cardOff = {
@@ -69,7 +71,7 @@ const paddedTwilioIdentities = ([
 function runPreflight(candidate: Record<string, string | undefined>) {
   const directory = mkdtempSync(join(tmpdir(), 'swift-twilio-preflight-'));
   try {
-    const candidatePath = join(directory, 'candidate.env');
+    const candidatePath = join(directory, 'candidate.txt');
     writeFileSync(candidatePath, Object.entries(candidate)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
       .map(([name, value]) => `${name}=${value}`).join('\n'));
@@ -772,7 +774,7 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
   // [PT-4] Production runs v2 only on the real provider, fully set up for LIVE cards.
   const liveCards = {
     CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', CARD_RAIL_ACCOUNT: 'swift-gy',
-    POWERTRANZ_API_URL: 'https://gateway.example.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
+    POWERTRANZ_API_URL: 'https://gateway.ptranz.com', POWERTRANZ_ID: 'LIVEID01', POWERTRANZ_PASSWORD: 'not-a-real-password',
     POWERTRANZ_PAGE_SET: 'PTZ/Swift', POWERTRANZ_PAGE_NAME: 'Weekly', API_PUBLIC_URL: 'https://api.example.com',
   };
   it('[PT-4] boots with the real provider fully set up for live cards (and drains on the same terms)', () => {
@@ -785,6 +787,8 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
       [{ CARD_RAIL_ENVIRONMENT: 'sandbox', POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /real cards only: CARD_RAIL_ENVIRONMENT must be live/],
       [{ POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /test system/],
       [{ POWERTRANZ_API_URL: undefined }, /POWERTRANZ_API_URL/],
+      // [Review S4] The provider's API lives under ptranz.com (guide sec. 2.3): never another host.
+      [{ POWERTRANZ_API_URL: 'https://gateway.example.com' }, /ptranz\.com/],
       [{ POWERTRANZ_ID: undefined }, /POWERTRANZ_ID/],
       [{ POWERTRANZ_PASSWORD: undefined }, /POWERTRANZ_PASSWORD/],
       [{ POWERTRANZ_PAGE_NAME: undefined }, /POWERTRANZ_PAGE_SET and POWERTRANZ_PAGE_NAME/],
@@ -832,6 +836,29 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
       .toThrow(/CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL/);
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api-test.example.test' }))
       .not.toThrow();
+  });
+
+  it('[review S2-1] in EVERY mode, the provider\'s TEST system (its sandbox) refuses to start on the public API host — a trailing dot is the same host', () => {
+    const sandbox = { CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox' };
+    for (const env of [
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_V2: '0', API_PUBLIC_URL: 'https://API.swiftgy.com/' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_ENVIRONMENT: undefined, API_PUBLIC_URL: 'https://api.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com./' },
+      { NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api.swiftgy.com.' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+  });
+
+  it('[review S3] in EVERY mode but production, live (real) cards refuse to start: a test server never charges real cards', () => {
+    for (const mode of ['development', 'test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-test.example.test' }), mode)
+        .toThrow(/live \(real cards\) outside production/);
+    }
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox', API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, ...liveCards })).not.toThrow();
   });
 
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {

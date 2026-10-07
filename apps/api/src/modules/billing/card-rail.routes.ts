@@ -13,10 +13,11 @@ import { NotificationService } from '../notification/notification.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getCardRailProvider } from '../../providers/card/card-rail-factory';
 import type { CardRailProvider, CardRailSource } from '../../providers/card/card-provider';
+import type { OnAudit } from '../../lib/audit-writer';
 import { SIMULATOR_PAGE, SimulatorCardRailProvider, SimulatorRefusal } from '../../providers/card/simulator-provider';
 import { PowerTranzCardRailProvider, type PowerTranzHostedPage } from '../../providers/card/powertranz-provider';
 import { BillingService } from './billing.service';
-import { CARD_ON_FILE_CONSENT_VERSION, CARD_SANDBOX_TEST_LABEL, CardRailService, INSTRUMENT_DTO_SELECT, cardTestLabel, type CardSessionDto, type PaymentInstrumentDto } from './card-rail.service';
+import { CARD_ON_FILE_CONSENT_VERSION, CARD_RESOLVE_ACTIONS, CARD_SANDBOX_TEST_LABEL, CardRailService, INSTRUMENT_DTO_SELECT, cardTestLabel, type CardSessionDto, type PaymentInstrumentDto } from './card-rail.service';
 import { CARD_OFF, cardPayAction, cardSessionsAllowed, type CardPayAction } from './card-pay-action';
 import { clientPlatform, type PayAction } from './fee-pay-actions';
 
@@ -531,6 +532,8 @@ function powerTranzOf(runtime: CardRailRuntime): PowerTranzCardRailProvider | nu
  * the card is typed and the bank's 3-D Secure check runs. Swift's page only
  * frames it: its words name "your bank" and the card, never the provider.
  */
+export const CARD_FRAME_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-popups allow-top-navigation-by-user-activation';
+
 function hostedCardPageHtml(facts: PowerTranzHostedPage): string {
   const price = formatAmount(fromMinor(facts.amountMinor, facts.currencyCode));
   const test = facts.sandbox ? `<p class="test">${escapeHtml(CARD_SANDBOX_TEST_LABEL)}</p>` : '';
@@ -541,24 +544,33 @@ function hostedCardPageHtml(facts: PowerTranzHostedPage): string {
   }
   return page('Swift card payment', `${head}`
     + `<p>Type your card on your bank's secure form below. Swift never sees your card number or security code.</p>`
-    + `<iframe class="card" title="Your bank's secure card form" srcdoc="${escapeHtml(facts.redirectData)}" allow="payment"></iframe>`
+    // [Review S3] Sandboxed: scripts and forms run (the self-posting form, the
+    // bank's 3-D Secure pages), same-origin is kept so the bank's pages keep
+    // their own cookies, popups for a bank that opens one; the frame can move
+    // this page only when the partner taps (the return page's links).
+    + `<iframe class="card" title="Your bank's secure card form" sandbox="${CARD_FRAME_SANDBOX}" srcdoc="${escapeHtml(facts.redirectData)}" allow="payment"></iframe>`
     + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Cancel and go back to the Swift app</a></p>`);
 }
 
+/** The card provider's own origins (its API is pinned to ptranz.com, guide sec. 2.3). */
+const CARD_PROVIDER_ORIGINS = 'https://*.ptranz.com';
+
 /**
- * [PT-4] The page's own policy. The bank's form runs inside the iframe (a
- * srcdoc frame inherits this policy): its self-posting script may run and post
- * to the bank over HTTPS, the bank's pages may load in the frame, and nothing
- * on this page may call Swift's API or be framed by another site.
+ * [PT-4 · review S3] The page's own policy. The bank's form runs inside the
+ * iframe (a srcdoc frame inherits this policy): only the provider's scripts
+ * may run there and its form may post only to the provider; the frame may
+ * then navigate to the provider's hosted page, the card's bank (3-D Secure
+ * challenge pages live on each bank's own host) and back to Swift; nothing on
+ * this page may call Swift's API or be framed by another site.
  */
 export const HOSTED_CARD_PAGE_CSP = [
   "default-src 'none'",
-  "script-src 'unsafe-inline' https:",
-  "style-src 'unsafe-inline' https:",
+  `script-src 'unsafe-inline' ${CARD_PROVIDER_ORIGINS}`,
+  `style-src 'unsafe-inline' ${CARD_PROVIDER_ORIGINS}`,
   'img-src data: https:',
-  'font-src data: https:',
+  `font-src data: ${CARD_PROVIDER_ORIGINS}`,
   "frame-src 'self' https:",
-  'form-action https:',
+  `form-action ${CARD_PROVIDER_ORIGINS}`,
   "connect-src 'none'",
   "base-uri 'none'",
   "object-src 'none'",
@@ -677,7 +689,9 @@ export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirm
 // (its census reads that file), so its admin gate, capability decision and
 // tenant binding run first; these are their queries. Nothing here
 // returns a vault token, the state or its hash, a page address, a provider
-// session reference or anything else that could move money.
+// session reference or anything else that could move money. [PT-4] The
+// provider's transaction reference is shown to finance: it names a payment
+// to look up in the provider's portal and cannot move money by itself.
 // ---------------------------------------------------------------------------
 
 const ADMIN_SESSION_SELECT = {
@@ -687,6 +701,8 @@ const ADMIN_SESSION_SELECT = {
   expiresAt: true, returnedAt: true, confirmedAt: true, lastCheckedAt: true,
   consentVersion: true, consentAt: true, failureCode: true,
   instrumentId: true, paymentId: true, createdAt: true,
+  // [Review S2-2] What finance needs to look a held payment up and resolve it.
+  providerTransactionRef: true, providerVoidState: true, providerRefundState: true, bookClaimedAt: true, resolution: true, resolvedBy: true, resolvedAt: true,
 } as const;
 
 const ADMIN_CARD_SELECT = {
@@ -733,6 +749,35 @@ export async function adminCardSession(prisma: PrismaClient, id: string) {
     select: { source: true, parsedStatus: true, verdict: true, rawSha256: true, createdAt: true },
   });
   return { session: withAmount(session), observations };
+}
+
+const resolveBody = z.object({
+  action: z.enum(CARD_RESOLVE_ACTIONS),
+  providerReference: z.string().trim().min(1).max(64),
+  amount: z.number().positive().max(99_999_999),
+  /** The stated reason may come in the body as well as the header (ADM-006). */
+  reason: z.string().trim().max(2000).optional(),
+}).strict();
+
+/**
+ * [Review S2-2] POST /billing/card-sessions/:id/resolve — finance decides a
+ * HELD card payment after checking the provider's portal: book it (exactly
+ * this week's price), refund it (one refund, durably claimed), record a
+ * refund made in the portal, or record that nothing was taken. Declared C4 in
+ * admin-authority.ts: two people. The session must be in the admin's tenant.
+ */
+export async function adminResolveCardSession(app: FastifyInstance, id: string, body: unknown, adminUserId: string, onAudit?: OnAudit) {
+  if (!ID_SHAPE.test(id)) throw notFound('CARD_SESSION_NOT_FOUND', 'There is no such card session.');
+  const parsed = resolveBody.safeParse(body ?? {});
+  if (!parsed.success) throw new AppError(400, 'INVALID_RESOLUTION', `Send { action: ${CARD_RESOLVE_ACTIONS.join(' | ')}, providerReference, amount }.`);
+  const tenantId = boundTenant();
+  const owned = await app.prisma.cardSession.findFirst({ where: { id, tenantId }, select: { id: true } });
+  if (!owned) throw notFound('CARD_SESSION_NOT_FOUND', 'There is no such card session.');
+  const { action, providerReference, amount } = parsed.data;
+  return mapNotFound(
+    cardRailRuntimeOf(app).service.resolveHeld({ sessionId: id, tenantId, action, providerReference, amount, adminUserId, ...(onAudit ? { onAudit } : {}) }),
+    'CARD_SESSION_NOT_FOUND', 'There is no such card session.',
+  );
 }
 
 /** GET /billing/subscriptions/:subscriptionId/cards — the bound setup, consent and how each card left service. */

@@ -7,6 +7,7 @@ import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
+import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
 /**
@@ -56,15 +57,30 @@ function assertSmsRecipientAllowlistConfig(env: Record<string, string | undefine
  * server's own address set, so the check can be made at all.
  */
 export function assertCardSimulatorNotPublic(env: Record<string, string | undefined>): void {
-  if (env['CARD_RAIL_PROVIDER'] === 'simulator' || (env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0') {
+  // [Review S2-1] …and the same for a real provider's TEST system (its sandbox).
+  const testSystem = env['CARD_RAIL_PROVIDER'] === 'simulator'
+    || (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] !== 'live');
+  if (testSystem || (env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0') {
     let host = '';
-    try { host = new URL(env['API_PUBLIC_URL'] ?? '').hostname.toLowerCase(); } catch { host = ''; }
+    // [#1511 review S4] A trailing dot names the same host.
+    try { host = new URL(env['API_PUBLIC_URL'] ?? '').hostname.toLowerCase().replace(/\.+$/, ''); } catch { host = ''; }
     if (host === PUBLIC_API_HOST) {
-      throw new Error(`FATAL: the card simulator (CARD_RAIL_PROVIDER=simulator or CARD_RAIL_SIMULATOR_LIVE) on the public API host ${PUBLIC_API_HOST} — a test page that books weeks without money. Refusing to start.`);
+      throw new Error(`FATAL: a TEST card system (the simulator, CARD_RAIL_SIMULATOR_LIVE, or the provider's sandbox) on the public API host ${PUBLIC_API_HOST} — it books weeks without real money. Refusing to start.`);
     }
     if ((env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0' && !host) {
       throw new Error('FATAL: CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL set to this TEST server\'s own address (never the public host). Refusing to start.');
     }
+  }
+}
+
+/**
+ * [PT-4 · review S3] In EVERY mode: real (live) cards run only on the
+ * production server. A test server told "live" would charge real cards and
+ * book them into a database that is not the record. Refused at boot, loudly.
+ */
+export function assertCardLiveOnlyInProduction(env: Record<string, string | undefined>): void {
+  if (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] === 'live' && runtimeMode(env) !== 'production') {
+    throw new Error('FATAL: CARD_RAIL_ENVIRONMENT=live (real cards) outside production — a test server never charges real cards. Use sandbox here. Refusing to start.');
   }
 }
 
@@ -76,6 +92,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // driver needs its whole configuration — keys parsed, the request proven to
   // fit the key. Production also refuses the sandbox and a UAT page.
   assertMmgCheckoutConfig(env);
+  // Validate the documented retention setting in every mode. Production
+  // salts are checked below after the existing configuration guards.
+  scanRawRetentionDays(env);
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
@@ -85,6 +104,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // loudly instead of silently texting no one. Values are never echoed.
   assertSmsRecipientAllowlistConfig(env);
   assertCardSimulatorNotPublic(env);
+  assertCardLiveOnlyInProduction(env);
   if (runtimeMode(env) !== 'production') {
     assertDurableStorageConfig(env);
     return;
@@ -308,6 +328,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     // eslint-disable-next-line no-console
     console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
   }
+  assertQrConfig(env);
 }
 
 /**

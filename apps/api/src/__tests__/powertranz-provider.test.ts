@@ -16,7 +16,7 @@ import {
 } from '../providers/card/powertranz-provider';
 import { CardBindingMismatchError } from '../providers/card/card-provider';
 import { createHash, randomUUID } from 'node:crypto';
-import { CARD_ON_FILE_CONSENT_SHA256, CARD_ON_FILE_CONSENT_TEXT, CARD_ON_FILE_CONSENT_VERSION } from '../modules/billing/card-rail.service';
+import { CARD_ON_FILE_CONSENT_SHA256, CARD_ON_FILE_CONSENT_TEXT, CARD_ON_FILE_CONSENT_VERSION, failureCodeOf } from '../modules/billing/card-rail.service';
 
 // ---------------------------------------------------------------------------
 // [PT-4] The real card provider against a fake gateway that answers in the
@@ -86,11 +86,11 @@ const preprocessed = (call: Call) => {
   };
 };
 
-/** sec. 7.3: the completion answer for the held transaction. */
-const completion = (fields: Record<string, unknown>) => (txnId: string) => ({
+/** sec. 7.3: the completion answer for the held page (its transaction and order). */
+const completion = (fields: Record<string, unknown>) => (page: { txnId: string; orderId: string }) => ({
   status: 200,
   body: {
-    TransactionType: 2, Approved: true, AuthorizationCode: '123456', TransactionIdentifier: txnId, TotalAmount: 2100, CurrencyCode: '328', RRN: '000000000001', CardBrand: 'Visa', IsoResponseCode: '00', ResponseMessage: 'Transaction is approved.',
+    TransactionType: 2, Approved: true, AuthorizationCode: '123456', TransactionIdentifier: page.txnId, OrderIdentifier: page.orderId, TotalAmount: 2100, CurrencyCode: '328', RRN: '000000000001', CardBrand: 'Visa', IsoResponseCode: '00', ResponseMessage: 'Transaction is approved.',
     RiskManagement: { ThreeDSecure: { Eci: '05', AuthenticationStatus: 'Y', ResponseCode: '3D0' } }, // sec. 6: present in every response
     ...fields,
   },
@@ -149,9 +149,11 @@ describe('configuration (secrets named, never echoed)', () => {
   });
   it('live needs its own non-test root; production takes live only; every refusal names the setting, never a value', () => {
     const cases: Array<[Record<string, string | undefined>, RegExp]> = [
-      [{ ...base, CARD_RAIL_ENVIRONMENT: 'live' }, /POWERTRANZ_API_URL is required/],
-      [{ ...base, CARD_RAIL_ENVIRONMENT: 'live', POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /test system/],
-      [{ ...base, POWERTRANZ_API_URL: 'https://gateway.example.com' }, /not a test system/],
+      [{ ...base, NODE_ENV: 'production', CARD_RAIL_ENVIRONMENT: 'live' }, /POWERTRANZ_API_URL is required/],
+      [{ ...base, NODE_ENV: 'production', CARD_RAIL_ENVIRONMENT: 'live', POWERTRANZ_API_URL: 'https://staging.ptranz.com' }, /test system/],
+      [{ ...base, POWERTRANZ_API_URL: 'https://gateway.ptranz.com' }, /not a test system/],
+      [{ ...base, POWERTRANZ_API_URL: 'https://staging.example.com' }, /ptranz\.com/],
+      [{ ...base, CARD_RAIL_ENVIRONMENT: 'live', POWERTRANZ_API_URL: 'https://gateway.ptranz.com' }, /only on the production server/],
       [{ ...base, NODE_ENV: 'production' }, /live/],
       [{ ...base, POWERTRANZ_API_URL: 'http://staging.ptranz.com' }, /https/],
       [{ ...base, POWERTRANZ_API_URL: 'https://staging.ptranz.com/api' }, /bare https/],
@@ -171,8 +173,9 @@ describe('configuration (secrets named, never echoed)', () => {
       expect((thrown as Error).message).toMatch(message);
       expect((thrown as Error).message).not.toContain('p@ss-not-real');
     }
-    expect(powerTranzConfigFromEnv({ ...base, NODE_ENV: 'production', CARD_RAIL_ENVIRONMENT: 'live', POWERTRANZ_API_URL: 'https://gateway.example.com' }))
-      .toMatchObject({ environment: 'live', apiRoot: 'https://gateway.example.com' });
+    expect(powerTranzConfigFromEnv({ ...base, NODE_ENV: 'production', CARD_RAIL_ENVIRONMENT: 'live', POWERTRANZ_API_URL: 'https://gateway.ptranz.com' }))
+      .toMatchObject({ environment: 'live', apiRoot: 'https://gateway.ptranz.com' });
+    expect(() => powerTranzConfigFromEnv({ ...base, NODE_ENV: 'production', CARD_RAIL_ENVIRONMENT: 'live', POWERTRANZ_API_URL: 'https://gateway.example.com' })).toThrow(/ptranz\.com/);
   });
 });
 
@@ -249,6 +252,24 @@ describe('createSession: the hosted payment page, preprocessed (sec. 2.2 1.3-1.4
     expect(p.savesCards).toBe(false);
   });
 
+  it('[review S4] a page Swift could not keep (its store failed after SP4) is definitively no page: failed — its SpiToken is gone, so no completion can ever be sent (sec. 7.3)', async () => {
+    const gw = gateway({ '/api/spi/sale': preprocessed });
+    const broken = new Proxy(redis, {
+      get(target, key) {
+        if (key === 'hset') return async () => { throw new Error('store unavailable'); };
+        const value = Reflect.get(target, key) as unknown;
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const p = new PowerTranzCardRailProvider(broken, CONFIG, { fetch: gw.fetch, keyPrefix: PREFIX });
+    const created = await p.createSession({
+      binding: p.binding, sessionRef: `cs_${nanoid(10)}`, purpose: 'PAY_NOW', returnUrl: RETURN_URL,
+      expiresAt: new Date(Date.now() + 15 * 60_000), amountMinor: 210_000, currencyCode: 'GYD',
+    });
+    expect(created).toMatchObject({ status: 'failed', reason: 'PAGE_NOT_KEPT' });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+  });
+
   it('a binding that is not its own is refused before any call [C2]', async () => {
     const gw = gateway({ '/api/spi/sale': preprocessed });
     const p = provider(gw);
@@ -295,7 +316,7 @@ describe('the browser\'s 3-D Secure result decides only whether Swift completes 
 describe('confirm: the completion is the money truth, sent at most once (sec. 2.2 1.7-1.8, 7.3)', () => {
   it('pending until the browser comes back; then ONE POST /api/spi/payment with the SpiToken as the body, no credential headers; approved 00 -> succeeded', async () => {
     let page!: Awaited<ReturnType<typeof openPage>>;
-    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => completion({})(page.txnId) });
+    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => completion({})(page) });
     const p = provider(gw);
     page = await openPage(p);
     expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })).toMatchObject({ status: 'pending' });
@@ -356,21 +377,44 @@ describe('confirm: the completion is the money truth, sent at most once (sec. 2.
     expect(gw.paths()).not.toContain('/api/spi/payment');
   });
 
-  it('the completion\'s answer lost (network, timeout, 5xx, unreadable): unknown, and NEVER sent a second time', async () => {
+  it('the completion\'s answer lost (network, timeout, 5xx, unreadable): unknown AND voidable under this transaction, and NEVER sent a second time', async () => {
     for (const lost of [(): ReturnType<Responder> => 'network', (): ReturnType<Responder> => 'timeout', (): ReturnType<Responder> => ({ status: 503, body: 'down' }), (): ReturnType<Responder> => ({ status: 200, body: '<html>oops' })]) {
       const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': lost });
       const p = provider(gw);
       const page = await openPage(p);
       await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, { AuthenticationStatus: 'Y' }) });
-      expect((await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })).status).toBe('unknown');
-      expect((await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })).status).toBe('unknown');
+      expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })).toMatchObject({ status: 'unknown', voidable: { providerRef: page.txnId } });
+      expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })).toMatchObject({ status: 'unknown', voidable: { providerRef: page.txnId } });
       expect(gw.calls.filter((c) => c.url.endsWith('/api/spi/payment'))).toHaveLength(1);
     }
   });
 
+  it('[review S2-2] an approval Swift cannot book (no 3-D Secure proof of its own, as the guide\'s own sample shows it) is voidable, never succeeded', async () => {
+    let page!: Awaited<ReturnType<typeof openPage>>;
+    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => completion({ RiskManagement: undefined })(page) });
+    const p = provider(gw);
+    page = await openPage(p);
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, { AuthenticationStatus: 'Y' }) });
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' }))
+      .toMatchObject({ status: 'unknown', reason: expect.stringMatching(/^APPROVED_UNAUTHENTICATED_/), voidable: { providerRef: page.txnId } });
+  });
+
+  it('[review S4] the completion is never sent after the SpiToken\'s five minutes (sec. 2.2 1.7): failed, nothing sent', async () => {
+    let now = Date.now();
+    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => ({ status: 200, body: { Approved: true } }) });
+    const p = provider(gw, { now: () => new Date(now) });
+    const page = await openPage(p, { expiresAt: new Date(now + 15 * 60_000) });
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, { AuthenticationStatus: 'Y' }) });
+    now += 5 * 60_000 + 1_000;
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })).toMatchObject({ status: 'failed', reason: 'SPI_TOKEN_EXPIRED' });
+    expect(gw.paths()).not.toContain('/api/spi/payment');
+    // Nothing was asked of the bank: never shown to the partner as a decline.
+    expect(failureCodeOf('SPI_TOKEN_EXPIRED')).toBe('COMPLETION_EXPIRED');
+  });
+
   it('two confirmations racing: exactly one completion is sent', async () => {
     let page!: Awaited<ReturnType<typeof openPage>>;
-    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => completion({})(page.txnId) });
+    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => completion({})(page) });
     const p = provider(gw);
     page = await openPage(p);
     await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, { AuthenticationStatus: 'Y' }) });
@@ -387,39 +431,57 @@ describe('confirm: the completion is the money truth, sent at most once (sec. 2.
   });
 });
 
-describe('reading the completion (sec. 6, Appendix 1): undocumented is unknown, never success', () => {
-  const held = { txnId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' };
-  const approved = { Approved: true, IsoResponseCode: '00', TransactionIdentifier: held.txnId, TotalAmount: 2100, CurrencyCode: '328', RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: '05' } } };
-  it('approved 00, this transaction, readable amount: succeeded', () => {
+describe('reading the completion (sec. 6, Appendix 1): booked only on full proof; money that may have moved is voided, never booked', () => {
+  const held = { txnId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', orderId: 'SWIFT-cs_1', amountMinor: 210_000, currencyCode: 'GYD' };
+  const approved = {
+    TransactionType: 2, Approved: true, IsoResponseCode: '00', TransactionIdentifier: held.txnId, OrderIdentifier: held.orderId,
+    TotalAmount: 2100, CurrencyCode: '328', RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: '05' } },
+  };
+  const unbookable = (json: unknown) => readCompletion(json, held).status;
+  it('approved 00, this Sale, this order, this amount, with its own 3-D Secure proof: succeeded', () => {
     expect(readCompletion(approved, held)).toEqual({ status: 'succeeded', amountMinor: 210_000, currencyCode: 'GYD' });
     expect(readCompletion({ ...approved, TransactionIdentifier: undefined, OriginalTrxnIdentifier: held.txnId }, held).status).toBe('succeeded');
+    expect(readCompletion({ ...approved, TransactionType: '2' }, held).status).toBe('succeeded');
   });
-  it('[3DS] approved 00 is booked only on PowerTranz\'s OWN 3-D Secure proof (sec. 6, 8.3, 8.4): Y or A, never N / U / R / absent / a failed ECI', () => {
+  it('[3DS] approved 00 is booked only on PowerTranz\'s OWN 3-D Secure proof (sec. 6, 8.3, 8.4): Y or A, never N / U / R / absent / a failed ECI — those are voided', () => {
     expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'A', Eci: '06' } } }, held).status).toBe('succeeded');
     expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y' } } }, held).status).toBe('succeeded');
     for (const tds of [{ AuthenticationStatus: 'N' }, { AuthenticationStatus: 'U' }, { AuthenticationStatus: 'R' }, {}, { AuthenticationStatus: 'Y', Eci: '07' }, { AuthenticationStatus: 'Y', Eci: '00' }]) {
-      expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: tds } }, held), JSON.stringify(tds)).toMatchObject({ status: 'unknown', reason: expect.stringMatching(/^APPROVED_UNAUTHENTICATED_/) });
+      expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: tds } }, held), JSON.stringify(tds)).toMatchObject({ status: 'unbookable', reason: expect.stringMatching(/^APPROVED_UNAUTHENTICATED_/) });
     }
-    expect(readCompletion({ ...approved, RiskManagement: undefined }, held).status).toBe('unknown');
+    expect(unbookable({ ...approved, RiskManagement: undefined })).toBe('unbookable');
   });
-
-  it('approved with any other code, naming another transaction, or with no readable amount or currency: unknown', () => {
-    for (const iso of ['10', '11', '16', '32', '', undefined]) expect(readCompletion({ ...approved, IsoResponseCode: iso }, held).status, String(iso)).toBe('unknown');
-    expect(readCompletion({ ...approved, TransactionIdentifier: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' }, held).status).toBe('unknown');
-    expect(readCompletion({ ...approved, CurrencyCode: '978' }, held).status).toBe('unknown');
-    expect(readCompletion({ ...approved, TotalAmount: 'lots' }, held).status).toBe('unknown');
-    expect(readCompletion({ ...approved, Approved: 'true' }, held).status).toBe('unknown');
-    expect(readCompletion(null, held).status).toBe('unknown');
+  it('[review S4] a numeric ECI is read like its text: 5 is authenticated, 7 is not', () => {
+    expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: 5 } } }, held).status).toBe('succeeded');
+    expect(readCompletion({ ...approved, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: 7 } } }, held).status).toBe('unbookable');
   });
-  it('declined by the bank: failed; a possible duplicate (787, 788, 387) or a code that is not the bank\'s answer (09, 68, 91, 94, 96, 98, 99, 06): unknown', () => {
+  it('[review S3] an approval must NAME this page: its transaction (absent is not enough), its order, a Sale — else voided', () => {
+    expect(readCompletion({ ...approved, TransactionIdentifier: undefined }, held)).toMatchObject({ status: 'unbookable', reason: 'APPROVAL_DOES_NOT_NAME_THIS_TRANSACTION' });
+    expect(unbookable({ ...approved, TransactionIdentifier: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' })).toBe('unbookable');
+    expect(readCompletion({ ...approved, OrderIdentifier: undefined }, held)).toMatchObject({ status: 'unbookable', reason: 'APPROVAL_DOES_NOT_NAME_THIS_ORDER' });
+    expect(unbookable({ ...approved, OrderIdentifier: 'SWIFT-cs_2' })).toBe('unbookable');
+    expect(readCompletion({ ...approved, TransactionType: 1 }, held)).toMatchObject({ status: 'unbookable', reason: 'APPROVAL_IS_NOT_A_SALE' });
+    expect(unbookable({ ...approved, TransactionType: undefined })).toBe('unbookable');
+  });
+  it('approved with any other code, another amount or currency, an unreadable amount, a truthy lookalike: voided', () => {
+    for (const iso of ['10', '11', '16', '32', '', undefined]) expect(unbookable({ ...approved, IsoResponseCode: iso }), String(iso)).toBe('unbookable');
+    expect(readCompletion({ ...approved, TotalAmount: 2000 }, held)).toMatchObject({ status: 'unbookable', reason: 'APPROVED_AMOUNT_MISMATCH' });
+    expect(unbookable({ ...approved, CurrencyCode: '840' })).toBe('unbookable');
+    expect(unbookable({ ...approved, CurrencyCode: '978' })).toBe('unbookable');
+    expect(unbookable({ ...approved, TotalAmount: 'lots' })).toBe('unbookable');
+    expect(unbookable({ ...approved, Approved: 'true' })).toBe('unbookable');
+    expect(unbookable(null)).toBe('unbookable');
+  });
+  it('declined by the bank: failed; a contradiction (declined with 00), a possible duplicate (787, 788, 387) or a code that is not the bank\'s answer (09, 68, 91, 94, 96, 98, 99, 06): voided', () => {
     for (const iso of ['05', '51', '54', '57', '12', '14', '82', 'N7', '97', '89']) {
       expect(readCompletion({ Approved: false, IsoResponseCode: iso }, held).status, iso).toBe('failed');
     }
+    expect(readCompletion({ Approved: false, IsoResponseCode: '00' }, held)).toMatchObject({ status: 'unbookable', reason: 'DECLINED_WITH_APPROVAL_CODE' });
     for (const code of ['787', '788', '387']) {
-      expect(readCompletion({ Approved: false, IsoResponseCode: '12', Errors: [{ Code: code, Message: 'Duplicate' }] }, held).status, code).toBe('unknown');
+      expect(unbookable({ Approved: false, IsoResponseCode: '12', Errors: [{ Code: code, Message: 'Duplicate' }] }), code).toBe('unbookable');
     }
     for (const iso of ['09', '68', '91', '94', '96', '98', '99', '06']) {
-      expect(readCompletion({ Approved: false, IsoResponseCode: iso }, held).status, iso).toBe('unknown');
+      expect(unbookable({ Approved: false, IsoResponseCode: iso }), iso).toBe('unbookable');
     }
   });
 });
@@ -459,6 +521,28 @@ describe('refund and void (sec. 5.2, 7.5, 7.6): the original transaction, at mos
     expect(await q.refund({ binding: q.binding, providerRef: original, amountMinor: 100, currencyCode: 'GYD', idempotencyKey: `refund-${nanoid(6)}` })).toMatchObject({ status: 'failed' });
     expect(await q.refund({ binding: q.binding, providerRef: 'not-a-guid', amountMinor: 100, currencyCode: 'GYD', idempotencyKey: `refund-${nanoid(6)}` })).toMatchObject({ status: 'failed', reason: 'REFUND_REQUEST_INVALID' });
     expect(refused.calls).toHaveLength(1);
+  });
+  it('[review S2-2] a void or refund counts only when its answer is about THIS transaction (sec. 6, 7.5, 7.6): named, of its type, a refund of its amount — anything else is unknown, never done', async () => {
+    const other = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const cases: Array<['void' | 'refund', Record<string, unknown>, string]> = [
+      ['void', { OriginalTrxnIdentifier: other, TransactionIdentifier: other, TransactionType: 4 }, 'VOID_APPROVAL_NOT_FOR_THIS_TRANSACTION'],
+      ['void', { TransactionType: 4 }, 'VOID_APPROVAL_NOT_FOR_THIS_TRANSACTION'],
+      ['void', { OriginalTrxnIdentifier: original, TransactionIdentifier: original, TransactionType: 5 }, 'VOID_APPROVAL_NOT_FOR_THIS_TYPE'],
+      ['void', { OriginalTrxnIdentifier: original, TransactionIdentifier: original }, 'VOID_APPROVAL_NOT_FOR_THIS_TYPE'],
+      ['refund', { OriginalTrxnIdentifier: other, TransactionIdentifier: other, TransactionType: 5, TotalAmount: 2100, CurrencyCode: '328' }, 'REFUND_APPROVAL_NOT_FOR_THIS_TRANSACTION'],
+      ['refund', { OriginalTrxnIdentifier: original, TransactionType: 4, TotalAmount: 2100, CurrencyCode: '328' }, 'REFUND_APPROVAL_NOT_FOR_THIS_TYPE'],
+      ['refund', { OriginalTrxnIdentifier: original, TransactionType: 5, TotalAmount: 1, CurrencyCode: '328' }, 'REFUND_APPROVAL_NOT_FOR_THIS_AMOUNT'],
+      ['refund', { OriginalTrxnIdentifier: original, TransactionType: 5, TotalAmount: 2100, CurrencyCode: '840' }, 'REFUND_APPROVAL_NOT_FOR_THIS_AMOUNT'],
+      ['refund', { OriginalTrxnIdentifier: original, TransactionType: 5 }, 'REFUND_APPROVAL_NOT_FOR_THIS_AMOUNT'],
+    ];
+    for (const [action, fields, reason] of cases) {
+      const gw = gateway({ [`/api/${action}`]: () => ({ status: 200, body: { Approved: true, IsoResponseCode: '00', ResponseMessage: 'Transaction is approved.', ...fields } }) });
+      const p = provider(gw);
+      const answer = action === 'void'
+        ? await p.voidPayment({ binding: p.binding, providerRef: original, idempotencyKey: `void-${nanoid(6)}` })
+        : await p.refund({ binding: p.binding, providerRef: original, amountMinor: 210_000, currencyCode: 'GYD', idempotencyKey: `refund-${nanoid(6)}` });
+      expect(answer, JSON.stringify(fields)).toMatchObject({ status: 'unknown', reason });
+    }
   });
   it('void: POST <root>/api/void with the original TransactionIdentifier only (no partial voids)', async () => {
     const gw = gateway({ '/api/void': () => ({ status: 200, body: { OriginalTrxnIdentifier: original, TransactionType: 4, Approved: true, TransactionIdentifier: original, IsoResponseCode: '00' } }) });

@@ -110,7 +110,15 @@ export async function resolveFinanceConfirmation(db: PrismaClient, input: {
         const raw = payment?.failureRaw as Record<string, unknown> | null;
         if (session?.status === 'SUCCEEDED' || payment?.status === 'CAPTURED' || raw?.['providerOutcome'] === 'CAPTURED'
           || hold.status === 'SETTLEMENT_APPLY_PENDING') throw conflict();
-        if (session) await tx.cardSession.update({ where: { id: session.id }, data: { status: 'FAILED', failureCode: 'FINANCE_CONFIRMED_UNPAID', confirmedAt: now } });
+        // [PT-4 · review S2-2] A card payment the provider may have taken (held
+        // for a person, or with a provider transaction or a void on record) is
+        // never closed as unpaid here: it is booked, refunded or recorded as
+        // not taken on its card session, against that transaction.
+        if (session && (session.status === 'HELD' || session.providerTransactionRef !== null || session.providerVoidState !== null)) {
+          throw new AppError(409, 'CARD_SESSION_RESOLVE_REQUIRED', 'Resolve this card payment on its card session: book it, refund it, or record that nothing was taken.');
+        }
+        // A one-use marker: an UNKNOWN session may already carry its confirmation time.
+        if (session) await tx.cardSession.update({ where: { id: session.id }, data: { status: 'FAILED', failureCode: 'FINANCE_CONFIRMED_UNPAID', ...(session.confirmedAt ? {} : { confirmedAt: now }) } });
         if (payment) await tx.subscriptionPayment.update({ where: { id: payment.id }, data: { status: 'FAILED', failureCode: 'DECLINED',
           failureRaw: { ...(raw ?? {}), providerOutcome: 'DECLINED', financeConfirmationId: hold.id, observedAt: now.toISOString() } as Prisma.InputJsonValue } });
         await resolveConfirmationInTx(tx, hold.subscriptionId, source, 'PROVEN_UNPAID', evidence, now);

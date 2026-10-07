@@ -38,6 +38,7 @@ function harness(opts: { orderId?: string | null; transaction?: () => Promise<un
       updateMany: async () => { statements.push({ op: 'booking.updateMany' }); return { count: 1 }; },
     },
     order: {
+      findUniqueOrThrow: async () => { statements.push({ op: 'order.findUniqueOrThrow' }); return { status: 'ACCEPTED' }; },
       update: async () => { statements.push({ op: 'order.update' }); return {}; },
     },
   };
@@ -56,6 +57,8 @@ describe('BookingService.rescheduleBooking — Order → Booking, like every oth
     expect(res.moved).toBe(true);
     expect(h.statements.map((s) => s.op)).toEqual([
       '$queryRaw SELECT id FROM "orders" WHERE id = ? FOR UPDATE',
+      // [L09 · M018] the parent's state is read under its own lock
+      'order.findUniqueOrThrow',
       'booking.create',
       'booking.updateMany',
       'order.update',
