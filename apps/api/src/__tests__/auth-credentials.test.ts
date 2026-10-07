@@ -39,7 +39,10 @@ const OUTAGE_PHONE = `${PREFIX}006`;
 const SLOW_NOTICE_PHONE = `${PREFIX}007`;
 const REPEAT_PHONE = `${PREFIX}008`;
 const OUTAGE_UNKNOWN_PHONE = `${PREFIX}099`;
-const ALL_PHONES = [LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE, OUTAGE_PHONE, SLOW_NOTICE_PHONE, REPEAT_PHONE];
+const RACE_PHONE = `${PREFIX}009`;
+const COOKIE_SET_PHONE = `${PREFIX}010`;
+const REPLAY_PHONES = ['011', '012', '013', '014'].map((suffix) => `${PREFIX}${suffix}`);
+const ALL_PHONES = [...REPLAY_PHONES, LOCK_PHONE, BROWSER_PHONE, SET_PHONE, SET_OTHER_STEP_UP_PHONE, SPRAY_PHONE, FOREIGN_PHONE, OUTAGE_PHONE, SLOW_NOTICE_PHONE, REPEAT_PHONE, RACE_PHONE, COOKIE_SET_PHONE];
 const PASSWORD = 'credentials-password-1';
 const NEW_PASSWORD = 'credentials-password-2';
 const ATTACKER_IP = '203.0.113.7';
@@ -346,6 +349,50 @@ describe('[MASTER-003] setting a password needs fresh proof and ends the other s
     expect(devChannelLog.slice(smsBefore).filter((e) => e.channel === 'sms' && e.to === SET_PHONE)).toHaveLength(1);
   });
 
+  it('one step-up buys ONE credential change: two concurrent requests on it — exactly one wins', async () => {
+    const user = await createUser(RACE_PHONE, null);
+    const token = (await loginWithOtp(app, RACE_PHONE)).json().data.tokens.accessToken as string;
+    await grantStepUp(app, token);
+    const set = (password: string) => app.inject({
+      method: 'POST', url: '/api/v1/auth/password/set', payload: { password },
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    });
+    const results = await Promise.all([set('the first new password'), set('the second new password')]);
+    expect(results.map((r) => r.statusCode).sort()).toEqual([200, 403]);
+    expect(results.find((r) => r.statusCode === 403)!.json().error.code).toBe('STEP_UP_REQUIRED');
+    const winner = results.find((r) => r.statusCode === 200)!;
+    const again = await post('password/set', { password: NEW_PASSWORD }, {
+      headers: { authorization: `Bearer ${winner.json().data.tokens.accessToken as string}` },
+    });
+    expect(again.statusCode, again.body).toBe(403);
+    expect(again.json().error.code).toBe('STEP_UP_REQUIRED');
+    const notices = await app.prisma.notification.findMany({ where: { userId: user.id } });
+    expect(notices.filter((notice) => (notice.data as { kind?: string } | null)?.kind === 'password_changed')).toHaveLength(1);
+  });
+
+  it('from a browser session: the new credentials arrive as cookies (never in the body), and the old cookie stops working', async () => {
+    const user = await createUser(COOKIE_SET_PHONE, null);
+    const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: `l04-cookie-set-${Date.now()}` });
+    await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: `l04-cookie-set-refresh-${Date.now()}`, authMethod: 'OTP', deviceId: 'l04', deviceType: 'test', expiresAt: new Date(Date.now() + 3_600_000) } });
+    await grantStepUp(app, token);
+    const browser = (cookie: string) => ({ 'x-swift-client': 'web', origin: ORIGIN, cookie: `${ACCESS_COOKIE}=${cookie}` });
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/auth/password/set', payload: { password: NEW_PASSWORD },
+      headers: { ...browser(token), 'content-type': 'application/json' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toEqual({ session: 'cookie' });
+    expect(res.body).not.toMatch(/accessToken|refreshToken/);
+    const cookies = ([] as string[]).concat((res.headers['set-cookie'] as string | string[] | undefined) ?? []);
+    const fresh = cookies.find((c) => c.startsWith(`${ACCESS_COOKIE}=`))!;
+    expect(fresh).toMatch(/HttpOnly/);
+    expect(cookies.some((c) => c.startsWith(`${REFRESH_COOKIE}=`) && /HttpOnly/.test(c))).toBe(true);
+    const freshValue = decodeURIComponent(fresh.split(';')[0]!.slice(ACCESS_COOKIE.length + 1));
+    expect((await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: browser(token) })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: browser(freshValue) })).statusCode).toBe(200);
+    expect(await bcrypt.compare(NEW_PASSWORD, (await app.prisma.user.findUniqueOrThrow({ where: { id: user.id } })).passwordHash!)).toBe(true);
+  });
+
   it('the password-changed text passes the launch-market gate like every other text', async () => {
     const user = await createUser(FOREIGN_PHONE, null);
     const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: `l04-foreign-${Date.now()}` });
@@ -358,5 +405,43 @@ describe('[MASTER-003] setting a password needs fresh proof and ends the other s
     });
     expect(res.statusCode, res.body).toBe(200);
     expect(devChannelLog.slice(smsBefore).filter((e) => e.channel === 'sms')).toHaveLength(0);
+  });
+});
+
+
+describe('refresh checks credential reuse before account status', () => {
+  it.each(['SUSPENDED', 'BANNED', 'DEACTIVATED'] as const)('revokes the rotated-token family before revealing %s', async (status) => {
+    const phone = REPLAY_PHONES[['SUSPENDED', 'BANNED', 'DEACTIVATED'].indexOf(status)]!;
+    const user = await createUser(phone, null);
+    const login = await loginWithOtp(app, phone);
+    const original = login.json().data.tokens.refreshToken as string;
+    const rotated = await post('refresh', { refreshToken: original });
+    expect(rotated.statusCode, rotated.body).toBe(200);
+    const current = rotated.json().data.refreshToken as string;
+    await app.prisma.session.updateMany({ where: { userId: user.id }, data: { rotatedAt: new Date(Date.now() - 60_000) } });
+    await app.prisma.user.update({ where: { id: user.id }, data: { status } });
+    const replay = await post('refresh', { refreshToken: original });
+    expect(replay.statusCode, replay.body).toBe(401);
+    expect(replay.json().error.code).toBe('INVALID_TOKEN');
+    expect(replay.body).not.toContain('accountStatus');
+    expect(await app.prisma.session.count({ where: { userId: user.id } })).toBe(0);
+    expect((await post('refresh', { refreshToken: current })).statusCode).toBe(401);
+    expect(await app.prisma.auditLog.count({ where: { userId: user.id, action: 'REFRESH_TOKEN_REUSE' } })).toBe(1);
+  });
+
+  it('a current or grace-window credential still cannot refresh a suspended account', async () => {
+    const user = await createUser(REPLAY_PHONES[3]!, null);
+    const original = (await loginWithOtp(app, REPLAY_PHONES[3]!)).json().data.tokens.refreshToken as string;
+    const rotated = await post('refresh', { refreshToken: original });
+    expect(rotated.statusCode, rotated.body).toBe(200);
+    const current = rotated.json().data.refreshToken as string;
+    await app.prisma.user.update({ where: { id: user.id }, data: { status: 'SUSPENDED' } });
+    for (const refreshToken of [current, original]) {
+      const response = await post('refresh', { refreshToken });
+      expect(response.statusCode, response.body).toBe(403);
+      expect(response.json().error.code).toBe('ACCOUNT_SUSPENDED');
+      expect(response.body).not.toMatch(/accessToken|refreshToken/);
+    }
+    expect(await app.prisma.session.count({ where: { userId: user.id } })).toBe(1);
   });
 });
