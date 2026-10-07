@@ -36,6 +36,8 @@ export const config = {
     '/cart',
     '/orders/:path*',
     '/courier',
+    '/services',
+    '/services/:path*',
     '/taxi',
     '/account/:path*',
     '/store/:path*',

@@ -25,6 +25,7 @@ const PUBLIC_PAGES = [
   '(app)/order/browse/page.tsx',
   '(app)/order/search/page.tsx',
   '(app)/order/vendor/[id]/page.tsx',
+  '(app)/services/page.tsx', // [W11] local pros, public browsing like the app
   '(app)/taxi/page.tsx', // public app handoff, no web booking
   '(marketing)/about/page.tsx',
   '(marketing)/account/delete/page.tsx', // public deletion instructions
@@ -59,6 +60,8 @@ const PRIVATE_PAGES = [
   '(app)/order/location/page.tsx',
   '(app)/orders/page.tsx',
   '(app)/orders/[id]/page.tsx',
+  '(app)/services/requests/page.tsx', // [W11] a customer's own requests
+  '(app)/services/requests/[id]/page.tsx',
   'dashboard/page.tsx',
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',
