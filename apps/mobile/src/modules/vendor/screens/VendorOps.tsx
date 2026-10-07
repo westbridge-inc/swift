@@ -31,6 +31,7 @@ import {
   fmtClock as fmtLocalClock,
   fmtWhen,
   formatSlot,
+  MmgDisputeNotice,
   orderActions,
   type VendorOrderActionKind,
 } from '../shared';
@@ -259,6 +260,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
           ) : null}
         </View>
       ) : null}
+      <MmgDisputeNotice order={order} />
       {actions.length > 0 ? (
         <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
           {actions.map((a) => (

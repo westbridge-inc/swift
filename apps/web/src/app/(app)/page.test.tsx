@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
-import HomePage from './page';
+import { HomeScreen as HomePage } from './home-screen';
 
 const state = vi.hoisted(() => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn(), coords: vi.fn() }));
 vi.mock('next/navigation', () => ({ usePathname: () => '/', useRouter: () => ({ push: state.push, back: state.back, replace: state.replace }) }));
