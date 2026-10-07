@@ -74,12 +74,13 @@ export function assertCardSimulatorNotPublic(env: Record<string, string | undefi
 }
 
 /**
- * [PT-4 · review S3] In EVERY mode: real (live) cards run only on the
- * production server. A test server told "live" would charge real cards and
- * book them into a database that is not the record. Refused at boot, loudly.
+ * [PT-4 · review S3] Called for every mode but production: real (live) cards
+ * run only on the production server. A test server told "live" would charge
+ * real cards and book them into a database that is not the record. Refused at
+ * boot, loudly.
  */
-export function assertCardLiveOnlyInProduction(env: Record<string, string | undefined>): void {
-  if (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] === 'live' && runtimeMode(env) !== 'production') {
+export function assertNoLiveCardsOffProduction(env: Record<string, string | undefined>): void {
+  if (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] === 'live') {
     throw new Error('FATAL: CARD_RAIL_ENVIRONMENT=live (real cards) outside production — a test server never charges real cards. Use sandbox here. Refusing to start.');
   }
 }
@@ -104,8 +105,8 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // loudly instead of silently texting no one. Values are never echoed.
   assertSmsRecipientAllowlistConfig(env);
   assertCardSimulatorNotPublic(env);
-  assertCardLiveOnlyInProduction(env);
   if (runtimeMode(env) !== 'production') {
+    assertNoLiveCardsOffProduction(env);
     assertDurableStorageConfig(env);
     return;
   }
