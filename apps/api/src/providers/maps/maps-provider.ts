@@ -2,6 +2,7 @@ import { haversineDistance, estimateDrivingDistance } from '../../utils/distance
 import { AppError } from '../../utils/errors';
 import { osrmOutcomeCounter } from '../../plugins/observability';
 import { isOsrmDurationOrAbsent, isOsrmMeasure } from './osrm-measure';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // MapsProvider — hard rule 4: swappable interface. Dispatch only ever asks for
@@ -34,6 +35,15 @@ export interface RouteEstimate {
   /** Real driving minutes when the engine knows them; null = caller applies
    *  its own deterministic speed model (keeps haversine mode bit-identical). */
   minutes: number | null;
+}
+
+/** A production taxi/courier quote needs the road the customer will travel.
+ * `source` already distinguishes every deterministic fallback, including a
+ * deliberately configured straight-line provider. Keep that signal intact. */
+export function assertRoadQuoteAvailable(route: RouteEstimate): void {
+  if (isProduction() && route.source !== 'osrm') {
+    throw new AppError(503, 'ROUTE_UNAVAILABLE', 'Road routing is unavailable. Try again in a moment.');
+  }
 }
 
 /** [TAXI multi-stop] One leg of a routed itinerary: one point to the next. */
@@ -382,8 +392,8 @@ export class OsrmMapsProvider implements MapsProvider {
 
   /** Real road distance + duration via the OSRM `route` service. Falls back to
    *  the deterministic estimate when OSRM fails to answer (down, an error, no
-   *  route, no distance beside a valid or absent duration), so an outage never
-   *  blocks a fare. An answer that
+   *  route, no distance beside a valid or absent duration). Callers that need
+   *  a real road quote refuse the fallback in production. An answer that
    *  PRESENTS an invalid distance or duration (negative, Infinity, NaN, not a
    *  number) is refused instead: 503 ROUTE_UNAVAILABLE, never priced and never
    *  swapped for the estimate. An absent duration stays null, as always: the

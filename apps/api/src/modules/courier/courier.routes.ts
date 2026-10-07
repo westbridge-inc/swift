@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
 import { readCourierRates } from '../country/pricing-config';
-import { getMapsProvider } from '../../providers/maps/maps-provider';
+import { assertRoadQuoteAvailable, getMapsProvider } from '../../providers/maps/maps-provider';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { RIDER_PICKUP_FROM } from '../order/order-status';
@@ -161,7 +161,9 @@ async function quote(
   rates?: CourierRates,
 ) {
   // Real road km when OSRM is configured; deterministic estimate otherwise.
-  const { km, source } = await courierMaps.routeKm(pickup, dropoff);
+  const route = await courierMaps.routeKm(pickup, dropoff);
+  assertRoadQuoteAvailable(route);
+  const { km, source } = route;
   // [ALG-18] Canonical BEFORE pricing: the fee and the frozen number are one number.
   const distanceKm = canonicalBillableKm(km);
   return { distanceKm, source, estimate: estimateCourierFee(distanceKm, size, speed, rates) };

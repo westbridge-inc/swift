@@ -52,6 +52,8 @@ import { installProcessLifecycle } from './utils/process-lifecycle';
 import { resolveCorsOrigins } from './utils/cors-origin';
 import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
+import { getMapsProvider } from './providers/maps/maps-provider';
+import { createRoutingProbe } from './providers/maps/routing-probe';
 
 
 // Process start ≈ API boot. Grace-windows the scheduler "never booted" page so a
@@ -102,7 +104,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // tests that grade every public GET under TENANT_UNSCOPED_ACCESS=deny.
   if (options.onRoute) app.addHook('onRoute', options.onRoute);
   let bootContractsComplete = false;
+  const checkRouting = createRoutingProbe(getMapsProvider());
+  app.addHook('onListen', async () => {
+    const routing = await checkRouting();
+    app.log[routing.status === 'degraded' ? 'warn' : 'info']({ routing }, 'routing readiness');
+  });
   const runtimeReadiness: RuntimeReadinessState = {
+    checkRouting,
     checkQueues: () => false,
     checkConsumers: () => false,
     checkWorker: async () => {
@@ -200,6 +208,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   registerRoutedWhileDegradedCounter(app);
   app.get('/health', async (request, reply) => {
     const checks: Record<string, string> = { api: 'ok' };
+    const routing = await checkRouting();
 
     try {
       await app.prisma.$queryRaw`SELECT 1`;
@@ -277,6 +286,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      routing,
       // [F-028-17] THIS process's effective dispatch tuning. The baselines
       // derive their wait math from these numbers, and a baseline shell can
       // carry different env than the server it drives — a cap-3 shell judged
