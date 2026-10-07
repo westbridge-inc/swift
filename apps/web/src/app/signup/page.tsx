@@ -18,6 +18,13 @@ import { StoreLocationPicker } from '@/components/store-location-picker';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
 
+/** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
+ *  to next year. Checked here too, so a typo is caught before the round trip. */
+function vehicleYearAccepted(year: string): boolean {
+  const n = Number(year);
+  return Number.isInteger(n) && n >= 1980 && n <= new Date().getFullYear() + 1;
+}
+
 /** [W9] The four ways in. A delivery rider and a taxi driver are both movers
  *  to the API; the vehicle each chooses decides which (partner.service:
  *  a car or a bus provisions a Driver, a motorbike or bicycle a Rider). */
@@ -317,7 +324,7 @@ export default function SignupPage() {
             ) : null}
             <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
             {mover === 'DRIVER' ? (
-              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !Number.isInteger(Number(veh.year)) || Number(veh.year) < 1900} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
+              <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
             ) : (
               <button type="button" onClick={() => void doVehicle()} disabled={busy || !agree} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
             )}

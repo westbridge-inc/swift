@@ -4,7 +4,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
-import { MOVER_VEHICLES } from '@/lib/signup-roles';
+import { LAUNCH_HIDDEN_BUSES, MOVER_VEHICLES } from '@/lib/signup-roles';
 
 // ---------------------------------------------------------------------------
 // [W9] Four first-level ways to join: order, a business, a delivery rider, a
@@ -72,10 +72,10 @@ describe('[W9] four ways to join', () => {
     expect(fx.replace).toHaveBeenCalledWith('/portal');
   });
 
-  it('a taxi driver registers as a mover, picks a car or a bus only, and gives the vehicle’s details', async () => {
+  it('a taxi driver registers as a mover, picks a car only — buses are hidden at launch — and gives the vehicle’s details', async () => {
     const user = await throughName(/Drive a taxi with Swift/);
     expect(fx.register.mock.calls[0]![0]).toMatchObject({ role: 'MOVER' });
-    expect(options()).toEqual([['CAR', 'Car'], ['WAGON_CAR', 'Wagon Car'], ['BUS_9', 'Bus (9-seater)'], ['BUS_15', 'Bus (15-seater)']]);
+    expect(options()).toEqual([['CAR', 'Car'], ['WAGON_CAR', 'Wagon Car']]);
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
@@ -85,6 +85,20 @@ describe('[W9] four ways to join', () => {
       role: 'MOVER', acceptAgreement: true, vehicleType: 'CAR',
       vehicle: { make: 'Toyota', model: 'Axio', year: 2018, color: 'Silver', licensePlate: 'PAA 1234' },
     });
+  });
+
+  it('the taxi door holds the vehicle year to what the server accepts (1980 to next year)', async () => {
+    const user = await throughName(/Drive a taxi with Swift/);
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
+      fireEvent.change(screen.getByLabelText(label!), { target: { value } });
+    }
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
+    const next = new Date().getFullYear() + 1;
+    for (const [year, open] of [['1979', false], ['1980', true], [String(next), true], [String(next + 1), false]] as const) {
+      fireEvent.change(screen.getByLabelText('Year'), { target: { value: year } });
+      expect(create().disabled, year).toBe(!open);
+    }
   });
 
   it('a business still registers as a business', async () => {
@@ -97,15 +111,27 @@ describe('[W9] four ways to join', () => {
 describe('[W9] the vehicles match the app and the server', () => {
   const mobile = (path: string) => readFileSync(join(__dirname, '..', '..', '..', '..', 'mobile', 'src', path), 'utf8');
 
-  it('the taxi door offers exactly the app’s driver vehicles, the rider door the rest of what is offered at launch', () => {
+  it('the taxi door offers the app’s driver vehicles minus the launch-hidden buses, the rider door the rest of what is offered at launch', () => {
     const driverKinds = /DRIVER_VEHICLE_KINDS: VehicleKind\[\] = \[([^\]]*)\]/.exec(mobile('services/api.ts'))![1]!.match(/'([A-Z_0-9]+)'/g)!.map((k) => k.slice(1, -1));
     const hidden = /LAUNCH_HIDDEN_VEHICLE_KINDS: readonly VehicleKind\[\] = \[([^\]]*)\]/.exec(mobile('lib/vehicleOffer.ts'))![1]!.match(/'([A-Z_0-9]+)'/g)!.map((k) => k.slice(1, -1));
     const all = [...mobile('modules/mover/screens/MoverOnboardingScreen.tsx').matchAll(/\{ key: '([A-Z_0-9]+)', label: '([^']+)'/g)].map((m) => [m[1]!, m[2]!] as const);
     expect(all.length).toBeGreaterThan(5);
-    expect(MOVER_VEHICLES.DRIVER.map((v) => v.value)).toEqual(driverKinds);
-    expect(MOVER_VEHICLES.RIDER.map((v) => v.value).sort()).toEqual(all.map(([key]) => key).filter((key) => !driverKinds.includes(key) && !hidden.includes(key)).sort());
+    // Owner ruling, 6 Oct: buses ("Group" rides) are hidden at launch. Whether
+    // the app still lists them, or hides them too (its launch-hidden list),
+    // the website's doors subtract them — so this holds either way.
+    const offered = (key: string) => !hidden.includes(key) && !LAUNCH_HIDDEN_BUSES.includes(key);
+    expect(MOVER_VEHICLES.DRIVER.map((v) => v.value)).toEqual(driverKinds.filter(offered));
+    expect(MOVER_VEHICLES.RIDER.map((v) => v.value).sort()).toEqual(all.map(([key]) => key).filter((key) => !driverKinds.includes(key) && offered(key)).sort());
     for (const vehicle of [...MOVER_VEHICLES.RIDER, ...MOVER_VEHICLES.DRIVER]) {
       expect(vehicle.label, vehicle.value).toBe(all.find(([key]) => key === vehicle.value)![1]);
     }
+  });
+
+  it('buses are hidden at launch: no door offers one, and the hidden set names every bus class the app knows', () => {
+    const appBuses = [...mobile('modules/mover/screens/MoverOnboardingScreen.tsx').matchAll(/\{ key: '(BUS_[A-Z_0-9]+)'/g)].map((m) => m[1]!);
+    expect(appBuses.length).toBeGreaterThan(0);
+    expect([...LAUNCH_HIDDEN_BUSES].sort()).toEqual([...new Set(appBuses)].sort());
+    const offered = [...MOVER_VEHICLES.RIDER, ...MOVER_VEHICLES.DRIVER].map((v) => v.value);
+    for (const bus of LAUNCH_HIDDEN_BUSES) expect(offered, bus).not.toContain(bus);
   });
 });
