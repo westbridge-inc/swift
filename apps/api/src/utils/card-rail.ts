@@ -21,6 +21,22 @@ export function cardRailV2DrainEnabled(env: Record<string, string | undefined> =
   return env['CARD_RAIL_V2_DRAIN'] === '1';
 }
 
+/** [PT-2] Saving a card for the weekly fee (an ENROLL session) is OFF unless
+ * CARD_RAIL_ENROLL is exactly '1' — independent of the provider's ability:
+ * the on-screen consent wording waits for the owner's sign-off. Off: the
+ * CARD entry offers Pay now only and an ENROLL request is refused. */
+export function cardEnrollEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env['CARD_RAIL_ENROLL'] === '1';
+}
+
+/** [PT-2] STAGING ONLY: CARD_RAIL_SIMULATOR_LIVE exactly '1' lets the
+ * simulator make the CARD pay action live — labelled as a test — so the whole
+ * card choice can be exercised on a test server. Production refuses to boot
+ * with it set (boot-config.ts), and the simulator itself never builds there. */
+export function cardSimulatorLiveEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env['CARD_RAIL_SIMULATOR_LIVE'] === '1';
+}
+
 /** No implicit OFF state: disabling the provider also requires the billing
  * kill switch, so boot and provider construction enforce the same contract. */
 export function assertDisabledCardRailConfig(env: Record<string, string | undefined>): void {

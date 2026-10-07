@@ -1,6 +1,6 @@
 import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import { log } from '../../utils/logger';
-import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';
+import { cardEnrollEnabled, cardRailKilled, cardRailV2Enabled, cardSimulatorLiveEnabled } from '../../utils/card-rail';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import { weeklyFeeAmount } from './subscription-fee';
@@ -19,9 +19,10 @@ import type { CardRailProvider, CardRailSource } from '../../providers/card/card
 //                        before any key, price or page). The simulator passes
 //                        it on a test server, so the whole loop can be driven.
 //   cardPayAction        what the Pay screen shows. `live` additionally needs
-//                        a REAL provider: the simulator never makes CARD live,
-//                        so no normal build shows a card button on a test
-//                        page. `off` is hidden, never a disabled "coming soon".
+//                        a REAL provider: the simulator makes CARD live only
+//                        on a test server that says so (CARD_RAIL_SIMULATOR_LIVE,
+//                        refused in production), and then labelled as a test.
+//                        `off` is hidden, never a disabled "coming soon".
 // ---------------------------------------------------------------------------
 
 /** What a card looks like on the Pay screen: brand, last 4, expiry, status [C9]. */
@@ -35,11 +36,13 @@ export type CardPayAction =
       /** Exactly what a Pay-now session charges right now (the server's price). */
       payNow: { amount: number; currencyCode: string };
       /** May the partner save a card for the weekly fee? False unless the
-       *  provider can charge a saved card without the partner present. */
+       *  provider can charge a saved card without the partner present AND
+       *  saving cards is switched on (CARD_RAIL_ENROLL). */
       addCard: boolean;
       /** The ACTIVE card, if any. */
       cardOnFile: CardView | null;
-      /** [PT-4] True on the provider's TEST system (sandbox): the screen shows testModeLabel. */
+      /** True when the card choice is a TEST — the simulator on a test server, or
+       *  the provider's sandbox [PT-4]: every screen shows testModeLabel. */
       testMode: boolean;
       testModeLabel?: string;
     };
@@ -112,8 +115,8 @@ type PayableSub = Pick<Subscription, 'id' | 'status' | 'feeWaived' | 'weeklyRate
  * THE rule for opening a card page. In order: the flag, the kill switch, a
  * provider that builds from this server's configuration, the platform switch
  * (an unknown platform counts only when every platform is on), a payable
- * subscription with a fee above zero, and — for a REAL provider — a payer in
- * a production tenant (the store-review demo never reaches a real card page).
+ * subscription with a fee above zero, and a payer in a production tenant (the
+ * store-review demo and the crawler never reach a card page, test or real).
  */
 export async function cardSessionsAllowed(
   prisma: PrismaClient,
@@ -134,7 +137,7 @@ export async function cardSessionsAllowed(
   const platformOn = platform === 'unknown' ? switches.ios && switches.android && switches.web : switches[platform];
   if (!platformOn) return { allowed: false, reason: 'PLATFORM_OFF' };
   if (!PAYABLE.has(sub.status) || sub.feeWaived || !(weeklyFeeAmount(sub) > 0)) return { allowed: false, reason: 'NOT_PAYABLE' };
-  if (!provider.simulator && !(await payerIsProduction(prisma, sub.id))) return { allowed: false, reason: 'NOT_PRODUCTION_PAYER' };
+  if (!(await payerIsProduction(prisma, sub.id))) return { allowed: false, reason: 'NOT_PRODUCTION_PAYER' };
   return { allowed: true, provider };
 }
 
@@ -163,7 +166,7 @@ export async function cardPayAction(
   rail: CardRailSource,
 ): Promise<CardPayAction> {
   const decision = await cardSessionsAllowed(prisma, sub, platform, rail);
-  if (!decision.allowed || decision.provider.simulator) return CARD_OFF;
+  if (!decision.allowed || (decision.provider.simulator && !cardSimulatorLiveEnabled())) return CARD_OFF;
   let payNow: { amount: number; currencyCode: string };
   try {
     const priced = await quote(sub.id);
@@ -172,7 +175,7 @@ export async function cardPayAction(
     return CARD_OFF; // nothing to pay (waived, zero), under review, or no price: no button
   }
   if (!(await readFeePaymentDecision(prisma, sub.id)).allowed) return CARD_OFF;
-  const addCard = decision.provider.savesCards;
+  const addCard = decision.provider.savesCards && cardEnrollEnabled();
   const cardOnFile = addCard
     ? await prisma.paymentInstrument.findFirst({ where: { subscriptionId: sub.id, status: 'ACTIVE' }, select: INSTRUMENT_DTO_SELECT })
     : null;

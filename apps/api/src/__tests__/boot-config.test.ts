@@ -780,6 +780,15 @@ describe('[PT-1] card rail v2 cannot be switched on in production yet, and the s
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_V2: undefined })).not.toThrow();
   });
 
+  it('[PT-2] refuses the staging-only switch that lets the simulator show the card choice, whatever its value but 0', () => {
+    for (const value of ['1', 'true', 'yes']) {
+      expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: value }), value).toThrow(/CARD_RAIL_SIMULATOR_LIVE/);
+    }
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_SIMULATOR_LIVE: undefined })).not.toThrow();
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1' })).not.toThrow();
+  });
+
   it('outside production the simulator boots (staging runs NODE_ENV=development)', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator' })).not.toThrow();
   });

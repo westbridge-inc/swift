@@ -3609,7 +3609,7 @@ export async function vendorRoutes(app: FastifyInstance) {
             ...(await sanDisplay(app.prisma, subscription)),
             ...(await payInfo(app.prisma, subscription)),
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-            ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.payAction(subscription, request.headers)),
+            ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
             weeklyRate: Number(subscription.weeklyRate),
           }
         : null,

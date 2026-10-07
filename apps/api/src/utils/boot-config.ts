@@ -154,6 +154,11 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (env['CARD_RAIL_PROVIDER'] === 'simulator') {
     throw new Error('FATAL: CARD_RAIL_PROVIDER=simulator in production — the card simulator is a test page with no real money. Refusing to start.');
   }
+  // [PT-2] The staging-only switch that lets the simulator show the card
+  // choice: production refuses it whatever its value, as it refuses the simulator.
+  if (env['CARD_RAIL_SIMULATOR_LIVE'] !== undefined && env['CARD_RAIL_SIMULATOR_LIVE'] !== '' && env['CARD_RAIL_SIMULATOR_LIVE'] !== '0') {
+    throw new Error('FATAL: CARD_RAIL_SIMULATOR_LIVE is a test-server switch (the card simulator shows a test card choice); production refuses it. Refusing to start.');
+  }
   const cardRailV2 = env['CARD_RAIL_V2'];
   if (cardRailV2 !== undefined && cardRailV2 !== '' && cardRailV2 !== '0' && cardRailV2 !== '1') {
     throw new Error('FATAL: CARD_RAIL_V2 must be 1 or 0 in production. Refusing to start.');

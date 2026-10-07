@@ -28,8 +28,10 @@ import {
   CARD_RAIL_RUNTIME_DECORATION,
   CARD_RETURN_BODY_LIMIT,
   CARD_RETURN_RATE,
+  CARD_RETURN_PAGES,
   CARD_SESSION_START_RATE,
   cardRailPublicRoutes,
+  returnPageHtml,
   type CardRailRuntime,
 } from '../modules/billing/card-rail.routes';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -268,6 +270,8 @@ beforeAll(async () => {
   process.env['MASTER_KEK'] = randomBytes(32).toString('base64');
   resetKeyProviderForTests();
   process.env['CARD_RAIL_V2'] = '1';
+  // Saving cards is its own switch (owner sign-off on the consent words); these tests drive it on.
+  process.env['CARD_RAIL_ENROLL'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -292,8 +296,10 @@ beforeAll(async () => {
 
 afterEach(async () => {
   process.env['CARD_RAIL_V2'] = '1';
+  process.env['CARD_RAIL_ENROLL'] = '1';
   delete process.env['CARD_RAIL_V2_DRAIN'];
   delete process.env['CARD_RAIL_KILL'];
+  delete process.env['CARD_RAIL_SIMULATOR_LIVE'];
   railOverride = null;
   await app.prisma.platformConfig.deleteMany({ where: { key: CARD_CHECKOUT_PLATFORMS_KEY } });
   resetCardCheckoutSwitchCache();
@@ -301,6 +307,7 @@ afterEach(async () => {
 
 afterAll(async () => {
   delete process.env['CARD_RAIL_V2'];
+  delete process.env['CARD_RAIL_ENROLL'];
   if (kekBefore === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = kekBefore;
   resetKeyProviderForTests();
   await runWithoutTenant(async () => {
@@ -429,6 +436,26 @@ describe('Add card, end to end through HTTP: the return grants nothing; the prov
     expect(twice.statusCode).toBe(200);
     expect(twice.json().data.card.status).toBe('REVOKED');
     expect(await app.prisma.auditLog.count({ where: { action: 'CARD_REMOVED', entityId: card!.id } })).toBe(1);
+  });
+});
+
+describe('the same tap again: the same session, and its page while it is open', () => {
+  it('PAY_NOW and ENROLL: the same Idempotency-Key answers 200 with the same session AND its page address while open; never once it is closed', async () => {
+    const p = await makeRider();
+    for (const purpose of ['PAY_NOW', 'ENROLL'] as const) {
+      const k = key();
+      const first = await startSession(p, purpose, { key: k });
+      expect(first.statusCode, first.body).toBe(201);
+      const again = await startSession(p, purpose, { key: k });
+      expect(again.statusCode, again.body).toBe(200);
+      expect(again.json().data).toMatchObject({ sessionId: first.json().data.sessionId, status: 'OPEN', hostedUrl: first.json().data.hostedUrl });
+      expect(again.json().data.hostedUrl).toMatch(/^\/api\/v1\/billing\/card\/simulator\/sim_[0-9a-f]{24}$/);
+      // Finished: the page cannot be opened again from a replay.
+      expect(pageState((await follow(await press(first.json().data.hostedUrl, 'APPROVE'))).body)).toBe('SUCCEEDED');
+      const after = await startSession(p, purpose, { key: k });
+      expect(after.statusCode).toBe(200);
+      expect(after.json().data).toMatchObject({ sessionId: first.json().data.sessionId, status: 'SUCCEEDED', hostedUrl: null });
+    }
   });
 });
 
@@ -708,9 +735,52 @@ describe('payActions CARD: the server alone decides, per platform, whether the P
     for (const p of [await makeStore(), await makeRider(), await makeDriver()]) {
       const quote = await runtime.billing.quoteCardPayNow(p.subId);
       expect(await cardActionOf(p), p.family).toEqual({
-        id: 'CARD', state: 'live', payNow: { amount: quote.amount, currencyCode: quote.currencyCode }, addCard: false, cardOnFile: null,
+        id: 'CARD', state: 'live', payNow: { amount: quote.amount, currencyCode: quote.currencyCode }, addCard: false, cardOnFile: null, testMode: false,
       });
     }
+  });
+
+  it('[staging] CARD_RAIL_SIMULATOR_LIVE: the simulator shows the card choice, labelled as a test — never to the store-review demo', async () => {
+    const p = await makeStore();
+    expect(await cardActionOf(p)).toEqual({ id: 'CARD', state: 'off' });
+    process.env['CARD_RAIL_SIMULATOR_LIVE'] = '1';
+    const quote = await runtime.billing.quoteCardPayNow(p.subId);
+    expect(await cardActionOf(p)).toEqual({
+      id: 'CARD', state: 'live', payNow: { amount: quote.amount, currencyCode: quote.currencyCode },
+      addCard: true, cardOnFile: null, testMode: true, testModeLabel: SIMULATOR_PAGE.testModeLabel,
+    });
+    // iOS still follows its own switch.
+    expect(await cardActionOf(p, { 'x-client-platform': 'ios' })).toEqual({ id: 'CARD', state: 'off' });
+    const review = await makeReviewTenant();
+    for (const demo of [await makeStore({ tenantId: review }), await makeRider({ tenantId: review })]) {
+      expect(await cardActionOf(demo), demo.family).toEqual({ id: 'CARD', state: 'off' });
+    }
+  });
+
+  it('saving cards switched off (CARD_RAIL_ENROLL): addCard false, ENROLL 409 ADD_CARD_OFF before any page, Pay now still opens', async () => {
+    delete process.env['CARD_RAIL_ENROLL'];
+    process.env['CARD_RAIL_SIMULATOR_LIVE'] = '1';
+    const p = await makeRider();
+    expect(await cardActionOf(p)).toMatchObject({ state: 'live', addCard: false, cardOnFile: null });
+    const refused = await startSession(p, 'ENROLL');
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('ADD_CARD_OFF');
+    expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(0);
+    expect((await startSession(p, 'PAY_NOW')).statusCode).toBe(201);
+  });
+
+  it('latestCardSession: the partner’s newest card session as its view (never the page address); a failure in plain words', async () => {
+    const p = await makeRider();
+    const payload = async () => (await partnerCall(p, 'GET', '/subscription')).json().data;
+    expect((await payload()).latestCardSession).toBeNull();
+    const declined = (await startSession(p, 'PAY_NOW')).json().data;
+    expect((await payload()).latestCardSession).toMatchObject({ sessionId: declined.sessionId, purpose: 'PAY_NOW', status: 'OPEN', testMode: true });
+    expect((await payload()).latestCardSession).not.toHaveProperty('hostedUrl');
+    expect(pageState((await follow(await press(declined.hostedUrl, 'DECLINE'))).body)).toBe('FAILED');
+    expect((await payload()).latestCardSession).toMatchObject({ sessionId: declined.sessionId, status: 'FAILED', failure: 'DECLINED' });
+    expect((await partnerCall(p, 'GET', `${SESSIONS}/${declined.sessionId}`)).json().data).toMatchObject({ status: 'FAILED', failure: 'DECLINED' });
+    process.env['CARD_RAIL_V2'] = '0';
+    expect((await payload()).latestCardSession).toBeNull();
   });
 
   it('the card on file is the ACTIVE card as brand / last 4 / expiry / status — nothing else', async () => {
@@ -809,6 +879,25 @@ describe('rate limits', () => {
     }
     expect(codes.slice(0, CARD_RETURN_RATE.max).every((c) => c === 200)).toBe(true);
     expect(codes[CARD_RETURN_RATE.max]).toBe(429);
+  });
+});
+
+describe('the provider is never named to a partner', () => {
+  it('no page Swift serves and no card-route answer names the card provider', async () => {
+    for (const state of CARD_RETURN_PAGES) expect(returnPageHtml(state), state).not.toMatch(/powertranz|ptranz/i);
+    const p = await makeRider();
+    const session = (await startSession(p, 'PAY_NOW')).json().data;
+    const bodies = [
+      (await app.inject({ method: 'GET', url: session.hostedUrl })).body,
+      (await app.inject({ method: 'GET', url: '/api/v1/billing/card/simulator/sim_000000000000000000000000' })).body,
+      (await follow(await press(session.hostedUrl, 'DECLINE'))).body,
+      (await partnerCall(p, 'GET', `${SESSIONS}/${session.sessionId}`)).body,
+      (await partnerCall(p, 'GET', '/subscription/cards')).body,
+      (await startSession(p, 'PAY_NOW', { payload: { purpose: 'PAY_NOW', amount: 1 } })).body,
+      (await startSession(p, 'ENROLL', { payload: { purpose: 'ENROLL' } })).body,
+      (await partnerCall(p, 'GET', `${SESSIONS}/nosuchsession`)).body,
+    ];
+    for (const body of bodies) expect(body).not.toMatch(/powertranz|ptranz/i);
   });
 });
 
