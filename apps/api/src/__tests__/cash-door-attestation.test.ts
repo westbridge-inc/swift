@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -13,6 +13,9 @@ import { reserveRiderLeg } from '../modules/dispatch/concurrency-policy';
 import { FloatService } from '../modules/dispatch/float.service';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { handoverAuthorityFor } from '../modules/order/handover-authority';
+import { CashRulesService } from '../modules/cash/cash-rules.service';
+import { OrderService } from '../modules/order/order.service';
+import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
 // [L02 · row 34] CASH AT THE DOOR IS RECORDED AS THE REAL AMOUNT.
@@ -412,5 +415,70 @@ describe('[row 34] the version echo: a stale screen records nothing', () => {
     const res = await handover(holder.token, order.id, { outcome: 'paid', collectedAmount: DUE, handoverVersion: await shownVersion(order.id) });
     expect(res.statusCode, res.body).toBe(200);
     expect((await facts(order.id)).order.status).toBe('DELIVERED');
+  });
+
+  it('rechecks the version after locking when the total changed after the preview', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const version = await shownVersion(order.id);
+    const orders = new OrderService(app.prisma, app.io);
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), orders);
+    const transition = orders.updateStatus.bind(orders);
+    const seam = vi.spyOn(orders, 'updateStatus').mockImplementationOnce(async (...args) => {
+      await app.prisma.order.update({ where: { id: order.id }, data: { totalAmount: DUE + 100 } });
+      return transition(...args);
+    });
+    try {
+      await expect(cash.handover(order.id, holder.user.id, {
+        outcome: 'paid', collectedAmount: DUE, handedOverShort: true, handoverVersion: version, gps: DOOR,
+      })).rejects.toMatchObject({ code: 'HANDOVER_STALE' });
+      expect(seam).toHaveBeenCalledOnce();
+      const f = await facts(order.id);
+      expect(f.order.status).toBe('ARRIVED');
+      expect(f.order['doorCashCollectedAmount']).toBeNull();
+      expect(f.order.paymentStatus).toBe('PENDING');
+      expect(f.earnings).toHaveLength(0);
+    } finally { seam.mockRestore(); }
+  });
+});
+
+describe('[row 34] cash attestation commits with all terminal facts', () => {
+  it('a failed commit rolls back the amount and hold; retry records them and the earning once', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const orders = new OrderService(app.prisma, app.io);
+    let fail = true;
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), orders, {
+      afterTerminalFacts: async () => {
+        if (fail) { fail = false; throw new Error('cash-attestation commit failpoint'); }
+      },
+    });
+    const input = {
+      outcome: 'paid' as const, collectedAmount: 2800, handedOverShort: true,
+      handoverVersion: await shownVersion(order.id), gps: DOOR,
+    };
+    await expect(cash.handover(order.id, holder.user.id, input)).rejects.toThrow('cash-attestation commit failpoint');
+    const rolledBack = await facts(order.id);
+    expect(rolledBack.order.status).toBe('ARRIVED');
+    expect(rolledBack.order.paymentStatus).toBe('PENDING');
+    expect(rolledBack.order['doorCashCollectedAmount']).toBeNull();
+    expect(rolledBack.order['doorCashMismatchAt']).toBeNull();
+    expect(rolledBack.earnings).toHaveLength(0);
+    expect(rolledBack.committedFloat).toBe(SUBTOTAL);
+    expect(await adminPages(order.id, 'ops_cash_door_short')).toHaveLength(0);
+
+    await cash.handover(order.id, holder.user.id, input);
+    await cash.handover(order.id, holder.user.id, input);
+    const committed = await facts(order.id);
+    expect(Number(committed.order['doorCashCollectedAmount'])).toBe(2800);
+    expect(Number(committed.order['doorCashShortfallAmount'])).toBe(700);
+    expect(committed.order['doorCashMismatchAt']).toBeInstanceOf(Date);
+    expect(committed.statuses.filter((s) => s === 'DELIVERED')).toHaveLength(1);
+    expect(committed.earnings).toHaveLength(1);
+    expect(Number(committed.earnings[0]!.amount)).toBe(FEE);
+    expect(committed.committedFloat).toBe(0);
+    expect(await adminPages(order.id, 'ops_cash_door_short')).toHaveLength(1);
   });
 });

@@ -1,4 +1,5 @@
 import { AppError } from '../../utils/errors';
+import { zMoneyWhole } from '../../utils/money-schema';
 
 // ---------------------------------------------------------------------------
 // [L02 · row 34] THE CASH TAKEN AT THE DOOR — what the mover says changed hands.
@@ -38,7 +39,7 @@ const cents = (n: number): number => Math.round(n * 100);
 /** The amount due at the door: the order's total, as a number. */
 export function doorCashDue(order: { totalAmount: unknown }): number {
   const due = Number(order.totalAmount);
-  if (!Number.isFinite(due) || due < 0) {
+  if (order.totalAmount === null || order.totalAmount === '' || !Number.isSafeInteger(due) || due < 0) {
     throw new AppError(409, 'ORDER_TOTAL_UNREADABLE', 'This order has no readable total, so the cash cannot be recorded. Contact support.');
   }
   return due;
@@ -52,9 +53,15 @@ export function decideDoorCash(
   order: { totalAmount: unknown },
   stated: { collectedAmount?: number; handedOverShort?: boolean },
 ): DoorCashDecision {
-  if (stated.collectedAmount === undefined) return { kind: 'UNSTATED' };
+  if (stated.collectedAmount === undefined) {
+    if (stated.handedOverShort === true) {
+      throw new AppError(400, 'CASH_AMOUNT_REQUIRED', 'Record the cash actually collected.');
+    }
+    return { kind: 'UNSTATED' };
+  }
   const due = doorCashDue(order);
   const collected = stated.collectedAmount;
+  assertCashAmount(collected);
   if (cents(collected) > cents(due)) {
     throw new AppError(409, 'CASH_OVER_DUE',
       `This order is GY$${gyd(due)}. Record only the cash you took for it, never more — give any extra back to the customer.`,
@@ -76,12 +83,19 @@ export function decideDoorCash(
  */
 export function assertGenuinelyShort(order: { totalAmount: unknown }, offered: number | undefined): { due: number; offered: number | null } {
   const due = doorCashDue(order);
+  if (offered !== undefined) assertCashAmount(offered);
   if (offered !== undefined && cents(offered) >= cents(due)) {
     throw new AppError(409, 'CASH_NOT_SHORT',
       `The customer is offering the full GY$${gyd(due)}. Take it, hand the order over and record the payment.`,
       { due, offered });
   }
   return { due, offered: offered ?? null };
+}
+
+function assertCashAmount(amount: number): void {
+  if (!zMoneyWhole.safeParse(amount).success) {
+    throw new AppError(400, 'CASH_AMOUNT_INVALID', 'Record a non-negative whole cash amount within the supported limit.');
+  }
 }
 
 export function gyd(n: number): string {

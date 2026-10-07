@@ -13,7 +13,7 @@ import { haversineDistance } from '../../utils/distance';
 import { identityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 import { assertFailureSource, captureHandoverEvidence, handoverBinding } from './handover-evidence';
-import { handoverAttemptState } from '../handover/handover-security';
+import { handoverAttemptState, type HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, adjustReserve, assembleClaimEvidence, assertEvidenceComplete, coveredAmountFor,
   drawReserveForPayout, reserveStatement, rollingClaimTotal, type LossProtectionRules,
@@ -53,6 +53,8 @@ export const DEFAULT_CASH_RULES: CashRulesConfig = {
   outlierMultiplier: 3,
   maxHandoverDistanceKm: 0.75,
 };
+
+type HandoverOrder = Omit<Order, keyof typeof HANDOVER_SECRETS_OMIT>;
 
 /**
  * The country's cash rules: the code defaults under the stored overrides.
@@ -245,7 +247,7 @@ export class CashRulesService {
       handedOverShort?: boolean;
     },
   ): Promise<{
-    order: Order;
+    order: HandoverOrder;
     claim: ReimbursementClaim | null;
     doorCash?: DoorCashDecision;
     /** True only for the call that committed a short-payment return: the caller announces it, once. */
@@ -503,6 +505,7 @@ export class CashRulesService {
       noShowNote = ` evidence:${decision.evidence}`;
     }
 
+    const failureOutcome = input.outcome;
     let staged: StagedClaim = { claim: null, riderNotice: null };
     const failed = await this.orders.updateStatus(
       orderId,
@@ -521,7 +524,8 @@ export class CashRulesService {
             gps: input.gps, photoUrl: input.photoUrl ?? input.courierProofPhotoUrl,
           }, rules.maxHandoverDistanceKm);
           await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'FAILED' } });
-          staged = await this.stageClaim(tx, { ...source, customer: order.customer }, mover, input, addressKey, filing.id);
+          staged = await this.stageClaim(tx, { ...source, customer: order.customer }, mover,
+            { ...input, outcome: failureOutcome }, addressKey, filing.id);
           // No strike from a declaration alone. Taxi remains incomplete while
           // the owner-defined destination wait requirement is unresolved. An
           // order at or over the ID gate stages no guarantee claim, so its
@@ -583,7 +587,7 @@ export class CashRulesService {
     input: { collectedAmount?: number; handoverVersion?: string; changedBy: string },
     gpsNote: string,
     kind: { isRide: boolean; isCourier: boolean },
-  ): Promise<{ order: Order; claim: null; returnStarted: true }> {
+  ): Promise<{ order: HandoverOrder; claim: null; returnStarted: true }> {
     if (kind.isRide || kind.isCourier || !mover.riderId) {
       throw new AppError(409, 'SHORT_PAYMENT_NOT_AVAILABLE',
         'This outcome is for goods deliveries. For a ride or a parcel, record the outcome the job offers or contact support.');
