@@ -629,5 +629,10 @@ export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
 /** [VERIFY-DOCS · owner rulings 1–3, 6 Oct 2026] The character document: optional for movers (an approved, current one is
  *  the "Police-cleared" flag), still required where a list names it. Registry text (DOC-INV-2). */
 export const POLICE_CLEARANCE_DOC_TYPE = 'police_clearance';
+/** [VERIFY-DOCS · owner ruling 8, 6 Oct 2026] The single hire-car permit, and the PERSON's Hire Car Driver's Licence (s.80)
+ *  and the CAR's yearly hire licence (s.79) that replace it (verification/hire-permit-grace.ts). Registry text (DOC-INV-2). */
+export const HIRE_PERMIT_DOC_TYPE = 'hire_car_permit';
+export const HIRE_DRIVER_LICENCE_DOC_TYPE = 'hire_car_driver_licence';
+export const HIRE_VEHICLE_LICENCE_DOC_TYPE = 'hire_car_vehicle_licence';
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];

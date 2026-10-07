@@ -29,6 +29,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
+import { customerRoutes } from '../modules/user/customer.routes';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
@@ -57,6 +58,7 @@ beforeAll(async () => {
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(authPlugin); await app.register(socketPlugin);
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
+  await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.ready();
   service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   const admin = await app.prisma.user.create({ data: {
@@ -270,5 +272,29 @@ describe('[V5 · ruling 7] TIN and the VAT number', () => {
     expect(bad.json().error.code).toBe('VAT_NUMBER_INVALID');
     expect((await put(s.token, { vatRegistrationNumber: null })).statusCode).toBe(200);
     expect((await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } })) as { vatRegistrationNumber?: string | null }).vatRegistrationNumber).toBeNull();
+  });
+
+  it('only the owner may give it: a manager of the same store is refused and the number stays as it was', async () => {
+    const s = await store();
+    expect((await put(s.token, { vatRegistrationNumber: '123456789' })).statusCode).toBe(200);
+    const manager = await app.prisma.user.create({ data: {
+      phone: `+${phoneBase + 700 + users.length}`, firstName: 'Vat', lastName: `Manager${users.length}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, countryCode: 'GY',
+    } });
+    users.push(manager.id);
+    await app.prisma.vendorStaff.create({ data: { vendorId: s.vendorId, userId: manager.id, role: 'MANAGER', invitedBy: s.userId } });
+    const token = app.jwt.sign({ userId: manager.id, role: 'CUSTOMER', jti: nanoid() });
+    await app.prisma.session.create({ data: { userId: manager.id, token, refreshToken: nanoid(48), deviceId: nanoid(), deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+    const res = await app.inject({ method: 'PUT', url: '/api/v1/vendor/profile', headers: { authorization: `Bearer ${token}`, 'x-vendor-id': s.vendorId }, payload: { vatRegistrationNumber: '999999999' } });
+    expect(res.statusCode, res.body).toBe(403);
+    expect((await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } })) as { vatRegistrationNumber?: string | null }).vatRegistrationNumber).toBe('123456789');
+  });
+
+  it('it is never public: the storefront a customer or a guest opens does not carry it', async () => {
+    const s = await store();
+    expect((await put(s.token, { vatRegistrationNumber: '987654321' })).statusCode).toBe(200);
+    const page = await app.inject({ method: 'GET', url: `/api/v1/customer/vendors/${s.vendorId}` });
+    expect(page.statusCode, page.body).toBe(200);
+    expect(page.body).not.toContain('987654321');
+    expect(page.body).not.toMatch(/vatRegistrationNumber/);
   });
 });

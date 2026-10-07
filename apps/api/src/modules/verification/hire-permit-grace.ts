@@ -13,13 +13,13 @@
  * recorded start the split has not happened there yet, and nothing is granted.
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_VEHICLE_LICENCE_DOC_TYPE } from './doc-registry';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
-export const HIRE_PERMIT_DOC_TYPE = 'hire_car_permit';
-/** The person's Hire Car Driver's Licence (PERSONAL) and the car's yearly hire licence (VEHICLE). */
-export const HIRE_DRIVER_LICENCE_DOC_TYPE = 'hire_car_driver_licence';
-export const HIRE_VEHICLE_LICENCE_DOC_TYPE = 'hire_car_vehicle_licence';
+// The three type names are registry text (DOC-INV-2): the permit, the person's Hire Car Driver's Licence
+// (PERSONAL) and the car's yearly hire licence (VEHICLE). Re-exported for this module's callers.
+export { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_VEHICLE_LICENCE_DOC_TYPE };
 export const HIRE_SPLIT_DOC_TYPES: readonly string[] = [HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_VEHICLE_LICENCE_DOC_TYPE];
 export const HIRE_PERMIT_GRACE_DAYS = 60;
 /** PlatformConfig key holding `{ startedAt }` — written once, at the first boot of this code. */
