@@ -123,6 +123,11 @@ export function failureCodeOf(reason: string): string {
 
 const notHeld = () => new AppError(409, 'CARD_SESSION_NOT_HELD', 'Only a card payment held for a person can be resolved, once.');
 
+/** [CARDS race audit] Provider answers that say only "the completion's answer
+ *  is not known" (sent, or possibly sent, and not recorded): before voiding,
+ *  the durable claim decides whether it was sent and whether it may still answer. */
+const ANSWER_NOT_KNOWN = new Set(['COMPLETION_SENT_ANSWER_LOST', 'COMPLETION_ALREADY_CLAIMED', 'COMPLETION_STATE_CHANGING', 'NO_RECORD_OF_THIS_PAGE', 'COMPLETION_RECORD_UNREADABLE']);
+
 /** [Review S2-2] Did this session's payment book the week (captured, or banked
  *  to the balance)? Read under the session lock. */
 async function bookedInTx(tx: Prisma.TransactionClient, s: Pick<CardSession, 'paymentId'>): Promise<boolean> {
@@ -533,13 +538,13 @@ export class CardRailService {
       case 'unknown': {
         // [Review S2-2] The provider may have taken money Swift cannot book:
         // void it now, under a durable claim; hold it for a person otherwise.
-        if (outcome.voidable) return this.voidUnbookable(session, outcome, outcome.voidable.providerRef, now);
+        if (outcome.voidable) return this.voidUnbookable(session, outcome, outcome.voidable.providerRef, now, { answerUnknown: ANSWER_NOT_KNOWN.has(outcome.reason) });
         // [CARDS S1] A completion was durably claimed (so it may have been
         // sent) and the provider can no longer say what became of it: past its
         // deadline it is treated as possibly taken — voided under the recorded
         // transaction, or held for a person. Never left open for a "not paid".
         const lost = this.lostCompletionRef(session, now);
-        if (lost) return this.voidUnbookable(session, outcome, lost, now);
+        if (lost) return this.voidUnbookable(session, outcome, lost, now, { answerUnknown: true });
         if (!expired) return this.observeOnly(session, outcome);
         // A Pay now may have moved money: it stays UNKNOWN and keeps being
         // asked. An enrolment moved none: it closes, and the card is added again.
@@ -836,13 +841,36 @@ export class CardRailService {
    * once the provider confirms the void; otherwise it is HELD for a person,
    * with the provider's transaction reference, and admins are paged at once.
    */
-  private async voidUnbookable(session: CardSession, outcome: CardSessionOutcome, providerRef: string, now: Date): Promise<CardConfirmResult> {
+  private async voidUnbookable(
+    session: CardSession, outcome: CardSessionOutcome, providerRef: string, now: Date, opts: { answerUnknown?: boolean } = {},
+  ): Promise<CardConfirmResult> {
     const reason = outcome.status === 'unknown' ? outcome.reason : 'UNBOOKABLE';
     const ref = providerRef.trim().slice(0, 64) || null;
     if (!ref) return this.hold(session, outcome, 'APPROVED_UNPROVEN', now, 'The provider gave no transaction reference to void.');
     const claimed = await this.prisma.$transaction(async (tx) => {
       const fresh = await this.lockSession(tx, session.id);
       if (!fresh || fresh.status === 'SUCCEEDED' || fresh.paymentId) return { fresh, claimed: false, late: false };
+      // [CARDS race audit] "Its answer is not known" is decided HERE, on the
+      // durable claim, under the lock that would claim the void — never on the
+      // provider store's own claim time alone (that claim is taken before the
+      // durable one, which may wait on this lock). A completion is only ever
+      // sent after its durable claim commits, so:
+      //   - no durable claim: it was never sent, and closing the session here
+      //     means it never will be (the claim refuses a closed session);
+      //   - a durable claim inside its deadline: it may still be answering —
+      //     nothing is voided yet.
+      if (opts.answerUnknown && LIVE.includes(fresh.status) && fresh.providerVoidState === null) {
+        if (!fresh.completionClaimedAt) {
+          if (fresh.purpose === 'PAY_NOW') await beginConfirmationInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'CARD_CONFIRMATION_PENDING', now);
+          await recordCardObservation(tx, this.observation(fresh, 'CONFIRM', outcome.rawSha256, observedStatus(outcome.status), 'ACCEPTED'));
+          await tx.cardSession.update({ where: { id: fresh.id }, data: { status: 'FAILED', failureCode: 'COMPLETION_NOT_SENT', ...(fresh.confirmedAt ? {} : { confirmedAt: now }) } });
+          if (fresh.purpose === 'PAY_NOW') {
+            await resolveConfirmationInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'PROVEN_UNPAID', { actor: 'card-provider', reference: `completion-not-sent:${outcome.rawSha256}` }, now);
+          }
+          return { fresh: null, claimed: false, late: false };
+        }
+        if (now.getTime() <= fresh.completionClaimedAt.getTime() + COMPLETION_CLAIM_WAIT_MS) return { fresh, claimed: false, late: false };
+      }
       const late = ['FAILED', 'EXPIRED', 'CANCELLED'].includes(fresh.status);
       if (!LIVE.includes(fresh.status) && !late && fresh.failureCode !== 'LATE_PROVIDER_APPROVAL') return { fresh, claimed: false, late: false };
       const last = await tx.cardObservation.findFirst({ where: { sessionId: fresh.id, source: 'CONFIRM' }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { rawSha256: true } });
@@ -857,19 +885,23 @@ export class CardRailService {
         },
       });
       if (late && won.count) await reopenConfirmationForReviewInTx(tx, fresh.subscriptionId, { cardSessionId: fresh.id }, 'LATE_PROVIDER_APPROVAL', now);
-      return { fresh, claimed: won.count === 1, late };
+      return { fresh, claimed: won.count === 1, late, decided: fresh.resolution !== null };
     });
     if (claimed.late) await notifyAdmins(this.prisma, this.notifications, {
       tenantId: session.tenantId, title: 'Card approval arrived after closure',
       body: `Card session ${session.id} received a provider approval after it was closed. Nothing was booked. Provider transaction ${ref}. ${claimed.claimed
         ? 'A void was sent: check its outcome on the session, then refund it or record that nothing was taken (two people).'
-        : 'Finance had already decided this payment: check the transaction in the provider\'s portal.'}`,
+        : 'decided' in claimed && claimed.decided
+          ? 'Finance had already decided this payment: check the transaction in the provider\'s portal.'
+          : 'A void had already been sent for it: check its outcome on the session.'}`,
       data: { kind: 'billing_invariants', alert: 'card-session-late-approval', sessionId: session.id, providerTransactionRef: ref },
       dedupeKey: `card-session-late-approval:${session.id}`,
     }).catch(() => {});
     if (!claimed.claimed) {
       const current = claimed.fresh ?? await this.prisma.cardSession.findUniqueOrThrow({ where: { id: session.id } });
       if (!LIVE.includes(current.status)) return this.resultOf(current);
+      // [CARDS race audit] Its completion may still be answering: asked again later.
+      if (opts.answerUnknown && current.providerVoidState === null && !current.paymentId) return this.resultOf(current);
       if (current.providerVoidState === 'VOIDED') return this.closeVoided(current, outcome.rawSha256, now);
       if (current.providerVoidState === 'SENDING') {
         // The claimant is finishing it — unless it stopped (a crash between the

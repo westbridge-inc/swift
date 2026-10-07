@@ -3,9 +3,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import Redis from 'ioredis';
 import { Writable } from 'node:stream';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { nanoid } from 'nanoid';
-import type { SubscriptionStatus, UserRole } from '@prisma/client';
+import type { CardSession, SubscriptionStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -44,7 +44,8 @@ import { REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
 import { SandboxPaymentProvider } from '../providers/payment/payment-provider';
 import type { CardRailProvider } from '../providers/card/card-provider';
 import { SIMULATOR_PAGE, SimulatorCardRailProvider, type SimulatorScenario } from '../providers/card/simulator-provider';
-import { POWERTRANZ_SANDBOX_ROOT, PowerTranzCardRailProvider } from '../providers/card/powertranz-provider';
+import { POWERTRANZ_SANDBOX_ROOT, PowerTranzCardRailProvider, readCompletion } from '../providers/card/powertranz-provider';
+import type { CardSessionOutcome, CompletionClaim } from '../providers/card/card-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
@@ -1703,8 +1704,14 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
       real.confirm = async () => ({ status: 'pending' as const, rawSha256: 'synthetic-pending' });
       try { await bankFramePosts(session.sessionId, 'Y'); } finally { real.confirm = realConfirm; }
       // Another server's durable claim stands (its completion may have gone out); this store has no claim.
-      await app.prisma.cardSession.update({ where: { id: row.id }, data: { completionClaimedAt: new Date(), providerTransactionRef: txnId } });
-      await serviceOf().confirm(row.id);
+      const claimedAt = new Date();
+      await app.prisma.cardSession.update({ where: { id: row.id }, data: { completionClaimedAt: claimedAt, providerTransactionRef: txnId } });
+      await serviceOf().confirm(row.id, { now: new Date(claimedAt.getTime() + 1_000) });
+      expect(completions() - before).toBe(0);
+      // [race audit] That server may still be answering: nothing is voided inside its deadline.
+      expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+      expect((await rowOf(row.id)).status).toBe('OPEN');
+      await serviceOf().confirm(row.id, { now: new Date(claimedAt.getTime() + 36_000) });
       expect(completions() - before).toBe(0);
       expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(1);
       expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', failureCode: 'VOIDED_UNPROVEN', providerVoidState: 'VOIDED' });
@@ -1719,6 +1726,108 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
       expect(booked.statusCode, booked.body).toBe(409);
       expect(booked.json().error?.code).toBe('PROVIDER_COMPLETION_EVIDENCE_REQUIRED');
       expect(await rowOf(sessionId)).toMatchObject({ status: 'HELD', paymentId: null, bookClaimedAt: null });
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+  });
+
+  describe('[CARDS race audit] claim -> send -> answer: "lost" is decided on the durable claim, under the lock that claims the void', () => {
+    type Internals = {
+      claimCompletion(sessionId: string, providerRef: string): Promise<CompletionClaim>;
+      settlePayNow(session: CardSession, outcome: Extract<CardSessionOutcome, { status: 'succeeded'; purpose: 'PAY_NOW' }>, now: Date): Promise<unknown>;
+    };
+    const internals = () => serviceOf() as unknown as Internals;
+    const voidsOf = (txnId: string) => sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId).length;
+    /** A Pay now whose bank check passed and was noted, with no completion sent yet. */
+    async function returnedSession(p: Partner) {
+      const session = (await open(p)).json().data;
+      const realConfirm = real.confirm.bind(real);
+      real.confirm = async () => ({ status: 'pending' as const, rawSha256: 'synthetic-pending' });
+      try { await bankFramePosts(session.sessionId, 'Y'); } finally { real.confirm = realConfirm; }
+      const row = await rowOf(session.sessionId);
+      return { row, txnId: (await heldOf(row.id))['txnId']!, key: `${PTZ_PREFIX}s:${row.providerSessionRef}` };
+    }
+
+    it('the provider store\'s claim aged while the durable claim waited on a lock: a completion durably claimed moments ago is never voided as lost', async () => {
+      const p = await makeStore();
+      const { row, txnId, key } = await returnedSession(p);
+      // Server A claimed in the provider store 60 s ago, waited on the session lock, then recorded its durable claim and sent.
+      await redis.hset(key, { completion: 'sending', completionClaimedAtMs: String(Date.now() - 60_000) });
+      const claimedAt = new Date();
+      await app.prisma.cardSession.update({ where: { id: row.id }, data: { completionClaimedAt: claimedAt, providerTransactionRef: txnId } });
+      await serviceOf().confirm(row.id, { now: new Date(claimedAt.getTime() + 1_000) });
+      expect(voidsOf(txnId)).toBe(0);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'OPEN', providerVoidState: null });
+      // Past the durable claim's own deadline its answer is lost: ONE void.
+      await serviceOf().confirm(row.id, { now: new Date(claimedAt.getTime() + 36_000) });
+      await serviceOf().confirm(row.id, { now: new Date(claimedAt.getTime() + 37_000) });
+      expect(voidsOf(txnId)).toBe(1);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', failureCode: 'VOIDED_UNPROVEN', providerVoidState: 'VOIDED' });
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+
+    it('a provider-store claim with no durable claim: the completion was never sent — closed as not completed, never voided; the stopped server can no longer send it', async () => {
+      const p = await makeStore();
+      const { row, txnId, key } = await returnedSession(p);
+      const before = completions();
+      await redis.hset(key, { completion: 'sending', completionClaimedAtMs: String(Date.now() - 60_000) });
+      expect((await serviceOf().confirm(row.id)).status).toBe('FAILED');
+      expect(voidsOf(txnId)).toBe(0);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', failureCode: 'COMPLETION_NOT_SENT', completionClaimedAt: null, providerVoidState: null });
+      expect((await confirmationOf(row.id))?.status).toBe('PROVEN_UNPAID');
+      // The server that held the provider-store claim resumes: its durable claim is refused, nothing is sent.
+      expect(await internals().claimCompletion(row.id, txnId)).toBe('closed');
+      expect(completions() - before).toBe(0);
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+
+    it('finance\'s "not paid" racing the durable claim, six times in parallel on a real database: exactly one wins — closed and never sent, or claimed and refused to finance', async () => {
+      const finance = await makeFinance();
+      const outcomes: string[] = [];
+      for (let i = 0; i < 6; i += 1) {
+        const p = await makeStore();
+        const { row, txnId } = await returnedSession(p);
+        const [hold] = (await confirmationReviewQueue(app.prisma, row.tenantId)).filter((r) => r.sourceId === row.id);
+        const [unpaid, claim] = await Promise.allSettled([
+          resolveFinanceConfirmation(app.prisma, {
+            id: hold!.id, tenantId: row.tenantId, actorId: finance.userId, sourceId: row.id,
+            epoch: hold!.epoch, clockVersion: hold!.clockVersion, decision: 'UNPAID', evidenceReference: 'synthetic-portal-check',
+          }, async () => undefined),
+          internals().claimCompletion(row.id, txnId),
+        ]);
+        expect(claim.status).toBe('fulfilled');
+        const after = await rowOf(row.id);
+        if (claim.status === 'fulfilled' && claim.value === 'send') {
+          expect(unpaid).toMatchObject({ status: 'rejected', reason: { code: 'CARD_COMPLETION_IN_FLIGHT' } });
+          expect(after.status).toBe('OPEN');
+          expect(after.completionClaimedAt).not.toBeNull();
+        } else {
+          expect(claim).toMatchObject({ value: 'closed' });
+          expect(unpaid.status).toBe('fulfilled');
+          expect(after).toMatchObject({ status: 'FAILED', failureCode: 'FINANCE_CONFIRMED_UNPAID', completionClaimedAt: null });
+        }
+        outcomes.push(claim.status === 'fulfilled' ? claim.value : 'rejected');
+      }
+      expect(outcomes.every((o) => o === 'send' || o === 'closed')).toBe(true);
+    });
+
+    it('the same late approval handled by two servers in parallel: exactly ONE void and ONE admin alert; nothing booked', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const { row, txnId } = await returnedSession(p);
+      const orderId = (await heldOf(row.id))['orderId']!;
+      // Closed by an earlier decision while its completion was answering (fixture).
+      await app.prisma.$transaction(async (tx) => {
+        await tx.cardSession.update({ where: { id: row.id }, data: { status: 'FAILED', failureCode: 'FINANCE_CONFIRMED_UNPAID', confirmedAt: new Date() } });
+        await resolveConfirmationInTx(tx, row.subscriptionId, { cardSessionId: row.id }, 'PROVEN_UNPAID', { actor: finance.userId, reference: 'closure-fixture' });
+      });
+      const reading = readCompletion((approve()({ txnId, orderId }) as { body: unknown }).body, { txnId, orderId, amountMinor: 210_000, currencyCode: 'GYD' });
+      if (reading.status !== 'succeeded') throw new Error('fixture: the approval must carry its own proof');
+      const outcome = { status: 'succeeded' as const, purpose: 'PAY_NOW' as const, providerRef: txnId, amountMinor: reading.amountMinor, currencyCode: reading.currencyCode, completionEvidence: reading.completionEvidence, rawSha256: createHash('sha256').update(`synthetic-late-approval:${txnId}`).digest('hex') };
+      const stale = await rowOf(row.id);
+      await Promise.all([internals().settlePayNow(stale, outcome, new Date()), internals().settlePayNow(stale, outcome, new Date())]);
+      expect(voidsOf(txnId)).toBe(1);
+      expect(await app.prisma.notification.count({ where: { userId: finance.userId, dedupeKey: `card-session-late-approval:${row.id}` } })).toBe(1);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', providerVoidState: 'VOIDED', paymentId: null });
       expect((await money(p.subId)).successes).toBe(0);
     });
   });

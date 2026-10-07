@@ -196,6 +196,21 @@ describe('[CARDS] the completion claim: timestamped, durable, never sent twice',
     expect(gw.paths()).toEqual(['/api/spi/sale']);
   });
 
+  it('[race audit] the durable claim waited on a lock past the SpiToken\'s five minutes: the completion is never sent late', async () => {
+    let now = Date.now();
+    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => ({ status: 200, body: { Approved: true } }) });
+    const p = provider(gw, { now: () => new Date(now) });
+    const page = await openPage(p, { expiresAt: new Date(now + 15 * 60_000) });
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, {}) });
+    now += 4 * 60_000; // inside the five minutes when the provider store claims it
+    const beforeCompletion = async () => { now += 2 * 60_000; return 'send' as const; }; // ...then the lock wait
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion }))
+      .toMatchObject({ status: 'failed', reason: 'SPI_TOKEN_EXPIRED' });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion })).toMatchObject({ status: 'failed', reason: 'SPI_TOKEN_EXPIRED' });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+  });
+
   it('a recorded success without the provider\'s own proof (an older record) never restores booking authority: unknown, voidable', async () => {
     const gw = gateway({ '/api/spi/sale': preprocessed });
     const p = provider(gw);
