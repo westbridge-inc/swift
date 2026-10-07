@@ -3,6 +3,7 @@ import { requireIdentityAuthority, IdentityReviewRequiredError, lockIdentityAuth
 import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
 import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { activateMoverFeeType, lockFeeCollectionAuthority, lockMoverFeeAuthority, lockMoverSources, moverFeeTariffSubject, resolveMoverFeeAuthority } from './mover-fee-authority';
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
@@ -149,6 +150,8 @@ export class SubscriptionService {
    * so the check rides its locks.
    */
   async priceForActivation(entity: ActivationEntity, db: Db = this.prisma): Promise<PartnerRate | null> {
+    // [REVIEW-PARTNER] The store-review fiction is never priced: it holds no subscription (createRow refuses it).
+    if (await this.isFiction(entity, db)) return null;
     const activation = await this.activation(entity, db);
     if (!activation.existing) {
       const human = await this.humanFor(entity, db);
@@ -190,6 +193,14 @@ export class SubscriptionService {
       log().error({ err, subscriptionId: sub.id }, 'SAN assignment at activation failed — backstop will heal');
       return sub;
     }
+  }
+
+  /** [REVIEW-PARTNER] Is the partner behind this entity an account of the store-review fiction? (Read in `db`.) */
+  async isFiction(entity: ActivationEntity, db: Db = this.prisma): Promise<boolean> {
+    const human = await this.humanFor(entity, db);
+    const rows = await db.$queryRaw<Array<{ kind: string }>>`
+      SELECT t."kind"::text AS "kind" FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId" WHERE u."id" = ${human.userId}`;
+    return rows[0]?.kind === 'REVIEW';
   }
 
   /** [#1393 · mover fee authority] The payer and all of its mover sources,
@@ -262,6 +273,9 @@ export class SubscriptionService {
     tx: Prisma.TransactionClient, tenantId: string,
   ) {
     const human = await this.humanFor(entity, tx);
+    // [REVIEW-PARTNER · DL-5] No weekly fee is ever born for the store-review fiction: it has no
+    // money rail, so a subscription would only be a bill nobody can or should pay.
+    if (await this.isFiction(entity, tx)) throw new ReviewDemoMoneyRefusedError();
     await requireIdentityAuthority(tx, human.userId);
     // decide also records explainable denials. Every read and write uses the
     // same locked transaction, so quarantine cannot race a punishment or grant.

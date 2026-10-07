@@ -1,3 +1,5 @@
+import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
+import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
@@ -1387,7 +1389,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // the store stays pending — never ACTIVE and searchable with no
     // subscription, which a failure after the CAS below used to leave behind.
     const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true } });
+      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
+      // suspension source survives it for a later heal or payment to act on.
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
       if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });
@@ -2431,6 +2435,69 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     }));
     return { success: true, data: updated };
+  });
+
+  // =========================================================================
+  // [AF-MOB-006] CUSTODY RECOVERY — the operations console's half. A case
+  // after pickup is owned, decided and timed here; the rider and store halves
+  // live in their own routes. Every action is recorded on the case trail and,
+  // for the consequential ones, as an operator action on the order.
+  // =========================================================================
+  const custodyDeps = { prisma: app.prisma, io: app.io, notifications };
+
+  app.get('/custody-cases', { preHandler: [adminGuard] }, async (request) => {
+    const { open, take } = z.object({
+      open: z.enum(['true', 'false']).optional(),
+      take: z.coerce.number().int().min(1).max(200).optional(),
+    }).parse(request.query ?? {});
+    return { success: true, data: await listCases(app.prisma, { open: open !== 'false', ...(take ? { take } : {}) }) };
+  });
+
+  app.get('/custody-cases/:id', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    return { success: true, data: await caseDetail(app.prisma, id) };
+  });
+
+  app.post('/custody-cases/:id/claim', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { ownerUserId } = z.object({ ownerUserId: z.string().min(1).max(64).optional() }).parse(request.body ?? {});
+    const kase = await claimCase(custodyDeps, { caseId: id, adminUserId: request.user.userId, ...(ownerUserId ? { ownerUserId } : {}) });
+    return { success: true, data: { caseId: kase.id, ownerUserId: kase.ownerUserId } };
+  });
+
+  app.post('/custody-cases/:id/direct', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ outcome: z.enum(CUSTODY_CASE_DIRECTABLE) }).parse(request.body ?? {});
+    // The stated reason (header or body) was already demanded by the C3 gate.
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const kase = await directCase({ ...custodyDeps, orderService }, {
+      caseId: id, adminUserId: request.user.userId, outcome: body.outcome, reason,
+      ipAddress: request.ip, userAgent: request.headers['user-agent'],
+    });
+    return { success: true, data: { caseId: kase.id, state: kase.state, version: kase.version } };
+  });
+
+  app.post('/custody-cases/:id/relay', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ riderId: z.string().min(1).max(64) }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const kase = await assignRelay(custodyDeps, {
+      caseId: id, adminUserId: request.user.userId, riderId: body.riderId, reason,
+      ipAddress: request.ip, userAgent: request.headers['user-agent'],
+    });
+    return { success: true, data: { caseId: kase.id, state: kase.state, relayRiderId: kase.relayRiderId, version: kase.version } };
+  });
+
+  app.post('/custody-cases/:id/confirm-return', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const pre = await app.prisma.custodyRecoveryCase.findUnique({ where: { id }, select: { orderId: true } });
+    if (!pre) throw new NotFoundError('RecoveryCase', id);
+    const kase = await confirmReturn({ ...custodyDeps, orderService }, {
+      orderId: pre.orderId, actor: { userId: request.user.userId, role: 'ADMIN' }, reason,
+      ipAddress: request.ip, userAgent: request.headers['user-agent'],
+    });
+    return { success: true, data: { caseId: kase.id, state: kase.state } };
   });
 
   app.put('/orders/:id/cancel', { preHandler: [adminGuard] }, async (request) => {

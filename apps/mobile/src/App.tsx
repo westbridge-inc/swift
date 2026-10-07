@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import './lib/crashReportingBoot';
 import 'react-native-gesture-handler';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { StatusBar, View } from 'react-native';
