@@ -1,6 +1,6 @@
 import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import { log } from '../../utils/logger';
-import { cardEnrollEnabled, cardRailKilled, cardRailV2Enabled, cardSimulatorLiveEnabled } from '../../utils/card-rail';
+import { cardEnrollEnabled, cardRailKilled, cardRailV2Enabled, cardSimulatorLiveEnabled, cardSimulatorSubscriptions } from '../../utils/card-rail';
 import { SIMULATOR_PAGE } from '../../providers/card/simulator-provider';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
@@ -108,7 +108,7 @@ export async function cardCheckoutPlatforms(prisma: Pick<PrismaClient, 'platform
 
 export type CardSessionsDecision =
   | { allowed: true; provider: CardRailProvider }
-  | { allowed: false; reason: 'FLAG_OFF' | 'KILLED' | 'NO_PROVIDER' | 'PLATFORM_OFF' | 'NOT_PAYABLE' | 'NOT_PRODUCTION_PAYER' };
+  | { allowed: false; reason: 'FLAG_OFF' | 'KILLED' | 'NO_PROVIDER' | 'NOT_TEST_SUBSCRIPTION' | 'PLATFORM_OFF' | 'NOT_PAYABLE' | 'NOT_PRODUCTION_PAYER' };
 
 type PayableSub = Pick<Subscription, 'id' | 'status' | 'feeWaived' | 'weeklyRate' | 'customRate'>;
 
@@ -118,6 +118,8 @@ type PayableSub = Pick<Subscription, 'id' | 'status' | 'feeWaived' | 'weeklyRate
  * (an unknown platform counts only when every platform is on), a payable
  * subscription with a fee above zero, and a payer in a production tenant (the
  * store-review demo and the crawler never reach a card page, test or real).
+ * [Review S2] The simulator — no real money, yet its "Approve" books a week —
+ * serves only the TEST subscriptions listed in CARD_RAIL_SIMULATOR_SUBSCRIPTIONS.
  */
 export async function cardSessionsAllowed(
   prisma: PrismaClient,
@@ -134,6 +136,7 @@ export async function cardSessionsAllowed(
     log().error({ err }, '[PT-2] the card rail configuration could not be loaded; card payment is off');
     return { allowed: false, reason: 'NO_PROVIDER' };
   }
+  if (provider.simulator && !cardSimulatorSubscriptions().has(sub.id)) return { allowed: false, reason: 'NOT_TEST_SUBSCRIPTION' };
   const switches = await cardCheckoutPlatforms(prisma);
   const platformOn = platform === 'unknown' ? switches.ios && switches.android && switches.web : switches[platform];
   if (!platformOn) return { allowed: false, reason: 'PLATFORM_OFF' };

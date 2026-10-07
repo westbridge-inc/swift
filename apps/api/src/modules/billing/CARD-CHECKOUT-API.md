@@ -79,7 +79,7 @@ Otherwise it is `off`. Reading the subscription never fails because of the card 
 - `cardOnFile` is `null`;
 - an Add card session is refused with `409 ADD_CARD_OFF` (section 5).
 
-**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. `payActions` shows `CARD` as `off` there unless the server also sets `CARD_RAIL_SIMULATOR_LIVE=1`: then `CARD` is `live` with `testMode: true` and `testModeLabel`, so a normal build shows the whole card choice end to end. Every screen must show `testModeLabel` whenever `testMode` is true. The store-review demo never sees a card choice, test or real.
+**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. The simulator moves no money, yet its "Approve" books a paid week, so it serves **only the test subscriptions listed by id** in `CARD_RAIL_SIMULATOR_SUBSCRIPTIONS`; for every other partner the card routes answer `409 PAY_ACTION_OFF` and `CARD` is `off`. It never runs on the public API host (the server refuses to start). `payActions` shows `CARD` as `off` even for a listed test subscription unless the server also sets `CARD_RAIL_SIMULATOR_LIVE=1`: then `CARD` is `live` with `testMode: true` and `testModeLabel`, so a normal build shows the whole card choice end to end. Every screen must show `testModeLabel` whenever `testMode` is true. The store-review demo never sees a card choice, test or real.
 
 **`payNow`** buttons read `Pay <currency> <amount, grouped> by card`.
 - When a week is owed, the amount is that week.
@@ -249,7 +249,8 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
   The page carries no amount, name, card or id: anyone who holds the link would see it.
 - **Every state shows two links:**
   - "Back to the Swift app" → `swift://pay/card/return`, with no parameters;
-  - "Continue on the web" → the same neutral fee route as the MMG return page.
+  - "Continue on the web" → the web's neutral weekly-fee route, `<APP_PUBLIC_URL>/weekly-fee` (the same route as the MMG return page), which picks the dashboard or the portal from the signed-in session.
+- **It waits at most 20 seconds for the provider's answer.** Past that it shows `PENDING`; the answer is still recorded when it comes, and the sweep asks again if it never does.
 - **It is never logged or cached.** Swift never writes its query or body to a log line. It sends `X-Robots-Tag: noindex`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 - **It is rate-limited per source address** (60 a minute), whoever is signed in: rotating sign-ins from one address buys nothing.
 - **It is inert while card payments are off** (`CARD_RAIL_V2=0` and not draining): nothing is read or written, and the page says `UNKNOWN`.

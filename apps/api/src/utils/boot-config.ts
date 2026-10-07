@@ -1,7 +1,7 @@
 import { runtimeMode } from './runtime-mode';
 import { malformedAllowlistPositions } from '../providers/notifications/sms-recipient-allowlist';
 import { firstInvalidTwilioConfig } from './twilio-identity';
-import { assertDisabledCardRailConfig } from './card-rail';
+import { PUBLIC_API_HOST, assertDisabledCardRailConfig } from './card-rail';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
@@ -47,6 +47,26 @@ function assertSmsRecipientAllowlistConfig(env: Record<string, string | undefine
   }
 }
 
+/**
+ * [PT-2 · review S2] In EVERY mode (staging runs as development): the card
+ * simulator moves no money but its "Approve" books a paid week, so it never
+ * runs where the public — or, until the DNS cutover, Apple's reviewers — can
+ * reach it: not on the public API host. Its test switch also needs this test
+ * server's own address set, so the check can be made at all.
+ */
+export function assertCardSimulatorNotPublic(env: Record<string, string | undefined>): void {
+  if (env['CARD_RAIL_PROVIDER'] === 'simulator' || (env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0') {
+    let host = '';
+    try { host = new URL(env['API_PUBLIC_URL'] ?? '').hostname.toLowerCase(); } catch { host = ''; }
+    if (host === PUBLIC_API_HOST) {
+      throw new Error(`FATAL: the card simulator (CARD_RAIL_PROVIDER=simulator or CARD_RAIL_SIMULATOR_LIVE) on the public API host ${PUBLIC_API_HOST} — a test page that books weeks without money. Refusing to start.`);
+    }
+    if ((env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0' && !host) {
+      throw new Error('FATAL: CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL set to this TEST server\'s own address (never the public host). Refusing to start.');
+    }
+  }
+}
+
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
@@ -63,6 +83,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // quietly restrict real users), and elsewhere a malformed entry is refused
   // loudly instead of silently texting no one. Values are never echoed.
   assertSmsRecipientAllowlistConfig(env);
+  assertCardSimulatorNotPublic(env);
   if (runtimeMode(env) !== 'production') {
     assertDurableStorageConfig(env);
     return;

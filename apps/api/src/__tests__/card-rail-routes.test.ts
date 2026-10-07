@@ -30,6 +30,7 @@ import {
   CARD_RETURN_RATE,
   CARD_RETURN_PAGES,
   CARD_SESSION_START_RATE,
+  cardWebFeeUrl,
   cardRailPublicRoutes,
   returnPageHtml,
   type CardRailRuntime,
@@ -105,13 +106,20 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, tenantId?: stri
 
 /** `tenantId`: the partner's tenant (default: production). `mapped: false`: the shared billing
  *  confirmation clock has not mapped the subscription yet ([#1393]; reading never maps it). */
-type SubOpts = { status?: SubscriptionStatus; due?: Date; tenantId?: string; mapped?: boolean };
+type SubOpts = { status?: SubscriptionStatus; due?: Date; tenantId?: string; mapped?: boolean; simulatorTest?: boolean };
 function period(opts: SubOpts) {
   const due = opts.due ?? new Date(Date.now() + 3 * DAY);
   return { currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due, nextBillingDate: due };
 }
+/** [Review S2] The simulator serves only listed TEST subscriptions: fixtures are listed unless a test says
+ *  `simulatorTest: false` (a real partner on a test server). */
+const simulatorTestSubs: string[] = [];
 async function mappedUnless<T extends { subId: string }>(partner: T, opts: SubOpts): Promise<T> {
   if (opts.mapped !== false) await inTenant(opts.tenantId, () => readDunningClock(app.prisma, partner.subId));
+  if (opts.simulatorTest !== false) {
+    simulatorTestSubs.push(partner.subId);
+    process.env['CARD_RAIL_SIMULATOR_SUBSCRIPTIONS'] = simulatorTestSubs.join(',');
+  }
   return partner;
 }
 
@@ -308,6 +316,7 @@ afterEach(async () => {
 afterAll(async () => {
   delete process.env['CARD_RAIL_V2'];
   delete process.env['CARD_RAIL_ENROLL'];
+  delete process.env['CARD_RAIL_SIMULATOR_SUBSCRIPTIONS'];
   if (kekBefore === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = kekBefore;
   resetKeyProviderForTests();
   await runWithoutTenant(async () => {
@@ -757,6 +766,25 @@ describe('payActions CARD: the server alone decides, per platform, whether the P
     }
   });
 
+  it('[review S2] a REAL partner on a test server never sees or settles a simulator payment — even with the test switch on, even calling the routes directly', async () => {
+    process.env['CARD_RAIL_SIMULATOR_LIVE'] = '1';
+    for (const real of [await makeStore({ simulatorTest: false }), await makeRider({ simulatorTest: false }), await makeDriver({ simulatorTest: false })]) {
+      expect(await cardActionOf(real), real.family).toEqual({ id: 'CARD', state: 'off' });
+      for (const purpose of ['PAY_NOW', 'ENROLL'] as const) {
+        const res = await startSession(real, purpose);
+        expect(res.statusCode, `${real.family} ${purpose}: ${res.body}`).toBe(409);
+        expect(res.json().error.code).toBe('PAY_ACTION_OFF');
+      }
+      expect(await app.prisma.cardSession.count({ where: { subscriptionId: real.subId } })).toBe(0);
+      const m = await money(real.subId);
+      expect(m.successes).toBe(0);
+      expect(m.payments).toHaveLength(0);
+    }
+    // A listed TEST subscription on the same server still drives the whole loop.
+    const test = await makeRider();
+    expect((await cardActionOf(test))['state']).toBe('live');
+  });
+
   it('saving cards switched off (CARD_RAIL_ENROLL): addCard false, ENROLL 409 ADD_CARD_OFF before any page, Pay now still opens', async () => {
     delete process.env['CARD_RAIL_ENROLL'];
     process.env['CARD_RAIL_SIMULATOR_LIVE'] = '1';
@@ -879,6 +907,58 @@ describe('rate limits', () => {
     }
     expect(codes.slice(0, CARD_RETURN_RATE.max).every((c) => c === 200)).toBe(true);
     expect(codes[CARD_RETURN_RATE.max]).toBe(429);
+  });
+});
+
+describe('[review S3 · S4] the return page: two ways back, and a time limit on the provider', () => {
+  it('every state shows "Back to the Swift app" AND "Continue on the web" (the web\'s neutral weekly-fee route)', () => {
+    const before = process.env['APP_PUBLIC_URL'];
+    process.env['APP_PUBLIC_URL'] = 'https://web.example.test/';
+    try {
+      expect(cardWebFeeUrl()).toBe('https://web.example.test/weekly-fee');
+      for (const state of CARD_RETURN_PAGES) {
+        const html = returnPageHtml(state);
+        expect(html, state).toContain(`href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a>`);
+        expect(html, state).toContain('href="https://web.example.test/weekly-fee" target="_top">Continue on the web</a>');
+      }
+      process.env['APP_PUBLIC_URL'] = 'not a url';
+      expect(cardWebFeeUrl()).toBe('https://swiftgy.com/weekly-fee');
+    } finally {
+      if (before === undefined) delete process.env['APP_PUBLIC_URL']; else process.env['APP_PUBLIC_URL'] = before;
+    }
+  });
+
+  it('a provider that answers slowly: the page says PENDING within the limit, and the late answer still books the week once', async () => {
+    const slowApp = Fastify({ logger: false });
+    registerErrorHandler(slowApp);
+    await slowApp.register(prismaPlugin);
+    await slowApp.register(redisPlugin);
+    await slowApp.register(authPlugin);
+    await slowApp.register(socketPlugin);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slowService = Object.create(runtime.service) as CardRailService;
+    slowService.confirm = async (id, opts) => { await gate; return runtime.service.confirm(id, opts); };
+    slowApp.decorate(CARD_RAIL_RUNTIME_DECORATION, { ...runtime, service: slowService });
+    await slowApp.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card', confirmWaitMs: 50 });
+    await slowApp.ready();
+    try {
+      const p = await makeStore();
+      const session = (await startSession(p, 'PAY_NOW')).json().data;
+      const location = await press(session.hostedUrl, 'APPROVE');
+      const started = Date.now();
+      const res = await slowApp.inject({ method: 'GET', url: location });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(pageState(res.body)).toBe('PENDING');
+      expect((await money(p.subId)).successes).toBe(0);
+      release();
+      for (let i = 0; i < 50 && (await money(p.subId)).successes === 0; i += 1) await new Promise((r) => setTimeout(r, 100));
+      expect((await money(p.subId)).successes).toBe(1);
+      expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('SUCCEEDED');
+    } finally {
+      release();
+      await slowApp.close();
+    }
   });
 });
 

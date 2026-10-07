@@ -417,10 +417,25 @@ function page(title: string, inner: string): string {
     + `a{color:#111;font-weight:600}</style></head><body>${inner}</body></html>`;
 }
 
+/** [Review S3] "Continue on the web": the web's one neutral weekly-fee route,
+ *  which picks the dashboard or the portal from the signed-in session (as the
+ *  MMG return page does). The web's origin is APP_PUBLIC_URL. */
+export function cardWebFeeUrl(env: Record<string, string | undefined> = process.env): string {
+  let origin = 'https://swiftgy.com';
+  try {
+    const url = new URL(env['APP_PUBLIC_URL'] || origin);
+    if (url.protocol === 'https:' || url.protocol === 'http:') origin = url.origin;
+  } catch {
+    // an unreadable setting keeps the public web origin
+  }
+  return `${origin}/weekly-fee`;
+}
+
 export function returnPageHtml(state: CardReturnPage): string {
   const words = RETURN_WORDS[state];
   return page(words.title, `<h1>${escapeHtml(words.title)}</h1><p>${escapeHtml(words.body)}</p>`
-    + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`);
+    + `<p><a href="${CARD_APP_RETURN_LINK}" target="_top">Back to the Swift app</a></p>`
+    + `<p><a href="${escapeHtml(cardWebFeeUrl())}" target="_top">Continue on the web</a></p>`);
 }
 
 /** Never cached, never indexed, never sent onward as a referrer. */
@@ -439,7 +454,25 @@ function privatePage(reply: FastifyReply): FastifyReply {
  * only when it is the session's first valid one, prompts the server to ask
  * the provider — server to server. It never credits by itself.
  */
-async function processReturn(runtime: CardRailRuntime, prisma: PrismaClient, request: FastifyRequest): Promise<CardReturnPage> {
+/** [Review S4] How long the return waits for the provider's server-side
+ *  answer before it shows "checking with the bank". The confirmation goes on:
+ *  its result is recorded when it comes, and the sweep asks again if it never does. */
+export const CARD_RETURN_CONFIRM_WAIT_MS = 20_000;
+
+async function confirmWithin(runtime: CardRailRuntime, sessionId: string, waitMs: number): Promise<CardReturnPage> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const confirmed = runtime.service.confirm(sessionId).then((r) => pageForStatus(r.status));
+  // A late failure is the sweep's to retry; it must not surface as an unhandled rejection.
+  confirmed.catch((err: unknown) => log().error({ err }, '[PT-2] a card confirmation finished with an error after its return was answered'));
+  const waited = new Promise<CardReturnPage>((resolve) => { timer = setTimeout(() => resolve('PENDING'), waitMs); });
+  try {
+    return await Promise.race([confirmed, waited]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function processReturn(runtime: CardRailRuntime, prisma: PrismaClient, request: FastifyRequest, waitMs: number): Promise<CardReturnPage> {
   if (!cardRailV2Enabled() && !cardRailV2DrainEnabled()) return 'UNKNOWN';
   const query = (request.query ?? {}) as Record<string, unknown>;
   const sessionId = single(query['session']);
@@ -454,7 +487,7 @@ async function processReturn(runtime: CardRailRuntime, prisma: PrismaClient, req
   if (!owner) return 'UNKNOWN';
   return runWithTenant(owner.tenantId, async () => {
     const result = await runtime.service.handleReturn({ sessionId, state, params });
-    if (result.accepted) return pageForStatus((await runtime.service.confirm(sessionId)).status);
+    if (result.accepted) return confirmWithin(runtime, sessionId, waitMs);
     // Past the state check (a reload, a late or repeated return): the
     // session's own status. Anything else learns nothing.
     if (result.verdict === 'REJECTED_REPLAY' || result.verdict === 'REJECTED_CLOSED' || result.verdict === 'REJECTED_EXPIRED') {
@@ -488,7 +521,8 @@ function simulatorPageHtml(ref: string, facts: NonNullable<Awaited<ReturnType<Si
   return page(SIMULATOR_PAGE.title, `${head}<form method="post" action="/api/v1/billing/card/simulator/${escapeHtml(ref)}">${buttons}</form>`);
 }
 
-export async function cardRailPublicRoutes(app: FastifyInstance): Promise<void> {
+export async function cardRailPublicRoutes(app: FastifyInstance, opts: { confirmWaitMs?: number } = {}): Promise<void> {
+  const confirmWaitMs = opts.confirmWaitMs ?? CARD_RETURN_CONFIRM_WAIT_MS;
   // A provider may return a form post; the server has no form parser
   // elsewhere, so this one is scoped to these routes.
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string', bodyLimit: CARD_RETURN_BODY_LIMIT }, (_request, body, done) => {
@@ -508,7 +542,7 @@ export async function cardRailPublicRoutes(app: FastifyInstance): Promise<void> 
   const returnHandler = async (request: FastifyRequest, reply: FastifyReply) => {
     let state: CardReturnPage = 'UNKNOWN';
     try {
-      state = await processReturn(rt(), app.prisma, request);
+      state = await processReturn(rt(), app.prisma, request, confirmWaitMs);
     } catch (err) {
       log().error({ err }, '[PT-2] a card return could not be finished; the sweep asks the provider again');
       state = 'PENDING';
