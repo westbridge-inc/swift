@@ -23,7 +23,7 @@ export function ListToolbar({ state, onChange, searchLabel, filters = [] }: {
   useEffect(() => {
     const t = setTimeout(() => { if (text !== state.search) onChange({ ...state, search: text, page: 1 }); }, 300);
     return () => clearTimeout(t);
-  }, [text]); // eslint-disable-line react-hooks/exhaustive-deps -- debounce on the typed text only
+  }, [text, state, onChange]);
 
   return (
     <div className="mc-toolbar" role="search">
@@ -68,6 +68,9 @@ export function Pager({ meta, shown, onPage, onShowTestData }: {
   onPage: (_page: number) => void;
   onShowTestData?: () => void;
 }) {
+  useEffect(() => {
+    if (meta && meta.page > Math.max(1, meta.totalPages)) onPage(Math.max(1, meta.totalPages));
+  }, [meta, onPage]);
   if (!meta) return null;
   const hidden = meta.hiddenTestRecords ?? 0;
   return (
@@ -81,7 +84,7 @@ export function Pager({ meta, shown, onPage, onShowTestData }: {
           </>
         ) : null}
       </p>
-      {meta.totalPages > 1 ? (
+      {meta.totalPages > 1 || meta.hasPrev ? (
         <div className="flex items-center gap-2">
           <button type="button" className="mc-btn" disabled={!meta.hasPrev} onClick={() => onPage(meta.page - 1)}>
             <ChevronLeft size={16} aria-hidden="true" /> Previous
