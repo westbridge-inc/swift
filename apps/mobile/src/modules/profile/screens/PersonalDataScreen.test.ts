@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   owner: { userId: 'subject-a', generation: 1 },
-  deleteAccount: vi.fn(), logout: vi.fn(), success: vi.fn(),
+  deleteAccount: vi.fn(), logout: vi.fn(), success: vi.fn(), error: vi.fn(),
 }));
 vi.mock('react', async (original) => ({
   ...await original<object>(), useEffect: () => undefined, useState: (value: unknown) => [value, vi.fn()],
@@ -13,7 +13,12 @@ vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
 vi.mock('@swift/ui', () => ({ color: { surface: { subtle: '' }, brand: { 50: '', 600: '' }, success: '' }, space: {} }));
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({}),
-  useMutation: (options: { mutationFn: () => unknown }) => ({ mutate: options.mutationFn }),
+  useMutation: (options: { mutationFn: () => unknown; onError?: (error: unknown) => void }) => ({
+    mutate: async () => {
+      try { return await options.mutationFn(); }
+      catch (error) { if (!options.onError) throw error; options.onError(error); }
+    },
+  }),
 }));
 vi.mock('../../../hooks/customer', () => ({ useProfile: () => ({ data: { firstName: 'Synthetic', lastName: 'Subject' } }) }));
 vi.mock('../../../services/api', () => ({ customerApi: { deleteAccount: mocks.deleteAccount } }));
@@ -24,7 +29,7 @@ vi.mock('../../../stores/authStore', () => ({
   useAuthStore: (select: (state: unknown) => unknown) => select({ logoutIfCurrent: mocks.logout }),
 }));
 vi.mock('../../../kit', () => Object.fromEntries(['ErrorState', 'Header', 'IconChip', 'LabeledInput', 'LoadingBlock', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'SettingsRow', 'T'].map((name) => [name, name])));
-vi.mock('../../../kit/toast', () => ({ toast: { success: mocks.success } }));
+vi.mock('../../../kit/toast', () => ({ toast: { success: mocks.success, error: mocks.error } }));
 import { PersonalDataScreen } from './PersonalDataScreen';
 
 function button(node: any): any {
@@ -42,6 +47,18 @@ describe('account deletion confirmation', () => {
     expect(mocks.success).toHaveBeenCalledExactlyOnceWith(message);
     expect(mocks.deleteAccount).toHaveBeenCalledWith(mocks.owner);
     expect(mocks.logout).toHaveBeenCalledExactlyOnceWith(mocks.owner);
+  });
+
+  it.each([
+    'You have GY$1,500 of unused weekly-fee credit. Open Get help and we will refund it, then your account can be deleted.',
+    'Swift has not finished paying a no-show claim it owes you. Open Get help to have it paid or closed.',
+  ])('shows the deletion refusal in the server words and keeps the session (%s)', async (message) => {
+    mocks.deleteAccount.mockRejectedValue({ response: { status: 409, data: { error: { code: 'PARTNER_OBLIGATIONS', message } } } });
+    await button(PersonalDataScreen()).props.onPress();
+    expect(mocks.deleteAccount).toHaveBeenCalledExactlyOnceWith(mocks.owner);
+    expect(mocks.error).toHaveBeenCalledExactlyOnceWith(message);
+    expect(mocks.success).not.toHaveBeenCalled();
+    expect(mocks.logout).not.toHaveBeenCalled();
   });
 
   it('keeps the completed deletion confirmation for a completed response', async () => {
