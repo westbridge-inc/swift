@@ -142,7 +142,7 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
   if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0 };
   const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
   const lateHorizon = new Date(Date.now() - LATE_WINDOW_MS);
-  const [checkouts, payments, holds, credit] = await Promise.all([
+  const [checkouts, cardPayments, payments, holds, credit] = await Promise.all([
     tx.mmgCheckoutIntent.count({ where: { subscriptionId, OR: [
       { status: { in: ['OPEN', 'CONFIRMING', 'HELD'] } },
       // [DS782 S2] A late MMG reply re-arms an EXPIRED or NOT_PAID checkout and
@@ -154,13 +154,15 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
         { replyAt: { gt: lateHorizon } },
       ] },
     ] } }),
+    // A card payment for the fee still open, unknown or held (saving a card moves no money).
+    tx.cardSession.count({ where: { subscriptionId, purpose: 'PAY_NOW', status: { in: ['OPEN', 'UNKNOWN', 'HELD'] } } }),
     // The weekly MMG prompt and any other fee payment not yet settled.
     tx.subscriptionPayment.count({ where: { subscriptionId, status: { in: ['PENDING', 'AUTHORIZED', 'UNKNOWN'] } } }),
     tx.paymentConfirmationHold.count({ where: { subscriptionId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }),
     tx.prepaidBalance.aggregate({ where: { subscriptionId, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
   ]);
   return {
-    pendingFeePaymentCount: checkouts + payments + holds,
+    pendingFeePaymentCount: checkouts + cardPayments + payments + holds,
     feeCreditCount: credit._count._all,
     feeCreditAmount: Number(credit._sum.balance ?? 0),
   };

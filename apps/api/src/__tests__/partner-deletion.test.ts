@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -458,6 +459,31 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
     await refused(p.userId, 'FEE_PAYMENT_PENDING');
     await untouched(p.userId);
     await app.prisma.subscriptionPayment.update({ where: { id: payment.id }, data: { status: 'FAILED' } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it.each(['OPEN', 'UNKNOWN', 'HELD'] as const)('a %s card payment for the weekly fee blocks deletion until it settles', async (status) => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    const session = await app.prisma.cardSession.create({ data: {
+      subscriptionId: sub.id, userId: p.userId, purpose: 'PAY_NOW', status, provider: 'simulator', environment: 'sandbox',
+      providerAccount: 'synthetic', amount: 2000, currencyCode: 'GYD', periodStart: sub.currentPeriodStart,
+      stateHash: createHash('sha256').update(nanoid()).digest('hex'), expiresAt: new Date(Date.now() + 600_000),
+    } });
+    await refused(p.userId, 'FEE_PAYMENT_PENDING');
+    await untouched(p.userId);
+    await app.prisma.cardSession.update({ where: { id: session.id }, data: { status: 'FAILED' } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('saving a card (no payment) does not block deletion', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    await app.prisma.cardSession.create({ data: {
+      subscriptionId: sub.id, userId: p.userId, purpose: 'ENROLL', status: 'OPEN', provider: 'simulator', environment: 'sandbox',
+      providerAccount: 'synthetic', consentVersion: 'synthetic', consentAt: new Date(),
+      stateHash: createHash('sha256').update(nanoid()).digest('hex'), expiresAt: new Date(Date.now() + 600_000),
+    } });
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
   });
 
