@@ -62,3 +62,25 @@ export function previousDecisions(queued: readonly QueuedDocument[], earlier: re
   }
   return found;
 }
+
+/**
+ * The queue rows with `previousDecision` attached. The lookup is a courtesy to
+ * the reviewer: if it fails, the queue still answers, every row reads
+ * `previousDecision: null`, and the failure is reported. An empty page reads
+ * nothing.
+ */
+export async function withPreviousDecisions<D extends QueuedDocument>(
+  documents: readonly D[],
+  readEarlier: (where: ReturnType<typeof earlierDocumentsWhere>) => Promise<EarlierDocument[]>,
+  onLookupFailed: (error: unknown) => void,
+): Promise<Array<D & { previousDecision: PreviousDecision | null }>> {
+  let previous = new Map<string, PreviousDecision>();
+  if (documents.length) {
+    try {
+      previous = previousDecisions(documents, await readEarlier(earlierDocumentsWhere(documents)));
+    } catch (error) {
+      onLookupFailed(error);
+    }
+  }
+  return documents.map((doc) => ({ ...doc, previousDecision: previous.get(doc.id) ?? null }));
+}

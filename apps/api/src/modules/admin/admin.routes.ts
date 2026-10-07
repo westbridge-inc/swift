@@ -3,7 +3,7 @@ import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
-import { earlierDocumentsWhere, previousDecisions } from '../verification/previous-decision';
+import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
@@ -5285,15 +5285,16 @@ export async function adminRoutes(app: FastifyInstance) {
     // [NO-DEAD-ENDS] A re-submitted document says so: the earlier verdict on
     // the same applicant's same document, and the reviewer's reason, ride on
     // the queue row (verification/previous-decision.ts). Only applicants on
-    // this page are read, through the same tenant-scoped client.
-    const earlier = documents.length
-      ? await tenantPrisma.verificationDocument.findMany({
-        where: earlierDocumentsWhere(documents),
+    // this page are read, through the same tenant-scoped client; a failed
+    // lookup degrades to null and never fails the queue.
+    const rows = await withPreviousDecisions(
+      documents,
+      (earlierWhere) => tenantPrisma.verificationDocument.findMany({
+        where: earlierWhere,
         select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
-      })
-      : [];
-    const previous = previousDecisions(documents, earlier);
-    const rows = documents.map((doc) => ({ ...doc, previousDecision: previous.get(doc.id) ?? null }));
+      }),
+      (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
+    );
 
     return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });

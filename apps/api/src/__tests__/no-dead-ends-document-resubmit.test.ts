@@ -235,3 +235,25 @@ describe('previousDecisions (pure)', () => {
     expect(found.get('new-id')).toMatchObject({ kind: 'RENEWAL', status: 'EXPIRED' });
   });
 });
+
+describe('[DS778 S4] the queue never fails because the earlier-verdict lookup failed', () => {
+  it('a failing lookup degrades every row to previousDecision: null and reports the failure', async () => {
+    const { withPreviousDecisions } = await import('../modules/verification/previous-decision');
+    const docs = [{ id: 'd1', userId: 'u1', docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z'), note: 'kept' }];
+    const failures: unknown[] = [];
+    const rows = await withPreviousDecisions(docs, async () => { throw new Error('connection reset'); }, (error) => failures.push(error));
+    expect(rows).toEqual([{ ...docs[0], previousDecision: null }]);
+    expect(failures).toHaveLength(1);
+  });
+  it('a working lookup attaches the decision, and an empty page reads nothing', async () => {
+    const { withPreviousDecisions } = await import('../modules/verification/previous-decision');
+    const docs = [{ id: 'd1', userId: 'u1', docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z') }];
+    const rows = await withPreviousDecisions(docs, async () => [
+      { id: 'old', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: null, createdAt: new Date('2026-10-01T00:00:00Z') },
+    ], () => {});
+    expect(rows[0]!.previousDecision).toMatchObject({ documentId: 'old', kind: 'RESUBMITTED_AFTER_REJECTION', reviewNote: 'blurry' });
+    let read = false;
+    expect(await withPreviousDecisions([], async () => { read = true; return []; }, () => {})).toEqual([]);
+    expect(read).toBe(false);
+  });
+});
