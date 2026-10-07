@@ -26,6 +26,7 @@ import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
 import { runAsSystem } from './tenant-context';
+import { runWithTenant } from './prisma';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -535,6 +536,11 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     const userId = socket.data.userId as string;
     const tenantId = socket.data.tenantId as string;
     const authSessionId = socket.data.authSessionId as string;
+    // [L04 · R5 socket] An event handler runs outside any HTTP request, so no
+    // tenant is bound for it. The socket's tenant was proven by its session at
+    // the handshake: every handler that reads the database runs inside it, so
+    // the wall scopes and binds those reads as it does a request's.
+    const inSocketTenant = <T>(fn: () => Promise<T>): Promise<T> => runWithTenant(tenantId, fn);
     let authorizationReady = false;
     let authorizationFailed = false;
     let authorizationExpiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -561,7 +567,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       const parsed = orderEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        const order = await app.prisma.order.findFirst({
+        const order = await inSocketTenant(() => app.prisma.order.findFirst({
           where: {
             id: parsed.data.orderId,
             OR: [
@@ -574,7 +580,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
             ],
           },
           select: { id: true },
-        });
+        }));
         if (order) {
           socket.join(`order:${parsed.data.orderId}`);
         }
@@ -596,7 +602,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       const parsed = chatEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        await assertRoomAccess(app.prisma, parsed.data.roomId, userId);
+        await inSocketTenant(() => assertRoomAccess(app.prisma, parsed.data.roomId, userId));
         socket.join(`chat:${parsed.data.roomId}`);
       } catch {
         // Refused or not found — non-fatal, the socket simply does not join
@@ -633,10 +639,10 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       const parsed = vendorEvent.safeParse(raw);
       if (!parsed.success) return;
       try {
-        const vendor = await app.prisma.vendor.findFirst({
+        const vendor = await inSocketTenant(() => app.prisma.vendor.findFirst({
           where: { id: parsed.data.vendorId, owner: { userId } },
           select: { id: true },
-        });
+        }));
         if (vendor) {
           socket.join(`vendor:${parsed.data.vendorId}`);
         }

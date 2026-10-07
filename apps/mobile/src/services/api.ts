@@ -9,6 +9,7 @@ import {
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
@@ -569,6 +570,8 @@ export const safetyApi = {
   // relative who does not have the app.
   shareTrip: (orderId: string, sendToPhone?: string) =>
     api.post(`/safety/trips/${orderId}/share`, sendToPhone ? { sendToPhone } : {}),
+  tripShares: (orderId: string) => api.get(`/safety/trips/${orderId}/shares`),
+  revokeAllTripShares: (orderId: string) => api.delete(`/safety/trips/${orderId}/shares`),
   revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
   /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
   monitoringPreference: () => api.get('/safety/monitoring-preference'),
@@ -733,6 +736,8 @@ export const placesApi = {
 type CourierSize = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type CourierSpeed = 'STANDARD' | 'EXPRESS' | 'RUSH';
 export const courierApi = {
+  rotateTracking: (id: string) => api.post(`/courier/order/${id}/tracking`),
+  revokeTracking: (id: string) => api.delete(`/courier/order/${id}/tracking`),
   estimate: (data: { pickup: Point; dropoff: Point; packageSize: CourierSize; speed: CourierSpeed }) =>
     api.post('/courier/estimate', data),
   order: (data: {
@@ -1306,6 +1311,37 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     },
     read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
       const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}
+
+/** The card half of the fee page (CARD-CHECKOUT-API): the same captured principal and store as
+ *  weeklyFeeApi. The server prices a Pay now; no amount and no card detail is ever sent. */
+export function cardFeeApi(family: import('../lib/cardFee').CardFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = `/${family}/subscription`;
+  const signedOut = async (): Promise<never> => { throw new Error('Sign in to pay.'); };
+  if (!session) return { start: signedOut, read: signedOut, remove: signedOut };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => family === 'vendor'
+    ? capturedVendorAuthConfig(current(), storeId, { headers })
+    : capturedAuthConfig(current(), { headers });
+  return {
+    start: async (purpose: import('../lib/cardFee').CardPurpose, key: string): Promise<import('../lib/cardFee').CardSessionStart> => {
+      const body = purpose === 'ENROLL' ? { purpose, consentVersion: CARD_CONSENT_VERSION } : { purpose };
+      const response = await api.post(`${base}/card-sessions`, body, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (sessionId: string): Promise<import('../lib/cardFee').CardSessionView> => {
+      const response = await api.get(`${base}/card-sessions/${encodeURIComponent(sessionId)}`, config());
+      current(); return response.data.data;
+    },
+    remove: async (cardId: string): Promise<unknown> => {
+      const response = await api.delete(`${base}/cards/${encodeURIComponent(cardId)}`, config());
       current(); return response.data.data;
     },
   };

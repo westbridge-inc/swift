@@ -47,6 +47,8 @@ async function business() {
   for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
     fireEvent.change(screen.getByLabelText(label!), { target: { value } });
   }
+  // The partner agreement (its own cases live in partner-agreement.test.tsx).
+  fireEvent.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
   return user;
 }
 
@@ -85,7 +87,7 @@ describe('Q8 website store pin', () => {
     await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
     await user.click(screen.getByRole('button', { name: 'Create business' }));
     expect(fx.become).toHaveBeenCalledExactlyOnceWith({
-      role: 'VENDOR', business: {
+      role: 'VENDOR', acceptAgreement: true, business: {
         name: 'Test shop', vendorType: 'RESTAURANT', phone: '+5926001003',
         addressLine1: '12 Regent Street', city: 'Georgetown', region: 'Demerara-Mahaica',
         latitude: DOOR.lat, longitude: DOOR.lng,
