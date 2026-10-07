@@ -374,7 +374,7 @@ describe('MMG live adapter — Transaction History for the checkout payment time
     modificationDate: '2026-10-01T15:38:31.000Z', transactionReference: '20402048536279', transactionReceipt: '20402048536279',
     debitParty: [{ key: 'accountid', value: 'P-DEBIT' }, { key: 'accountcategory', value: 'P-CAT' }],
     creditParty: [{ key: 'accountid', value: 'P-CREDIT' }, { key: 'accountcategory', value: 'P-CAT' }],
-    external_id: 'P-EXTERNAL',
+    external_id: '1790883499',
   };
   /** Another UAT row of the same day, a payment that is not ours. */
   const OTHER_ROW = { ...UAT_ROW, modificationDate: '2026-10-01T15:38:15.000Z', transactionReference: '20402048536111', transactionReceipt: '20402048536111' };
@@ -408,6 +408,29 @@ describe('MMG live adapter — Transaction History for the checkout payment time
     expect(await new LiveMmgProvider(CFG, notJson as any).transactionHistoryRows(QUERY)).toMatchObject({ outcome: 'error' });
   });
 
+  it.each(['history', 'authentication'])('bounds a stalled %s body and returns an error so the poll can continue', async (phase) => {
+    vi.useFakeTimers();
+    try {
+      let stalledSignal: AbortSignal | null | undefined;
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        const isAuth = url.includes('/e-commerce-login/mer');
+        if (isAuth && phase === 'history') return AUTH_OK;
+        stalledSignal = init?.signal;
+        return { ok: true, status: 200, json: () => new Promise(() => {}) };
+      });
+      let result: unknown = 'pending';
+      void new LiveMmgProvider(CFG, fetchMock as any).transactionHistoryRows(QUERY).then((answer) => { result = answer; });
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(result).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(result).toMatchObject({ outcome: 'error' });
+      expect(stalledSignal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reads the answer whole: a missing or non-list TransactionList, or any row that is not an object, is an error, never a shorter list', () => {
     expect(historyAnswerFrom(200, UAT_ANSWER)).toEqual({ outcome: 'rows', rows: [OTHER_ROW, UAT_ROW] });
     expect(historyAnswerFrom(200, { executionId: 'E', TransactionList: [] })).toEqual({ outcome: 'rows', rows: [] });
@@ -419,11 +442,14 @@ describe('MMG live adapter — Transaction History for the checkout payment time
   it('reads one row exactly as sent: strings stay strings, the amount in exact minor units, anything unreadable null', () => {
     expect(historyRowFrom(UAT_ROW)).toEqual({
       transactionReference: '20402048536279', transactionReceipt: '20402048536279', statusText: 'completed',
-      amountMinor: 50000, currencyCode: 'GYD', modificationDate: '2026-10-01T15:38:31.000Z',
+      externalId: '1790883499', amountMinor: 50000, currencyCode: 'GYD', modificationDate: '2026-10-01T15:38:31.000Z',
     });
     expect(historyRowFrom({ ...UAT_ROW, amount: '500.00' }).amountMinor).toBe(50000);
+    for (const external_id of [undefined, null, 1790883499, {}, []]) {
+      expect(historyRowFrom({ ...UAT_ROW, external_id }).externalId).toBeNull();
+    }
     expect(historyRowFrom({ transactionReference: 20402048536279, transactionReceipt: null, transactionStatus: 7, amount: 'five hundred', currency: 1, modificationDate: 1727811511000 }))
-      .toEqual({ transactionReference: null, transactionReceipt: null, statusText: null, amountMinor: null, currencyCode: null, modificationDate: null });
+      .toEqual({ transactionReference: null, transactionReceipt: null, externalId: null, statusText: null, amountMinor: null, currencyCode: null, modificationDate: null });
   });
 
   it('the sandbox has no history for the checkout: it never answers "successful", so it is never asked', async () => {

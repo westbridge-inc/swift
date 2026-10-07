@@ -76,7 +76,7 @@ const lookup: MmgLookupClient = {
 /** MMG stamps creationDate as Guyana wall-clock time written with a "Z" (UAT, 1 Oct). */
 const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
 /** MMG's lookup of `txn` in the exact UAT shape, read as the live adapter reads it. */
-function mmgAnswers(txn: string, ledger: string, amountGyd: number, patch: Record<string, unknown> = {}) {
+function mmgAnswers(checkout: { merchantTransactionId: string }, txn: string, ledger: string, amountGyd: number, patch: Record<string, unknown> = {}) {
   lookups.set(txn, lookupDetailFrom({
     transactionStatus: 'successful', amount: String(amountGyd), currency: 'GYD', creationDate: gyStamp(new Date()),
     subType: 'subscriber_mpay', transactionReference: ledger,
@@ -84,7 +84,7 @@ function mmgAnswers(txn: string, ledger: string, amountGyd: number, patch: Recor
     metadata: [{ key: 'amount', value: String(amountGyd) }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }],
     descriptionText: null, ...patch,
   }, txn));
-  history.holds(txn, amountGyd);
+  history.holds(txn, amountGyd, { external_id: checkout.merchantTransactionId });
 }
 /** MMG ids are digits (UAT: transactionId 20402048536279, transactionReference 20402048601581); unique per run. */
 let idSeq = 0;
@@ -269,7 +269,7 @@ beforeAll(async () => {
   const paid = await started(s.store);
   const txn = mmgId();
   const ledger = mmgId();
-  mmgAnswers(txn, ledger, paid.amountGyd);
+  mmgAnswers(paid.row, txn, ledger, paid.amountGyd);
   expect((await returnWith(reply(paid.row, '0', txn))).json().data.state).toBe('CONFIRMED');
   s.confirmed = { ref: paid.ref, ours: paid.row.merchantTransactionId, txn, ledger, amount: paid.amountGyd };
   // OPEN: the same store starts one more and never finishes it.
@@ -281,7 +281,7 @@ beforeAll(async () => {
   const held = await started(s.rider);
   const heldTxn = mmgId();
   const heldLedger = mmgId();
-  mmgAnswers(heldTxn, heldLedger, held.amountGyd + 1);
+  mmgAnswers(held.row, heldTxn, heldLedger, held.amountGyd + 1);
   expect((await returnWith(reply(held.row, '0', heldTxn))).json().data.state).toBe('CONFIRMING');
   expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: held.ref } })).status).toBe('HELD');
   s.held = { ref: held.ref, ours: held.row.merchantTransactionId, txn: heldTxn, ledger: heldLedger };
@@ -568,8 +568,8 @@ describe('2. the detail: the row, a timeline from the observations, and the cred
     const rider = await makeRider();
     const c = await started(rider);
     const txn = mmgId();
-    mmgAnswers(txn, mmgId(), c.amountGyd);
-    history.answer = async () => ({ outcome: 'rows', rows: [mmgHistoryRow(txn, c.amountGyd, { modificationDate: gyStamp(new Date(Date.now() + 3 * 60_000)) })] });
+    mmgAnswers(c.row, txn, mmgId(), c.amountGyd);
+    history.answer = async () => ({ outcome: 'rows', rows: [mmgHistoryRow(txn, c.amountGyd, { external_id: c.row.merchantTransactionId, modificationDate: gyStamp(new Date(Date.now() + 3 * 60_000)) })] });
     try {
       expect((await returnWith(reply(c.row, '0', txn))).json().data.state).toBe('CONFIRMING');
     } finally {

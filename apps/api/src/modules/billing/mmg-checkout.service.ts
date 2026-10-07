@@ -388,15 +388,16 @@ export function paymentHistoryOf(record: { failure: string | null; body: unknown
  * history could not be asked, read or seen whole (UNAVAILABLE), or has no
  * record of it (NOT_IN_HISTORY): both may resolve on a later check; more than
  * one record (AMBIGUOUS); a record that does not agree, exactly, with this
- * checkout (DISAGREES: both of its numbers, "completed", the amount, GYD); a
+ * checkout reference (REFERENCE_MISMATCH), or its transaction numbers, status,
+ * amount or currency (DISAGREES); a
  * time that cannot be read; a time more than two minutes after Swift first
  * heard of the payment (MMG's times do not match the zone, or it is not this
  * checkout's payment); outside the checkout's window (two minutes either side).
  * The lookup's creationDate plays no part: it is the lookup's own moment.
  */
-export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNAVAILABLE' | 'NOT_IN_HISTORY' | 'AMBIGUOUS' | 'DISAGREES' | 'UNREADABLE' | 'AFTER_REPLY' | 'OUTSIDE';
+export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNAVAILABLE' | 'NOT_IN_HISTORY' | 'AMBIGUOUS' | 'REFERENCE_MISMATCH' | 'DISAGREES' | 'UNREADABLE' | 'AFTER_REPLY' | 'OUTSIDE';
 export function paymentTimeCheckOf(
-  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, txnId: string, creation: CreationCheck,
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, txnId: string, creation: CreationCheck,
 ): CreationCheckResult {
   if (creation.zone === null) return 'ZONE_UNVERIFIED';
   if (creation.firstReplyAt === null) return 'AFTER_REPLY';
@@ -406,6 +407,7 @@ export function paymentTimeCheckOf(
   if (history.naming.length > 1) return 'AMBIGUOUS';
   if (history.truncated) return 'UNAVAILABLE';
   const row = historyRowFrom(history.naming[0]!);
+  if (row.externalId === null || row.externalId !== intent.merchantTransactionId) return 'REFERENCE_MISMATCH';
   if (row.transactionReference !== txnId || row.transactionReceipt !== txnId
     || row.statusText === null || !MMG_HISTORY_SUCCESS.includes(row.statusText)
     || row.amountMinor === null || row.amountMinor !== minorOf(intent)
@@ -422,6 +424,7 @@ const PAYMENT_TIME_HOLDS: Record<Exclude<CreationCheckResult, 'INSIDE'>, { reaso
   UNAVAILABLE: { reason: 'PAYMENT_TIME_UNAVAILABLE', retry: true },
   NOT_IN_HISTORY: { reason: 'PAYMENT_TIME_NOT_IN_HISTORY', retry: true },
   AMBIGUOUS: { reason: 'PAYMENT_TIME_AMBIGUOUS', retry: false },
+  REFERENCE_MISMATCH: { reason: 'HISTORY_REFERENCE_MISMATCH', retry: false },
   DISAGREES: { reason: 'PAYMENT_TIME_DISAGREES', retry: false },
   UNREADABLE: { reason: 'PAYMENT_TIME_UNREADABLE', retry: false },
   AFTER_REPLY: { reason: 'PAYMENT_TIME_AFTER_REPLY', retry: false },
@@ -521,7 +524,7 @@ export function judge(
     const time = paymentTimeCheckOf(intent, txnId, creation);
     if (time !== 'INSIDE') {
       const { reason, retry } = PAYMENT_TIME_HOLDS[time];
-      return retry ? { verdict: 'HOLD', txnId, reason, decisive: false, decisiveWhenLate: tied } : hold(reason, tied);
+      return retry ? { verdict: 'HOLD', txnId, reason, decisive: false, decisiveWhenLate: tied } : hold(reason, time === 'REFERENCE_MISMATCH' || tied);
     }
     // (6) MMG's ledger number is credited with the transaction, once (confirm).
     if (!detail.ledgerReference || !MMG_TXN_ID.test(detail.ledgerReference)) return hold('LEDGER_REFERENCE_MISSING', tied);
@@ -543,6 +546,7 @@ const HOLD_GUIDANCE: Readonly<Record<string, string>> = {
   PAYMENT_TIME_NOT_IN_HISTORY: ' MMG’s lookup says the payment succeeded, but MMG’s transaction history did not show it for the checkout’s time while Swift kept checking. If every MMG payment is held like this, check MMG_CHECKOUT_CREATION_ZONE against how MMG writes its times. Check the payment against the MMG statement before confirming it.',
   PAYMENT_TIME_UNAVAILABLE: ' MMG’s transaction history could not be read in full, so the time of this payment could not be checked. Check the payment against the MMG statement before confirming it.',
   PAYMENT_TIME_AMBIGUOUS: ' MMG’s transaction history shows more than one record of this transaction. Check the payment against the MMG statement before confirming it.',
+  HISTORY_REFERENCE_MISMATCH: ' MMG’s transaction history is missing this checkout reference or names a different checkout reference. Nothing was credited. Match the checkout reference against the MMG statement before confirming it.',
   PAYMENT_TIME_DISAGREES: ' MMG’s transaction history record of this transaction does not match the checkout (its numbers, its status, the amount or the currency). Check the payment against the MMG statement before confirming it.',
   PAYMENT_TIME_UNREADABLE: ' MMG’s transaction history gives a time for this payment that cannot be read. Check the payment against the MMG statement before confirming it.',
   PAYMENT_TIME_AFTER_REPLY: ' MMG’s transaction history dates this payment after Swift had already received the MMG reply naming it: either MMG_CHECKOUT_CREATION_ZONE does not match how MMG writes times, or the payment is not this checkout’s. Check the payment against the MMG statement before confirming it.',

@@ -49,7 +49,7 @@ const unanswered = { txnId: null, reason: 'NO_SUCCESS_ANSWER' } as const;
  *  its numbers MMGTX1, the amount and currency, and modificationDate, when the payment was
  *  made, as MMG writes it (Guyana wall clock with a "Z"), or exactly the string given. */
 const record = (paid: Date | string | undefined, patch: Record<string, unknown> = {}): Record<string, unknown> => ({
-  amount: '1500', currency: 'GYD', displayType: 'EMerchant Payment', transactionStatus: 'completed', descriptionText: '',
+  external_id: REF, amount: '1500', currency: 'GYD', displayType: 'EMerchant Payment', transactionStatus: 'completed', descriptionText: '',
   modificationDate: paid instanceof Date ? gyStamp(paid) : paid, transactionReference: 'MMGTX1', transactionReceipt: 'MMGTX1', ...patch,
 });
 /** What MMG's history answered for MMGTX1: these records, the answer whole. */

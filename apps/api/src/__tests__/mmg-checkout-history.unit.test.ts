@@ -40,13 +40,13 @@ const uat = { merchantTransactionId: '1790883499', amount: new Prisma.Decimal(50
 const replied = new Date('2026-10-01T19:39:05Z');
 /** Guyana wall-clock time written with a "Z", as MMG writes its times (UAT). */
 const wall = (at: Date | number) => new Date(new Date(at).getTime() - 4 * 3_600_000).toISOString();
-/** MMG's history row for the 1 Oct payment (party values and external_id are placeholders: the probe printed only their keys). */
+/** MMG's history row for the 1 Oct payment (party values are synthetic; probe 2 proved external_id is the checkout reference). */
 const ROW = {
   amount: '500', currency: 'GYD', displayType: 'EMerchant Payment', transactionStatus: 'completed', descriptionText: '',
   modificationDate: '2026-10-01T15:38:31.000Z', transactionReference: TXN, transactionReceipt: TXN,
   debitParty: [{ key: 'accountid', value: 'P-DEBIT' }, { key: 'accountcategory', value: 'P-CAT' }],
   creditParty: [{ key: 'accountid', value: 'P-CREDIT' }, { key: 'accountcategory', value: 'P-CAT' }],
-  external_id: 'P-EXTERNAL',
+  external_id: uat.merchantTransactionId,
 };
 const row = (patch: Record<string, unknown> = {}) => ({ ...ROW, ...patch });
 /** The same day's other UAT row: a payment that is not this one. */
@@ -78,6 +78,18 @@ describe('[7 Oct] condition (5): the payment time is MMG history’s modificatio
       expect(verdictOf(rows([ROW]), { detail: lookupWith(creationDate) }), String(creationDate)).toEqual(CONFIRMED);
     }
     expect(paymentTimeCheckOf(uat, TXN, { zone: 'GUYANA_WALL_CLOCK', firstReplyAt: replied, history: rows([ROW]) })).toBe('INSIDE');
+  });
+
+  it.each([
+    ['missing', undefined], ['null', null], ['empty', ''], ['different', '1790883498'],
+    ['MMG transaction id', TXN], ['lookup ledger number', LEDGER],
+    ['number', 1790883499], ['leading space', ' 1790883499'], ['trailing space', '1790883499 '],
+    ['prefix', 'x1790883499'], ['suffix', '1790883499x'], ['newline', '1790883499\n'],
+  ])('history external_id %s is a decisive HOLD, even without a successful checkout reply', (_name, external_id) => {
+    for (const success of [answered, unanswered]) {
+      expect(verdictOf(rows([row({ external_id })]), { success }))
+        .toEqual({ verdict: 'HOLD', txnId: TXN, reason: 'HISTORY_REFERENCE_MISMATCH', decisive: true });
+    }
   });
 
   it('a late lookup of an in-time payment confirms: MMG stamps creationDate with the moment of the lookup', () => {

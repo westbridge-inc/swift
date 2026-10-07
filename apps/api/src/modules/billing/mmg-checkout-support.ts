@@ -106,9 +106,10 @@ export function decodeSupportCursor(cursor: string): { createdAt: Date; id: stri
  * configured zone is UNREADABLE (judge holds CREATION_ZONE_UNVERIFIED).
  */
 export function windowCheckOf(
-  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, txnId: string, creation: CreationCheck,
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, txnId: string, creation: CreationCheck,
 ): NonNullable<MmgCheckoutTimelineEntry['windowCheck']> {
   const result = paymentTimeCheckOf(intent, txnId, creation);
+  if (result === 'REFERENCE_MISMATCH') return 'DISAGREES';
   return result === 'ZONE_UNVERIFIED' ? 'UNREADABLE' : result;
 }
 
@@ -147,7 +148,7 @@ export interface ObservationForTimeline {
  * claims to be is dropped, never shown.
  */
 export function timelineEntryOf(
-  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, o: ObservationForTimeline, creation: CreationCheck,
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, o: ObservationForTimeline, creation: CreationCheck,
 ): MmgCheckoutTimelineEntry {
   const body = o.body && typeof o.body === 'object' && !Array.isArray(o.body) ? o.body as Record<string, unknown> : null;
   const at = o.createdAt.toISOString();

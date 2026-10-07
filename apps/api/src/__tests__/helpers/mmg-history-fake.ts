@@ -9,8 +9,8 @@ import type { MmgHistoryAnswer, MmgHistoryQuery } from '../../providers/mmg/mmg-
 //   transactionReference and transactionReceipt, transactionStatus
 //   "completed", the amount as a major-unit string, the currency, and
 //   modificationDate: when the payment was made, written as Guyana wall
-//   clock with a "Z" (party values and external_id are placeholders: the
-//   probe printed only their keys);
+//   clock with a "Z"; external_id is the checkout reference supplied by the
+//   test (probe 2). Party values are synthetic; they do not identify the merchant;
 // - only the rows whose time lies within the query's dates, read the same
 //   way, oldest first, at most `rows` (MMG's `offset`) of them.
 // ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ export function mmgHistoryRow(txn: string, amountGyd: number, patch: Record<stri
     modificationDate: mmgTimeOf(new Date()), transactionReference: txn, transactionReceipt: txn,
     debitParty: [{ key: 'accountid', value: '6000002' }, { key: 'accountcategory', value: 'P-CAT' }],
     creditParty: [{ key: 'accountid', value: 'P-CREDIT' }, { key: 'accountcategory', value: 'P-CAT' }],
-    external_id: 'P-EXTERNAL', ...patch,
+    ...patch,
   };
 }
 

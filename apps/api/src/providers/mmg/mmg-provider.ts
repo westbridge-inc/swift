@@ -202,6 +202,8 @@ export function historyAnswerFrom(status: number, body: unknown): MmgHistoryAnsw
 /** One history row as condition (5) reads it. Every field MMG did not send,
  *  or sent in a form that cannot be read exactly, is null: never a default. */
 export interface MmgHistoryRow {
+  /** Swift checkout reference from MMG history; never a coerced or trimmed value. */
+  externalId: string | null;
   transactionReference: string | null;
   transactionReceipt: string | null;
   /** transactionStatus exactly as sent ("completed" in UAT, 7 Oct). */
@@ -215,6 +217,7 @@ export interface MmgHistoryRow {
 export function historyRowFrom(row: Record<string, unknown>): MmgHistoryRow {
   const text = (value: unknown): string | null => (typeof value === 'string' ? value : null);
   return {
+    externalId: text(row['external_id']),
     transactionReference: text(row['transactionReference']),
     transactionReceipt: text(row['transactionReceipt']),
     statusText: text(row['transactionStatus']),
@@ -480,10 +483,25 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   ) {}
 
   private async call(path: string, init: NonNullable<Parameters<typeof fetch>[1]>): Promise<Response> {
+    return this.callReading(path, init, async (response) => response);
+  }
+
+  /** Keep the deadline active through the response body, including transports
+   * that do not settle their body promise when the signal is aborted. */
+  private async callReading<T>(path: string, init: NonNullable<Parameters<typeof fetch>[1]>, read: (response: Response) => Promise<T>): Promise<T> {
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), CALL_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        ac.abort();
+        reject(new Error('MMG request timed out'));
+      }, CALL_TIMEOUT_MS);
+    });
     try {
-      return await this.fetchFn(`${this.cfg.baseUrl}${path}`, { ...init, signal: ac.signal });
+      return await Promise.race([
+        this.fetchFn(`${this.cfg.baseUrl}${path}`, { ...init, signal: ac.signal }).then(read),
+        deadline,
+      ]);
     } finally {
       clearTimeout(timer);
     }
@@ -497,16 +515,17 @@ export class LiveMmgProvider implements MmgMerchantProvider {
       username: this.cfg.merchantMsisdn,
       password: this.cfg.password,
     });
-    const res = await this.call('/e-commerce-login/mer', {
+    const body = await this.callReading('/e-commerce-login/mer', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
+    }, async (res) => {
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`MMG auth failed (${res.status}): ${detail.slice(0, 200)}`);
+      }
+      return await res.json() as { access_token?: string; expires_in?: number };
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`MMG auth failed (${res.status}): ${detail.slice(0, 200)}`);
-    }
-    const body = (await res.json()) as { access_token?: string; expires_in?: number };
     if (!body.access_token) throw new Error('MMG auth returned no access_token');
     this.cachedToken = { token: body.access_token, fetchedAt: Date.now() };
     return { token: body.access_token, expiresAt: new Date(Date.now() + (body.expires_in ?? 120) * 1000) };
@@ -655,16 +674,16 @@ export class LiveMmgProvider implements MmgMerchantProvider {
    *  count asked. Never throws: MMG unreachable, or any answer other than an
    *  HTTP 200 list of objects, is an error to retry, never evidence. */
   async transactionHistoryRows(query: MmgHistoryQuery): Promise<MmgHistoryAnswer> {
-    let res: Response;
     try {
       const headers = await this.wssHeaders(`hist-${Date.now()}`);
       const qs = new URLSearchParams({ msisdn: this.cfg.merchantMsisdn, offset: String(query.rows), fromdate: query.fromdate, todate: query.todate });
-      res = await this.call(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers });
+      return await this.callReading(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers }, async (res) => {
+        const body: unknown = res.status === 200 ? await res.json().catch(() => null) : null;
+        return historyAnswerFrom(res.status, body);
+      });
     } catch (err) {
       return { outcome: 'error', reason: `MMG history unreachable: ${(err as Error).message}` };
     }
-    const body: unknown = res.status === 200 ? await res.json().catch(() => null) : null;
-    return historyAnswerFrom(res.status, body);
   }
 
   /** GET /txn-history. Throws on transport. */

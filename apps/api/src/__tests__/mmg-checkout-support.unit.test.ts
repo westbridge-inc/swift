@@ -87,7 +87,7 @@ const recordAt = (paid: unknown, patch: Record<string, unknown> = {}) => ({
   amount: '500', currency: 'GYD', displayType: 'EMerchant Payment', transactionStatus: 'completed', descriptionText: '',
   modificationDate: paid, transactionReference: '20402048536279', transactionReceipt: '20402048536279',
   debitParty: [{ key: 'accountid', value: '6000002' }, { key: 'accountcategory', value: 'P-CAT' }],
-  creditParty: [{ key: 'accountid', value: 'P-CREDIT' }, { key: 'accountcategory', value: 'P-CAT' }], external_id: 'P-EXTERNAL', ...patch,
+  creditParty: [{ key: 'accountid', value: 'P-CREDIT' }, { key: 'accountcategory', value: 'P-CAT' }], external_id: intent.merchantTransactionId, ...patch,
 });
 const naming = (...rows: Record<string, unknown>[]): PaymentHistory => ({ outcome: 'rows', naming: rows, truncated: false });
 
@@ -119,6 +119,8 @@ describe('the window support sees is the window judge() decides with', () => {
     ['two history records of it', naming(recordAt(gyStamp(replied)), recordAt(gyStamp(replied))), replied, 'AMBIGUOUS', 'PAYMENT_TIME_AMBIGUOUS'],
     ['a history record for another amount', naming(recordAt(gyStamp(replied), { amount: '501' })), replied, 'DISAGREES', 'PAYMENT_TIME_DISAGREES'],
     ['a history record that is not "completed"', naming(recordAt(gyStamp(replied), { transactionStatus: 'successful' })), replied, 'DISAGREES', 'PAYMENT_TIME_DISAGREES'],
+    ['history reference missing', naming(recordAt(gyStamp(replied), { external_id: undefined })), replied, 'DISAGREES', 'HISTORY_REFERENCE_MISMATCH'],
+    ['history reference differs', naming(recordAt(gyStamp(replied), { external_id: '1790883498' })), replied, 'DISAGREES', 'HISTORY_REFERENCE_MISMATCH'],
     ['history could not be read', { outcome: 'error' }, replied, 'UNAVAILABLE', 'PAYMENT_TIME_UNAVAILABLE'],
     ['history cut short at the row limit', { outcome: 'rows', naming: [recordAt(gyStamp(replied))], truncated: true }, replied, 'UNAVAILABLE', 'PAYMENT_TIME_UNAVAILABLE'],
     ['history never asked', null, replied, 'UNAVAILABLE', 'PAYMENT_TIME_UNAVAILABLE'],
