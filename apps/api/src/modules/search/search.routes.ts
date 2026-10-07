@@ -5,7 +5,7 @@ import { AppError, ForbiddenError } from '../../utils/errors';
 import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';
 import { bindBrowseTenant, requireRequestTenant } from './search-scope';
 import { customerPoint } from '../discovery/customer-point';
-import { visibleVendorInTenant } from '../vendor/vendor-visibility';
+import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
 import { hiddenOnlyItemIds, listableItemsForVendors } from '../verification/category-gate';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { ITEM_HIT_SELECT, itemHitFromSearchDoc, toItemHit, type ItemHit } from './item-hit';
@@ -132,11 +132,11 @@ export async function searchRoutes(app: FastifyInstance) {
         // subscription stops operating. Reuse the same bounded live gate.
         const [liveVendors, liveItems] = await Promise.all([
           app.prisma.vendor.findMany({
-            where: { ...visibleVendorInTenant(tenantId), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
+            where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), id: { in: vendors.map((v) => v.id) }, isCurrentlyOpen: true },
             select: { id: true }, take: parsedLimit,
           }),
           app.prisma.item.findMany({
-            where: { id: { in: items.map((i) => i.id) }, isAvailable: true, vendor: visibleVendorInTenant(tenantId) },
+            where: { id: { in: items.map((i) => i.id) }, isAvailable: true, vendor: catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)) },
             select: { id: true, vendorId: true }, take: parsedLimit,
           }),
         ]);
@@ -179,7 +179,7 @@ export async function searchRoutes(app: FastifyInstance) {
         // dropped tenant.isActive, so a shut-off operator's store surfaced
         // whenever Meilisearch was down.
         where: {
-          ...visibleVendorInTenant(tenantId),
+          ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
           ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }),
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
@@ -213,7 +213,7 @@ export async function searchRoutes(app: FastifyInstance) {
         where: {
           isAvailable: true,
           // the relation filter is not reached by the tenant-scoping extension: the tenant is named here
-          vendor: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
+          vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
           OR: [
             { name: { contains: q, mode: 'insensitive' } },
             { description: { contains: q, mode: 'insensitive' } },
@@ -290,7 +290,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const [vendors, items] = await Promise.all([
       app.prisma.vendor.findMany({
-        where: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
+        where: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true, items: { some: { isAvailable: true } } }), name: { contains: q, mode: 'insensitive' } },
         select: { name: true, vendorType: true },
         take: 5,
       }),
@@ -299,7 +299,7 @@ export async function searchRoutes(app: FastifyInstance) {
         // dish names kept autocompleting for every customer who typed.
         where: {
           isAvailable: true,
-          vendor: { ...visibleVendorInTenant(tenantId), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
+          vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), ...(request.publicTenantId && { isCurrentlyOpen: true }) },
           name: { contains: q, mode: 'insensitive' },
           ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
         },
@@ -339,7 +339,7 @@ export async function searchRoutes(app: FastifyInstance) {
     const items = await app.prisma.item.findMany({
       where: {
         isAvailable: true,
-        vendor: { ...visibleVendorInTenant(tenantId), isCurrentlyOpen: true },
+        vendor: { ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)), isCurrentlyOpen: true },
         ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
       },
       // The shared select again. Trending is the Market tab's fallback rail, so
@@ -392,7 +392,7 @@ export async function searchRoutes(app: FastifyInstance) {
 
     const vendors = await app.prisma.vendor.findMany({
       where: {
-        ...visibleVendorInTenant(tenantId),
+        ...catalogueVendorInTenant(tenantId, Boolean(request.publicTenantId)),
         isCurrentlyOpen: true,
         // Empty stores (no orderable item) stay out of nearby discovery.
         items: { some: { isAvailable: true } },
