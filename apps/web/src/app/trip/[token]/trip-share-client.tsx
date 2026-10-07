@@ -12,6 +12,21 @@ import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 const POLL_MS = 5000;
 
+/** [M053] The only images this public page draws are Swift's own: https on
+ *  the API's origin (where owned storage is signed). Anything else — a URL a
+ *  profile field happens to hold — renders as the initial, so no third party
+ *  learns who is watching whose trip. Exported for the page test. */
+export function ownedImageSrc(url: string | null | undefined, apiOrigin: string = API_URL): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const owned = new URL(apiOrigin).origin;
+    return parsed.protocol === 'https:' && parsed.origin === owned ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 interface TripView {
   status: string;
   ended: boolean;
@@ -27,7 +42,8 @@ interface TripView {
   emergencyNote: string;
 }
 
-export function TripShareClient({ token }: { token: string }) {
+/** `imageOrigin` is the origin whose images count as Swift's own (the API's). */
+export function TripShareClient({ token, imageOrigin = API_URL }: { token: string; imageOrigin?: string }) {
   const [view, setView] = useState<TripView | null>(null);
   const [gone, setGone] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -142,9 +158,9 @@ export function TripShareClient({ token }: { token: string }) {
 
             {view.driver ? (
               <div className="mt-3 flex items-center gap-3 sw-card p-4">
-                {view.driver.photoUrl ? (
+                {ownedImageSrc(view.driver.photoUrl, imageOrigin) ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={view.driver.photoUrl} alt={`Driver ${view.driver.firstName}`} className="h-14 w-14 rounded-full object-cover" />
+                  <img src={ownedImageSrc(view.driver.photoUrl, imageOrigin)!} alt={`Driver ${view.driver.firstName}`} referrerPolicy="no-referrer" className="h-14 w-14 rounded-full object-cover" />
                 ) : (
                   <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--swift-red-50)] text-lg font-bold text-[var(--swift-red)]">
                     {view.driver.firstName.slice(0, 1)}
