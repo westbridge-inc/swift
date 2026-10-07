@@ -219,6 +219,32 @@ describe('[DELETION-INTEGRITY] support completes an in-app closure request', () 
     expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN', acceptingOrders: false });
   });
 
+  it('if the store is wound down between the approve check and its write, approve still says the account is closed', async () => {
+    const b = await makeBusiness();
+    expect((await complete(b.ticketId)).statusCode).toBe(200);
+    // The approve route's first read sees the store as it was a moment before
+    // the closure landed; the activation write then meets the wound-down row.
+    const real = app.prisma.vendor.findUnique.bind(app.prisma.vendor);
+    let served = false;
+    const stale = vi.spyOn(app.prisma.vendor, 'findUnique').mockImplementation((async (args: any) => {
+      const row = await real(args);
+      // Only the route's own read (the one that brings the owner), only once.
+      if (!served && args?.include?.owner && row) { served = true; return { ...row, suspensionSource: null }; }
+      return row;
+    }) as never);
+    const verified = vi.spyOn(VerificationService.prototype, 'isRoleVerified').mockResolvedValue(true);
+    try {
+      const res = await app.inject({
+        method: 'PUT', url: `/api/v1/admin/vendors/${b.vendorId}/approve`,
+        headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' }, payload: { reason: TEST_ADMIN_REASON },
+      });
+      expect(served, 'the approve route read the stale row').toBe(true);
+      expect(res.statusCode, res.payload).toBe(409);
+      expect(res.json().error.code).toBe('ACCOUNT_CLOSED');
+    } finally { stale.mockRestore(); verified.mockRestore(); }
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' });
+  });
+
   it('an admin cannot complete a closure request from another operator', async () => {
     // Pins the tenant wall: the ticket and the person are read through the
     // admin's own tenant, so the erasure can never run for someone outside it.

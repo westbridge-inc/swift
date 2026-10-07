@@ -1,5 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { formatMoney } from '../../utils/currency-amount';
+import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Open cash obligations
@@ -30,6 +32,8 @@ export interface PartnerObligations {
   pendingFeePaymentCount?: number;
   /** Fee subscriptions with prepaid credit Swift holds for the person. */
   feeCreditCount?: number;
+  /** That credit in total, in GYD major units — the amount Swift refunds. */
+  feeCreditAmount?: number;
 }
 
 export interface PartnerDeletionVerdict {
@@ -71,13 +75,19 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
     'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
   FEE_PAYMENT_PENDING:
     'A weekly-fee payment is still in progress or being confirmed with MMG. Wait for it to finish, or open Get help to have it resolved, then return here to delete your account.',
+  // [Owner ruling 2026-10-07] Unused credit is refunded by support (recorded
+  // in the admin console), then the account can be deleted.
   FEE_CREDIT:
-    'You have weekly-fee credit paid in advance to Swift. Open Get help to have it returned, or let it be used for your next weekly fee, then return here to delete your account.',
+    'You have {amount} of unused weekly-fee credit. Open Get help and we\u2019ll refund it, then your account can be deleted.',
 };
 
-/** The whole refusal, as one sentence a person can act on. */
-export function refusalMessage(blockers: PartnerBlocker[]): string {
-  return blockers.map((b) => BLOCKER_MESSAGE[b]).join(' ');
+/** The whole refusal, as one sentence a person can act on, with the amounts
+ *  that apply to this person filled in. */
+export function refusalMessage(blockers: PartnerBlocker[], o?: Pick<PartnerObligations, 'feeCreditAmount'>): string {
+  const credit = o?.feeCreditAmount;
+  return blockers.map((b) => b === 'FEE_CREDIT' && credit !== undefined
+    ? BLOCKER_MESSAGE[b].replace('{amount}', formatMoney(credit, 'GYD', { whole: Number.isInteger(credit) }))
+    : BLOCKER_MESSAGE[b]).join(' ');
 }
 
 /**
@@ -122,25 +132,40 @@ export async function partnerObligations(
  *  row, which every fee checkout and credit also takes first (the fee payer
  *  lock), so no checkout can start or settle between this census and cutoff.
  *  EXPIRED and NOT_PAID checkouts are final only once no further MMG check is
- *  due: a late MMG confirmation is still credited [MMG-CHECKOUT-API]. */
+ *  due and their late-reply window has closed: a late MMG reply re-arms them
+ *  and a confirmation is still credited [MMG-CHECKOUT-API, DS782]. */
 async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
   const subscriptions = await tx.subscription.findMany({
     where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
     select: { id: true },
   });
-  if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0 };
+  if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0 };
   const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
-  const [checkouts, payments, holds, feeCreditCount] = await Promise.all([
+  const lateHorizon = new Date(Date.now() - LATE_WINDOW_MS);
+  const [checkouts, cardPayments, payments, holds, credit] = await Promise.all([
     tx.mmgCheckoutIntent.count({ where: { subscriptionId, OR: [
       { status: { in: ['OPEN', 'CONFIRMING', 'HELD'] } },
-      { status: { in: ['EXPIRED', 'NOT_PAID'] }, nextCheckAt: { not: null } },
+      // [DS782 S2] A late MMG reply re-arms an EXPIRED or NOT_PAID checkout and
+      // a confirmation is still credited, so it is final only once no check is
+      // due AND its late-reply window has closed.
+      { status: { in: ['EXPIRED', 'NOT_PAID'] }, OR: [
+        { nextCheckAt: { not: null } },
+        { createdAt: { gt: lateHorizon } },
+        { replyAt: { gt: lateHorizon } },
+      ] },
     ] } }),
+    // A card payment for the fee still open, unknown or held (saving a card moves no money).
+    tx.cardSession.count({ where: { subscriptionId, purpose: 'PAY_NOW', status: { in: ['OPEN', 'UNKNOWN', 'HELD'] } } }),
     // The weekly MMG prompt and any other fee payment not yet settled.
     tx.subscriptionPayment.count({ where: { subscriptionId, status: { in: ['PENDING', 'AUTHORIZED', 'UNKNOWN'] } } }),
     tx.paymentConfirmationHold.count({ where: { subscriptionId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }),
-    tx.prepaidBalance.count({ where: { subscriptionId, balance: { gt: 0 } } }),
+    tx.prepaidBalance.aggregate({ where: { subscriptionId, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
   ]);
-  return { pendingFeePaymentCount: checkouts + payments + holds, feeCreditCount };
+  return {
+    pendingFeePaymentCount: checkouts + cardPayments + payments + holds,
+    feeCreditCount: credit._count._all,
+    feeCreditAmount: Number(credit._sum.balance ?? 0),
+  };
 }
 
 // ── Winding down what is not a blocker ─────────────────────────────────────

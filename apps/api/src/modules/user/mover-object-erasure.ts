@@ -47,7 +47,7 @@ async function authority(tx: Prisma.TransactionClient, userId: string, pointers:
     SELECT * FROM (
       SELECT id AS owner, avatar AS key, false AS held FROM users WHERE strpos(avatar, ${name}) > 0
       UNION ALL SELECT "userId", k, false FROM riders, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
-      UNION ALL SELECT "userId", k, false FROM drivers, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
+      UNION ALL SELECT "userId", k, false FROM drivers, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","vehicleInspectionUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
       UNION ALL SELECT "userId", "fileUrl", "legalHoldId" IS NOT NULL FROM verification_documents WHERE strpos("fileUrl", ${name}) > 0
       UNION ALL SELECT "createdBy", "fileKey", false FROM encrypted_objects WHERE strpos("fileKey", ${name}) > 0
     ) AS refs WHERE key IS NOT NULL AND key <> ''

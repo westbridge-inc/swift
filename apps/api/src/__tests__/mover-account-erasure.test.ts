@@ -64,6 +64,16 @@ describe('driver vehicle inspection document erasure', () => {
     expect(envelope.shreddedAt).not.toBeNull();
     expect(await app.prisma.deletionReceipt.count({ where: { subjectId: p.userId, verificationProbeResult: 'CONFIRMED_ABSENT' } })).toBe(6);
   });
+
+  it('does not purge an object another driver\u2019s vehicle inspection pointer still references', async () => {
+    const p = await mover('driver'); const other = await mover('driver');
+    const alias = p.urls['vehiclePhotoUrl']!.replace('/uploads/', '');
+    await app.prisma.driver.update({ where: { id: other.profileId }, data: { vehicleInspectionUrl: alias } });
+    const del = vi.spyOn(storage, 'delete');
+    expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE' });
+    expect(del).not.toHaveBeenCalledWith(p.urls['vehiclePhotoUrl']);
+    expect(await storage.getObject(p.urls['vehiclePhotoUrl']!)).toEqual(bytes);
+  });
 });
 
 for (const role of ['rider', 'driver'] as const) describe(`${role} legacy document and photo erasure`, () => {

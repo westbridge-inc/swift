@@ -47,19 +47,13 @@ import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
-
-/** [F-021-21] Consent surface from the client's own attestation header,
- *  constrained to the known set — never a hardcoded guess. */
-function consentSurface(request: { headers: Record<string, unknown> }): 'ios' | 'android' | 'mobile' | 'web' {
-  const h = String(request.headers['x-client-platform'] ?? '').toLowerCase();
-  return h === 'ios' || h === 'android' || h === 'web' ? h : 'mobile';
-}
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -3241,7 +3235,7 @@ export async function customerRoutes(app: FastifyInstance) {
       await recordConsent(tx, {
         subjectType: 'customer', subjectId: userId,
         documentType: 'marketing_consent', version: LEGAL_VERSION,
-        action, surface: consentSurface(request), ip: request.ip,
+        action, surface: consentSurfaceOf(request), ip: request.ip,
         evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
       });
       return { marketing: granted, changed: true };
