@@ -11,6 +11,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
 import { assertStorePinInMarket } from '../vendor/store-pin';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -172,14 +173,17 @@ export class PartnerService {
   }
 
   private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
-    const rows = await tx.$queryRaw<Array<{ id: string; roles: UserRole[] }>>`
-      SELECT "id", "roles"
-      FROM "users"
-      WHERE "id" = ${userId}
-      FOR UPDATE
+    const rows = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; tenantKind: string }>>`
+      SELECT u."id", u."roles", t."kind"::text AS "tenantKind"
+      FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
+      WHERE u."id" = ${userId}
+      FOR UPDATE OF u
     `;
     const user = rows[0];
     if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+    // [REVIEW-PARTNER] Every provisioning entry point passes this lock: a demo (REVIEW) account
+    // never gains a rider, driver or store role — before any profile, store or consent row.
+    if (user.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
 
     if (input.role === 'VENDOR') {
       return this.provisionVendor(tx, user.id, user.roles, input.business!);
@@ -312,11 +316,14 @@ export class PartnerService {
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.
-      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string }>>`
-        SELECT "id", "roles", "lastMoverRole", "countryCode" FROM "users" WHERE "id" = ${userId} FOR UPDATE
+      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string; tenantKind: string }>>`
+        SELECT u."id", u."roles", u."lastMoverRole", u."countryCode", t."kind"::text AS "tenantKind"
+        FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId" WHERE u."id" = ${userId} FOR UPDATE OF u
       `;
       const user = users[0];
       if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+      // [REVIEW-PARTNER] A demo account's vehicle (and so its mover role) is the pack's, never swapped.
+      if (user.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
       await tx.$queryRaw`SELECT "id" FROM "riders" WHERE "userId" = ${userId} FOR UPDATE`;
       await tx.$queryRaw`SELECT "id" FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
       const rider = await tx.rider.findUnique({ where: { userId } });
