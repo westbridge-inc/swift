@@ -267,7 +267,9 @@ export class AccountService {
       // escrow above has already captured any needed contact authority.
       await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
-      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false } });
+      // Marked wound down with the cutoff, so no billing repair or fee payment
+      // can reopen a closed account's store (it reopens billing holds only).
+      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN' } });
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
