@@ -916,6 +916,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
+        const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
+        await retryAccountErasures(ctx);
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
