@@ -30,18 +30,17 @@ export default function ClaimsPage() {
     void qc.invalidateQueries({ queryKey: ['cash-metrics'] });
     void qc.invalidateQueries({ queryKey: ['rlp-reserve'] });
   });
-  const order = (c: any) => `order ${c.orderId}`;
 
   const approve = (c: any) => void actions.run({
     title: `Approve this ${gyd(c.amount)} claim?`,
-    body: <p>{order(c)}. Approving means the company guarantee pays it; the payout is recorded separately once the money is sent.</p>,
+    body: <p>Order {c.orderId}. Approving means the company guarantee pays it; the payout is recorded separately once the money is sent.</p>,
     confirmLabel: 'Approve claim',
     submit: ({ reason }) => approveClaim(c.id, reason),
     success: () => `The ${gyd(c.amount)} claim is approved.`,
   });
   const reject = (c: any) => void actions.run({
     title: `Reject this ${gyd(c.amount)} claim?`,
-    body: <p>{order(c)}. Nothing is paid; the reason is what the filer is answered with.</p>,
+    body: <p>Order {c.orderId}. Nothing is paid; the reason is what the filer is answered with.</p>,
     confirmLabel: 'Reject claim',
     submit: ({ reason }) => rejectClaim(c.id, reason),
     success: () => `The ${gyd(c.amount)} claim is rejected.`,
@@ -51,7 +50,7 @@ export default function ClaimsPage() {
   // the claim's own figure before anything closes.
   const pay = (c: any) => void actions.run({
     title: `Mark this ${gyd(c.amount)} claim paid?`,
-    body: <p>{order(c)}. Record the transfer you already sent. The amount must be the claim&apos;s own figure, to the cent.</p>,
+    body: <p>Order {c.orderId}. Record the transfer you already sent. The amount must be the claim&apos;s own figure, to the cent.</p>,
     confirmLabel: 'Mark paid',
     fields: [
       { kind: 'reference', name: 'reference', label: 'Payment reference', hint: 'Bank or MMG reference, or receipt number — unique to this payout' },

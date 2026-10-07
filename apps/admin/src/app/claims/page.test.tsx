@@ -122,7 +122,7 @@ describe('claim payout mutation', () => {
 
     await user.click(targetButton);
     let dialog = screen.getByRole('dialog', { name: 'Mark this $3,400 claim paid?' });
-    expect(dialog.textContent).toContain('order order-target');
+    expect(dialog.textContent).toContain('Order order-target.');
     // nothing typed: refused beside the fields, nothing sent
     await user.click(within(dialog).getByRole('button', { name: 'Mark paid' }));
     expect(within(dialog).getByText(/Enter the reference/)).toBeTruthy();
