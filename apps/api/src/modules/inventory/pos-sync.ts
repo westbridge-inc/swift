@@ -1,0 +1,543 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { Prisma } from '@prisma/client';
+import { AppError } from '../../utils/errors';
+import { applyStockMovement, recordOpeningBalance } from './stock';
+
+// ---------------------------------------------------------------------------
+// [POS-SYNC] Re-uploading a till export updates the store.
+//
+// The bulk import only ever CREATED items, so the second upload of the same
+// till export doubled the catalogue. This is the update path:
+//
+//   file (already relabelled to Swift's columns by automap)
+//     -> plan: match rows to items by SKU, inside ONE store, never by name
+//     -> preview: the plan as the store sees it; writes nothing
+//     -> confirm: the SAME plan re-derived under the store's lock and applied
+//        in one transaction, or refused if it is not what was previewed.
+//
+// What is never guessed: a row without a SKU, a SKU that appears twice in the
+// file or twice in the store, an unreadable / zero price, a fractional or
+// negative count. Each is listed as "needs attention" and nothing is applied
+// for it. A blank cell is "no information": it changes nothing.
+//
+// What it writes, and how:
+//  - stock: the till's count is an absolute number, so the change is a ledger
+//    movement of (till count - Swift count), reason POS_IMPORT, note naming the
+//    upload — through applyStockMovement, the single writer. An item Swift does
+//    not count stays uncounted (the till's figure is shown, not applied).
+//  - sold out: the inventory engine's own edges — zero hides an item that is
+//    switched on; a restock brings back only an item the ENGINE hid. The
+//    owner's own "off" is never undone. A till that says "not for sale" switches
+//    the item off the way the owner would.
+//  - prices: applied and listed old -> new. Orders already placed keep the
+//    prices they were placed at (order lines are snapshots); carts hold no
+//    price, so an open cart shows the new price when it is next read.
+//  - items missing from the file: left alone, unless the store chose
+//    "mark them sold out" (switched off, no count invented).
+//  - one PosImport row (id = upload id, unique per store + file hash) and one
+//    audit row per applied upload. A retried confirm replays the stored
+//    result; the same file under a new upload is refused.
+// ---------------------------------------------------------------------------
+
+export type MissingPolicy = 'LEAVE' | 'SOLD_OUT';
+export type SoldOutEffect = 'BECOMES_SOLD_OUT' | 'BACK_ON_SALE' | 'STAYS_SWITCHED_OFF' | 'SWITCHED_OFF_BY_TILL';
+
+/** The match key: exact SKU, trimmed, case-insensitive. Nothing else. */
+export const skuKey = (sku: string | null | undefined): string => (sku ?? '').trim().toLowerCase();
+
+/** sha256 of the file as confirmed, line endings normalised. */
+export function contentHashOf(csv: string): string {
+  return createHash('sha256').update(csv.replace(/\r\n?/g, '\n').replace(/\n+$/, ''), 'utf8').digest('hex');
+}
+
+export const newUploadId = (): string => randomBytes(18).toString('base64url');
+
+const MAX_PRICE = 10_000_000;
+const MAX_COUNT = 1_000_000;
+
+type Reading<T> = { kind: 'blank' } | { kind: 'ok'; value: T } | { kind: 'bad'; reason: string };
+
+const GROUPED = /^\d{1,3}(,\d{3})+(\.\d+)?$/;
+const PLAIN = /^\d+(\.\d+)?$/;
+
+/** A selling price as a till writes it: "1500", "1,500.00", "$1500", "GYD 1,500", "G$1500". */
+export function readPrice(raw: string | undefined): Reading<number> {
+  const text = (raw ?? '').trim();
+  if (text === '') return { kind: 'blank' };
+  const bare = text.replace(/^(?:GY\$|G\$|GYD|\$)\s*/i, '').replace(/\s*GYD$/i, '');
+  if (!GROUPED.test(bare) && !PLAIN.test(bare)) return { kind: 'bad', reason: `The price "${text}" is not a number Swift can read.` };
+  const [, cents = ''] = bare.split('.');
+  if (cents.length > 2) return { kind: 'bad', reason: `The price "${text}" has more than 2 decimal places.` };
+  const value = Number(bare.replace(/,/g, ''));
+  if (!(value > 0)) return { kind: 'bad', reason: 'The price is zero. Swift never sells an item for nothing from a file.' };
+  if (value > MAX_PRICE) return { kind: 'bad', reason: `The price is over Swift's limit of ${MAX_PRICE.toLocaleString('en-US')}.` };
+  return { kind: 'ok', value };
+}
+
+/** A stock count: whole units, zero or more. "12", "1,200", "12.000" read; "2.5" and "-3" do not. */
+export function readCount(raw: string | undefined): Reading<number> {
+  const text = (raw ?? '').trim();
+  if (text === '') return { kind: 'blank' };
+  const negative = text.startsWith('-');
+  const bare = negative ? text.slice(1) : text;
+  if (!GROUPED.test(bare) && !PLAIN.test(bare)) return { kind: 'bad', reason: `The stock "${text}" is not a number Swift can read.` };
+  const value = Number(bare.replace(/,/g, ''));
+  if (negative && value !== 0) return { kind: 'bad', reason: 'The stock is below zero in the file.' };
+  if (!Number.isInteger(value)) return { kind: 'bad', reason: `The stock "${text}" is not a whole number. Swift counts whole units.` };
+  if (value > MAX_COUNT) return { kind: 'bad', reason: `The stock is over Swift's limit of ${MAX_COUNT.toLocaleString('en-US')}.` };
+  return { kind: 'ok', value };
+}
+
+/** An item of the store, as the plan reads it. */
+export interface StoreItem {
+  id: string;
+  name: string;
+  sku: string | null;
+  basePrice: Prisma.Decimal | number;
+  stockQuantity: number | null;
+  isAvailable: boolean;
+  autoHiddenAt: Date | null;
+}
+
+export interface ChangeView {
+  row: number;
+  sku: string;
+  itemId: string;
+  name: string;
+  fileName: string;
+  stock: { from: number | null; to: number | null } | null;
+  price: { from: number; to: number } | null;
+  soldOut: SoldOutEffect | null;
+  notes: string[];
+}
+
+export interface NewItemView {
+  row: number; sku: string; name: string; category: string; description: string; unit: string;
+  price: number; stock: number | null; isAvailable: boolean;
+}
+
+export interface SyncView {
+  missingPolicy: MissingPolicy;
+  changes: ChangeView[];
+  unchanged: number;
+  newItems: NewItemView[];
+  needsAttention: Array<{ row: number; sku: string; name: string; reason: string }>;
+  missing: Array<{ itemId: string; sku: string; name: string; action: 'LEAVE' | 'SWITCH_OFF' | 'ALREADY_OFF' }>;
+  notOnSku: number;
+  totals: {
+    rows: number; matched: number; stockChanges: number; priceChanges: number; becomeSoldOut: number;
+    backOnSale: number; switchedOffByTill: number; newItems: number; needsAttention: number; missing: number;
+    switchedOffMissing: number; unchanged: number;
+  };
+}
+
+interface MatchedRow {
+  row: number;
+  item: StoreItem;
+  fileName: string;
+  sku: string;
+  /** The till's count; null = the file gave none. */
+  count: number | null;
+  /** The file's price; null = the file gave none. */
+  price: number | null;
+  /** The till says this item is not for sale. */
+  tillOff: boolean;
+}
+
+export interface SyncPlan {
+  view: SyncView;
+  digest: string;
+  matched: MatchedRow[];
+  switchOffIds: string[];
+}
+
+const FIELD_LIMITS = { name: 150, category: 100, description: 2000, unit: 30, sku: 64 } as const;
+
+/**
+ * Build the plan for one store. Pure: the same file against the same store
+ * state gives the same plan, and the digest covers what will be WRITTEN
+ * (which items, to which counts and prices, which new items, which switch-offs)
+ * but not the current values — so a sale between preview and confirm does not
+ * make the preview stale, while any change to WHAT gets applied does.
+ */
+export function buildSyncPlan(input: {
+  vendorId: string;
+  contentHash: string;
+  rows: Array<Record<string, string>>;
+  items: StoreItem[];
+  missingPolicy: MissingPolicy;
+  canAddNew: boolean;
+}): SyncPlan {
+  const { rows, items, missingPolicy } = input;
+
+  const store = new Map<string, StoreItem[]>();
+  let notOnSku = 0;
+  for (const item of items) {
+    const key = skuKey(item.sku);
+    if (!key) { notOnSku += 1; continue; }
+    store.set(key, [...(store.get(key) ?? []), item]);
+  }
+
+  const inFile = new Map<string, number>();
+  for (const r of rows) {
+    const key = skuKey(r['sku']);
+    if (key) inFile.set(key, (inFile.get(key) ?? 0) + 1);
+  }
+
+  const needsAttention: SyncView['needsAttention'] = [];
+  const matched: MatchedRow[] = [];
+  const newItems: NewItemView[] = [];
+
+  rows.forEach((r, index) => {
+    const rowNo = index + 2; // 1-based, after the header
+    const sku = (r['sku'] ?? '').trim();
+    const key = skuKey(sku);
+    const name = (r['name'] ?? '').trim();
+    const refuse = (reason: string) => needsAttention.push({ row: rowNo, sku, name, reason });
+
+    if (!key) return refuse('No SKU in the file. Swift only updates items it can match by SKU, so this row was not used.');
+    if ((inFile.get(key) ?? 0) > 1) return refuse(`This SKU is in the file ${inFile.get(key)} times. Fix the file so each SKU appears once.`);
+    if (sku.length > FIELD_LIMITS.sku) return refuse(`The SKU is longer than ${FIELD_LIMITS.sku} characters.`);
+    const owners = store.get(key) ?? [];
+    if (owners.length > 1) return refuse(`${owners.length} items in your store have this SKU. Give each one its own SKU on Swift first.`);
+
+    const price = readPrice(r['basePrice']);
+    if (price.kind === 'bad') return refuse(price.reason);
+    const count = readCount(r['stockQuantity']);
+    if (count.kind === 'bad') return refuse(count.reason);
+    const available = (r['isAvailable'] ?? '').trim();
+    if (available !== '' && available !== 'true' && available !== 'false') {
+      return refuse(`The "available for sale" cell says "${available}". It should say yes or no.`);
+    }
+
+    if (owners.length === 1) {
+      matched.push({
+        row: rowNo, item: owners[0]!, fileName: name, sku,
+        count: count.kind === 'ok' ? count.value : null,
+        price: price.kind === 'ok' ? price.value : null,
+        tillOff: available === 'false',
+      });
+      return;
+    }
+
+    // A SKU the store does not have yet: a new item, if the file says enough.
+    const category = (r['category'] ?? '').trim();
+    const lacking = [!name && 'a name', !category && 'a category', price.kind !== 'ok' && 'a price'].filter(Boolean);
+    if (lacking.length > 0) return refuse(`This SKU is not in your store yet, and a new item needs ${lacking.join(', ')}.`);
+    const description = (r['description'] ?? '').trim();
+    const unit = (r['unit'] ?? '').trim();
+    for (const [field, value] of [['name', name], ['category', category], ['description', description], ['unit', unit]] as const) {
+      if (value.length > FIELD_LIMITS[field]) return refuse(`The ${field} is longer than ${FIELD_LIMITS[field]} characters.`);
+    }
+    if (!input.canAddNew) return refuse('Swift has to verify your store before new items can be listed. Your existing items were still updated.');
+    newItems.push({
+      row: rowNo, sku, name, category, description, unit,
+      price: (price as { value: number }).value,
+      stock: count.kind === 'ok' ? count.value : null,
+      isAvailable: available !== 'false',
+    });
+  });
+
+  // Items on Swift whose SKU the file never mentions (a SKU that needs
+  // attention IS mentioned: it is not missing, it is unresolved).
+  const missing: SyncView['missing'] = [];
+  const switchOffIds: string[] = [];
+  for (const [key, owners] of store) {
+    if (inFile.has(key)) continue;
+    for (const item of owners) {
+      const action = missingPolicy === 'LEAVE' ? 'LEAVE' : item.isAvailable ? 'SWITCH_OFF' : 'ALREADY_OFF';
+      if (action === 'SWITCH_OFF') switchOffIds.push(item.id);
+      missing.push({ itemId: item.id, sku: item.sku ?? '', name: item.name, action });
+    }
+  }
+  missing.sort((a, b) => a.sku.localeCompare(b.sku));
+
+  const changes: ChangeView[] = [];
+  let unchanged = 0;
+  for (const m of matched) {
+    const change = describeChange(m);
+    if (change) changes.push(change); else unchanged += 1;
+  }
+
+  const digest = createHash('sha256').update(JSON.stringify({
+    v: 1,
+    vendorId: input.vendorId,
+    contentHash: input.contentHash,
+    missingPolicy,
+    matched: matched
+      .map((m) => [m.item.id, m.item.stockQuantity === null ? null : m.count, m.price, m.tillOff])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    newItems: newItems.map((n) => [skuKey(n.sku), n.name, n.category, n.price, n.stock, n.isAvailable]).sort(),
+    attention: needsAttention.map((n) => n.row).sort((a, b) => a - b),
+    missing: missing.map((m) => [m.itemId, m.action === 'LEAVE' ? 'LEAVE' : 'SWITCH_OFF']).sort(),
+  })).digest('hex');
+
+  const count = (effect: SoldOutEffect) => changes.filter((c) => c.soldOut === effect).length;
+  const view: SyncView = {
+    missingPolicy,
+    changes,
+    unchanged,
+    newItems,
+    needsAttention,
+    missing,
+    notOnSku,
+    totals: {
+      rows: rows.length,
+      matched: matched.length,
+      stockChanges: changes.filter((c) => c.stock !== null).length,
+      priceChanges: changes.filter((c) => c.price !== null).length,
+      becomeSoldOut: count('BECOMES_SOLD_OUT'),
+      backOnSale: count('BACK_ON_SALE'),
+      switchedOffByTill: count('SWITCHED_OFF_BY_TILL'),
+      newItems: newItems.length,
+      needsAttention: needsAttention.length,
+      missing: missing.length,
+      switchedOffMissing: switchOffIds.length,
+      unchanged,
+    },
+  };
+  return { view, digest, matched, switchOffIds };
+}
+
+/** What confirming would do to one matched item, judged against its current state. Null = nothing. */
+function describeChange(m: MatchedRow): ChangeView | null {
+  const { item } = m;
+  const notes: string[] = [];
+  const from = item.stockQuantity;
+  let stock: ChangeView['stock'] = null;
+  if (m.count !== null) {
+    if (from === null) {
+      notes.push(`Swift does not count stock for this item, so the till's count (${m.count}) is not used. Turn on stock counting in the item editor to use it.`);
+    } else if (m.count !== from) {
+      stock = { from, to: m.count };
+    }
+  }
+  const currentPrice = Number(item.basePrice);
+  const price = m.price !== null && m.price !== currentPrice ? { from: currentPrice, to: m.price } : null;
+
+  // Sold out, by the engine's own edges (see applyAvailabilityEdges).
+  let soldOut: SoldOutEffect | null = null;
+  const after = stock ? stock.to! : from;
+  if (m.tillOff && (item.isAvailable || item.autoHiddenAt !== null)) {
+    soldOut = 'SWITCHED_OFF_BY_TILL';
+  } else if (stock && after !== null && after <= 0 && item.isAvailable) {
+    soldOut = 'BECOMES_SOLD_OUT';
+  } else if (stock && after !== null && after > 0 && !item.isAvailable) {
+    soldOut = item.autoHiddenAt !== null ? 'BACK_ON_SALE' : 'STAYS_SWITCHED_OFF';
+  }
+  if (soldOut === 'STAYS_SWITCHED_OFF') notes.push('You switched this item off on Swift, so it stays off. Switch it back on in Swift when you want to sell it.');
+
+  if (!stock && !price && (soldOut === null || soldOut === 'STAYS_SWITCHED_OFF')) return null;
+  return { row: m.row, sku: m.sku, itemId: item.id, name: item.name, fileName: m.fileName, stock, price, soldOut, notes };
+}
+
+const ITEM_SELECT = {
+  id: true, name: true, sku: true, basePrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true,
+} as const;
+
+/** The preview: the plan against the store as it is now. Reads only. */
+export async function previewSync(
+  db: Prisma.TransactionClient,
+  input: { vendorId: string; csv: string; rows: Array<Record<string, string>>; missingPolicy: MissingPolicy; canAddNew: boolean },
+) {
+  const contentHash = contentHashOf(input.csv);
+  const items = await db.item.findMany({ where: { vendorId: input.vendorId }, select: ITEM_SELECT });
+  const plan = buildSyncPlan({ vendorId: input.vendorId, contentHash, rows: input.rows, items, missingPolicy: input.missingPolicy, canAddNew: input.canAddNew });
+  const earlier = await db.posImport.findFirst({
+    where: { vendorId: input.vendorId, contentHash },
+    select: { id: true, createdAt: true },
+  });
+  return {
+    uploadId: newUploadId(),
+    contentHash,
+    planDigest: plan.digest,
+    alreadyApplied: earlier ? { uploadId: earlier.id, appliedAt: earlier.createdAt.toISOString() } : null,
+    ...plan.view,
+  };
+}
+
+export interface ConfirmInput {
+  vendorId: string;
+  tenantId: string;
+  actorId: string;
+  uploadId: string;
+  contentHash: string;
+  planDigest: string;
+  csv: string;
+  rows: Array<Record<string, string>>;
+  missingPolicy: MissingPolicy;
+  canAddNew: boolean;
+  now?: Date;
+}
+
+export type ConfirmResult = SyncView & { uploadId: string; contentHash: string; appliedAt: string; replayed: boolean };
+
+/** Prices listed in the audit row (the full list is in the PosImport summary). */
+const AUDIT_PRICE_LINES = 200;
+
+/**
+ * Confirm: re-derive the plan under the store's lock and apply it, or refuse.
+ *
+ * The vendor row lock is the one checkout takes before it moves stock, so a
+ * confirm and a checkout at the same store never interleave (and cannot
+ * deadlock: both lock the vendor first, then items). It also serialises two
+ * confirms of one store, which is what makes a double-click a replay.
+ */
+export async function confirmSync(
+  db: { $transaction: <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, opts?: { timeout?: number; maxWait?: number }) => Promise<T> },
+  input: ConfirmInput,
+): Promise<ConfirmResult> {
+  if (contentHashOf(input.csv) !== input.contentHash) {
+    throw new AppError(409, 'PREVIEW_STALE', 'This is not the file you previewed. Preview it again before you apply it.');
+  }
+  const run = () => db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${input.vendorId} FOR UPDATE`;
+
+    const earlier = await tx.posImport.findUnique({ where: { id: input.uploadId } });
+    if (earlier) {
+      if (earlier.vendorId !== input.vendorId) throw new AppError(409, 'UPLOAD_ID_TAKEN', 'Preview the file again before you apply it.');
+      return { ...(earlier.summary as unknown as Omit<ConfirmResult, 'replayed'>), replayed: true };
+    }
+    const sameFile = await tx.posImport.findFirst({ where: { vendorId: input.vendorId, contentHash: input.contentHash } });
+    if (sameFile) {
+      throw new AppError(409, 'ALREADY_APPLIED',
+        'You already applied this exact file, so nothing was changed. Export a fresh file from your till and upload that.',
+        { uploadId: sameFile.id, appliedAt: sameFile.createdAt.toISOString() });
+    }
+
+    // Every item of the store is locked before it is read, so the counts the
+    // deltas are taken from cannot move until this commits.
+    await tx.$queryRaw`SELECT id FROM "items" WHERE "vendorId" = ${input.vendorId} ORDER BY id FOR UPDATE`;
+    const items = await tx.item.findMany({ where: { vendorId: input.vendorId }, select: ITEM_SELECT });
+    const plan = buildSyncPlan({
+      vendorId: input.vendorId, contentHash: input.contentHash, rows: input.rows, items,
+      missingPolicy: input.missingPolicy, canAddNew: input.canAddNew,
+    });
+    if (plan.digest !== input.planDigest) {
+      throw new AppError(409, 'PREVIEW_STALE', 'Your store changed since the preview, so it no longer shows what would happen. Preview the file again.');
+    }
+
+    const now = input.now ?? new Date();
+    const note = `Till export ${input.uploadId}`;
+    const changeOf = new Map(plan.view.changes.map((c) => [c.itemId, c]));
+    for (const m of plan.matched) {
+      const change = changeOf.get(m.item.id);
+      if (!change) continue;
+      if (change.price) {
+        await tx.item.update({ where: { id: m.item.id }, data: { basePrice: change.price.to } });
+      }
+      if (change.stock && change.stock.from !== null && change.stock.to !== null) {
+        const moved = await applyStockMovement(tx, {
+          itemId: m.item.id,
+          delta: change.stock.to - change.stock.from,
+          reason: 'POS_IMPORT',
+          actorId: input.actorId,
+          tenantId: input.tenantId,
+          note,
+        });
+        if (moved.applied) await applyAvailabilityEdges(tx, m.item.id, moved.balanceAfter ?? 0, now);
+      }
+      if (change.soldOut === 'SWITCHED_OFF_BY_TILL') {
+        await tx.item.update({ where: { id: m.item.id }, data: { isAvailable: false, autoHiddenAt: null } });
+      }
+    }
+
+    if (plan.view.newItems.length > 0) {
+      const categories = await tx.category.findMany({ where: { vendorId: input.vendorId }, select: { id: true, name: true } });
+      const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
+      for (const n of plan.view.newItems) {
+        let categoryId = categoryIds.get(n.category.toLowerCase());
+        if (!categoryId) {
+          const created = await tx.category.create({ data: { vendorId: input.vendorId, name: n.category, sortOrder: categoryIds.size } });
+          categoryId = created.id;
+          categoryIds.set(n.category.toLowerCase(), categoryId);
+        }
+        // Born sold out when the till has none, so a restock brings it in.
+        const bornEmpty = n.stock === 0 && n.isAvailable;
+        const item = await tx.item.create({
+          data: {
+            vendorId: input.vendorId, categoryId, name: n.name, description: n.description || undefined,
+            basePrice: n.price, sku: n.sku, unit: n.unit || undefined,
+            isAvailable: n.isAvailable && !bornEmpty, autoHiddenAt: bornEmpty ? now : null,
+            fulfillment: 'DELIVERY', dietaryTags: [], allergens: [],
+          },
+          select: { id: true },
+        });
+        // [F2] The ledger explains the count the item is born with.
+        await recordOpeningBalance(tx, item.id, n.stock, input.actorId);
+      }
+    }
+
+    if (plan.switchOffIds.length > 0) {
+      await tx.item.updateMany({
+        where: { id: { in: plan.switchOffIds }, vendorId: input.vendorId, isAvailable: true },
+        data: { isAvailable: false, autoHiddenAt: null },
+      });
+    }
+
+    const summary: Omit<ConfirmResult, 'replayed'> = {
+      ...plan.view,
+      uploadId: input.uploadId,
+      contentHash: input.contentHash,
+      appliedAt: now.toISOString(),
+    };
+    await tx.posImport.create({
+      data: {
+        id: input.uploadId, vendorId: input.vendorId, tenantId: input.tenantId, contentHash: input.contentHash,
+        planDigest: plan.digest, missingPolicy: input.missingPolicy, actorId: input.actorId,
+        summary: summary as unknown as Prisma.InputJsonValue,
+      },
+    });
+    const priceLines = plan.view.changes.filter((c) => c.price);
+    await tx.auditLog.create({
+      data: {
+        userId: input.actorId,
+        action: 'POS_IMPORT_APPLIED',
+        entity: 'Vendor',
+        entityId: input.vendorId,
+        changes: {
+          uploadId: input.uploadId,
+          contentHash: input.contentHash,
+          missingPolicy: input.missingPolicy,
+          ...plan.view.totals,
+          prices: priceLines.slice(0, AUDIT_PRICE_LINES).map((c) => ({ itemId: c.itemId, sku: c.sku, from: c.price!.from, to: c.price!.to })),
+          pricesListed: Math.min(priceLines.length, AUDIT_PRICE_LINES),
+        },
+      },
+    });
+    return { ...summary, replayed: false };
+  }, { timeout: 120_000, maxWait: 10_000 });
+
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      // A racer committed the same upload or the same file first; answer as it would have.
+      return run();
+    }
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2034') {
+      throw new AppError(409, 'STORE_BUSY', 'Your store was busy with orders for a moment. Try again.');
+    }
+    throw err;
+  }
+}
+
+/**
+ * The inventory engine's edges after a count changed: zero hides an item that
+ * is switched on (marking it as the engine's hide), and a restock brings back
+ * only an item the engine hid. The owner's own "off" carries no marker, so a
+ * restock never undoes it. Same predicates as checkout, cancel and /adjust.
+ */
+async function applyAvailabilityEdges(tx: Prisma.TransactionClient, itemId: string, balance: number, now: Date) {
+  if (balance <= 0) {
+    await tx.item.updateMany({
+      where: { id: itemId, stockQuantity: { lte: 0 }, isAvailable: true },
+      data: { isAvailable: false, autoHiddenAt: now },
+    });
+  } else {
+    await tx.item.updateMany({
+      where: { id: itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
+      data: { isAvailable: true, autoHiddenAt: null },
+    });
+  }
+}

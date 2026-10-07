@@ -1473,6 +1473,8 @@ model Vendor {
   estimatedPrepTime       Int                      @default(30)
   categories              Category[]
   items                   Item[]
+  /// [POS-SYNC] Till exports this store confirmed (one row per applied file).
+  posImports              PosImport[]
   isVerified              Boolean                  @default(false)
   // [REPORT-013 F-013-06] The wall-clock bound of the document authority
   // behind isVerified: min(expiresAt) over the checklist evidence, written
@@ -2636,6 +2638,42 @@ enum StockMovementReason {
   /// One per tracked item at migration time, so the ledger explains the counter
   /// it inherited instead of pretending history started today.
   OPENING_BALANCE
+  /// [POS-SYNC] The store re-uploaded its till export and confirmed the preview:
+  /// the till's count replaced Swift's. The movement's note names the upload.
+  POS_IMPORT
+}
+
+/// [POS-SYNC] One till export the store confirmed, applied once.
+///
+/// The id IS the upload id the preview handed out, so a retried confirm (a
+/// double click, a dropped connection) finds this row and gets the same result
+/// back instead of applying twice. (vendorId, contentHash) is unique, so the
+/// same file can never be applied to the same store a second time: an old file
+/// re-uploaded after sales would put back stock that was already sold.
+///
+/// The audit row (audit_logs, POS_IMPORT_APPLIED) is the tamper-evident record;
+/// this row is what makes the second confirm a no-op. `summary` is what the
+/// store was shown as applied, so a replay answers with exactly that.
+model PosImport {
+  id            String   @id
+  vendorId      String
+  vendor        Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  /// The store's tenant, stamped from the vendor by pos_imports_tenant_matches_vendor.
+  tenantId      String   @default("swift-default")
+  /// sha256 of the file as confirmed (line endings normalised).
+  contentHash   String
+  /// sha256 of the plan the preview showed: which items, to which counts and prices.
+  planDigest    String
+  /// LEAVE or SOLD_OUT: what the store chose for items missing from the file.
+  missingPolicy String
+  /// Who confirmed it (a user id; deliberately not a foreign key, like the ledger's actorId).
+  actorId       String
+  summary       Json
+  createdAt     DateTime @default(now())
+
+  @@unique([vendorId, contentHash])
+  @@index([tenantId])
+  @@map("pos_imports")
 }
 
 model OrderItemOption {

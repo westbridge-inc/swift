@@ -120,9 +120,11 @@ describe('Excel import (§3.1)', () => {
   it('a real workbook round-trips: xlsx → automap preview → confirm → items', async () => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalogue');
-    sheet.addRow(['Product Name', 'Section', 'Unit Cost', 'Qty on hand']);
-    sheet.addRow(['Basmati Rice 5kg', 'Groceries', 3500, 40]);
-    sheet.addRow(['Cassava Bread', 'Bakery', 800, 12]);
+    // [POS-SYNC F1] The store's cost sits before its selling price, as in a
+    // till export; the cost must never become the price.
+    sheet.addRow(['Product Name', 'Section', 'Unit Cost', 'Unit Price', 'Qty on hand']);
+    sheet.addRow(['Basmati Rice 5kg', 'Groceries', 2800, 3500, 40]);
+    sheet.addRow(['Cassava Bread', 'Bakery', 600, 800, 12]);
     const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
 
     const res = await postFile('/api/v1/vendor/items/import/xlsx', owner.token, 'catalogue.xlsx',
