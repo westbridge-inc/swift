@@ -1,6 +1,7 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { Prisma } from '@prisma/client';
 import type {
   PrismaClient,
@@ -2415,7 +2416,7 @@ export class OrderService {
         type: 'ORDER_UPDATE',
         title: 'Ride cancelled',
         body: 'The passenger cancelled this ride. You can stop and go back online.',
-        data: { orderId, status: 'CANCELLED' },
+        data: taxiNotificationData(orderId, { status: 'CANCELLED' }, 'earner'),
       });
     }
 
@@ -2543,7 +2544,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId);
+        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
         break;
     }
 
