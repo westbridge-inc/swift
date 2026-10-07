@@ -6,9 +6,9 @@ import { space } from '@swift/ui';
 import { Header, Screen, SettingsRow, T } from '../../../kit';
 import { openExternal } from '../../../lib/openExternal';
 
-// Kit Contact Us (55). Channels below are the launch support set —
-// TODO(SWIFT-117): confirm the final support phone/handles before release.
+// Published launch support channels.
 const SUPPORT_EMAIL = 'support@swiftgy.com';
+const SUPPORT_PHONE = { display: '+592 716 3534', dial: 'tel:+5927163534' } as const;
 
 export function ContactUsScreen() {
   const navigation = useNavigation<any>();
@@ -32,6 +32,12 @@ export function ContactUsScreen() {
             label="Message about an active order"
             sub="Fastest — chat with your rider directly"
             onPress={() => navigation.navigate('ChatList')}
+          />
+          <SettingsRow
+            icon="phone"
+            label="Call support"
+            sub={SUPPORT_PHONE.display}
+            onPress={() => void openExternal(SUPPORT_PHONE.dial, `Couldn't open your phone app — call ${SUPPORT_PHONE.display}.`)}
           />
           <SettingsRow
             icon="mail"
