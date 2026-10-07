@@ -46,6 +46,13 @@ import { SIMULATOR_PAGE, SIMULATOR_PROVIDER } from '../../providers/card/simulat
  *  with the screen that shows them (PT-3); the version is recorded on the
  *  session and on the card. */
 export const CARD_ON_FILE_CONSENT_VERSION = 'card-on-file-v1';
+/** [Owner sign-off, 7 Oct 2026] The exact words of `card-on-file-v1`, shown on
+ *  the Add card screen. A change of wording is a new version, never an edit
+ *  of this one: every saved card records the version its partner accepted.
+ *  Saving cards stays OFF (CARD_RAIL_ENROLL) until the owner's go. */
+export const CARD_ON_FILE_CONSENT_TEXT = 'Swift will charge the card you add for your weekly fee each week, when it is due, until you remove it. Your bank may ask you to confirm a charge. You can remove the card here at any time.';
+/** sha256 of CARD_ON_FILE_CONSENT_TEXT: a test pins it, so the words cannot drift under the same version. */
+export const CARD_ON_FILE_CONSENT_SHA256 = '6384aa5c414e5686dacff1ea8503a304bca572cf2111004a17ca2268e25ce7e8';
 /** How long a hosted page stays usable (the provider is told the same). */
 export const CARD_SESSION_TTL_MS = 15 * 60 * 1000;
 /** An UNKNOWN session is asked about again at most this often. */
@@ -89,6 +96,15 @@ export interface CardConfirmResult {
 }
 
 const sha256Hex = (value: string) => createHash('sha256').update(value).digest('hex');
+
+/** [PT-4] A provider's failure reason, as the session's failure code: a failed
+ *  3-D Secure check and a page never finished are not "declined" (nothing was
+ *  asked of the bank); everything else the provider calls failed is. */
+export function failureCodeOf(reason: string): string {
+  if (reason.startsWith('NOT_AUTHENTICATED')) return 'NOT_AUTHENTICATED';
+  if (reason === 'PAGE_NOT_FINISHED') return 'EXPIRED_UNUSED';
+  return 'DECLINED';
+}
 
 function stateMatches(state: string, stateHash: string): boolean {
   const got = Buffer.from(sha256Hex(state), 'hex');
@@ -473,7 +489,7 @@ export class CardRailService {
         if (outcome.purpose !== session.purpose) return this.hold(session, outcome, 'PURPOSE_MISMATCH', now);
         return outcome.purpose === 'ENROLL' ? this.enrollCard(session, outcome, now) : this.settlePayNow(session, outcome, now);
       case 'failed':
-        return this.close(session, 'FAILED', 'DECLINED', outcome, now);
+        return this.close(session, 'FAILED', failureCodeOf(outcome.reason), outcome, now);
       case 'requires_action':
       case 'pending':
         // Local expiry cannot prove a payable instruction will never settle.

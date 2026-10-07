@@ -32,17 +32,26 @@ import {
 //      security code or PIN ever reaches Swift [C1].
 //   2. The bank's 3-D Secure check runs in that iframe; the result comes back
 //      THROUGH THE BROWSER to MerchantResponseUrl, Swift's public return (sec.
-//      2.2 1.6). It is not a financial result. Swift records it as an
-//      observation and uses it only to DECIDE whether to complete (sec. 8):
-//      it can make Swift decline, never make money appear [C5].
+//      2.2 1.6). The guide gives the merchant no other channel for it before
+//      completion, no signature on it, and no inquiry call (sec. 3 lists
+//      none). So it is NEVER trusted: it is recorded as an observation and
+//      may only STOP Swift from completing (a result that is not 3D0 with Y/A,
+//      or that names another page) — it can never start money, mark anything
+//      paid, or change the session [C5].
 //   3. confirm: the merchant completes with POST /spi/payment and the SpiToken
 //      (sec. 2.2 1.7, 7.3). Before that call "there has been no financial
-//      authorization and no funds have been held" (sec. 7.3). The answer to
-//      that server-to-server call is the ONLY money truth: Approved true with
-//      IsoResponseCode "00" (sec. 6, 7.3, Appendix 1). Swift sends the
-//      completion at most ONCE per page (an atomic claim), and never repeats
-//      it blindly: the guide documents no inquiry call and a "Duplicate call
-//      received" error (Appendix 1, 787).
+//      authorization and no funds have been held" (sec. 7.3), and PowerTranz
+//      itself refuses a completion whose authentication was N or R (sec. 8.3).
+//      The answer to that server-to-server call is the ONLY money truth, and
+//      Swift books it only when it is Approved with IsoResponseCode "00" for
+//      THIS transaction AND its OWN 3-D Secure fields (RiskManagement.
+//      ThreeDSecure, present in every response per sec. 6) show the payment
+//      was authenticated (AuthenticationStatus Y or A, sec. 8.3; not a
+//      failed / non-3DS ECI, sec. 8.4). An approval without that proof is
+//      unknown: a person looks, nothing is booked, nothing is dropped. Swift
+//      sends the completion at most ONCE per page (an atomic claim), and never
+//      repeats it blindly: the guide documents no inquiry call and a
+//      "Duplicate call received" error (Appendix 1, 787).
 //   4. A Sale settles automatically (sec. 2.2 1.9, 7.4). Refund (sec. 5.2,
 //      7.5) and void (sec. 5.2, 7.6) take the ORIGINAL TransactionIdentifier.
 //
@@ -277,8 +286,10 @@ export type AuthenticationDecision =
  *     liability shift without authentication), 3D3 (error), or anything else;
  *   - never when the result names another page: its SpiToken, transaction or
  *     order differ from the ones Swift holds.
- * This decision can only make Swift DECLINE: a "proceed" still goes to the
- * provider, whose completion answer is the money truth.
+ * The browser's result is untrusted (no signature, no server-side copy,
+ * sec. 2.2 1.6, sec. 3): this decision can only make Swift DECLINE. A
+ * "proceed" grants nothing — it lets Swift ask PowerTranz, server to server,
+ * whose completion answer (with its own 3-D Secure proof) is the money truth.
  */
 export function authenticationDecision(
   result: Record<string, unknown> | null,
@@ -299,6 +310,25 @@ export function authenticationDecision(
   return { proceed: false, note: `NOT_AUTHENTICATED_${code ?? 'NONE'}_${status ?? 'NONE'}` };
 }
 
+/** sec. 8.4: ECI values that mean 3-D Secure failed or was not used (Visa/Amex 07; Mastercard 00; NPA N0). */
+const UNAUTHENTICATED_ECI = new Set(['07', '00', 'N0']);
+
+/**
+ * The 3-D Secure proof carried by PowerTranz's OWN server-side answer (sec. 6:
+ * RiskManagement.ThreeDSecure is present in every response): authenticated
+ * only when AuthenticationStatus is Y or A (sec. 8.3) and the ECI, when given,
+ * is not a failed / non-3DS value (sec. 8.4). Nothing the browser sent counts here.
+ */
+export function serverAuthentication(json: Record<string, unknown>): { authenticated: boolean; note: string } {
+  const rm = isObject(json['RiskManagement']) ? json['RiskManagement'] : null;
+  const tds = rm && isObject(rm['ThreeDSecure']) ? rm['ThreeDSecure'] : null;
+  const status = str(tds?.['AuthenticationStatus']);
+  const eci = str(tds?.['Eci'])?.trim();
+  if (status !== 'Y' && status !== 'A') return { authenticated: false, note: `SERVER_3DS_${status ?? 'ABSENT'}` };
+  if (eci !== undefined && UNAUTHENTICATED_ECI.has(eci)) return { authenticated: false, note: `SERVER_ECI_${eci}` };
+  return { authenticated: true, note: `SERVER_3DS_${status}` };
+}
+
 /** Appendix 1 numeric response codes that say an earlier identical call may have been taken. */
 const DUPLICATE_CODES = new Set(['787', '788', '387']);
 /** Payment ISO codes (Appendix 1) that do not say the bank declined: the money may or may not have moved. */
@@ -317,9 +347,10 @@ export type CompletionReading =
 
 /**
  * The completion answer (sec. 6, 7.3, Appendix 1), read for money:
- *   - Approved true AND IsoResponseCode "00" AND naming THIS transaction AND a
- *     readable amount and currency: succeeded (the service still compares the
- *     amount with its price and HOLDS a difference);
+ *   - Approved true AND IsoResponseCode "00" AND naming THIS transaction AND
+ *     its own 3-D Secure fields proving authentication (serverAuthentication)
+ *     AND a readable amount and currency: succeeded (the service still
+ *     compares the amount with its price and HOLDS a difference);
  *   - Approved true with anything else: unknown (money may have moved; a
  *     person looks — never booked, never dropped);
  *   - Approved false: failed, UNLESS the code says the call may have been a
@@ -338,6 +369,8 @@ export function readCompletion(json: unknown, held: { txnId: string }): Completi
     const original = str(json['OriginalTrxnIdentifier'])?.toLowerCase();
     const mine = held.txnId.toLowerCase();
     if (txn !== undefined && txn !== mine && original !== mine) return { status: 'unknown', reason: 'APPROVAL_NAMES_ANOTHER_TRANSACTION' };
+    const auth = serverAuthentication(json);
+    if (!auth.authenticated) return { status: 'unknown', reason: `APPROVED_UNAUTHENTICATED_${auth.note}` };
     const currencyCode = alphaOfCurrency(json['CurrencyCode']);
     const amountMinor = currencyCode ? minorOfTotalAmount(json['TotalAmount'], currencyCode) : null;
     if (!currencyCode || amountMinor === null) return { status: 'unknown', reason: 'APPROVED_AMOUNT_UNREADABLE' };

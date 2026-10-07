@@ -499,7 +499,7 @@ function powerTranzOf(runtime: CardRailRuntime): PowerTranzCardRailProvider | nu
  * frames it: its words name "your bank" and the card, never the provider.
  */
 function hostedCardPageHtml(facts: PowerTranzHostedPage): string {
-  const price = formatAmount(fromMinor(facts.amountMinor, facts.currencyCode), { code: true });
+  const price = formatAmount(fromMinor(facts.amountMinor, facts.currencyCode));
   const test = facts.sandbox ? `<p class="test">${escapeHtml(CARD_SANDBOX_TEST_LABEL)}</p>` : '';
   const head = `${test}<p class="brand">Swift</p><h1>${escapeHtml(`Pay ${price} by card`)}</h1>`;
   if (facts.expired || facts.finished) {

@@ -8,6 +8,7 @@ import { readFeePaymentDecision } from './fee-payment-authority';
 import type { ClientPlatform } from './fee-pay-actions';
 import { INSTRUMENT_DTO_SELECT, cardTestLabel, type PaymentInstrumentDto } from './card-rail.service';
 import type { CardRailProvider, CardRailSource } from '../../providers/card/card-provider';
+import { SIMULATOR_PROVIDER } from '../../providers/card/simulator-provider';
 
 // ---------------------------------------------------------------------------
 // [PT-2] May this partner pay the weekly fee by card, here, now? Decided in
@@ -179,6 +180,8 @@ export async function cardPayAction(
   const cardOnFile = addCard
     ? await prisma.paymentInstrument.findFirst({ where: { subscriptionId: sub.id, status: 'ACTIVE' }, select: INSTRUMENT_DTO_SELECT })
     : null;
-  const testModeLabel = cardTestLabel({ provider: decision.provider.binding.provider, environment: decision.provider.binding.environment });
+  const testModeLabel = decision.provider.simulator
+    ? cardTestLabel({ provider: SIMULATOR_PROVIDER, environment: 'sandbox' })
+    : cardTestLabel({ provider: decision.provider.binding.provider, environment: decision.provider.binding.environment });
   return { id: 'CARD', state: 'live', payNow, addCard, cardOnFile, testMode: testModeLabel !== undefined, ...(testModeLabel ? { testModeLabel } : {}) };
 }

@@ -128,7 +128,11 @@ At most one card is `ACTIVE`: the weekly fee is charged to it.
 { purpose: 'ENROLL' | 'PAY_NOW'; consentVersion?: 'card-on-file-v1' }  // consentVersion is required for ENROLL
 ```
 
-- **ENROLL (Add card)** needs the partner to accept the weekly-charge consent on screen first. Send the version they accepted. The words live with the screen; the version is `card-on-file-v1`.
+- **ENROLL (Add card)** needs the partner to accept the weekly-charge consent on screen first. Send the version they accepted: `card-on-file-v1`, whose words (owner sign-off, 7 Oct 2026) are exactly:
+
+  > Swift will charge the card you add for your weekly fee each week, when it is due, until you remove it. Your bank may ask you to confirm a charge. You can remove the card here at any time.
+
+  New words are a new version, never an edit of this one. Saving cards stays off on the server (`CARD_RAIL_ENROLL`) until the owner's go.
 - **PAY_NOW** is priced by the server. The body carries no amount.
 
 **Success:** `201` for a new session; `200` when the same `Idempotency-Key` asks again. A repeat answers the same session **with its `hostedUrl` while the page can still be used** (open and inside its window), so "Continue on the card page" opens it again; once the page is finished or expired, `hostedUrl` is `null`.
@@ -232,7 +236,7 @@ Never say "paid" or "added" before `SUCCEEDED`.
 
 The provider sends the partner's browser back to Swift's return address, `/api/v1/billing/card/return?session=<id>&state=<one-time value>`. It is the provider's `MerchantResponseUrl`. The app and the web never call it themselves.
 
-- **It accepts GET and POST.** Query parameters and form or JSON fields, up to 16 KB.
+- **It accepts GET and POST.** Query parameters and form, JSON or JSON-as-text fields, up to 16 KB. (The real provider's card frame posts the bank's 3-D Secure result here "as Json", which a form sends as text.)
 - **It records what came back and grants nothing by itself.**
   - Only the first return that carries the session's one-time `state`, while the session is open and inside its window, prompts the server to ask the provider, server to server.
   - Everything else (a wrong or reused `state`, a closed or expired session, an unknown session) is recorded with its reason and ends there.
@@ -253,6 +257,13 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
 - **It is never logged or cached.** Swift never writes its query or body to a log line. It sends `X-Robots-Tag: noindex`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 - **It is rate-limited per source address** (60 a minute), whoever is signed in: rotating sign-ins from one address buys nothing.
 - **It is inert while card payments are off** (`CARD_RAIL_V2=0` and not draining): nothing is read or written, and the page says `UNKNOWN`.
+
+**The real provider (PT-4)** — `hostedUrl` is a Swift page on the API origin, `/api/v1/billing/card/pay/{ref}`:
+- Swift's header and words ("Pay GY$2,100 by card", "Type your card on your bank's secure form below. Swift never sees your card number or security code.") around an iframe holding the bank's secure card form; the provider's name is never shown.
+- On the provider's test system it carries the test label (`testMode: true`, `testModeLabel`), as the CARD entry and the session do.
+- The card is typed and the bank's 3-D Secure check runs inside the iframe. When the check is done, the return page above appears inside the same frame with the same two links ("Back to the Swift app" closes the in-app sheet).
+- Once the page is finished or expired it shows "This card page has ended" and no form. It sends its own strict content policy, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and is never logged.
+- Nothing about opening it changes for the app: open `hostedUrl` in the in-app sheet (phone) or the same tab (web), then poll the session.
 
 **The simulator** (staging only; production refuses it) serves its page at `hostedUrl`:
 - four buttons: Approve / Approve, but weekly charges need 3-D Secure / Decline / Time out;
@@ -299,15 +310,21 @@ Pressing a button sends the browser to the return page, exactly as a real provid
 
 ## 11. Not in this contract yet
 
-- The PowerTranz provider (PT-4). Until then `CARD` is `off` everywhere, and the simulator (staging only) is the only provider.
-- **Questions for PowerTranz** (asked through the coordinator). Until they are answered, `addCard` stays `false`:
+- **What the real provider (PT-4) does and does not do**, from its own guide v2.7 only:
+  - Pay now by card, on its hosted page with 3-D Secure; Swift completes the payment only when the bank's check passed (verified or attempted), and only the provider's answer to that completion books the week, once.
+  - No saved cards: the guide documents no weekly charge without the partner present and returns no last 4 or expiry. `addCard` is `false` with it, whatever the switch says.
+  - Refund and void of a payment exist in the provider; the two-person admin flow that uses them is not in this contract yet.
+- **Questions for PowerTranz** (asked through the coordinator):
   - how a saved card is charged each week without the partner present (a merchant-initiated or recurring indicator, and the 3-D Secure and CVV rules);
   - GYD (ISO 4217 `328`) acceptance and settlement;
-  - our hosted `PageSet` / `PageName`, and styling it as Swift;
-  - whether `MerchantResponseUrl` must be registered;
+  - our hosted `PageSet` / `PageName`, and styling it as Swift; whether the hosted page collects the cardholder details 3-D Secure 2 needs (guide sec. 9.3) or Swift must send them;
+  - whether `MerchantResponseUrl` must be registered, and the exact shape of the frame's post to it;
+  - whether the payment completion's answer carries the original `TransactionIdentifier`, and how to look up a completion whose answer was lost (the guide documents no inquiry call);
+  - whether the hosted page works inside an iframe in iPhone Safari (third-party cookies) and Android in-app browsers;
+  - the production API root (the guide says it is provided after staging is validated);
   - enabling `PanToken` on a Pay now.
 - Admin reversal / manual resolution of a `HELD` session, and refunds.
 - The UI (a separate lane builds it against this contract and the simulator).
-- The credential setup tool (PT-5, for MMG and the card provider together).
+- The credential setup tool (PT-5, for MMG and the card provider together): `deploy/owner/swift-payments-setup.command`.
 
 Changes to this contract are made here first, in the same PR as the code that changes.

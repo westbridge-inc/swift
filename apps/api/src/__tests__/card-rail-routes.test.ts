@@ -21,7 +21,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { stepUpKey } from '../modules/auth/step-up';
 import { BillingService } from '../modules/billing/billing.service';
 import { readDunningClock } from '../modules/billing/dunning-clock';
-import { CARD_ON_FILE_CONSENT_VERSION, CardRailService } from '../modules/billing/card-rail.service';
+import { CARD_ON_FILE_CONSENT_VERSION, CARD_SANDBOX_TEST_LABEL, CardRailService } from '../modules/billing/card-rail.service';
 import { CARD_CHECKOUT_PLATFORMS_KEY, resetCardCheckoutSwitchCache } from '../modules/billing/card-pay-action';
 import {
   CARD_APP_RETURN_LINK,
@@ -30,6 +30,7 @@ import {
   CARD_RETURN_RATE,
   CARD_RETURN_PAGES,
   CARD_SESSION_START_RATE,
+  HOSTED_CARD_PAGE_CSP,
   cardRailPublicRoutes,
   returnPageHtml,
   type CardRailRuntime,
@@ -39,6 +40,7 @@ import { REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
 import { SandboxPaymentProvider } from '../providers/payment/payment-provider';
 import type { CardRailProvider } from '../providers/card/card-provider';
 import { SIMULATOR_PAGE, SimulatorCardRailProvider, type SimulatorScenario } from '../providers/card/simulator-provider';
+import { POWERTRANZ_SANDBOX_ROOT, PowerTranzCardRailProvider } from '../providers/card/powertranz-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
@@ -181,7 +183,8 @@ async function makeReviewTenant(): Promise<string> {
 /** A provider the routes treat as REAL (never the simulator): it answers with the simulator's truth. */
 function realProvider(opts: { savesCards: boolean }): CardRailProvider {
   return {
-    binding: sim.binding,
+    // Its own live setup (the label the screen shows follows it); the routes never ask it for a page here.
+    binding: { provider: 'realcards', environment: 'live', account: ACCOUNT },
     simulator: false,
     savesCards: opts.savesCards,
     createSession: (i) => sim.createSession(i),
@@ -970,5 +973,305 @@ describe('admin read views: evidence as hashes, never anything that moves money'
     const p = await makeRider();
     const res = await app.inject({ method: 'GET', url: '/api/v1/admin/billing/card-sessions', headers: { authorization: `Bearer ${p.token}` } });
     expect(res.statusCode).toBe(403);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [PT-4] The real card provider through HTTP: a second app whose card rail is
+// the PowerTranz provider, talking to a fake gateway that answers in the
+// guide's documented shapes (synthetic values). The partner, the hosted page,
+// the browser's 3-D Secure result and the completion — end to end.
+// ---------------------------------------------------------------------------
+
+describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s check, one completion', () => {
+  const ORIGIN = 'https://api.example.test';
+  const PTZ_PREFIX = `ptz:r${RUN}:`;
+  let ptz: FastifyInstance;
+  let real: PowerTranzCardRailProvider;
+  type Answer = { status: number; body: unknown } | 'network';
+  const calls: Array<{ path: string; body: string }> = [];
+  let sale: (body: Record<string, unknown>) => Answer;
+  let payment: (txnId: string) => Answer;
+
+  const fakeFetch = (async (url: string | URL, init?: Parameters<typeof globalThis.fetch>[1]) => {
+    const path = new URL(String(url)).pathname;
+    const body = typeof init?.body === 'string' ? init.body : '';
+    calls.push({ path, body });
+    let answer: Answer;
+    if (path === '/api/spi/sale') answer = sale(JSON.parse(body) as Record<string, unknown>);
+    else if (path === '/api/spi/payment') {
+      const held = (await redis.keys(`${PTZ_PREFIX}s:*`));
+      let txnId = '';
+      for (const k of held) if ((await redis.hget(k, 'spiToken')) === JSON.parse(body)) txnId = (await redis.hget(k, 'txnId')) ?? '';
+      answer = payment(txnId);
+    } else answer = { status: 404, body: 'not found' };
+    if (answer === 'network') throw new TypeError('fetch failed');
+    return new Response(typeof answer.body === 'string' ? answer.body : JSON.stringify(answer.body), { status: answer.status });
+  }) as unknown as typeof fetch;
+
+  const preprocess = (req: Record<string, unknown>): Answer => ({
+    status: 200,
+    body: {
+      TransactionType: 2, Approved: false, TransactionIdentifier: req['TransactionIdentifier'], IsoResponseCode: 'SP4', OrderIdentifier: req['OrderIdentifier'],
+      RedirectData: '<form id="f" method="post" action="https://hpp.example.test/pay"><input type="hidden" name="t" value="synthetic"></form><script>document.getElementById("f").submit()</script>',
+      SpiToken: `spi-${nanoid(12)}`,
+    },
+  });
+  const approve = (fields: Record<string, unknown> = {}) => (txnId: string): Answer => ({
+    status: 200,
+    body: {
+      TransactionType: 2, Approved: true, AuthorizationCode: '123456', TransactionIdentifier: txnId, TotalAmount: 2100, CurrencyCode: '328', RRN: '000000000001', IsoResponseCode: '00',
+      RiskManagement: { ThreeDSecure: { Eci: '05', AuthenticationStatus: 'Y', ResponseCode: '3D0' } }, // the completion's OWN 3-D Secure proof (sec. 6)
+      ...fields,
+    },
+  });
+
+  const call = (p: Partner, method: 'GET' | 'POST' | 'DELETE', path: string, opts: { payload?: unknown; headers?: Record<string, string> } = {}) =>
+    ptz.inject({ method, url: `/api/v1/${p.family}${path}`, headers: headersOf(p, opts.headers), ...(opts.payload !== undefined ? { payload: opts.payload as never } : {}) });
+  const open = (p: Partner, purpose: 'PAY_NOW' | 'ENROLL' = 'PAY_NOW') =>
+    call(p, 'POST', SESSIONS, { payload: { purpose, ...(purpose === 'ENROLL' ? { consentVersion: CARD_ON_FILE_CONSENT_VERSION } : {}) }, headers: { 'idempotency-key': key() } });
+  const pathOf = (url: string) => url.replace(ORIGIN, '');
+  /** The MerchantResponseUrl Swift sent with the Sale (sec. 5.1): where the bank's frame posts its result. */
+  const merchantResponsePath = () => {
+    const last = [...calls].reverse().find((c) => c.path === '/api/spi/sale')!;
+    const ext = (JSON.parse(last.body) as { ExtendedData: { MerchantResponseUrl: string } }).ExtendedData;
+    return pathOf(ext.MerchantResponseUrl);
+  };
+  /** The page's held facts, as the bank's frame would echo them. */
+  async function heldOf(sessionId: string) {
+    const row = await app.prisma.cardSession.findUniqueOrThrow({ where: { id: sessionId } });
+    return redis.hgetall(`${PTZ_PREFIX}s:${row.providerSessionRef}`);
+  }
+  /** The bank's frame posts the authentication result "as Json" (Appendix 2), as a form can: text/plain. */
+  async function bankFramePosts(sessionId: string, status: string, extra: Record<string, unknown> = {}) {
+    const held = await heldOf(sessionId);
+    const result = {
+      TransactionType: 2, Approved: false, TransactionIdentifier: held['txnId'], IsoResponseCode: '3D0', OrderIdentifier: held['orderId'], SpiToken: held['spiToken'],
+      CardBrand: 'Visa', RiskManagement: { ThreeDSecure: { Eci: '05', AuthenticationStatus: status, ResponseCode: '3D0' } },
+      BillingAddress: { EmailAddress: 'cardholder@example.test' }, ...extra,
+    };
+    return ptz.inject({ method: 'POST', url: merchantResponsePath(), headers: { 'content-type': 'text/plain' }, payload: JSON.stringify(result) });
+  }
+  const completions = () => calls.filter((c) => c.path === '/api/spi/payment').length;
+
+  beforeAll(async () => {
+    sale = preprocess;
+    payment = approve();
+    ptz = Fastify({ logger: false });
+    registerErrorHandler(ptz);
+    registerEmptyJsonBodyParser(ptz);
+    await ptz.register(prismaPlugin);
+    await ptz.register(redisPlugin);
+    await ptz.register(authPlugin);
+    await ptz.register(socketPlugin);
+    await ptz.register(rateLimit, { keyGenerator: rateLimitKey((token) => ptz.jwt.verify(token)), max: 10_000, timeWindow: '1 minute' });
+    real = new PowerTranzCardRailProvider(redis, {
+      account: `pt4r-${RUN}`, environment: 'sandbox', apiRoot: POWERTRANZ_SANDBOX_ROOT, powerTranzId: 'TESTID01', password: 'not-a-real-password',
+      pageSet: 'PTZ/SwiftTest', pageName: 'WeeklyFee', publicBaseUrl: ORIGIN,
+    }, { fetch: fakeFetch, keyPrefix: PTZ_PREFIX });
+    const notifications = new NotificationService(ptz.prisma, ptz.io);
+    const billing = new BillingService(ptz.prisma, notifications, new SandboxPaymentProvider(), undefined, () => real);
+    ptz.decorate(CARD_RAIL_RUNTIME_DECORATION, { service: new CardRailService(ptz.prisma, notifications, billing, () => real, { returnUrlBase: ORIGIN }), billing, rail: () => real });
+    await ptz.register(vendorRoutes, { prefix: '/api/v1/vendor' });
+    await ptz.register(riderRoutes, { prefix: '/api/v1/rider' });
+    await ptz.register(driverRoutes, { prefix: '/api/v1/driver' });
+    await ptz.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card' });
+    await ptz.ready();
+  });
+
+  afterEach(() => {
+    sale = preprocess;
+    payment = approve();
+  });
+
+  afterAll(async () => {
+    let cursor = '0';
+    do {
+      const [next, keys] = await redis.scan(cursor, 'MATCH', `${PTZ_PREFIX}*`, 'COUNT', 500);
+      cursor = next;
+      if (keys.length) await redis.del(...keys.filter((k) => k.startsWith(PTZ_PREFIX)));
+    } while (cursor !== '0');
+    await ptz.close();
+  });
+
+  it('Pay now: Swift\'s page frames the bank\'s form; the bank\'s check passes; ONE completion books the week ONCE', async () => {
+    sale = preprocess; payment = approve();
+    const p = await makeStore();
+    const cardAction = (await call(p, 'GET', '/subscription')).json().data.payActions[1];
+    expect(cardAction).toMatchObject({ id: 'CARD', state: 'live', addCard: false, testMode: true, testModeLabel: CARD_SANDBOX_TEST_LABEL });
+    const opened = await open(p);
+    expect(opened.statusCode, opened.body).toBe(201);
+    const session = opened.json().data;
+    expect(session).toMatchObject({ purpose: 'PAY_NOW', status: 'OPEN', testMode: true, testModeLabel: CARD_SANDBOX_TEST_LABEL });
+    expect(session.hostedUrl).toMatch(/^https:\/\/api\.example\.test\/api\/v1\/billing\/card\/pay\/ptz_[0-9a-f]{24}$/);
+
+    const pageRes = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+    expect(pageRes.statusCode).toBe(200);
+    expect(pageRes.headers['content-security-policy']).toBe(HOSTED_CARD_PAGE_CSP);
+    expect(pageRes.headers['cache-control']).toBe('no-store');
+    expect(pageRes.headers['referrer-policy']).toBe('no-referrer');
+    expect(pageRes.body).toContain('<iframe class="card"');
+    expect(pageRes.body).toContain('srcdoc="&lt;form id=&quot;f&quot;');
+    expect(pageRes.body).toContain(CARD_SANDBOX_TEST_LABEL.replace("'", '&#39;'));
+    expect(pageRes.body).toContain('<h1>Pay GY$2,100 by card</h1>');
+    // Swift's own words never name the provider; no card field is Swift's.
+    const own = pageRes.body.replace(/srcdoc="[^"]*"/, '');
+    expect(own).not.toMatch(/powertranz|ptranz/i);
+    expect(own).not.toMatch(/<input|<select|<textarea/i);
+    expect(completions()).toBe(0);
+
+    const back = await bankFramePosts(session.sessionId, 'Y');
+    expect(back.statusCode).toBe(200);
+    expect(pageState(back.body)).toBe('SUCCEEDED');
+    expect(back.body).not.toMatch(/powertranz|ptranz/i);
+    expect(completions()).toBe(1);
+    const m = await money(p.subId);
+    expect(m.successes).toBe(1);
+    const captured = m.payments.filter((x) => x.status === 'CAPTURED');
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.externalRef).toBe((await heldOf(session.sessionId))['txnId']);
+    // The same post again (a reload of the frame): nothing more, no second completion.
+    expect(pageState((await bankFramePosts(session.sessionId, 'Y')).body)).toBe('SUCCEEDED');
+    expect(completions()).toBe(1);
+    expect((await money(p.subId)).successes).toBe(1);
+    expect((await call(p, 'GET', `${SESSIONS}/${session.sessionId}`)).json().data).toMatchObject({ status: 'SUCCEEDED', settlement: 'advanced' });
+    // The page is finished: no bank form is served again.
+    const after = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+    expect(after.body).not.toContain('<iframe');
+    expect(after.body).toContain('This card page has ended');
+  });
+
+  it('the bank\'s check fails (N): no completion, nothing booked, a plain NOT_AUTHENTICATED — and the card choice comes back at once', async () => {
+    const p = await makeRider();
+    const session = (await open(p)).json().data;
+    expect((await call(p, 'GET', '/subscription')).json().data.payActions[1]).toEqual({ id: 'CARD', state: 'off' }); // a page is open
+    const before = completions();
+    expect(pageState((await bankFramePosts(session.sessionId, 'N')).body)).toBe('FAILED');
+    expect(completions()).toBe(before);
+    expect((await money(p.subId)).successes).toBe(0);
+    expect((await call(p, 'GET', `${SESSIONS}/${session.sessionId}`)).json().data).toMatchObject({ status: 'FAILED', failure: 'NOT_AUTHENTICATED' });
+    expect((await call(p, 'GET', '/subscription')).json().data.payActions[1]).toMatchObject({ state: 'live' });
+  });
+
+  it('the browser claims approval, the bank declines the completion: nothing booked [C5]', async () => {
+    payment = () => ({ status: 200, body: { Approved: false, IsoResponseCode: '05', ResponseMessage: 'Do not honor' } });
+    const p = await makeRider();
+    const session = (await open(p)).json().data;
+    expect(pageState((await bankFramePosts(session.sessionId, 'Y', { Approved: true, IsoResponseCode: '00' })).body)).toBe('FAILED');
+    expect((await money(p.subId)).successes).toBe(0);
+    expect((await call(p, 'GET', `${SESSIONS}/${session.sessionId}`)).json().data).toMatchObject({ status: 'FAILED', failure: 'DECLINED' });
+  });
+
+  it('the page cannot be made (the gateway refuses the Sale): 502, the session closes, the payment confirmation is resolved — the partner can pay at once', async () => {
+    sale = () => ({ status: 200, body: { Approved: false, IsoResponseCode: '12', ResponseMessage: 'Invalid transaction', Errors: [{ Code: '757', Message: 'Hosted page not found' }] } });
+    const p = await makeRider();
+    const refused = await open(p);
+    expect(refused.statusCode, refused.body).toBe(502);
+    expect(refused.json().error.code).toBe('CARD_SESSION_UNAVAILABLE');
+    expect(refused.body).not.toMatch(/powertranz|ptranz/i);
+    const [row] = await app.prisma.cardSession.findMany({ where: { subscriptionId: p.subId } });
+    expect(row).toMatchObject({ status: 'CANCELLED', failureCode: 'PROVIDER_PAGE_UNAVAILABLE' });
+    const hold = await app.prisma.paymentConfirmationHold.findFirst({ where: { cardSessionId: row!.id } });
+    expect(hold?.status).toBe('PROVEN_NO_EFFECT');
+    expect((await call(p, 'GET', '/subscription')).json().data.payActions[1]).toMatchObject({ state: 'live' });
+    sale = preprocess;
+    expect((await open(p)).statusCode).toBe(201);
+  });
+
+  it('the completion\'s answer is lost: PENDING, nothing booked, never sent twice, and never called failed', async () => {
+    payment = () => 'network';
+    const p = await makeRider();
+    const session = (await open(p)).json().data;
+    expect(pageState((await bankFramePosts(session.sessionId, 'Y')).body)).toBe('PENDING');
+    const sent = completions();
+    // The sweep asks again, inside and past the window: still no second completion, and money may have moved — never FAILED.
+    const row = await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } });
+    const service = (ptz as unknown as Record<string, CardRailRuntime>)[CARD_RAIL_RUNTIME_DECORATION]!.service;
+    await service.confirm(session.sessionId);
+    await service.confirm(session.sessionId, { now: new Date(row.expiresAt.getTime() + 60_000) });
+    expect(completions()).toBe(sent);
+    expect((await money(p.subId)).successes).toBe(0);
+    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('UNKNOWN');
+  });
+
+  it('[3DS · forged return] the browser claims 3-D Secure success AND approval; PowerTranz\'s own answer is not authenticated: nothing is booked, nothing is paid', async () => {
+    // The forged post says everything a thief would want; PowerTranz, server to server, says the cardholder was NOT authenticated.
+    payment = approve({ RiskManagement: { ThreeDSecure: { Eci: '07', AuthenticationStatus: 'N', ResponseCode: '3D0' } } });
+    const p = await makeStore();
+    const periodEndBefore = (await money(p.subId)).sub.currentPeriodEnd.getTime();
+    const session = (await open(p)).json().data;
+    const back = await bankFramePosts(session.sessionId, 'Y', {
+      Approved: true, IsoResponseCode: '00', AuthorizationCode: '999999', ResponseMessage: 'Transaction is approved.',
+      RiskManagement: { ThreeDSecure: { Eci: '05', AuthenticationStatus: 'Y', Cavv: 'forged', ResponseCode: '3D0' } },
+    });
+    expect(pageState(back.body)).not.toBe('SUCCEEDED');
+    const m = await money(p.subId);
+    expect(m.successes).toBe(0);
+    expect(m.payments.filter((x) => x.status === 'CAPTURED')).toHaveLength(0);
+    expect(m.sub.currentPeriodEnd.getTime()).toBe(periodEndBefore);
+    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).not.toBe('SUCCEEDED');
+    expect((await call(p, 'GET', `${SESSIONS}/${session.sessionId}`)).json().data.status).not.toBe('SUCCEEDED');
+  });
+
+  it('[3DS · forged return] PowerTranz\'s own answer carries no 3-D Secure proof at all: an approval is held for a person, never booked', async () => {
+    payment = approve({ RiskManagement: undefined });
+    const p = await makeStore(); // the approval's amount is this store's fee: only the missing proof can stop it
+    const session = (await open(p)).json().data;
+    expect(pageState((await bankFramePosts(session.sessionId, 'Y', { Approved: true, IsoResponseCode: '00' })).body)).toBe('PENDING');
+    expect((await money(p.subId)).successes).toBe(0);
+  });
+
+  it('[3DS · forged return] a return posted with no session state, or another session\'s, changes nothing and asks PowerTranz nothing', async () => {
+    const p = await makeRider();
+    const session = (await open(p)).json().data;
+    const held = await heldOf(session.sessionId);
+    const claim = JSON.stringify({ Approved: true, IsoResponseCode: '00', SpiToken: held['spiToken'], TransactionIdentifier: held['txnId'], RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: '05', ResponseCode: '3D0' } } });
+    const before = completions();
+    const wrongState = merchantResponsePath().replace(/state=[^&]+/, `state=${'Q'.repeat(43)}`);
+    for (const url of [wrongState, '/api/v1/billing/card/return', `/api/v1/billing/card/return?session=${session.sessionId}`]) {
+      const res = await ptz.inject({ method: 'POST', url, headers: { 'content-type': 'text/plain' }, payload: claim });
+      expect(pageState(res.body), url).toBe('UNKNOWN');
+    }
+    expect(completions()).toBe(before);
+    expect((await money(p.subId)).successes).toBe(0);
+    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('OPEN');
+  });
+
+  it('a completion for another amount is HELD for a person: nothing booked', async () => {
+    payment = approve({ TotalAmount: 1 });
+    const p = await makeStore();
+    const session = (await open(p)).json().data;
+    expect(pageState((await bankFramePosts(session.sessionId, 'Y')).body)).toBe('PENDING');
+    expect((await money(p.subId)).successes).toBe(0);
+    expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('HELD');
+  });
+
+  it('the result can also arrive as a form field holding the JSON; a result naming another page completes nothing', async () => {
+    const p = await makeRider();
+    const session = (await open(p)).json().data;
+    const held = await heldOf(session.sessionId);
+    const forged = { IsoResponseCode: '3D0', SpiToken: 'spi-someone-else', TransactionIdentifier: held['txnId'], RiskManagement: { ThreeDSecure: { ResponseCode: '3D0', AuthenticationStatus: 'Y' } } };
+    const before = completions();
+    const res = await ptz.inject({ method: 'POST', url: merchantResponsePath(), headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: `Response=${encodeURIComponent(JSON.stringify(forged))}` });
+    expect(pageState(res.body)).toBe('FAILED');
+    expect(completions()).toBe(before);
+    expect((await money(p.subId)).successes).toBe(0);
+  });
+
+  it('saving a card is never offered by this provider: ENROLL 409 ADD_CARD_OFF, even with saving switched on', async () => {
+    const p = await makeRider();
+    const res = await open(p, 'ENROLL');
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('ADD_CARD_OFF');
+  });
+
+  it('an unknown page reference, or card payments off: 404 with nothing served', async () => {
+    expect((await ptz.inject({ method: 'GET', url: '/api/v1/billing/card/pay/ptz_000000000000000000000000' })).statusCode).toBe(404);
+    const p = await makeRider();
+    const session = (await open(p)).json().data;
+    process.env['CARD_RAIL_V2'] = '0';
+    const res = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).not.toContain('<iframe');
   });
 });
