@@ -119,6 +119,8 @@ export const TENANT_TABLES = [
   'ride_queue_entries', 'safety_deletion_holds', 'san_tombstones',
   // [TAXI multi-stop] The intermediate stops of one ride, walled like the ride itself.
   'taxi_trip_stops',
+  // [AF-MOB-006] A custody recovery case, walled like the order it recovers.
+  'custody_recovery_cases',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -239,6 +241,8 @@ export interface TenantLineageRule {
    *  — quarantined for adjudication, invisible to every tenant — instead of
    *  being defaulted into the production tenant. */
   nullable?: true;
+  /** QR lineage never exempts an UPDATE whose non-null parent is missing or RLS-hidden. */
+  requiredParent?: boolean;
 }
 export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
@@ -276,12 +280,34 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'document_record', trigger: 'document_record_tenant_matches_account', parent: 'users', fk: 'accountId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
+  // QR parents are locked FOR SHARE until commit, so a child insert cannot race
+  // a change to its parent. (A vendor's tenant never changes at all:
+  // vendors_tenant_immutable, migration 20261005210200.)
+  // Optional code links explicitly retain null; a non-null missing/hidden
+  // parent is refused on UPDATE as well as INSERT.
+  { table: 'qr_codes', trigger: 'qr_codes_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'], requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
+  { table: 'slug_redirects', trigger: 'slug_redirects_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'], requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
+  { table: 'pending_attributions', trigger: 'pending_attributions_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
+  { table: 'attribution_claims', trigger: 'attribution_claims_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
+  { table: 'scan_events', trigger: 'scan_events_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
+  { table: 'scan_daily_rollups', trigger: 'scan_daily_rollups_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
+  // Order credit must identify THIS store, as well as this tenant.
+  { table: 'orders', trigger: 'orders_tenant_matches_attribution_code', parent: 'qr_codes', fk: 'attributionQrCodeId', watch: ['attributionQrCodeId', 'vendorId'], requiredParent: true,
+    parentTenantSql: `SELECT CASE WHEN NEW."attributionQrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."attributionQrCodeId" AND "entityType" = 'VENDOR' AND "entityId" = NEW."vendorId" FOR SHARE) END` },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
     parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
   // [TAXI multi-stop] one hop: a stop inherits the tenant of its ride (the delivery_cash_settlements shape)
   { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [AF-MOB-006] one hop: a custody recovery case inherits the tenant of the order it recovers
+  { table: 'custody_recovery_cases', trigger: 'custody_recovery_cases_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
   // card and a hosted session belong to the person who pays the fee
   { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },
@@ -320,15 +346,15 @@ export function lineageBackfillSql(table: string): string {
   return `UPDATE ${table} AS lineage_row SET "tenantId" = (${parentTenantOf(rule).replace(/NEW\./g, 'lineage_row.')}) WHERE lineage_row."tenantId" IS NULL`;
 }
 export function tenantLineageDdl(): string[] {
-  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch, nullable }) => [
+  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch, nullable, requiredParent }) => [
     `CREATE OR REPLACE FUNCTION ${trigger}() RETURNS trigger AS $$
       DECLARE parent_tenant TEXT;
       BEGIN
         ${parentTenantSql ?? `SELECT "tenantId" FROM ${parent} WHERE id = NEW."${fk}"`} INTO parent_tenant;
         IF parent_tenant IS NULL THEN
-          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          ${requiredParent ? '-- A QR UPDATE with a missing/hidden non-null parent is refused too.' : `-- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
           -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
-          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;`}
           RAISE EXCEPTION '${table} row % names ${parent} row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
         END IF;

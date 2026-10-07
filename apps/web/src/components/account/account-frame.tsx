@@ -1,14 +1,13 @@
 'use client';
 
 import { Fragment, type ReactNode } from 'react';
-import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { useCustomerSession } from '@/components/customer-session';
 import { SignInDoor } from '@/components/customer-shell';
 
-export const fieldClass = 'w-full rounded-xl border border-black/15 bg-white px-3 py-3';
-export const buttonClass = 'min-h-11 rounded-full bg-[var(--swift-red)] px-5 py-3 font-bold text-white disabled:opacity-50';
-export const secondaryClass = 'min-h-11 rounded-xl border border-black/15 px-4 py-2 font-semibold disabled:opacity-50';
+export const fieldClass = 'sw-input';
+export const buttonClass = 'sw-btn sw-btn-md';
+export const secondaryClass = 'sw-btn sw-btn-md sw-btn-outline';
 
 export function AccountBoundary({ children, path = '/account' }: { children: ReactNode; path?: string }) {
   const session = useCustomerSession();
@@ -19,9 +18,10 @@ export function AccountBoundary({ children, path = '/account' }: { children: Rea
 }
 
 export function AccountFrame({ title, children }: { title: string; children: ReactNode }) {
-  return <div className="mx-auto max-w-lg space-y-5">
-    <Link href="/account" className="inline-block py-2 text-sm font-semibold text-[var(--swift-red)]">Back to account</Link>
-    <h1 className="text-2xl font-extrabold">{title}</h1>
+  // [WEB-REDESIGN] The shell's back button returns to Account; the page is
+  // the design's narrow column: an eyebrow, the title, then the content.
+  return <div className="mx-auto flex max-w-[720px] flex-col gap-5">
+    <div><span className="sw-eyebrow">Account</span><h1 className="sw-title mt-1">{title}</h1></div>
     {children}
   </div>;
 }

@@ -22,10 +22,12 @@ import { DECLARATION_CONSENT_TYPE } from '../modules/vendor/unregistered-declara
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import {
-  VENDOR_TIER_CAPS_DEFAULTS, assertPromotable, assertWithinTierCaps, judgeTierCap, promoteIfRegistered, tierUsage, vendorTierCapsFor,
+  VENDOR_TIER_CAPS_DEFAULTS, assertPromotable, assertWithinTierCaps, judgeTierCap, nudgeOwnerOnce, promoteIfRegistered, tierUsage, vendorTierCapsFor,
 } from '../modules/vendor/vendor-tier';
 import { CountryConfigService } from '../modules/country/country-config.service';
+import { guyanaWallClockParts } from '../utils/guyana-day';
 import { EXTRA_DOC_TYPES, BUCKET_OF, DECLARATION_DOC_TYPE, REGISTRATION_DOC_TYPES } from '../modules/verification/doc-registry';
+import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -36,6 +38,10 @@ const users: string[] = [];
 const extraVendorIds: string[] = [];
 let mkUser: (n: number, roles: string[], active: string, extra?: Record<string, unknown>) => Promise<{ id: string }>;
 const orderIds: string[] = [];
+
+// Today's orders are seeded "a minute ago" and counted for the Guyana day:
+// never run across Guyana midnight (helpers/guyana-day-clock).
+beforeAll(waitClearOfGuyanaMidnight, GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS);
 
 beforeAll(async () => {
   vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64'));
@@ -123,12 +129,25 @@ describe('[DOC-1 P3-2] the micro-vendor tier is capped, not bypassed', () => {
     await placedOrder(999_999, new Date(now.getTime() - 2 * 3_600_000), 'CANCELLED');
     await placedOrder(40_000, new Date(now.getTime() - 9 * 86_400_000));
     const usage = await system(() => tierUsage(app.prisma, vendorId, now));
-    expect(usage.ordersToday).toBe(now.getUTCHours() >= 2 ? 1 : 0);
+    // An order two hours ago is today's unless the GUYANA day began less than two hours ago.
+    expect(usage.ordersToday).toBe(guyanaWallClockParts(now).hour >= 2 ? 1 : 0);
     expect(usage.grossThisWeek).toBe(50_000);
     const v = await vendor();
     const verdict = await system(() => assertWithinTierCaps(app.prisma, v, VENDOR_TIER_CAPS_DEFAULTS, 1000, now));
     expect(verdict?.allowed).toBe(true);
     await expect(system(() => assertWithinTierCaps(app.prisma, v, VENDOR_TIER_CAPS_DEFAULTS, 100_001, now))).rejects.toMatchObject({ code: 'VENDOR_TIER_CAP' });
+  });
+
+  it('"today" is the GUYANA day: orders on either side of 20:00 in Guyana (00:00 UTC) count as the same day, and the previous Guyana evening does not', async () => {
+    // 20:30 in Guyana on 9 March 2030 = 00:30 UTC on the 10th. A UTC day would
+    // start 30 minutes ago and drop the evening's earlier orders.
+    const now = new Date('2030-03-10T00:30:00.000Z');
+    await placedOrder(1000, new Date('2030-03-09T23:30:00.000Z')); // 19:30 GYT on the 9th: today
+    await placedOrder(1000, new Date('2030-03-10T00:10:00.000Z')); // 20:10 GYT on the 9th: today
+    await placedOrder(1000, new Date('2030-03-09T03:30:00.000Z')); // 23:30 GYT on the 8th: yesterday
+    const usage = await system(() => tierUsage(app.prisma, vendorId, now));
+    expect(usage.dayStart.toISOString()).toBe('2030-03-09T04:00:00.000Z');
+    expect(usage.ordersToday).toBe(2);
   });
 
   it('the checkout path itself refuses the order that would cross the day cap for an unregistered store, and accepts the same cart once the store is registered', async () => {
@@ -257,6 +276,30 @@ describe('[DOC-1 P3-2] the build against the contract: declaration, requirement 
     const facade = await system(() => new CountryConfigService(app.prisma).getDocumentChecklist('GY', 'RESTAURANT', 'UNREGISTERED'));
     expect(facade).toEqual(expect.arrayContaining([DECLARATION_DOC_TYPE, 'food_handler_cert']));
     expect(await system(() => new CountryConfigService(app.prisma).getDocumentChecklist('GY', 'RESTAURANT'))).toContain(REGISTRATION_DOC_TYPES[0]);
+  });
+
+  it('the once-a-day nudge counts the GUYANA day: one sent at 19:00 in Guyana still holds at 20:30 (00:30 UTC); one from the previous Guyana evening does not', async () => {
+    const v = await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, ownerId: true } }));
+    const owner = await system(() => app.prisma.vendorOwner.findUniqueOrThrow({ where: { id: v.ownerId }, select: { userId: true } }));
+    const verdict = judgeTierCap({ dayStart: new Date(), weekStart: new Date(), ordersToday: 25, grossThisWeek: 0 }, VENDOR_TIER_CAPS_DEFAULTS, 1000);
+    expect(verdict.nudge).toBe(true);
+    const sent: unknown[] = [];
+    const notifications = { send: async (input: unknown) => { sent.push(input); } };
+    const plant = (at: string) => system(() => app.prisma.notification.create({ data: {
+      userId: owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'nudge', body: 'nudge',
+      data: { kind: 'vendor_tier_nudge', vendorId }, createdAt: new Date(at),
+    } }));
+    const now = new Date('2031-03-10T00:30:00.000Z'); // 20:30 GYT on 9 March
+    const planted: string[] = [];
+    try {
+      planted.push((await plant('2031-03-09T03:00:00.000Z')).id); // 23:00 GYT on the 8th: yesterday
+      expect(await system(() => nudgeOwnerOnce(app.prisma, notifications, v, verdict, VENDOR_TIER_CAPS_DEFAULTS, now))).toBe(true);
+      planted.push((await plant('2031-03-09T23:00:00.000Z')).id); // 19:00 GYT on the 9th: today
+      expect(await system(() => nudgeOwnerOnce(app.prisma, notifications, v, verdict, VENDOR_TIER_CAPS_DEFAULTS, now))).toBe(false);
+      expect(sent).toHaveLength(1);
+    } finally {
+      await system(() => app.prisma.notification.deleteMany({ where: { id: { in: planted } } }));
+    }
   });
 
   it('test_nudge_at_sixty_percent: a checkout that lands the store at 60 % of a cap tells the owner once a day, with the DCRA steps', async () => {

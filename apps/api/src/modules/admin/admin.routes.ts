@@ -1,6 +1,10 @@
+import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
+import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
+import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
 import { processorRegisterView } from '../legal/processor-register';
 import { recordExternalProcessingDecision } from '../verification/external-processing';
+import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
@@ -64,6 +68,7 @@ import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
+import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1159,7 +1164,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] Who may suspend whom is decided inside the transition, from
     // the database's view of both accounts (see mover-authority.ts).
@@ -1183,7 +1188,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/users/:id/unsuspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // Restoration obeys the same hierarchy as the act it reverses: an ordinary
     // ADMIN cannot lift a suspension a SUPER_ADMIN imposed on another ADMIN.
@@ -1208,7 +1213,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] The role hierarchy — not an ADMIN-string check — decides who
     // may ban whom, inside the transition: the seed mints the SUPER_ADMIN as
@@ -1237,7 +1242,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // nothing could reverse one. Lifting a ban is SUPER_ADMIN-only; the
     // transition enforces that whichever route asks, so an ordinary ADMIN can
     // never walk a ban back, through this route or /unsuspend.
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
       actorUserId: request.user.userId,
@@ -1374,7 +1379,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // the store stays pending — never ACTIVE and searchable with no
     // subscription, which a failure after the CAS below used to leave behind.
     const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true } });
+      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
+      // suspension source survives it for a later heal or payment to act on.
+      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
       if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
       return tx.vendor.findUniqueOrThrow({ where: { id } });
     });
@@ -2418,6 +2425,69 @@ export async function adminRoutes(app: FastifyInstance) {
       },
     }));
     return { success: true, data: updated };
+  });
+
+  // =========================================================================
+  // [AF-MOB-006] CUSTODY RECOVERY — the operations console's half. A case
+  // after pickup is owned, decided and timed here; the rider and store halves
+  // live in their own routes. Every action is recorded on the case trail and,
+  // for the consequential ones, as an operator action on the order.
+  // =========================================================================
+  const custodyDeps = { prisma: app.prisma, io: app.io, notifications };
+
+  app.get('/custody-cases', { preHandler: [adminGuard] }, async (request) => {
+    const { open, take } = z.object({
+      open: z.enum(['true', 'false']).optional(),
+      take: z.coerce.number().int().min(1).max(200).optional(),
+    }).parse(request.query ?? {});
+    return { success: true, data: await listCases(app.prisma, { open: open !== 'false', ...(take ? { take } : {}) }) };
+  });
+
+  app.get('/custody-cases/:id', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    return { success: true, data: await caseDetail(app.prisma, id) };
+  });
+
+  app.post('/custody-cases/:id/claim', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { ownerUserId } = z.object({ ownerUserId: z.string().min(1).max(64).optional() }).parse(request.body ?? {});
+    const kase = await claimCase(custodyDeps, { caseId: id, adminUserId: request.user.userId, ...(ownerUserId ? { ownerUserId } : {}) });
+    return { success: true, data: { caseId: kase.id, ownerUserId: kase.ownerUserId } };
+  });
+
+  app.post('/custody-cases/:id/direct', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ outcome: z.enum(CUSTODY_CASE_DIRECTABLE) }).parse(request.body ?? {});
+    // The stated reason (header or body) was already demanded by the C3 gate.
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const kase = await directCase({ ...custodyDeps, orderService }, {
+      caseId: id, adminUserId: request.user.userId, outcome: body.outcome, reason,
+      ipAddress: request.ip, userAgent: request.headers['user-agent'],
+    });
+    return { success: true, data: { caseId: kase.id, state: kase.state, version: kase.version } };
+  });
+
+  app.post('/custody-cases/:id/relay', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ riderId: z.string().min(1).max(64) }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const kase = await assignRelay(custodyDeps, {
+      caseId: id, adminUserId: request.user.userId, riderId: body.riderId, reason,
+      ipAddress: request.ip, userAgent: request.headers['user-agent'],
+    });
+    return { success: true, data: { caseId: kase.id, state: kase.state, relayRiderId: kase.relayRiderId, version: kase.version } };
+  });
+
+  app.post('/custody-cases/:id/confirm-return', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const pre = await app.prisma.custodyRecoveryCase.findUnique({ where: { id }, select: { orderId: true } });
+    if (!pre) throw new NotFoundError('RecoveryCase', id);
+    const kase = await confirmReturn({ ...custodyDeps, orderService }, {
+      orderId: pre.orderId, actor: { userId: request.user.userId, role: 'ADMIN' }, reason,
+      ipAddress: request.ip, userAgent: request.headers['user-agent'],
+    });
+    return { success: true, data: { caseId: kase.id, state: kase.state } };
   });
 
   app.put('/orders/:id/cancel', { preHandler: [adminGuard] }, async (request) => {
@@ -4723,6 +4793,53 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
+  // ── MMG payments: support lookup [MMG-CHECKOUT-API.md section 11] ─────────
+  //
+  // Support finds a partner's MMG weekly-fee payment by the Swift reference,
+  // MMG's transaction id, MMG's ledger number or the partner's phone: an exact
+  // match after normalisation, never a substring. Both reads are C1 and each
+  // is audited INSIDE the request, before anything is answered: who, when,
+  // which identifier matched and the checkout ids, never the query itself
+  // (it may be a phone number). A search that finds nothing is recorded too;
+  // a refused read, or a detail of a checkout that is not there, disclosed
+  // nothing and is not.
+  const mmgCheckoutSearchSchema = z.object({
+    q: z.string().max(64).optional(),
+    status: z.enum(MMG_SUPPORT_STATUSES).optional(),
+    cursor: z.string().max(200).optional(),
+    limit: z.coerce.number().int().min(1).max(MMG_SUPPORT_PAGE_MAX).optional(),
+  });
+
+  app.get('/billing/mmg-checkouts', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const query = mmgCheckoutSearchSchema.parse(request.query ?? {});
+    const cursor = query.cursor === undefined ? null : decodeSupportCursor(query.cursor);
+    if (query.cursor !== undefined && !cursor) throw new ValidationError('That page link is not one this list gave out. Start the search again.');
+    const result = await searchMmgCheckouts(tenantPrisma, { tenantId, q: query.q, status: query.status, cursor, limit: query.limit ?? MMG_SUPPORT_PAGE_DEFAULT });
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: {
+        queryType: result.queryType,
+        queryShape: result.queryShape,
+        matchedIds: result.data.map((row) => row.id).join(','),
+        matchedCount: result.data.length,
+        statusFilter: query.status ?? null,
+        page: cursor ? 'next' : 'first',
+      },
+    });
+    return { success: true, data: result.data, nextCursor: result.nextCursor };
+  });
+
+  app.get('/billing/mmg-checkouts/:id', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const detail = await mmgCheckoutSupportDetail(tenantPrisma, { tenantId, id });
+    if (!detail) throw new NotFoundError('MMG checkout', id);
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'DETAIL', matchedIds: detail.id, matchedCount: 1, checkoutStatus: detail.status },
+    });
+    return { success: true, data: detail };
+  });
+
   // ── Collections workbench [san spec PART 21] — the founder's call list ────
 
   /** Tabs of who to call, with tap-to-call + WhatsApp links and the promise
@@ -5154,7 +5271,21 @@ export async function adminRoutes(app: FastifyInstance) {
       tenantPrisma.verificationDocument.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(documents, total, { page, limit, skip }) };
+    // [NO-DEAD-ENDS] A re-submitted document says so: the earlier verdict on
+    // the same applicant's same document, and the reviewer's reason, ride on
+    // the queue row (verification/previous-decision.ts). Only applicants on
+    // this page are read, through the same tenant-scoped client; a failed
+    // lookup degrades to null and never fails the queue.
+    const rows = await withPreviousDecisions(
+      documents,
+      (earlierWhere) => tenantPrisma.verificationDocument.findMany({
+        where: earlierWhere,
+        select: { id: true, userId: true, docType: true, status: true, reviewNote: true, reviewedAt: true, createdAt: true },
+      }),
+      (err) => request.log.warn({ errName: err instanceof Error ? err.name : typeof err }, 'review queue: earlier-decision lookup failed; rows sent without it'),
+    );
+
+    return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
 
   app.put('/verification/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -6310,4 +6441,17 @@ export async function adminRoutes(app: FastifyInstance) {
     await audit(request.user.userId, 'DISCOVERY_CATEGORY_MERGE', 'DiscoveryCategory', request.params.id, { targetId, ...result.dedupes }, request);
     return { success: true, data: result };
   });
+
+  // [PT-2] Card rail v2 read views (CARD-CHECKOUT-API.md section 8): sessions,
+  // their evidence (hashes, never payloads) and a subscription's cards. No
+  // vault token, state, page address or provider reference is ever returned.
+  app.get('/billing/card-sessions', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSessions(app.prisma, request.query),
+  }));
+  app.get<{ Params: { id: string } }>('/billing/card-sessions/:id', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminCardSession(app.prisma, request.params.id),
+  }));
+  app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
+    success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
 }

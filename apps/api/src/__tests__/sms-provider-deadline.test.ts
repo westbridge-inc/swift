@@ -10,13 +10,31 @@ import { getChannels } from '../providers/notifications/channels';
 
 const accountSid = `AC${'a'.repeat(32)}`;
 
+// Outside production the real adapter texts only allowlisted numbers
+// (sms-recipient-allowlist.ts). This suite tests the adapter's deadline, so it
+// lists the number it texts.
+const RECIPIENT = '+5926000000';
+
 function configure() {
+  vi.stubEnv('SMS_RECIPIENT_ALLOWLIST', RECIPIENT);
   vi.stubEnv('NOTIFICATION_PROVIDER', 'twilio');
   vi.stubEnv('TWILIO_ACCOUNT_SID', accountSid);
   vi.stubEnv('TWILIO_API_KEY_SID', `SK${'b'.repeat(32)}`);
   vi.stubEnv('TWILIO_API_KEY_SECRET', 'test-key-secret');
   vi.stubEnv('TWILIO_FROM', '+15550000000');
   vi.stubEnv('TWILIO_MESSAGING_SERVICE_SID', '');
+}
+
+// [REVIEW-PARTNER] getChannels() seals every channel for the store-review
+// fiction: before the adapter runs, the seal reads (from the database) whether
+// the recipient belongs to the fiction. The deadline under test is the
+// ADAPTER's, armed when it starts — so these cases fake only the adapter's
+// timer functions (the seal's database I/O must still run), and start the
+// clock once the adapter has actually been reached.
+const FAKE_TIMERS = { toFake: ['setTimeout', 'clearTimeout'] as ('setTimeout' | 'clearTimeout')[] };
+async function untilAdapterReached(fetchStub: { mock: { calls: unknown[] } }): Promise<void> {
+  for (let i = 0; i < 2_000 && fetchStub.mock.calls.length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  expect(fetchStub.mock.calls.length, 'the Twilio adapter was reached').toBeGreaterThan(0);
 }
 
 afterEach(() => {
@@ -48,7 +66,7 @@ describe('Twilio SMS whole-request deadline', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       let outcome = 'still pending';
-      const send = getChannels().sms.sendSms('+5926000000', 'test')
+      const send = getChannels().sms.sendSms(RECIPIENT, 'test')
         .then(() => { outcome = 'unexpected success'; }, (error: Error) => { outcome = error.message; });
       await vi.waitUntil(() => headersReceived, { timeout: 2_000, interval: 5 });
       expect(headersSent).toBe(true);
@@ -66,17 +84,19 @@ describe('Twilio SMS whole-request deadline', () => {
 
   it.each(['headers', 'json'])('settles even when the %s phase ignores abort', async (phase) => {
     configure();
-    vi.useFakeTimers();
+    vi.useFakeTimers(FAKE_TIMERS);
     let signal: AbortSignal | undefined;
     const body = vi.fn(() => new Promise(() => {}));
-    vi.stubGlobal('fetch', vi.fn((_url: unknown, init: { signal: AbortSignal }) => {
+    const fetchStub = vi.fn((_url: unknown, init: { signal: AbortSignal }) => {
       signal = init.signal;
       if (phase === 'headers') return new Promise(() => {});
       return Promise.resolve({ ok: true, status: 201, json: body });
-    }));
+    });
+    vi.stubGlobal('fetch', fetchStub);
     let outcome = 'still pending';
-    const send = getChannels().sms.sendSms('+5926000000', 'test')
+    const send = getChannels().sms.sendSms(RECIPIENT, 'test')
       .then(() => { outcome = 'unexpected success'; }, (error: Error) => { outcome = error.message; });
+    await untilAdapterReached(fetchStub);
     await vi.advanceTimersByTimeAsync(7_999);
     expect(outcome).toBe('still pending');
     await vi.advanceTimersByTimeAsync(1);
@@ -89,14 +109,14 @@ describe('Twilio SMS whole-request deadline', () => {
 
   it.each(['success', 'http error', 'invalid body', 'network error'])('clears the deadline after %s', async (outcome) => {
     configure();
-    vi.useFakeTimers();
+    vi.useFakeTimers(FAKE_TIMERS);
     const fetchStub = vi.fn();
     if (outcome === 'network error') fetchStub.mockRejectedValue(new Error('synthetic network error'));
     else if (outcome === 'http error') fetchStub.mockResolvedValue(new Response('unavailable', { status: 503 }));
     else if (outcome === 'invalid body') fetchStub.mockResolvedValue(new Response('not json', { status: 201 }));
     else fetchStub.mockResolvedValue(new Response(JSON.stringify({ sid: `SM${'a'.repeat(32)}` }), { status: 201 }));
     vi.stubGlobal('fetch', fetchStub);
-    const send = getChannels().sms.sendSms('+5926000000', 'test');
+    const send = getChannels().sms.sendSms(RECIPIENT, 'test');
     if (outcome === 'success') await expect(send).resolves.toEqual({ ref: `SM${'a'.repeat(32)}` });
     else await expect(send).rejects.toThrow(/^Twilio SMS /);
     expect(vi.getTimerCount()).toBe(0);
