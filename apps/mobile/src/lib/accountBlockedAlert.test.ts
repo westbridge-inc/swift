@@ -37,3 +37,13 @@ describe('explainSessionEnded', () => {
     expect(alert).not.toHaveBeenCalled();
   });
 });
+
+describe('openSupportMail', () => {
+  it('a phone with no mail app is told where to write, never a silent tap', async () => {
+    const { openSupportMail } = await import('./accountBlockedAlert');
+    openURL.mockImplementationOnce(() => Promise.reject(new Error('no mail app')));
+    openSupportMail('mailto:support@swiftgy.com?subject=x', 'support@swiftgy.com');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(alert).toHaveBeenCalledWith('Couldn’t open your mail app', 'Write to support@swiftgy.com.');
+  });
+});

@@ -52,6 +52,8 @@ describe('[NO-DEAD-ENDS] a blocked account at the code screen gets a door, not j
     expect(source).toContain('const blocked = verify.isError ? accountBlockedOf(verify.error) : null;');
     expect(source).toMatch(/blocked\?\.message \?\?/);
     expect(source).toContain('testID="otp-account-blocked-support"');
-    expect(source).toContain('accountSupportMailto(blocked, phone)');
+    expect(source).toContain('openSupportMail(accountSupportMailto(blocked, phone), blocked.supportEmail)');
+    // The code screen is mounted by web suites too: no kit or animation import rides in with the door.
+    expect(source).not.toContain("from '../../lib/openExternal'");
   });
 });

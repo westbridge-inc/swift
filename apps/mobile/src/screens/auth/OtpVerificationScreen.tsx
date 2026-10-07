@@ -9,7 +9,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { formatResendWait, OTP_RESEND_WINDOW_S, otpCooldownOf } from '../../lib/otpCooldown';
 import { useCountdown } from '../../hooks/useCountdown';
 import { accountBlockedOf, accountSupportMailto } from '../../lib/accountBlocked';
-import { openExternal } from '../../lib/openExternal';
+import { openSupportMail } from '../../lib/accountBlockedAlert';
 import { Header, PillButton, Screen, T } from '../../kit';
 
 const CODE_LEN = 6;
@@ -153,12 +153,7 @@ export function OtpVerificationScreen() {
             icon="mail"
             size="md"
             style={{ marginTop: space.md, alignSelf: 'flex-start' }}
-            onPress={() => {
-              void openExternal(
-                accountSupportMailto(blocked, phone),
-                `Couldn’t open your mail app — write to ${blocked.supportEmail}.`,
-              );
-            }}
+            onPress={() => openSupportMail(accountSupportMailto(blocked, phone), blocked.supportEmail)}
           />
         ) : null}
 
