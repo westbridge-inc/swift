@@ -65,7 +65,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'booking_confirmed', 'booking_slot_declined', 'booking_completed', 'booking_cancelled',
     'booking_reminder', 'booking_rescheduled',
     // Safety of the person receiving it (the driver confirm is a job update)
-    'guardian_checkin', 'trip_share_rotated', 'liveness_midshift_missed', 'liveness_locked',
+    'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',
     // Money a partner must act on (billing_suspended_nudge is about a suspension,
     // not a marketing nudge, so it stays loud)
