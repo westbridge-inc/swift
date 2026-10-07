@@ -229,6 +229,18 @@ function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
   return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 
+/** [REVIEW-PARTNER] Is this the store-review fiction? Tenants are not tenant-scoped rows.
+ *  A lookup that fails answers "no": a real operator page is never lost to a lookup failure. */
+export async function isReviewTenantId(prisma: Pick<PrismaClient, 'tenant'>, tenantId: string): Promise<boolean> {
+  try {
+    const t = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { kind: true } });
+    return t?.kind === 'REVIEW';
+  } catch (err) {
+    log().error({ err }, '[REVIEW-PARTNER] could not read the tenant kind for a page — delivering it');
+    return false;
+  }
+}
+
 export async function notifyAdmins(
   prisma: PrismaClient,
   notifications: NotificationService,
@@ -291,6 +303,13 @@ export async function notifyAdmins(
   // dedup window kept the outage dark for 15 minutes. Paging operators is a
   // sanctioned cross-tenant read; it must not depend on whose request it
   // happens to run inside.
+  // [REVIEW-PARTNER] The store-review fiction pages NO real operator: an admin page about a
+  // REVIEW tenant is suppressed here, at the one seam every admin page passes. (A durable
+  // caller's requireAll is satisfied: there is nobody to reach.)
+  if (input.tenantId && await isReviewTenantId(prisma, input.tenantId)) {
+    log().info({ kind: input.data?.['kind'] ?? null }, 'review-tenant send suppressed: admin page');
+    return 0;
+  }
   const admins = await runWithoutTenant(() => prisma.user.findMany({
     where: input.tenantId
       ? {

@@ -235,11 +235,15 @@ describe('Twilio outbound SMS credentials and error boundary', () => {
     configure();
     vi.useFakeTimers();
     try {
-      vi.stubGlobal('fetch', vi.fn((_url: string, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      const fetchMock = vi.fn((_url: string, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
         init.signal.addEventListener('abort', () => reject(new Error('test-key-secret abort-private-body')));
-      })));
+      }));
+      vi.stubGlobal('fetch', fetchMock);
       const pending = expect(getChannels().sms.sendSms('+5926000000', 'test'))
         .rejects.toThrow(/^Twilio SMS timed out$/);
+      // [REVIEW-PARTNER] The outbound seal reads the destination first: the request (and its
+      // eight-second timer) starts once that read is done. Advance the clock from the request's start.
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1), { timeout: 10_000, interval: 5 });
       await vi.advanceTimersByTimeAsync(8_000);
       await pending;
     } finally {
