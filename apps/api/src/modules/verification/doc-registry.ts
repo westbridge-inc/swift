@@ -332,24 +332,41 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
       });
       docTypes += 1;
     }
+    // [VERIFY-DOCS] One requirement set per (role, tier): its required list's items are BLOCKING in
+    // their published order; its `<KEY>_OPTIONAL` list's items join the same set as NON-blocking
+    // (a type both lists name stays blocking). The set is RECONCILED to the lists — an item they no
+    // longer name is removed — so the registry never keeps a requirement the owner has lifted.
+    const declared = new Map<string, { actorRole: string; tier: string; items: Map<string, { isBlocking: boolean; sortOrder: number }> }>();
     for (const [listKey, codes] of Object.entries(lists)) {
       // [DOC-1 §3.6 · P3-2] A <ROLE>_UNREGISTERED list is the same role's requirement set at the
       // UNREGISTERED tier — the registry's own tier column, not a second role.
-      const { actorRole, tier } = splitChecklistKey(listKey);
+      const { actorRole, tier, optional } = splitChecklistKey(listKey);
+      const key = `${actorRole}|${tier}`;
+      const entry = declared.get(key) ?? { actorRole, tier, items: new Map() };
+      declared.set(key, entry);
+      for (const [i, legacyCode] of codes.entries()) {
+        const code = registryCode(c.code, legacyCode);
+        const had = entry.items.get(code);
+        if (optional) { if (!had) entry.items.set(code, { isBlocking: false, sortOrder: 1000 + i }); }
+        else entry.items.set(code, { isBlocking: true, sortOrder: i });
+      }
+    }
+    for (const { actorRole, tier, items } of declared.values()) {
       const set = await prisma.requirementSet.upsert({
         where: { countryCode_actorRole_tier_effectiveFrom: { countryCode: c.code, actorRole, tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM } },
         create: { countryCode: c.code, actorRole, tier, effectiveFrom: REGISTRY_EFFECTIVE_FROM },
         update: {},
       });
       requirementSets += 1;
-      for (const [i, legacyCode] of codes.entries()) {
+      for (const [docTypeCode, { isBlocking, sortOrder }] of items) {
         await prisma.requirementItem.upsert({
-          where: { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode: registryCode(c.code, legacyCode) } },
-          create: { requirementSetId: set.id, docTypeCode: registryCode(c.code, legacyCode), isBlocking: true, minCount: 1, sortOrder: i },
-          update: { sortOrder: i },
+          where: { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode } },
+          create: { requirementSetId: set.id, docTypeCode, isBlocking, minCount: 1, sortOrder },
+          update: { isBlocking, sortOrder },
         });
         requirementItems += 1;
       }
+      await prisma.requirementItem.deleteMany({ where: { requirementSetId: set.id, docTypeCode: { notIn: [...items.keys()] } } });
     }
   }
   const extraDocTypes = await seedExtraDocTypes(prisma);
@@ -538,11 +555,16 @@ export async function seedDocFields(prisma: PrismaClient): Promise<number> {
  */
 export const UNREGISTERED_TIER = 'UNREGISTERED';
 export const UNREGISTERED_LIST_SUFFIX = '_UNREGISTERED';
-/** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; anything else is the STANDARD tier. */
-export function splitChecklistKey(listKey: string): { actorRole: string; tier: string } {
-  return listKey.endsWith(UNREGISTERED_LIST_SUFFIX)
-    ? { actorRole: listKey.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER }
-    : { actorRole: listKey, tier: REGISTRY_TIER };
+/** [VERIFY-DOCS] `<KEY>_OPTIONAL` names documents the same role MAY add: never a gate. */
+export const OPTIONAL_LIST_SUFFIX = '_OPTIONAL';
+/** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; MOVER_OPTIONAL → { actorRole: 'MOVER', optional };
+ *  anything else is the STANDARD tier's required list. */
+export function splitChecklistKey(listKey: string): { actorRole: string; tier: string; optional: boolean } {
+  const optional = listKey.endsWith(OPTIONAL_LIST_SUFFIX);
+  const key = optional ? listKey.slice(0, -OPTIONAL_LIST_SUFFIX.length) : listKey;
+  return key.endsWith(UNREGISTERED_LIST_SUFFIX)
+    ? { actorRole: key.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER, optional }
+    : { actorRole: key, tier: REGISTRY_TIER, optional };
 }
 
 export async function registryChecklist(prisma: PrismaClient, countryCode: string, actorRole: string, now = new Date(), tier: string = REGISTRY_TIER): Promise<string[] | null> {
@@ -555,9 +577,11 @@ export async function registryChecklist(prisma: PrismaClient, countryCode: strin
     orderBy: { effectiveFrom: 'desc' },
     include: { items: { include: { docType: { select: { legacyCode: true, isActive: true } } }, orderBy: { sortOrder: 'asc' } } },
   });
-  if (!set || set.items.length === 0) return null;
+  // [VERIFY-DOCS] The checklist is the BLOCKING items; an optional item never becomes a requirement.
+  const blocking = set?.items.filter((i) => i.isBlocking) ?? [];
+  if (!set || blocking.length === 0) return null;
   if (!set.items.every((i) => i.docType.isActive)) return null;
-  return set.items.map((i) => i.docType.legacyCode);
+  return blocking.map((i) => i.docType.legacyCode);
 }
 
 /** [DOC-1 Part XIX · P19] The identity types whose VALID record lets a proprietor's verified name stand in for a business name ("trading as"). Registry text (DOC-INV-2). */
@@ -568,5 +592,8 @@ export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
+/** [VERIFY-DOCS · owner rulings 1–3, 6 Oct 2026] The character document: optional for movers (an approved, current one is
+ *  the "Police-cleared" flag), still required where a list names it. Registry text (DOC-INV-2). */
+export const POLICE_CLEARANCE_DOC_TYPE = 'police_clearance';
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
