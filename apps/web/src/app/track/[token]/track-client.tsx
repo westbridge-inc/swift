@@ -17,10 +17,10 @@ const POLL_MS = 5000;
 interface ParcelView {
   orderNumber: string;
   status: string;
-  courierRecipientName: string | null;
-  pickupAddress: string | null;
-  deliveryAddress: string | null;
-  estimatedDeliveryTime: number | null;
+  courierRecipientName?: string | null;
+  pickupAddress?: string | null;
+  deliveryAddress?: string | null;
+  estimatedDeliveryTime?: number | null;
   /** [W-47] `lastLocationUpdate` is the POSITION's own timestamp: the page shows how old the
    *  point is, not how recently it happened to fetch. */
   rider: { currentLat: number | null; currentLng: number | null; lastLocationUpdate?: string | null; user: { firstName: string | null } | null } | null;
@@ -45,7 +45,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 // RETURNED is over too: the page stops polling a parcel that has gone back.
-const TERMINAL = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED', 'RETURNED']);
+const TERMINAL = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED', 'RETURNED', 'REFUNDED', 'FAILED']);
 
 export function TrackClient({ token }: { token: string }) {
   const [view, setView] = useState<ParcelView | null>(null);
@@ -200,12 +200,12 @@ export function TrackClient({ token }: { token: string }) {
               </div>
             ) : null}
 
-            <div className="mt-3 sw-card p-4">
+            {!TERMINAL.has(view.status) ? <div className="mt-3 sw-card p-4">
               <p className="sw-eyebrow">From</p>
               <p className="mt-0.5 text-sm">{view.pickupAddress ?? '—'}</p>
               <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-[var(--swift-muted)]">To</p>
               <p className="mt-0.5 text-sm">{view.deliveryAddress ?? '—'}</p>
-            </div>
+            </div> : null}
           </>
         )}
       </div>
