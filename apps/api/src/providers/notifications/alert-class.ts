@@ -79,6 +79,9 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_forced_offline', 'verification_vehicle_lapsed',
     'verification_l2', 'trust_l3', 'compliance_review_failed',
+    // Account security: the password changed and other devices were signed out;
+    // password sign-in paused after many wrong attempts
+    'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
     'low_stock', 'staff_added', 'review_response', 'rating_removed', 'category_request_resolved',
     'category_backfill_review', 'vendor_tier_promoted', 'support_update', 'store_pin_moved',

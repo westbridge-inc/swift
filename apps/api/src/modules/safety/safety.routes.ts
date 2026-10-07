@@ -206,19 +206,40 @@ export async function safetyRoutes(app: FastifyInstance) {
   });
 
   // [S-19] Ops alerts: the durable page with per-recipient acknowledgement.
+  // [M009] Platform (null-tenant) alerts belong to platform operators: only a
+  // SUPER_ADMIN lists or acknowledges them (coordinator ruling, 5 Oct 2026). A
+  // tenant's ADMIN sees and acknowledges their own tenant's alerts, named
+  // explicitly by tenant, never by whatever scope the request happens to carry.
   const { acknowledgeOpsAlert, runOpsAlertDrillIfDue } = await import('./ops-alert');
+  const opsAlertInclude = { recipients: { select: { userId: true, deliveredAt: true, seenAt: true, ackedAt: true } } } as const;
   app.get('/ops-alerts', auth, async (request) => {
-    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can list alerts.');
-    const rows = await app.prisma.opsAlert.findMany({ where: { acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: { recipients: { select: { userId: true, deliveredAt: true, seenAt: true, ackedAt: true } } } });
+    const role = request.user.role;
+    if (isPlatformResponder(role)) {
+      const rows = await runWithoutTenant(() => app.prisma.opsAlert.findMany({ where: { acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: opsAlertInclude }));
+      return { success: true, data: rows };
+    }
+    if (role !== 'ADMIN') throw new ForbiddenError('Only ops can list alerts.');
+    const tenantId = request.tenantId;
+    if (!tenantId) throw new ForbiddenError('Platform alerts are for platform operators.');
+    const rows = await app.prisma.opsAlert.findMany({ where: { tenantId, acknowledgedAt: null, closedAt: null }, orderBy: { createdAt: 'desc' }, take: 100, include: opsAlertInclude });
     return { success: true, data: rows };
   });
   app.post<{ Params: { id: string } }>('/ops-alerts/:id/ack', auth, async (request) => {
-    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can acknowledge an alert.');
-    const res = await acknowledgeOpsAlert(app.prisma, { opsAlertId: request.params.id, userId: request.user.userId });
+    const role = request.user.role;
+    if (!isOps(role)) throw new ForbiddenError('Only ops can acknowledge an alert.');
+    const alert = await runWithoutTenant(() => app.prisma.opsAlert.findUnique({ where: { id: request.params.id }, select: { id: true, tenantId: true } }));
+    if (!alert) throw new NotFoundError('OpsAlert', request.params.id);
+    if (!isPlatformResponder(role)) {
+      if (alert.tenantId === null) throw new ForbiddenError('Platform alerts are acknowledged by platform operators.');
+      if (alert.tenantId !== request.tenantId) throw new NotFoundError('OpsAlert', request.params.id);
+    }
+    const res = await asResponder(role, () => acknowledgeOpsAlert(app.prisma, { opsAlertId: alert.id, userId: request.user.userId }));
+    if (res.refused.length > 0) throw new ForbiddenError('You are not a responder for this alert.');
     return { success: true, data: { acknowledged: res.acknowledged.length > 0 } };
   });
   app.post('/ops-alerts/drill', auth, async (request) => {
-    if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can run a drill.');
+    // A drill is a PLATFORM page (no tenant): platform operators only [M009].
+    if (!isPlatformResponder(request.user.role)) throw new ForbiddenError('Only platform operators can run a drill.');
     process.env['OPS_ALERT_DRILL_INTERVAL_DAYS'] ??= '7';
     const { openOpsAlert } = await import('./ops-alert');
     const res = await openOpsAlert(app.prisma, new NotificationService(app.prisma, app.io), { kind: 'DRILL', tenantId: null, title: '🧪 Ops alert drill — acknowledge now', body: 'A manual drill of the SOS paging path. Acknowledge it before the deadline; unacknowledged, it escalates like a real SOS.', data: { kind: 'ops_alert_drill', manual: true, by: request.user.userId } });

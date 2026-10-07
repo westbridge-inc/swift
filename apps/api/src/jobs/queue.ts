@@ -856,24 +856,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.log.info({ headSeq: anchor ? String(anchor.headSeq) : null }, 'audit chain anchored');
       }
       if (job.name === 'backup-freshness') {
-        const { checkBackupFreshness } = await import('../modules/ops/backup-freshness');
-        const result = await checkBackupFreshness(ctx.prisma);
-        if (result.stale) {
-          const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
-          await opsPageOnce(ctx, 'backup-freshness', 20 * 3600, () =>
-            notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
-              // Platform-wide infrastructure alarm, not one tenant's event.
-              tenantId: null,
-              title: 'Backups are not safe',
-              body: result.reason,
-              data: {
-                kind: 'ops_backup_stale',
-                ageHours: result.ageHours,
-                offsite: result.offsite,
-              },
-            }),
-          );
-        }
+        // [75] A platform page: durable OpsAlert, SUPER_ADMINs in-app + push,
+        // on-call phones texted, escalated until acknowledged.
+        const { pageBackupFreshness } = await import('../modules/ops/backup-freshness');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { result } = await pageBackupFreshness({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
         ctx.log.info({ ...result }, 'backup freshness checked');
         return;
       }
@@ -1444,8 +1431,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const { getChannels } = await import('../providers/notifications/channels');
           const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
           await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[] }));
-          for (const id of esc.escalated) {
+          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
+          // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+          for (const id of esc.platformPage) {
             await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
               pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
             ).catch(() => {});
