@@ -1026,7 +1026,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
-      : safeVendors.map((v) => ({ ...v, subscription: undefined }));
+      : safeVendors.map((v) => ({ ...v, subscription: undefined, vatRegistrationNumber: undefined }));
     return {
       success: true,
       data: { id: access.ownerId, userId: request.user.userId, vendors: visible, myRole: access.role },
@@ -1324,6 +1324,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
+        ...(access.role !== 'OWNER' ? { vatRegistrationNumber: undefined } : {}),
         ...link,
         mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
         mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),

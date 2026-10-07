@@ -42,10 +42,13 @@ export async function ensureHireSplitStarted(db: PrismaClient, now: Date = new D
   if (existing) return existing;
   try {
     await db.platformConfig.create({ data: { key: HIRE_SPLIT_STARTED_KEY, value: { startedAt: now.toISOString() } } });
-  } catch {
-    // another node won the race: its moment stands
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'P2002') throw error;
+    // Another node won the unique-key race. Its persisted moment stands.
   }
-  return (await hireSplitStartedAt(db)) ?? now;
+  const persisted = await hireSplitStartedAt(db);
+  if (!persisted) throw new Error('The hire-car licence transition start was not persisted.');
+  return persisted;
 }
 
 /** The last moment an old permit still counts as the two new licences. */

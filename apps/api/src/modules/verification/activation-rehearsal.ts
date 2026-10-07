@@ -79,7 +79,7 @@ export async function rehearseActivation(
   for (const set of sets) {
     // [VERIFY-DOCS] A set's checklist is its BLOCKING items (registryChecklist); optional items never gate.
     const blocking = set.items.filter((i) => i.isBlocking);
-    if (blocking.length === 0 || !set.items.every((i) => activeAfter.has(i.docType.code))) continue;
+    if (blocking.length === 0 || !blocking.every((i) => activeAfter.has(i.docType.code))) continue;
     const registryList = blocking.map((i) => i.docType.legacyCode);
     const jsonList = json[set.actorRole] ?? [];
     afterList.set(set.actorRole, registryList);

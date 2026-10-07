@@ -94,7 +94,6 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   trade_licence: 365,
   // [VERIFY-DOCS · ruling 8] A Guyana driver's licence is valid 5 years (GRA).
   drivers_licence: 5 * 365,
-  vehicle_registration: 3 * 365,
   // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
   self_declaration_unregistered: 365,
 };
@@ -614,7 +613,7 @@ export async function registryChecklist(prisma: PrismaClient, countryCode: strin
   // [VERIFY-DOCS] The checklist is the BLOCKING items; an optional item never becomes a requirement.
   const blocking = set?.items.filter((i) => i.isBlocking) ?? [];
   if (!set || blocking.length === 0) return null;
-  if (!set.items.every((i) => i.docType.isActive)) return null;
+  if (!blocking.every((i) => i.docType.isActive)) return null;
   return blocking.map((i) => i.docType.legacyCode);
 }
 

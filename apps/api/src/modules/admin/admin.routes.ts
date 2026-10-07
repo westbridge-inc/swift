@@ -1308,7 +1308,7 @@ export async function adminRoutes(app: FastifyInstance) {
       app.prisma.vendor.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors, total, { page, limit, skip }) };
+    return { success: true, ...paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip }) };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1319,7 +1319,7 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       orderBy: { createdAt: 'asc' },
     });
-    return { success: true, data: vendors };
+    return { success: true, data: vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })) };
   });
 
   /** One business, whole story: profile, owner, sibling stores, subscription,
@@ -1353,6 +1353,7 @@ export async function adminRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...vendor,
+        vatRegistrationNumber: undefined,
         recentOrders: recentOrders.map((o) => ({ ...o, totalAmount: Number(o.totalAmount) })),
       },
     };

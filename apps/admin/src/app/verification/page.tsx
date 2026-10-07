@@ -16,7 +16,7 @@ const EXPIRING_DOC_TYPES = [
   // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences that replace the permit
   'hire_car_driver_licence', 'hire_car_vehicle_licence',
   'road_service_licence', 'food_handler_cert', 'gra_restaurant_licence',
-  'drivers_licence', 'vehicle_registration',
+  'drivers_licence',
   // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate
   'liquor_licence', 'sanitary_certificate', 'trade_licence',
   // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year

@@ -49,7 +49,7 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
 }
 
 /** The records themselves: the evidence rule before any transition allowance. */
-async function recordEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
+export async function recordEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
   const vehicles = await db.subjectLink.findMany({
     where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
     select: { subjectId: true },
@@ -93,6 +93,8 @@ async function recordEvidenceFor(db: EvidenceDb, userId: string, checklist: read
  */
 export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], currentSubjectId?: string | null): Promise<boolean> {
   if (checklist.length === 0) return false;
+  // Replacement licences require current evidence or the explicit permit grace, never a legacy flag.
+  if (checklist.some((type) => HIRE_SPLIT_DOC_TYPES.includes(type))) return true;
   // Historical links and retired submissions still establish that proof was
   // filed. A missing current record is not a never-filed legacy account.
   const vehicles = await db.subjectLink.findMany({

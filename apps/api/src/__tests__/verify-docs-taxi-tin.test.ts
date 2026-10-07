@@ -17,7 +17,7 @@
  * Names of new types and keys are plain strings here, so on the old code every case fails on its
  * own assertion rather than on an import.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { VehicleType } from '@prisma/client';
@@ -29,6 +29,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
+import { adminRoutes } from '../modules/admin/admin.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { VerificationService } from '../modules/verification/verification.service';
 import { evaluateMoverDocuments } from '../modules/verification/mover-document-authority';
@@ -36,11 +37,13 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { moverRequiredFrom } from '../modules/country/country-config.service';
-import { AUTO_APPROVE_EXPIRY_DAYS, ALWAYS_REVIEW_LEGACY_CODES, BUCKET_OF, FIELD_CATALOGUE, VALIDATOR_CATALOGUE } from '../modules/verification/doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, ALWAYS_REVIEW_LEGACY_CODES, BUCKET_OF, FIELD_CATALOGUE, VALIDATOR_CATALOGUE, registryChecklist, registryCode } from '../modules/verification/doc-registry';
 import { VALIDATOR_IMPLEMENTATIONS } from '../modules/verification/validators';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { rehearseActivation } from '../modules/verification/activation-rehearsal';
+import { ensureHireSplitStarted } from '../modules/verification/hire-permit-grace';
 
 const DAY = 86_400_000;
 const SPLIT_KEY = 'documents.hire_car_split_started_at';
@@ -50,6 +53,7 @@ const users: string[] = [];
 let app: FastifyInstance;
 let service: VerificationService;
 let adminId: string;
+let adminToken: string;
 let priorSplit: unknown;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'verify-docs-taxi-tin-test');
 
@@ -60,12 +64,15 @@ beforeAll(async () => {
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
+  await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
   const admin = await app.prisma.user.create({ data: {
-    phone: `+${phoneBase}`, firstName: 'Taxi', lastName: 'Reviewer', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, selfieCapturedAt: new Date(),
+    phone: `+${phoneBase}`, firstName: 'Taxi', lastName: 'Reviewer', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, selfieCapturedAt: new Date(), admin: { create: { permissions: ['*'] } },
   } });
   users.push(admin.id); adminId = admin.id;
+  adminToken = app.jwt.sign({ userId: admin.id, role: 'ADMIN', jti: nanoid() });
+  await app.prisma.session.create({ data: { userId: admin.id, token: adminToken, refreshToken: nanoid(48), deviceId: nanoid(), deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
   priorSplit = (await app.prisma.platformConfig.findUnique({ where: { key: SPLIT_KEY } }))?.value ?? null;
 });
 
@@ -116,7 +123,8 @@ async function approve(docId: string, docType: string, expiresInDays = 300) {
 const statusOf = async (token: string) => (await app.inject({ method: 'GET', url: '/api/v1/verification/status?role=MOVER', headers: { authorization: `Bearer ${token}` } })).json().data as {
   checklist: string[]; missing: string[]; roleVerified: boolean; documents: Array<{ docType: string; status: string }>;
 };
-const live = (userId: string) => service.getLiveOperationStatus(userId, { vehicleType: 'CAR', kind: 'DRIVER' });
+const live = async (userId: string) => service.getLiveOperationStatus(userId, { vehicleType: 'CAR', kind: 'DRIVER',
+  legacyVerified: (await app.prisma.driver.findUniqueOrThrow({ where: { userId }, select: { documentsVerified: true } })).documentsVerified });
 /** The live verdict's deadline: the moment a job claim (checked again under lock) stops trusting it. */
 const validUntil = async (userId: string) => (await evaluateMoverDocuments(app.prisma, userId, { vehicleType: 'CAR', kind: 'DRIVER' })).validUntil;
 
@@ -135,10 +143,20 @@ async function legacyTaxi(permitDays = 300) {
     fileUrl: await ownedVerificationFixture(app.prisma, m.userId, 'v5-permit'), subjectId: registration.subjectId,
   } });
   await approve(permit.id, 'hire_car_permit', permitDays);
+  await app.prisma.driver.update({ where: { userId: m.userId }, data: { documentsVerified: true } });
   return { ...m, permitId: permit.id };
 }
 
 describe('[V5 · ruling 8] the taxi’s seven documents', () => {
+  it('a genuine vehicle registration is approved without inventing an expiry', async () => {
+    const m = await driver();
+    const doc = await submit(m, 'vehicle_registration');
+    expect(doc.statusCode).toBe(201);
+    const approved = await service.approveDocument(doc.json().data.id, adminId);
+    expect(approved.status).toBe('APPROVED');
+    expect(approved.expiresAt).toBeNull();
+    expect(AUTO_APPROVE_EXPIRY_DAYS).not.toHaveProperty('vehicle_registration');
+  });
   it.each(['CAR', 'WAGON_CAR'] as const)('%s requires exactly the seven, in order', (vt) => {
     expect(moverRequiredFrom(DEFAULT_DOCUMENT_CHECKLISTS, vt)).toEqual(TAXI7);
   });
@@ -193,6 +211,24 @@ describe('[V5 · ruling 8] the taxi’s seven documents', () => {
 });
 
 describe('[V5 · transition] an approved permit counts as both new licences for 60 days, or until it expires', () => {
+  it('initialization refuses a failed write instead of starting with no persisted grace', async () => {
+    await app.prisma.platformConfig.deleteMany({ where: { key: SPLIT_KEY } });
+    const failure = vi.spyOn(app.prisma.platformConfig, 'create').mockRejectedValueOnce(new Error('synthetic grace write unavailable'));
+    try {
+      await expect(ensureHireSplitStarted(app.prisma)).rejects.toThrow('synthetic grace write unavailable');
+      expect(await app.prisma.platformConfig.findUnique({ where: { key: SPLIT_KEY } })).toBeNull();
+    } finally { failure.mockRestore(); }
+  });
+
+  it('a unique-create race keeps the other node’s persisted start', async () => {
+    await setSplitStarted(10);
+    const existing = await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: SPLIT_KEY } });
+    const raced = vi.spyOn(app.prisma.platformConfig, 'findUnique').mockResolvedValueOnce(null);
+    try {
+      expect((await ensureHireSplitStarted(app.prisma)).toISOString()).toBe((existing.value as { startedAt: string }).startedAt);
+    } finally { raced.mockRestore(); }
+  });
+
   it('during the 60 days: verified and live, with the two new licences asked for', async () => {
     await setSplitStarted(10);
     const m = await legacyTaxi();
@@ -218,6 +254,57 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     expect(until).toBeGreaterThan(Date.now() + 3 * DAY);
     await app.prisma.verificationDocument.update({ where: { id: m.permitId }, data: { expiresAt: new Date(Date.now() - DAY) } });
     expect((await live(m.userId)).allowed).toBe(false);
+  });
+
+  it('a reminder uses the permit’s earlier deadline rather than promising the whole remaining window', async () => {
+    await setSplitStarted(10);
+    const m = await legacyTaxi(5);
+    await service.hirePermitGraceSweep();
+    const notes = await app.prisma.notification.findMany({ where: { userId: m.userId, title: { contains: 'hire' } } });
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.data).toMatchObject({ daysLeft: 5 });
+    expect(notes[0]!.body).toContain(new Date(Date.now() + 5 * DAY).toISOString().slice(0, 10));
+  });
+
+  it('a permit whose retention clock elapsed never promises continuing eligibility', async () => {
+    await setSplitStarted(10);
+    const m = await legacyTaxi();
+    await app.prisma.verificationDocument.update({ where: { id: m.permitId }, data: { retentionExpiresAt: new Date(Date.now() - DAY) } });
+    expect(await app.prisma.documentRecord.count({ where: { submissionId: m.permitId, status: 'VALID' } })).toBe(1);
+    await service.hirePermitGraceSweep();
+    expect(await app.prisma.notification.count({ where: { userId: m.userId, title: { contains: 'hire' } } })).toBe(0);
+  });
+
+  it('an expired transition permit asks for the replacement licences and is never called optional', async () => {
+    await setSplitStarted(10);
+    const m = await legacyTaxi();
+    await app.prisma.verificationDocument.update({ where: { id: m.permitId }, data: { expiresAt: new Date(Date.now() - DAY) } });
+    await service.expireLapsedDocuments();
+    const notices = await app.prisma.notification.findMany({ where: { userId: m.userId, title: 'Document expired', data: { path: ['docId'], equals: m.permitId } } });
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.body).not.toMatch(/optional|keep working/i);
+    expect(notices[0]!.body).toContain('Hire Car Driver’s Licence');
+  });
+
+  it('concurrent grace reminders persist one notice per stage', async () => {
+    await setSplitStarted(10);
+    const m = await legacyTaxi();
+    let reached = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const original = app.prisma.notification.findFirst;
+    const probe = vi.spyOn(app.prisma.notification, 'findFirst').mockImplementation(async (args) => {
+      if (args?.where?.userId !== m.userId) return original.call(app.prisma.notification, args);
+      reached += 1;
+      if (reached === 4) release();
+      await barrier;
+      return null;
+    });
+    try {
+      await Promise.all(Array.from({ length: 4 }, () => service.hirePermitGraceSweep()));
+      expect(reached).toBe(4);
+      expect(await app.prisma.notification.count({ where: { userId: m.userId, title: { contains: 'hire' } } })).toBe(1);
+    } finally { probe.mockRestore(); }
   });
 
   it('after 60 days the permit no longer counts; the two new licences restore the driver', async () => {
@@ -301,6 +388,47 @@ describe('[V5 · ruling 7] TIN and the VAT number', () => {
     expect((await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } })) as { vatRegistrationNumber?: string | null }).vatRegistrationNumber).toBe('123456789');
   });
 
+  it.each(['STAFF', 'MANAGER'] as const)('VAT stays on the owner’s billing profile when %s reads the store', async (role) => {
+    const s = await store();
+    expect((await put(s.token, { vatRegistrationNumber: '123456789' })).statusCode).toBe(200);
+    const member = await app.prisma.user.create({ data: { phone: `+${phoneBase + 800 + users.length}`, firstName: 'Synthetic', lastName: `Vat${role}${users.length}`,
+      roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, countryCode: 'GY' } });
+    users.push(member.id);
+    await app.prisma.vendorStaff.create({ data: { vendorId: s.vendorId, userId: member.id, role, invitedBy: s.userId } });
+    const token = app.jwt.sign({ userId: member.id, role: 'CUSTOMER', jti: nanoid() });
+    await app.prisma.session.create({ data: { userId: member.id, token, refreshToken: nanoid(48), deviceId: nanoid(), deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+    const headers = { authorization: `Bearer ${token}`, 'x-vendor-id': s.vendorId };
+    const get = await app.inject({ method: 'GET', url: '/api/v1/vendor/profile', headers });
+    expect(get.statusCode, get.body).toBe(200);
+    expect(get.body).not.toContain('123456789');
+    expect(get.body).not.toContain('vatRegistrationNumber');
+    if (role === 'MANAGER') {
+      const edit = await app.inject({ method: 'PUT', url: '/api/v1/vendor/profile', headers, payload: { description: 'Synthetic store description' } });
+      expect(edit.statusCode, edit.body).toBe(200);
+      expect(edit.body).not.toContain('123456789');
+      expect(edit.body).not.toContain('vatRegistrationNumber');
+    }
+    const owner = await app.inject({ method: 'GET', url: '/api/v1/vendor/profile', headers: { authorization: `Bearer ${s.token}` } });
+    expect(owner.statusCode).toBe(200);
+    expect(owner.body).toContain('123456789');
+  });
+
+  it('general admin store views do not copy the owner’s VAT billing number', async () => {
+    const s = await store();
+    expect((await put(s.token, { vatRegistrationNumber: '123456789' })).statusCode).toBe(200);
+    const headers = { authorization: `Bearer ${adminToken}` };
+    for (const url of ['/api/v1/admin/vendors', `/api/v1/admin/vendors/${s.vendorId}`]) {
+      const res = await app.inject({ method: 'GET', url, headers });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.body).not.toContain('123456789');
+      expect(res.body).not.toContain('vatRegistrationNumber');
+    }
+    await app.prisma.vendor.update({ where: { id: s.vendorId }, data: { status: 'PENDING_APPROVAL' } });
+    const pending = await app.inject({ method: 'GET', url: '/api/v1/admin/vendors/pending', headers });
+    expect(pending.statusCode, pending.body).toBe(200);
+    expect(pending.body).not.toContain('vatRegistrationNumber');
+  });
+
   it('it is never public: the storefront a customer or a guest opens does not carry it', async () => {
     const s = await store();
     expect((await put(s.token, { vatRegistrationNumber: '987654321' })).statusCode).toBe(200);
@@ -308,5 +436,26 @@ describe('[V5 · ruling 7] TIN and the VAT number', () => {
     expect(page.statusCode, page.body).toBe(200);
     expect(page.body).not.toContain('987654321');
     expect(page.body).not.toMatch(/vatRegistrationNumber/);
+  });
+});
+
+
+describe('[V5 · registry] inactive optional documents never silence active requirements', () => {
+  it('both the facade and activation rehearsal still report the blocking national ID', async () => {
+    const set = await app.prisma.requirementSet.findFirstOrThrow({ where: { countryCode: 'GY', actorRole: 'MOVER_NO_LICENCE' } });
+    const requiredCode = registryCode('GY', 'national_id');
+    const optionalCode = registryCode('GY', 'police_clearance');
+    const prior = await app.prisma.docType.findMany({ where: { code: { in: [requiredCode, optionalCode] } } });
+    const optional = await app.prisma.requirementItem.create({ data: { requirementSetId: set.id, docTypeCode: optionalCode, isBlocking: false, minCount: 1, sortOrder: 99 } });
+    try {
+      await app.prisma.docType.update({ where: { code: requiredCode }, data: { isActive: true } });
+      await app.prisma.docType.update({ where: { code: optionalCode }, data: { isActive: false } });
+      expect(await registryChecklist(app.prisma, 'GY', 'MOVER_NO_LICENCE')).toEqual(['national_id']);
+      const rehearsal = await rehearseActivation(app.prisma, service, { countryCode: 'GY', legacyCodes: ['national_id'] });
+      expect(rehearsal.registry.setsThatSwitch.find((s) => s.actorRole === 'MOVER_NO_LICENCE')?.registryList).toEqual(['national_id']);
+    } finally {
+      await app.prisma.requirementItem.delete({ where: { id: optional.id } });
+      for (const type of prior) await app.prisma.docType.update({ where: { code: type.code }, data: { isActive: type.isActive } });
+    }
   });
 });
