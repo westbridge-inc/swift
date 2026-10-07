@@ -2,15 +2,17 @@
 
 import { Suspense } from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
 import { useSearchParams } from 'next/navigation';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { getMarketCategories, getMarketDepth, getMarketItems, money, type MarketItem } from '@/lib/customer';
 import { marketTabVisible } from '@/lib/app-rules';
 import { PRESS } from '@/components/customer-shell';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { MarketSkeleton, MarketGridSkeleton, CategorySkeleton } from '@/components/customer-skeletons';
-import { EmptyNote } from '@/components/order-ui';
+import { MarketSkeleton, MarketGridSkeleton, CategorySkeleton, MARKET_CARD, MARKET_CHIPS, MARKET_COPY, MARKET_GRID, MARKET_IMAGE } from '@/components/customer-skeletons';
+import { EmptyNote, Photo } from '@/components/order-ui';
+import { Pictogram } from '@/components/glyphs';
+import { launchCity } from '@/lib/web-ordering';
+import { CircleCheck, Plus, Search } from 'lucide-react';
 
 /**
  * [Q7b] MARKET — the phone app's Market tab on the web: goods (clothes,
@@ -36,40 +38,47 @@ function MarketInner() {
   });
 
   if (depth.isPending) return <MarketSkeleton />;
-  if (depth.isError && !depth.data) return <DataUnavailable what="the market" error={depth.error} onRetry={() => void depth.refetch()} />;
+  if (depth.isError && !depth.data) return <div className="pt-2"><DataUnavailable what="the market" error={depth.error} onRetry={() => void depth.refetch()} /></div>;
   if (!open) {
     return (
-      <div className="space-y-4">
-        <h1 className="text-2xl font-extrabold">Market</h1>
-        <EmptyNote>The market opens once enough stores list their goods. Until then, every store is on Home.</EmptyNote>
-        <Link href="/" className="inline-block rounded-full bg-[var(--swift-red)] px-5 py-2.5 font-bold text-[var(--swift-white)]">Browse stores</Link>
+      <div className="flex flex-col">
+        <MarketHeader />
+        <div className="sw-empty">
+          <span className="sw-empty-tile"><Pictogram name="shops" size={40} /></span>
+          <p className="sw-heading">The market isn’t open yet</p>
+          <p className="sw-caption max-w-[360px] text-[15px] leading-[22px]">The market opens once enough stores list their goods. Until then, every store is on Home.</p>
+          <Link href="/" className="sw-btn sw-btn-block mt-4 max-w-[400px]">Browse stores</Link>
+        </div>
       </div>
     );
   }
 
   const items: MarketItem[] = feed.data?.pages.flatMap((page) => page.items) ?? [];
   const chips = [{ slug: '', name: 'All' }, ...(categories.data ?? [])];
+  const current = chips.find((chip) => chip.slug === category);
   return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-extrabold">Market</h1>
-        <p className="mt-1 text-sm text-[var(--swift-muted)]">Goods from every store — clothes, tools, household things.</p>
-      </div>
+    <div className="flex flex-col">
+      <MarketHeader />
       {categories.isPending ? <CategorySkeleton /> : (
-        <nav aria-label="Market categories" className="h-12 -mx-4 flex gap-2 overflow-x-auto px-4 pb-1 [overscroll-behavior-x:contain] [scrollbar-width:none]">
+        <nav aria-label="Market categories" className={MARKET_CHIPS}>
           {chips.map((chip) => (
             <Link
               key={chip.slug || 'all'}
               href={chip.slug ? `/market?category=${encodeURIComponent(chip.slug)}` : '/market'}
               replace
               aria-current={category === chip.slug ? 'page' : undefined}
-              className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold ${category === chip.slug ? 'bg-[var(--swift-red)] text-[var(--swift-white)]' : 'border border-[var(--swift-border)] bg-[var(--swift-card)] hover:bg-[var(--swift-subtle)]'}`}
+              className="sw-chip h-12 px-5"
             >
               {chip.name}
             </Link>
           ))}
         </nav>
       )}
+
+      <div className="pb-3 pt-6">
+        <span className="sw-eyebrow sw-eyebrow-soft">Fresh from local sellers</span>
+        <h2 className="sw-title mt-0.5">{category && current ? current.name : 'Everything in the market'}</h2>
+      </div>
 
       {feed.isError && items.length === 0 ? (
         <DataUnavailable what="the market" error={feed.error} onRetry={() => void feed.refetch()} />
@@ -79,21 +88,24 @@ function MarketInner() {
         <EmptyNote>{category ? 'No store has listed anything here yet. Try another category.' : 'The market is still filling up.'}</EmptyNote>
       ) : (
         <>
-          <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+          <ul className={MARKET_GRID}>
             {items.map((item) => (
-              <li key={item.id}>
+              <li key={item.id} className="min-w-0">
                 <Link
                   href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
-                  className={`block overflow-hidden rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] ${PRESS}`}
+                  className={`${MARKET_CARD} ${PRESS}`}
                 >
-                  <span className="relative block h-36 bg-[var(--swift-subtle)]">
-                    {item.imageUrl ? <Image src={item.imageUrl} alt="" fill unoptimized sizes="(min-width: 1024px) 264px, (min-width: 640px) 30vw, 46vw" loading="lazy" className="object-cover" /> : null}
-                    {item.isNew ? <span className="absolute left-2 top-2 rounded-full bg-[var(--swift-ink)] px-2 py-0.5 text-[length:var(--swift-type-micro)] font-bold text-[var(--swift-white)]">NEW</span> : null}
+                  <span className={MARKET_IMAGE}>
+                    <Photo src={item.imageUrl} vendorType="STORE" name={item.name} sizes="(min-width: 760px) 220px, 46vw" className="absolute inset-0 rounded-none" />
+                    {item.isNew ? <span className="absolute left-2 top-2 rounded-full bg-[rgba(33,26,26,0.72)] px-3 py-[5px] text-[13px] font-semibold leading-[18px] text-[var(--swift-white)]">NEW</span> : null}
                   </span>
-                  <span className="block p-3">
-                    <span className="block truncate font-bold">{item.name}</span>
-                    <span className="block font-semibold text-[var(--swift-red)]">{money(item.basePrice)}</span>
-                    <span className="block truncate text-xs text-[var(--swift-muted)]">{item.vendorName}</span>
+                  <span className={MARKET_COPY}>
+                    <span className="line-clamp-2 text-[13px] font-semibold leading-[18px]">{item.name}</span>
+                    <span className="truncate text-[13px] leading-[18px] text-[var(--swift-muted)]">{item.vendorName}</span>
+                    <span className="mt-1 flex items-center justify-between">
+                      <span className="sw-money text-[var(--swift-red)]">{money(item.basePrice)}</span>
+                      <span aria-hidden="true" className="grid h-8 w-8 place-items-center rounded-full bg-[var(--swift-red)] text-[var(--swift-white)]"><Plus size={18} /></span>
+                    </span>
                   </span>
                 </Link>
               </li>
@@ -104,13 +116,29 @@ function MarketInner() {
               type="button"
               onClick={() => void feed.fetchNextPage()}
               disabled={feed.isFetchingNextPage}
-              className={`mx-auto block rounded-full border border-[var(--swift-border-strong)] px-6 py-2.5 font-semibold disabled:opacity-60 ${PRESS}`}
+              className="sw-btn sw-btn-md sw-btn-outline mx-auto mt-6"
             >
               {feed.isFetchingNextPage ? 'Loading…' : 'Show more'}
             </button>
           ) : null}
         </>
       )}
+      <p className="mt-5 flex items-start gap-2 text-[13px] leading-[18px] text-[var(--swift-muted)]">
+        <CircleCheck size={16} className="mt-0.5 flex-none text-[var(--swift-success)]" aria-hidden />
+        Every shop here pays Swift a flat weekly fee and keeps 100% of what it sells.
+      </p>
+    </div>
+  );
+}
+
+function MarketHeader() {
+  return (
+    <div className="flex items-start">
+      <div className="flex-1">
+        <span className="sw-eyebrow">Swift market · {launchCity()}</span>
+        <h1 className="sw-title mt-1">Market</h1>
+      </div>
+      <Link href="/order/search" aria-label="Search the market" className="sw-icon-btn mt-1"><Search size={19} aria-hidden /></Link>
     </div>
   );
 }
