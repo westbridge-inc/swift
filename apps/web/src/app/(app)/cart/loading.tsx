@@ -3,7 +3,13 @@ import cart from './cart.module.css';
 
 export default function CartSkeleton() {
   return <LoadingRegion label="Loading your cart" className={cart.page}>
-    <section className={cart.itemsColumn}><h1 className={cart.title}>Your cart</h1>{[1, 2, 3].map((i) => <div key={i} className={cart.itemCard}><div className={cart.itemCopy}><Bone className="h-6 w-3/4" /><Bone className="mt-1 h-5 w-24" /><Bone className="mt-1 h-6 w-20" /></div><Bone className="h-11 w-28 rounded-full" /></div>)}</section>
-    <aside className={cart.rail} aria-label="Loading checkout">{[1, 2, 3].map((i) => <div key={i} className={cart.panel}><Bone className="h-6 w-32" /><Bone className="mt-3 h-11" /><Bone className="mt-3 h-5 w-2/3" /></div>)}</aside>
+    <section className={cart.itemsColumn}>
+      <div className={cart.titleRow}><h1 className={cart.title}>Cart</h1></div>
+      <div className={cart.lines}>
+        {[1, 2, 3].map((i) => <div key={i} className={cart.itemCard}><Bone className="h-16 w-16 flex-none rounded-xl" /><div className={cart.itemCopy}><Bone className="h-[22px] w-3/4" /><Bone className="mt-1 h-[18px] w-24" /><Bone className="mt-2 h-8 w-[104px] rounded-full" /></div></div>)}
+      </div>
+      <div className={cart.panel}><Bone className="h-6 w-32" /><Bone className="h-[52px] rounded-2xl" /></div>
+    </section>
+    <aside className={cart.rail} aria-label="Loading checkout"><div className={cart.summary}><Bone className="h-6 w-40" /><Bone className="h-24" /><Bone className="h-16 rounded-full" /></div></aside>
   </LoadingRegion>;
 }

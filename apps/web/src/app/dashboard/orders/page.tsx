@@ -291,11 +291,15 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // where money plausibly landed and nothing has reversed or resolved it; the
   // server enforces the same matrix and refuses the rest by name.
   const ATTESTABLE_PAYMENT = ['PENDING', 'AUTHORIZED'];
-  const showConfirmPay =
+  const attestablePay =
     isMmg && ATTESTABLE_PAYMENT.includes(String(o.paymentStatus ?? '')) && !['CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
+  // Row 52: only the owner or a manager of THIS order's store may confirm; the
+  // server says which per order (and refuses staff regardless).
+  const showConfirmPay = attestablePay && o.canConfirmPayment === true;
+  const confirmPayNeedsManager = attestablePay && o.canConfirmPayment !== true;
   // and when it is NOT attestable, the screen says why rather than going quiet
   const payBlockedReason =
-    isMmg && !showConfirmPay && o.paymentStatus !== 'CAPTURED'
+    isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED'
       ? {
           REFUNDED: 'This payment was refunded — a new payment is a new transaction.',
           PARTIALLY_REFUNDED: 'This payment was partly refunded — support settles the balance.',
@@ -497,6 +501,9 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         )}
         {payBlockedReason && (
           <p className="w-full text-sm text-[var(--swift-muted)]">{payBlockedReason}</p>
+        )}
+        {confirmPayNeedsManager && (
+          <p className="w-full text-sm text-[var(--swift-muted)]">Only the owner or a manager can confirm MMG payments.</p>
         )}
         {showConfirmPay && (
           <input
