@@ -175,7 +175,7 @@ describe('[DOC-1 P19] the disclosure is compiled, never written', () => {
       const trade = await approved(userId, 'trade_licence');
       await withNumber(permit.id, 'permit_number', `FH-${NUM}`);
       await withNumber(trade.id, 'licence_number', `TL-${NUM}`);
-      const block = await system(() => compileStorefrontDisclosure(app.prisma, vendorId));
+      const block = await system(() => compileActivationDisclosure(app.prisma, vendorId, { accountId: userId, tenantId: 'swift-default' }));
       expect(block.licences.find((l) => l.docType === 'trade_licence')?.value).toBe(`TL-${NUM}`);
       expect(block.licences.find((l) => l.docType === 'food_handler_cert')?.value).toBe('on file');
       expect(JSON.stringify(block)).not.toContain(`FH-${NUM}`);
