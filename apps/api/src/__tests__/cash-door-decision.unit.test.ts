@@ -26,6 +26,13 @@ describe('cash-door amounts remain exact whole money at the service boundary', (
       .toEqual({ kind: 'SHORT_HANDED_OVER', due: 3500, collected: 2800, shortfall: 700 });
   });
 
+  it.each(['TAXI', 'COURIER'])('does not extend the goods shortfall ruling to %s', (orderType) => {
+    const order = { totalAmount: 3500, orderType };
+    expect(() => decideDoorCash(order, { collectedAmount: 2800, handedOverShort: true }))
+      .toThrow(expect.objectContaining({ code: 'SHORT_PAYMENT_NOT_AVAILABLE' }));
+    expect(decideDoorCash(order, {})).toEqual({ kind: 'UNSTATED' });
+  });
+
   it('cannot attest an unknown amount as a short handover', () => {
     expect(() => decideDoorCash({ totalAmount: 3500 }, { handedOverShort: true }))
       .toThrow(expect.objectContaining({ code: 'CASH_AMOUNT_REQUIRED' }));

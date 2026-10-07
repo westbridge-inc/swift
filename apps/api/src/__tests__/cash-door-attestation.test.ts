@@ -360,6 +360,23 @@ describe('[row 34] short cash: NO HANDOVER is the default (owner ruling, 5 Oct)'
     expect(f.cases).toHaveLength(0);
   });
 
+  it('refuses an unpaid return if cash is already recorded while the goods are still at the door', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CAPTURED' } });
+    const res = await handover(holder.token, order.id, {
+      outcome: 'short_payment', collectedAmount: 100, handoverVersion: await shownVersion(order.id),
+    });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('CASH_ALREADY_RECORDED');
+    const f = await facts(order.id);
+    expect(f.order.status).toBe('ARRIVED');
+    expect(f.order.paymentStatus).toBe('CAPTURED');
+    expect(f.cases).toHaveLength(0);
+    expect(f.statuses).not.toContain('RETURNING');
+  });
+
   it('handed over for less anyway: the real amount is recorded, the rider bears the difference, the mismatch is held and operations is paged — no claim, no strike, no deduction', async () => {
     const holder = await makeRider();
     const customer = await makeCustomer();
@@ -391,6 +408,24 @@ describe('[row 34] short cash: NO HANDOVER is the default (owner ruling, 5 Oct)'
 });
 
 describe('[row 34] the version echo: a stale screen records nothing', () => {
+  it('refuses a stale screen before consuming any delivery-PIN attempt', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: { ridePin: '314159' } });
+    const stale = await shownVersion(order.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: { deliveryInstructions: 'Fixture door changed' } });
+    const response = await handover(holder.token, order.id, {
+      outcome: 'paid', collectedAmount: DUE, handoverVersion: stale, ridePin: '000000',
+    });
+    expect(response.statusCode, response.body).toBe(409);
+    expect(response.json().error.code).toBe('HANDOVER_STALE');
+    const row = await app.prisma.order.findUniqueOrThrow({
+      where: { id: order.id }, select: { status: true, ridePinAttempts: true, doorCashCollectedAmount: true },
+    });
+    expect(row).toEqual({ status: 'ARRIVED', ridePinAttempts: 0, doorCashCollectedAmount: null });
+  });
+
   it('a stale handoverVersion answers 409 HANDOVER_STALE and the order is untouched; the current one completes', async () => {
     const holder = await makeRider();
     const customer = await makeCustomer();
@@ -438,6 +473,30 @@ describe('[row 34] the version echo: a stale screen records nothing', () => {
       expect(f.order.status).toBe('ARRIVED');
       expect(f.order['doorCashCollectedAmount']).toBeNull();
       expect(f.order.paymentStatus).toBe('PENDING');
+      expect(f.earnings).toHaveLength(0);
+    } finally { seam.mockRestore(); }
+  });
+
+  it('uses the locked total for cash even if a caller omits the optional version echo', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const orders = new OrderService(app.prisma, app.io);
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), orders);
+    const transition = orders.updateStatus.bind(orders);
+    const seam = vi.spyOn(orders, 'updateStatus').mockImplementationOnce(async (...args) => {
+      await app.prisma.order.update({ where: { id: order.id }, data: { totalAmount: DUE + 100 } });
+      return transition(...args);
+    });
+    try {
+      await expect(cash.handover(order.id, holder.user.id, {
+        outcome: 'paid', collectedAmount: DUE, gps: DOOR,
+      })).rejects.toMatchObject({ code: 'CASH_SHORT_NO_HANDOVER' });
+      expect(seam).toHaveBeenCalledOnce();
+      const f = await facts(order.id);
+      expect(f.order.status).toBe('ARRIVED');
+      expect(f.order.paymentStatus).toBe('PENDING');
+      expect(f.order['doorCashCollectedAmount']).toBeNull();
       expect(f.earnings).toHaveLength(0);
     } finally { seam.mockRestore(); }
   });

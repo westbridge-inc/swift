@@ -50,7 +50,7 @@ export function doorCashDue(order: { totalAmount: unknown }): number {
  * SHORT while the goods are still with the mover); returns what to record.
  */
 export function decideDoorCash(
-  order: { totalAmount: unknown },
+  order: { totalAmount: unknown; orderType?: string },
   stated: { collectedAmount?: number; handedOverShort?: boolean },
 ): DoorCashDecision {
   if (stated.collectedAmount === undefined) {
@@ -68,6 +68,12 @@ export function decideDoorCash(
       { due, collected });
   }
   if (cents(collected) === cents(due)) return { kind: 'EXACT', due, collected };
+  // The owner's short-handover ruling covers goods deliveries. Taxi fares
+  // and courier fees retain their existing outcome rules.
+  if (order.orderType === 'TAXI' || order.orderType === 'COURIER') {
+    throw new AppError(409, 'SHORT_PAYMENT_NOT_AVAILABLE',
+      'This outcome is for goods deliveries. For a ride or a parcel, record the outcome the job offers or contact support.');
+  }
   if (stated.handedOverShort !== true) {
     throw new AppError(409, 'CASH_SHORT_NO_HANDOVER',
       `Do not hand over: the customer must pay the full GY$${gyd(due)}. If they cannot, choose "Customer can't pay in full" and the order goes back to the store, which gives you back the cash you paid for it.`,
