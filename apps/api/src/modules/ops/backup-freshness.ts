@@ -1,4 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
+import type Redis from 'ioredis';
+import type { NotificationService } from '../notification/notification.service';
+import { pageOps, resolveOpsPage, type PageOutcome } from './ops-page';
 
 // ---------------------------------------------------------------------------
 // Has a backup actually happened lately?
@@ -95,4 +98,33 @@ export async function checkBackupFreshness(
     offsite: true,
     reason: `Last verified offsite backup ${Math.floor(ageHours)}h ago.`,
   };
+}
+
+export const BACKUP_PAGE_TITLE = 'Backups are not safe';
+
+/**
+ * [75 · OPS-PAGING] The stale-backup alarm is a PLATFORM page, so it travels
+ * the same durable path as every other page (ops-page.ts): an OpsAlert row
+ * with per-recipient delivery to every SUPER_ADMIN, a text to every on-call
+ * phone, an acknowledgement deadline and escalation. It used to be a bare
+ * notice to SUPER_ADMINs only: no on-call text, no receipt, no escalation.
+ * One open page per window; a fresh backup closes it.
+ */
+export async function pageBackupFreshness(
+  deps: { prisma: PrismaClient; redis: Redis; notifications: NotificationService },
+  now: Date = new Date(),
+): Promise<{ result: BackupFreshness; page: PageOutcome | null }> {
+  const result = await checkBackupFreshness(deps.prisma, now);
+  if (!result.stale) {
+    await resolveOpsPage(deps.prisma, BACKUP_PAGE_TITLE, 'backup-fresh');
+    return { result, page: null };
+  }
+  const page = await pageOps(deps, {
+    key: 'ops_page:backup-freshness',
+    windowSeconds: 20 * 3600,
+    title: BACKUP_PAGE_TITLE,
+    body: result.reason,
+    data: { kind: 'ops_backup_stale', ageHours: result.ageHours, offsite: result.offsite },
+  });
+  return { result, page };
 }

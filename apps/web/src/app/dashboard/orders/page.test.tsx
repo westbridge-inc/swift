@@ -300,6 +300,20 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     },
   );
 
+  it('[row 52] staff at the order\'s store get no attest button, only who can confirm', async () => {
+    const over = { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', canConfirmPayment: false };
+    const fetchMock = mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await waitFor(() => expect(screen.getByText('Total (MMG)')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /received in my MMG/i })).toBeNull();
+    expect(screen.queryByLabelText(/MMG transaction reference/i)).toBeNull();
+    expect(screen.getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
+  });
+
   it('offers it on a PENDING payment, names the amount, and will not send without a reference', async () => {
     const { user, fetchMock } = await openMmgDetail('PENDING');
     const button = await screen.findByRole('button', { name: /received in my MMG/i });
