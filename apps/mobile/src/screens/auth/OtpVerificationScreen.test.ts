@@ -45,3 +45,15 @@ describe('OTP verification accessibility and automation contract', () => {
     expect(source + registerSource).not.toMatch(/(?:AsyncStorage|SecureStore|localStorage).*registrationProof/);
   });
 });
+
+describe('[NO-DEAD-ENDS] a blocked account at the code screen gets a door, not just a sentence', () => {
+  it('reads the refusal through the shared reader and offers support’s mailbox', () => {
+    expect(source).toContain("import { accountBlockedOf, accountSupportMailto } from '../../lib/accountBlocked'");
+    expect(source).toContain('const blocked = verify.isError ? accountBlockedOf(verify.error) : null;');
+    expect(source).toMatch(/blocked\?\.message \?\?/);
+    expect(source).toContain('testID="otp-account-blocked-support"');
+    expect(source).toContain('openSupportMail(accountSupportMailto(blocked, phone), blocked.supportEmail)');
+    // The code screen is mounted by web suites too: no kit or animation import rides in with the door.
+    expect(source).not.toContain("from '../../lib/openExternal'");
+  });
+});
