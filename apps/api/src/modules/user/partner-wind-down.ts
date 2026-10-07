@@ -8,8 +8,13 @@ import { bindTenantTransaction } from '../../plugins/prisma';
  * Q1a). Rescue incentives deliberately do not block: they have no payout path
  * and ship switched off (rescue-incentive-deletion-rule.unit.test.ts). The
  * caller also checks live work under authority locks.
+ *
+ * [GUARDRAILS §1] Weekly-fee money also blocks: a checkout MMG can still
+ * confirm (it would be credited to a cancelled, de-identified subscription
+ * with no one to tell), an unresolved payment hold, and fee credit Swift holds
+ * for the person. Never a silently dropped payment.
  */
-export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'OPEN_CLAIM'] as const;
+export const PARTNER_BLOCKERS = ['CASH_HELD', 'UNSETTLED_CASH', 'OPEN_CLAIM', 'FEE_PAYMENT_PENDING', 'FEE_CREDIT'] as const;
 export type PartnerBlocker = (typeof PARTNER_BLOCKERS)[number];
 
 export interface PartnerObligations {
@@ -21,6 +26,10 @@ export interface PartnerObligations {
   earningsOwed: number;
   /** Loss-protection claims for this mover that Swift has neither paid nor rejected. */
   openClaimCount?: number;
+  /** Fee checkouts MMG can still confirm, plus unresolved payment confirmation holds. */
+  pendingFeePaymentCount?: number;
+  /** Fee subscriptions with prepaid credit Swift holds for the person. */
+  feeCreditCount?: number;
 }
 
 export interface PartnerDeletionVerdict {
@@ -41,6 +50,8 @@ export function verdictFor(o: PartnerObligations): PartnerDeletionVerdict {
   if (o.committedFloat > 0) blockers.push('CASH_HELD');
   if (o.unsettledCashCount > 0) blockers.push('UNSETTLED_CASH');
   if ((o.openClaimCount ?? 0) > 0) blockers.push('OPEN_CLAIM');
+  if ((o.pendingFeePaymentCount ?? 0) > 0) blockers.push('FEE_PAYMENT_PENDING');
+  if ((o.feeCreditCount ?? 0) > 0) blockers.push('FEE_CREDIT');
   return { blockers, clear: blockers.length === 0 };
 }
 
@@ -58,6 +69,10 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
     'A cash settlement is still open between you and a store. Confirm the handover, then return here to delete your account. Use Get help if the other party cannot confirm.',
   OPEN_CLAIM:
     'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
+  FEE_PAYMENT_PENDING:
+    'A weekly-fee payment is still in progress or being confirmed with MMG. Wait for it to finish, or open Get help to have it resolved, then return here to delete your account.',
+  FEE_CREDIT:
+    'You have weekly-fee credit paid in advance to Swift. Open Get help to have it returned, or let it be used for your next weekly fee, then return here to delete your account.',
 };
 
 /** The whole refusal, as one sentence a person can act on. */
@@ -83,8 +98,9 @@ export async function partnerObligations(
   const openClaimCount = claimants.length === 0 ? 0 : await tx.reimbursementClaim.count({
     where: { OR: claimants, paidAt: null, status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] } },
   });
+  const fees = await feeMoney(tx, userId);
   if (!rider && await tx.vendor.count({ where: { owner: { userId } } }) === 0) {
-    return { committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0, openClaimCount };
+    return { committedFloat: 0, unsettledCashCount: 0, earningsOwed: 0, openClaimCount, ...fees };
   }
 
   const unsettled = await tx.deliveryCashSettlement.count({
@@ -97,7 +113,34 @@ export async function partnerObligations(
     unsettledCashCount: unsettled,
     earningsOwed: 0,
     openClaimCount,
+    ...fees,
   };
+}
+
+/** Weekly-fee money on the person's own fee subscriptions (as a mover, or as
+ *  the owner of a store). Read under the caller's lock on the person's user
+ *  row, which every fee checkout and credit also takes first (the fee payer
+ *  lock), so no checkout can start or settle between this census and cutoff.
+ *  EXPIRED and NOT_PAID checkouts are final only once no further MMG check is
+ *  due: a late MMG confirmation is still credited [MMG-CHECKOUT-API]. */
+async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
+  const subscriptions = await tx.subscription.findMany({
+    where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
+    select: { id: true },
+  });
+  if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0 };
+  const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
+  const [checkouts, payments, holds, feeCreditCount] = await Promise.all([
+    tx.mmgCheckoutIntent.count({ where: { subscriptionId, OR: [
+      { status: { in: ['OPEN', 'CONFIRMING', 'HELD'] } },
+      { status: { in: ['EXPIRED', 'NOT_PAID'] }, nextCheckAt: { not: null } },
+    ] } }),
+    // The weekly MMG prompt and any other fee payment not yet settled.
+    tx.subscriptionPayment.count({ where: { subscriptionId, status: { in: ['PENDING', 'AUTHORIZED', 'UNKNOWN'] } } }),
+    tx.paymentConfirmationHold.count({ where: { subscriptionId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }),
+    tx.prepaidBalance.count({ where: { subscriptionId, balance: { gt: 0 } } }),
+  ]);
+  return { pendingFeePaymentCount: checkouts + payments + holds, feeCreditCount };
 }
 
 // ── Winding down what is not a blocker ─────────────────────────────────────

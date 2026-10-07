@@ -14,6 +14,8 @@ import { retryAccountErasures } from '../modules/user/account-erasure-retry';
 import { AccountService } from '../modules/user/account.service';
 import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS, windDownPartner } from '../modules/user/partner-wind-down';
 import { restoreBillingAccess } from '../modules/billing/billing-access';
+import { currentDunningClock } from '../modules/billing/dunning-clock';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [Apple 5.1.1(v)] A mover or vendor closes their own account.
@@ -94,12 +96,19 @@ beforeAll(async () => {
   await app.ready();
 });
 
+const vendorSubscriptionIds: string[] = [];
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, vendorSubscriptionIds).catch(() => undefined);
+  await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: vendorSubscriptionIds } } }).catch(() => undefined);
+  await app.prisma.subscription.deleteMany({ where: { id: { in: vendorSubscriptionIds } } }).catch(() => undefined);
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: userIds } }, select: { id: true } });
   const riderIds = riders.map((r) => r.id);
   await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+  const subs = (await app.prisma.subscription.findMany({ where: { riderId: { in: riderIds } }, select: { id: true } })).map((x) => x.id);
+  await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subs } } }).catch(() => undefined);
+  await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subs } } }).catch(() => undefined);
   await app.prisma.subscription.deleteMany({ where: { riderId: { in: riderIds } } });
   await app.prisma.supportTicket.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
@@ -126,7 +135,7 @@ describe('[5.1.1v] the verdict, without a database', () => {
     // Told one at a time, a person clears a blocker, tries again, and is
     // refused for a different reason they were never shown. That is the
     // "contact Support" dead end with extra steps.
-    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250, openClaimCount: 1 });
+    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250, openClaimCount: 1, pendingFeePaymentCount: 1, feeCreditCount: 1 });
     expect(all.blockers).toHaveLength(PARTNER_BLOCKERS.length);
     for (const b of PARTNER_BLOCKERS) expect(refusalMessage(all.blockers)).toContain(BLOCKER_MESSAGE[b]);
   });
@@ -385,5 +394,110 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     expect(after.status).toBe('CANCELLED');
     expect(after.autoRenew).toBe(false);
     expect(after.nextRetryAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [GUARDRAILS §1] Fee money still on its way to Swift, or held by Swift for the
+// person, blocks deletion. A checkout that MMG can still confirm would be
+// credited to a cancelled, de-identified subscription after deletion, with no
+// one left to tell and no way back: a silently dropped payment.
+// ---------------------------------------------------------------------------
+describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
+  async function feeSubscription(riderId: string) {
+    const now = Date.now();
+    return app.prisma.subscription.create({ data: {
+      riderId, type: 'DELIVERY_RIDER', weeklyRate: 2000,
+      currentPeriodStart: new Date(now), currentPeriodEnd: new Date(now + 7 * 86_400_000), nextBillingDate: new Date(now + 7 * 86_400_000),
+    } });
+  }
+  let mtx = 0;
+  async function checkout(subscriptionId: string, userId: string, data: { status: string; nextCheckAt?: Date | null }) {
+    mtx += 1;
+    return app.prisma.mmgCheckoutIntent.create({ data: {
+      subscriptionId, merchantTransactionId: `${String(Date.now()).slice(-13)}${String(mtx).padStart(5, '0')}`,
+      amount: 2000, currencyCode: 'GYD', createdByUserId: userId, platform: 'test',
+      checkoutUrlSealed: Buffer.alloc(40), checkoutUrlDek: Buffer.alloc(60), expiresAt: new Date(Date.now() + 600_000), ...data,
+    } });
+  }
+  const refused = async (userId: string, blocker: 'FEE_PAYMENT_PENDING' | 'FEE_CREDIT') => {
+    const error = await new AccountService(app).deleteAccount(userId).then(() => null, (e: unknown) => e);
+    expect(error, 'deletion must be refused while fee money is unsettled').toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
+    expect((error as Error).message).toContain((BLOCKER_MESSAGE as Record<string, string>)[blocker]);
+  };
+  // A settled checkout: MMG proved it unpaid and no further check is due.
+  const settledUnpaid = { status: 'NOT_PAID', nextCheckAt: null };
+  const untouched = async (userId: string) =>
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: userId } })).toMatchObject({ status: 'ACTIVE', firstName: 'Part' });
+  const inAnHour = new Date(Date.now() + 3_600_000);
+
+  it.each([
+    ['OPEN', undefined], ['CONFIRMING', inAnHour], ['HELD', null], ['EXPIRED', inAnHour], ['NOT_PAID', inAnHour],
+  ] as const)('a %s fee checkout MMG can still confirm blocks deletion; once it settles, deletion proceeds', async (status, nextCheckAt) => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    const c = await checkout(sub.id, p.userId, { status, ...(nextCheckAt !== undefined && { nextCheckAt }) });
+    await refused(p.userId, 'FEE_PAYMENT_PENDING');
+    await untouched(p.userId);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: c.id }, data: settledUnpaid });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it.each(['PENDING', 'AUTHORIZED', 'UNKNOWN'] as const)('a %s weekly-fee payment blocks deletion until it settles', async (status) => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    const payment = await app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: sub.id, amount: 2000, paymentMethod: 'MOBILE_MONEY', status,
+      periodStart: sub.currentPeriodStart, periodEnd: sub.currentPeriodEnd,
+    } });
+    await refused(p.userId, 'FEE_PAYMENT_PENDING');
+    await untouched(p.userId);
+    await app.prisma.subscriptionPayment.update({ where: { id: payment.id }, data: { status: 'FAILED' } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('a checkout MMG can no longer confirm does not block', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    await checkout(sub.id, p.userId, { status: 'EXPIRED', nextCheckAt: null });
+    await checkout(sub.id, p.userId, { status: 'NOT_PAID', nextCheckAt: null });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('an unresolved payment confirmation hold on a store the person owns blocks deletion', async () => {
+    const p = await makePartner(['CUSTOMER', 'VENDOR_OWNER']);
+    const owner = await app.prisma.vendorOwner.create({ data: { userId: p.userId } });
+    const vendor = await app.prisma.vendor.create({ data: {
+      ownerId: owner.id, name: 'Synthetic fee-hold store', slug: `hold-${nanoid(12)}`, vendorType: 'RESTAURANT',
+      phone: 'synthetic', addressLine1: 'Synthetic', city: 'Synthetic', region: 'Synthetic', latitude: 0, longitude: 0,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+    } });
+    vendorIds.push(vendor.id);
+    const now = Date.now();
+    const sub = await app.prisma.subscription.create({ data: {
+      vendorId: vendor.id, type: 'RESTAURANT', weeklyRate: 20000, billingMethod: 'CASH', autoRenew: false,
+      currentPeriodStart: new Date(now - 7 * 86_400_000), currentPeriodEnd: new Date(now + 86_400_000), nextBillingDate: new Date(now + 86_400_000),
+    } });
+    vendorSubscriptionIds.push(sub.id);
+    const settled = await checkout(sub.id, p.userId, settledUnpaid);
+    const clock = await app.prisma.$transaction((tx) => currentDunningClock(tx, sub.id));
+    const hold = await app.prisma.paymentConfirmationHold.create({ data: {
+      tenantId: clock.tenantId, subscriptionId: sub.id, clockId: clock.id, sourceEpoch: clock.epoch, checkoutId: settled.id,
+      reason: 'SYNTHETIC_REVIEW', beganAt: new Date(), reviewDueAt: new Date(now + 86_400_000),
+    } });
+    await refused(p.userId, 'FEE_PAYMENT_PENDING');
+    await untouched(p.userId);
+    await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data: { status: 'PROVEN_UNPAID', resolvedAt: new Date(), resolvedBy: 'synthetic' } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('weekly-fee credit Swift holds for the person blocks deletion until it is used or returned', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 500 } });
+    await refused(p.userId, 'FEE_CREDIT');
+    await untouched(p.userId);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: sub.id }, data: { balance: 0 } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
   });
 });

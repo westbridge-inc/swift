@@ -168,6 +168,8 @@ function harness() {
     // Account erasure keeps review scores but clears review words (owner
     // decision 2026-10-05); no review rows exist in this harness.
     rating: { updateMany: vi.fn(async () => ({ count: 0 })) },
+    // The deletion census reads fee subscriptions; these subjects have none.
+    subscription: { findMany: vi.fn(async () => []) },
     $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(async (fn: any) => fn(db)),
     $queryRaw: vi.fn(async (query: unknown, ...values: unknown[]) => rawSecurityCensus(people, orphans, query, values)
