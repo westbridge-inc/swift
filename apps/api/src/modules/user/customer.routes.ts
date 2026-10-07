@@ -174,9 +174,12 @@ const checkoutSchema = z.object({
   // [L09 · price lock] What the customer saw: the quote's total and each cart
   // line's unit price. Optional: an older app sends neither.
   expectedTotal: z.number().nonnegative().max(1_000_000_000).optional(),
+  // No count cap of its own: a cart has no line cap and the apps send every
+  // line, so a cap here would refuse a cart the customer can build. The
+  // request body limit bounds the list, and checkout only looks each entry up
+  // in the cart it already loaded (no query per entry).
   expectedLines: z
     .array(z.object({ lineId: z.string().min(1).max(64), unitPrice: z.number().nonnegative().max(1_000_000_000) }))
-    .max(200)
     .optional(),
 });
 

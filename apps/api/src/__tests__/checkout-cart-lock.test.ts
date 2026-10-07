@@ -426,6 +426,28 @@ describe('[price lock] the order is placed at the prices the customer saw, or re
     expect(res.json().error.code).toBe('CART_CHANGED');
   });
 
+  it('a cart with more than 200 lines can still be placed with every line price the customer saw', async () => {
+    // A cart has no line cap, and the apps send every line's price, so the
+    // checkout body must take as many lines as a cart can hold.
+    // A small-price item keeps the order under the ID-verification threshold.
+    const mint = await app.prisma.item.create({ data: { vendorId, categoryId: (await app.prisma.item.findUniqueOrThrow({ where: { id: plainItemId } })).categoryId, name: 'Lock Mint', basePrice: 20, isAvailable: true } });
+    const c = await makeCustomer();
+    const cartRow = await app.prisma.cart.create({ data: { customerId: c.userId, vendorId } });
+    await app.prisma.cartItem.createMany({
+      data: Array.from({ length: 201 }, (_, i) => ({ cartId: cartRow.id, itemId: mint.id, quantity: 1, selectedOptions: {}, specialInstructions: `line ${i + 1}` })),
+    });
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const quote = (await inject('GET', '/api/v1/customer/cart', undefined, c.token)).json().data;
+    expect(quote.items).toHaveLength(201);
+    const res = await place(c.token, {
+      expectedTotal: Number(quote.totalAmount),
+      expectedLines: quote.items.map((l: { id: string; customerPrice: number }) => ({ lineId: l.id, unitPrice: Number(l.customerPrice) })),
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(Number(res.json().data.orders[0].total)).toBe(Number(quote.totalAmount));
+    expect(await app.prisma.orderItem.count({ where: { order: { customerId: c.userId } } })).toBe(201);
+  });
+
   it('build 9: an app that sends no prices keeps today\'s behaviour — the order is placed at the current price', async () => {
     const { c, quote } = await seenCart();
     await repriceBurger(100);
