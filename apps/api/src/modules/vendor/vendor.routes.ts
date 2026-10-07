@@ -651,13 +651,25 @@ export async function vendorRoutes(app: FastifyInstance) {
   // the docs lapsed could otherwise be fully accepted, prepared and handed over.
   // This closes that server-authoritative hole (invariant 2). Reject/cancel are
   // deliberately NOT gated — a blocked store must still be able to decline.
-  async function assertVendorCanOperate(vendorId: string) {
+  /**
+   * [BILLING-INFLIGHT · owner ruling 1 Oct ~22:10] "Suspended store: accepted
+   * orders are completed; new orders are blocked until it pays." A weekly-fee
+   * hold (a billing suspension, or a lapsed fee grace) refuses NEW work only:
+   * `work: 'IN_FLIGHT'` (progress on an order the store already accepted) skips
+   * the billing arm. Every other hold keeps its rule on both kinds of work: an
+   * admin/safety/moderation suspension, a closed store, expired documents.
+   * A null suspension source is billing's (the transition rule reinstate uses).
+   */
+  async function assertVendorCanOperate(vendorId: string, work: 'NEW' | 'IN_FLIGHT' = 'NEW') {
     const vendor = await app.prisma.vendor.findUnique({
       where: { id: vendorId },
-      select: { isVerified: true, status: true, vendorType: true },
+      select: { isVerified: true, status: true, vendorType: true, suspensionSource: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
-    if (vendor.status === 'SUSPENDED' || vendor.status === 'CLOSED') {
+    // [Fable #1481 S4-1] Only a suspension billing stamped is a billing hold; one with no source (e.g. an owner
+    // closing their account) keeps the ordinary rule.
+    const billingHold = vendor.status === 'SUSPENDED' && vendor.suspensionSource === 'BILLING';
+    if ((vendor.status === 'SUSPENDED' && !(work === 'IN_FLIGHT' && billingHold)) || vendor.status === 'CLOSED') {
       throw new AppError(403, 'VENDOR_SUSPENDED', 'Your store is not active and cannot work orders. Reopen it from Account.');
     }
     const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
@@ -669,6 +681,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // PAST_DUE vendor whose grace had run out kept working orders until the
     // billing sweep flipped them SUSPENDED. Now all three actor gates agree.
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
+    // The subscription arm is billing's: it gates NEW work only. (Read either
+    // way, so every order step keeps one shape between its order read and its
+    // write; the golden race suites hold the route at this read.)
+    if (work === 'IN_FLIGHT') return;
     const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
@@ -1728,7 +1744,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
     // complete-appointment. Marking it "preparing" sent the customer kitchen
     // pushes for a haircut and stranded it (complete-appointment requires
@@ -1751,7 +1767,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
     // that already sits in PREPARING is not reopened into the kitchen path.
     if (order.fulfillment === 'APPOINTMENT') {
@@ -1812,7 +1828,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the fallback that stops a self-delivery order dying in the kitchen. */
   app.put<{ Params: IdParam }>('/orders/:id/fulfillment-mode', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     const { mode } = fulfillmentModeSchema.parse(request.body);
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders have a fulfillment mode');
@@ -2150,7 +2166,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  decline memory). No-op while an offer is already live. */
   app.post<{ Params: IdParam }>('/orders/:id/retry-dispatch', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
     }
@@ -2171,7 +2187,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
     }
@@ -2213,7 +2229,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
       throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
     }
@@ -2240,7 +2256,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  carries the cash-capture gate and the PIN check. */
   app.put<{ Params: IdParam }>('/orders/:id/delivered', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
       throw new AppError(400, 'NOT_SELF_DELIVERY', 'This order is being delivered by a Swift rider — they complete it from their app.');
     }

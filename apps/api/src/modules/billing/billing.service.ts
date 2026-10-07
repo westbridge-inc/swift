@@ -16,6 +16,7 @@ import type { PaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
+import { restoreBillingAccess } from './billing-access';
 import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
@@ -3898,30 +3899,9 @@ export class BillingService {
   }
 
   private async reinstateRows(tx: Prisma.TransactionClient, sub: SubWithRelations, periodKey: string) {
-    if (sub.vendor) {
-      // [REPORT-013 F-013-07] Payment restores ONLY what billing took. The
-      // lifecycle CAS matches a billing-caused suspension exclusively — an
-      // admin/safety suspension survives payment. Commerce reopens only
-      // where the projection-maintained document truth (isVerified, kept
-      // in-generation by every evidence path since v10) still stands: a
-      // store whose documents died mid-suspension comes back ACTIVE but
-      // closed, never a blind acceptingOrders=true.
-      // Transition rule: a pre-migration suspension has a null source; the
-      // only AUTOMATED suspender has always been billing, so null lifts with
-      // payment (an admin can always re-suspend, which stamps ADMIN).
-      await tx.vendor.updateMany({
-        where: {
-          id: sub.vendor.id,
-          status: 'SUSPENDED',
-          OR: [{ suspensionSource: 'BILLING' }, { suspensionSource: null }],
-        },
-        data: { status: 'ACTIVE', suspensionSource: null },
-      });
-      await tx.vendor.updateMany({
-        where: { id: sub.vendor.id, status: 'ACTIVE', isVerified: true },
-        data: { acceptingOrders: true },
-      });
-    }
+    // [REPORT-013 F-013-07] Payment restores ONLY what billing took: the one
+    // shared restore (billing-access.ts), also used by the wrongful-suspension heal.
+    if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
 
     await tx.billingEvent.create({
       data: {
