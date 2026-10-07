@@ -19,7 +19,7 @@ export function OfflineNotice() {
   }, []);
 
   if (!offline) return null;
-  return <aside role="status" className="mb-4 rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-4">
+  return <aside role="status" className="mb-4 sw-card p-4">
     <p className="font-bold">You’re offline.</p>
     <p className="text-sm text-[var(--swift-muted)]">Reconnect to keep ordering. Your cart is kept on your account.</p>
   </aside>;

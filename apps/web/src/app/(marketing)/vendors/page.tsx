@@ -77,7 +77,7 @@ export default function VendorsPage() {
             {MONEY.map((m) => (
               <div
                 key={m}
-                className="flex items-start gap-3 rounded-2xl border border-[var(--swift-border)] bg-white p-4"
+                className="flex items-start gap-3 sw-card p-4"
               >
                 <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-[var(--swift-red)]" aria-hidden />
                 <span className="text-[15px] leading-relaxed">{m}</span>
@@ -95,7 +95,7 @@ export default function VendorsPage() {
         </p>
         <ul className="mt-8 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {DASHBOARD.map(({ icon: Icon, title, body }) => (
-            <li key={title} className="rounded-2xl bg-white p-6 shadow-sm">
+            <li key={title} className="rounded-2xl bg-[var(--swift-card)] p-6 shadow-[var(--swift-elevation-card)]">
               <Icon className="h-6 w-6 text-[var(--swift-red)]" aria-hidden />
               <h3 className="mt-4 font-bold">{title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-[var(--swift-muted)]">{body}</p>
@@ -145,7 +145,7 @@ export default function VendorsPage() {
           <div className="mt-10 flex flex-wrap gap-3">
             <Link
               href="/signup"
-              className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-white transition-colors hover:bg-[var(--swift-red-600)]"
+              className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
             >
               Start a business account
             </Link>
