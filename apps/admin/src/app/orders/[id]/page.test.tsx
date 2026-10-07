@@ -1,5 +1,5 @@
-import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import OrderDetailPage from './page';
 import {
   API_ORIGIN,
@@ -46,12 +46,24 @@ function deferredReply() {
   return { promise, resolve };
 }
 
+const REASON = 'Repeated no-shows after three written warnings';
+type User = ReturnType<typeof renderWithQuery>['user'];
+
+/** [MC-MONEY] Types the reason into the open panel and presses its confirm button. */
+async function giveReason(user: User, dialog: HTMLElement, confirmLabel: string) {
+  await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+  await user.click(within(dialog).getByRole('button', { name: confirmLabel }));
+}
+
+beforeEach(() => {
+  // [MC-MONEY] no browser prompt or confirm is ever the way in
+  vi.stubGlobal('prompt', vi.fn(() => { throw new Error('window.prompt was called'); }));
+  vi.stubGlobal('confirm', vi.fn(() => { throw new Error('window.confirm was called'); }));
+});
+afterEach(() => vi.unstubAllGlobals());
+
 describe('order cancel and refund mutations', () => {
-  it('confirms and sends a plain cancellation to the exact endpoint and payload', async () => {
-    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
-    vi.stubGlobal('confirm', confirm);
-    // [ADM-006] the operator is asked why; the reason is theirs, not a template
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
+  it('names the order, asks why, and sends a plain cancellation to the exact endpoint and payload; a cancelled panel sends nothing', async () => {
     const fetchMock = mockApi(
       orderHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -63,29 +75,26 @@ describe('order cancel and refund mutations', () => {
     const { user } = renderWithQuery(
       <OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />,
     );
-    const cancelButton = await screen.findByRole('button', { name: 'Cancel order' });
+    const cancelButton = await screen.findByRole('button', { name: 'Cancel order…' });
 
     await user.click(cancelButton);
-    expect(confirm).toHaveBeenNthCalledWith(1, 'Cancel order ORDER-TEST-1?');
+    let dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TEST-1?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     await user.click(cancelButton);
+    dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TEST-1?' });
+    // [ADM-006] the operator is asked why; the reason is theirs, not a template
+    await giveReason(user, dialog, 'Cancel order');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
-    expect(confirm).toHaveBeenNthCalledWith(2, 'Cancel order ORDER-TEST-1?');
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/cancel`);
     expect(init?.method).toBe('PUT');
-    expect(JSON.parse(String(init?.body))).toEqual({
-      reason: 'Repeated no-shows after three written warnings',
-      refund: false,
-    });
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: REASON, refund: false });
+    expect((await screen.findByRole('status')).textContent).toContain('Order ORDER-TEST-1 is cancelled.');
   });
 
-  it('confirms and sends cancel-plus-refund with refund=true', async () => {
-    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
-    vi.stubGlobal('confirm', confirm);
-    // [ADM-006] the operator is asked why; the reason is theirs, not a template
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
+  it('cancel-plus-refund says the store OWES a refund and that nothing is marked refunded, then sends refund=true', async () => {
     const fetchMock = mockApi(
       orderHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -97,39 +106,23 @@ describe('order cancel and refund mutations', () => {
     const { user } = renderWithQuery(
       <OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />,
     );
-    const refundButton = await screen.findByRole('button', { name: 'Record refund owed' });
-
-    await user.click(refundButton);
-    expect(confirm).toHaveBeenNthCalledWith(
-      1,
-      'Cancel ORDER-TEST-1 and record that Test Store OWES the customer a refund?'
-      + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
-      + ' list until someone records the reference and the amount actually handed back.',
-    );
-    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
-
-    await user.click(refundButton);
+    await user.click(await screen.findByRole('button', { name: 'Record refund owed…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TEST-1 and record a refund owed?' });
+    expect(dialog.textContent).toContain('This records that Test Store OWES the customer a refund. It does not mark anything refunded');
+    expect(dialog.textContent).toContain('the reference and the amount actually handed back');
+    await giveReason(user, dialog, 'Cancel and record refund owed');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
-    expect(confirm).toHaveBeenNthCalledWith(
-      2,
-      'Cancel ORDER-TEST-1 and record that Test Store OWES the customer a refund?'
-      + '\n\nThis does not mark anything refunded. The order stays in the outstanding'
-      + ' list until someone records the reference and the amount actually handed back.',
-    );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/cancel`);
-    expect(init?.method).toBe('PUT');
-    expect(JSON.parse(String(init?.body))).toEqual({
-      reason: 'Repeated no-shows after three written warnings',
-      refund: true,
-    });
+    expect(JSON.parse(String(init?.body))).toEqual({ reason: REASON, refund: true });
   });
 
-  it.each(['Cancel order', 'Record refund owed'])(
-    'renders a %s failure without changing the visible order state',
-    async (buttonName) => {
-      vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
+  it.each([
+    ['Cancel order…', 'Cancel order'],
+    ['Record refund owed…', 'Cancel and record refund owed'],
+  ])(
+    'renders a %s failure in the panel without changing the visible order state',
+    async (buttonName, confirmLabel) => {
       const fetchMock = mockApi(
         orderHandler((request) => {
           if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -150,25 +143,24 @@ describe('order cancel and refund mutations', () => {
       const { user } = renderWithQuery(
         <OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />,
       );
-      const actionButton = await screen.findByRole('button', { name: buttonName });
+      await user.click(await screen.findByRole('button', { name: buttonName }));
+      const dialog = screen.getByRole('dialog');
+      await giveReason(user, dialog, confirmLabel);
 
-      await user.click(actionButton);
-
-      expect((await screen.findByRole('alert')).textContent).toContain(
-        'Order cancellation failed: Cannot cancel an order with status COMPLETED',
+      expect((await within(dialog).findByRole('alert')).textContent).toContain(
+        'Cannot cancel an order with status COMPLETED',
       );
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+      expect(screen.getByRole('alert').textContent).toContain('Cannot cancel an order with status COMPLETED');
       expect(screen.getByRole('heading', { name: '#ORDER-TEST-1' })).toBeTruthy();
       expect(screen.getByText('PENDING')).toBeTruthy();
-      expect((actionButton as HTMLButtonElement).disabled).toBe(false);
       expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
       expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(1);
     },
   );
 
-  it('disables the cash-refund control while pending and sends only one money mutation', async () => {
+  it('locks the panel while the cash-refund cancel is pending and sends only one money mutation', async () => {
     const pending = deferredReply();
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const fetchMock = mockApi(
       orderHandler((request) => {
         if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/cancel') {
@@ -180,12 +172,15 @@ describe('order cancel and refund mutations', () => {
     const { user } = renderWithQuery(
       <OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />,
     );
-    const refundButton = await screen.findByRole('button', { name: 'Record refund owed' });
+    const refundButton = await screen.findByRole('button', { name: 'Record refund owed…' });
 
     await user.click(refundButton);
+    const dialog = screen.getByRole('dialog');
+    await giveReason(user, dialog, 'Cancel and record refund owed');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
-    expect((refundButton as HTMLButtonElement).disabled).toBe(true);
-
+    const sending = within(dialog).getByRole('button', { name: 'Sending…' }) as HTMLButtonElement;
+    expect(sending.disabled).toBe(true);
+    await user.click(sending);
     await user.click(refundButton);
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
 
@@ -194,10 +189,6 @@ describe('order cancel and refund mutations', () => {
   });
 
   it('never offers Swift refund controls for MMG and names the direct store refund rail', async () => {
-    const confirm = vi.fn().mockReturnValue(false);
-    vi.stubGlobal('confirm', confirm);
-    // [ADM-006] the operator is asked why; the reason is theirs, not a template
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Repeated no-shows after three written warnings'));
     const mmgOrder = { ...order, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' };
     const fetchMock = mockApi(
       orderHandler((_request) => {
@@ -208,13 +199,14 @@ describe('order cancel and refund mutations', () => {
       <OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />,
     );
 
-    const cancelButton = await screen.findByRole('button', { name: 'Cancel order' });
-    expect(screen.queryByRole('button', { name: 'Record refund owed' })).toBeNull();
+    const cancelButton = await screen.findByRole('button', { name: 'Cancel order…' });
+    expect(screen.queryByRole('button', { name: 'Record refund owed…' })).toBeNull();
     await user.click(cancelButton);
-
-    expect(confirm).toHaveBeenCalledWith(
-      'Cancel order ORDER-TEST-1?\n\nMMG payment stays between customer and store. If paid, it is refunded by Test Store; Swift cannot refund it.',
+    const dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TEST-1?' });
+    expect(dialog.textContent).toContain(
+      'MMG payment stays between customer and store. If paid, it is refunded by Test Store; Swift cannot refund it.',
     );
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
 });
@@ -249,11 +241,6 @@ describe('[A-14] an unsettled refund obligation', () => {
   });
 
   it('settles only with a reference AND an amount, and sends both to the settle endpoint', async () => {
-    const prompt = vi.fn()
-      .mockReturnValueOnce('CASH-REF-001')
-      .mockReturnValueOnce('2500')
-      .mockReturnValueOnce('Cash handed back against receipt CASH-REF-001');
-    vi.stubGlobal('prompt', prompt);
     const fetchMock = mockApi(orderHandler((request) => {
       if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/orders/order-1/refund-settled') {
         return { body: { success: true, data: {} } };
@@ -262,29 +249,40 @@ describe('[A-14] an unsettled refund obligation', () => {
     }, owedOrder));
 
     const { user } = renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
-    await user.click(await screen.findByRole('button', { name: 'Record refund handed back' }));
+    await user.click(await screen.findByRole('button', { name: 'Record refund handed back…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Record the refund handed back for order ORDER-TEST-1?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), 'Cash handed back against receipt CASH-REF-001');
+    // the reason alone is not evidence: both fields are refused, nothing is sent
+    await user.click(within(dialog).getByRole('button', { name: 'Record refund' }));
+    expect(within(dialog).getByText(/Enter the reference/)).toBeTruthy();
+    expect(within(dialog).getByText(/Enter the amount/)).toBeTruthy();
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reference' }), 'CASH-REF-001');
+    await user.click(within(dialog).getByRole('button', { name: 'Record refund' }));
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+    // what was typed is what is sent — the server, not the console, compares it
+    // with what is owed (a console that filled in the owed figure would make the
+    // attestation empty)
+    await user.type(within(dialog).getByRole('textbox', { name: 'Amount handed back' }), '2,400');
+    await user.click(within(dialog).getByRole('button', { name: 'Record refund' }));
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/refund-settled`);
-    expect(JSON.parse(String(init?.body))).toEqual({ reference: 'CASH-REF-001', amount: '2500' });
+    expect(JSON.parse(String(init?.body))).toEqual({ reference: 'CASH-REF-001', amount: 2400 });
   });
 
-  it('abandoning either prompt sends NO money mutation', async () => {
-    for (const answers of [[null], ['CASH-REF-002', null]]) {
-      const prompt = vi.fn();
-      answers.forEach((a) => prompt.mockReturnValueOnce(a));
-      vi.stubGlobal('prompt', prompt);
-      const fetchMock = mockApi(orderHandler(() => {
-        throw new Error('no mutation expected');
-      }, owedOrder));
+  it('a cancelled panel sends NO money mutation', async () => {
+    const fetchMock = mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, owedOrder));
 
-      const { user } = renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
-      await user.click(await screen.findByRole('button', { name: 'Record refund handed back' }));
-
-      await waitFor(() => expect(prompt).toHaveBeenCalledTimes(answers.length));
-      expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
-    }
+    const { user } = renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+    await user.click(await screen.findByRole('button', { name: 'Record refund handed back…' }));
+    const dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reference' }), 'CASH-REF-002');
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
 
   it('a settled refund shows its evidence, and the owed banner is gone', async () => {

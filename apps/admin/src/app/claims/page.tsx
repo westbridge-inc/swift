@@ -2,11 +2,11 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics, fetchRlpReserve, adjustRlpReserve } from '@/lib/api';
 import { StatusPill, gyd } from '@/components/detail';
-import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
@@ -14,41 +14,71 @@ const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTE
  * The under-$50 guarantee queue: failed cash handovers (no-show / refused)
  * with GPS + photo evidence. Deterministic guardrail flags (over_cap,
  * outlier, collusion_*) surface what needs a harder look.
+ *
+ * [MISSION CONTROL · MONEY] Every decision here is money (C4): it is asked in
+ * the page's panel — the payout's reference and amount, the reserve entry's
+ * amount and note, and the reason, together — checked before anything is
+ * sent, and answered on screen: "sent for a second admin's approval", done,
+ * or the server's refusal kept in the panel.
  */
 export default function ClaimsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('PENDING_REVIEW');
-  const { data, isLoading } = useQuery({ queryKey: ['claims', filter], queryFn: () => fetchClaims(filter) });
+  const claimsQ = useQuery({ queryKey: ['claims', filter], queryFn: () => fetchClaims(filter) });
+  const { data, isLoading } = claimsQ;
   const metricsQ = useQuery({ queryKey: ['cash-metrics'], queryFn: fetchCashMetrics });
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ['claims'] });
-    qc.invalidateQueries({ queryKey: ['cash-metrics'] });
-  };
-  const approve = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => approveClaim(id, reason),
-    onSuccess: invalidate,
+  const actions = useActionRunner(() => {
+    void qc.invalidateQueries({ queryKey: ['claims'] });
+    void qc.invalidateQueries({ queryKey: ['cash-metrics'] });
+    void qc.invalidateQueries({ queryKey: ['rlp-reserve'] });
   });
-  const reject = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => rejectClaim(id, reason),
-    onSuccess: invalidate,
+
+  const approve = (c: any) => void actions.run({
+    title: `Approve this ${gyd(c.amount)} claim?`,
+    body: <p>Order {c.orderId}. Approving means the company guarantee pays it; the payout is recorded separately once the money is sent.</p>,
+    confirmLabel: 'Approve claim',
+    submit: ({ reason }) => approveClaim(c.id, reason),
+    success: () => `The ${gyd(c.amount)} claim is approved.`,
   });
-  const pay = useMutation({
-    mutationFn: ({ id, reference, amount, reason }: { id: string; reference: string; amount: string | number; reason: string }) =>
-      payClaim(id, reference, amount, reason),
-    onSuccess: invalidate,
+  const reject = (c: any) => void actions.run({
+    title: `Reject this ${gyd(c.amount)} claim?`,
+    body: <p>Order {c.orderId}. Nothing is paid; the reason is what the filer is answered with.</p>,
+    confirmLabel: 'Reject claim',
+    submit: ({ reason }) => rejectClaim(c.id, reason),
+    success: () => `The ${gyd(c.amount)} claim is rejected.`,
+  });
+  // [A-11] The reference must be unique — one transfer settles one claim — and
+  // the payer states what they actually sent, which the server checks against
+  // the claim's own figure before anything closes.
+  const pay = (c: any) => void actions.run({
+    title: `Mark this ${gyd(c.amount)} claim paid?`,
+    body: <p>Order {c.orderId}. Record the transfer you already sent. The amount must be the claim&apos;s own figure, to the cent.</p>,
+    confirmLabel: 'Mark paid',
+    fields: [
+      { kind: 'reference', name: 'reference', label: 'Payment reference', hint: 'Bank or MMG reference, or receipt number — unique to this payout' },
+      { kind: 'amount', name: 'amount', label: 'Amount you transferred', hint: `In GYD; this claim is ${gyd(c.amount)}`, cents: true },
+    ],
+    submit: ({ reason, values }) => payClaim(c.id, String(values['reference']), Number(values['amount']), reason),
+    success: () => `The ${gyd(c.amount)} claim is paid.`,
   });
 
   // [DOC-1 §31.4 · P31-1] The reserve line every payout is drawn from: balance, floor, this month's provisioning.
   const reserveQ = useQuery({ queryKey: ['rlp-reserve'], queryFn: () => fetchRlpReserve('GY') });
-  const adjust = useMutation({
-    mutationFn: ({ amount, note, reason }: { amount: number; note: string; reason: string }) => adjustRlpReserve('GY', amount, note, reason),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['rlp-reserve'] }); },
+  const adjust = () => void actions.run({
+    title: 'Record an entry on the GY reserve line?',
+    body: <p>A top-up adds to the loss-protection reserve; a negative amount corrects it downwards. Payouts are drawn from this line.</p>,
+    confirmLabel: 'Record entry',
+    fields: [
+      { kind: 'amount', name: 'amount', label: 'Amount', hint: 'In GYD; start with a minus sign to correct downwards', cents: true, signed: true },
+      { kind: 'text', name: 'note', label: 'Note', hint: 'Recorded with the entry', required: true, maxLength: 500 },
+    ],
+    submit: ({ reason, values }) => adjustRlpReserve('GY', Number(values['amount']), String(values['note']), reason),
+    success: (_r, { values }) => `${gyd(values['amount'])} recorded on the GY reserve line.`,
   });
   const reserve: any = reserveQ.data?.data ?? null;
 
   const rows: any[] = data?.data ?? [];
   const m: any = metricsQ.data?.data ?? {};
-  const busy = approve.isPending || reject.isPending || pay.isPending;
 
   return (
     <div>
@@ -57,14 +87,7 @@ export default function ClaimsPage() {
         Failed cash handovers under the company guarantee — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payout done.
       </p>
 
-      {(pay.error || approve.error || reject.error) && (
-        <div className="mb-4">
-          <MutationError
-            error={pay.error || approve.error || reject.error}
-            label={pay.error ? 'Payout did not record' : approve.error ? 'Approval did not record' : 'Rejection did not record'}
-          />
-        </div>
-      )}
+      {actions.banner}
 
       {/* Founder cockpit numbers (cash-rules founderMetrics) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
@@ -101,24 +124,12 @@ export default function ClaimsPage() {
             ) : null}
           </div>
           <button
-            onClick={() => {
-              const raw = window.prompt('Adjust the reserve by (GYD, negative to correct downwards):')?.trim();
-              const amount = Number(raw);
-              if (!raw || !Number.isFinite(amount) || amount === 0) return;
-              const note = window.prompt('Why (recorded with the entry):')?.trim();
-              if (!note || note.length < 3) return;
-              if (window.confirm(`Record a ${gyd(amount)} entry on the GY reserve line?`)) {
-                const reason = askReason({ action: `adjust the GY reserve line by ${gyd(amount)}`, subject: 'the loss-protection reserve' });
-                if (reason) adjust.mutate({ amount, note, reason });
-              }
-            }}
-            disabled={adjust.isPending}
+            onClick={adjust}
             className="ml-auto px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
           >
-            Adjust reserve
+            Adjust reserve…
           </button>
         </div>
-        {adjust.error ? <div className="mt-3"><MutationError error={adjust.error} label="Reserve entry did not record" /></div> : null}
         {reserve?.entries?.length ? (
           <ul className="mt-3 text-xs text-[var(--muted)] space-y-1">
             {reserve.entries.slice(0, 5).map((e: any) => (
@@ -145,6 +156,9 @@ export default function ClaimsPage() {
       <div className="space-y-3">
         {isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+        ) : claimsQ.isError ? (
+          // [DS768 E4] unpaid guarantee claims never look "clear" because a read failed
+          <QueryFailed error={claimsQ.error} what="the claims" onRetry={() => void claimsQ.refetch()} retrying={claimsQ.isFetching} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             No {filter.replaceAll('_', ' ').toLowerCase()} claims.
@@ -201,49 +215,25 @@ export default function ClaimsPage() {
                   {c.status === 'PENDING_REVIEW' && (
                     <>
                       <button
-                        onClick={() => {
-                          if (window.confirm(`Approve this ${gyd(c.amount)} claim?`)) {
-                            const reason = askReason({ action: `approve this ${gyd(c.amount)} claim`, subject: `order ${c.orderId}` });
-                            if (reason) approve.mutate({ id: c.id, reason });
-                          }
-                        }}
-                        disabled={busy}
+                        onClick={() => approve(c)}
                         className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                       >
-                        Approve
+                        Approve…
                       </button>
                       <button
-                        onClick={() => {
-                          const reason = askReason({ action: 'reject this claim', subject: `order ${c.orderId}` });
-                          if (reason) reject.mutate({ id: c.id, reason });
-                        }}
-                        disabled={busy}
+                        onClick={() => reject(c)}
                         className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                       >
-                        Reject
+                        Reject…
                       </button>
                     </>
                   )}
                   {(c.status === 'APPROVED' || c.status === 'AUTO_APPROVED') && (
                     <button
-                      onClick={() => {
-                        // [A-11] The reference must be unique — one transfer
-                        // settles one claim — and the payer states what they
-                        // actually sent, which the server checks against the
-                        // claim's own figure before anything closes.
-                        const ref = window.prompt('Payment reference (bank/MMG ref or receipt no. — required, and unique to this payout):')?.trim();
-                        if (!ref) return;
-                        const sent = window.prompt(`Amount you actually transferred, in GYD (this claim is ${gyd(c.amount)}):`)?.trim();
-                        if (!sent) return;
-                        if (window.confirm(`Mark this ${gyd(c.amount)} claim for order ${c.orderId} as PAID? Reference ${ref}, amount sent ${sent}.`)) {
-                          const reason = askReason({ action: 'mark this claim as paid', subject: `order ${c.orderId}` });
-                          if (reason) pay.mutate({ id: c.id, reference: ref, amount: sent, reason });
-                        }
-                      }}
-                      disabled={busy}
+                      onClick={() => pay(c)}
                       className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
                     >
-                      Mark paid
+                      Mark paid…
                     </button>
                   )}
                 </div>

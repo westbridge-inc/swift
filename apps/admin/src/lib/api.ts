@@ -272,12 +272,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 
@@ -286,6 +293,55 @@ export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${i
 export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}`);
 export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
 export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);
+
+// ── [MC-PR2] Activation checklists: the per-document truth, in the gate's own terms ──
+export type ActivationItemState = 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | 'MISSING';
+export interface ActivationChecklistItem {
+  docType: string;
+  state: ActivationItemState;
+  documentId: string | null;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  /** The reviewer's note on a rejection — what the applicant was told. */
+  note: string | null;
+  /** Approved, and a newer submission of the same type is waiting for review. */
+  renewalPending: boolean;
+}
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'CLOSED';
+export interface VendorActivationChecklist {
+  vendorId: string;
+  /** The owner's user id: the Review Center's applicant. */
+  applicantId: string;
+  storeStatus: string;
+  suspensionSource: string | null;
+  ownerAccountStatus: string | null;
+  /** The store's weekly-fee subscription state (null before it has one). */
+  subscriptionStatus?: string | null;
+  /** May the store's subscription operate now (the vendor gate's rule)? A suspended store whose fee cannot operate reads FEE_UNPAID. */
+  feeOperable?: boolean;
+  isVerified: boolean;
+  activationValidUntil: string | null;
+  role: string;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
+  ready: boolean;
+  next: VendorActivationNext;
+}
+export type MoverActivationNext = 'VERIFIED' | 'CAN_VERIFY' | 'NEEDS_INSURANCE' | 'NEEDS_DOCUMENTS';
+export interface MoverActivationChecklist {
+  moverId: string;
+  kind: 'RIDER' | 'DRIVER';
+  applicantId: string;
+  vehicleType: string;
+  documentsVerified: boolean;
+  checklist: { items: ActivationChecklistItem[]; complete: boolean };
+  live: { allowed: boolean; reason: 'ok' | 'docs' | 'insurance' };
+  next: MoverActivationNext;
+}
+export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<VendorActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
+export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
+  apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const suspendVendor = (id: string, reason: string) =>
@@ -865,3 +921,71 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+// ── [MC-AD3] Weekly-fee payments held for a person's decision ─────────────
+// GET /admin/billing/confirmations (confirmation-finance.ts confirmationReviewQueue). A held MMG checkout,
+// card payment or recorded payment waits here; a paused obligation is listed but not resolvable here.
+export interface FeeConfirmation {
+  id: string;
+  subscriptionId: string;
+  epoch: number;
+  clockEpoch: number;
+  clockVersion: number;
+  status: string;
+  resolvable: boolean;
+  source: 'MMG_CHECKOUT' | 'CARD_SESSION' | 'PAYMENT' | 'OBLIGATION';
+  sourceId: string;
+  reason: string;
+  beganAt: string;
+  reviewDueAt: string;
+  overdue: boolean;
+  remainingGraceMs: number;
+}
+export const fetchFeeConfirmations = (): Promise<Envelope<FeeConfirmation[]>> => apiFetch('/api/v1/admin/billing/confirmations');
+/** C4 (money): a second admin approves it (202 APPROVAL_REQUIRED). PAID is accepted only on the provider evidence
+ *  Swift already recorded — the server refuses a typed claim (409 SETTLEMENT_EVIDENCE_REQUIRED). */
+export const resolveFeeConfirmation = (
+  id: string,
+  decision: { sourceId: string; epoch: number; clockVersion: number; decision: 'PAID' | 'UNPAID'; evidenceReference: string; providerPaymentId?: string },
+  reason: string,
+) => apiFetch(`/api/v1/admin/billing/confirmations/${encodeURIComponent(id)}/resolve`, {
+  method: 'POST',
+  body: JSON.stringify({
+    sourceId: decision.sourceId, epoch: decision.epoch, clockVersion: decision.clockVersion, decision: decision.decision,
+    evidenceReference: decision.evidenceReference, ...(decision.providerPaymentId ? { providerPaymentId: decision.providerPaymentId } : {}), reason,
+  }),
+  reason,
+});
+
+// ── [MC-AD4] Paid MMG orders held for review (ready too long) ─────────────
+export interface HeldOrder {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  status: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  totalAmount: number;
+  readyAt: string | null;
+  foodAgeHeldAt: string | null;
+  placedAt: string | null;
+  heldMinutes: number | null;
+  readyMinutes: number | null;
+  vendor: { id: string; name: string } | null;
+}
+export const fetchHeldOrders = (): Promise<Envelope<HeldOrder[]>> => apiFetch('/api/v1/admin/orders/held');
+/** C2 (operational): the only release the server offers today is "deliver anyway". */
+export const releaseHeldOrder = (id: string) =>
+  apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/food-age-hold/release`, { method: 'POST', body: JSON.stringify({ decision: 'DELIVER_ANYWAY' }) });
+
+// ── [MC-AD5] An MMG payment dispute on a store order ──────────────────────
+/** C3: decided against the claim revision the operator reviewed; the reason is the decision note too. */
+export const resolvePaymentDispute = (
+  id: string,
+  decision: { resolution: 'CUSTOMER_PAID' | 'CUSTOMER_DID_NOT_PAY'; expectedClaimRevision: number },
+  reason: string,
+) => apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/payment-claim/resolve`, {
+  method: 'POST',
+  body: JSON.stringify({ ...decision, note: reason }),
+  reason,
+});

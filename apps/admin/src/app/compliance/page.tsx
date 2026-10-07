@@ -1,9 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { maskedPhone } from '@/lib/review-center';
+import { outcomeOf, succeeded } from '@/lib/outcome';
+import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 /**
  * The liability shield. Three panels:
@@ -13,23 +16,58 @@ import { askReason } from '@/lib/ask-reason';
  *    re-review of their documents.
  *  - Audit runs: the immutable "we checked" trail — every daily run, counts,
  *    zero or not.
+ *
+ * [MISSION CONTROL · PR-3b] Each decision asks why in the page (a failed
+ * review's note is a field of that same panel, required for a fail), and the
+ * server's answer — including "their checklist still fails" — stays on
+ * screen. Phones are masked; the full number is on the person's page.
  */
 export default function CompliancePage() {
   const qc = useQueryClient();
-  const [note, setNote] = useState<Record<string, string>>({});
   const [openEvidence, setOpenEvidence] = useState<string | null>(null);
+  const [auditing, setAuditing] = useState(false);
 
   const q = useQuery({ queryKey: ['compliance'], queryFn: fetchCompliance, refetchInterval: 60_000 });
-  const refresh = () => qc.invalidateQueries({ queryKey: ['compliance'] });
+  const refresh = () => void qc.invalidateQueries({ queryKey: ['compliance'] });
+  const actions = useActionRunner(refresh);
+  const nameOf = (p: any) => [p?.user?.firstName, p?.user?.lastName].filter(Boolean).join(' ') || 'this person';
 
-  const run = useMutation({ mutationFn: runComplianceAudit, onSettled: refresh });
-  const decide = useMutation({
-    mutationFn: ({ id, pass, reason }: { id: string; pass: boolean; reason: string }) => decideComplianceReview(id, pass, note[id], reason),
-    onSettled: refresh,
+  // An audit run changes nothing about anyone's account (C2): no reason, but its answer is shown.
+  const runAudit = async () => {
+    setAuditing(true);
+    actions.clear();
+    try {
+      const res: any = await runComplianceAudit();
+      const r = res?.data;
+      actions.show(succeeded(
+        `Audit finished: ${r?.moversChecked ?? 0} online ${r?.moversChecked === 1 ? 'mover' : 'movers'} checked, ${r?.violations ?? 0} ${r?.violations === 1 ? 'violation' : 'violations'}.`,
+        r?.violations ? 'Each one is already offline; the evidence is below.' : undefined,
+      ));
+    } catch (error) {
+      actions.show(outcomeOf(error, { kind: 'write' }));
+    } finally {
+      setAuditing(false);
+      refresh();
+    }
+  };
+
+  const resolveViolation = (v: any) => void actions.run({
+    title: `Mark ${nameOf(v)}'s violation resolved?`,
+    body: <p>This only succeeds once their document checklist passes again. Until then they stay offline.</p>,
+    confirmLabel: 'Mark resolved',
+    submit: ({ reason }) => resolveComplianceViolation(v.id, reason),
+    success: () => `${nameOf(v)}'s violation is resolved.`,
   });
-  const resolve = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => resolveComplianceViolation(id, reason),
-    onSettled: refresh,
+
+  const decideReview = (c: any, pass: boolean) => void actions.run({
+    title: pass ? `Pass ${nameOf(c)}'s re-verification?` : `Fail ${nameOf(c)}'s re-verification and take them offline?`,
+    body: pass
+      ? <p>You have re-opened their documents in Verification and they are genuine and current.</p>
+      : <p>They go offline now and stay offline until their documents pass again. The note says what is wrong; it is kept with the decision.</p>,
+    confirmLabel: pass ? 'Documents check out' : 'Fail and take offline',
+    fields: [{ kind: 'text', name: 'note', label: pass ? 'Note (optional)' : 'What is wrong', required: !pass, maxLength: 500 }],
+    submit: ({ reason, values }) => decideComplianceReview(c.id, pass, String(values['note'] ?? '') || undefined, reason),
+    success: () => (pass ? `${nameOf(c)} passed re-verification.` : `${nameOf(c)} failed re-verification and is offline.`),
   });
 
   const d = q.data?.data;
@@ -42,17 +80,19 @@ export default function CompliancePage() {
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-2xl font-bold">Compliance</h1>
         <button
-          onClick={() => run.mutate()}
-          disabled={run.isPending}
+          onClick={() => void runAudit()}
+          disabled={auditing}
           className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
         >
-          {run.isPending ? 'Auditing…' : 'Run audit now'}
+          {auditing ? 'Auditing…' : 'Run audit now'}
         </button>
       </div>
       <p className="text-[var(--muted)] text-sm mb-6">
         Every day Swift re-checks everyone on the road against their document checklist and keeps the evidence.
         An unlicensed or uninsured mover operating here is a lawsuit — this page is where that never happens.
       </p>
+      {actions.banner}
+      {q.isError ? <div className="mb-6"><QueryFailed error={q.error} what="the compliance record" onRetry={() => void q.refetch()} retrying={q.isFetching} /></div> : null}
 
       {/* Open violations */}
       <h2 className="font-semibold mb-2">
@@ -71,7 +111,7 @@ export default function CompliancePage() {
                 <span className="font-semibold">
                   {v.user?.firstName} {v.user?.lastName}
                 </span>
-                <span className="text-xs text-[var(--muted)]">{v.user?.phone}</span>
+                <span className="text-xs text-[var(--muted)]">{maskedPhone(v.user?.phone ?? undefined)}</span>
                 <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-400 font-bold">
                   {String(v.reason).replaceAll('_', ' ')}
                 </span>
@@ -90,12 +130,11 @@ export default function CompliancePage() {
                   {openEvidence === v.id ? 'Hide evidence' : 'View evidence'}
                 </button>
                 <button
-                  onClick={() => { const reason = askReason({ action: 'mark this compliance violation as resolved', subject: `violation ${v.id}` }); if (reason) resolve.mutate({ id: v.id, reason }); }}
-                  disabled={resolve.isPending}
+                  onClick={() => resolveViolation(v)}
                   className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
                   title="Only succeeds once their checklist passes again"
                 >
-                  Mark resolved
+                  Mark resolved…
                 </button>
               </div>
               {openEvidence === v.id && (
@@ -122,32 +161,24 @@ export default function CompliancePage() {
                 <span className="font-semibold">
                   {c.user?.firstName} {c.user?.lastName}
                 </span>
-                <span className="text-xs text-[var(--muted)]">{c.user?.phone}</span>
+                <span className="text-xs text-[var(--muted)]">{maskedPhone(c.user?.phone ?? undefined)}</span>
                 <span className="text-xs text-amber-400">due {new Date(c.dueAt).toLocaleDateString()}</span>
               </div>
               <p className="text-xs text-[var(--muted)] mt-1.5">
                 Re-open their documents in Verification and confirm they are genuine and current — then decide here.
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <input
-                  value={note[c.id] ?? ''}
-                  onChange={(e) => setNote({ ...note, [c.id]: e.target.value })}
-                  placeholder="Note (required for fail)"
-                  className="flex-1 min-w-48 bg-[var(--panel-2)] px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
-                />
                 <button
-                  onClick={() => { const reason = askReason({ action: 'pass this re-verification review' }); if (reason) decide.mutate({ id: c.id, pass: true, reason }); }}
-                  disabled={decide.isPending}
+                  onClick={() => decideReview(c, true)}
                   className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
                 >
-                  Documents check out
+                  Documents check out…
                 </button>
                 <button
-                  onClick={() => { const reason = askReason({ action: 'fail this re-verification review and force offline' }); if (reason) decide.mutate({ id: c.id, pass: false, reason }); }}
-                  disabled={decide.isPending || !(note[c.id] ?? '').trim()}
+                  onClick={() => decideReview(c, false)}
                   className="px-3 py-1.5 text-xs rounded-lg bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50"
                 >
-                  Fail — force offline
+                  Fail — take offline…
                 </button>
               </div>
             </div>

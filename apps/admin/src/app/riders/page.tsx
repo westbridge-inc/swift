@@ -1,72 +1,89 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchRiders, verifyRiderDocuments } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { fetchRiders } from '@/lib/api';
+import { ENUM_LABELS, label, ratingText } from '@/lib/labels';
+import { EMPTY_LIST_STATE, listQueryString, type ListState } from '@/lib/list-query';
+import { maskedPhone } from '@/lib/review-center';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { Truncate } from '@/components/mc/Truncate';
+import { DataTable } from '@/components/mc/DataTable';
+import { ListToolbar, Pager } from '@/components/mc/ListControls';
+
+// [MC-PR3] Riders: server paging, search and filters, test data hidden by
+// default, masked phones, plain words, a failed read said as one.
+// [MC-PR2] Verifying a rider's documents happens on their page, beside the
+// checklist that shows what is approved and what is missing — never blind from
+// a list row (the old button also dropped the server's refusal).
+
+interface RiderRow {
+  id: string;
+  riderType: string;
+  isOnline: boolean;
+  documentsVerified: boolean;
+  averageRating?: number | null;
+  totalRatings?: number | null;
+  user?: { firstName?: string | null; lastName?: string | null; phone?: string | null } | null;
+}
+
+const STATUS_OPTIONS: Array<[string, string]> = [
+  ['', 'Anyone'], ['online', 'Online now'], ['offline', 'Offline'], ['verified', 'Documents verified'], ['unverified', 'Documents not verified'],
+];
 
 export default function RidersPage() {
-  const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['riders'], queryFn: fetchRiders });
-  const verifyMutation = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => verifyRiderDocuments(id, reason),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['riders'] }),
-  });
+  const [state, setState] = useState<ListState>(EMPTY_LIST_STATE);
+  const list = useQuery({ queryKey: ['riders', state], queryFn: () => fetchRiders(listQueryString(state)), placeholderData: keepPreviousData });
+  const rows: RiderRow[] = list.data?.data ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">Riders</h1>
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Name</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Phone</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Type</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Documents</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Rating</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
-            ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={7} className="p-8 text-center text-[var(--muted)]">No riders found</td></tr>
-            ) : (
-              data?.data?.map((rider: any) => (
-                <tr key={rider.id} className="border-b border-[var(--border)] hover:bg-white/5">
-                  <td className="p-4 font-medium"><Link href={`/riders/${rider.id}`} className="hover:text-[var(--accent)] transition-colors">{rider.user?.firstName} {rider.user?.lastName}</Link></td>
-                  <td className="p-4">{rider.user?.phone || '\u2014'}</td>
-                  <td className="p-4">{rider.riderType}</td>
-                  <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs ${
-                      rider.isOnline ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
-                    }`}>{rider.isOnline ? 'Online' : 'Offline'}</span>
-                  </td>
-                  <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs ${
-                      rider.documentsVerified ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
-                    }`}>{rider.documentsVerified ? 'Verified' : 'Pending'}</span>
-                  </td>
-                  <td className="p-4">{rider.averageRating?.toFixed(1) || '\u2014'}</td>
-                  <td className="p-4 text-right">
-                    {!rider.documentsVerified && (
-                      <button
-                        onClick={() => { const reason = askReason({ action: 'verify these documents', subject: `${rider.user?.firstName} ${rider.user?.lastName}` }); if (reason) verifyMutation.mutate({ id: rider.id, reason }); }}
-                        className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80"
-                      >
-                        Verify Docs
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+    <div className="mc-page">
+      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Riders</h1>
+      <ListToolbar
+        state={state}
+        onChange={setState}
+        searchLabel="Search by name or phone"
+        filters={[
+          { key: 'status', label: 'Status', options: STATUS_OPTIONS },
+          { key: 'type', label: 'Work', options: [['', 'All riders'], ...Object.entries(ENUM_LABELS.RiderType)] },
+        ]}
+      />
+      {list.isLoading ? (
+        <div className="mc-card" aria-busy="true">Loading riders…</div>
+      ) : list.isError ? (
+        <QueryFailed error={list.error} what="the rider list" onRetry={() => void list.refetch()} retrying={list.isFetching} />
+      ) : (
+        <>
+          <DataTable<RiderRow>
+            label="Riders"
+            rows={rows}
+            rowKey={(r) => r.id}
+            empty={state.search || Object.values(state.filters).some(Boolean) ? 'No rider matches this search.' : 'No riders yet.'}
+            columns={[
+              {
+                key: 'name', header: 'Name', width: '28%', primary: true,
+                cell: (r) => (
+                  <Link href={`/riders/${r.id}`} className="block min-w-0">
+                    <Truncate text={[r.user?.firstName, r.user?.lastName].filter(Boolean).join(' ') || 'Unnamed rider'} />
+                  </Link>
+                ),
+              },
+              { key: 'phone', header: 'Phone', width: '15%', cell: (r) => <span className="mc-numbers">{maskedPhone(r.user?.phone ?? undefined)}</span> },
+              { key: 'work', header: 'Work', width: '16%', cell: (r) => label('RiderType', r.riderType) },
+              { key: 'online', header: 'Now', width: '11%', cell: (r) => <span className={`mc-badge${r.isOnline ? ' mc-tone-good' : ''}`}>{r.isOnline ? 'Online' : 'Offline'}</span> },
+              {
+                key: 'docs', header: 'Documents', width: '17%',
+                cell: (r) => (r.documentsVerified
+                  ? <span className="mc-badge mc-tone-good">Verified</span>
+                  : <Link href={`/riders/${r.id}`} className="mc-badge mc-tone-warn">Check documents</Link>),
+              },
+              { key: 'rating', header: 'Rating', width: '13%', cell: (r) => <span className="mc-numbers">{ratingText(r.averageRating, r.totalRatings)}</span> },
+            ]}
+          />
+          <Pager meta={list.data?.meta} shown={rows.length} onPage={(page) => setState({ ...state, page })} onShowTestData={() => setState({ ...state, showTestData: true, page: 1 })} />
+        </>
+      )}
     </div>
   );
 }

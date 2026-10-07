@@ -13,6 +13,7 @@ import type {
   MmgCheckoutTimelineEntry,
 } from '@swift/types';
 import { fetchMmgCheckout, fetchMmgCheckouts } from '@/lib/api';
+import { HeldFeePayments } from '@/components/mc/HeldFeePayments';
 
 /**
  * [MMG support lookup] Find a partner's MMG weekly-fee payment.
@@ -22,7 +23,8 @@ import { fetchMmgCheckout, fetchMmgCheckouts } from '@/lib/api';
  * partner's phone. The server matches it EXACTLY and records every search and
  * every opened payment. This page shows only what the server answered: no row
  * is drawn before it arrives, and an error is shown as an error, never as
- * "nothing found". Confirming or reversing a held payment is not here yet.
+ * "nothing found". [MC-AD3] Held payments waiting for a decision are listed
+ * above the search, each decided on the provider's record (HeldFeePayments).
  */
 const SEARCH_HINT = 'Swift reference, MMG transaction ID, MMG reference or partner phone';
 
@@ -109,6 +111,8 @@ export default function MmgPaymentsPage() {
       <p className="text-[var(--muted)] text-sm mb-6">
         Find a partner&apos;s MMG weekly-fee payment by any reference they or MMG can quote. Every search and every opened payment is recorded.
       </p>
+
+      <HeldFeePayments />
 
       <form onSubmit={submit} className="flex flex-col md:flex-row gap-3 mb-6" role="search" aria-label="Find an MMG payment">
         <input

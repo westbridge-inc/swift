@@ -1,50 +1,114 @@
 'use client';
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import Link from 'next/link';
+import { ArrowLeft } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRiderDetail,
   fetchDriverDetail,
+  fetchMoverActivationChecklist,
   verifyRiderDocuments,
   verifyDriverDocuments,
   setDriverRideClass,
+  type MoverActivationChecklist,
 } from '@/lib/api';
-import { Section, Row, StatusPill, BackLink, ActionButton, gyd } from '@/components/detail';
-import { askReason } from '@/lib/ask-reason';
+import { label, ratingText, type Tone } from '@/lib/labels';
+import type { Outcome } from '@/lib/outcome';
+import { ActionResult } from '@/components/mc/ActionResult';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { StatusBadge } from '@/components/mc/StatusBadge';
+import { Truncate } from '@/components/mc/Truncate';
+import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 
-const RIDE_CLASSES = ['ECONOMY', 'COMFORT', 'XL'];
+// ---------------------------------------------------------------------------
+// [MISSION CONTROL · PR-2] Rider (delivery/courier) and driver (taxi) pages.
+//
+// The page reads the mover's activation checklist: every required document for
+// their vehicle, and the live-operation gate the Verify button obeys. "Verify…"
+// appears only when that gate allows it; until then the page says what is
+// missing and links the mover in the Review Center. Every answer — the verify,
+// a ride-class change, a refusal — is shown in words (the old page dropped
+// them), and a failed load says so instead of "Not found".
+// Group (minibus) rides stay off at launch (owner ruling, 6 Oct).
+// ---------------------------------------------------------------------------
 
-/** Rider (delivery/courier) and Driver (taxi) drill-downs share one anatomy:
- *  who + vehicle + documents + weekly subscription + latest earnings. */
+const RIDE_CLASSES = ['ECONOMY', 'COMFORT', 'XL'] as const;
+
+const when = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
+
+function Row({ label: name, children }: { label: string; children: React.ReactNode }) {
+  if (children == null || children === '') return null;
+  return (
+    <div className="mc-row">
+      <dt>{name}</dt>
+      <dd>{children}</dd>
+    </div>
+  );
+}
+
+/** Where this mover stands, in one sentence, from the server's verdict. */
+function moverVerdict(c: MoverActivationChecklist, name: string): { tone: Tone; text: string } {
+  switch (c.next) {
+    case 'VERIFIED':
+      return c.live.allowed
+        ? { tone: 'good', text: `Verified. ${name} can go online.` }
+        : { tone: 'bad', text: `Verified earlier, but a required document is no longer current, so ${name} cannot go online until it is renewed.` };
+    case 'CAN_VERIFY':
+      return { tone: 'info', text: 'Every required document is approved and current. You can verify them now.' };
+    case 'NEEDS_INSURANCE':
+      return { tone: 'warn', text: 'Waiting for current HIRE-class insurance. Passenger work needs it approved before they can be verified.' };
+    case 'NEEDS_DOCUMENTS':
+      return c.checklist.complete
+        ? { tone: 'warn', text: 'Every document is approved, but a vehicle document belongs to a different vehicle than the one on their profile. Review it in the Review Center.' }
+        : { tone: 'warn', text: 'Waiting for documents. Decide each one in the Review Center; you can verify once all are approved.' };
+  }
+}
+
 export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver' }) {
   const qc = useQueryClient();
+  const dialog = useActionDialog();
+  const [result, setResult] = useState<Outcome | null>(null);
   const isDriver = kind === 'driver';
-  const { data, isLoading } = useQuery({
+  const profile = useQuery({
     queryKey: [kind, id],
     queryFn: () => (isDriver ? fetchDriverDetail(id) : fetchRiderDetail(id)),
   });
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: [kind, id] });
-    qc.invalidateQueries({ queryKey: [`${kind}s`] });
-  };
-  const verify = useMutation({
-    mutationFn: (reason: string) => (isDriver ? verifyDriverDocuments(id, reason) : verifyRiderDocuments(id, reason)),
-    onSuccess: invalidate,
-  });
-  const rideClass = useMutation({
-    mutationFn: ({ cls, reason }: { cls: string; reason: string }) => setDriverRideClass(id, cls, reason),
-    onSuccess: invalidate,
-  });
+  const checklist = useQuery({ queryKey: [`${kind}-checklist`, id], queryFn: () => fetchMoverActivationChecklist(kind, id) });
 
-  const m: any = data?.data;
+  const show = (outcome: Outcome | null) => {
+    if (!outcome) return;
+    setResult(outcome);
+    void qc.invalidateQueries({ queryKey: [kind, id] });
+    void qc.invalidateQueries({ queryKey: [`${kind}-checklist`, id] });
+    void qc.invalidateQueries({ queryKey: [`${kind}s`] });
+  };
+
   const listHref = isDriver ? '/drivers' : '/riders';
   const listLabel = isDriver ? 'Drivers' : 'Riders';
+  const back = (
+    <Link href={listHref} className="mc-back">
+      <ArrowLeft size={16} aria-hidden="true" /> {listLabel}
+    </Link>
+  );
 
-  if (isLoading) return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
-  if (!m) {
+  const m: any = profile.data?.data;
+  if (profile.isLoading) {
+    return <div className="mc-page">{back}<div className="mc-card" aria-busy="true">Loading…</div></div>;
+  }
+  if (profile.isError || !m) {
     return (
-      <div>
-        <BackLink href={listHref} label={listLabel} />
-        <p className="text-[var(--muted)]">Not found.</p>
+      <div className="mc-page">
+        {back}
+        <QueryFailed
+          error={profile.error ?? new Error('The server sent no record.')}
+          what={isDriver ? 'this driver' : 'this rider'}
+          onRetry={() => void profile.refetch()}
+          retrying={profile.isFetching}
+        />
       </div>
     );
   }
@@ -54,129 +118,157 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
   const sub = m.subscription;
   const earnings: any[] = m.earnings ?? [];
   const earned = earnings.reduce((a, e) => a + Number(e.amount ?? 0), 0);
+  const c: MoverActivationChecklist | undefined = checklist.data?.data;
+  const context = { applicantId: m.user?.id ?? c?.applicantId };
+
+  const verify = async () => show(await dialog.run({
+    title: `Verify ${name}'s documents?`,
+    body: <p>Their required documents are approved and current. Verifying lets them go online, and their 14-day free trial starts.</p>,
+    confirmLabel: 'Verify documents',
+    reason: { hint: 'Kept on the permanent record.' },
+    context,
+    submit: ({ reason }) => (isDriver ? verifyDriverDocuments(id, reason) : verifyRiderDocuments(id, reason)),
+    success: () => `${name} is verified and can go online.`,
+  }));
+
+  const setRideClass = async (cls: string) => show(await dialog.run({
+    title: `Set ${name}'s ride class to ${label('RideClass', cls)}?`,
+    body: <p>Riders asking for a {label('RideClass', cls)} can be matched to them. Confirm the vehicle fits before you change it.</p>,
+    confirmLabel: 'Change ride class',
+    reason: { hint: 'Kept on the permanent record.' },
+    context,
+    submit: ({ reason }) => setDriverRideClass(id, cls, reason),
+    success: () => `${name} now drives ${label('RideClass', cls)} rides.`,
+  }));
 
   return (
-    <div>
-      <BackLink href={listHref} label={listLabel} />
+    <div className="mc-page">
+      {back}
 
-      <div className="flex flex-wrap items-center gap-3 mb-6">
-        <div className="w-12 h-12 rounded-full bg-[var(--accent)] flex items-center justify-center text-lg font-bold">
+      <header className="flex flex-wrap items-start gap-4 mb-5">
+        <div
+          aria-hidden="true"
+          className="mc-numbers grid place-items-center shrink-0 w-12 h-12 rounded-full text-white text-lg font-bold"
+          style={{ background: 'var(--mc-accent)' }}
+        >
           {name.charAt(0).toUpperCase()}
         </div>
-        <div>
-          <h1 className="text-2xl font-bold">{name}</h1>
-          <p className="text-sm text-[var(--muted)]">{m.user?.phone}</p>
+        <div className="min-w-0 flex-1 basis-56">
+          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+            <Truncate text={name} lines={2} focusable />
+          </h1>
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <span className={`mc-badge ${m.documentsVerified ? 'mc-tone-good' : 'mc-tone-warn'}`}>
+              {m.documentsVerified ? 'Documents verified' : 'Documents not verified'}
+            </span>
+            <span className={`mc-badge${m.isOnline ? ' mc-tone-good' : ''}`}>{m.isOnline ? 'Online' : 'Offline'}</span>
+            {isDriver && m.rideClass ? <span className="mc-badge mc-tone-info">{label('RideClass', m.rideClass)}</span> : null}
+          </div>
+          <p className="mc-muted mt-1.5">
+            {[isDriver ? 'Taxi driver' : label('RiderType', m.riderType), m.user?.phone, `Joined ${when(m.user?.createdAt)}`].filter(Boolean).join(' · ')}
+          </p>
         </div>
-        {m.documentsVerified ? (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">docs verified</span>
-        ) : (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-amber-500/15 text-amber-400">docs unverified</span>
-        )}
-        {m.isOnline ? (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">online</span>
-        ) : (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">offline</span>
-        )}
-        {isDriver && m.rideClass ? (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-sky-500/15 text-sky-400">{m.rideClass}</span>
-        ) : null}
-        <div className="ml-auto flex gap-2">
-          {!m.documentsVerified && (
-            <ActionButton
-              label="Verify documents"
-              confirm={`Verify ${name}'s documents? Their 14-day trial starts now and they can go online.`}
-              onClick={() => { const reason = askReason({ action: 'verify these documents', subject: name }); if (reason) verify.mutate(reason); }}
-              disabled={verify.isPending}
-            />
-          )}
+        <div className="flex flex-wrap gap-2 w-full sm:w-auto sm:ml-auto">
+          {c?.next === 'CAN_VERIFY' ? (
+            <button type="button" className="mc-btn mc-btn-primary" onClick={verify}>Verify…</button>
+          ) : null}
         </div>
-      </div>
+      </header>
+
+      <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-5" />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 space-y-4">
-          <Section title="Latest earnings">
-            {earnings.length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">No earnings yet.</p>
-            ) : (
-              <>
-                <div className="space-y-2">
-                  {earnings.map((e: any) => (
-                    <div key={e.id} className="flex items-center gap-3 p-2.5 rounded-lg bg-white/5 text-sm">
-                      <span>{String(e.type).replaceAll('_', ' ').toLowerCase()}</span>
-                      <span className="text-xs text-[var(--muted)]">{new Date(e.createdAt).toLocaleDateString()}</span>
-                      <span className="ml-auto font-medium">{gyd(e.amount)}</span>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-[var(--muted)] mt-3">
-                  Last {earnings.length} entries · {gyd(earned)} — 100% theirs, Swift only charges the weekly fee.
-                </p>
-              </>
-            )}
-          </Section>
+        <div className="lg:col-span-2 space-y-4 min-w-0">
+          {c ? (
+            <ActivationChecklist
+              title={`Required documents · ${label('VehicleType', c.vehicleType)}`}
+              items={c.checklist.items}
+              applicantId={c.applicantId}
+              verdict={moverVerdict(c, name)}
+            />
+          ) : checklist.isLoading ? (
+            <div className="mc-card" aria-busy="true">Loading the document checklist…</div>
+          ) : (
+            <QueryFailed error={checklist.error} what="the document checklist" onRetry={() => void checklist.refetch()} retrying={checklist.isFetching} />
+          )}
 
-          {isDriver && (
-            <Section title="Ride class">
-              <div className="flex gap-2">
+          {isDriver ? (
+            <section aria-labelledby="ride-class" className="mc-card">
+              <h2 id="ride-class" className="mc-label">Ride class</h2>
+              <div className="flex flex-wrap gap-2">
                 {RIDE_CLASSES.map((cls) => (
                   <button
                     key={cls}
-                    onClick={() => {
-                      if (m.rideClass !== cls && window.confirm(`Set ${name}'s ride class to ${cls}?`)) {
-                        const reason = askReason({ action: `set this driver's ride class to ${cls}`, subject: name });
-                        if (reason) rideClass.mutate({ cls, reason });
-                      }
-                    }}
-                    disabled={rideClass.isPending}
-                    className={`px-4 py-2 rounded-lg text-sm transition-colors disabled:opacity-50 ${
-                      m.rideClass === cls ? 'bg-[var(--accent)] text-white' : 'border border-[var(--border)] text-[var(--muted)] hover:bg-white/10'
-                    }`}
+                    type="button"
+                    aria-pressed={m.rideClass === cls}
+                    onClick={() => { if (m.rideClass !== cls) void setRideClass(cls); }}
+                    className={`mc-btn${m.rideClass === cls ? ' mc-btn-primary' : ''}`}
                   >
-                    {cls}
+                    {label('RideClass', cls)}
                   </button>
                 ))}
               </div>
-              <p className="text-xs text-[var(--muted)] mt-3">
-                Class assignment is manual — confirm the vehicle matches before upgrading.
-              </p>
-            </Section>
-          )}
+              <p className="mc-muted text-xs mt-3">Set by hand. Confirm the vehicle matches before you change it.</p>
+            </section>
+          ) : null}
+
+          <section aria-labelledby="earnings" className="mc-card">
+            <h2 id="earnings" className="mc-label">Latest earnings</h2>
+            {earnings.length === 0 ? (
+              <p className="mc-muted">No earnings yet.</p>
+            ) : (
+              <>
+                <ul className="grid gap-1">
+                  {earnings.map((e) => (
+                    <li key={e.id} className="mc-row">
+                      <span>{label('EarningType', e.type)} <span className="mc-muted text-xs">· {when(e.createdAt)}</span></span>
+                      <span className="mc-numbers">{gyd(e.amount)}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mc-muted text-xs mt-3">
+                  Last {earnings.length} entries · {gyd(earned)}. All of it is theirs; Swift only charges the weekly fee.
+                </p>
+              </>
+            )}
+          </section>
         </div>
 
-        <div className="space-y-4">
-          <Section title="Vehicle">
-            <div className="space-y-1.5">
-              <Row label="Vehicle" value={vehicle || '—'} />
-              <Row label="Plate" value={m.licensePlate} />
-              {!isDriver && <Row label="Type" value={m.vehicleType?.toLowerCase()} />}
-              {!isDriver && <Row label="Rider type" value={m.riderType?.toLowerCase()} />}
-              {m.vehicleYear ? <Row label="Year" value={m.vehicleYear} /> : null}
-            </div>
-          </Section>
+        <div className="space-y-4 min-w-0">
+          <section aria-labelledby="vehicle" className="mc-card">
+            <h2 id="vehicle" className="mc-label">Vehicle</h2>
+            <dl className="mc-rows">
+              <Row label="Vehicle">{vehicle || '—'}</Row>
+              <Row label="Plate">{m.licensePlate}</Row>
+              <Row label="Type">{m.vehicleType ? label('VehicleType', m.vehicleType) : null}</Row>
+              {m.vehicleYear ? <Row label="Year">{m.vehicleYear}</Row> : null}
+            </dl>
+          </section>
 
-          <Section title="Subscription">
+          <section aria-labelledby="subscription" className="mc-card">
+            <h2 id="subscription" className="mc-label">Subscription</h2>
             {sub ? (
-              <div className="space-y-1.5">
-                <Row label="Status" value={<StatusPill value={sub.status} />} />
-                <Row label="Weekly rate" value={gyd(sub.customRate ?? sub.weeklyRate)} />
-                {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends" value={new Date(sub.trialEndDate).toLocaleDateString()} /> : null}
-                {sub.nextBillingDate ? <Row label="Next bill" value={new Date(sub.nextBillingDate).toLocaleDateString()} /> : null}
-              </div>
+              <dl className="mc-rows">
+                <Row label="Status"><StatusBadge group="SubscriptionStatus" value={sub.status} /></Row>
+                <Row label="Weekly fee"><span className="mc-numbers">{gyd(sub.customRate ?? sub.weeklyRate)}</span></Row>
+                {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends">{when(sub.trialEndDate)}</Row> : null}
+                {sub.nextBillingDate ? <Row label="Next bill">{when(sub.nextBillingDate)}</Row> : null}
+              </dl>
             ) : (
-              <p className="text-sm text-[var(--muted)]">No subscription yet (starts on verification).</p>
+              <p className="mc-muted">No subscription yet. It starts when their documents are verified.</p>
             )}
-          </Section>
+          </section>
 
-          <Section title="Performance">
-            <div className="space-y-1.5">
-              <Row label="Rating" value={m.averageRating ? `${Number(m.averageRating).toFixed(1)} (${m.totalRatings ?? 0})` : '—'} />
-              {!isDriver && <Row label="Deliveries" value={m.totalDeliveries} />}
-              {!isDriver && <Row label="Acceptance" value={m.acceptanceRate != null ? `${Math.round(Number(m.acceptanceRate))}%` : '—'} />}
-              {isDriver && <Row label="Trips" value={m._count?.orders} />}
-              <Row label="Joined" value={m.user?.createdAt ? new Date(m.user.createdAt).toLocaleDateString() : '—'} />
-              <Row label="Account" value={m.user?.status?.toLowerCase()} href={m.user?.id ? `/users/${m.user.id}` : undefined} />
-            </div>
-          </Section>
+          <section aria-labelledby="performance" className="mc-card">
+            <h2 id="performance" className="mc-label">Performance</h2>
+            <dl className="mc-rows">
+              <Row label="Rating"><span className="mc-numbers">{ratingText(m.averageRating, m.totalRatings)}</span></Row>
+              {!isDriver ? <Row label="Deliveries"><span className="mc-numbers">{m.totalDeliveries ?? 0}</span></Row> : null}
+              {!isDriver && m.acceptanceRate != null ? <Row label="Acceptance">{`${Math.round(Number(m.acceptanceRate))}%`}</Row> : null}
+              {isDriver ? <Row label="Trips"><span className="mc-numbers">{m._count?.orders ?? 0}</span></Row> : null}
+              <Row label="Account">{m.user?.id ? <Link href={`/users/${m.user.id}`}><StatusBadge group="UserStatus" value={m.user?.status} /></Link> : null}</Row>
+            </dl>
+          </section>
         </div>
       </div>
     </div>

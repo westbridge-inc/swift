@@ -4,10 +4,24 @@ import { isRejectionReasonCode, rejectionLabel } from './rejection-reasons';
 export const REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 export type ReviewLane = 'operator' | 'customer' | 'all';
+/**
+ * [MC-AD1] The applicant's latest earlier decision on the same document type, carried by each queue row
+ * (GET /admin/verification/queue). Null: a first upload, or the lookup was unavailable — never an error.
+ */
+export interface PreviousDecision {
+  documentId: string;
+  kind: 'RESUBMITTED_AFTER_REJECTION' | 'RENEWAL';
+  status: 'REJECTED' | 'EXPIRED' | 'APPROVED';
+  /** The reviewer's own words to the applicant last time. */
+  reviewNote: string | null;
+  decidedAt: string | null;
+  submittedAt: string;
+}
 export interface ReviewDocument {
   id: string; userId: string; docType: string; role: string; status: ReviewStatus;
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
+  previousDecision?: PreviousDecision | null;
   user?: {
     id: string; firstName?: string; lastName?: string; phone?: string; countryCode?: string;
     driver?: { licensePlate?: string; vehicleMake?: string; vehicleModel?: string; vehicleType?: string } | null;
@@ -26,6 +40,8 @@ const LABELS: Record<string, string> = {
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
   self_declaration_unregistered: 'Unregistered business declaration',
+  // [MC-PR2] checklist photo types the queue and the activation checklist both name
+  storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
   VENDOR_OWNER: 'Business owner', MOVER: 'Rider/Driver', CUSTOMER: 'Customer',
   RIDER: 'Rider', DRIVER: 'Driver', ADMIN: 'Administrator',
   CAR: 'Car', MOTORCYCLE: 'Motorcycle', BICYCLE: 'Bicycle', VAN: 'Van', TRUCK: 'Truck',
@@ -127,6 +143,20 @@ export function reviewTimeline(events: ReviewTimelineEvent[]): Array<ReviewTimel
     }
     return [{ ...event, label }];
   });
+}
+/** [MC-AD1] The marker for a re-submission, in words; null for a first upload. */
+export function resubmissionLabel(doc: Pick<ReviewDocument, 'previousDecision'>): string | null {
+  const prev = doc.previousDecision;
+  if (!prev) return null;
+  return prev.kind === 'RESUBMITTED_AFTER_REJECTION' ? 'Re-submitted after rejection' : 'Renewal';
+}
+const shortDay = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' }) : null);
+/** [MC-AD1] What the earlier decision was, in one sentence (the reviewer's note is quoted separately). */
+export function previousDecisionLine(prev: PreviousDecision): string {
+  const when = shortDay(prev.decidedAt);
+  if (prev.kind === 'RESUBMITTED_AFTER_REJECTION') return `Rejected ${when ?? 'earlier'}. This upload answers that rejection.`;
+  if (prev.status === 'EXPIRED') return `This upload replaces a document that expired${when ? ` (decided ${when})` : ''}.`;
+  return `This upload renews a document approved ${when ?? 'earlier'}.`;
 }
 export const applicantId = (doc: ReviewDocument) => doc.userId || doc.user?.id || doc.id;
 export const maskedPhone = (phone?: string) => phone ? `••• ••• ${phone.slice(-4)}` : 'No phone on file';

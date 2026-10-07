@@ -91,6 +91,31 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
         next: `${NOTHING_CHANGED} Featuring opens once a business registration is approved for the owner.`,
         link: { label: 'Open in Review Center', href: reviewCenterHref(ctx.applicantId) },
       };
+    case 'DISCLOSURE_INCOMPLETE':
+      return {
+        tone: 'refused',
+        title: "The store's supplier information is incomplete",
+        next: `${NOTHING_CHANGED} Its documents are approved; it goes live by itself once the missing details are complete.`,
+      };
+    case 'FEE_UNPAID':
+      return {
+        tone: 'refused',
+        title: 'This store is held by its weekly fee',
+        next: `${NOTHING_CHANGED} Its weekly fee is unpaid or its billing is stopped. It comes back by itself when the fee is paid through the MMG checkout page; the console cannot lift a fee hold.`,
+      };
+    case 'ACCOUNT_CLOSED':
+      return { tone: 'refused', title: 'The owner closed their Swift account', next: `${NOTHING_CHANGED} A closed account's store is not reopened from the console.` };
+    case 'STORE_CLOSED':
+      return { tone: 'refused', title: 'This store is closed', next: `${NOTHING_CHANGED} A closed store is not reopened from the console.` };
+    case 'SETTLEMENT_EVIDENCE_REQUIRED':
+      // [MC-AD3] A held fee payment is confirmed PAID only on the provider's own record, never a typed claim.
+      return {
+        tone: 'refused',
+        title: "The provider's record of this payment isn't on file",
+        next: `${NOTHING_CHANGED} Swift credits a week only on the provider's own confirmation. Look the payment up in MMG payments; once Swift's lookup has recorded it, decide again.`,
+      };
+    case 'ACTIVATION_HELD':
+      return { tone: 'refused', title: 'The store changed while you were acting', next: `${NOTHING_CHANGED} Refresh and check its documents before trying again.` };
     case 'ALREADY_ACTIVE':
       return { tone: 'refused', title: 'This store is already live', next: 'Nothing more is needed. Refresh to see its current status.' };
     case 'STEP_UP_REQUIRED':
