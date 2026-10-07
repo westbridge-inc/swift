@@ -4,7 +4,7 @@ import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, registryCode } from './doc-registry';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor } from './evidence';
@@ -476,6 +476,11 @@ export class VerificationService {
     // the same set auth.ts cuts off, nothing more.
     if (['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(user.status)) {
       throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active — documents cannot be submitted.');
+    }
+    // [VERIFY-DOCS · owner ruling 5] Never a medical document, whatever a stored list names: refused
+    // before anything is recorded or sent anywhere.
+    if (isNeverAcceptedDocType(docType)) {
+      throw new AppError(400, 'DOC_TYPE_NOT_ACCEPTED', 'Swift does not accept medical documents. Remove it and upload the document your checklist asks for.');
     }
     const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
       ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;

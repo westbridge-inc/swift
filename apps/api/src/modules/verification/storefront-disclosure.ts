@@ -115,9 +115,12 @@ export async function compileStorefrontDisclosure(db: Db, vendorId: string, now 
     ? { value: vendor.owner.user.phone, source: 'ACCOUNT' } : null;
   if (!contact) missing.push('contact');
 
-  // Licence disclosures: every VALID licence-class record, with its number when read.
+  // Licence disclosures: every VALID licence-class record, with its number when read — except a PERSONAL
+  // licence (the food handler's permit belongs to a person): "on file", and its number is never even read
+  // here. [VERIFY-DOCS · owner ruling 5, 6 Oct 2026]
   const licences: DisclosureElement[] = [];
   for (const r of records.filter((x) => LICENCE_DISCLOSURE_TYPES.includes(x.docType))) {
+    if (BUCKET_OF[r.docType] === 'PERSONAL') { licences.push({ value: 'on file', source: 'RECORD', docType: r.docType, recordId: r.id }); continue; }
     const f = await readFields(db, r.submissionId, ['licence_number', 'certificate_number', 'permit_number']);
     const number = [...f.values()].find((x) => x && x.trim());
     licences.push({ value: number ? number.trim() : 'on file', source: 'RECORD', docType: r.docType, recordId: r.id });

@@ -79,7 +79,7 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   vehicle_insurance: 365,  // annual policy
   hire_car_permit: 365,    // annual occupational permit
   road_service_licence: 365, // annual commercial road-service licence
-  food_handler_cert: 365,  // annual health cert
+  food_handler_cert: 365,  // annual Food Handler's Permit (Food Safety Act 2019 s.54) — a permit, never a medical certificate
   gra_restaurant_licence: 365,
   // [DOC-1 §18.1] the addendum's annual Guyana licences (submittable through a category gate)
   liquor_licence: 365,
@@ -314,7 +314,8 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   for (const c of countries) {
     // Code defaults under the stored JSON (P3-2): a list added in code is seeded everywhere; an edited stored list wins.
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
-    const legacyCodes = [...new Set(Object.values(lists).flat())];
+    // [VERIFY-DOCS] A never-accepted type (a medical document) is never minted, whatever a stored list says.
+    const legacyCodes = [...new Set(Object.values(lists).flat())].filter((code) => !isNeverAcceptedDocType(code));
     for (const legacyCode of legacyCodes) {
       const bucket = BUCKET_OF[legacyCode] ?? 'PERSONAL';
       const validity = AUTO_APPROVE_EXPIRY_DAYS[legacyCode];
@@ -343,6 +344,7 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
       });
       requirementSets += 1;
       for (const [i, legacyCode] of codes.entries()) {
+        if (isNeverAcceptedDocType(legacyCode)) continue; // [VERIFY-DOCS] never minted above, never required
         await prisma.requirementItem.upsert({
           where: { requirementSetId_docTypeCode: { requirementSetId: set.id, docTypeCode: registryCode(c.code, legacyCode) } },
           create: { requirementSetId: set.id, docTypeCode: registryCode(c.code, legacyCode), isBlocking: true, minCount: 1, sortOrder: i },
@@ -377,13 +379,13 @@ const DATES = (issue = 'issue_date', expiry = 'expiry_date'): FieldRow[] => [
   { fieldCode: issue, dataType: 'date', validatorRef: 'V_DATE_ORDER' },
   { fieldCode: expiry, dataType: 'date', validatorRef: 'V_EXPIRY_PLAUSIBLE' },
 ];
+// [VERIFY-DOCS · owner ruling 5, 6 Oct 2026] An ID proves who someone is and that they are an adult:
+// number, name, date of birth, dates. Sex and nationality are not needed and are not declared (RETIRED_FIELDS).
 const IDENTITY: FieldRow[] = [
   { fieldCode: 'doc_number', dataType: 'text', isPii: true, blind: true, identifier: true, validatorRef: 'V_MRZ_CHECKSUM' },
   { fieldCode: 'full_name', dataType: 'text', isPii: true },
   { fieldCode: 'dob', dataType: 'date', isPii: true, validatorRef: 'V_DOB_ADULT' },
-  { fieldCode: 'sex', dataType: 'enum', isPii: true, enumValues: ['M', 'F', 'X'] },
   ...DATES(),
-  { fieldCode: 'nationality', dataType: 'text', isPii: true },
 ];
 export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   national_id: IDENTITY,
@@ -445,7 +447,7 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
     { fieldCode: 'model', dataType: 'text' },
     { fieldCode: 'year', dataType: 'number' },
     { fieldCode: 'colour', dataType: 'text' }, // recorded, never judged (owner ruling 2026-10-01: any colour)
-    { fieldCode: 'owner_name', dataType: 'text', isPii: true },
+    // [VERIFY-DOCS · ruling 5] no owner_name: the registered owner can be a third party (RETIRED_FIELDS)
   ],
   road_service_licence: [
     { fieldCode: 'licence_number', dataType: 'text', blind: true, identifier: true },
@@ -502,6 +504,37 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   ],
 };
 
+/**
+ * [VERIFY-DOCS · owner ruling 5, 6 Oct 2026] Fields an older registry declared and Swift no longer
+ * collects: a person's sex and nationality on identity documents, and the registered owner's name on a
+ * vehicle registration (it can be a third party's). The seed RETIRES their declarations (seedDocFields),
+ * so no extraction creates them again, and the subject's export and the custody trail never show an
+ * empty placeholder an older extraction left for them. A value under one (none is ever written: the
+ * processor contract carries only the document number) would still be exported to its subject.
+ */
+export const RETIRED_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  national_id: ['sex', 'nationality'],
+  owner_national_id: ['sex', 'nationality'],
+  passport: ['sex', 'nationality'],
+  digital_id: ['sex', 'nationality'],
+  vehicle_registration: ['owner_name'],
+};
+/** An empty placeholder for a retired field: nothing to show anyone. */
+export function isRetiredPlaceholder(legacyCode: string, fieldCode: string, valueCt: unknown): boolean {
+  return valueCt === null && (RETIRED_FIELDS[legacyCode]?.includes(fieldCode) ?? false);
+}
+
+/**
+ * [VERIFY-DOCS · owner ruling 5] Swift never accepts a medical certificate or any health record — health
+ * data is sensitive personal data (Data Protection Act 2023 s.2), and nothing Swift does needs it (the food
+ * handler's permit is a permit). No list may name one, the registry never mints one, and an upload of one
+ * is refused before any document is recorded, whatever a stored list says.
+ */
+export const NEVER_ACCEPTED_DOC_TYPES: ReadonlySet<string> = new Set(['medical_certificate', 'health_certificate', 'medical_report', 'doctors_note', 'fitness_to_work_certificate']);
+export function isNeverAcceptedDocType(code: string): boolean {
+  return NEVER_ACCEPTED_DOC_TYPES.has(code) || /medical|doctor|physician|health_cert/i.test(code);
+}
+
 /** The field a processor's generic `documentNumber` lands in for a type: a declared `doc_number` first (the legacy convention), else the type's identifier. */
 export function identifierFieldOf(legacyCode: string, declared: ReadonlyArray<{ fieldCode: string }>): string | null {
   if (declared.some((f) => f.fieldCode === 'doc_number')) return 'doc_number';
@@ -509,8 +542,12 @@ export function identifierFieldOf(legacyCode: string, declared: ReadonlyArray<{ 
   return id && declared.some((f) => f.fieldCode === id) ? id : null;
 }
 
-/** Seed the declared fields of every seeded document type. Expand-only: rows are upserted, never removed (a type's own test may add fields for a run). */
+/** Seed the declared fields of every seeded document type. Expand-only: rows are upserted, never removed (a type's own test may add fields for a run)
+ *  — except a RETIRED field, whose declaration is removed so no extraction creates it again [VERIFY-DOCS]. */
 export async function seedDocFields(prisma: PrismaClient): Promise<number> {
+  for (const [legacyCode, fieldCodes] of Object.entries(RETIRED_FIELDS)) {
+    await prisma.docField.deleteMany({ where: { docType: { legacyCode }, fieldCode: { in: [...fieldCodes] } } });
+  }
   const types = await prisma.docType.findMany({ select: { code: true, legacyCode: true } });
   const validators = new Set((await prisma.validator.findMany({ select: { code: true } })).map((v) => v.code));
   let n = 0;
