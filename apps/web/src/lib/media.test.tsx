@@ -19,17 +19,17 @@ const API = 'https://api.example.test';
 
 describe('[W2b] where a stored photo lives', () => {
   it('puts the API origin in front of a stored path, as the phone app does', () => {
-    expect(mediaUrl('/uploads/items/v1/abc.jpg', API)).toBe(`${API}/uploads/items/v1/abc.jpg`);
-    expect(mediaUrl('uploads/items/v1/abc.jpg', API)).toBe(`${API}/uploads/items/v1/abc.jpg`);
-    expect(mediaUrl(`${API}/uploads/items/v1/abc.jpg`, API)).toBe(`${API}/uploads/items/v1/abc.jpg`);
+    expect(mediaUrl('/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg', API)).toBe(`${API}/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg`);
+    expect(mediaUrl('uploads/items/v1/AbCdEfGh_jKlMn-p.jpg', API)).toBe(`${API}/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg`);
+    expect(mediaUrl(`${API}/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(`${API}/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg`);
     expect(mediaUrl('https://elsewhere.test/a.jpg', API)).toBe('https://elsewhere.test/a.jpg');
     expect(mediaUrl('blob:https://swiftgy.com/123', API)).toBe('blob:https://swiftgy.com/123');
     expect(mediaUrl(null, API)).toBeNull();
     expect(mediaUrl('', API)).toBeNull();
   });
 
-  it('only the API’s own public photo folders go to the optimiser', () => {
-    expect(optimizable(`${API}/uploads/items/v1/a.jpg`, API)).toBe(true);
+  it('only avatars and vehicles use the built-in optimiser', () => {
+    expect(optimizable(`${API}/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(false);
     expect(optimizable(`${API}/uploads/avatars/u1.jpg`, API)).toBe(true);
     expect(optimizable(`${API}/uploads/vehicles/d1.jpg`, API)).toBe(true);
     // Never another host, a private folder, or a path that climbs out.
@@ -38,15 +38,15 @@ describe('[W2b] where a stored photo lives', () => {
     expect(optimizable(`${API}/uploads/items/../verification/id.jpg`, API)).toBe(false);
     expect(optimizable(`${API}/uploads/items/%2e%2e/verification/id.jpg`, API)).toBe(false);
     expect(optimizable(`http://api.example.test/uploads/items/a.jpg`, API)).toBe(false);
-    expect(photo('/uploads/items/v1/a.jpg', API)).toEqual({ src: `${API}/uploads/items/v1/a.jpg`, unoptimized: false });
+    expect(photo('/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg', API)).toEqual({ src: '/media/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg', unoptimized: false, loader: expect.any(Function) });
     expect(photo('https://elsewhere.test/a.jpg', API)).toEqual({ src: 'https://elsewhere.test/a.jpg', unoptimized: true });
   });
 
-  it('a store photo kept in object storage (saved as "items/<store>/<file>") goes to the optimiser too — that address only', () => {
+  it('a store photo kept in object storage (saved as "items/<store>/<file>") bypasses the optimiser — that address only', () => {
     const key = 'items/cm1store0000000000000001/AbCdEfGh_jKlMn-p.jpg';
     expect(mediaUrl(key, API)).toBe(`${API}/${key}`);
-    expect(photo(key, API)).toEqual({ src: `${API}/${key}`, unoptimized: false });
-    expect(optimizable(`${API}/${key}`, API)).toBe(true);
+    expect(photo(key, API)).toEqual({ src: `/media/${key}`, unoptimized: false, loader: expect.any(Function) });
+    expect(optimizable(`${API}/${key}`, API)).toBe(false);
     // A store, then a photo: nothing deeper or shallower, no other folder, no climbing.
     expect(optimizable(`${API}/items/cm1store/sub/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(false);
     expect(optimizable(`${API}/items/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(false);
@@ -58,16 +58,37 @@ describe('[W2b] where a stored photo lives', () => {
 
   it('a store’s photo card asks the web server for a resized copy of the API’s photo, sized for the card', () => {
     // The test origin (vitest.config) is the browser API origin here.
-    const { container } = render(<Photo src="/uploads/items/v1/rice.jpg" name="Cook-up rice" sizes="160px" />);
+    const { container } = render(<Photo src="/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg" name="Cook-up rice" sizes="160px" />);
     const img = container.querySelector('img')!;
-    expect(img.getAttribute('src')).toMatch(/^\/_next\/image\?url=http%3A%2F%2Fvendor-api\.test%2Fuploads%2Fitems%2Fv1%2Frice\.jpg&w=\d+&q=75$/);
-    expect(img.getAttribute('srcset')).toContain('/_next/image?url=');
+    expect(img.getAttribute('src')).toMatch(/^\/media\/uploads\/items\/v1\/AbCdEfGh_jKlMn-p\.jpg\?w=\d+$/);
+    expect(img.getAttribute('srcset')).toContain('/media/uploads/items/v1/AbCdEfGh_jKlMn-p.jpg?w=');
+    expect(img.getAttribute('srcset')).not.toContain('/_next/image');
     expect(img.getAttribute('sizes')).toBe('160px');
   });
 
   it('a store photo saved as an object-storage key is resized by the web server like any other', () => {
     const { container } = render(<Photo src="items/cm1store/AbCdEfGh_jKlMn-p.jpg" name="Pepperpot" sizes="160px" />);
-    expect(container.querySelector('img')!.getAttribute('src')).toMatch(/^\/_next\/image\?url=http%3A%2F%2Fvendor-api\.test%2Fitems%2Fcm1store%2FAbCdEfGh_jKlMn-p\.jpg&w=\d+&q=75$/);
+    expect(container.querySelector('img')!.getAttribute('src')).toMatch(/^\/media\/items\/cm1store\/AbCdEfGh_jKlMn-p\.jpg\?w=\d+$/);
+  });
+
+  it('passes the custom loader and responsive widths through every store Photo card', () => {
+    const media = photo(`${API}/items/store/AbCdEfGh_jKlMn-p.jpg`, API)!;
+    expect(media.loader!({ src: media.src, width: 640, quality: 1 })).toBe('/media/items/store/AbCdEfGh_jKlMn-p.jpg?w=640');
+    expect(photo(`${API}/uploads/avatars/u1.jpg`, API)).toEqual({ src: `${API}/uploads/avatars/u1.jpg`, unoptimized: false });
+  });
+
+  it.each([
+    '/uploads/items/store/sub/AbCdEfGh_jKlMn-p.jpg',
+    '/uploads/items/store/a.jpg',
+    '/items/store/AbCdEfGh_jKlMn-p.jpg?token=x',
+    '/items/store/AbCdEfGh_jKlMn-p.jpg#x',
+    '/items/store/%41bCdEfGh_jKlMn-p.jpg',
+    '/items/../store/AbCdEfGh_jKlMn-p.jpg',
+    'https://user@api.example.test/items/store/AbCdEfGh_jKlMn-p.jpg',
+    'https://elsewhere.test/items/store/AbCdEfGh_jKlMn-p.jpg',
+  ])('never hands an invalid store source to either resize route: %s', (source) => {
+    expect(photo(source, API)?.unoptimized).toBe(true);
+    expect(photo(source, API)?.loader).toBeUndefined();
   });
 
   it('a photo on any other host is drawn as it is, never through the optimiser', () => {
@@ -96,19 +117,17 @@ describe('[W2b] the web server’s image optimiser', () => {
   it('may fetch only the public photo folders on the release’s own API origin', () => {
     const host = new URL(RELEASE_BROWSER_API_ORIGIN).hostname;
     expect(release.images?.remotePatterns).toEqual([
-      ...['items', 'avatars', 'vehicles'].map((folder) => ({ protocol: 'https', hostname: host, port: '', pathname: `/uploads/${folder}/**` })),
-      // [PUBLIC-PHOTOS] stores' photos kept in object storage: a store, then a photo.
-      { protocol: 'https', hostname: host, port: '', pathname: '/items/*/*' },
+      ...['avatars', 'vehicles'].map((folder) => ({ protocol: 'https', hostname: host, port: '', pathname: `/uploads/${folder}/**` })),
     ]);
     expect(staging.images?.remotePatterns?.map((pattern) => (pattern as { hostname: string }).hostname))
-      .toEqual(Array(4).fill(new URL(STAGING_BROWSER_API_ORIGIN).hostname));
+      .toEqual(Array(2).fill(new URL(STAGING_BROWSER_API_ORIGIN).hostname));
     for (const pattern of release.images?.remotePatterns ?? []) {
       expect(JSON.stringify(pattern)).not.toMatch(/\*\*?\./);
     }
     expect(release.images?.domains ?? []).toEqual([]);
   });
 
-  it('serves WebP, keeps a resized copy a year, never resizes SVG', () => {
+  it('serves WebP, keeps avatar and vehicle resized copies a year, never resizes SVG', () => {
     expect(release.images?.formats).toEqual(['image/webp']);
     expect(release.images?.minimumCacheTTL).toBe(60 * 60 * 24 * 365);
     expect(release.images?.dangerouslyAllowSVG).toBe(false);

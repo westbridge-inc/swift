@@ -44,7 +44,7 @@ export function Photo({
   return (
     <span className={`sw-photo ${className}`} style={dim ? { opacity: 0.45 } : undefined}>
       {media ? (
-        <Image src={media.src} alt={alt} fill unoptimized={media.unoptimized} sizes={sizes} {...(priority ? { priority: true } : { loading: 'lazy' as const })} className="object-cover" />
+        <Image {...media} alt={alt} fill sizes={sizes} {...(priority ? { priority: true } : { loading: 'lazy' as const })} className="object-cover" />
       ) : (
         <span className="flex flex-col items-center justify-center gap-2 p-3 text-center">
           <Pictogram name={verticalPictogram(vendorType)} size={iconSize} />

@@ -1,7 +1,7 @@
 import type { NextConfig } from 'next';
 import { PHASE_DEVELOPMENT_SERVER } from 'next/constants';
 import { SITE_DOMAIN } from './src/site.domain';
-import { mediaRemotePatterns } from './src/lib/media-patterns';
+import { MEDIA_DEVICE_SIZES, MEDIA_IMAGE_SIZES, mediaRemotePatterns } from './src/lib/media-patterns';
 
 /** The public site's own names: never noindexed, whichever build answers them. */
 const PUBLIC_SITE_HOSTS = [SITE_DOMAIN, `www.${SITE_DOMAIN}`];
@@ -58,19 +58,17 @@ export default function createNextConfig(phase: string): NextConfig {
     env: {
       NEXT_PUBLIC_API_URL: browserApiOrigin,
     },
-    // [W2b · owner ruling h4] Stores' photos are resized by this server for
-    // the screen that asks (WebP, cached), instead of every phone downloading
-    // the full upload. Only the public photo folders on the API's own origin
-    // may be fetched (src/lib/media-patterns.ts). WebP only: AVIF is a little
-    // smaller but several times slower to encode on a small server. A stored
-    // photo's address never changes (a new photo is a new file name), so a
-    // resized copy is kept for a year.
+    // Store photos bypass Next's stale-on-error image cache via photo() and
+    // /media. The one-year minimum below applies ONLY to avatars and vehicles.
+    // Both resize routes share the same responsive width lists and WebP format.
     images: {
       remotePatterns: mediaRemotePatterns(browserApiOrigin),
+      // Do not let /_next/image wrap /media and revive its stale-on-error cache.
+      localPatterns: [{ pathname: '/icons/**' }, { pathname: '/_next/static/media/**' }],
       formats: ['image/webp'],
       minimumCacheTTL: 60 * 60 * 24 * 365,
-      deviceSizes: [390, 640, 828, 1080, 1200, 1920],
-      imageSizes: [48, 64, 96, 128, 160, 256, 320],
+      deviceSizes: MEDIA_DEVICE_SIZES,
+      imageSizes: MEDIA_IMAGE_SIZES,
       dangerouslyAllowSVG: false,
     },
     // App Router ignores dot-prefixed folders, so the OS association files are
