@@ -3,7 +3,8 @@
 import { Fragment, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, refundSubscriptionCredit, fetchBillingEvents } from '@/lib/api';
+import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSubscriptionCredit, recordSubscriptionRefundPaid, releaseSubscriptionRefund, fetchBillingEvents } from '@/lib/api';
+import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
 import { StatusPill, gyd } from '@/components/detail';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
 
@@ -34,6 +35,34 @@ function BillingEvents({ id }: { id: string }) {
         </div>
       ))}
     </div>
+  );
+}
+
+const DONE_COPY = {
+  'set-aside': 'Set aside. Pay it now outside Swift, then record the payout here.',
+  paid: 'Payout recorded. The refund is complete.',
+  release: 'Returned to the credit. Nothing is set aside.',
+} as const;
+const QUEUED_COPY = {
+  'set-aside': 'Do not pay anything yet. Once a second admin approves, apply it from the approvals queue; the credit is then set aside and you pay it.',
+  paid: 'Once a second admin approves, apply it from the approvals queue to record the payout.',
+  release: 'Once a second admin approves, apply it from the approvals queue to return the money to the credit.',
+} as const;
+
+/** What happened to the last refund step on this row: done, queued for a
+ *  second admin (with the approval id), or refused with the server's words. */
+function RefundOutcome({ outcome }: { outcome: MoneyActionOutcome }) {
+  if (outcome.kind === 'error') return <p role="alert" className="text-xs text-red-500 mt-2">{outcome.message}</p>;
+  return (
+    <p role="status" className={`text-xs mt-2 ${outcome.kind === 'queued' ? 'text-amber-500' : 'text-[var(--muted)]'}`}>
+      {outcome.message}
+      {outcome.approvalId && (
+        <>
+          {' '}Approval {outcome.approvalId}.{' '}
+          <Link href="/approvals" className="underline">Open the approvals queue</Link>
+        </>
+      )}
+    </p>
   );
 }
 
@@ -74,13 +103,35 @@ export default function SubscriptionsPage() {
     onSuccess: invalidate,
   });
 
-  // [Owner ruling 2026-10-07] Refund the whole unused credit, paid back outside
-  // Swift; the reference is the proof. A second admin approves.
-  const refund = useMutation({
-    mutationFn: ({ id, amount, method, reference, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; reason: string }) =>
-      refundSubscriptionCredit(id, amount, method, reference, reason),
-    onSuccess: invalidate,
+  // [Owner ruling 2026-10-07] Refund the whole unused credit, in order: SET IT
+  // ASIDE (a second admin approves; nothing is paid before it is set aside),
+  // PAY it outside Swift, then RECORD THE PAYOUT with its reference (a second
+  // admin approves). RELEASE returns a set-aside that could not be paid.
+  // Every answer is shown: a money action answers 202 APPROVAL_REQUIRED, which
+  // apiFetch throws, so "queued" is read on the error path, never hidden.
+  const [refundOutcome, setRefundOutcome] = useState<Record<string, MoneyActionOutcome>>({});
+  const told = (id: string, outcome: MoneyActionOutcome) => setRefundOutcome((all) => ({ ...all, [id]: outcome }));
+  const refundStep = (step: 'set-aside' | 'paid' | 'release') => ({
+    onSuccess: (_res: unknown, v: { id: string }) => { told(v.id, { kind: 'done', message: DONE_COPY[step] }); invalidate(); },
+    onError: (e: unknown, v: { id: string }) => {
+      const outcome = outcomeOfThrown(e);
+      told(v.id, outcome.kind === 'queued' ? { ...outcome, message: `${outcome.message} ${QUEUED_COPY[step]}` } : outcome);
+    },
   });
+  const setAside = useMutation({
+    mutationFn: ({ id, amount, reason }: { id: string; amount: number; reason: string }) => setAsideSubscriptionCredit(id, amount, reason),
+    ...refundStep('set-aside'),
+  });
+  const recordPaid = useMutation({
+    mutationFn: ({ id, amount, method, reference, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; reason: string }) =>
+      recordSubscriptionRefundPaid(id, amount, method, reference, reason),
+    ...refundStep('paid'),
+  });
+  const release = useMutation({
+    mutationFn: ({ id, amount, reason }: { id: string; amount: number; reason: string }) => releaseSubscriptionRefund(id, amount, reason),
+    ...refundStep('release'),
+  });
+  const refundBusy = setAside.isPending || recordPaid.isPending || release.isPending;
 
   const rows: any[] = data?.data ?? [];
 
@@ -172,20 +223,47 @@ export default function SubscriptionsPage() {
                           >
                             Top up
                           </button>
-                          {Number(s.prepaidBalance?.balance ?? 0) > 0 && (
+                          {Number(s.refundSetAside ?? 0) > 0 ? (
+                            <>
+                              <button
+                                onClick={() => {
+                                  const owed = Number(s.refundSetAside);
+                                  const how = window.prompt(`GY$${owed.toLocaleString()} is set aside to refund ${h.name}. Paid back by MMG or BANK?`, 'MMG');
+                                  const method = how?.trim().toUpperCase() === 'BANK' ? 'BANK_TRANSFER' : how?.trim().toUpperCase() === 'MMG' ? 'MMG' : null;
+                                  if (!method) return;
+                                  const reference = window.prompt('Reference of the refund you paid (MMG or bank). It is the proof the money went back:');
+                                  if (!reference) return;
+                                  if (!window.confirm(`Record that GY$${owed.toLocaleString()} was paid back to ${h.name} by ${method === 'MMG' ? 'MMG' : 'bank transfer'} (${reference})? A second admin approves it.`)) return;
+                                  const reason = askReason({ action: 'record this refund payout', subject: `${h.name} (${reference})` });
+                                  if (reason) recordPaid.mutate({ id: s.id, amount: owed, method, reference, reason });
+                                }}
+                                disabled={refundBusy}
+                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              >
+                                Record payout
+                              </button>
+                              <button
+                                onClick={() => {
+                                  const owed = Number(s.refundSetAside);
+                                  if (!window.confirm(`Return the GY$${owed.toLocaleString()} set aside for ${h.name} to their credit? Only if the refund could not be paid.`)) return;
+                                  const reason = askReason({ action: 'return this refund set-aside to credit', subject: h.name });
+                                  if (reason) release.mutate({ id: s.id, amount: owed, reason });
+                                }}
+                                disabled={refundBusy}
+                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              >
+                                Release
+                              </button>
+                            </>
+                          ) : Number(s.prepaidBalance?.balance ?? 0) > 0 && (
                             <button
                               onClick={() => {
                                 const credit = Number(s.prepaidBalance.balance);
-                                const how = window.prompt(`Refund ${h.name}'s unused credit of GY$${credit.toLocaleString()}. Paid back by MMG or BANK? (Swift does not send the money: pay it first, then record it here.)`, 'MMG');
-                                const method = how?.trim().toUpperCase() === 'BANK' ? 'BANK_TRANSFER' : how?.trim().toUpperCase() === 'MMG' ? 'MMG' : null;
-                                if (!method) return;
-                                const reference = window.prompt('Reference of the refund you paid (MMG or bank). It is the proof the money went back:');
-                                if (!reference) return;
-                                if (!window.confirm(`Record a GY$${credit.toLocaleString()} refund to ${h.name} by ${method === 'MMG' ? 'MMG' : 'bank transfer'} (${reference})? Their credit becomes zero.`)) return;
-                                const reason = askReason({ action: 'record this credit refund', subject: `${h.name} (${reference})` });
-                                if (reason) refund.mutate({ id: s.id, amount: credit, method, reference, reason });
+                                if (!window.confirm(`Set aside ${h.name}'s unused credit of GY$${credit.toLocaleString()} for a refund? A second admin approves it. Do not pay anything yet: pay only once it shows as set aside, then record the payout here.`)) return;
+                                const reason = askReason({ action: 'set this credit aside for a refund', subject: h.name });
+                                if (reason) setAside.mutate({ id: s.id, amount: credit, reason });
                               }}
-                              disabled={refund.isPending}
+                              disabled={refundBusy}
                               className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                             >
                               Refund credit
@@ -207,6 +285,10 @@ export default function SubscriptionsPage() {
                             </button>
                           )}
                         </div>
+                        {Number(s.refundSetAside ?? 0) > 0 && (
+                          <p className="text-xs text-amber-500 mt-2">GY${Number(s.refundSetAside).toLocaleString()} set aside: pay it outside Swift, then record the payout.</p>
+                        )}
+                        {refundOutcome[s.id] && <RefundOutcome outcome={refundOutcome[s.id]!} />}
                       </td>
                     </tr>
                     {openTrail === s.id && (

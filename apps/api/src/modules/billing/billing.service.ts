@@ -17,7 +17,7 @@ import { getMmgProvider } from '../../providers/mmg/mmg-provider';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { restoreBillingAccess } from './billing-access';
-import { postLedger, topupPostings, chargeSuccessPostings, refundPostings } from './ledger';
+import { postLedger, topupPostings, chargeSuccessPostings } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
@@ -4232,79 +4232,6 @@ export class BillingService {
    *  notice + immediate re-bill) is recorded as owed on the command and run
    *  after the commit — a failure there leaves it owed, and the billing poll
    *  drains it. One inbound payment, one converged command. */
-  /**
-   * [Owner ruling 2026-10-07] Unused prepaid weekly-fee credit is refunded
-   * before an account can be deleted. Swift never moves the money: an admin
-   * pays it back outside Swift (MMG or bank transfer) and records the
-   * reference here, after a second admin approves (C4). One transaction, under
-   * the payer lock every wallet write takes first: the wallet goes to zero by
-   * compare-and-set, the PREPAID_REFUND event joins the wallet's provable
-   * history, the balanced ledger movement is posted and the caller's audit row
-   * is written. The approved amount must be the whole credit at that moment.
-   * The same reference again is a replay that records nothing.
-   */
-  async refundPrepaidCredit(input: {
-    adminId: string;
-    subscriptionId: string;
-    amount: number;
-    method: 'MMG' | 'BANK_TRANSFER';
-    reference: string;
-    onAudit?: OnAudit;
-  }): Promise<{ replayed: boolean; refunded: number; currencyCode: string; billingEventId: string }> {
-    if (!(input.amount > 0)) throw new AppError(400, 'INVALID_AMOUNT', 'A refund must be positive');
-    const eventKey = `credit-refund:${input.subscriptionId}:${input.reference}`;
-    const cents = (n: unknown) => Math.round(Number(n) * 100);
-    return this.prisma.$transaction(async (tx) => {
-      const payer = await lockSubscriptionPayer(tx, input.subscriptionId);
-      if (payer.kind === 'MOVER') await lockMoverFeeAuthority(tx, payer);
-      const prior = await tx.billingEvent.findUnique({ where: { idempotencyKey: eventKey } });
-      if (prior) {
-        if (prior.type !== 'PREPAID_REFUND' || cents(prior.amount) !== cents(input.amount)) {
-          throw new AppError(409, 'REFUND_REFERENCE_REUSED', 'This reference already recorded a different refund.');
-        }
-        return { replayed: true, refunded: Number(prior.amount), currencyCode: prior.currencyCode, billingEventId: prior.id };
-      }
-      const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: input.subscriptionId } });
-      if (!wallet || cents(wallet.balance) <= 0) {
-        throw new AppError(409, 'NO_FEE_CREDIT', 'There is no unused weekly-fee credit to refund.');
-      }
-      if (cents(wallet.balance) !== cents(input.amount)) {
-        throw new AppError(409, 'FEE_CREDIT_CHANGED', `The unused credit is ${Number(wallet.balance)} ${wallet.currencyCode}. Refund exactly that amount.`);
-      }
-      const zeroed = await tx.prepaidBalance.updateMany({
-        where: { subscriptionId: input.subscriptionId, balance: wallet.balance, currencyCode: wallet.currencyCode },
-        data: { balance: 0 },
-      });
-      if (zeroed.count !== 1) throw new AppError(409, 'FEE_CREDIT_CHANGED', 'The credit changed while the refund was recorded. Check it and try again.');
-      const amount = Number(wallet.balance);
-      const event = await tx.billingEvent.create({
-        data: {
-          subscriptionId: input.subscriptionId,
-          type: 'PREPAID_REFUND',
-          amount,
-          currencyCode: wallet.currencyCode,
-          paymentRef: input.reference,
-          idempotencyKey: eventKey,
-          note: `Unused fee credit refunded outside Swift by ${input.method} (recorded by ${input.adminId})`,
-        },
-      });
-      await postLedger(tx, {
-        idempotencyKey: `ledger:${eventKey}`,
-        description: `Unused fee credit refunded via ${input.method} (${input.reference})`,
-        entries: refundPostings(input.subscriptionId, amount, input.method),
-      });
-      const facts = { amount, method: input.method, reference: input.reference, billingEventId: event.id };
-      if (input.onAudit) {
-        await input.onAudit(tx, facts);
-      } else {
-        await tx.auditLog.create({
-          data: { userId: input.adminId, action: 'PREPAID_REFUND', entity: 'Subscription', entityId: input.subscriptionId, changes: facts as never },
-        });
-      }
-      return { replayed: false, refunded: amount, currencyCode: wallet.currencyCode, billingEventId: event.id };
-    });
-  }
-
   async recordTopUpCommand(input: {
     adminId: string;
     idempotencyKey: string;

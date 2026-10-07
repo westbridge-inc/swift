@@ -64,13 +64,16 @@ describe('[hard rule 2] test_no_customer_funds_ingress — order money never ent
   it('the ledger has no account that could hold order money', () => {
     // Every account is fee/subscription-scoped. WALLET_LIABILITY is the PARTNER fee wallet,
     // subledgered by subscriptionId — it is named here so the exemption is deliberate.
+    // REFUND_PAYABLE is that same fee credit set aside to be paid back to the partner
+    // (owner ruling 2026-10-07), subledgered the same way: fee money, never order money.
     const names = Object.keys(LEDGER_ACCOUNTS).sort();
     expect(names).toEqual([
       'BANK_LOCAL', 'CHARGEBACK_LOSS', 'CHARGEBACK_RESERVE', 'CLEARING_CARD', 'CLEARING_MMG',
       'DEFERRED_REVENUE', 'FEE_REVENUE', 'FX_VARIANCE', 'OPENING_BALANCES', 'PROMO_EXPENSE',
-      'PROVIDER_FEES', 'SUSPENSE_LIABILITY', 'WALLET_LIABILITY',
+      'PROVIDER_FEES', 'REFUND_PAYABLE', 'SUSPENSE_LIABILITY', 'WALLET_LIABILITY',
     ]);
     expect(LEDGER_ACCOUNTS['WALLET_LIABILITY']!.name).toMatch(/subscriptionId/);
+    expect(LEDGER_ACCOUNTS['REFUND_PAYABLE']!.name).toMatch(/subscriptionId/);
   });
 
   it('User.walletBalance stays dormant — a customer balance Swift owes is custody by another name', () => {
