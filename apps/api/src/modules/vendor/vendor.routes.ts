@@ -39,6 +39,7 @@ import { parseMenuText } from '../../utils/menu-text-parse';
 import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { ReviewDemoMoneyRefusedError, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
@@ -694,13 +695,25 @@ export async function vendorRoutes(app: FastifyInstance) {
   // the docs lapsed could otherwise be fully accepted, prepared and handed over.
   // This closes that server-authoritative hole (invariant 2). Reject/cancel are
   // deliberately NOT gated — a blocked store must still be able to decline.
-  async function assertVendorCanOperate(vendorId: string) {
+  /**
+   * [BILLING-INFLIGHT · owner ruling 1 Oct ~22:10] "Suspended store: accepted
+   * orders are completed; new orders are blocked until it pays." A weekly-fee
+   * hold (a billing suspension, or a lapsed fee grace) refuses NEW work only:
+   * `work: 'IN_FLIGHT'` (progress on an order the store already accepted) skips
+   * the billing arm. Every other hold keeps its rule on both kinds of work: an
+   * admin/safety/moderation suspension, a closed store, expired documents.
+   * A null suspension source is billing's (the transition rule reinstate uses).
+   */
+  async function assertVendorCanOperate(vendorId: string, work: 'NEW' | 'IN_FLIGHT' = 'NEW') {
     const vendor = await app.prisma.vendor.findUnique({
       where: { id: vendorId },
-      select: { isVerified: true, status: true, vendorType: true },
+      select: { isVerified: true, status: true, vendorType: true, suspensionSource: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
-    if (vendor.status === 'SUSPENDED' || vendor.status === 'CLOSED') {
+    // [Fable #1481 S4-1] Only a suspension billing stamped is a billing hold; one with no source (e.g. an owner
+    // closing their account) keeps the ordinary rule.
+    const billingHold = vendor.status === 'SUSPENDED' && vendor.suspensionSource === 'BILLING';
+    if ((vendor.status === 'SUSPENDED' && !(work === 'IN_FLIGHT' && billingHold)) || vendor.status === 'CLOSED') {
       throw new AppError(403, 'VENDOR_SUSPENDED', 'Your store is not active and cannot work orders. Reopen it from Account.');
     }
     const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
@@ -712,6 +725,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // PAST_DUE vendor whose grace had run out kept working orders until the
     // billing sweep flipped them SUSPENDED. Now all three actor gates agree.
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId }, orderBy: { createdAt: 'desc' } });
+    // The subscription arm is billing's: it gates NEW work only. (Read either
+    // way, so every order step keeps one shape between its order read and its
+    // write; the golden race suites hold the route at this read.)
+    if (work === 'IN_FLIGHT') return;
     const operability = subscriptionOperability(sub, { missingRow: 'GRANDFATHER' });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
@@ -794,6 +811,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (target.id === request.user.userId) {
       throw new AppError(400, 'SELF_STAFF', 'You already own this store');
     }
+    // [REVIEW-PARTNER] No store membership is granted by, or to, a demo account.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, target.id);
     const existing = await app.prisma.vendorStaff.findUnique({
       where: { vendorId_userId: { vendorId, userId: target.id } },
     });
@@ -824,6 +843,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const body = updateStaffSchema.parse(request.body);
     const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
+    // [REVIEW-PARTNER] No store membership is raised by, or for, a demo account.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, existing.userId);
 
     const member = await app.prisma.vendorStaff.update({
       where: { id: request.params.id },
@@ -1209,6 +1230,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;
     const body = updateVendorProfileSchema.parse(request.body);
+    // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
+    // refused before it is even read, and before any step-up, write or owner notice.
+    if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     // [Q8] A moved pin is held to the same market rule as a new store, before anything is written.
     const pin = body.latitude !== undefined && body.longitude !== undefined ? { latitude: body.latitude, longitude: body.longitude } : null;
     if (pin) assertStorePinInMarket(pin.latitude, pin.longitude);
@@ -1767,7 +1791,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/preparing — Mark order as being prepared */
   app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
     // complete-appointment. Marking it "preparing" sent the customer kitchen
     // pushes for a haircut and stranded it (complete-appointment requires
@@ -1790,7 +1814,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
   app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
     // that already sits in PREPARING is not reopened into the kitchen path.
     if (order.fulfillment === 'APPOINTMENT') {
@@ -1851,7 +1875,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the fallback that stops a self-delivery order dying in the kitchen. */
   app.put<{ Params: IdParam }>('/orders/:id/fulfillment-mode', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     const { mode } = fulfillmentModeSchema.parse(request.body);
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders have a fulfillment mode');
@@ -2198,7 +2222,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  decline memory). No-op while an offer is already live. */
   app.post<{ Params: IdParam }>('/orders/:id/retry-dispatch', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'DELIVERY') {
       throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
     }
@@ -2219,7 +2243,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
     }
@@ -2261,7 +2285,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
   app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
       throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
     }
@@ -2288,7 +2312,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  carries the cash-capture gate and the PIN check. */
   app.put<{ Params: IdParam }>('/orders/:id/delivered', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
-    await assertVendorCanOperate(order.vendorId!);
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
       throw new AppError(400, 'NOT_SELF_DELIVERY', 'This order is being delivered by a Swift rider — they complete it from their app.');
     }
@@ -3655,6 +3679,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     await requireStepUp(app, request);
     const sub = await app.prisma.subscription.findFirst({ where: { vendorId } });
     if (!sub) throw new NotFoundError('Subscription');

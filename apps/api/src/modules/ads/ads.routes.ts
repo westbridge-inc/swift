@@ -8,6 +8,7 @@ import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
 import { mondayOfDate, weekSpan, isMonday } from './ads-weeks';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { adsEnabled } from './ads-enabled';
 
 // Advertiser-facing ads routes (ads-platform spec §4.2/§4.3). Registration and
@@ -355,6 +356,8 @@ export async function adsRoutes(app: FastifyInstance) {
     await advertisers.assertMember(request.params.id, request.user.userId, true); // OWNER only
     const invited = await app.prisma.user.findUnique({ where: { phone: body.phone }, select: { id: true } });
     if (!invited) throw new NotFoundError('User', body.phone);
+    // [REVIEW-PARTNER] No membership is granted by, or to, a demo account.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, invited.id);
     const member = await app.prisma.advertiserMember.upsert({
       where: { advertiserId_userId: { advertiserId: request.params.id, userId: invited.id } },
       create: { advertiserId: request.params.id, userId: invited.id, role: body.role },

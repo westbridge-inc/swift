@@ -49,6 +49,13 @@ export async function reviewCredentialFor(prisma: PrismaClient, identifier: stri
   );
 }
 
+/** Does `code` match the credential's stored hash? Constant-time; nothing else. */
+export function reviewCodeMatches(credential: Pick<ReviewCredentialFacts, 'id' | 'staticOtpHash'>, code: string): boolean {
+  const expected = Buffer.from(credential.staticOtpHash);
+  const got = Buffer.from(hashReviewCode(credential.id, code));
+  return expected.length === got.length && crypto.timingSafeEqual(expected, got);
+}
+
 /** send-otp for a review identifier: nothing is sent; the window opens. */
 export async function armReviewCode(redis: Redis, identifier: string, credentialId: string): Promise<void> {
   await redis.set(`${ARMED_PREFIX}${identifier}`, credentialId, 'EX', REVIEW_CODE_TTL);
