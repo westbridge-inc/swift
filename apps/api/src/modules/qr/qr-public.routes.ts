@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { classifyScan, normalizeShortCode } from './qr-codes';
 import { QrService } from './qr.service';
-import { buildScanEvent, enqueueScanEvent, startScanLog, stopScanLog } from './scan-log';
+import { buildScanEvent, recordScanEvent, startScanLog, stopScanLog } from './scan-log';
 
 // ---------------------------------------------------------------------------
 // The app-side twins of the public resolver (spec Part 6.2 / 8.2), mounted
@@ -46,7 +46,7 @@ export async function qrPublicRoutes(app: FastifyInstance) {
     const qr = code ? await qrService.findByShortCode(code) : null;
     // Unknown codes acknowledge identically and log nothing — no oracle,
     // no junk rows. The event is garnish; the response never waits on it.
-    if (qr) enqueueScanEvent(buildScanEvent(request, qr, 'APP_OPEN_ASSUMED'));
+    if (qr) recordScanEvent(() => buildScanEvent(request, qr, 'APP_OPEN_ASSUMED'));
     return { success: true, data: { recorded: Boolean(qr) } };
   });
 }

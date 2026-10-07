@@ -6,6 +6,7 @@ import { testControlEnabled } from '../modules/ops/test-control';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
+import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
 /**
@@ -55,6 +56,9 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // driver needs its whole configuration — keys parsed, the request proven to
   // fit the key. Production also refuses the sandbox and a UAT page.
   assertMmgCheckoutConfig(env);
+  // Validate the documented retention setting in every mode. Production
+  // salts are checked below after the existing configuration guards.
+  scanRawRetentionDays(env);
   // [TA-S1-007] The mode is parsed, not compared: an unset or misspelled
   // NODE_ENV throws here and the process never starts — it is not "not
   // production", it is a misconfiguration nobody may guess their way past.
@@ -275,6 +279,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     // eslint-disable-next-line no-console
     console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
   }
+  assertQrConfig(env);
 }
 
 /**
