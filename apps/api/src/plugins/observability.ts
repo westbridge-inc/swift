@@ -237,6 +237,14 @@ export const browserSessionCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [REVIEW-PARTNER] Sends of the store-review fiction stopped at the outbound seal, by channel and reason. */
+export const reviewSendSuppressedCounter = new client.Counter({
+  name: 'swift_review_send_suppressed_total',
+  help: 'Outbound SMS/push/email of the store-review fiction suppressed at the channel seal',
+  labelNames: ['channel', 'reason'] as const,
+  registers: [registry],
+});
+
 export const moneySurfaceCounter = new client.Counter({
   name: 'swift_money_surface_total',
   help: 'Money-surface authority transitions and refusals by event',
@@ -448,6 +456,15 @@ export const notificationFailuresCounter = new client.Counter({
   name: 'swift_notification_failures_total',
   help: 'Notification deliveries that failed after retries, by channel and stage',
   labelNames: ['channel', 'stage'] as const,
+  registers: [registry],
+});
+
+/** [L04 · SMS allowlist] Outside production, a text to a number that is not on
+ *  SMS_RECIPIENT_ALLOWLIST is not sent and counted here. No label carries the
+ *  number: the count is the evidence, never the recipient. */
+export const smsRecipientNotAllowlistedCounter = new client.Counter({
+  name: 'swift_sms_recipient_not_allowlisted_total',
+  help: 'Non-production SMS not sent because the recipient is not on SMS_RECIPIENT_ALLOWLIST',
   registers: [registry],
 });
 

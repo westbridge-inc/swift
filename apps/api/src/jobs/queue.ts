@@ -1963,6 +1963,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (dw.recovered.length + dw.flagged.length > 0) {
           ctx.log.error({ recovered: dw.recovered, flagged: dw.flagged }, 'Stranded-delivery watchdog: released pre-pickup orders / flagged goods-in-hand rider drops');
         }
+        // [AF-MOB-006] Custody recovery cases nobody has acted on by their
+        // deadline page operations again, every interval, until a human does.
+        const { escalateOverdueCases } = await import('../modules/custody/custody-recovery');
+        const overdue = await escalateOverdueCases({ prisma: ctx.prisma, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (overdue.length > 0) ctx.log.error({ overdue }, 'Custody recovery cases past their deadline were escalated to operations');
         return;
       }
 

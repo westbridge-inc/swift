@@ -192,3 +192,146 @@ body {
   .rc-actions button { flex: 1; }
   .admin-modal { padding: 1rem; }
 }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   MISSION CONTROL (owner design, confirmed 6 Oct 2026) — tokens + primitives.
+   Bricolage Grotesque for numbers and names, Hanken Grotesk for body, Indian
+   Red (#803B3B) accent on warm paper. Pages move onto these one at a time
+   (PR-1 pilot: the store detail); the shell keeps the dark sheet above until
+   it moves too. Text colours are chosen for WCAG AA (4.5:1) on their
+   backgrounds — the design's lighter tints are used for fills, never for text.
+   ─────────────────────────────────────────────────────────────────────────── */
+:root {
+  --mc-font-body: var(--font-mc-body), 'Hanken Grotesk', system-ui, -apple-system, sans-serif;
+  --mc-font-numbers: var(--font-mc-numbers), 'Bricolage Grotesque', var(--mc-font-body);
+  --mc-paper: #F7F5F3;
+  --mc-card: #FFFFFF;
+  --mc-surface: #FBFBF9;
+  --mc-ink: #211A1A;
+  --mc-muted: #786C6C;        /* 4.6:1 on paper, 5.0:1 on white */
+  --mc-muted-strong: #6B5F5F; /* small text on tinted fills */
+  --mc-line: #EAE2E1;
+  --mc-line-strong: #D9CDCC;
+  --mc-accent: #803B3B;       /* Indian Red */
+  --mc-accent-deep: #5C2A2C;
+  --mc-accent-soft: #F5EBEC;
+  --mc-good: #1E6E5A;  --mc-good-soft: #E9F1EF;
+  --mc-warn: #9A4708;  --mc-warn-soft: #F8EEE6;
+  --mc-bad: #B91C1C;   --mc-bad-soft: #FCEEEE;
+  --mc-info: #3B5B7A;  --mc-info-soft: #EBEFF2;
+  --mc-radius: 11px;
+  --mc-radius-sm: 8px;
+}
+
+/* A page on the Mission Control sheet. Fills <main> edge to edge (main pads
+   1rem on phones, 1.5rem from md), so the dark ground never frames it. */
+.mc-page { margin: -1rem; padding: 1rem; min-height: calc(100% + 2rem); background: var(--mc-paper); color: var(--mc-ink); font-family: var(--mc-font-body); font-size: .875rem; line-height: 1.5; }
+@media (min-width: 768px) { .mc-page { margin: -1.5rem; padding: 1.5rem 1.75rem 2.5rem; min-height: calc(100% + 3rem); } }
+.mc-page :where(a, button, input, textarea, select):focus-visible, .mc-dialog :where(a, button, input, textarea, select):focus-visible { outline: 2px solid var(--mc-accent); outline-offset: 2px; }
+.mc-numbers { font-family: var(--mc-font-numbers); font-variant-numeric: tabular-nums; }
+.mc-label { font-size: .6875rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--mc-muted); }
+.mc-muted { color: var(--mc-muted); }
+.mc-back { display: inline-flex; align-items: center; gap: .4rem; min-height: 44px; color: var(--mc-muted); font-weight: 600; }
+.mc-back:hover { color: var(--mc-accent); }
+.mc-card { background: var(--mc-card); border: 1px solid var(--mc-line); border-radius: var(--mc-radius); padding: 1rem 1.125rem; min-width: 0; }
+.mc-card > .mc-label { margin-bottom: .75rem; }
+.mc-rows { display: grid; gap: .5rem; }
+.mc-row { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; min-width: 0; }
+.mc-row > dt { color: var(--mc-muted); flex-shrink: 0; }
+.mc-row > dd { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.mc-row a { color: var(--mc-accent); font-weight: 600; }
+
+/* Buttons: 44px targets; the ellipsis on a label means "asks you first". */
+.mc-btn { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; min-height: 44px; padding: .5rem .9rem; border-radius: var(--mc-radius-sm); border: 1px solid var(--mc-line-strong); background: var(--mc-card); color: var(--mc-muted-strong); font: 600 .8125rem/1.2 var(--mc-font-body); cursor: pointer; white-space: nowrap; text-decoration: none; }
+.mc-btn:hover:not(:disabled) { border-color: var(--mc-accent); color: var(--mc-accent); }
+.mc-btn:disabled { opacity: .5; cursor: not-allowed; }
+.mc-btn-primary { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
+.mc-btn-primary:hover:not(:disabled) { background: var(--mc-accent-deep); color: #fff; }
+.mc-btn-danger { color: var(--mc-accent); border-color: rgb(128 59 59 / 40%); }
+.mc-btn-quiet { border-color: transparent; background: transparent; }
+
+/* Status words in a pill. */
+.mc-badge { display: inline-flex; align-items: center; gap: .35rem; max-width: 100%; padding: .15rem .55rem; border-radius: 9999px; font-size: .75rem; font-weight: 650; line-height: 1.4; white-space: nowrap; background: var(--mc-surface); color: var(--mc-muted-strong); border: 1px solid var(--mc-line); }
+.mc-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.mc-tone-good { background: var(--mc-good-soft); color: var(--mc-good); border-color: transparent; }
+.mc-tone-warn { background: var(--mc-warn-soft); color: var(--mc-warn); border-color: transparent; }
+.mc-tone-bad { background: var(--mc-bad-soft); color: var(--mc-bad); border-color: transparent; }
+.mc-tone-info { background: var(--mc-info-soft); color: var(--mc-info); border-color: transparent; }
+
+/* <ActionResult> and <QueryFailed>: the server's answer, in words. */
+.mc-result { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: .25rem .75rem; align-items: start; padding: .875rem 1rem; border-radius: var(--mc-radius); border: 1px solid var(--mc-line); background: var(--mc-card); color: var(--mc-ink); font-family: var(--mc-font-body); font-size: .875rem; line-height: 1.5; }
+.mc-result-icon { grid-row: span 4; margin-top: .1rem; }
+.mc-result-title { font-weight: 700; }
+.mc-result-server { color: var(--mc-muted-strong); }
+.mc-result-next { color: var(--mc-ink); }
+.mc-result-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .35rem; }
+.mc-result-code { font-size: .75rem; color: var(--mc-muted-strong); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.mc-result-dismiss { grid-column: 3; grid-row: 1; min-width: 44px; min-height: 44px; margin: -.6rem -.6rem 0 0; border: 0; background: transparent; color: var(--mc-muted-strong); cursor: pointer; font-size: 1.1rem; border-radius: var(--mc-radius-sm); }
+.mc-result > :not(.mc-result-icon):not(.mc-result-dismiss) { grid-column: 2; }
+.mc-result-success { border-color: rgb(30 110 90 / 30%); background: var(--mc-good-soft); }
+.mc-result-success .mc-result-icon { color: var(--mc-good); }
+.mc-result-queued { border-color: rgb(59 91 122 / 30%); background: var(--mc-info-soft); }
+.mc-result-queued .mc-result-icon { color: var(--mc-info); }
+.mc-result-refused { border-color: rgb(154 71 8 / 30%); background: var(--mc-warn-soft); }
+.mc-result-refused .mc-result-icon { color: var(--mc-warn); }
+.mc-result-failed { border-color: rgb(185 28 28 / 30%); background: var(--mc-bad-soft); }
+.mc-result-failed .mc-result-icon { color: var(--mc-bad); }
+.mc-result .mc-btn { min-height: 40px; }
+/* On a phone the words take the full width; the icon sits beside the title only. */
+@media (max-width: 480px) {
+  .mc-result { padding: .75rem .875rem; }
+  .mc-result-icon { grid-row: auto; }
+  .mc-result > :not(.mc-result-icon):not(.mc-result-title):not(.mc-result-dismiss) { grid-column: 1 / -1; }
+}
+
+/* <Truncate>: one line (or a clamp) with an ellipsis; the full text is in the
+   DOM for screen readers, in the title for a mouse, and shown in place when
+   the text — or the link around it — has keyboard focus. */
+.mc-truncate { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-truncate[data-lines] { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--mc-lines, 2); overflow-wrap: anywhere; }
+.mc-truncate:focus-visible, :focus-visible > .mc-truncate, :focus-visible .mc-truncate { white-space: normal; overflow: visible; overflow-wrap: anywhere; -webkit-line-clamp: unset; display: block; }
+
+/* <DataTable>: fixed layout, ellipsis cells, a card per row at phone width. */
+.mc-table-wrap { background: var(--mc-card); border: 1px solid var(--mc-line); border-radius: var(--mc-radius); overflow: hidden; min-width: 0; }
+.mc-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .8125rem; }
+.mc-table caption { text-align: left; padding: .75rem 1rem 0; }
+.mc-table th { text-align: left; padding: .6rem 1rem; border-bottom: 1px solid var(--mc-line); }
+.mc-table td { padding: .7rem 1rem; border-bottom: 1px solid var(--mc-surface); vertical-align: middle; min-width: 0; overflow: hidden; }
+.mc-table tr:last-child td { border-bottom: 0; }
+.mc-table tbody tr:hover td { background: var(--mc-surface); }
+.mc-table [data-align=right] { text-align: right; }
+.mc-table .mc-cell-sub { display: block; font-size: .75rem; font-weight: 400; color: var(--mc-muted); }
+.mc-table a { color: var(--mc-ink); font-weight: 650; }
+.mc-table a:hover { color: var(--mc-accent); }
+.mc-table-empty { padding: 2rem 1rem; text-align: center; color: var(--mc-muted); }
+@media (max-width: 640px) {
+  .mc-table, .mc-table tbody, .mc-table tr, .mc-table td { display: block; width: 100%; }
+  .mc-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .mc-table tr { padding: .6rem .9rem; border-bottom: 1px solid var(--mc-line); }
+  .mc-table tr:last-child { border-bottom: 0; }
+  .mc-table td { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; padding: .25rem 0; border: 0; text-align: right; }
+  .mc-table td::before { content: attr(data-label); flex-shrink: 0; color: var(--mc-muted); font-size: .75rem; text-align: left; }
+  .mc-table td[data-primary] { display: block; text-align: left; padding-bottom: .4rem; font-size: .875rem; }
+  .mc-table td[data-primary]::before { content: none; }
+  .mc-table td > * { min-width: 0; }
+  .mc-table td:empty { display: none; }
+}
+
+/* <ReasonDialog>: the in-page panel that replaced window.prompt / confirm. */
+.admin-modal.mc-dialog { background: var(--mc-card); color: var(--mc-ink); border-color: var(--mc-line); font-family: var(--mc-font-body); font-size: .875rem; width: min(100%, 32rem); box-shadow: 0 18px 48px rgb(33 26 26 / 28%); }
+.admin-modal.mc-dialog h2 { font-family: var(--mc-font-numbers); font-size: 1.25rem; font-weight: 650; letter-spacing: -.01em; margin-bottom: .25rem; overflow-wrap: anywhere; }
+.admin-modal.mc-dialog p { margin-bottom: .75rem; }
+.admin-modal.mc-dialog .mc-dialog-body { color: var(--mc-muted-strong); }
+.admin-modal.mc-dialog label { margin: .75rem 0 0; color: var(--mc-ink); font-weight: 600; }
+.admin-modal.mc-dialog textarea, .admin-modal.mc-dialog input { background: var(--mc-surface); color: var(--mc-ink); border: 1px solid var(--mc-line-strong); border-radius: var(--mc-radius-sm); font-weight: 400; }
+.admin-modal.mc-dialog [aria-invalid=true] { border-color: var(--mc-bad); }
+.admin-modal.mc-dialog .mc-field-help { display: flex; justify-content: space-between; gap: 1rem; font-size: .75rem; color: var(--mc-muted-strong); font-weight: 400; }
+.admin-modal.mc-dialog .mc-field-error { font-size: .8125rem; color: var(--mc-bad); font-weight: 600; margin: .25rem 0 0; }
+.admin-modal.mc-dialog .mc-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-top: 1.25rem; }
+.admin-modal.mc-dialog .mc-dialog-actions .mc-btn { min-height: 44px; }
+.admin-modal.mc-dialog .mc-result { margin-top: 1rem; }
+.admin-modal.mc-dialog .mc-result p { margin-bottom: 0; }
+.admin-modal.mc-dialog button.mc-btn { background: var(--mc-card); border: 1px solid var(--mc-line-strong); color: var(--mc-muted-strong); }
+.admin-modal.mc-dialog button.mc-btn-primary { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
+.admin-modal.mc-dialog button.mc-btn-primary:hover:not(:disabled) { background: var(--mc-accent-deep); }
+@media (max-width: 480px) { .admin-modal.mc-dialog .mc-dialog-actions .mc-btn { flex: 1 1 auto; } }

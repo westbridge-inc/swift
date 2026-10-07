@@ -65,6 +65,8 @@ type PayAction =
   | { id: 'CARD'; state: 'off' };
 ```
 
+`latestMmgCheckout` and every entry of `recentCheckouts` is a `CheckoutStatus` (section 5), so each carries the partner's receipt references: `swiftReference` always, and `mmgTransactionId` once the checkout is `CONFIRMED`. Show both under "Recent checkouts", worded "Swift reference" and "MMG transaction ID" (section 5, "The receipt").
+
 ### When `MMG_CHECKOUT` is `live`
 
 It is `live` only when **all** of these hold:
@@ -159,8 +161,18 @@ type CheckoutStatus = {
   expiresAt: string;
   confirmedAt: string | null;            // set when CONFIRMED
   subscriptionStatus: SubscriptionStatus; // the subscription now, so the screen updates in place
+  swiftReference: string;                // ours: the merchantTransactionId MMG was sent (18 digits). Always.
+  mmgTransactionId: string | null;       // MMG's transaction, only when CONFIRMED; null otherwise
 };
 ```
+
+### The receipt
+
+Every checkout carries the two references a partner can quote to support, who finds the payment by either one (section 11):
+- `swiftReference`, worded "Swift reference": always.
+- `mmgTransactionId`, worded "MMG transaction ID": only once the checkout is `CONFIRMED`. A transaction an MMG reply merely named (a `CONFIRMING` or `HELD` checkout) is never sent: it is a lead for a person, not a receipt, and showing it would read as "paid".
+
+An API older than this sends neither: show nothing in their place.
 
 `404 CHECKOUT_NOT_FOUND` is the one answer for an unknown `ref` and for another partner's `ref`.
 
@@ -288,6 +300,26 @@ The server writes the fee notices. They never offer an agent, cash, a Swift Numb
 ## 10. Not in this contract yet
 
 - Card payments: `CARD` stays `off` until PT-4.
-- The admin checkouts list, the HELD review queue and reversals (PR 6).
+- The HELD review queue's decisions (confirm or reject a held payment) and reversals: the rest of PR 6. The checkouts list and support's lookup are section 11.
+
+## 11. Support lookup (admin)
+
+For Swift support, never a partner. Both routes are under `/api/v1/admin`, for `ADMIN` and `SUPER_ADMIN` holding the `billing.mmg.read` capability (class C1: they disclose who paid). The shapes are `@swift/types` `mmg-checkout-support`; the API builds them field by field.
+
+`GET /api/v1/admin/billing/mmg-checkouts?q=&status=&cursor=&limit=`
+- `q` (optional, up to 64 characters) is matched EXACTLY after normalisation, never as a substring:
+  - as an id, its digits (a pasted `MMG-2040 2048 536279` is `20402048536279`; at least 6 digits). It matches our `merchantTransactionId` (`SWIFT_REFERENCE`), the confirmed `mmgTransactionId` (`MMG_TRANSACTION_ID`), a transaction an MMG reply named (`MMG_CANDIDATE`), or MMG's own ledger number from its lookup, `transactionReference` (`MMG_REFERENCE`);
+  - as a phone, E.164: `+…` as written, a 7-digit number as `+592…`, `592` plus 7 digits with its `+`. It matches every checkout of the partner with that phone (`PARTNER_PHONE`).
+  - No `q`: the checkouts list.
+- `status`: one of the six statuses. `limit`: 1–50, default 20. `cursor`: the `nextCursor` of the previous page; anything else is `400`.
+- Answer: `{ success: true, data: MmgCheckoutSupportRow[], nextCursor: string | null }`, newest first. A row: `id`, `swiftReference`, `mmgTransactionId`, `mmgTransactionReference` (when a lookup returned one), `amount`, `currencyCode`, `status`, `platform`, `partner` (`kind`, `displayName`, `maskedPhone`, `subscriptionId`), `createdAt`, `replyAt`, `confirmedAt`, `reason` (operators only) and `matchedBy`.
+
+`GET /api/v1/admin/billing/mmg-checkouts/:id`
+- The row (without `matchedBy`), plus `timeline` (every reply and lookup in order: `source`, `at`, MMG's `resultCode`, the lookup's `transactionStatus`, `amount`, `currency`, `mmgTransactionId`, `mmgTransactionReference`, `windowCheck` (a lookup: `INSIDE`, `OUTSIDE` the window, `AFTER_REPLY` when MMG's time is more than two minutes after the first reply naming the payment, or `UNREADABLE`; the same check that credits) and `failure`), `timelineTruncated`, and `creditedPeriod` for a `CONFIRMED` checkout (`APPLIED` with the week it paid, `CREDIT` kept for the next bill, or `PENDING`, with the receipt number).
+- `404` for an unknown id and for another tenant's checkout.
+
+**Never in an answer:** the MMG page (sealed at rest), any token or Idempotency-Key, MMG's reply message or HTML, keys or headers.
+
+**Every read is recorded** in the admin audit trail, inside the request, before the answer leaves: who, when, which identifier type matched (`queryType`), what kind of query it was (`queryShape`) and the checkout ids. Never the query itself: it may be a phone number. A refused read, and a detail of a checkout that is not there, disclosed nothing and are not recorded.
 
 Changes to this contract are made here first, in the same PR as the code that changes.
