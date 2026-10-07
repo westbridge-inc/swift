@@ -237,8 +237,11 @@ describe('Checklists drive from config', () => {
       'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
     ]);
 
+    // [VERIFY-DOCS · owner ruling 6 Oct ~21:25 GYT] A service business opens on its owner's ID; a
+    // police clearance is optional for the store (home-visit bookings need it: verify-docs-home-visits).
     const service = await inject('GET', '/api/v1/verification/status?role=SERVICE', undefined, vendorToken);
-    expect(service.json().data.checklist).toEqual(['owner_national_id', 'police_clearance']);
+    expect(service.json().data.checklist).toEqual(['owner_national_id']);
+    expect(service.json().data.optional).toContain('police_clearance');
   });
 });
 
@@ -373,15 +376,17 @@ describe('Provider auto-decisions (swappable interface)', () => {
     expect(res.json().data.status).toBe('APPROVED');
     expect(res.json().data.kycRef).toMatch(/^sbx_/);
 
-    // ID alone is not the SERVICE bar — police clearance is still missing
-    // (service people enter customers' homes), so listing stays gated.
+    // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT — a DELIBERATE change] The owner's ID IS
+    // the service business's bar now. A police clearance is needed only for HOME-VISIT bookings
+    // (verify-docs-home-visits.test.ts), never to list, so the listing is accepted at once.
     const early = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
       name: 'Hot Stone Massage',
       basePrice: 8000,
     }, vendorToken);
-    expect(early.statusCode).toBe(403);
-    expect(early.json().error.code).toBe('VERIFICATION_REQUIRED');
+    expect(early.statusCode).toBe(200);
+
+    // The clearance stays a document the business MAY add (and what home visits need).
 
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',

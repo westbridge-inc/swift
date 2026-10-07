@@ -1021,6 +1021,16 @@ export class OrderService {
         }
         const mobileVisit = requestedMode ? requestedMode === 'MOBILE' : offered === 'MOBILE' || offered === 'BOTH';
         if (mobileVisit) {
+          // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] A home visit is booked only while
+          // the owner holds an approved, current police clearance. Refused before anything else
+          // about the visit (an address would not change the answer); the owner is told once a
+          // day what unlocks it. In-shop bookings never reach this branch.
+          const owner = await this.prisma.vendorOwner.findUnique({ where: { id: vendor.ownerId }, select: { userId: true } });
+          const { homeVisitRefusal, homeVisitsCleared, tellOwnerHomeVisitsPaused } = await import('../verification/home-visits');
+          if (!owner || !(await homeVisitsCleared(this.prisma, owner.userId))) {
+            if (owner) await tellOwnerHomeVisitsPaused(this.prisma, this.notifications, owner.userId, vendor.name).catch(() => false);
+            throw homeVisitRefusal(vendor.name, offered === 'BOTH');
+          }
           if (!address) throw new AppError(400, 'NO_ADDRESS', `Add your address — ${vendor.name} travels to you`);
           const travel = await this.maps.routeKm(
             { lat: vendor.latitude, lng: vendor.longitude },

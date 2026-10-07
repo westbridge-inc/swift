@@ -395,9 +395,14 @@ describe('[VERIFY-DOCS] the registry and the config say the same thing', () => {
   });
 });
 
-describe('[VERIFY-DOCS] services and stores keep their lists until the home-visit rule is decided', () => {
-  it('SERVICE, SERVICE_PROVIDER and the store lists are unchanged by this change', () => {
-    expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE']).toEqual(['owner_national_id', 'police_clearance']);
+describe('[VERIFY-DOCS] services follow the home-visit rule; marketplace tradespeople and stores keep their lists', () => {
+  // [VERIFY-DOCS · owner ruling 6 Oct ~21:25 GYT — a DELIBERATE change to this pin] The services
+  // rule is decided: a service BUSINESS opens on its owner's ID and its home-visit bookings need
+  // the owner's police clearance (verify-docs-home-visits.test.ts proves the booking side).
+  // Marketplace tradespeople keep it required; the store lists are untouched.
+  it('SERVICE opens on the owner’s ID (police clearance optional); SERVICE_PROVIDER and the store lists are unchanged', () => {
+    expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE']).toEqual(['owner_national_id']);
+    expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_OPTIONAL']).toEqual(['police_clearance']);
     expect(DEFAULT_DOCUMENT_CHECKLISTS['SERVICE_PROVIDER']).toEqual(['national_id', 'police_clearance']);
     expect(DEFAULT_DOCUMENT_CHECKLISTS['RESTAURANT']).toEqual(['owner_national_id', 'business_registration', 'tin_certificate', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo']);
   });
