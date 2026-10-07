@@ -154,6 +154,11 @@ describe('an unavailable line recovers on the phone (E07)', () => {
     expect(unavailableBranch).toContain("{it.unavailableReason || 'No longer available — remove to continue'}");
   });
 
+  it('[L09 · price lock] Place order sends the prices on screen; a pickup retry sends the pickup total it confirmed', () => {
+    const order = src.slice(src.indexOf('const onOrder = (extra?: Record<string, unknown>) => {'), src.indexOf('tipAmount: submittedTip,'));
+    expect(order).toContain('...pricesAsSeen(pickupRetry ? pickupQuote.data : c),\n        ...(extra ?? {}),');
+  });
+
   it('[row 70] a line\'s small print comes from the one helper that shows its note', () => {
     expect(src).toContain('const meta = cartLineMeta(it, ');
   });

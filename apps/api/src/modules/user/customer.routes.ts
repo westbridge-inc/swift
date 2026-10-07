@@ -172,6 +172,13 @@ const checkoutSchema = z.object({
     )
     .max(10)
     .optional(),
+  // [L09 · price lock] What the customer saw: the quote's total and each cart
+  // line's unit price. Optional: an older app sends neither.
+  expectedTotal: z.number().nonnegative().max(1_000_000_000).optional(),
+  expectedLines: z
+    .array(z.object({ lineId: z.string().min(1).max(64), unitPrice: z.number().nonnegative().max(1_000_000_000) }))
+    .max(200)
+    .optional(),
 });
 
 /**
@@ -2204,6 +2211,9 @@ export async function customerRoutes(app: FastifyInstance) {
         fulfillmentSelections: body.fulfillmentSelections,
         express: body.express,
         appointments: body.appointments,
+        ...(body.expectedTotal != null || body.expectedLines
+          ? { expectedPrices: { total: body.expectedTotal, lines: body.expectedLines } }
+          : {}),
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
         onCommitted: (committed) => { commit = committed; },
       });

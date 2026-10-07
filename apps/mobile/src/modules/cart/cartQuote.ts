@@ -113,7 +113,7 @@ export const CHECKOUT_PROMO_REFUSAL_CODES = [
  *  re-quotes the cart so the line marks itself unavailable. The exact codes
  *  come from order.service.ts (the pre-lock inventory guard and its
  *  post-lock twin, both 409). */
-export const CART_STALE_CHECKOUT_CODES = ['ITEM_UNAVAILABLE', 'INSUFFICIENT_STOCK', 'CART_OPTIONS_CHANGED'] as const;
+export const CART_STALE_CHECKOUT_CODES = ['ITEM_UNAVAILABLE', 'INSUFFICIENT_STOCK', 'CART_OPTIONS_CHANGED', 'PRICE_CHANGED'] as const;
 
 /** The code when a checkout refusal means an item changed under the customer
  *  — available when quoted, gone by the time the order was placed. Everything
@@ -136,6 +136,7 @@ export function checkoutErrorMessage(err: unknown): string {
       .response?.data?.error?.message;
     if (message) return message;
     if (stale === 'CART_OPTIONS_CHANGED') return 'The choices for one of your items need updating — remove it and add it again.';
+    if (stale === 'PRICE_CHANGED') return 'Prices changed since you last looked — review your cart and place the order again.';
     return stale === 'ITEM_UNAVAILABLE'
       ? 'One of your items is no longer available — remove it to continue.'
       : 'One of your items is not available in that quantity — adjust the quantity or remove it.';
@@ -235,4 +236,26 @@ export function cartLineMeta(line: CartLineText, unitPriceEach: string | null): 
   ]
     .filter(Boolean)
     .join(' · ');
+}
+
+/**
+ * [L09 · price lock] What the customer saw, sent with Place order: the quote's
+ * total and each line's unit price, exactly as the quote on screen priced
+ * them. The server compares them with what the order would charge and refuses
+ * with PRICE_CHANGED (old → new) on any difference, so a price changed after
+ * the customer last looked is never charged unseen. Nothing is sent when the
+ * quote has no total it can stand behind.
+ */
+export function pricesAsSeen(
+  quote: { totalAmount?: unknown; items?: Array<{ id?: unknown; customerPrice?: unknown }> | null } | null | undefined,
+): { expectedTotal: number; expectedLines: Array<{ lineId: string; unitPrice: number }> } | Record<string, never> {
+  const total = Number(quote?.totalAmount);
+  if (!quote || quote.totalAmount == null || !Number.isFinite(total)) return {};
+  const lines = (quote.items ?? []).flatMap((line) => {
+    const unitPrice = Number(line?.customerPrice);
+    return typeof line?.id === 'string' && line.customerPrice != null && Number.isFinite(unitPrice)
+      ? [{ lineId: line.id, unitPrice }]
+      : [];
+  });
+  return { expectedTotal: total, expectedLines: lines };
 }

@@ -178,7 +178,10 @@ describe('[Q7b] cart → checkout → tracking', () => {
     const checkouts = calls('POST', '/api/v1/customer/checkout') as Array<[unknown, RequestInit]>;
     expect(checkouts).toHaveLength(1);
     const [, checkoutInit] = checkouts[0]!;
-    expect(JSON.parse(String(checkoutInit.body))).toEqual({ paymentMethod: 'CASH', tipAmount: 0 });
+    // [L09 · price lock] With the total and line price this page showed.
+    expect(JSON.parse(String(checkoutInit.body))).toEqual({
+      paymentMethod: 'CASH', tipAmount: 0, expectedTotal: 2150, expectedLines: [{ lineId: 'l1', unitPrice: 1800 }],
+    });
     expect((checkoutInit.headers as Record<string, string>)['Idempotency-Key']).toMatch(/.{8,}/);
   });
 
@@ -196,7 +199,9 @@ describe('[Q7b] cart → checkout → tracking', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Place order · GY$2,150 · pay by MMG' }));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/o9'));
     const [[, init]] = calls('POST', '/api/v1/customer/checkout') as [[unknown, RequestInit]];
-    expect(JSON.parse(String(init.body))).toEqual({ paymentMethod: 'MOBILE_MONEY', tipAmount: 0 });
+    expect(JSON.parse(String(init.body))).toEqual({
+      paymentMethod: 'MOBILE_MONEY', tipAmount: 0, expectedTotal: 2150, expectedLines: [{ lineId: 'l1', unitPrice: 1800 }],
+    });
   });
 
   it('never turns an MMG choice into cash behind the customer’s back when the store’s MMG goes away', async () => {

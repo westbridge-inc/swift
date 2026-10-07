@@ -309,6 +309,9 @@ export type CheckoutBody = {
   fulfillmentSelections?: Record<string, string>;
   promoCode?: string;
   appointments?: Array<{ itemId: string; slotStart: string; mode?: string }>;
+  /** [L09 · price lock] The total and line prices the customer saw. */
+  expectedTotal?: number;
+  expectedLines?: Array<{ lineId: string; unitPrice: number }>;
 };
 
 export type CheckoutAttempt = { signature: string; key: string };

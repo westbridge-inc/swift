@@ -86,6 +86,12 @@ interface CheckoutInput {
    *  mode picks where a BOTH-mode service happens (validated against what
    *  the business actually offers). */
   appointments?: Array<{ itemId: string; slotStart: Date; mode?: 'AT_BUSINESS' | 'MOBILE' }>;
+  /** [L09 · price lock] What the customer saw when they placed the order: the
+   *  quote's total and each cart line's unit price. Compared under the store
+   *  lock with what the order would charge; any difference refuses with
+   *  PRICE_CHANGED (seen → now) so the customer confirms the new price. An
+   *  older app sends neither and is not compared (today's behaviour). */
+  expectedPrices?: { total?: number; lines?: Array<{ lineId: string; unitPrice: number }> };
   /** Injectable clock so the risk heuristic is testable */
   now?: Date;
   /** Test seam [REPORT-013 F-013-01/06]: runs after pre-transaction pricing
@@ -143,6 +149,46 @@ function checkoutOptionRefusal(item: { id: string; name: string }, error: Option
     return new AppError(409, 'ITEM_UNAVAILABLE', `${what} — remove it from your cart and add it again with another choice.`, details);
   }
   return new AppError(409, 'CART_OPTIONS_CHANGED', `Choose your options for ${item.name} again — remove it from your cart and add it from the menu.`, details);
+}
+
+/** GYD as the customer reads it: "GYD 1,450" (cents only when there are any). */
+function gyd(amount: number): string {
+  return `GYD ${amount.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+/** Money compared to the cent, so a decimal read never reads as a change. */
+const sameMoney = (a: number, b: number) => Math.round(a * 100) === Math.round(b * 100);
+
+/**
+ * [L09 · price lock] Refuse when the order would charge anything other than
+ * what the customer saw: a line's unit price or the total. Only what the
+ * client sent is compared (an older app sends nothing and is not refused).
+ * A line the customer saw that is no longer in the cart is a cart change.
+ */
+function assertPricesAsSeen(
+  expected: NonNullable<CheckoutInput['expectedPrices']>,
+  lines: ReadonlyArray<{ id: string; item: { name: string }; unitPrice: number }>,
+  total: number,
+): void {
+  const byId = new Map(lines.map((line) => [line.id, line]));
+  const changed: Array<{ lineId: string; name: string; seen: number; now: number }> = [];
+  for (const seen of expected.lines ?? []) {
+    const line = byId.get(seen.lineId);
+    if (!line) throw new AppError(409, 'CART_CHANGED', 'Your cart just changed — review it and place the order again.');
+    if (!sameMoney(line.unitPrice, seen.unitPrice)) {
+      changed.push({ lineId: line.id, name: line.item.name, seen: seen.unitPrice, now: line.unitPrice });
+    }
+  }
+  const totalChanged = expected.total != null && !sameMoney(total, expected.total);
+  if (changed.length === 0 && !totalChanged) return;
+  const parts = changed.map((c) => `${c.name} ${gyd(c.seen)} → ${gyd(c.now)}`);
+  if (totalChanged) parts.push(`total ${gyd(expected.total!)} → ${gyd(total)}`);
+  throw new AppError(
+    409,
+    'PRICE_CHANGED',
+    `Prices changed since you last looked: ${parts.join('; ')}. Review your cart and place the order again.`,
+    { lines: changed, total: totalChanged ? { seen: expected.total, now: total } : null },
+  );
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -1352,6 +1398,16 @@ export class OrderService {
         ) {
           throw new AppError(409, 'CART_CHANGED', `The price of ${current.name} just changed — review your cart and place the order again.`);
         }
+      }
+      // [L09 · price lock] The prices just proven current are what the order
+      // charges; they must also be what the customer saw when they tapped
+      // Place order (the quote's line prices and total, sent with the order).
+      if (input.expectedPrices) {
+        assertPricesAsSeen(
+          input.expectedPrices,
+          cart.items.map((line) => ({ id: line.id, item: line.item, unitPrice: priceCartLine(line).unitPrice })),
+          priced.perPlan.reduce((sum, plan) => sum + plan.total, 0),
+        );
       }
 
       let committedMmgPayUrl: string | null = null;

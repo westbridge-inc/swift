@@ -63,6 +63,7 @@ import {
   pickupRetryChoices,
   pickupStoreNames,
   pricedTip,
+  pricesAsSeen,
   quoteStoreIds,
   quotedRiderTip,
   shortStores,
@@ -402,6 +403,9 @@ export function CartScreen() {
         ...(pricing.fulfillmentSelections ? { fulfillmentSelections: pricing.fulfillmentSelections } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
+        // [L09 · price lock] The total and line prices the customer saw: the
+        // cart's quote, or for a pickup retry the pickup quote they confirmed.
+        ...pricesAsSeen(pickupRetry ? pickupQuote.data : c),
         ...(extra ?? {}),
         tipAmount: submittedTip,
       },

@@ -338,6 +338,107 @@ describe('[reorder] a past order comes back with its choices, or names the line 
   });
 });
 
+describe('[price lock] the order is placed at the prices the customer saw, or refused', () => {
+  // A delivery cart priced the way the app shows it: GET /cart, then Place
+  // order with that quote's total and line prices.
+  async function seenCart() {
+    const c = await makeCustomer();
+    expect((await add(c.token, { selectedOptions: validOptions() })).statusCode).toBe(201);
+    expect((await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: plainItemId, quantity: 2 }, c.token)).statusCode).toBe(201);
+    await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
+    const quote = (await inject('GET', '/api/v1/customer/cart', undefined, c.token)).json().data;
+    const seen = {
+      expectedTotal: Number(quote.totalAmount),
+      expectedLines: quote.items.map((l: { id: string; customerPrice: number }) => ({ lineId: l.id, unitPrice: Number(l.customerPrice) })),
+    };
+    const burgerLine = quote.items.find((l: { itemId: string }) => l.itemId === itemId).id as string;
+    return { c, quote, seen, burgerLine };
+  }
+  const place = (token: string, extra: Record<string, unknown>) =>
+    inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', ...extra }, token);
+  const repriceBurger = (by: number) => app.prisma.item.update({ where: { id: itemId }, data: { basePrice: BASE + by } });
+
+  it('an unchanged cart, sent with the prices the customer saw, is placed at those prices', async () => {
+    const { c, quote, seen } = await seenCart();
+    const res = await place(c.token, seen);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(Number(res.json().data.orders[0].total)).toBe(Number(quote.totalAmount));
+  });
+
+  it('a price changed after the customer last saw the cart is refused with the old and new price, then placed once they confirm', async () => {
+    const { c, quote, seen } = await seenCart();
+    await repriceBurger(100);
+    try {
+      const refused = await place(c.token, seen);
+      expect(refused.statusCode).toBe(409);
+      const total = Number(quote.totalAmount);
+      expect(refused.json().error).toMatchObject({
+        code: 'PRICE_CHANGED',
+        message: `Prices changed since you last looked: Lock Burger GYD 1,450 → GYD 1,550; total GYD ${total.toLocaleString('en-US')} → GYD ${(total + 100).toLocaleString('en-US')}. Review your cart and place the order again.`,
+      });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+      // The customer sees the new quote and confirms: placed at the new price.
+      const fresh = (await inject('GET', '/api/v1/customer/cart', undefined, c.token)).json().data;
+      expect(Number(fresh.totalAmount)).toBe(total + 100);
+      const placed = await place(c.token, {
+        expectedTotal: Number(fresh.totalAmount),
+        expectedLines: fresh.items.map((l: { id: string; customerPrice: number }) => ({ lineId: l.id, unitPrice: Number(l.customerPrice) })),
+      });
+      expect(placed.statusCode, placed.body).toBe(200);
+      expect(Number(placed.json().data.orders[0].total)).toBe(total + 100);
+    } finally {
+      await repriceBurger(0);
+    }
+  });
+
+  it('a line price alone is enough to refuse (an app that sends lines without a total)', async () => {
+    const { c, seen } = await seenCart();
+    await app.prisma.option.update({ where: { id: sizeLarge }, data: { additionalPrice: 350 } });
+    try {
+      const refused = await place(c.token, { expectedLines: seen.expectedLines });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error.code).toBe('PRICE_CHANGED');
+      expect(refused.json().error.message).toBe('Prices changed since you last looked: Lock Burger GYD 1,450 → GYD 1,500. Review your cart and place the order again.');
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.option.update({ where: { id: sizeLarge }, data: { additionalPrice: 300 } });
+    }
+  });
+
+  it('the total alone is enough to refuse (an app that sends only the total it showed)', async () => {
+    const { c, seen } = await seenCart();
+    await app.prisma.item.update({ where: { id: plainItemId }, data: { basePrice: 520 } });
+    try {
+      const refused = await place(c.token, { expectedTotal: seen.expectedTotal });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error.code).toBe('PRICE_CHANGED');
+      expect(refused.json().error.details.total).toEqual({ seen: seen.expectedTotal, now: seen.expectedTotal + 40 });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.item.update({ where: { id: plainItemId }, data: { basePrice: 500 } });
+    }
+  });
+
+  it('a line the customer saw that is no longer in the cart is a cart change', async () => {
+    const { c, seen } = await seenCart();
+    const res = await place(c.token, { expectedLines: [...seen.expectedLines, { lineId: 'gone-line', unitPrice: 500 }] });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CART_CHANGED');
+  });
+
+  it('build 9: an app that sends no prices keeps today\'s behaviour — the order is placed at the current price', async () => {
+    const { c, quote } = await seenCart();
+    await repriceBurger(100);
+    try {
+      const res = await place(c.token, {});
+      expect(res.statusCode, res.body).toBe(200);
+      expect(Number(res.json().data.orders[0].total)).toBe(Number(quote.totalAmount) + 100);
+    } finally {
+      await repriceBurger(0);
+    }
+  });
+});
+
 describe('[row 70] an item note is part of a cart line', () => {
   it('the same item and options with a different note becomes its own line; both notes survive to the order', async () => {
     const c = await makeCustomer();

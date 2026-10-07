@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  cartLineMeta, cartPricingChoices, cartStaleCheckoutCode, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
+  cartLineMeta, cartPricingChoices, cartStaleCheckoutCode, pricesAsSeen, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
   pickupRetryChoices, pickupStoreNames, pricedTip, quoteStoreIds, quotedRiderTip, shortStores, type CartQuote,
 } from './cartQuote';
 import { checkoutTipAmount } from './checkout-tip';
@@ -214,5 +214,29 @@ describe('[row 70] a cart line shows its choices and its note', () => {
   it('no note, no options: only what there is', () => {
     expect(cartLineMeta({ selectedOptionNames: [], specialInstructions: '  ' }, null)).toBe('');
     expect(cartLineMeta({}, 'GY$500 each')).toBe('GY$500 each');
+  });
+});
+
+describe('[L09 · price lock] Place order carries the prices the customer saw', () => {
+  it('the quote\'s total and each line\'s unit price, as numbers', () => {
+    expect(pricesAsSeen({ totalAmount: '2150.00', items: [{ id: 'l1', customerPrice: 1800 }, { id: 'l2', customerPrice: '350' }] }))
+      .toEqual({ expectedTotal: 2150, expectedLines: [{ lineId: 'l1', unitPrice: 1800 }, { lineId: 'l2', unitPrice: 350 }] });
+  });
+
+  it('no total it can stand behind, nothing sent (the server then compares nothing)', () => {
+    expect(pricesAsSeen(null)).toEqual({});
+    expect(pricesAsSeen({ totalAmount: null, items: [{ id: 'l1', customerPrice: 1800 }] })).toEqual({});
+    expect(pricesAsSeen({ totalAmount: 'abc', items: [] })).toEqual({});
+  });
+
+  it('a line with no readable price is left out rather than sent as 0', () => {
+    expect(pricesAsSeen({ totalAmount: 500, items: [{ id: 'l1', customerPrice: null }, { id: 'l2', customerPrice: 500 }] }))
+      .toEqual({ expectedTotal: 500, expectedLines: [{ lineId: 'l2', unitPrice: 500 }] });
+  });
+
+  it('a refusal because a price changed re-reads the cart and shows the server\'s old → new message', () => {
+    const refused = { response: { data: { error: { code: 'PRICE_CHANGED', message: 'Prices changed since you last looked: Roti GYD 800 → GYD 900. Review your cart and place the order again.' } } } };
+    expect(cartStaleCheckoutCode(refused)).toBe('PRICE_CHANGED');
+    expect(checkoutErrorMessage(refused)).toBe('Prices changed since you last looked: Roti GYD 800 → GYD 900. Review your cart and place the order again.');
   });
 });
