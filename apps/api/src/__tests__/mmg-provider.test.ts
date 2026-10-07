@@ -412,7 +412,7 @@ describe('MMG live adapter — Transaction History for the checkout payment time
     vi.useFakeTimers();
     try {
       let stalledSignal: AbortSignal | null | undefined;
-      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const fetchMock = vi.fn(async (url: string, init?: Parameters<typeof fetch>[1]) => {
         const isAuth = url.includes('/e-commerce-login/mer');
         if (isAuth && phase === 'history') return AUTH_OK;
         stalledSignal = init?.signal;
