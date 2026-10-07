@@ -72,6 +72,7 @@ describe('SUSPENSION-HEAL — the wrongful-suspension heal reopens the store it 
     const s = await wronglySuspendedStore();
     const report = await runBillingInvariants(prisma);
     expect(report.wrongfulSuspensions).toContain(s.subId);
+    expect(report.healedWithStoreStillHeld).not.toContain(s.subId);
     expect((await prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).status).toBe('ACTIVE');
     const v = await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } });
     expect(v.status).toBe('ACTIVE');
@@ -97,6 +98,12 @@ describe('SUSPENSION-HEAL — the wrongful-suspension heal reopens the store it 
     expect((await prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).status).toBe('ACTIVE');
     expect(await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } }))
       .toMatchObject({ status: 'SUSPENDED', suspensionSource: source, acceptingOrders: false });
+    // The page names it: the fee is healed, the store is still closed and an operator decides it.
+    expect(report.healedWithStoreStillHeld).toContain(s.subId);
+    // The heal's record says what happened, not that the store was reopened.
+    const heal = await prisma.billingEvent.findFirstOrThrow({ where: { subscriptionId: s.subId, type: 'REINSTATED' } });
+    expect(heal.note).toContain('store left held');
+    expect(heal.note).not.toContain('store access restored');
   });
 
   it('a store whose documents lapsed comes back ACTIVE but NOT taking orders', async () => {
@@ -108,10 +115,13 @@ describe('SUSPENSION-HEAL — the wrongful-suspension heal reopens the store it 
 
   it('[Fable #1481 S4-2] a store an admin already reinstated (ACTIVE, stale BILLING source) keeps the intake its owner chose', async () => {
     const s = await wronglySuspendedStore({ status: 'ACTIVE', acceptingOrders: false, suspensionSource: 'BILLING' });
-    await runBillingInvariants(prisma);
+    const report = await runBillingInvariants(prisma);
     const v = await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } });
     expect(v.status).toBe('ACTIVE');
     expect(v.acceptingOrders).toBe(false);
+    // An open store is not a held one: nothing for an operator to decide.
+    expect(report.wrongfulSuspensions).toContain(s.subId);
+    expect(report.healedWithStoreStillHeld).not.toContain(s.subId);
   });
 
   it('[Fable #1481 S4-1] a suspension with no source (an owner closing their account) is never lifted as a billing one', async () => {
