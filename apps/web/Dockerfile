@@ -66,6 +66,10 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# The local-pros pages (W11) reuse the phone app's appointment time rules and
+# its service catalogue labels the same way; both import only @swift/types.
+COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
+COPY apps/mobile/src/modules/services/serviceCatalogPresentation.ts apps/mobile/src/modules/services/serviceCatalogPresentation.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 
