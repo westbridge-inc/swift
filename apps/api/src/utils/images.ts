@@ -17,6 +17,26 @@ export function looksLikeImage(buffer: Buffer): boolean {
 }
 
 /**
+ * The image type the BYTES say, or null when they are not one of the three
+ * raster formats Swift accepts. A served photo's Content-Type comes from here,
+ * never from a stored label: a label is whatever the uploader claimed.
+ */
+export function imageContentType(buffer: Buffer): 'image/jpeg' | 'image/png' | 'image/webp' | null {
+  if (buffer.length < 12) return null;
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png';
+  if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+/** The extension a stored photo is named with, by what its bytes are. */
+export const IMAGE_EXTENSION: Record<'image/jpeg' | 'image/png' | 'image/webp', string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+};
+
+/**
  * Document sniff (security spec §6): verification uploads accept PDFs too —
  * the content must match one of the allowed formats, never just the header.
  */
@@ -74,7 +94,29 @@ function stripJpeg(buf: Buffer): Buffer | null {
   if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
   const out: Buffer[] = [buf.subarray(0, 2)]; // SOI
   let i = 2;
+  let inScan = false;
   while (i < buf.length) {
+    if (inScan) {
+      const start = i;
+      // Entropy-coded bytes escape 0xFF as 0xFF00. Restart/TEM markers
+      // belong to the scan too; every other marker resumes segment parsing.
+      // Progressive JPEGs can carry APP1/COM between ANY pair of scans.
+      while (i < buf.length) {
+        if (buf[i] !== 0xff) { i += 1; continue; }
+        let next = i + 1;
+        while (next < buf.length && buf[next] === 0xff) next += 1;
+        if (next >= buf.length) return null;
+        const marker = buf[next]!;
+        if (marker === 0x00 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+          i = next + 1;
+          continue;
+        }
+        break;
+      }
+      if (i >= buf.length) return null; // no complete EOI
+      out.push(buf.subarray(start, i));
+      inScan = false;
+    }
     if (buf[i] !== 0xff) return null; // not on a segment boundary — refuse
     // Skip fill bytes (a legal run of 0xFF before a marker).
     let m = i + 1;
@@ -87,8 +129,13 @@ function stripJpeg(buf: Buffer): Buffer | null {
       i = m + 1;
       continue;
     }
-    if (marker === 0xd9) { out.push(buf.subarray(i)); return Buffer.concat(out); } // EOI
-    if (marker === 0xda) { out.push(buf.subarray(i)); return Buffer.concat(out); } // SOS → entropy data to the end
+    if (marker === 0xd9) {
+      // EOI ends the image. Appended metadata or another payload is never
+      // part of the published photo, even when a decoder ignores it.
+      out.push(buf.subarray(i, m + 1));
+      return Buffer.concat(out);
+    }
+    if (marker === 0x00 || marker === 0xd8) return null;
     if (m + 2 >= buf.length) return null;
     const len = buf.readUInt16BE(m + 1);
     if (len < 2) return null;
@@ -96,8 +143,11 @@ function stripJpeg(buf: Buffer): Buffer | null {
     if (end > buf.length) return null;
     if (!JPEG_DROP_MARKERS.has(marker)) out.push(buf.subarray(i, end));
     i = end;
+    // DNL may define the height inside an entropy-coded scan; its payload
+    // has a length word and the scan resumes immediately after it.
+    inScan = marker === 0xda || marker === 0xdc;
   }
-  return Buffer.concat(out);
+  return null; // an unfinished container cannot establish safe stripping
 }
 
 function stripPng(buf: Buffer): Buffer | null {
@@ -112,9 +162,9 @@ function stripPng(buf: Buffer): Buffer | null {
     if (len > buf.length || end > buf.length) return null;
     if (!PNG_DROP_CHUNKS.has(type)) out.push(buf.subarray(i, end));
     i = end;
-    if (type === 'IEND') break;
+    if (type === 'IEND') return len === 0 ? Buffer.concat(out) : null;
   }
-  return Buffer.concat(out);
+  return null; // includes an incomplete trailing chunk or a missing IEND
 }
 
 function stripWebp(buf: Buffer): Buffer | null {
@@ -163,14 +213,34 @@ function stripWebp(buf: Buffer): Buffer | null {
  */
 export function stripImageMetadata(buffer: Buffer, mimeType: string): Buffer {
   try {
+    // [PUBLIC-PHOTOS] For an image, the BYTES choose the stripper, never the
+    // declared type: a JPEG a phone labelled "image/png" went through the PNG
+    // stripper, did not parse, and kept its GPS tags.
+    const kind = mimeType.startsWith('image/') ? (imageContentType(buffer) ?? mimeType) : mimeType;
     let stripped: Buffer | null = null;
-    if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') stripped = stripJpeg(buffer);
-    else if (mimeType === 'image/png') stripped = stripPng(buffer);
-    else if (mimeType === 'image/webp') stripped = stripWebp(buffer);
+    if (kind === 'image/jpeg' || kind === 'image/jpg') stripped = stripJpeg(buffer);
+    else if (kind === 'image/png') stripped = stripPng(buffer);
+    else if (kind === 'image/webp') stripped = stripWebp(buffer);
     // A stripper that grew the file got something wrong; keep the original.
     if (!stripped || stripped.length > buffer.length) return buffer;
     return stripped;
   } catch {
     return buffer;
+  }
+}
+
+/**
+ * [PUBLIC-PHOTOS] The same stripping for bytes about to be PUBLISHED, which
+ * fails CLOSED: null when the container does not parse, so a photo whose tags
+ * cannot be removed is never served. (Upload keeps failing open — refusing a
+ * person's own document over an odd segment is the worse harm there.)
+ */
+export function stripImageMetadataStrict(buffer: Buffer, type: 'image/jpeg' | 'image/png' | 'image/webp'): Buffer | null {
+  try {
+    const stripped = type === 'image/jpeg' ? stripJpeg(buffer) : type === 'image/png' ? stripPng(buffer) : stripWebp(buffer);
+    if (!stripped || stripped.length > buffer.length) return null;
+    return stripped;
+  } catch {
+    return null;
   }
 }
