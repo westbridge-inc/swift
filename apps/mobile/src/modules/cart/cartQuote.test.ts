@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  cartPricingChoices, cartStaleCheckoutCode, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
+  cartLineMeta, cartPricingChoices, cartStaleCheckoutCode, CHECKOUT_PROMO_REFUSAL_CODES, checkoutErrorMessage, deliveryFeeRows, isBookingsOnly,
   pickupRetryChoices, pickupStoreNames, pricedTip, quoteStoreIds, quotedRiderTip, shortStores, type CartQuote,
 } from './cartQuote';
 import { checkoutTipAmount } from './checkout-tip';
@@ -195,5 +195,24 @@ describe('[E07] a checkout refusal because the cart went stale is read as such',
 
   it('a refusal with no response keeps the one generic fallback — never invented availability copy', () => {
     expect(checkoutErrorMessage(null)).toBe('Could not place the order. Try again.');
+  });
+
+  it('[F4] a line whose choices need updating is a stale-cart refusal too: the cart re-reads and the line marks itself', () => {
+    expect(cartStaleCheckoutCode(refused('CART_OPTIONS_CHANGED'))).toBe('CART_OPTIONS_CHANGED');
+    expect(checkoutErrorMessage(refused('CART_OPTIONS_CHANGED', 'Choose your options for Roti again — remove it from your cart and add it from the menu.')))
+      .toBe('Choose your options for Roti again — remove it from your cart and add it from the menu.');
+    expect(checkoutErrorMessage(refused('CART_OPTIONS_CHANGED'))).toBe('The choices for one of your items need updating — remove it and add it again.');
+  });
+});
+
+describe('[row 70] a cart line shows its choices and its note', () => {
+  it('two lines of one item differ by their note, so the note shows', () => {
+    expect(cartLineMeta({ selectedOptionNames: ['Large', 'Cheese'], specialInstructions: ' No onions ' }, null)).toBe('Large, Cheese · Note: No onions');
+    expect(cartLineMeta({ selectedOptionNames: ['Large'], specialInstructions: 'Extra sauce' }, 'GY$1,300 each')).toBe('Large · Note: Extra sauce · GY$1,300 each');
+  });
+
+  it('no note, no options: only what there is', () => {
+    expect(cartLineMeta({ selectedOptionNames: [], specialInstructions: '  ' }, null)).toBe('');
+    expect(cartLineMeta({}, 'GY$500 each')).toBe('GY$500 each');
   });
 });

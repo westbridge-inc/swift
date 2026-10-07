@@ -54,6 +54,7 @@ import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
 import {
+  cartLineMeta,
   cartStaleCheckoutCode,
   cartPricingChoices,
   checkoutErrorMessage,
@@ -738,12 +739,7 @@ export function CartScreen() {
               const hasTotal = Number.isFinite(shownTotal);
               // The unit price is not lost: it moves to the muted meta line,
               // where it is labelled and unambiguous.
-              const meta = [
-                it.selectedOptionNames?.length ? it.selectedOptionNames.join(', ') : null,
-                Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null,
-              ]
-                .filter(Boolean)
-                .join(' · ');
+              const meta = cartLineMeta(it, Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null);
               return (
               <View key={it.id}>
                 {idx > 0 ? <View style={RULE} /> : null}
@@ -782,7 +778,8 @@ export function CartScreen() {
                     {!it.isAvailable ? (
                       <>
                         <T variant="caption" tone="error" style={{ marginTop: 2 }}>
-                          No longer available — remove to continue
+                          {/* [F4] The server's reason when a choice sold out. */}
+                          {it.unavailableReason || 'No longer available — remove to continue'}
                         </T>
                         {/* [E07] One tap to recover: the SAME remove-line
                             mutation as the trash glyph, labelled so the path

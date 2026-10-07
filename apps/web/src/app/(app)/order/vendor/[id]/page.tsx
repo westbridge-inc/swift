@@ -6,7 +6,7 @@ import Image from 'next/image';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { Star, Clock, Plus, X, Minus } from 'lucide-react';
-import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem } from '@/lib/customer';
+import { getVendor, addToCart, getItemSlots, savePendingAppointment, money, type VendorDetail, type MenuItem, type OptionGroup } from '@/lib/customer';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay, formatAppointmentSlot } from '@/lib/appointmentTime';
 import { useCustomerSession } from '@/components/customer-session';
 import { MenuSkeleton } from '@/components/customer-skeletons';
@@ -29,6 +29,12 @@ function nextDays(n: number) {
     out.push({ key, label: i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : formatAppointmentDay(key) });
   }
   return out;
+}
+
+/** [F4] A choice the store has marked sold out is never offered, pre-selected
+ *  or sent (the server refuses it too, for every app). */
+function liveOptions(group: OptionGroup) {
+  return group.options.filter((o) => o.isAvailable !== false);
 }
 
 function itemPrice(item: MenuItem, sel: Record<string, string>) {
@@ -106,9 +112,12 @@ export default function VendorPage() {
   function openItem(item: MenuItem) {
     if (!item.isAvailable) return;
     if (item.fulfillment === 'APPOINTMENT') { setBday(appointmentDayKey(new Date())); setBook(item); return; }
+    // A required group starts on the store's default only while it is on
+    // sale; a sold-out default is never chosen for the customer, and neither
+    // is some other choice they did not pick: the group waits for them.
     const defaults: Record<string, string> = {};
     for (const g of item.optionGroups ?? []) {
-      const d = g.options.find((o) => o.isDefault) ?? g.options[0];
+      const d = liveOptions(g).find((o) => o.isDefault);
       if (g.isRequired && d) defaults[g.id] = d.id;
     }
     setSel(defaults); setQty(1); setModal(item);
@@ -116,13 +125,20 @@ export default function VendorPage() {
 
   async function confirmAdd() {
     if (!modal || !v) return;
+    // Only choices still on sale in this menu are sent.
+    const chosen: Record<string, string> = {};
     for (const g of modal.optionGroups ?? []) {
-      if (g.isRequired && !sel[g.id]) { setToast(`Choose an option for “${g.name}”.`); return; }
+      const pick = liveOptions(g).find((o) => o.id === sel[g.id]);
+      if (pick) chosen[g.id] = pick.id;
+      else if (g.isRequired) {
+        setToast(liveOptions(g).length ? `Choose an option for “${g.name}”.` : `“${g.name}” is sold out right now.`);
+        return;
+      }
     }
     setBusy(true);
     try {
       if (!(await signedInToOrder(modal))) return;
-      await addToCart({ vendorId: v.id, itemId: modal.id, quantity: qty, selectedOptions: sel });
+      await addToCart({ vendorId: v.id, itemId: modal.id, quantity: qty, selectedOptions: chosen });
       setAdded((n) => n + qty); setModal(null); setToast('Added to your cart');
       setTimeout(() => setToast(null), 2500);
     } catch (e: any) { setToast(e.message || 'Could not add item'); }
@@ -190,7 +206,7 @@ export default function VendorPage() {
               <div key={g.id} className="mt-4">
                 <p className="font-bold">{g.name} {g.isRequired && <span className="text-sm font-semibold text-[var(--swift-red)]">Required</span>}</p>
                 <div className="mt-2 space-y-1.5">
-                  {g.options.filter((o) => o.isAvailable).map((o) => (
+                  {liveOptions(g).map((o) => (
                     <label key={o.id} className="flex cursor-pointer items-center justify-between rounded-xl border border-black/10 px-3 py-2.5 has-[:checked]:border-[var(--swift-red)] has-[:checked]:bg-[var(--swift-red-50)]">
                       <span className="flex items-center gap-2.5">
                         <input type="radio" name={g.id} checked={sel[g.id] === o.id} onChange={() => setSel((s) => ({ ...s, [g.id]: o.id }))} className="accent-[var(--swift-red)]" />

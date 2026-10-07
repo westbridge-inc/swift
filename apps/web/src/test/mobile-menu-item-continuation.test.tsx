@@ -149,3 +149,29 @@ describe('guest item Add survives sign-in on the scanned store', () => {
     expect(deliver.mock.calls[0]![0]).toMatchObject({ addDraft: { notes: 'Extra pepper' } });
   });
 });
+
+describe('[F4] the phone never chooses a sold-out option', () => {
+  const soldOutDefault = { ...item, optionGroups: [{ ...item.optionGroups[0]!, options: [
+    { id: 'pumpkin', name: 'Pumpkin', isDefault: true, isAvailable: false },
+    { id: 'chickpea', name: 'Chickpea', isAvailable: true },
+  ] }] };
+
+  it('a sold-out default is shown as sold out, is not pre-selected and cannot be tapped; the customer chooses', () => {
+    state.auth.isAuthenticated = true;
+    state.vendor = { ...vendor, data: { ...vendor.data, categories: [{ items: [soldOutDefault] }] } };
+    render(<MenuItemScreen />);
+    const soldOut = screen.getByRole('button', { name: 'Pumpkin · sold out' });
+    expect(soldOut.getAttribute('aria-pressed')).not.toBe('true');
+    fireEvent.click(soldOut);
+    expect(soldOut.getAttribute('aria-pressed')).not.toBe('true');
+    expect((screen.getByRole('button', { name: 'Choose required options' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(state.mutate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Chickpea/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Add to cart/ }));
+    expect(state.mutate).toHaveBeenCalledExactlyOnceWith(
+      { vendorId: 'scanned-store', itemId: 'roti', quantity: 1, selectedOptions: { filling: 'chickpea' } },
+      expect.any(Object),
+    );
+  });
+});

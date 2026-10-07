@@ -149,6 +149,15 @@ describe('an unavailable line recovers on the phone (E07)', () => {
     expect(unavailableBranch).not.toContain('<AddMorph');
   });
 
+  it('[F4] an unavailable line says why when the server said (a sold-out choice), else the sold-out item wording', () => {
+    const unavailableBranch = src.slice(src.indexOf('{!it.isAvailable ? ('), src.indexOf(') : (', src.indexOf('{!it.isAvailable ? (')));
+    expect(unavailableBranch).toContain("{it.unavailableReason || 'No longer available — remove to continue'}");
+  });
+
+  it('[row 70] a line\'s small print comes from the one helper that shows its note', () => {
+    expect(src).toContain('const meta = cartLineMeta(it, ');
+  });
+
   it('a failed background re-quote keeps the cart on screen — only a cart that never loaded is an error (DS222 R1)', () => {
     expect(src).toContain(') : cart.isError && cart.data === undefined ? (');
     expect(src).not.toMatch(/\) : cart\.isError \? \(/);

@@ -113,7 +113,7 @@ export const CHECKOUT_PROMO_REFUSAL_CODES = [
  *  re-quotes the cart so the line marks itself unavailable. The exact codes
  *  come from order.service.ts (the pre-lock inventory guard and its
  *  post-lock twin, both 409). */
-export const CART_STALE_CHECKOUT_CODES = ['ITEM_UNAVAILABLE', 'INSUFFICIENT_STOCK'] as const;
+export const CART_STALE_CHECKOUT_CODES = ['ITEM_UNAVAILABLE', 'INSUFFICIENT_STOCK', 'CART_OPTIONS_CHANGED'] as const;
 
 /** The code when a checkout refusal means an item changed under the customer
  *  — available when quoted, gone by the time the order was placed. Everything
@@ -135,6 +135,7 @@ export function checkoutErrorMessage(err: unknown): string {
     const message = (err as { response?: { data?: { error?: { message?: string } } } })
       .response?.data?.error?.message;
     if (message) return message;
+    if (stale === 'CART_OPTIONS_CHANGED') return 'The choices for one of your items need updating — remove it and add it again.';
     return stale === 'ITEM_UNAVAILABLE'
       ? 'One of your items is no longer available — remove it to continue.'
       : 'One of your items is not available in that quantity — adjust the quantity or remove it.';
@@ -214,4 +215,24 @@ export function shortStores(quote: CartQuote | null | undefined): Array<{ vendor
       minOrderAmount: Number(s.minOrderAmount),
       amountToAdd: Number(s.amountToMinimum ?? Math.max(0, Number(s.minOrderAmount) - Number(s.subtotal))),
     }));
+}
+
+/** The cart-line fields the line's small print reads (GET /cart `items[]`). */
+export interface CartLineText {
+  selectedOptionNames?: string[] | null;
+  specialInstructions?: string | null;
+}
+
+/** [row 70] The muted line under an item's name: its choices, its note for
+ *  the store (two lines of one item can differ only by the note, so it must
+ *  show) and, for more than one, the unit price. */
+export function cartLineMeta(line: CartLineText, unitPriceEach: string | null): string {
+  const note = line.specialInstructions?.trim();
+  return [
+    line.selectedOptionNames?.length ? line.selectedOptionNames.join(', ') : null,
+    note ? `Note: ${note}` : null,
+    unitPriceEach,
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }

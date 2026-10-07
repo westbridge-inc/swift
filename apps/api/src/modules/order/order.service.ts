@@ -36,7 +36,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { BookingService } from '../booking/booking.service';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
-import { resolveSelectedOptions, optionsUnitPrice, OptionSelectionError, selectionKey, validateSelectedOptions, type ResolvedOption } from './options';
+import { resolveSelectedOptions, optionsUnitPrice, OptionSelectionError, normalizeItemNote, rebuildSelectionFromSnapshot, selectionKey, validateSelectedOptions, type OptionSelection, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
@@ -125,6 +125,23 @@ interface CheckoutStaged {
   orders: CheckoutCreatedOrder[];
   answer: CheckoutAnswer;
   receiptId: string | null;
+}
+
+/** [L09 · M023 · F4] How checkout refuses a line its options no longer allow.
+ *  A sold-out or removed choice answers like a sold-out item (409
+ *  ITEM_UNAVAILABLE): every app already re-reads the cart on that code, and
+ *  the cart quote marks the line so the customer removes it and chooses
+ *  again. Any other gap (a choice the store now requires, too many choices)
+ *  asks for the choices again. */
+function checkoutOptionRefusal(item: { id: string; name: string }, error: OptionSelectionError): AppError {
+  const details = { itemId: [item.id], reason: [error.reason] };
+  if (error.reason === 'OPTION_UNAVAILABLE' || error.reason === 'OPTION_UNKNOWN') {
+    const what = error.reason === 'OPTION_UNAVAILABLE' && error.optionName
+      ? `${error.optionName} for ${item.name} is sold out`
+      : `A choice for ${item.name} is no longer on the menu`;
+    return new AppError(409, 'ITEM_UNAVAILABLE', `${what} — remove it from your cart and add it again with another choice.`, details);
+  }
+  return new AppError(409, 'CART_OPTIONS_CHANGED', `Choose your options for ${item.name} again — remove it from your cart and add it from the menu.`, details);
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
@@ -773,13 +790,7 @@ export class OrderService {
         validateSelectedOptions(line.item, line.selectedOptions);
       } catch (error) {
         if (!(error instanceof OptionSelectionError)) throw error;
-        // A reordered line copies no choices: say plainly what is needed.
-        const message = error.reason === 'OPTION_REQUIRED'
-          ? `Choose your options for ${line.item.name} before you order.`
-          : `${line.item.name}: ${error.message}. Review your cart and try again.`;
-        throw new AppError(409, 'CART_OPTIONS_CHANGED', message, {
-          itemId: [line.item.id], reason: [error.reason],
-        });
+        throw checkoutOptionRefusal(line.item, error);
       }
     }
 
@@ -1245,13 +1256,21 @@ export class OrderService {
       }
       // The priced address is resolved again, the same way (the cart's choice,
       // else the default), and must be the same address at the same place.
+      // The order is stamped with this address's text too, so the text is
+      // part of the comparison: a new door number is a different destination.
+      const addressSelect = { id: true, latitude: true, longitude: true, addressLine1: true, city: true } as const;
       const lockedAddress = (lockedCart.deliveryAddressId
-        ? await tx.address.findUnique({ where: { id: lockedCart.deliveryAddressId }, select: { id: true, latitude: true, longitude: true } })
+        ? await tx.address.findUnique({ where: { id: lockedCart.deliveryAddressId }, select: addressSelect })
         : null)
-        ?? await tx.address.findFirst({ where: { userId: input.userId, isDefault: true }, select: { id: true, latitude: true, longitude: true } });
+        ?? await tx.address.findFirst({ where: { userId: input.userId, isDefault: true }, select: addressSelect });
       if (
         (lockedAddress?.id ?? null) !== (address?.id ?? null)
-        || (address && lockedAddress && (lockedAddress.latitude !== address.latitude || lockedAddress.longitude !== address.longitude))
+        || (address && lockedAddress && (
+          lockedAddress.latitude !== address.latitude
+          || lockedAddress.longitude !== address.longitude
+          || lockedAddress.addressLine1 !== address.addressLine1
+          || lockedAddress.city !== address.city
+        ))
       ) {
         throw new AppError(409, 'CART_CHANGED', 'Your delivery address just changed — review it and place the order again.');
       }
@@ -1298,6 +1317,36 @@ export class OrderService {
         // Same code+status as the pre-lock ITEM_UNAVAILABLE path, so a race
         // loser reads identically wherever the race is caught.
         throw new AppError(409, 'ITEM_UNAVAILABLE', `${darkItem.name} just became unavailable — remove it and try again.`);
+      }
+      // [L09 · M023 · F4] The choices are re-read here as well, beside the
+      // item check above: a choice that sold out (or was removed), or a price
+      // that changed, after the pre-check is refused instead of ordered at the
+      // old price. Each line is validated by the one validator and priced by
+      // the one line pricer against this read, and must price exactly as the
+      // plan did.
+      const lockedMenu = new Map((await tx.item.findMany({
+        where: { id: { in: [...new Set(cart.items.map((line) => line.itemId))] } },
+        select: { id: true, name: true, vendorId: true, fulfillment: true, basePrice: true, optionGroups: { include: { options: true } } },
+      })).map((row) => [row.id, row]));
+      for (const line of cart.items) {
+        const current = lockedMenu.get(line.itemId);
+        if (!current) {
+          throw new AppError(409, 'ITEM_UNAVAILABLE', `${line.item.name} just became unavailable — remove it and try again.`);
+        }
+        try {
+          validateSelectedOptions(current, line.selectedOptions);
+        } catch (error) {
+          if (!(error instanceof OptionSelectionError)) throw error;
+          throw checkoutOptionRefusal(current, error);
+        }
+        const planned = priceCartLine(line);
+        const repriced = priceCartLine({ quantity: line.quantity, selectedOptions: line.selectedOptions, item: current });
+        if (
+          repriced.unitPrice !== planned.unitPrice
+          || JSON.stringify(repriced.options) !== JSON.stringify(planned.options)
+        ) {
+          throw new AppError(409, 'CART_CHANGED', `The price of ${current.name} just changed — review your cart and place the order again.`);
+        }
       }
 
       let committedMmgPayUrl: string | null = null;
@@ -2890,7 +2939,7 @@ export class OrderService {
   async reorder(userId: string, orderId: string) {
     const original = await this.prisma.order.findFirst({
       where: { id: orderId, customerId: userId },
-      include: { items: true },
+      include: { items: { include: { selectedOptions: true } } },
     });
 
     if (!original || !original.vendorId) {
@@ -2902,42 +2951,66 @@ export class OrderService {
       throw new AppError(400, 'VENDOR_UNAVAILABLE', 'This restaurant is no longer available');
     }
 
-    // Clear existing cart and create new one
-    await this.prisma.cart.deleteMany({ where: { customerId: userId } });
-
-    const cart = await this.prisma.cart.create({
-      data: { customerId: userId, vendorId: original.vendorId },
-    });
-
     // Add items to cart, checking availability
     const availableItems = await this.prisma.item.findMany({
       where: { id: { in: original.items.map((i) => i.itemId) }, isAvailable: true },
+      include: { optionGroups: { include: { options: true } } },
     });
-    const availableIds = new Set(availableItems.map((i) => i.id));
+    const availableById = new Map(availableItems.map((i) => [i.id, i]));
 
-    const cartItems = original.items
-      .filter((i) => availableIds.has(i.itemId))
-      .map((i) => ({
-        cartId: cart.id,
-        itemId: i.itemId,
-        quantity: i.quantity,
-        selectedOptions: {},
-        specialInstructions: i.specialInstructions,
-      }));
+    // [L09 · reorder] Each line comes back WITH its choices, rebuilt from the
+    // names the order kept against today's menu by the one validator. A line
+    // whose choices cannot be rebuilt exactly (one is sold out or gone, or the
+    // item now needs a choice) is not added with its choices dropped: it is
+    // named, so the customer chooses again from the menu.
+    const needsOptions: string[] = [];
+    const cartItems: Array<{ itemId: string; quantity: number; selectedOptions: OptionSelection; specialInstructions: string | null }> = [];
+    let unavailableCount = 0;
+    for (const line of original.items) {
+      const item = availableById.get(line.itemId);
+      if (!item) { unavailableCount += 1; continue; }
+      const selection = rebuildSelectionFromSnapshot(item, line.selectedOptions);
+      if (!selection) { needsOptions.push(line.name); continue; }
+      cartItems.push({
+        itemId: line.itemId,
+        quantity: line.quantity,
+        selectedOptions: selection,
+        specialInstructions: normalizeItemNote(line.specialInstructions),
+      });
+    }
 
+    const chooseAgain = needsOptions.length > 0
+      ? `Choose your options for ${[...new Set(needsOptions)].join(', ')} again from the menu.`
+      : null;
+    // Nothing could come back: refuse BEFORE touching the cart the customer has.
     if (cartItems.length === 0) {
+      if (chooseAgain) throw new AppError(409, 'REORDER_NEEDS_OPTIONS', chooseAgain);
       throw new AppError(400, 'NO_ITEMS', 'None of the items from this order are currently available');
     }
 
-    await this.prisma.cartItem.createMany({ data: cartItems });
+    // Replace the cart in one step, so a failure never leaves it emptied.
+    const cart = await this.prisma.$transaction(async (tx) => {
+      await tx.cart.deleteMany({ where: { customerId: userId } });
+      const created = await tx.cart.create({
+        data: { customerId: userId, vendorId: original.vendorId! },
+      });
+      await tx.cartItem.createMany({
+        data: cartItems.map((line) => ({ ...line, cartId: created.id, selectedOptions: line.selectedOptions as Prisma.InputJsonValue })),
+      });
+      return created;
+    });
 
-    const unavailableCount = original.items.length - cartItems.length;
+    const left = [
+      unavailableCount > 0 ? `${unavailableCount} item(s) were unavailable.` : null,
+      chooseAgain,
+    ].filter(Boolean).join(' ');
     return {
       cartId: cart.id,
       itemsAdded: cartItems.length,
       unavailableItems: unavailableCount,
-      message: unavailableCount > 0
-        ? `${cartItems.length} items added to cart. ${unavailableCount} item(s) were unavailable.`
+      needsOptions,
+      message: left
+        ? `${cartItems.length} items added to cart. ${left}`
         : `${cartItems.length} items added to cart. Ready to checkout!`,
     };
   }

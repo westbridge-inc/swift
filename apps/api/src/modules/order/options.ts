@@ -55,14 +55,20 @@ export function optionsUnitPrice(options: ResolvedOption[]): number {
 export type OptionSelectionReason = 'OPTION_UNKNOWN' | 'OPTION_UNAVAILABLE' | 'OPTION_DUPLICATE' | 'OPTION_LIMIT' | 'OPTION_REQUIRED';
 
 export class OptionSelectionError extends Error {
-  constructor(readonly reason: OptionSelectionReason, readonly groupName: string | null, message: string) {
+  constructor(
+    readonly reason: OptionSelectionReason,
+    readonly groupName: string | null,
+    message: string,
+    /** The choice that was refused, when one was named (a sold-out choice). */
+    readonly optionName: string | null = null,
+  ) {
     super(message);
     this.name = 'OptionSelectionError';
   }
 }
 
 type ValidatableOption = { id: string; name: string; additionalPrice: unknown; isAvailable?: boolean | null };
-type ValidatableGroup = { id: string; name: string; isRequired: boolean; minSelect: number; maxSelect: number; options: ValidatableOption[] };
+export type ValidatableGroup = { id: string; name: string; isRequired: boolean; minSelect: number; maxSelect: number; options: ValidatableOption[] };
 
 export type OptionSelection = Record<string, string | string[]>;
 
@@ -96,7 +102,11 @@ export function validateSelectedOptions(
     for (const id of chosen) {
       const option = typeof id === 'string' ? optionById.get(id) : undefined;
       if (!option) throw new OptionSelectionError('OPTION_UNKNOWN', group.name, `That option isn't available for "${group.name}"`);
-      if (option.isAvailable === false) throw new OptionSelectionError('OPTION_UNAVAILABLE', group.name, `${option.name} is not available right now for "${group.name}"`);
+      // [F4] Sold out is enforced HERE, for every client (an older app, the
+      // web, a stale menu): never only by a screen hiding the choice.
+      if (option.isAvailable === false) {
+        throw new OptionSelectionError('OPTION_UNAVAILABLE', group.name, `${option.name} is sold out right now. Choose another option for "${group.name}"`, option.name);
+      }
       if (seen.has(option.id)) throw new OptionSelectionError('OPTION_DUPLICATE', group.name, `Choose each option for "${group.name}" once`);
       seen.add(option.id);
     }
@@ -135,4 +145,59 @@ export function selectionKey(selected: unknown): string {
 export function normalizeItemNote(note: string | null | undefined): string | null {
   const trimmed = (note ?? '').trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * [L09 · reorder] A past line's choices, rebuilt against TODAY's menu from the
+ * group and option names its order kept (an order stores names, not ids).
+ * Returns the canonical selection only when it can be rebuilt exactly and the
+ * one validator accepts it; null when a choice is gone, sold out, renamed or
+ * ambiguous, or the item now needs a choice the order never made. A reorder
+ * never drops a choice silently and never guesses one.
+ */
+export function rebuildSelectionFromSnapshot(
+  item: { optionGroups?: ValidatableGroup[] | null },
+  snapshot: ReadonlyArray<{ optionGroupName: string; optionName: string }>,
+): OptionSelection | null {
+  const groups = item.optionGroups ?? [];
+  const chosen = new Map<string, string[]>();
+  for (const pick of snapshot) {
+    const matchingGroups = groups.filter((g) => g.name === pick.optionGroupName);
+    if (matchingGroups.length !== 1) return null;
+    const group = matchingGroups[0]!;
+    const matchingOptions = group.options.filter((o) => o.name === pick.optionName);
+    if (matchingOptions.length !== 1) return null;
+    chosen.set(group.id, [...(chosen.get(group.id) ?? []), matchingOptions[0]!.id]);
+  }
+  const shaped: Record<string, string | string[]> = {};
+  for (const group of groups) {
+    const ids = chosen.get(group.id);
+    if (!ids) continue;
+    // The shape the apps send: one id for a pick-one group, a list otherwise.
+    shaped[group.id] = group.maxSelect > 1 || ids.length > 1 ? ids : ids[0]!;
+  }
+  try {
+    return validateSelectedOptions(item, shaped).selection;
+  } catch (error) {
+    if (error instanceof OptionSelectionError) return null;
+    throw error;
+  }
+}
+
+/**
+ * [F4] Why a cart line cannot be ordered as it stands, in a few plain words
+ * for the cart screen, or null when its choices are still good. The cart
+ * quote marks such a line unavailable, the same as a sold-out item, so every
+ * app blocks the order button on it and offers Remove.
+ */
+export function lineOptionsIssue(item: { optionGroups?: ValidatableGroup[] | null }, selected: unknown): string | null {
+  try {
+    validateSelectedOptions(item, selected);
+    return null;
+  } catch (error) {
+    if (!(error instanceof OptionSelectionError)) throw error;
+    if (error.reason === 'OPTION_UNAVAILABLE' && error.optionName) return `${error.optionName} is sold out — remove and choose again`;
+    if (error.reason === 'OPTION_UNKNOWN') return 'A choice is no longer on the menu — remove and choose again';
+    return 'Your choices need updating — remove and choose again';
+  }
 }

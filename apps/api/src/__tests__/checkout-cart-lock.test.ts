@@ -20,6 +20,12 @@ import { registerErrorHandler } from '../middleware/error-handler';
 //    exactly.
 //  - row 70: an item note is part of a cart line's identity — the same item
 //    with a different note is its own line, never silently dropped.
+//  - F4: "sold out" on a choice is enforced by the server for every app: the
+//    menu marks it, cart add refuses it with a plain message, the cart marks a
+//    line whose choice sold out, and checkout refuses it — before the lock and
+//    again where the order commits (with any price change since pricing).
+//  - reorder: a past order comes back WITH its choices, or the line is named
+//    for the customer to choose again; it never drops a choice silently.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -151,21 +157,28 @@ describe('[M023] one option validator for cart add, cart update and checkout', (
     try {
       const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
       expect(res.statusCode).toBe(409);
-      expect(res.json().error.code).toBe('CART_OPTIONS_CHANGED');
+      // [F4] The sold-out answer every app already recovers from: it re-reads
+      // the cart, where the line is marked (see the F4 cart test).
+      expect(res.json().error.code).toBe('ITEM_UNAVAILABLE');
+      expect(res.json().error.message).toBe('Cheese for Lock Burger is sold out — remove it from your cart and add it again with another choice.');
       expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
     } finally {
       await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: true } });
     }
   });
 
-  it('a line with no choices for a required group (as a reorder copies it) asks the customer to choose', async () => {
+  it('a line with no choices for a required group (an older cart, or a group the store added since) asks the customer to choose again', async () => {
     const c = await makeCustomer();
     const cart = await app.prisma.cart.create({ data: { customerId: c.userId, vendorId } });
-    await app.prisma.cartItem.create({ data: { cartId: cart.id, itemId, quantity: 1, selectedOptions: {} } });
+    const line = await app.prisma.cartItem.create({ data: { cartId: cart.id, itemId, quantity: 1, selectedOptions: {} } });
     const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('CART_OPTIONS_CHANGED');
-    expect(res.json().error.message).toBe('Choose your options for Lock Burger before you order.');
+    expect(res.json().error.message).toBe('Choose your options for Lock Burger again — remove it from your cart and add it from the menu.');
+    // The cart says so too, and blocks the line, so the way out is visible.
+    const quote = (await inject('GET', '/api/v1/customer/cart', undefined, c.token)).json().data;
+    expect(quote.unavailableItemIds).toEqual([line.id]);
+    expect(quote.items[0]).toMatchObject({ isAvailable: false, unavailableReason: 'Your choices need updating — remove and choose again' });
   });
 
   it('a valid set is priced exactly and its options are snapshotted on the order', async () => {
@@ -179,6 +192,149 @@ describe('[M023] one option validator for cart add, cart update and checkout', (
     const item = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: order.id }, include: { selectedOptions: true } });
     expect(Number(item.totalCustomer)).toBe(3100);
     expect(item.selectedOptions.map((o) => [o.optionName, Number(o.markedUpPrice)]).sort()).toEqual([['Cheese', 150], ['Egg', 100], ['Large', 300]]);
+  });
+});
+
+describe('[F4] sold out on a choice is enforced by the server, for every app', () => {
+  it('cart add refuses a sold-out choice with a plain message — what an older app sends', async () => {
+    const c = await makeCustomer();
+    const res = await add(c.token, { selectedOptions: { [sizeGroupId]: sizeGone } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toBe('Jumbo is sold out right now. Choose another option for "Size"');
+    expect(res.json().error.details).toMatchObject({ selectedOptions: ['OPTION_UNAVAILABLE'] });
+    expect(await lines(c.userId)).toHaveLength(0);
+  });
+
+  it('the store menu marks the sold-out choice', async () => {
+    const c = await makeCustomer();
+    const res = await inject('GET', `/api/v1/customer/vendors/${vendorId}`, undefined, c.token);
+    expect(res.statusCode).toBe(200);
+    const burger = res.json().data.categories.flatMap((cat: { items: Array<{ id: string }> }) => cat.items)
+      .find((it: { id: string }) => it.id === itemId);
+    const size = burger.optionGroups.find((g: { id: string }) => g.id === sizeGroupId);
+    expect(size.options.map((o: { name: string; isAvailable: boolean }) => [o.name, o.isAvailable]).sort())
+      .toEqual([['Jumbo', false], ['Large', true], ['Small', true]]);
+  });
+
+  it('the cart marks a line whose choice sold out after it was added, and says why', async () => {
+    const c = await makeCustomer();
+    expect((await add(c.token, { selectedOptions: validOptions() })).statusCode).toBe(201);
+    expect((await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: plainItemId, quantity: 1 }, c.token)).statusCode).toBe(201);
+    const [burgerLine, friesLine] = await lines(c.userId);
+    await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: false } });
+    try {
+      const quote = (await inject('GET', '/api/v1/customer/cart', undefined, c.token)).json().data;
+      expect(quote.unavailableItemIds).toEqual([burgerLine!.id]);
+      const byId = new Map(quote.items.map((l: { id: string }) => [l.id, l]));
+      expect(byId.get(burgerLine!.id)).toMatchObject({ isAvailable: false, unavailableReason: 'Cheese is sold out — remove and choose again' });
+      expect(byId.get(friesLine!.id)).toMatchObject({ isAvailable: true, unavailableReason: null });
+    } finally {
+      await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: true } });
+    }
+  });
+
+  async function pickupCart() {
+    const c = await makeCustomer();
+    expect((await add(c.token, { selectedOptions: validOptions() })).statusCode).toBe(201);
+    return c;
+  }
+  const checkoutWith = (c: { userId: string }, beforeTransaction: () => Promise<void>) =>
+    new OrderService(app.prisma, app.io).checkout({
+      userId: c.userId, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' }, beforeTransaction,
+    });
+
+  it('a choice that sells out after the first check is refused where the order commits', async () => {
+    const c = await pickupCart();
+    try {
+      await expect(checkoutWith(c, async () => {
+        await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: false } });
+      })).rejects.toMatchObject({ statusCode: 409, code: 'ITEM_UNAVAILABLE' });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: true } });
+    }
+  });
+
+  it('a choice repriced after the first check is refused where the order commits', async () => {
+    const c = await pickupCart();
+    try {
+      await expect(checkoutWith(c, async () => {
+        await app.prisma.option.update({ where: { id: sizeLarge }, data: { additionalPrice: 350 } });
+      })).rejects.toMatchObject({ statusCode: 409, code: 'CART_CHANGED' });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.option.update({ where: { id: sizeLarge }, data: { additionalPrice: 300 } });
+    }
+  });
+
+  it('the item repriced after the first check is refused where the order commits', async () => {
+    const c = await pickupCart();
+    try {
+      await expect(checkoutWith(c, async () => {
+        await app.prisma.item.update({ where: { id: itemId }, data: { basePrice: BASE + 100 } });
+      })).rejects.toMatchObject({ statusCode: 409, code: 'CART_CHANGED' });
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+    } finally {
+      await app.prisma.item.update({ where: { id: itemId }, data: { basePrice: BASE } });
+    }
+  });
+});
+
+describe('[reorder] a past order comes back with its choices, or names the line to choose again', () => {
+  async function pastOrder(c: { token: string }, extra?: Record<string, unknown>) {
+    expect((await add(c.token, { selectedOptions: validOptions(), specialInstructions: 'No onions' })).statusCode).toBe(201);
+    if (extra) expect((await inject('POST', '/api/v1/customer/cart/items', extra, c.token)).statusCode).toBe(201);
+    const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
+    expect(res.statusCode).toBe(200);
+    const orderId = res.json().data.orders[0].id as string;
+    await app.prisma.order.update({ where: { id: orderId }, data: { status: 'DELIVERED' } });
+    return orderId;
+  }
+
+  it('the choices and the note come back, and the reorder checks out at the same price', async () => {
+    const c = await makeCustomer();
+    const orderId = await pastOrder(c);
+    const res = await inject('POST', `/api/v1/customer/orders/${orderId}/reorder`, {}, c.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ itemsAdded: 1, unavailableItems: 0, needsOptions: [], message: '1 items added to cart. Ready to checkout!' });
+    const [line] = await lines(c.userId);
+    expect(line!.selectedOptions).toEqual({ [extrasGroupId]: [extraCheese], [sizeGroupId]: sizeLarge });
+    expect(line!.specialInstructions).toBe('No onions');
+    const again = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
+    expect(again.statusCode).toBe(200);
+    expect(again.json().data.orders[0].subtotal).toBe(BASE + 300 + 150);
+  });
+
+  it('a line whose choice has sold out is named, not added without it; the rest comes back', async () => {
+    const c = await makeCustomer();
+    const orderId = await pastOrder(c, { vendorId, itemId: plainItemId, quantity: 2 });
+    await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: false } });
+    try {
+      const res = await inject('POST', `/api/v1/customer/orders/${orderId}/reorder`, {}, c.token);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().data).toMatchObject({
+        itemsAdded: 1, needsOptions: ['Lock Burger'],
+        message: '1 items added to cart. Choose your options for Lock Burger again from the menu.',
+      });
+      expect((await lines(c.userId)).map((l) => [l.itemId, l.quantity])).toEqual([[plainItemId, 2]]);
+    } finally {
+      await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: true } });
+    }
+  });
+
+  it('when nothing can come back with its choices, it says so and leaves the current cart alone', async () => {
+    const c = await makeCustomer();
+    const orderId = await pastOrder(c);
+    expect((await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: plainItemId, quantity: 3 }, c.token)).statusCode).toBe(201);
+    await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: false } });
+    try {
+      const res = await inject('POST', `/api/v1/customer/orders/${orderId}/reorder`, {}, c.token);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatchObject({ code: 'REORDER_NEEDS_OPTIONS', message: 'Choose your options for Lock Burger again from the menu.' });
+      expect((await lines(c.userId)).map((l) => [l.itemId, l.quantity])).toEqual([[plainItemId, 3]]);
+    } finally {
+      await app.prisma.option.update({ where: { id: extraCheese }, data: { isAvailable: true } });
+    }
   });
 });
 
@@ -232,6 +388,9 @@ describe('[M022] options, notes and destination are part of the locked cart', ()
     }],
     ['the delivery address being moved', async (c: Awaited<ReturnType<typeof readyCart>>) => {
       await app.prisma.address.update({ where: { id: c.addressId }, data: { latitude: 6.8300, longitude: -58.1700 } });
+    }],
+    ['the delivery address text changing in place (same spot, a new door)', async (c: Awaited<ReturnType<typeof readyCart>>) => {
+      await app.prisma.address.update({ where: { id: c.addressId }, data: { addressLine1: '1 Lock, Flat 9' } });
     }],
   ])('%s between pricing and commit refuses the checkout', async (_name, mutate) => {
     const c = await readyCart();

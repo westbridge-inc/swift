@@ -33,7 +33,7 @@ import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCo
 import { PickingService } from '../order/picking.service';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
-import { normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
+import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
 import { RatingService } from '../rating/rating.service';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
@@ -343,8 +343,13 @@ async function buildCartResponse(
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
               isAvailable: true, vendorId: true, fulfillment: true,
+              // [F4] Everything the one option validator reads, so the quote
+              // marks a line whose choice sold out exactly as checkout refuses it.
               optionGroups: {
-                select: { name: true, options: { select: { id: true, name: true, additionalPrice: true } } },
+                select: {
+                  id: true, name: true, isRequired: true, minSelect: true, maxSelect: true,
+                  options: { select: { id: true, name: true, additionalPrice: true, isAvailable: true } },
+                },
               },
               // [E01] Each line prices against ITS OWN vendor — the tracked
               // `cart.vendor` is only the most recently added store.
@@ -452,8 +457,13 @@ async function buildCartResponse(
 
   const itemDetails = cart.items.map((ci) => {
     const line = priceCartLine(ci);
+    // [F4] A line is orderable only if its item AND its choices still are: a
+    // sold-out choice marks the line the way a sold-out item does (every app
+    // blocks the order button on it and offers Remove), with the reason.
+    const optionsIssue = ci.item.isAvailable ? lineOptionsIssue(ci.item, ci.selectedOptions) : null;
+    const lineAvailable = ci.item.isAvailable && optionsIssue === null;
 
-    if (!ci.item.isAvailable) unavailableItemIds.push(ci.id);
+    if (!lineAvailable) unavailableItemIds.push(ci.id);
 
     return {
       id: ci.id,
@@ -467,7 +477,8 @@ async function buildCartResponse(
       selectedOptionNames: line.options.map((o) => o.optionName),
       specialInstructions: ci.specialInstructions,
       lineTotal: line.lineTotal,
-      isAvailable: ci.item.isAvailable,
+      isAvailable: lineAvailable,
+      unavailableReason: optionsIssue,
       fulfillment: ci.item.fulfillment,
       // [E01] Which store's order this line joins at checkout.
       vendorId: ci.item.vendorId,
