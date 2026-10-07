@@ -54,19 +54,20 @@ describe('team invitation taps reach the mounted inbox', () => {
       if (state.routes[state.index]?.name === 'Main') {
         const mainNext = mainRouter.getStateForAction(mainState, action, mainOptions);
         if (mainNext) {
-          mainState = mainNext; landed = mainState.routes[mainState.index]?.name;
+          mainState = mainRouter.getRehydratedState(mainNext, mainOptions); landed = mainState.routes[mainState.index]?.name;
           return landed === 'Notifications';
         }
       }
       const next = root.getStateForAction(state, action, options);
       if (!next) return false;
-      state = next;
+      state = root.getRehydratedState(next, options);
       const route = state.routes[state.index]!;
       if (route.name !== 'Storefront') return false;
       const nested = child.getStateForAction(child.getInitialState(childOptions), {
         type: 'NAVIGATE', payload: { name: String(params?.['screen']) },
       }, childOptions);
-      landed = nested?.routes[nested.index]?.name;
+      const nestedState = nested ? child.getRehydratedState(nested, childOptions) : undefined;
+      landed = nestedState?.routes[nestedState.index]?.name;
       return landed === 'Notifications';
     });
     const response = { notification: { request: { content: { data: { kind: 'staff_invite', audience: 'customer', vendorId: 'fixture-store' } } } } };
