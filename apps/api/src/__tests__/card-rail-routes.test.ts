@@ -952,7 +952,13 @@ describe('[review S3 · S4] the return page: two ways back, and a time limit on 
       expect(pageState(res.body)).toBe('PENDING');
       expect((await money(p.subId)).successes).toBe(0);
       release();
-      for (let i = 0; i < 50 && (await money(p.subId)).successes === 0; i += 1) await new Promise((r) => setTimeout(r, 100));
+      // The ledger commit is visible before confirm stores its final session verdict.
+      // Wait for both durable results within the same bounded polling loop.
+      for (let i = 0; i < 50; i += 1) {
+        const settled = await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } });
+        if ((await money(p.subId)).successes === 1 && settled.status === 'SUCCEEDED') break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
       expect((await money(p.subId)).successes).toBe(1);
       expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('SUCCEEDED');
     } finally {
