@@ -5,11 +5,12 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { getSessionPrincipal, restoreSession, sessionProbe, subscribeSession } from '@/lib/auth';
 import { getMarketDepth } from '@/lib/customer';
+import { cartItemCount, customerCartKey, readShellCart, readShellPerson, shellPersonKey } from '@/lib/shell-data';
 import { marketTabVisible } from '@/lib/app-rules';
 import { customerRoute, HOME_PATH } from '@/lib/customer-routes';
 import { Providers } from '@/components/providers';
 import { CustomerSessionProvider, type CustomerSession, type NearPoint, type SessionStatus } from '@/components/customer-session';
-import { ContentSkeleton, SignInDoor, TabBar, TopBar } from '@/components/customer-shell';
+import { BackRow, ContentSkeleton, ShellNavProvider, SideRail, SignInDoor, SwitchAppSheet, TabBar } from '@/components/customer-shell';
 import CartSkeleton from './cart/loading';
 import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
@@ -144,15 +145,27 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   const session = useShellSession();
   const { status, principal, restoreTried, epoch, ensureSignedIn } = session;
   const depth = useInAppDepth(pathname);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [backClaims, setBackClaims] = useState(0);
   const [nearPoint, setNearPoint] = useState<NearPoint | null>(null);
 
-  useEffect(() => { setMenuOpen(false); }, [pathname]);
+  useEffect(() => { setSwitching(false); }, [pathname]);
 
   // [Q7b] Market is a tab only when the server's depth verdict says so — the
   // phone app's rule, read from the same public endpoint.
   const market = useQuery({ queryKey: ['market', 'depth'], queryFn: getMarketDepth, staleTime: 5 * 60_000, retry: false });
   const marketVisible = marketTabVisible(market.data);
+
+  // [WEB-REDESIGN] The rail and the dock show how many things are in the
+  // cart, and the rail shows who is signed in. Both are the account's own
+  // reads (the cart and profile the phone app reads), asked only once someone
+  // is signed in and keyed to that person, so a sign-out never shows the last
+  // person's count. A failed read shows no badge, never a made-up number.
+  const scope = principal ?? 'guest';
+  const signedIn = status === 'signed-in';
+  const cart = useQuery({ queryKey: customerCartKey(scope, epoch), queryFn: readShellCart, enabled: signedIn, staleTime: 30_000, retry: false });
+  const me = useQuery({ queryKey: shellPersonKey(scope, epoch), queryFn: readShellPerson, enabled: signedIn, staleTime: 5 * 60_000, retry: false });
+  const cartCount = signedIn ? cartItemCount(cart.data) : 0;
 
   // A private page opened with an expired access cookie: spend the refresh
   // cookie once before deciding this is a guest.
@@ -165,6 +178,11 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
     else router.push(route.parent ?? HOME_PATH);
   }, [depth, router, route.parent]);
 
+  const claimBack = useCallback(() => {
+    setBackClaims((count) => count + 1);
+    return () => setBackClaims((count) => count - 1);
+  }, []);
+
   // Where sign-in brings the person back to: this page, with its query (a
   // store's ?item=, a category) — read when the link is drawn or tapped.
   const returnPath = useCallback(
@@ -176,40 +194,48 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
     () => ({ status, scope: principal ?? 'guest', epoch, ensureSignedIn, nearPoint, setNearPoint }),
     [status, principal, epoch, ensureSignedIn, nearPoint],
   );
+  const showBack = route.parent !== null;
+  const openSwitchApp = useCallback(() => setSwitching(true), []);
+  const nav = useMemo(() => ({ showBack, goBack, claimBack, openSwitchApp }), [showBack, goBack, claimBack, openSwitchApp]);
 
   let content: React.ReactNode;
   if (route.public || status === 'signed-in') content = children;
   else if (status === 'guest' && restoreTried) content = <SignInDoor door={route.door} returnPath={returnPath()} />;
   else content = <div aria-label="Opening this page">{pathname === '/cart' ? <CartSkeleton /> : pathname === '/orders' ? <OrdersSkeleton /> : pathname.startsWith('/orders/') ? <OrderDetailSkeleton /> : <ContentSkeleton />}</div>;
 
-  // [PWA-1] Installed on an iPhone the app runs edge to edge: the header pads
+  // [PWA-1] Installed on an iPhone the app runs edge to edge: the page pads
   // below the status bar, the dock sits above the home bar, and the page ends
   // above both. Every inset is zero in an ordinary browser tab. `--swift-dock`
   // is how far fixed things (the install card, a store's cart button) must sit
-  // above the bottom: the dock on phones, the home bar alone from md up.
+  // above the bottom: the dock on phones, the home bar alone from 760 px up.
   return (
     <CustomerSessionProvider value={context}>
-      <div className="swift-app min-h-screen [--swift-dock:calc(3.5rem_+_env(safe-area-inset-bottom))] md:[--swift-dock:env(safe-area-inset-bottom)]">
-        <TopBar
-          activeTab={route.tab}
-          marketVisible={marketVisible}
-          status={status}
-          showBack={route.parent !== null}
-          onBack={goBack}
-          menuOpen={menuOpen}
-          onMenuChange={setMenuOpen}
-          returnPath={returnPath}
-        />
-        <main className="mx-auto max-w-6xl px-4 pt-4 pb-[calc(5rem_+_env(safe-area-inset-bottom))] md:pt-6 md:pb-[calc(1.5rem_+_env(safe-area-inset-bottom))]">
-          <OfflineNotice />
-          <div key={pathname} className="swift-route-in">{content}</div>
-        </main>
-        <TabBar activeTab={route.tab} marketVisible={marketVisible} />
-        {/* [PWA-1] Offered on Home only, never over a cart, checkout or live
-            order. Mounted from the first render, so an install event that
-            lands before Home does is still caught. */}
-        <InstallPrompt enabled={pathname === HOME_PATH} />
-      </div>
+      <ShellNavProvider value={nav}>
+        <div className="swift-app min-h-screen bg-[var(--swift-canvas)] [--swift-dock:calc(60px_+_env(safe-area-inset-bottom))] wide:flex wide:[--swift-dock:env(safe-area-inset-bottom)]">
+          <SideRail
+            activeTab={route.tab}
+            marketVisible={marketVisible}
+            cartCount={cartCount}
+            status={status}
+            person={me.data ?? null}
+            returnPath={returnPath}
+            onSwitchApp={openSwitchApp}
+          />
+          <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
+            <div className="sw-page">
+              <OfflineNotice />
+              {showBack && backClaims === 0 ? <BackRow /> : null}
+              <div key={pathname} className="swift-route-in">{content}</div>
+            </div>
+          </main>
+          <TabBar activeTab={route.tab} marketVisible={marketVisible} cartCount={cartCount} />
+          {switching ? <SwitchAppSheet onClose={() => setSwitching(false)} /> : null}
+          {/* [PWA-1] Offered on Home only, never over a cart, checkout or live
+              order. Mounted from the first render, so an install event that
+              lands before Home does is still caught. */}
+          <InstallPrompt enabled={pathname === HOME_PATH} />
+        </div>
+      </ShellNavProvider>
     </CustomerSessionProvider>
   );
 }

@@ -634,3 +634,70 @@ describe('Q12 · B7 — a 23:30 Guyana booking stays on its Guyana date in every
     expect(await picker(cutId, next, customer.token)).toContain(gy(next, 0, 0).toISOString());
   });
 });
+
+describe('[L09 · M017] one slot is one instant: stray seconds never make a second booking', () => {
+  it('a request a fraction of a second into a confirmed slot is the same slot, refused at checkout and at reservation', async () => {
+    const slot = gy(gyDay(4), 10, 0);
+    const first = await makeUser('Ines', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(first, cutId, slot);
+    expect((await accept(order.id)).statusCode).toBe(200);
+
+    const second = await makeUser('Joel', ['CUSTOMER'], 'CUSTOMER');
+    const late = await book(second, cutId, new Date(slot.getTime() + 400));
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error.code).toBe('SLOT_TAKEN');
+
+    const { BookingService } = await import('../modules/booking/booking.service');
+    await expect(new BookingService(app.prisma).reserveSlot(cutId, second.userId, new Date(slot.getTime() + 400)))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    await expect(new BookingService(app.prisma).assertSlotFree(cutId, new Date(slot.getTime() + 400)))
+      .rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    expect(await app.prisma.booking.count({ where: { itemId: cutId, status: { not: 'CANCELLED' }, slotStart: { gte: slot, lt: new Date(slot.getTime() + MINUTE) } } })).toBe(1);
+  });
+
+  it('a slot asked for with stray seconds is stored on the minute, on the order and on the booking', async () => {
+    const slot = gy(gyDay(4), 11, 0);
+    const customer = await makeUser('Kira', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, new Date(slot.getTime() + 37_250));
+    expect(order.appointmentSlot).toBe(slot.toISOString());
+    expect((await accept(order.id)).statusCode).toBe(200);
+    expect((await bookingOf(order.id)).slotStart.toISOString()).toBe(slot.toISOString());
+  });
+});
+
+describe('[L09 · M018] a finished appointment stays finished', () => {
+  it('completing the appointment completes its booking, and a completed appointment cannot be moved', async () => {
+    const slot = gy(gyDay(4), 12, 0);
+    const customer = await makeUser('Lena', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, slot);
+    expect((await accept(order.id)).statusCode).toBe(200);
+    const done = await call('PUT', `/api/v1/vendor/orders/${order.id}/complete-appointment`, provider.token, {});
+    expect(done.statusCode, done.body).toBe(200);
+    const booking = await bookingOf(order.id);
+    expect(booking.status).toBe('COMPLETED');
+
+    const move = await call('POST', `/api/v1/customer/bookings/${booking.id}/reschedule`, customer.token, { newSlotStart: gy(gyDay(4), 14, 0).toISOString() });
+    expect(move.statusCode).toBe(400);
+    expect(move.json().error.code).toBe('NOT_RESCHEDULABLE');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).appointmentSlot?.toISOString()).toBe(slot.toISOString());
+  });
+
+  it('a booking still marked live on a finished order is refused under the order lock, by either side', async () => {
+    const slot = gy(gyDay(4), 13, 0);
+    const customer = await makeUser('Mona', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, slot);
+    expect((await accept(order.id)).statusCode).toBe(200);
+    expect((await call('PUT', `/api/v1/vendor/orders/${order.id}/complete-appointment`, provider.token, {})).statusCode).toBe(200);
+    // A row written before completion synced (or by a path that forgot to).
+    const booking = await bookingOf(order.id);
+    await app.prisma.booking.update({ where: { id: booking.id }, data: { status: 'CONFIRMED' } });
+
+    for (const [path, token] of [['customer', customer.token], ['vendor', provider.token]] as const) {
+      const move = await call('POST', `/api/v1/${path}/bookings/${booking.id}/reschedule`, token, { newSlotStart: gy(gyDay(4), 15, 0).toISOString() });
+      expect([400, 409], move.body).toContain(move.statusCode);
+      expect(move.json().error.code).toBe('NOT_RESCHEDULABLE');
+    }
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).appointmentSlot?.toISOString()).toBe(slot.toISOString());
+    expect(await app.prisma.booking.count({ where: { orderId: order.id, status: { not: 'CANCELLED' } } })).toBe(1);
+  });
+});
