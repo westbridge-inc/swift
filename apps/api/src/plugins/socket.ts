@@ -25,6 +25,8 @@ import { warRoomsForSocket } from '../modules/safety/war-room';
 import { isProduction } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
+import { resolveIdentityById } from '../modules/auth/preauth-identity';
+import { bindTenantTransaction, runWithTenant } from './prisma';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -143,6 +145,9 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
             true
           )
         `;
+        // [L04 · R1] Bound to the tenant the caller runs in (the walled users
+        // table shows only that tenant's accounts); a no-op outside a tenant.
+        await bindTenantTransaction(tx);
         return operation(tx);
       }, {
         maxWait: authorityTransactionMaxWaitMs,
@@ -219,7 +224,15 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       const snapshot = [...activeSocketAuthorities.values()];
       const sessionIds = [...new Set(snapshot.map(({ sessionId }) => sessionId))];
       try {
-        const sessions = await readAuthoritiesBySessionIds(sessionIds);
+        // [L04 · R1] Each socket was authorized in its account's tenant; its
+        // session is re-read bound to that same tenant, one pass per tenant.
+        const byTenant = new Map<string, Set<string>>();
+        for (const { tenantId, sessionId } of snapshot) {
+          if (!byTenant.has(tenantId)) byTenant.set(tenantId, new Set());
+          byTenant.get(tenantId)!.add(sessionId);
+        }
+        const sessions = (await Promise.all([...byTenant].map(([tenantId, ids]) =>
+          runWithTenant(tenantId, () => readAuthoritiesBySessionIds([...ids]))))).flat();
         const sessionsById = new Map(sessions.map((session) => [session.sessionId, session]));
         const now = Date.now();
         for (const authority of snapshot) {
@@ -415,7 +428,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     'Invalid or expired token',
   ]);
 
-  async function resolveSocketAuthority(token: string, boundedPostConnectRead = false): Promise<{
+  async function resolveSocketAuthority(token: string, postConnect?: { tenantId: string }): Promise<{
     userId: string;
     tenantId: string;
     role: string;
@@ -429,36 +442,13 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
 
     // A valid JWT is not enough: the exact session and account remain the
     // authoritative principal for both the initial and post-registration read.
-    const session = boundedPostConnectRead
-      ? await readAuthorityByToken(token).then((row) => row ? ({
-        id: row.sessionId,
-        expiresAt: row.expiresAt,
-        authMethod: row.authMethod,
-        user: {
-          id: row.userId,
-          tenantId: row.tenantId,
-          status: row.userStatus,
-          roles: row.roles,
-          activeRole: row.activeRole,
-        },
-      }) : null)
-      : await app.prisma.session.findUnique({
-        where: { token },
-        select: {
-          id: true,
-          expiresAt: true,
-          authMethod: true,
-          user: {
-            select: {
-              id: true,
-              tenantId: true,
-              status: true,
-              roles: true,
-              activeRole: true,
-            },
-          },
-        },
-      });
+    // [L04 · R1 · OTA-016] The users table is walled per tenant, so the
+    // authority is read BOUND to the account's tenant: after connection, the
+    // tenant the handshake authorized (one bounded read); at the handshake,
+    // the tenant the one pre-auth identity capability resolves.
+    const session = postConnect
+      ? await runWithTenant(postConnect.tenantId, () => readBoundedPrincipal(token))
+      : await readHandshakePrincipal(token);
     const authorizationExpiresAtMs = session
       ? Math.min(session.expiresAt.getTime(), payload.exp! * 1000)
       : 0;
@@ -478,7 +468,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     ) {
       // The assurance verdict is already DECIDED; a logout hiccup must not
       // downgrade it to an infrastructure error.
-      await authService.logout(session.id, session.user.id).catch(() => {});
+      await runWithTenant(session.user.tenantId, () => authService.logout(session.id, session.user.id)).catch(() => {});
       throw new SocketAuthRefused('Invalid or expired token');
     }
     return {
@@ -488,6 +478,41 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       authSessionId: session.id,
       authorizationExpiresAtMs,
     };
+  }
+
+  /** The post-connect authority: ONE bounded read in the caller's (bound) tenant. */
+  async function readBoundedPrincipal(token: string) {
+    const row = await readAuthorityByToken(token);
+    return row ? {
+      id: row.sessionId,
+      expiresAt: row.expiresAt,
+      authMethod: row.authMethod,
+      user: {
+        id: row.userId,
+        tenantId: row.tenantId,
+        status: row.userStatus,
+        roles: row.roles,
+        activeRole: row.activeRole,
+      },
+    } : null;
+  }
+
+  /** The handshake authority: the session row (sessions carry no tenant and
+   *  are not walled), the account's tenant from the pre-auth identity
+   *  capability, then the account read bound to that tenant. */
+  async function readHandshakePrincipal(token: string) {
+    const session = await app.prisma.session.findUnique({
+      where: { token },
+      select: { id: true, userId: true, expiresAt: true, authMethod: true },
+    });
+    if (!session) return null;
+    const identity = await resolveIdentityById(app.prisma, session.userId);
+    if (!identity) return null;
+    const user = await runWithTenant(identity.tenantId, () => app.prisma.user.findUnique({
+      where: { id: identity.id },
+      select: { id: true, tenantId: true, status: true, roles: true, activeRole: true },
+    }));
+    return user ? { id: session.id, expiresAt: session.expiresAt, authMethod: session.authMethod, user } : null;
   }
 
   // Require valid JWT on every connection — no unauthenticated sockets
@@ -670,7 +695,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           socketAuthUserRoom(userId),
           socketAuthSessionRoom(authSessionId),
         ]);
-        const authority = await resolveSocketAuthority(token, true);
+        const authority = await resolveSocketAuthority(token, { tenantId });
         if (
           authority.userId !== userId
           || authority.tenantId !== tenantId
