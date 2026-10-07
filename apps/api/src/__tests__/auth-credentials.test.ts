@@ -350,7 +350,7 @@ describe('[MASTER-003] setting a password needs fresh proof and ends the other s
   });
 
   it('one step-up buys ONE credential change: two concurrent requests on it — exactly one wins', async () => {
-    await createUser(RACE_PHONE, null);
+    const user = await createUser(RACE_PHONE, null);
     const token = (await loginWithOtp(app, RACE_PHONE)).json().data.tokens.accessToken as string;
     await grantStepUp(app, token);
     const set = (password: string) => app.inject({
@@ -360,6 +360,14 @@ describe('[MASTER-003] setting a password needs fresh proof and ends the other s
     const results = await Promise.all([set('the first new password'), set('the second new password')]);
     expect(results.map((r) => r.statusCode).sort()).toEqual([200, 403]);
     expect(results.find((r) => r.statusCode === 403)!.json().error.code).toBe('STEP_UP_REQUIRED');
+    const winner = results.find((r) => r.statusCode === 200)!;
+    const again = await post('password/set', { password: NEW_PASSWORD }, {
+      headers: { authorization: `Bearer ${winner.json().data.tokens.accessToken as string}` },
+    });
+    expect(again.statusCode, again.body).toBe(403);
+    expect(again.json().error.code).toBe('STEP_UP_REQUIRED');
+    const notices = await app.prisma.notification.findMany({ where: { userId: user.id } });
+    expect(notices.filter((notice) => (notice.data as { kind?: string } | null)?.kind === 'password_changed')).toHaveLength(1);
   });
 
   it('from a browser session: the new credentials arrive as cookies (never in the body), and the old cookie stops working', async () => {
