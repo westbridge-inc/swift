@@ -124,7 +124,7 @@ export function SiteFooter() {
 /** Section shell with the marketing rhythm baked in. */
 export function Section({ children, tint = false }: { children: React.ReactNode; tint?: boolean }) {
   return (
-    <section className={tint ? 'bg-[var(--swift-subtle)]' : ''}>
+    <section className={tint ? 'bg-[var(--swift-sunken)]' : ''}>
       <div className="mx-auto max-w-6xl px-5 py-16 md:py-20">{children}</div>
     </section>
   );
