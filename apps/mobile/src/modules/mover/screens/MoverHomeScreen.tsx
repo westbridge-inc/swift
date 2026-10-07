@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -48,6 +49,9 @@ import { useBackgroundLocationDisclosure } from './BackgroundLocationDisclosure'
 import { fareLockedFor, fareToSubmit } from './fare-locked';
 import { offerEarnings } from './offer-earnings';
 import { canAdjustFare } from '../../../kit';
+import { rideStops } from '../../../lib/taxiItinerary';
+import { StopsSummary } from '../TaxiItinerary';
+import { RelayTasks } from '../RelayTasks';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -100,6 +104,9 @@ export function DispatchOfferCard({
   // a separately-fetched board row for its price.
   const pickup = job?.pickupAddress ?? offer.pickupAddress ?? offer.vendorName ?? 'Pickup nearby';
   const dropoff = job?.deliveryAddress ?? job?.dropoffAddress ?? offer.deliveryAddress ?? undefined;
+  // [TAXI multi-stop] The live card carries a ride's stops itself (also when
+  // recovered after a restart); the board row is the fallback.
+  const offerStops = rideStops(offer).length > 0 ? rideStops(offer) : rideStops(job);
   const pct = total ? Math.max(0, secs / total) : 0;
 
   // Driver-set price: the slider runs from a floor up to the market max Swift
@@ -263,7 +270,13 @@ export function DispatchOfferCard({
           ) : null}
 
           <View style={{ marginTop: space.lg }}>
-            <RoutePair pickup={pickup} dropoff={dropoff} pickupHint={offer.etaMinutes != null ? `Pickup · ${offer.etaMinutes} min away` : 'Pickup'} />
+            <RoutePair
+              pickup={pickup}
+              dropoff={dropoff}
+              pickupHint={offer.etaMinutes != null ? `Pickup · ${offer.etaMinutes} min away` : 'Pickup'}
+              stops={offerStops.length > 0 ? offerStops : undefined}
+            />
+            <StopsSummary count={offerStops.length} testID="driver-offer-stops" />
           </View>
 
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
@@ -734,6 +747,7 @@ export function MoverHomeScreen({ navigation }: any) {
         backgroundStyle={{ backgroundColor: dk.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20 }}
         handleIndicatorStyle={{ backgroundColor: dk.faint }}
       >
+        <MapCredits />
         <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}>
           {/* Status header */}
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -906,6 +920,9 @@ export function MoverHomeScreen({ navigation }: any) {
             </DCard>
           ) : null}
 
+          {/* [AF-MOB-006] Handoffs Swift asked this rider to take over. Riders only. */}
+          {kind === 'RIDER' ? <RelayTasks enabled={online} onTakenOver={() => active.refetch?.()} /> : null}
+
           {/* Active job / available jobs / states */}
           {activeJob ? (
             <Pressable onPress={() => navigation?.navigate?.('ActiveJob')}>
@@ -964,7 +981,12 @@ export function MoverHomeScreen({ navigation }: any) {
                       ) : null}
                     </View>
                     <View style={{ marginTop: space.md }}>
-                      <RoutePair pickup={j.vendor?.name ?? j.pickupAddress ?? 'Pickup'} dropoff={j.deliveryAddress ?? j.dropoffAddress} />
+                      <RoutePair
+                        pickup={j.vendor?.name ?? j.pickupAddress ?? 'Pickup'}
+                        dropoff={j.deliveryAddress ?? j.dropoffAddress}
+                        stops={rideStops(j).length > 0 ? rideStops(j) : undefined}
+                      />
+                      <StopsSummary count={rideStops(j).length} testID={`driver-board-stops-${j.id}`} />
                     </View>
                     {j.itemCount ? (
                       <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>

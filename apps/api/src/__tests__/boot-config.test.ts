@@ -24,6 +24,7 @@ const good: Record<string, string | undefined> = {
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
+  AWS_S3_BUCKET: 'synthetic-boot-bucket',
   NOTIFICATION_PROVIDER: 'twilio',
   TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
   TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`,
@@ -84,6 +85,30 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it.each([
+    ['CONSENT_REQUIRED', '0'],
+    ['ADMIN_CAPABILITY_MODE', 'shadow'],
+    ['PREVIEW_MODE', '1'],
+  ])('launch bypass %s=%s is refused by production', (name, value) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: value })).toThrow(name);
+  });
+
+  it.each(['development', 'test'])('launch bypass fixtures remain available in %s', (mode) => {
+    expect(() => assertSafeBootConfig({
+      NODE_ENV: mode,
+      CONSENT_REQUIRED: '0',
+      ADMIN_CAPABILITY_MODE: 'shadow',
+      PREVIEW_MODE: '1',
+    })).not.toThrow();
+  });
+
+  it('launch bypass defaults keep production admission open', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, CONSENT_REQUIRED: '1', ADMIN_CAPABILITY_MODE: 'enforce', PREVIEW_MODE: '0',
+    })).not.toThrow();
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
   it('boots with the card rail explicitly disabled and no card credentials', () => {
     expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
   });
@@ -333,8 +358,9 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local' })).toThrow(/STORAGE_PROVIDER/);
   });
 
-  it('allows local storage in production only with STORAGE_ALLOW_LOCAL=1 (deliberate pilot)', () => {
-    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).not.toThrow();
+  it('allows deliberate local storage only with an explicit root and separate backup obligation', () => {
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' })).toThrow(/UPLOAD_DIR/);
+    expect(() => assertSafeBootConfig({ ...good, STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1', UPLOAD_DIR: '/srv/swift/uploads', STORAGE_LOCAL_BACKUP_ACK: '1' })).not.toThrow();
   });
 
   it('accepts the real object-storage providers', () => {
@@ -683,7 +709,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   const checkoutOn = (): Record<string, string> => ({
     MMG_CHECKOUT_ENABLED: '1',
     MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
-    MMG_CHECKOUT_MERCHANT_ID: '0000000001',
+    MMG_CHECKOUT_MERCHANT_ID: '0000001',
     MMG_CHECKOUT_CLIENT_ID: 'client-test',
     MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
     MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
@@ -707,6 +733,18 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '1' }))
       .toThrow(/MMG_CHECKOUT_MERCHANT_ID is required/);
     expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
+  });
+
+  it('[DS632] MMG_CHECKOUT_CREATION_ZONE is exactly GUYANA_WALL_CLOCK or UTC, or unset: anything else refuses to start, in production and outside it, the checkout on or off', () => {
+    for (const zone of ['guyana', 'utc', 'UTC ', 'America/Guyana']) {
+      expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly GUYANA_WALL_CLOCK or UTC/);
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), zone).toThrow(/MMG_CHECKOUT_CREATION_ZONE must be exactly/);
+    }
+    for (const zone of [undefined, '', 'GUYANA_WALL_CLOCK', 'UTC']) {
+      expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_CREATION_ZONE: zone }), String(zone)).not.toThrow();
+    }
   });
 
   it('production boots with a complete checkout configuration, and never with the UAT page', () => {

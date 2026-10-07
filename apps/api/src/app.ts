@@ -36,7 +36,7 @@ import { registerEmptyJsonBodyParser } from './plugins/empty-json';
 import { initializeJobRuntime, type JobRuntime } from './jobs/runtime';
 import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegradedCounter, type RuntimeReadinessState } from './plugins/readiness';
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
-import { loggerRedactConfig } from './utils/logger-config';
+import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
@@ -83,6 +83,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       level: process.env['LOG_LEVEL'] || 'info',
       // secrets and credentials never reach log output
       redact: loggerRedactConfig,
+      serializers: loggerSerializers,
       transport:
         isDevelopment()
           ? { target: 'pino-pretty', options: { colorize: true } }
@@ -348,6 +349,12 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // webhook secret arrives with MMG biller onboarding.
   const { agentCashRoutes } = await import('./modules/billing/agent-cash.routes');
   await app.register(agentCashRoutes, { prefix: '/api/v1/billing/mmg' });
+  // MMG hosted-checkout replies [mmg checkout 3/6]: the web return page
+  // forwards MMG's reply here and MMG's own servers may call notify. Both are
+  // rate-limited, body-capped and inert while MMG_CHECKOUT_ENABLED is off; a
+  // reply only prompts the server's own MMG lookup, never a credit.
+  const { mmgCheckoutPublicRoutes } = await import('./modules/billing/mmg-checkout.routes');
+  await app.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps
