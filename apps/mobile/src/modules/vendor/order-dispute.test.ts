@@ -35,6 +35,14 @@ describe('withoutForwardWorkWhilePaused', () => {
 });
 
 describe('the store sees the paused state where it works the order', () => {
+  it('describes differing payment reports without assigning the disagreement to the customer', () => {
+    expect(mmgDisputePaused(disputed)).toBe(true);
+    expect(MMG_DISPUTE_NOTICE.body).toContain("The store's and the customer's MMG payment reports don't match.");
+    expect(MMG_DISPUTE_NOTICE.body).not.toMatch(/The customer disputes/i);
+    expect(MMG_DISPUTE_NOTICE.body).toMatch(/Swift support is checking it/);
+    expect(MMG_DISPUTE_NOTICE.body).toMatch(/Don’t hand anything over until then/);
+  });
+
   const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
   it('every vendor action list goes through the pause, and the board card and order screen say why', () => {
     const shared = read('./shared.tsx');

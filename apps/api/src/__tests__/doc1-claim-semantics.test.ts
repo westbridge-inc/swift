@@ -112,9 +112,9 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     // over. The field is required now, so a forgotten projection is a compile error; these
     // three assert the behaviour the compiler cannot see.
     expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD', mmgClaimMismatchAt: new Date() }, 'RIDER_ASSIGNED'))
-      .toThrow(/disputes the store's payment claim/);
+      .toThrow(/MMG payment reports don't match/);
     expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD', mmgClaimMismatchAt: new Date() }, 'PREPARING'))
-      .toThrow(/disputes the store's payment claim/);
+      .toThrow(/MMG payment reports don't match/);
     // HOSTILE: a caller that did not project the column must fail loudly, never pass.
     expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD' } as never, 'RIDER_ASSIGNED'))
       .toThrow(/was not projected/);
@@ -141,7 +141,7 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     expect(dispute.json().data.mismatch).toBe(true);
     const held = await orderOf(order.id);
     expect(held.mmgClaimMismatchAt).not.toBeNull();
-    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: held.paymentStatus, orderType: 'FOOD', mmgClaimMismatchAt: held.mmgClaimMismatchAt }, 'ACCEPTED')).toThrow(/disputes the store/);
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: held.paymentStatus, orderType: 'FOOD', mmgClaimMismatchAt: held.mmgClaimMismatchAt }, 'ACCEPTED')).toThrow(/MMG payment reports don't match/);
     expect(await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'mmg_claim_mismatch' }, body: { contains: order.id } } }))).toBeGreaterThanOrEqual(1);
     // [S1-6] A decision names the dispute generation the operator reviewed; a stale one is refused.
     const resolved = await app.inject({ method: 'POST', url: `/api/v1/admin/orders/${order.id}/payment-claim/resolve`, payload: { resolution: 'CUSTOMER_PAID', note: 'Wallet statement shows the transfer', expectedClaimRevision: held.mmgClaimRevision }, headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': `Resolved ${RUN}: statement checked` } });
@@ -150,6 +150,20 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     expect(cleared.mmgClaimMismatchAt).toBeNull();
     expect(cleared.paymentStatus).toBe('CLAIMED');
     expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: cleared.paymentStatus, orderType: 'FOOD', mmgClaimMismatchAt: null }, 'ACCEPTED')).not.toThrow();
+  });
+
+  it('different typed references pause the order without blaming either payment reporter', async () => {
+    const order = await mmgOrder('PENDING');
+    expect((await claim(order.id, { paid: true, reference: `REF${RUN}C` })).statusCode).toBe(200);
+    expect((await confirm(order.id, `REF${RUN}D`)).statusCode).toBe(200);
+    const held = await orderOf(order.id);
+    expect(held.mmgClaimMismatchAt).not.toBeNull();
+    const refused = await app.inject({ method: 'PUT', url: `/api/v1/vendor/orders/${order.id}/accept`, headers: { authorization: `Bearer ${vendorToken}` } });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('MMG_CLAIM_MISMATCH');
+    expect(refused.json().error.message).toContain("The store's and the customer's MMG payment reports don't match.");
+    expect(refused.json().error.message).not.toMatch(/The customer disputes/i);
+    expect((await orderOf(order.id)).status).toBe('PENDING');
   });
 
   it('DOC-INV-48 ratchet: the attestation route never writes a capture, and no VENDOR_COLLECTS field is named as confirmed', () => {
