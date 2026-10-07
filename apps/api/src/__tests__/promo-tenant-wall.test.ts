@@ -171,6 +171,33 @@ afterAll(async () => {
 });
 
 describe('[R0 promo] a platform-wide code is production’s, never the review tenant’s', () => {
+  it('bad public-catalogue configuration does not reveal a platform code to another tenant', async () => {
+    const configured = process.env['PUBLIC_TENANT_ID'];
+    process.env['PUBLIC_TENANT_ID'] = `missing-${RUN}`;
+    try {
+      const platform = await inject('POST', '/api/v1/customer/promo/validate', { code: PLATFORM_CODE }, reviewer.token);
+      const unknown = await inject('POST', '/api/v1/customer/promo/validate', { code: UNKNOWN_CODE }, reviewer.token);
+      expect(unknown.statusCode).toBe(404);
+      expect({ status: platform.statusCode, body: platform.body }).toEqual({ status: unknown.statusCode, body: unknown.body });
+    } finally {
+      if (configured === undefined) delete process.env['PUBLIC_TENANT_ID']; else process.env['PUBLIC_TENANT_ID'] = configured;
+    }
+  });
+
+  it('a saved foreign promo pointer cannot disclose terms or discount the cart quote', async () => {
+    await sys(() => app.prisma.cart.update({ where: { customerId: reviewer.userId }, data: { promoCodeId: platformPromoId } }));
+    try {
+      const response = await inject('GET', '/api/v1/customer/cart', undefined, reviewer.token);
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json().data.promoCode).toBeNull();
+      expect(response.json().data.discount).toBe(0);
+      expect(response.body).not.toContain(PLATFORM_CODE);
+      expect(response.body).not.toContain('production platform offer');
+    } finally {
+      await sys(() => app.prisma.cart.update({ where: { customerId: reviewer.userId }, data: { promoCodeId: null } }));
+    }
+  });
+
   it('validate: a REVIEW-tenant user gets exactly the unknown-code answer, and the code is not attached to their cart', async () => {
     const platform = await inject('POST', '/api/v1/customer/promo/validate', { code: PLATFORM_CODE }, reviewer.token);
     const unknown = await inject('POST', '/api/v1/customer/promo/validate', { code: UNKNOWN_CODE }, reviewer.token);

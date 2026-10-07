@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { resolvePublicMarketTenant } from '../search/search-scope';
 import { getTenantId } from '../../plugins/tenant-context';
+import { AppError } from '../../utils/errors';
 
 /**
  * [L04 · R0 promo finding] Which tenant a promo code belongs to.
@@ -15,7 +16,7 @@ import { getTenantId } from '../../plugins/tenant-context';
  */
 export async function promoBelongsToCallerTenant(
   prisma: PrismaClient,
-  promo: { vendorId: string | null },
+  promo: { vendorId: string | null } | null,
   callerUserId: string,
 ): Promise<boolean> {
   // The caller's tenant is the one authentication bound for this request — the
@@ -29,9 +30,21 @@ export async function promoBelongsToCallerTenant(
   // catalogue (PUBLIC_TENANT_ID, else the one active PRODUCTION tenant; an
   // ambiguous deployment is a loud refusal, never a guess) — and that rule only
   // ever names a PRODUCTION tenant, so the fiction can never match it.
-  if (promo.vendorId === null) {
-    return callerTenantId === await resolvePublicMarketTenant({ prisma });
+  // Use the same indexed ownership reads for unknown, platform and store
+  // codes. Callers must not skip this check when the code lookup is empty:
+  // the extra query count must not identify a foreign code.
+  let publicTenantId: string | null = null;
+  try { publicTenantId = await resolvePublicMarketTenant({ prisma }); }
+  catch (error) {
+    // The resolver already counts misconfiguration for operators. Its
+    // diagnostic must not tell a foreign caller that this code exists.
+    if (!(error instanceof AppError && (error.code === 'PUBLIC_TENANT_UNRESOLVED' || error.code === 'NOT_FOUND'))) throw error;
   }
-  const vendor = await prisma.vendor.findUnique({ where: { id: promo.vendorId }, select: { tenantId: true } });
-  return vendor !== null && vendor.tenantId === callerTenantId;
+  const vendor = await prisma.vendor.findUnique({
+    where: { id: promo?.vendorId ?? '__no_promo_vendor__' }, select: { tenantId: true },
+  });
+  if (!promo) return false;
+  return promo.vendorId === null
+    ? callerTenantId === publicTenantId
+    : vendor !== null && vendor.tenantId === callerTenantId;
 }

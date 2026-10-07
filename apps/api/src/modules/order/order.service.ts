@@ -2926,7 +2926,7 @@ export class OrderService {
     // [L04] Another tenant's code — a platform code for a caller outside
     // production above all — is the unknown-code answer, and so is never
     // redeemed: its redemption count cannot move.
-    if (!promo || !(await promoBelongsToCallerTenant(this.prisma, promo, userId))) {
+    if (!(await promoBelongsToCallerTenant(this.prisma, promo, userId)) || !promo) {
       throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
     }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
