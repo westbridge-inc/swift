@@ -65,6 +65,8 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // isFiction (store-review demo check): reached only from authenticated requests — document
   // submission (vendor, verification routes) and an admin's approval (admin routes).
   'modules/subscription/subscription.service.ts': { sites: 1, role: 'REQUEST' },
+  // Rating-text erasure: account deletion requests and the tenant-bound erasure retry.
+  'modules/user/account.service.ts': { sites: 1, role: 'SHARED' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
   'modules/verification/mover-document-authority.ts': { sites: 2, role: 'SHARED' },

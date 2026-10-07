@@ -155,9 +155,83 @@ export function echoedReferencesFrom(raw: unknown, fields: readonly string[] = M
   return out;
 }
 
-/** The one call the checkout verifier makes. */
+// ---------------------------------------------------------------------------
+// [MMG checkout · 7 Oct] Transaction History, read for condition (5).
+// MMG (7 Oct): the lookup's creationDate is the moment of the LOOKUP;
+// history's modificationDate is when the transaction was performed. What
+// MMG UAT answered Swift's merchant credentials on 7 Oct (read-only probe):
+// - GET /e-merchant-initiated-transactions/txn-history?msisdn=<merchant>
+//   &offset=<n>&fromdate=<stamp>&todate=<stamp>, the lookup's x-wss headers;
+// - fromdate and todate are both required (400 without them) and read like
+//   MMG's own stamps (Guyana wall clock written with a "Z"); a date with no
+//   time is refused (422 "Invalid dates");
+// - `offset` is the NUMBER of rows answered, oldest first, not a page;
+// - {executionId, TransactionList: [...]}: each row names the checkout's
+//   transactionId in BOTH transactionReference and transactionReceipt;
+//   transactionStatus "completed"; amount a major-unit string; currency;
+//   modificationDate; displayType; descriptionText; debitParty/creditParty
+//   [{key, value}] (keys accountid, accountcategory); external_id.
+// ---------------------------------------------------------------------------
+
+/** The history query, its dates already written as MMG reads them. `rows` is MMG's `offset`: how many rows to answer. */
+export interface MmgHistoryQuery {
+  fromdate: string;
+  todate: string;
+  rows: number;
+}
+
+/** MMG's history answer: every row as MMG sent it, or why there is none.
+ *  Only an HTTP 200 object whose TransactionList is a list of objects is an
+ *  answer; anything else is an error to retry, never a shorter list. */
+export type MmgHistoryAnswer =
+  | { outcome: 'rows'; rows: Record<string, unknown>[] }
+  | { outcome: 'error'; reason: string };
+
+/** One HTTP answer to the history call, read whole. Pure: the live adapter and the tests read it the same way. */
+export function historyAnswerFrom(status: number, body: unknown): MmgHistoryAnswer {
+  if (status !== 200) return { outcome: 'error', reason: `MMG history HTTP ${status}` };
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'error', reason: 'MMG history answered with no object' };
+  const list = (body as Record<string, unknown>)['TransactionList'];
+  if (!Array.isArray(list)) return { outcome: 'error', reason: 'MMG history answered with no TransactionList' };
+  if (!list.every((row: unknown) => !!row && typeof row === 'object' && !Array.isArray(row))) {
+    return { outcome: 'error', reason: 'MMG history answered a row that is not an object' };
+  }
+  return { outcome: 'rows', rows: list as Record<string, unknown>[] };
+}
+
+/** One history row as condition (5) reads it. Every field MMG did not send,
+ *  or sent in a form that cannot be read exactly, is null: never a default. */
+export interface MmgHistoryRow {
+  /** Swift checkout reference from MMG history; never a coerced or trimmed value. */
+  externalId: string | null;
+  transactionReference: string | null;
+  transactionReceipt: string | null;
+  /** transactionStatus exactly as sent ("completed" in UAT, 7 Oct). */
+  statusText: string | null;
+  /** Exact minor units, or null. */
+  amountMinor: number | null;
+  currencyCode: string | null;
+  /** When MMG performed the transaction, exactly as sent. */
+  modificationDate: string | null;
+}
+export function historyRowFrom(row: Record<string, unknown>): MmgHistoryRow {
+  const text = (value: unknown): string | null => (typeof value === 'string' ? value : null);
+  return {
+    externalId: text(row['external_id']),
+    transactionReference: text(row['transactionReference']),
+    transactionReceipt: text(row['transactionReceipt']),
+    statusText: text(row['transactionStatus']),
+    amountMinor: exactMinor(row['amount']),
+    currencyCode: text(row['currency']),
+    modificationDate: text(row['modificationDate']),
+  };
+}
+
+/** The calls the checkout verifier makes. */
 export interface MmgLookupClient {
   transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail>;
+  /** [7 Oct] GET txn-history for condition (5). Never throws. */
+  transactionHistoryRows(query: MmgHistoryQuery): Promise<MmgHistoryAnswer>;
 }
 
 /**
@@ -326,6 +400,12 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
       raw,
     };
   }
+
+  /** [7 Oct] No history for the checkout: the sandbox never answers MMG's
+   *  "successful", so the verifier never asks it, and nothing here confirms. */
+  async transactionHistoryRows(_query: MmgHistoryQuery): Promise<MmgHistoryAnswer> {
+    return { outcome: 'rows', rows: [] };
+  }
 }
 
 export interface LiveMmgConfig {
@@ -403,10 +483,25 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   ) {}
 
   private async call(path: string, init: NonNullable<Parameters<typeof fetch>[1]>): Promise<Response> {
+    return this.callReading(path, init, async (response) => response);
+  }
+
+  /** Keep the deadline active through the response body, including transports
+   * that do not settle their body promise when the signal is aborted. */
+  private async callReading<T>(path: string, init: NonNullable<Parameters<typeof fetch>[1]>, read: (response: Response) => Promise<T>): Promise<T> {
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), CALL_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        ac.abort();
+        reject(new Error('MMG request timed out'));
+      }, CALL_TIMEOUT_MS);
+    });
     try {
-      return await this.fetchFn(`${this.cfg.baseUrl}${path}`, { ...init, signal: ac.signal });
+      return await Promise.race([
+        this.fetchFn(`${this.cfg.baseUrl}${path}`, { ...init, signal: ac.signal }).then(read),
+        deadline,
+      ]);
     } finally {
       clearTimeout(timer);
     }
@@ -420,16 +515,17 @@ export class LiveMmgProvider implements MmgMerchantProvider {
       username: this.cfg.merchantMsisdn,
       password: this.cfg.password,
     });
-    const res = await this.call('/e-commerce-login/mer', {
+    const body = await this.callReading('/e-commerce-login/mer', {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: form.toString(),
+    }, async (res) => {
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`MMG auth failed (${res.status}): ${detail.slice(0, 200)}`);
+      }
+      return await res.json() as { access_token?: string; expires_in?: number };
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`MMG auth failed (${res.status}): ${detail.slice(0, 200)}`);
-    }
-    const body = (await res.json()) as { access_token?: string; expires_in?: number };
     if (!body.access_token) throw new Error('MMG auth returned no access_token');
     this.cachedToken = { token: body.access_token, fetchedAt: Date.now() };
     return { token: body.access_token, expiresAt: new Date(Date.now() + (body.expires_in ?? 120) * 1000) };
@@ -572,6 +668,22 @@ export class LiveMmgProvider implements MmgMerchantProvider {
     const body: unknown = await res.json().catch(() => null);
     if (!body || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'error', reason: 'MMG lookup answered with no object' };
     return lookupDetailFrom(body as Record<string, unknown>, transactionId);
+  }
+
+  /** [7 Oct] GET /txn-history for condition (5), exactly the dates and row
+   *  count asked. Never throws: MMG unreachable, or any answer other than an
+   *  HTTP 200 list of objects, is an error to retry, never evidence. */
+  async transactionHistoryRows(query: MmgHistoryQuery): Promise<MmgHistoryAnswer> {
+    try {
+      const headers = await this.wssHeaders(`hist-${Date.now()}`);
+      const qs = new URLSearchParams({ msisdn: this.cfg.merchantMsisdn, offset: String(query.rows), fromdate: query.fromdate, todate: query.todate });
+      return await this.callReading(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers }, async (res) => {
+        const body: unknown = res.status === 200 ? await res.json().catch(() => null) : null;
+        return historyAnswerFrom(res.status, body);
+      });
+    } catch (err) {
+      return { outcome: 'error', reason: `MMG history unreachable: ${(err as Error).message}` };
+    }
   }
 
   /** GET /txn-history. Throws on transport. */

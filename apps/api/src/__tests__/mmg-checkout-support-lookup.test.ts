@@ -27,6 +27,7 @@ import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTe
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { FakeMmgHistory, mmgHistoryRow } from './helpers/mmg-history-fake';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import {
@@ -66,11 +67,16 @@ let zoneBefore: string | undefined;
 const startedAt = new Date();
 
 const lookups = new Map<string, MmgLookupDetail>();
-const lookup: MmgLookupClient = { transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' } };
+/** [7 Oct] MMG's Transaction History (helpers/mmg-history-fake.ts): it holds every payment `mmgAnswers` registers, made now. */
+const history = new FakeMmgHistory();
+const lookup: MmgLookupClient = {
+  transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' },
+  transactionHistoryRows: (query) => history.transactionHistoryRows(query),
+};
 /** MMG stamps creationDate as Guyana wall-clock time written with a "Z" (UAT, 1 Oct). */
 const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
 /** MMG's lookup of `txn` in the exact UAT shape, read as the live adapter reads it. */
-function mmgAnswers(txn: string, ledger: string, amountGyd: number, patch: Record<string, unknown> = {}) {
+function mmgAnswers(checkout: { merchantTransactionId: string }, txn: string, ledger: string, amountGyd: number, patch: Record<string, unknown> = {}) {
   lookups.set(txn, lookupDetailFrom({
     transactionStatus: 'successful', amount: String(amountGyd), currency: 'GYD', creationDate: gyStamp(new Date()),
     subType: 'subscriber_mpay', transactionReference: ledger,
@@ -78,6 +84,7 @@ function mmgAnswers(txn: string, ledger: string, amountGyd: number, patch: Recor
     metadata: [{ key: 'amount', value: String(amountGyd) }, { key: 'merchant', value: 'Swift' }, { key: 'description', value: '' }],
     descriptionText: null, ...patch,
   }, txn));
+  history.holds(txn, amountGyd, { external_id: checkout.merchantTransactionId });
 }
 /** MMG ids are digits (UAT: transactionId 20402048536279, transactionReference 20402048601581); unique per run. */
 let idSeq = 0;
@@ -262,7 +269,7 @@ beforeAll(async () => {
   const paid = await started(s.store);
   const txn = mmgId();
   const ledger = mmgId();
-  mmgAnswers(txn, ledger, paid.amountGyd);
+  mmgAnswers(paid.row, txn, ledger, paid.amountGyd);
   expect((await returnWith(reply(paid.row, '0', txn))).json().data.state).toBe('CONFIRMED');
   s.confirmed = { ref: paid.ref, ours: paid.row.merchantTransactionId, txn, ledger, amount: paid.amountGyd };
   // OPEN: the same store starts one more and never finishes it.
@@ -274,7 +281,7 @@ beforeAll(async () => {
   const held = await started(s.rider);
   const heldTxn = mmgId();
   const heldLedger = mmgId();
-  mmgAnswers(heldTxn, heldLedger, held.amountGyd + 1);
+  mmgAnswers(held.row, heldTxn, heldLedger, held.amountGyd + 1);
   expect((await returnWith(reply(held.row, '0', heldTxn))).json().data.state).toBe('CONFIRMING');
   expect((await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: held.ref } })).status).toBe('HELD');
   s.held = { ref: held.ref, ours: held.row.merchantTransactionId, txn: heldTxn, ledger: heldLedger };
@@ -545,38 +552,48 @@ describe('2. the detail: the row, a timeline from the observations, and the cred
     const row = await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: s.confirmed.ref } });
     const detailWith = (checkout: () => ReturnType<typeof getMmgCheckoutProvider>) =>
       runWithoutTenant(() => mmgCheckoutSupportDetail(app.prisma, { tenantId: row.tenantId, id: row.id }, { checkout }));
-    // The provider verify() would use here (this file's sandbox, GUYANA_WALL_CLOCK): the lookup reads INSIDE.
-    expect((await detailWith(() => sandbox))!.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ windowCheck: 'INSIDE' });
+    // The provider verify() would use here (this file's sandbox, GUYANA_WALL_CLOCK): MMG's history record reads INSIDE.
+    expect((await detailWith(() => sandbox))!.timeline.find((e) => e.source === 'HISTORY')).toMatchObject({ windowCheck: 'INSIDE' });
     // The checkout switched off (the environment still names a zone): verify() reads no zone and holds
     // every payment CREATION_ZONE_UNVERIFIED, so support claims nothing either.
     expect(process.env['MMG_CHECKOUT_CREATION_ZONE']).toBe('GUYANA_WALL_CLOCK');
     const off = getMmgCheckoutProvider({ ...process.env, MMG_CHECKOUT_ENABLED: '0' });
     expect(off.creationZone).toBeNull();
-    expect((await detailWith(() => off))!.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ windowCheck: 'UNREADABLE' });
+    expect((await detailWith(() => off))!.timeline.find((e) => e.source === 'HISTORY')).toMatchObject({ windowCheck: 'UNREADABLE' });
     // A provider that cannot be built (a configuration error) is no zone too.
-    expect((await detailWith(() => { throw new Error('bad MMG configuration'); }))!.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ windowCheck: 'UNREADABLE' });
+    expect((await detailWith(() => { throw new Error('bad MMG configuration'); }))!.timeline.find((e) => e.source === 'HISTORY')).toMatchObject({ windowCheck: 'UNREADABLE' });
   });
 
-  it('[Sol, DS663] a payment MMG stamps three minutes after its first reply, inside the window: held as CREATION_AFTER_REPLY, and support shows AFTER_REPLY, never INSIDE', async () => {
+  it('[Sol, DS663 · 7 Oct] a payment MMG’s history dates three minutes after its first reply, inside the window: held as PAYMENT_TIME_AFTER_REPLY, and support shows AFTER_REPLY, never INSIDE', async () => {
     const rider = await makeRider();
     const c = await started(rider);
     const txn = mmgId();
-    mmgAnswers(txn, mmgId(), c.amountGyd, { creationDate: gyStamp(new Date(Date.now() + 3 * 60_000)) });
-    expect((await returnWith(reply(c.row, '0', txn))).json().data.state).toBe('CONFIRMING');
-    expect(await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: c.ref } })).toMatchObject({ status: 'HELD', reason: 'CREATION_AFTER_REPLY' });
+    mmgAnswers(c.row, txn, mmgId(), c.amountGyd);
+    history.answer = async () => ({ outcome: 'rows', rows: [mmgHistoryRow(txn, c.amountGyd, { external_id: c.row.merchantTransactionId, modificationDate: gyStamp(new Date(Date.now() + 3 * 60_000)) })] });
+    try {
+      expect((await returnWith(reply(c.row, '0', txn))).json().data.state).toBe('CONFIRMING');
+    } finally {
+      history.answer = null;
+    }
+    expect(await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: c.ref } })).toMatchObject({ status: 'HELD', reason: 'PAYMENT_TIME_AFTER_REPLY' });
     const detail = (await asAdmin(`${SEARCH}/${c.ref}`)).json().data as MmgCheckoutSupportDetail;
-    const lookupEntry = detail.timeline.find((e) => e.source === 'LOOKUP');
-    expect(lookupEntry).toMatchObject({ mmgTransactionId: txn, transactionStatus: 'successful', windowCheck: 'AFTER_REPLY' });
-    expect(detail.timeline.some((e) => e.source === 'LOOKUP' && e.windowCheck === 'INSIDE')).toBe(false);
+    expect(detail.timeline.find((e) => e.source === 'HISTORY')).toMatchObject({ mmgTransactionId: txn, transactionStatus: 'completed', windowCheck: 'AFTER_REPLY' });
+    // The lookup shows MMG's status, never a window: its creationDate is the lookup's own moment.
+    expect(detail.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ mmgTransactionId: txn, transactionStatus: 'successful', windowCheck: null });
+    expect(detail.timeline.some((e) => e.windowCheck === 'INSIDE' && e.source !== 'RETURN')).toBe(false);
   });
 
-  it('a confirmed payment: the reply (ResultCode 0, in time), the lookup (successful, amount, GYD, ledger number, inside the window), the week it paid and its receipt', async () => {
+  it('a confirmed payment: the reply (ResultCode 0, in time), the lookup (successful, amount, GYD, ledger number), MMG’s history record (completed, inside the window), the week it paid and its receipt', async () => {
     const detail = (await asAdmin(`${SEARCH}/${s.confirmed.ref}`)).json().data as MmgCheckoutSupportDetail;
     expect(detail).toMatchObject({ id: s.confirmed.ref, swiftReference: s.confirmed.ours, mmgTransactionId: s.confirmed.txn, mmgTransactionReference: s.confirmed.ledger, status: 'CONFIRMED', timelineTruncated: false });
     expect(detail.timeline[0]).toMatchObject({ source: 'RETURN', resultCode: '0', mmgTransactionId: s.confirmed.txn, windowCheck: 'INSIDE', failure: null });
     expect(detail.timeline).toContainEqual(expect.objectContaining({
       source: 'LOOKUP', transactionStatus: 'successful', amount: String(s.confirmed.amount), currency: 'GYD',
-      mmgTransactionId: s.confirmed.txn, mmgTransactionReference: s.confirmed.ledger, windowCheck: 'INSIDE', resultCode: null,
+      mmgTransactionId: s.confirmed.txn, mmgTransactionReference: s.confirmed.ledger, windowCheck: null, resultCode: null,
+    }));
+    expect(detail.timeline).toContainEqual(expect.objectContaining({
+      source: 'HISTORY', transactionStatus: 'completed', amount: String(s.confirmed.amount), currency: 'GYD',
+      mmgTransactionId: s.confirmed.txn, mmgTransactionReference: null, windowCheck: 'INSIDE', resultCode: null, failure: null,
     }));
     const times = detail.timeline.map((e) => Date.parse(e.at));
     expect([...times].sort((a, b) => a - b)).toEqual(times);

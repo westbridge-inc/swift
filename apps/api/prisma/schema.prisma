@@ -3493,15 +3493,15 @@ model MmgCheckoutObservation {
   tenantId  String   @default("swift-default")
   /// The checkout the observation was matched to, if any.
   intentId  String?
-  /// RETURN | NOTIFY | LOOKUP
+  /// RETURN | NOTIFY | LOOKUP | HISTORY
   source    String
-  /// RETURN/NOTIFY: the path the partner came back on. LOOKUP: the transaction id asked about.
+  /// RETURN/NOTIFY: the path the partner came back on. LOOKUP/HISTORY: the transaction id asked about.
   detail    String?
-  /// The decrypted reply (RETURN/NOTIFY) or the lookup answer (LOOKUP).
+  /// The decrypted reply (RETURN/NOTIFY), the lookup answer (LOOKUP), or the history query and only the rows naming the transaction (HISTORY).
   body      Json?
   /// Key names and JSON types only (describeShape): safe for any log.
   shape     Json?
-  /// Why nothing could be used: NO_TOKEN | NO_CHECKOUT | LOOKUP_NOT_FOUND | LOOKUP_FAILED
+  /// Why nothing could be used: NO_TOKEN | NO_CHECKOUT | LOOKUP_NOT_FOUND | LOOKUP_FAILED | HISTORY_NOT_FOUND | HISTORY_FAILED
   failure   String?
   createdAt DateTime @default(now())
 

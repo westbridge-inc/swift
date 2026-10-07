@@ -53,10 +53,14 @@ const RESULT_WORDS: Record<string, string> = {
 const WINDOW_WORDS: Record<NonNullable<MmgCheckoutTimelineEntry['windowCheck']>, string> = {
   INSIDE: 'Inside the checkout window',
   OUTSIDE: 'Outside the checkout window',
-  AFTER_REPLY: "After MMG's first reply: MMG's time may not match the zone setting",
+  AFTER_REPLY: "After MMG's first reply: MMG's time may not match the zone setting, or it is another payment",
   UNREADABLE: "MMG's date could not be read",
+  NOT_IN_HISTORY: "Not in MMG's transaction history",
+  AMBIGUOUS: "More than one record in MMG's transaction history",
+  DISAGREES: "MMG's transaction history record does not match the checkout",
+  UNAVAILABLE: "MMG's transaction history could not be read in full",
 };
-const SOURCE_WORDS: Record<MmgCheckoutTimelineEntry['source'], string> = { RETURN: 'Reply (return page)', NOTIFY: 'Reply (MMG server)', LOOKUP: 'MMG lookup' };
+const SOURCE_WORDS: Record<MmgCheckoutTimelineEntry['source'], string> = { RETURN: 'Reply (return page)', NOTIFY: 'Reply (MMG server)', LOOKUP: 'MMG lookup', HISTORY: 'MMG transaction history' };
 const PLATFORM_WORDS: Record<string, string> = { ios: 'iPhone app', android: 'Android app', web: 'Website', unknown: 'Unknown' };
 
 const gyd = (amount: number) => `GY$${amount.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;

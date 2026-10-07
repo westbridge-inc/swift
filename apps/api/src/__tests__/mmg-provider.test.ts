@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SandboxMmgProvider, LiveMmgProvider, getMmgProvider, lookupDetailFrom, MMG_REFERENCE_WIRE_CONTRACT, MMG_UAT_URL, type LiveMmgConfig } from '../providers/mmg/mmg-provider';
+import { SandboxMmgProvider, LiveMmgProvider, getMmgProvider, historyAnswerFrom, historyRowFrom, lookupDetailFrom, MMG_REFERENCE_WIRE_CONTRACT, MMG_UAT_URL, type LiveMmgConfig } from '../providers/mmg/mmg-provider';
 
 // MMG Merchant-Initiated sandbox: exercises the whole loop (initiate → the
 // payer approves on their phone → lookup) deterministically, so billing/agent
@@ -356,5 +356,103 @@ describe('MMG live adapter — the checkout lookup as MMG UAT answers it', () =>
     const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(status, { error: 'x' }));
     const mmg = new LiveMmgProvider(CFG, fetchMock as any);
     expect(await mmg.transactionLookupDetail('20402048536279')).toEqual({ outcome: 'not_found' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [7 Oct] MMG's Transaction History, read for the checkout's payment time.
+// MMG (7 Oct): the lookup's creationDate is the moment of the LOOKUP; history's
+// modificationDate is when the transaction was performed. The shapes below are
+// MMG UAT's own answers to Swift's merchant credentials on 7 Oct (field names,
+// types and formats from the read-only probe; party values and external_id are
+// placeholders: the probe printed only their keys).
+// ---------------------------------------------------------------------------
+describe('MMG live adapter — Transaction History for the checkout payment time (UAT, 7 Oct)', () => {
+  /** The 1 Oct payment's row, as MMG UAT listed it on 7 Oct. */
+  const UAT_ROW = {
+    amount: '500', currency: 'GYD', displayType: 'EMerchant Payment', transactionStatus: 'completed', descriptionText: '',
+    modificationDate: '2026-10-01T15:38:31.000Z', transactionReference: '20402048536279', transactionReceipt: '20402048536279',
+    debitParty: [{ key: 'accountid', value: 'P-DEBIT' }, { key: 'accountcategory', value: 'P-CAT' }],
+    creditParty: [{ key: 'accountid', value: 'P-CREDIT' }, { key: 'accountcategory', value: 'P-CAT' }],
+    external_id: '1790883499',
+  };
+  /** Another UAT row of the same day, a payment that is not ours. */
+  const OTHER_ROW = { ...UAT_ROW, modificationDate: '2026-10-01T15:38:15.000Z', transactionReference: '20402048536111', transactionReceipt: '20402048536111' };
+  const UAT_ANSWER = { executionId: 'EXEC-1', TransactionList: [OTHER_ROW, UAT_ROW] };
+  const QUERY = { fromdate: '2026-10-01T15:26:19.000Z', todate: '2026-10-01T15:51:05.000Z', rows: 100 };
+
+  it('asks GET txn-history for the merchant with exactly the dates and row count it is given, with the x-wss headers the lookup carries', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(200, UAT_ANSWER));
+    const mmg = new LiveMmgProvider(CFG, fetchMock as any);
+    expect(await mmg.transactionHistoryRows(QUERY)).toEqual({ outcome: 'rows', rows: [OTHER_ROW, UAT_ROW] });
+    const [url, init] = fetchMock.mock.calls[1]!;
+    const asked = new URL(String(url));
+    expect(`${asked.origin}${asked.pathname}`).toBe(`${MMG_UAT_URL}/e-merchant-initiated-transactions/txn-history`);
+    expect(Object.fromEntries(asked.searchParams)).toEqual({ msisdn: '9991161', offset: '100', fromdate: QUERY.fromdate, todate: QUERY.todate });
+    expect(init.method).toBe('GET');
+    expect(init.headers).toMatchObject({ 'x-wss-token': 'tok_1', 'x-wss-mid': '9991161', 'x-wss-mkey': CFG.mkey, 'x-api-key': CFG.apiKey, 'x-wss-msecret': CFG.msecret });
+    expect(String(init.headers['x-wss-correlationid'])).toMatch(/^hist-/);
+  });
+
+  it('never throws: MMG unreachable, or any answer other than HTTP 200 with a TransactionList of objects, is an error to retry, never evidence', async () => {
+    const down = vi.fn().mockResolvedValueOnce(AUTH_OK).mockRejectedValueOnce(new Error('socket hang up'));
+    expect(await new LiveMmgProvider(CFG, down as any).transactionHistoryRows(QUERY)).toEqual({ outcome: 'error', reason: 'MMG history unreachable: socket hang up' });
+    // What MMG UAT answered on 7 Oct to a date with no time (422) and to a query without both dates (400).
+    const invalidDates = { transactionId: 'X', requestId: 'R', timestamp: 'T', statusCode: 422, message: 'Invalid dates', response: null };
+    const problem = { type: 'about:blank', title: 'Bad Request', status: 400, detail: '', instance: '/x', properties: null };
+    for (const [status, body] of [[422, invalidDates], [400, problem], [500, {}], [201, UAT_ANSWER]] as const) {
+      const fetchMock = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(status, body));
+      expect(await new LiveMmgProvider(CFG, fetchMock as any).transactionHistoryRows(QUERY)).toEqual({ outcome: 'error', reason: `MMG history HTTP ${status}` });
+    }
+    const notJson = vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce({ ok: true, status: 200, json: async () => { throw new SyntaxError('x'); } });
+    expect(await new LiveMmgProvider(CFG, notJson as any).transactionHistoryRows(QUERY)).toMatchObject({ outcome: 'error' });
+  });
+
+  it.each(['history', 'authentication'])('bounds a stalled %s body and returns an error so the poll can continue', async (phase) => {
+    vi.useFakeTimers();
+    try {
+      let stalledSignal: AbortSignal | null | undefined;
+      const fetchMock = vi.fn(async (url: string, init?: Parameters<typeof fetch>[1]) => {
+        const isAuth = url.includes('/e-commerce-login/mer');
+        if (isAuth && phase === 'history') return AUTH_OK;
+        stalledSignal = init?.signal;
+        return { ok: true, status: 200, json: () => new Promise(() => {}) };
+      });
+      let result: unknown = 'pending';
+      void new LiveMmgProvider(CFG, fetchMock as any).transactionHistoryRows(QUERY).then((answer) => { result = answer; });
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(result).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(result).toMatchObject({ outcome: 'error' });
+      expect(stalledSignal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reads the answer whole: a missing or non-list TransactionList, or any row that is not an object, is an error, never a shorter list', () => {
+    expect(historyAnswerFrom(200, UAT_ANSWER)).toEqual({ outcome: 'rows', rows: [OTHER_ROW, UAT_ROW] });
+    expect(historyAnswerFrom(200, { executionId: 'E', TransactionList: [] })).toEqual({ outcome: 'rows', rows: [] });
+    for (const body of [null, [], 'x', { executionId: 'E' }, { TransactionList: {} }, { TransactionList: [UAT_ROW, null] }, { TransactionList: [UAT_ROW, 'x'] }, { TransactionList: [[UAT_ROW]] }]) {
+      expect(historyAnswerFrom(200, body), JSON.stringify(body)).toMatchObject({ outcome: 'error' });
+    }
+  });
+
+  it('reads one row exactly as sent: strings stay strings, the amount in exact minor units, anything unreadable null', () => {
+    expect(historyRowFrom(UAT_ROW)).toEqual({
+      transactionReference: '20402048536279', transactionReceipt: '20402048536279', statusText: 'completed',
+      externalId: '1790883499', amountMinor: 50000, currencyCode: 'GYD', modificationDate: '2026-10-01T15:38:31.000Z',
+    });
+    expect(historyRowFrom({ ...UAT_ROW, amount: '500.00' }).amountMinor).toBe(50000);
+    for (const external_id of [undefined, null, 1790883499, {}, []]) {
+      expect(historyRowFrom({ ...UAT_ROW, external_id }).externalId).toBeNull();
+    }
+    expect(historyRowFrom({ transactionReference: 20402048536279, transactionReceipt: null, transactionStatus: 7, amount: 'five hundred', currency: 1, modificationDate: 1727811511000 }))
+      .toEqual({ transactionReference: null, transactionReceipt: null, externalId: null, statusText: null, amountMinor: null, currencyCode: null, modificationDate: null });
+  });
+
+  it('the sandbox has no history for the checkout: it never answers "successful", so it is never asked', async () => {
+    expect(await new SandboxMmgProvider().transactionHistoryRows(QUERY)).toEqual({ outcome: 'rows', rows: [] });
   });
 });

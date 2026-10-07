@@ -60,26 +60,29 @@ export interface MmgCheckoutSupportPage {
   nextCursor: string | null;
 }
 
-/** One reply, callback or MMG lookup the checkout recorded, in order. */
+/** One reply, callback, MMG lookup or MMG history answer the checkout recorded, in order. */
 export interface MmgCheckoutTimelineEntry {
   at: string;
-  source: 'RETURN' | 'NOTIFY' | 'LOOKUP';
+  source: 'RETURN' | 'NOTIFY' | 'LOOKUP' | 'HISTORY';
   /** MMG's ResultCode on a reply (0 successful … 7 timed out). */
   resultCode: string | null;
-  /** MMG's lookup transactionStatus, exactly as sent ("successful"). */
+  /** MMG's lookup transactionStatus ("successful"), or its history record's ("completed"), exactly as sent. */
   transactionStatus: string | null;
-  /** The MMG transaction a reply named, or the one a lookup asked about. */
+  /** The MMG transaction a reply named, or the one a lookup or history answer was about. */
   mmgTransactionId: string | null;
   /** MMG's ledger number a lookup returned. */
   mmgTransactionReference: string | null;
-  /** The amount and currency MMG's lookup reported, as sent. */
+  /** The amount and currency MMG's lookup or history record reported, as sent. */
   amount: string | null;
   currency: string | null;
-  /** A lookup: where MMG's creationDate stands, by the same check that credits: INSIDE, OUTSIDE the
-   *  checkout's window, AFTER_REPLY (more than two minutes after the first reply naming it: MMG's time
-   *  may not match the configured zone), or UNREADABLE. A reply: did it arrive by the deadline. */
-  windowCheck: 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE' | null;
-  /** Why nothing could be used (NO_TOKEN, INVALID_RESPONSE, LOOKUP_NOT_FOUND, LOOKUP_FAILED, RESULT_CODE_n). */
+  /** A history answer: where MMG's time for the payment stands, by the same check that credits: INSIDE,
+   *  OUTSIDE the checkout's window, AFTER_REPLY (more than two minutes after the first reply naming it:
+   *  MMG's time may not match the configured zone, or it is not this checkout's payment), UNREADABLE,
+   *  NOT_IN_HISTORY, AMBIGUOUS (more than one record), DISAGREES (the record does not match the
+   *  checkout), or UNAVAILABLE (history could not be read in full). A reply: did it arrive by the
+   *  deadline. A lookup: none (its creationDate is the lookup's own moment, MMG 7 Oct). */
+  windowCheck: 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE' | 'NOT_IN_HISTORY' | 'AMBIGUOUS' | 'DISAGREES' | 'UNAVAILABLE' | null;
+  /** Why nothing could be used (NO_TOKEN, INVALID_RESPONSE, LOOKUP_NOT_FOUND, LOOKUP_FAILED, HISTORY_NOT_FOUND, HISTORY_FAILED, RESULT_CODE_n). */
   failure: string | null;
 }
 export const MMG_CHECKOUT_TIMELINE_KEYS = [
