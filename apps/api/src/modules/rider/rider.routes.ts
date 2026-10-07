@@ -1214,13 +1214,13 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     const order = await app.prisma.order.findUnique({
-      where: { id: rider.currentOrderId },
+      where: { id: rider.currentOrderId, riderId: rider.id },
       // [F-0011] The response spreads this row wholesale — omit at the source.
       omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
 
-    if (!order) {
+    if (!order || (order.orderType === 'COURIER' && TERMINAL_ORDER_STATUSES.includes(order.status))) {
       // Stale pointer — heal it through the seam: it re-points to any other
       // live leg rather than nulling under one, and settles availability from
       // the count instead of declaring the rider free.
@@ -1748,7 +1748,7 @@ export async function riderRoutes(app: FastifyInstance) {
       vendor: o.vendor,
       items: o.items,
       itemCount: o.items.reduce((s, i) => s + i.quantity, 0),
-      deliveryAddress: o.deliveryAddress,
+      deliveryAddress: o.orderType === 'COURIER' ? null : o.deliveryAddress,
       deliveryFee: Number(o.deliveryFee),
       tipAmount: Number(o.tipAmount),
       totalEarning: Number(o.deliveryFee) + Number(o.tipAmount),
