@@ -22,7 +22,7 @@ import { subscriptionOperability, inoperableSubscriptionWhere, type OperabilityS
  *  the same answer whatever it is (the gate itself never reads it). */
 type GateRow = OperabilitySubscription & { billingMethod: PaymentMethod };
 const gate = (row: GateRow, now: Date, env: Record<string, string>) => subscriptionOperability(row, { missingRow: 'BLOCK' }, now, env);
-import { MMG_PAUSE_CLOCKS_KEY, syncMmgPauseClock } from '../modules/billing/mmg-pause';
+import { FEE_PAUSE_REPAIR_PREFIX, MMG_PAUSE_CLOCKS_KEY, feePauseHoldsBilling, feePauseStatus, syncMmgPauseClock } from '../modules/billing/mmg-pause';
 import { activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS } from '../modules/billing/dunning-clock';
 import { mmgTerminalProof } from '../modules/billing/mmg-terminal-evidence';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
@@ -143,6 +143,7 @@ afterAll(async () => {
   await syncMmgPauseClock(app.prisma, new Date(), ON).catch(() => {});
   await app.prisma.platformConfig.deleteMany({ where: { OR: [
     { key: MMG_PAUSE_CLOCKS_KEY }, { key: 'billing.mmg_pause.open' }, { key: { startsWith: 'billing.mmg_pause.reactivated:' } },
+    { key: { startsWith: FEE_PAUSE_REPAIR_PREFIX } },
   ] } }).catch(() => {});
   try {
     await app.prisma.$transaction(async (tx) => {
@@ -182,7 +183,9 @@ async function whileCardLive<T>(fn: () => Promise<T>): Promise<T> {
 /** Start from no pause: close any pause an earlier case left open. */
 async function noPauseOpen(): Promise<void> {
   await syncMmgPauseClock(app.prisma, new Date(), ON);
-  await app.prisma.platformConfig.deleteMany({ where: { key: { in: [MMG_PAUSE_CLOCKS_KEY, 'billing.mmg_pause.open'] } } });
+  await app.prisma.platformConfig.deleteMany({ where: { OR: [
+    { key: { in: [MMG_PAUSE_CLOCKS_KEY, 'billing.mmg_pause.open'] } }, { key: { startsWith: FEE_PAUSE_REPAIR_PREFIX } },
+  ] } });
 }
 const events = (subscriptionId: string, type?: 'CHARGE_FAILED' | 'CHARGE_SUCCESS' | 'REMINDER' | 'SUSPENDED' | 'CHURNED') =>
   app.prisma.billingEvent.count({ where: { subscriptionId, ...(type ? { type } : {}) } });
@@ -867,18 +870,70 @@ describe('[PROD-PATH] resume ordering: on resume only the current week is billed
     expect(await events(subId, 'SUSPENDED')).toBe(0);
   });
 
-  it('a failed pause repair during resume leaves the span open until grace can be repaired', async () => {
+  it('a fee whose clock can never be paused (a trial whose owner is gone) holds ONLY itself: the pause ends and everyone else bills', async () => {
     await noPauseOpen();
     const t0 = new Date(Date.now() - 120_000);
-    const subId = await makeVendorSub(new Date(t0.getTime() - FULL_FEE_GRACE_MS + 60_000), { method: 'CASH', status: 'PAST_DUE', extra: { failedAttempts: 3 } });
-    const fail = async (boundary: string) => { if (boundary === 'after-read') throw new Error('injected: clock storage unavailable'); };
-    await syncMmgPauseClock(app.prisma, t0, OFF, fail);
-    await syncMmgPauseClock(app.prisma, new Date(), ON, fail);
-    expect(await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_pause.open' } })).not.toBeNull();
-    expect(await billing.billSubscription((await subWithRelations(subId)) as any)).toBe('pending');
-    const resume = new Date();
-    await syncMmgPauseClock(app.prisma, resume, ON);
-    expect(activeOverdueMs((await clockOf(subId))!, resume)).toBe(FULL_FEE_GRACE_MS - 60_000);
+    // An owner's deletion sets the subscription's owner to NULL; the conversion
+    // job already skips such a trial (no valid payer). Its clock cannot be read.
+    const ended = new Date(t0.getTime() - DAY);
+    const orphan = (await app.prisma.subscription.create({ data: {
+      type: 'RESTAURANT', status: 'TRIAL', isTrialActive: true, trialEndDate: ended, weeklyRate: 12000, billingMethod: 'CASH',
+      currentPeriodStart: new Date(ended.getTime() - 14 * DAY), currentPeriodEnd: ended, nextBillingDate: ended,
+    } })).id;
+    subIds.push(orphan);
+    const due = new Date(Date.now() - 20 * DAY);
+    const other = await makeVendorSub(due, { method: 'CASH' });
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: other, balance: 50000, currencyCode: 'GYD' } });
+    await syncMmgPauseClock(app.prisma, t0, OFF);
+    await syncMmgPauseClock(app.prisma, new Date(), ON);
+    // The pause is over: one unreadable clock never holds any other partner's billing.
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_pause.open' } })).toBeNull();
+    expect(await feePauseHoldsBilling(app.prisma, other)).toBe(false);
+    for (let i = 0; i < 3; i += 1) await billing.runBillingCycle();
+    const payments = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: other } });
+    expect(payments).toHaveLength(1);
+    expect(payments[0]).toMatchObject({ status: 'CAPTURED', periodStart: due, periodEnd: new Date(due.getTime() + 21 * DAY) });
+    // Its own fee waits alone, on a record naming the pause start, and an admin is told.
+    expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${orphan}` } })).value).toEqual({ since: t0.toISOString() });
+    expect(await feePauseHoldsBilling(app.prisma, orphan)).toBe(true);
+    expect((await feePauseStatus(app.prisma)).awaitingRepair).toBe(1);
+    await syncMmgPauseClock(app.prisma, new Date(), ON);
+    expect(await feePauseHoldsBilling(app.prisma, orphan)).toBe(true);
+  });
+
+  it.each(['after', 'during'] as const)('a clock that could not be paused waits alone, and is paused from the FIRST pause start when repaired %s a second pause', async (when) => {
+    await noPauseOpen();
+    const t0 = new Date(Date.now() - 10 * 60_000);
+    const stuck = await makeVendorSub(new Date(t0.getTime() - FULL_FEE_GRACE_MS + 60_000), { method: 'CASH', status: 'PAST_DUE', extra: { failedAttempts: 3 } });
+    const failStuck = async (boundary: string, id?: string) => { if (boundary === 'after-read' && id === stuck) throw new Error('injected: this clock cannot be paused'); };
+    const at = (minutes: number) => new Date(t0.getTime() + minutes * 60_000);
+    await syncMmgPauseClock(app.prisma, t0, OFF, failStuck);
+    await syncMmgPauseClock(app.prisma, at(2), ON, failStuck);
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: 'billing.mmg_pause.open' } })).toBeNull();
+    // Its own billing waits: no charge, no suspension.
+    expect(await feePauseHoldsBilling(app.prisma, stuck)).toBe(true);
+    expect(await billing.billSubscription((await subWithRelations(stuck)) as any)).toBe('pending');
+    expect((await sub(stuck)).status).toBe('PAST_DUE');
+    expect(await events(stuck, 'SUSPENDED')).toBe(0);
+    // A second pause comes; the clock is repaired after it ends, or while it is open.
+    await syncMmgPauseClock(app.prisma, at(4), OFF, failStuck);
+    let released: Date;
+    if (when === 'after') {
+      await syncMmgPauseClock(app.prisma, at(6), ON, failStuck);
+      // The second resume keeps the record's FIRST start.
+      expect((await app.prisma.platformConfig.findUniqueOrThrow({ where: { key: `${FEE_PAUSE_REPAIR_PREFIX}${stuck}` } })).value).toEqual({ since: t0.toISOString() });
+      released = new Date();
+      await syncMmgPauseClock(app.prisma, released, ON);
+    } else {
+      await syncMmgPauseClock(app.prisma, at(5), OFF);
+      released = at(6);
+      await syncMmgPauseClock(app.prisma, released, ON);
+    }
+    // Paused from that first start, then released: the minute of grace that remained is still there.
+    expect(await feePauseHoldsBilling(app.prisma, stuck)).toBe(false);
+    expect(activeOverdueMs((await clockOf(stuck))!, released)).toBe(FULL_FEE_GRACE_MS - 60_000);
+    expect((await sub(stuck)).billingEnforcementDueAt).toEqual(new Date(released.getTime() + 60_000));
+    expect((await feePauseStatus(app.prisma)).awaitingRepair).toBe(0);
   });
 
   it('billing that runs BEFORE the resume tick bills nothing; after it, ONE fee covers the off weeks and the current week (cash, prepaid)', async () => {

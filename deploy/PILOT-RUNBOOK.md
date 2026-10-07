@@ -820,7 +820,10 @@ explicitly off. Beyond the earlier guards:
   until the resume has recorded it). Each pause and resume is in the audit
   log (BILLING_FEE_PAUSE_STARTED/ENDED, and BILLING_FEE_PAUSED/RESUMED per
   fee), and an admin sees the state and counts at
-  `GET /api/v1/admin/billing/fee-pause`. The poller leaves every MMG row
+  `GET /api/v1/admin/billing/fee-pause`. A fee whose dunning clock could
+  not be paused (for example a subscription whose owner was deleted) waits
+  on its own after the resume, never anyone else's; `awaitingRepair` counts
+  them, and one that stays above 0 needs a person. The poller leaves every MMG row
   untouched, and any MMG call refuses with MMG_DISABLED.
   To switch MMG on, set `MMG_DRIVER=live` and `MMG_CHECKOUT_ENABLED=1`
   together (cash partners pay through the checkout page) and redeploy;
