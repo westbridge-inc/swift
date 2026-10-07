@@ -86,3 +86,13 @@ describe('socket principal ownership', () => {
     expect(mocks.socket.disconnect).toHaveBeenCalledTimes(2);
   });
 });
+
+
+it('tries polling when a carrier blocks the websocket transport', () => {
+  disconnectSocket();
+  mocks.state.current = aSession;
+  connectSocket();
+  expect(mocks.state.options.transports).toEqual(['websocket', 'polling']);
+  expect(mocks.state.options.tryAllTransports).toBe(true);
+  disconnectSocket();
+});
