@@ -285,12 +285,17 @@ Pressing a button sends the browser to the return page, exactly as a real provid
 
 - No view ever returns a vault token, the session's state or hash, a provider page address, or anything else that could move money. Views show the provider's transaction reference (what finance looks up) and the session's void, refund, booking-claim and resolution markers.
 - **Resolve** body: `{ action, providerReference, amount }`. `providerReference` must be the transaction recorded on the session. `action`:
-  - `BOOK` books exactly this week's price once — never after a void or refund that may have worked, and never on a card test system for a partner who is not a listed test subscription;
+  - `BOOK` requires the stored provider-approved completion, including its own `RiskManagement.ThreeDSecure` proof, bound to this session and exact price; typed portal facts and two-person approval cannot replace that proof. Missing proof returns `409 PROVIDER_COMPLETION_EVIDENCE_REQUIRED`. It books once — never after a void or refund that may have worked, and never on a card test system for a partner who is not a listed test subscription;
   - `REFUND` sends one refund of that transaction (never resent; never once the week is booked);
   - `REFUNDED_IN_PORTAL` records a refund made in the provider's portal;
   - `NOTHING_TAKEN` records that the provider shows nothing taken.
   Each decision is taken once, under the session's lock; a booking and a refund can never both happen. The general payment-confirmation review refuses to close such a card payment as unpaid (`409 CARD_SESSION_RESOLVE_REQUIRED`).
 - **A payment Swift cannot book** (the provider's answer lacks its own 3-D Secure proof, names another transaction, order, type or amount, or was lost) is voided at once — one void, durably claimed. Voided: the session is `FAILED` (no `failure` category). The void refused or unanswered: `HELD`, and admins are paged with the provider's transaction reference.
+- **The completion is claimed on the session first.** Immediately before Swift sends the one completion, it records the claim on the session (under the same locks finance takes). A session closed before that moment never has its completion sent (nothing was taken). A claimed completion is never sent twice.
+  - While a claimed completion may still be answering (its own deadline plus a margin, 35 s), nobody treats its answer as lost, and the general payment-confirmation review refuses to close it as unpaid (`409 CARD_COMPLETION_IN_FLIGHT`); afterwards it refuses with `409 CARD_SESSION_RESOLVE_REQUIRED` (the session is voided, or held for the card-session decision above).
+  - A claimed completion whose answer can no longer arrive (lost) is voided under the recorded transaction, like any payment Swift cannot book.
+- **An approval that arrives after its session was closed** is never booked: Swift claims one void, the session becomes `HELD` (`LATE_PROVIDER_APPROVAL`), its payment confirmation is reopened, and admins are paged. The void confirmed: `FAILED` again. Refused or unanswered: it stays `HELD`, `BOOK` is refused, and no new collection of the fee (card or MMG) starts while it is held. A session finance had already decided keeps that decision; admins are paged.
+
 
 ## 9. Operations
 

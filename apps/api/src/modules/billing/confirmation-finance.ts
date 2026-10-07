@@ -1,6 +1,7 @@
 import type { MmgCheckoutIntent, Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS, markSettlementApplying, resolveConfirmationInTx } from './dunning-clock';
+import { COMPLETION_CLAIM_WAIT_MS } from '../../providers/card/card-provider';
 import type { OnAudit } from '../../lib/audit-writer';
 
 /** An existing credit, bound to this checkout's exact instruction and owner.
@@ -114,7 +115,11 @@ export async function resolveFinanceConfirmation(db: PrismaClient, input: {
         // for a person, or with a provider transaction or a void on record) is
         // never closed as unpaid here: it is booked, refunded or recorded as
         // not taken on its card session, against that transaction.
-        if (session && (session.status === 'HELD' || session.providerTransactionRef !== null || session.providerVoidState !== null)) {
+        if (session?.completionClaimedAt && (session.status === 'OPEN' || session.status === 'UNKNOWN')
+          && session.providerVoidState === null && now.getTime() <= session.completionClaimedAt.getTime() + COMPLETION_CLAIM_WAIT_MS) {
+          throw new AppError(409, 'CARD_COMPLETION_IN_FLIGHT', 'The card payment is still being confirmed. Wait for its answer.');
+        }
+        if (session && (session.completionClaimedAt !== null || session.status === 'HELD' || session.providerTransactionRef !== null || session.providerVoidState !== null)) {
           throw new AppError(409, 'CARD_SESSION_RESOLVE_REQUIRED', 'Resolve this card payment on its card session: book it, refund it, or record that nothing was taken.');
         }
         // A one-use marker: an UNKNOWN session may already carry its confirmation time.

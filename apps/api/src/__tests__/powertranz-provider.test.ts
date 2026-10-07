@@ -138,6 +138,90 @@ afterAll(async () => {
   await redis.quit();
 });
 
+describe('[CARDS] the completion claim: timestamped, durable, never sent twice', () => {
+  it('an overlapping confirmation waits through the request deadline and margin, then treats a lost answer as voidable without resending', async () => {
+    let clock = Date.now();
+    const gw = gateway({ '/api/spi/sale': preprocessed });
+    const p = provider(gw, { now: () => new Date(clock) });
+    const page = await openPage(p);
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, {}) });
+    const k = `${PREFIX}s:${page.ref}`;
+    // Model a different worker that durably claimed and is still awaiting its answer.
+    await redis.hset(k, { completion: 'sending', completionClaimedAtMs: String(clock) });
+    const confirm = () => p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' });
+    expect(await confirm()).toMatchObject({ status: 'pending' });
+    clock += 35_000;
+    expect(await confirm()).toMatchObject({ status: 'pending' });
+    clock += 1;
+    expect(await confirm()).toMatchObject({ status: 'unknown', reason: 'COMPLETION_SENT_ANSWER_LOST', voidable: { providerRef: page.txnId } });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+  });
+
+  it('the durable claim is asked immediately before the one completion; "send" sends it once', async () => {
+    let page!: Awaited<ReturnType<typeof openPage>>;
+    const asked: string[] = [];
+    const gw = gateway({ '/api/spi/sale': preprocessed, '/api/spi/payment': () => { asked.push('payment'); return completion({})(page); } });
+    const p = provider(gw);
+    page = await openPage(p);
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, {}) });
+    const beforeCompletion = async (ref: string) => { asked.push(`claim:${ref}`); return 'send' as const; };
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion })).toMatchObject({ status: 'succeeded' });
+    expect(asked).toEqual([`claim:${page.txnId}`, 'payment']);
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion })).toMatchObject({ status: 'succeeded' });
+    expect(asked).toHaveLength(2);
+  });
+
+  it('"closed": the session closed first — the completion is never sent and nothing was taken (no void is asked for)', async () => {
+    const gw = gateway({ '/api/spi/sale': preprocessed });
+    const p = provider(gw);
+    const page = await openPage(p);
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, {}) });
+    const confirm = () => p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion: async () => 'closed' as const });
+    const first = await confirm();
+    expect(first).toMatchObject({ status: 'failed', reason: 'SESSION_CLOSED_BEFORE_COMPLETION' });
+    expect(first).not.toHaveProperty('voidable');
+    expect(await confirm()).toMatchObject({ status: 'failed', reason: 'SESSION_CLOSED_BEFORE_COMPLETION' });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+    expect(await redis.hget(`${PREFIX}s:${page.ref}`, 'spiToken')).toBeNull();
+  });
+
+  it('"claimed": a durable claim already exists (this store lost its own) — never sent again; the money is treated as possibly taken', async () => {
+    const gw = gateway({ '/api/spi/sale': preprocessed });
+    const p = provider(gw);
+    const page = await openPage(p);
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, {}) });
+    const confirm = () => p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion: async () => 'claimed' as const });
+    expect(await confirm()).toMatchObject({ status: 'unknown', reason: 'COMPLETION_ALREADY_CLAIMED', voidable: { providerRef: page.txnId } });
+    expect(await confirm()).toMatchObject({ status: 'unknown', reason: 'COMPLETION_ALREADY_CLAIMED', voidable: { providerRef: page.txnId } });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+  });
+
+  it('a recorded success without the provider\'s own proof (an older record) never restores booking authority: unknown, voidable', async () => {
+    const gw = gateway({ '/api/spi/sale': preprocessed });
+    const p = provider(gw);
+    const page = await openPage(p);
+    await redis.hset(`${PREFIX}s:${page.ref}`, { completion: 'done', result: JSON.stringify({ status: 'succeeded', amountMinor: 210_000, currencyCode: 'GYD', rawSha256: 'synthetic' }) });
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' }))
+      .toMatchObject({ status: 'unknown', reason: 'COMPLETION_EVIDENCE_UNVERIFIED', voidable: { providerRef: page.txnId } });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+  });
+
+  it('the durable claim cannot be taken (the database is down): nothing is sent, ever, for this page', async () => {
+    const gw = gateway({ '/api/spi/sale': preprocessed });
+    const p = provider(gw);
+    const page = await openPage(p);
+    await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, {}) });
+    await expect(p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion: async () => { throw new Error('database unavailable'); } }))
+      .rejects.toThrow('database unavailable');
+    expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW', beforeCompletion: async () => 'send' as const }))
+      .toMatchObject({ status: 'failed', reason: 'COMPLETION_CLAIM_FAILED' });
+    expect(gw.paths()).toEqual(['/api/spi/sale']);
+    // Nothing was asked of the bank: never shown to the partner as a decline.
+    expect(failureCodeOf('COMPLETION_CLAIM_FAILED')).toBe('COMPLETION_NOT_SENT');
+    expect(failureCodeOf('SESSION_CLOSED_BEFORE_COMPLETION')).toBe('COMPLETION_NOT_SENT');
+  });
+});
+
 describe('configuration (secrets named, never echoed)', () => {
   const base = {
     NODE_ENV: 'development',
@@ -420,7 +504,10 @@ describe('confirm: the completion is the money truth, sent at most once (sec. 2.
     await p.noteReturn({ binding: p.binding, providerSessionRef: page.ref, params: authResult(page, { AuthenticationStatus: 'Y' }) });
     const answers = await Promise.all(Array.from({ length: 5 }, () => p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })));
     expect(gw.calls.filter((c) => c.url.endsWith('/api/spi/payment'))).toHaveLength(1);
-    expect(answers.filter((a) => a.status === 'succeeded').length + answers.filter((a) => a.status === 'unknown').length).toBe(5);
+    // [CARDS S2] A racer that finds the completion still being sent waits (pending): it never reads
+    // an ACTIVE completion as a lost answer, which the service would void.
+    expect(answers.filter((a) => a.status === 'succeeded').length + answers.filter((a) => a.status === 'pending').length).toBe(5);
+    expect(answers.filter((a) => a.status === 'unknown')).toEqual([]);
     expect(await p.confirm({ binding: p.binding, providerSessionRef: page.ref, purpose: 'PAY_NOW' })).toMatchObject({ status: 'succeeded' });
   });
 
@@ -439,7 +526,7 @@ describe('reading the completion (sec. 6, Appendix 1): booked only on full proof
   };
   const unbookable = (json: unknown) => readCompletion(json, held).status;
   it('approved 00, this Sale, this order, this amount, with its own 3-D Secure proof: succeeded', () => {
-    expect(readCompletion(approved, held)).toEqual({ status: 'succeeded', amountMinor: 210_000, currencyCode: 'GYD' });
+    expect(readCompletion(approved, held)).toEqual({ status: 'succeeded', amountMinor: 210_000, currencyCode: 'GYD', completionEvidence: expect.objectContaining({ Approved: true, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y', Eci: '05' } } }) });
     expect(readCompletion({ ...approved, TransactionIdentifier: undefined, OriginalTrxnIdentifier: held.txnId }, held).status).toBe('succeeded');
     expect(readCompletion({ ...approved, TransactionType: '2' }, held).status).toBe('succeeded');
   });
