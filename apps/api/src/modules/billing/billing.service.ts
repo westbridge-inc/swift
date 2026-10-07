@@ -3860,9 +3860,14 @@ export class BillingService {
       nudgeAtMs: BigInt(elapsed + FEE_RETRY_MS), churnAtMs: BigInt(elapsed + suspensionRetentionMs()),
     } });
     if (sub.vendor) {
-      // SUSPENDED vendors vanish from customer browse (which filters ACTIVE)
-      await tx.vendor.update({
-        where: { id: sub.vendor.id },
+      // SUSPENDED vendors vanish from customer browse (which filters ACTIVE).
+      // Billing suspends only an open store, or re-stamps its own suspension.
+      // A store already suspended for another reason (an admin, safety,
+      // wind-down, or none recorded), awaiting approval, or closed keeps its
+      // state, so a later fee payment cannot open it (restoreBillingAccess
+      // lifts BILLING suspensions only).
+      await tx.vendor.updateMany({
+        where: { id: sub.vendor.id, OR: [{ status: 'ACTIVE' }, { status: 'SUSPENDED', suspensionSource: 'BILLING' }] },
         data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' },
       });
     }

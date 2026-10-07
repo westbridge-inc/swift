@@ -1,3 +1,5 @@
+import { ownedVerificationFixture } from './helpers/verification-object';
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -11,7 +13,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
-import { windDownPartner } from '../modules/user/partner-wind-down';
+import { windDownPartner, BLOCKER_MESSAGE } from '../modules/user/partner-wind-down';
 import { guyanaTiers } from '../modules/ops/platform-config';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
@@ -26,11 +28,13 @@ import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 //
 // The schedule is the one G-MMG-1 names on main: the weekly MMG prompt is
 // issued at the partner's #1270 rate while they are ACTIVE, the partner then
-// leaves (wind-down, an older CANCELLED row that still has auto-renew on, or
-// in-app account deletion), and the payer's approval arrives afterwards.
+// leaves (wind-down, or an older CANCELLED row that still has auto-renew on)
+// or asks to delete the account, and the payer's approval arrives afterwards.
 //   - ACTIVE: the approval pays exactly one week, at the #1270 rate.
-//   - CANCELLED or deleted: the money is banked as wallet balance. The
-//     subscription is never reactivated and nextBillingDate does not move.
+//   - CANCELLED: the money is banked as wallet balance. The subscription is
+//     never reactivated and nextBillingDate does not move.
+//   - Deletion requested: refused while the prompt can still be approved
+//     (GUARDRAILS §1), so the partner is still ACTIVE and pays one week.
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -48,7 +52,7 @@ const RATE_CARD = {
   COURIER: { tier: 'courier', rate: guyanaTiers.mover },
 } as const;
 type Partner = keyof typeof RATE_CARD;
-type Leaving = 'ACTIVE' | 'CANCELLED_BY_WIND_DOWN' | 'CANCELLED_AUTO_RENEW_STILL_ON' | 'ACCOUNT_DELETED';
+type Leaving = 'ACTIVE' | 'CANCELLED_BY_WIND_DOWN' | 'CANCELLED_AUTO_RENEW_STILL_ON' | 'DELETION_REQUESTED';
 
 async function makePartner(partner: Partner, due: Date) {
   seq += 1;
@@ -65,12 +69,14 @@ async function makePartner(partner: Partner, due: Date) {
   await app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'late-approval', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
   });
+  await grantStepUp(app, token);
   const entity = partner === 'TAXI_DRIVER'
     ? {
         driverId: (await app.prisma.driver.create({
           data: {
             userId: user.id, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020,
-            vehicleColor: 'White', licensePlate: `LA-${nanoid(8)}`, driverLicenseUrl: 'test/lic', vehicleInsuranceUrl: 'test/ins',
+            vehicleColor: 'White', licensePlate: `LA-${nanoid(8)}`, driverLicenseUrl: await ownedVerificationFixture(app.prisma, user.id, 'licence'),
+            vehicleInsuranceUrl: await ownedVerificationFixture(app.prisma, user.id, 'insurance'),
           },
         })).id,
       }
@@ -118,11 +124,16 @@ async function leave(leaving: Leaving, p: { userId: string; token: string; subId
     // The shape the pre-R13 wind-down left in real databases: CANCELLED, but
     // auto-renew and the retry clock untouched.
     await app.prisma.subscription.update({ where: { id: p.subId }, data: { status: 'CANCELLED' } });
-  } else if (leaving === 'ACCOUNT_DELETED') {
+  } else if (leaving === 'DELETION_REQUESTED') {
+    // [GUARDRAILS §1] In-app deletion is refused while the weekly MMG prompt
+    // can still be approved: the money would otherwise land on a deleted,
+    // cancelled account with no one to tell. The partner stays, so the
+    // approval pays their week like any ACTIVE partner's.
     const res = await app.inject({ method: 'DELETE', url: '/api/v1/customer/account', headers: { authorization: `Bearer ${p.token}` } });
-    expect(res.statusCode, res.payload).toBe(200);
-    const gone = await app.prisma.user.findUniqueOrThrow({ where: { id: p.userId }, select: { status: true } });
-    expect(gone.status).toBe('DEACTIVATED');
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'PARTNER_OBLIGATIONS', message: BLOCKER_MESSAGE.FEE_PAYMENT_PENDING });
+    const kept = await app.prisma.user.findUniqueOrThrow({ where: { id: p.userId }, select: { status: true } });
+    expect(kept.status).toBe('ACTIVE');
   }
 }
 
@@ -159,7 +170,7 @@ afterAll(async () => {
 });
 
 const schedules = (['TAXI_DRIVER', 'COURIER'] as const).flatMap((partner) =>
-  (['ACTIVE', 'CANCELLED_BY_WIND_DOWN', 'CANCELLED_AUTO_RENEW_STILL_ON', 'ACCOUNT_DELETED'] as const)
+  (['ACTIVE', 'CANCELLED_BY_WIND_DOWN', 'CANCELLED_AUTO_RENEW_STILL_ON', 'DELETION_REQUESTED'] as const)
     .map((leaving) => ({ partner, leaving })));
 
 describe('[G-MMG-1] a late MMG approval under the #1270 rate card', () => {
@@ -195,7 +206,7 @@ describe('[G-MMG-1] a late MMG approval under the #1270 rate card', () => {
       weeksGranted: successes.length,
       banked: banked ? Number(banked.amount) : 0,
     };
-    if (leaving === 'ACTIVE') {
+    if (leaving === 'ACTIVE' || leaving === 'DELETION_REQUESTED') {
       // Exactly one week, at the #1270 rate; nothing banked.
       expect(outcome).toEqual({
         status: 'ACTIVE', nextBillingDate: new Date(due.getTime() + 7 * DAY).toISOString(), weeksGranted: 1, banked: 0,
