@@ -126,7 +126,10 @@ describe('the door: the DLQ endpoints have a caller again', () => {
 
   it('finds the page reachable from navigation, not only by typing the URL', () => {
     // A page nothing links to is only a marginally better door than no page.
+    // [MC shell] The sidebar renders its items from components/layout/nav.ts.
+    const nav = readFileSync(join(process.cwd(), '../admin/src/components/layout/nav.ts'), 'utf8');
+    expect(nav).toMatch(/href: '\/jobs'/);
     const sidebar = readFileSync(join(process.cwd(), '../admin/src/components/layout/Sidebar.tsx'), 'utf8');
-    expect(sidebar).toMatch(/href: '\/jobs'/);
+    expect(sidebar).toMatch(/NAV_GROUPS/);
   });
 });
