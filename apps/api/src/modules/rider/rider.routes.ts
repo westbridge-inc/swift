@@ -35,7 +35,7 @@ import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
 import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { requireStepUp } from '../auth/step-up';
-import { normalizeRegistrationMark } from '../verification/subjects';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { HANDOVER_SECRETS_OMIT, handoverAttemptState } from '../handover/handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 import { handoverBlockCounter } from '../../plugins/observability';
@@ -502,14 +502,13 @@ export async function riderRoutes(app: FastifyInstance) {
     if (body.vehicleType !== undefined && body.vehicleType !== rider.vehicleType) {
       throw new AppError(409, 'USE_VEHICLE_CHANGE', 'Change your vehicle from the vehicle screen — a new vehicle needs its own documents.');
     }
-    // [High #9 · DS109] Changing the plate re-identifies the vehicle the rider operates.
+    // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the rider operates.
     // Step-up first (the same proof as a money surface), the old vehicle links close so
     // GO re-checks the EXACT new vehicle, and live supply retires now — a retyped plate
     // never carries another subject's approved documents, and the old vehicle's evidence
     // stops counting.
-    const plateChanged = body.licensePlate !== undefined
-      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(rider.licensePlate ?? '');
-    if (plateChanged) {
+    const identityChanged = vehicleIdentityChanged(rider, body);
+    if (identityChanged) {
       await requireStepUp(app, request);
     }
 
@@ -531,10 +530,10 @@ export async function riderRoutes(app: FastifyInstance) {
     if (docFields.some((f) => updateData[f] !== undefined)) {
       updateData['documentsVerified'] = false;
     }
-    // [High #9 · DS109] A real plate change retires live supply atomically (same shape as
+    // [High #9 · DS109] A real vehicle identity change retires live supply atomically (same shape as
     // the driver route and the admin reject path) and clears the legacy verification flag,
     // so the new vehicle must be verified before this rider is dispatchable again.
-    if (plateChanged) {
+    if (identityChanged) {
       updateData['isOnline'] = false;
       updateData['locationSessionId'] = null;
       updateData['documentsVerified'] = false;
@@ -568,9 +567,9 @@ export async function riderRoutes(app: FastifyInstance) {
         },
       });
 
-      if (plateChanged) {
-        // A plate change never inherits another subject's approved documents: every open
-        // vehicle link closes. New submissions for the new plate create a PENDING assignment
+      if (identityChanged) {
+        // A vehicle identity change never inherits another subject's approved documents: every open
+        // vehicle link closes. New vehicle submissions create a PENDING assignment
         // that an admin must approve before its evidence propagates.
         await tx.subjectLink.updateMany({
           where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
