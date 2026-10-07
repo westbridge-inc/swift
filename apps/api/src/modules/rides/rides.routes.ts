@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
+import { isRideClassServed } from '../../config/vehicle-classes';
 import { z } from 'zod';
 import { FareService } from './fare.service';
 import {
@@ -305,6 +306,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] The queue never holds a trip with stops (v1): its entry
     // has no place for them, and the trip would be booked later without them.
     refuseQueuedStops(body.stops);
+    if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);
 

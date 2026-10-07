@@ -32,7 +32,10 @@ import { partnerRoutes } from '../modules/partner/partner.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { LAUNCH_HIDDEN_VEHICLE_TYPES, VEHICLE_TYPES_IN_ORDER, isRideClassServed, isVehicleOffered } from '../config/vehicle-classes';
-import { offeredRideClasses } from '../modules/rides/fare.service';
+import { FareService, offeredRideClasses } from '../modules/rides/fare.service';
+import { scanRideQueue } from '../modules/rides/queue.service';
+import { makeDispatchService } from '../modules/dispatch/dispatch.service';
+import { NotificationService } from '../modules/notification/notification.service';
 
 const DAY = 86_400_000;
 const CENTRAL = { lat: 6.81, lng: -58.155 };
@@ -87,6 +90,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!app) return;
   await system(async () => {
+    await app.prisma.rideQueueEntry.deleteMany({ where: { customerId: { in: users } } });
     // A run of this file against code that still sells Group (a mutation) creates a ride; it must not outlive the run.
     await app.prisma.order.deleteMany({ where: { customerId: { in: users } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
@@ -164,6 +168,37 @@ describe('[ruling 9] nobody signs up with, switches to, or works a bus', () => {
 });
 
 describe('[ruling 9] the Group tier leaves the riders’ fares', () => {
+  it('a stale Group queue request is refused before replacing the customer’s offered trip', async () => {
+    const { userId, token } = await person('CUSTOMER', { trustLevel: 'L2' });
+    const offered = await app.prisma.rideQueueEntry.create({ data: { customerId: userId, tenantId: 'swift-default',
+      pickupLat: CENTRAL.lat, pickupLng: CENTRAL.lng, pickupAddress: 'Central GT',
+      dropoffLat: SOUTH.lat, dropoffLng: SOUTH.lng, dropoffAddress: 'South GT',
+      rideClass: 'ECONOMY', passengerCount: 1, expiresAt: new Date(Date.now() + DAY) } });
+    const res = await send('POST', '/api/v1/rides/queue/join', token, { pickup: CENTRAL, dropoff: SOUTH,
+      pickupAddress: 'Central GT', dropoffAddress: 'South GT', passengerCount: 6, rideClass: 'GROUP' });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_RIDE_CLASS');
+    expect(await app.prisma.rideQueueEntry.findUniqueOrThrow({ where: { id: offered.id }, select: { status: true } })).toEqual({ status: 'WAITING' });
+    expect(await app.prisma.rideQueueEntry.count({ where: { customerId: userId, rideClass: 'GROUP' } })).toBe(0);
+  });
+
+  it.each([-1, 1])('an existing Group queue entry becomes terminal with one honest notice (TTL sign %s)', async (sign) => {
+    const { userId } = await person('CUSTOMER', { trustLevel: 'L2' });
+    const entry = await app.prisma.rideQueueEntry.create({ data: { customerId: userId, tenantId: 'swift-default',
+      pickupLat: CENTRAL.lat, pickupLng: CENTRAL.lng, pickupAddress: 'Central GT',
+      dropoffLat: SOUTH.lat, dropoffLng: SOUTH.lng, dropoffAddress: 'South GT',
+      rideClass: 'GROUP', passengerCount: 6, expiresAt: new Date(Date.now() + sign * DAY) } });
+    const scan = () => scanRideQueue(app, new FareService(app.prisma), makeDispatchService(app), new NotificationService(app.prisma, app.io));
+    await scan(); await scan();
+    expect((await app.prisma.rideQueueEntry.findUniqueOrThrow({ where: { id: entry.id } })).status).toBe('EXPIRED');
+    const notices = await app.prisma.notification.findMany({ where: { userId } });
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.body).toMatch(/no longer offered/);
+    expect(notices[0]!.data).toMatchObject({ kind: 'ride_queue_unavailable' });
+    expect(notices[0]!.data).not.toHaveProperty('rideClass');
+    expect(await app.prisma.order.count({ where: { customerId: userId } })).toBe(0);
+  });
+
   it('only Economy and Comfort are offered: Group is not served while no offered vehicle serves it', () => {
     expect(offeredRideClasses()).toEqual(['ECONOMY', 'COMFORT']);
     expect(isRideClassServed('GROUP')).toBe(false);
