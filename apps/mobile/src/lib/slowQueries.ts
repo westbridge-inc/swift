@@ -1,6 +1,8 @@
 import type { QueryClient } from '@tanstack/react-query';
 
 export const SLOW_QUERY_MS = 5_000;
+let slowConnection = false;
+export function isSlowConnection(): boolean { return slowConnection; }
 
 /** One timer for the app, irrespective of the number of mounted query hooks.
  * Only active, fetching reads count; cached content is never gated by this. */
@@ -21,10 +23,11 @@ export function watchSlowQueries(client: QueryClient, publish: (slow: boolean) =
     }
     for (const key of starts.keys()) if (!active.has(key)) starts.delete(key);
     const remaining = oldest + SLOW_QUERY_MS - Date.now();
-    publish(remaining <= 0);
+    slowConnection = remaining <= 0;
+    publish(slowConnection);
     if (Number.isFinite(remaining) && remaining > 0) timer = setTimeout(update, remaining);
   };
   const off = client.getQueryCache().subscribe(update);
   update();
-  return () => { off(); if (timer !== undefined) clearTimeout(timer); };
+  return () => { off(); if (timer !== undefined) clearTimeout(timer); slowConnection = false; };
 }
