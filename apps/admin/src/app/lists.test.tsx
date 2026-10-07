@@ -34,7 +34,7 @@ describe('[MC-PR3] the people list asks the server for a page, a search and filt
     const { user } = renderWithQuery(<UsersPage />);
     await screen.findByRole('table', { name: 'People' });
     let q = lastQuery(fetchMock, '/api/v1/admin/users');
-    expect(Object.fromEntries(q)).toEqual({ page: '1', limit: '25' });
+    expect(Object.fromEntries(q)).toEqual({ page: '1', limit: '25', excludeFixtures: 'true' });
     expect(screen.getByText('Showing 1–1 of 60')).toBeTruthy();
 
     await user.type(screen.getByRole('searchbox', { name: 'Search by name, phone or email' }), 'real');
@@ -43,7 +43,7 @@ describe('[MC-PR3] the people list asks the server for a page, a search and filt
     await user.click(screen.getByRole('checkbox', { name: 'Show test data' }));
     await waitFor(() => {
       q = lastQuery(fetchMock, '/api/v1/admin/users');
-      expect(Object.fromEntries(q)).toEqual({ page: '1', limit: '25', search: 'real', role: 'VENDOR_OWNER', excludeFixtures: 'false' });
+      expect(Object.fromEntries(q)).toEqual({ page: '1', limit: '25', search: 'real', role: 'VENDOR_OWNER' });
     });
 
     await user.click(screen.getByRole('button', { name: /Next/ }));
@@ -52,11 +52,11 @@ describe('[MC-PR3] the people list asks the server for a page, a search and filt
   });
 
   it('[security review] says how many test records it hid, with a way to show them — nothing leaves silently', async () => {
-    const fetchMock = mockApi((r: ApiRequest) => ({ body: { success: true, data: people, meta: { ...meta(1, 1), hiddenTestRecords: r.url.searchParams.get('excludeFixtures') === 'false' ? 0 : 7 } } }));
+    const fetchMock = mockApi((r: ApiRequest) => ({ body: { success: true, data: people, meta: { ...meta(1, 1), hiddenTestRecords: r.url.searchParams.get('excludeFixtures') === 'true' ? 7 : 0 } } }));
     const { user } = renderWithQuery(<UsersPage />);
     expect(await screen.findByText(/7 test records hidden/)).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Show them' }));
-    await waitFor(() => expect(lastQuery(fetchMock, '/api/v1/admin/users').get('excludeFixtures')).toBe('false'));
+    await waitFor(() => expect(lastQuery(fetchMock, '/api/v1/admin/users').get('excludeFixtures')).toBeNull());
     expect((screen.getByRole('checkbox', { name: 'Show test data' }) as HTMLInputElement).checked).toBe(true);
     await waitFor(() => expect(screen.queryByText(/test records hidden/)).toBeNull());
   });
@@ -100,7 +100,7 @@ describe('[MC-PR3] stores, riders, drivers and orders lists', () => {
     await screen.findByRole('table', { name: 'Stores' });
     await user.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'PENDING_APPROVAL');
     await user.selectOptions(screen.getByRole('combobox', { name: 'Type' }), 'SUPERMARKET');
-    await waitFor(() => expect(Object.fromEntries(lastQuery(fetchMock, '/api/v1/admin/vendors'))).toEqual({ page: '1', limit: '25', status: 'PENDING_APPROVAL', type: 'SUPERMARKET' }));
+    await waitFor(() => expect(Object.fromEntries(lastQuery(fetchMock, '/api/v1/admin/vendors'))).toEqual({ page: '1', limit: '25', status: 'PENDING_APPROVAL', type: 'SUPERMARKET', excludeFixtures: 'true' }));
     expect(screen.getByText('No store matches this search.')).toBeTruthy();
   });
 
@@ -137,6 +137,6 @@ describe('[MC-PR3] stores, riders, drivers and orders lists', () => {
     expect(within(table).getByText('Taxi ride')).toBeTruthy();
     await user.selectOptions(screen.getByRole('combobox', { name: 'Type' }), 'TAXI');
     await user.type(screen.getByRole('searchbox', { name: 'Search by order number or address' }), 'SW-1');
-    await waitFor(() => expect(Object.fromEntries(lastQuery(fetchMock, '/api/v1/admin/orders'))).toEqual({ page: '1', limit: '25', type: 'TAXI', search: 'SW-1' }));
+    await waitFor(() => expect(Object.fromEntries(lastQuery(fetchMock, '/api/v1/admin/orders'))).toEqual({ page: '1', limit: '25', type: 'TAXI', search: 'SW-1', excludeFixtures: 'true' }));
   });
 });
