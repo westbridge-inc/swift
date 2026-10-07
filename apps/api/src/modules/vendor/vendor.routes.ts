@@ -18,7 +18,7 @@ import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/ob
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
-import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled } from './staff-invites';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -877,7 +877,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
 
-    await app.prisma.vendorStaff.delete({ where: { id: request.params.id } });
+    await app.prisma.$transaction(async (tx) => {
+      await lockStaffInviteGrant(tx, vendorId, existing.userId);
+      const current = await tx.vendorStaff.findFirst({ where: { id: request.params.id, vendorId, userId: existing.userId } });
+      if (!current) throw new NotFoundError('StaffMember', request.params.id);
+      await closePendingStaffInvites(tx, vendorId, current.userId, new Date());
+      await tx.vendorStaff.delete({ where: { id: current.id } });
+    });
     return { success: true, data: { deleted: true } };
   });
 

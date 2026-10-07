@@ -347,7 +347,7 @@ const CENSUS: Case[] = [
   // ── Store / advertiser business surfaces [GAPS].
   { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: null, why: 'GAP: store — the item editor exists and is unrouted' },
   { k: 'staff_added', d: { vendorId: 'v1' }, to: null, why: 'GAP: store team screen' },
-  { k: 'staff_invite', d: { vendorId: 'v1', audience: 'customer' }, to: { screen: 'Notifications' }, why: '[row 55] the invite is answered on the inbox Accept card' },
+  { k: 'staff_invite', d: { vendorId: 'v1', audience: 'customer' }, to: { screen: 'Storefront', params: { screen: 'Notifications' } }, why: '[row 55] the invite is answered on the inbox Accept card' },
   { k: 'review_response', d: { ratingId: 'r1', vendorId: 'v1' }, to: null, why: 'GAP: store reviews' },
   { k: 'rating_removed', to: null, why: 'GAP: a rating was removed' },
   { k: 'category_request_resolved', to: null, why: 'GAP: store category request answered' },
@@ -527,6 +527,10 @@ describe('every destination is a route the app actually registers', () => {
     const mounted = new Set([...stack.matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)].map((m) => m[1]!));
     // Every role stack sits under the root route Main, so it is reachable too.
     mounted.add('Main');
+    // The root mounts a CustomerStack separately for cross-mode inbox taps.
+    const root = readFileSync(join(process.cwd(), 'src', 'navigation', 'RootNavigator.tsx'), 'utf8');
+    expect(root).toMatch(/name="Storefront"\s+component=\{CustomerStack\}/);
+    mounted.add('Storefront');
     expect(mounted.size, 'the scan itself found the stack').toBeGreaterThan(5);
 
     const payloads = [

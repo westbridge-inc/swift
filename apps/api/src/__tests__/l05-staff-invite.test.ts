@@ -12,7 +12,8 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
-import { STAFF_INVITE_KIND, staffInviteAcceptEnabled } from '../modules/vendor/staff-invites';
+import { STAFF_INVITE_KIND, staffInviteAcceptEnabled, deliverStaffInvite } from '../modules/vendor/staff-invites';
+import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
 // Row 55. Adding a store team member by phone must not tell the owner whether
@@ -49,7 +50,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, extra: Record<s
   return { userId: user.id, token, phone };
 }
 
-function inject(method: 'GET' | 'POST', url: string, token: string, payload?: Record<string, unknown>) {
+function inject(method: 'GET' | 'POST' | 'DELETE', url: string, token: string, payload?: Record<string, unknown>) {
   return app.inject({
     method, url,
     ...(payload !== undefined ? { payload } : {}),
@@ -239,6 +240,11 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
     expect(revoked.statusCode).toBe(409);
     expect(await memberOf(late.userId)).toBeNull();
     expect(await memberOf(orphan.userId)).toBeNull();
+    for (const [person, invite] of [[late, lateInvite], [orphan, orphanInvite]] as const) {
+      const row = await app.prisma.notification.findUniqueOrThrow({ where: { id: invite!.id } });
+      expect((row.data as { state: string }).state).toBe('CLOSED');
+      expect((await inject('GET', '/api/v1/customer/team-invites', person.token)).json().data).toEqual([]);
+    }
   });
 
   it('Accept racing Decline has exactly one winner, and membership matches it', async () => {
@@ -254,6 +260,100 @@ describe('[row 55] switch ON: invite, then the person accepts', () => {
     const state = ((await app.prisma.notification.findUniqueOrThrow({ where: { id: invite!.id } })).data as { state: string }).state;
     expect(state).toBe(a.statusCode === 200 ? 'ACCEPTED' : 'DECLINED');
     expect(Boolean(await memberOf(known.userId))).toBe(a.statusCode === 200);
+  });
+});
+
+describe('invite grants serialize with revocation', () => {
+  it('concurrent deliveries record one invitation and wait for the shared grant lock', async () => {
+    const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    let release!: () => void;
+    let acquired!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { acquired = resolve; });
+    const key = JSON.stringify(['staff-invite-grant', vendorId, known.userId]);
+    const holding = app.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+      acquired();
+      await held;
+    }, { timeout: 10000 });
+    await ready;
+    const input = { vendorId, targetUserId: known.userId, role: 'MANAGER' as const, inviterId: owner.userId, now: new Date() };
+    const publisher = new NotificationService(app.prisma, app.io);
+    const deliveries = Promise.all([deliverStaffInvite(app.prisma, publisher, input), deliverStaffInvite(app.prisma, publisher, input)]);
+    let whileHeld: Awaited<ReturnType<typeof invitesOf>> = [];
+    try {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      whileHeld = await invitesOf(known.userId);
+    } finally { release(); await holding; }
+    const results = await deliveries;
+    expect(whileHeld, 'issuance cannot pass an outstanding revocation/grant lock').toHaveLength(0);
+    expect(results.sort()).toEqual(['ALREADY_INVITED', 'SENT']);
+    expect(await invitesOf(known.userId)).toHaveLength(1);
+  });
+
+  it.each(['accept', 'remove'] as const)('%s waits for the same grant lock as issuance and revocation', async action => {
+    process.env['STAFF_INVITE_ACCEPT'] = '1';
+    const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await add(known.phone, 'MANAGER');
+    const [invite] = await waitForInvites(known.userId, 1);
+    const member = action === 'remove'
+      ? await app.prisma.vendorStaff.create({ data: { vendorId, userId: known.userId, role: 'STAFF', invitedBy: owner.userId } })
+      : null;
+    let release!: () => void;
+    let acquired!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const ready = new Promise<void>((resolve) => { acquired = resolve; });
+    const key = JSON.stringify(['staff-invite-grant', vendorId, known.userId]);
+    const holding = app.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+      acquired(); await held;
+    }, { timeout: 10000 });
+    await ready;
+    let finished = false;
+    const answer = (action === 'accept'
+      ? inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token)
+      : inject('DELETE', `/api/v1/vendor/staff/${member!.id}`, owner.token))
+      .then(result => { finished = true; return result; });
+    let finishedWhileHeld: boolean;
+    try { await new Promise(resolve => setTimeout(resolve, 150)); finishedWhileHeld = finished; }
+    finally { release(); await holding; }
+    const response = await answer;
+    expect(response.statusCode, response.body).toBe(200);
+    expect(finishedWhileHeld, 'grant/revocation must wait for the shared store/person lock').toBe(false);
+    expect(Boolean(await memberOf(known.userId))).toBe(action === 'accept');
+  });
+
+  it('accepting one legacy duplicate retires the others, so a removed worker cannot regain MANAGER access', async () => {
+    process.env['STAFF_INVITE_ACCEPT'] = '1';
+    const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await add(known.phone, 'MANAGER');
+    const [first] = await waitForInvites(known.userId, 1);
+    const duplicate = await app.prisma.notification.create({ data: {
+      userId: known.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Synthetic duplicate', body: 'Fixture only', data: first!.data!,
+    } });
+    expect((await inject('POST', `/api/v1/customer/team-invites/${first!.id}/accept`, known.token)).statusCode).toBe(200);
+    const member = await memberOf(known.userId);
+    expect(member?.role).toBe('MANAGER');
+    expect(((await app.prisma.notification.findUniqueOrThrow({ where: { id: duplicate.id } })).data as { state: string }).state).toBe('CLOSED');
+    expect((await inject('DELETE', `/api/v1/vendor/staff/${member!.id}`, owner.token)).statusCode).toBe(200);
+    const rejoin = await inject('POST', `/api/v1/customer/team-invites/${duplicate.id}/accept`, known.token);
+    expect(rejoin.statusCode).toBe(409);
+    expect(await memberOf(known.userId)).toBeNull();
+    expect((await inject('GET', '/api/v1/vendor/stores', known.token)).statusCode).toBe(403);
+    expect((await inject('GET', '/api/v1/customer/team-invites', known.token)).json().data).toEqual([]);
+  });
+
+  it('removal closes all outstanding legacy grants in the same transaction as deleting membership', async () => {
+    process.env['STAFF_INVITE_ACCEPT'] = '1';
+    const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    await add(known.phone, 'MANAGER');
+    const [invite] = await waitForInvites(known.userId, 1);
+    const member = await app.prisma.vendorStaff.create({ data: { vendorId, userId: known.userId, role: 'STAFF', invitedBy: owner.userId } });
+    expect((await inject('DELETE', `/api/v1/vendor/staff/${member.id}`, owner.token)).statusCode).toBe(200);
+    const row = await app.prisma.notification.findUniqueOrThrow({ where: { id: invite!.id } });
+    expect((row.data as { state: string }).state).toBe('CLOSED');
+    expect((await inject('POST', `/api/v1/customer/team-invites/${invite!.id}/accept`, known.token)).statusCode).toBe(409);
+    expect(await memberOf(known.userId)).toBeNull();
   });
 });
 

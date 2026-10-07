@@ -76,14 +76,31 @@ const inviteWhere = (userId: string, vendorId?: string): Prisma.NotificationWher
 });
 
 interface InviteSender {
-  send(payload: {
-    userId: string;
-    type: 'SYSTEM_ANNOUNCEMENT';
-    title: string;
-    body: string;
-    audience: 'customer';
-    data: Record<string, unknown>;
-  }): Promise<string>;
+  publishPersisted(notificationId: string): Promise<boolean>;
+}
+
+/** One grant lock is shared by issuance, answers and owner revocation. A
+ * notification-row lock alone cannot serialize two different invite rows. */
+export async function lockStaffInviteGrant(tx: Prisma.TransactionClient, vendorId: string, userId: string) {
+  const key = JSON.stringify(['staff-invite-grant', vendorId, userId]);
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+}
+
+/** Caller holds the grant lock. Close even legacy duplicates, including
+ * expired rows, so no old invitation can outlive acceptance or revocation. */
+export async function closePendingStaffInvites(
+  tx: Prisma.TransactionClient, vendorId: string, userId: string, now: Date, exceptId?: string,
+) {
+  const rows = await tx.notification.findMany({
+    where: inviteWhere(userId, vendorId), select: { id: true, data: true },
+  });
+  for (const row of rows) {
+    if (row.id === exceptId) continue;
+    await tx.notification.update({ where: { id: row.id }, data: {
+      isRead: true, readAt: now,
+      data: { ...(row.data as Record<string, unknown>), state: 'CLOSED', decidedAt: now.toISOString() },
+    } });
+  }
 }
 
 /**
@@ -98,40 +115,44 @@ export async function deliverStaffInvite(
 ): Promise<'SENT' | 'ALREADY_MEMBER' | 'ALREADY_INVITED' | 'NOT_INVITABLE'> {
   // [REVIEW-PARTNER] A demo account never receives a store membership invite.
   if (await isReviewAccount(prisma, input.targetUserId)) return 'NOT_INVITABLE';
-  const member = await prisma.vendorStaff.findUnique({
-    where: { vendorId_userId: { vendorId: input.vendorId, userId: input.targetUserId } },
-    select: { id: true },
-  });
-  if (member) return 'ALREADY_MEMBER';
-  const live = await prisma.notification.findMany({
-    where: inviteWhere(input.targetUserId, input.vendorId),
-    select: { data: true },
-  });
-  if (live.some((n) => {
-    const d = readInvite(n.data);
-    return d !== null && new Date(d.expiresAt).getTime() > input.now.getTime();
-  })) return 'ALREADY_INVITED';
+  const committed = await prisma.$transaction(async (tx) => {
+    await lockStaffInviteGrant(tx, input.vendorId, input.targetUserId);
+    const member = await tx.vendorStaff.findUnique({
+      where: { vendorId_userId: { vendorId: input.vendorId, userId: input.targetUserId } },
+      select: { id: true },
+    });
+    if (member) return { result: 'ALREADY_MEMBER' as const };
+    const live = await tx.notification.findMany({
+      where: inviteWhere(input.targetUserId, input.vendorId), select: { data: true },
+    });
+    if (live.some((n) => {
+      const d = readInvite(n.data);
+      return d !== null && new Date(d.expiresAt).getTime() > input.now.getTime();
+    })) return { result: 'ALREADY_INVITED' as const };
 
-  const vendor = await prisma.vendor.findUniqueOrThrow({ where: { id: input.vendorId }, select: { name: true } });
-  const roleWords = input.role === 'MANAGER' ? 'a manager' : 'staff';
-  await sender.send({
-    userId: input.targetUserId,
-    type: 'SYSTEM_ANNOUNCEMENT',
-    title: 'Team invite',
-    body: `${vendor.name} invited you to join their team as ${roleWords}. Open your notifications to accept or decline.`,
-    audience: 'customer',
-    data: {
-      // A literal, so the push-kind censuses (alert class, tap router) see it.
-      kind: 'staff_invite',
-      vendorId: input.vendorId,
-      storeName: vendor.name,
-      role: input.role,
-      invitedBy: input.inviterId,
-      expiresAt: new Date(input.now.getTime() + STAFF_INVITE_TTL_MS).toISOString(),
-      state: 'PENDING',
-    } satisfies Omit<InviteData, 'audience'>,
+    const vendor = await tx.vendor.findUnique({
+      where: { id: input.vendorId }, select: { name: true, owner: { select: { userId: true } } },
+    });
+    if (!vendor || vendor.owner.userId !== input.inviterId) return { result: 'NOT_INVITABLE' as const };
+    const roleWords = input.role === 'MANAGER' ? 'a manager' : 'staff';
+    // The invite must be persisted by the SAME transaction holding the grant
+    // lock; sender.send would write through a separate client and fan out early.
+    const notification = await tx.notification.create({ data: {
+      userId: input.targetUserId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Team invite',
+      body: `${vendor.name} invited you to join their team as ${roleWords}. Open your notifications to accept or decline.`,
+      data: {
+        kind: 'staff_invite', vendorId: input.vendorId, storeName: vendor.name,
+        role: input.role, invitedBy: input.inviterId,
+        expiresAt: new Date(input.now.getTime() + STAFF_INVITE_TTL_MS).toISOString(),
+        state: 'PENDING', audience: 'customer',
+      } satisfies InviteData,
+    }, select: { id: true } });
+    return { result: 'SENT' as const, notificationId: notification.id };
   });
-  return 'SENT';
+  if ('notificationId' in committed && committed.notificationId) {
+    await sender.publishPersisted(committed.notificationId);
+  }
+  return committed.result;
 }
 
 /** The caller's own live invites, newest first. */
@@ -160,13 +181,19 @@ export async function decideStaffInvite(
 ) {
   // [REVIEW-PARTNER] Accepting is a membership grant: never to a demo account.
   if (input.decision === 'ACCEPT') await refuseReviewAccountRoleGrant(prisma, input.userId);
-  return prisma.$transaction(async (tx) => {
+  const candidate = await prisma.notification.findFirst({
+    where: { id: input.inviteId, userId: input.userId }, select: { data: true },
+  });
+  const candidateInvite = candidate && readInvite(candidate.data);
+  if (!candidateInvite) throw new NotFoundError('Invite', input.inviteId);
+  const outcome = await prisma.$transaction(async (tx) => {
+    await lockStaffInviteGrant(tx, candidateInvite.vendorId, input.userId);
     const locked = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM "notifications" WHERE id = ${input.inviteId} AND "userId" = ${input.userId} FOR UPDATE`;
     if (locked.length === 0) throw new NotFoundError('Invite', input.inviteId);
     const row = await tx.notification.findUniqueOrThrow({ where: { id: input.inviteId }, select: { data: true } });
     const invite = readInvite(row.data);
-    if (!invite) throw new NotFoundError('Invite', input.inviteId);
+    if (!invite || invite.vendorId !== candidateInvite.vendorId) throw new NotFoundError('Invite', input.inviteId);
     if (invite.state !== 'PENDING') {
       throw new AppError(409, 'INVITE_CLOSED', 'This invite has already been answered.');
     }
@@ -182,7 +209,7 @@ export async function decideStaffInvite(
     };
     if (new Date(invite.expiresAt).getTime() <= input.now.getTime()) {
       await close('CLOSED');
-      throw new AppError(410, 'INVITE_EXPIRED', 'This invite has expired. Ask the store owner to send a new one.');
+      return { error: new AppError(410, 'INVITE_EXPIRED', 'This invite has expired. Ask the store owner to send a new one.') };
     }
     if (input.decision === 'DECLINE') {
       await close('DECLINED');
@@ -195,7 +222,7 @@ export async function decideStaffInvite(
     });
     if (!vendor || vendor.owner.userId !== invite.invitedBy || vendor.owner.userId === input.userId) {
       await close('CLOSED');
-      throw new AppError(409, 'INVITE_CLOSED', 'This invite is no longer valid.');
+      return { error: new AppError(409, 'INVITE_CLOSED', 'This invite is no longer valid.') };
     }
     const existing = await tx.vendorStaff.findUnique({
       where: { vendorId_userId: { vendorId: vendor.id, userId: input.userId } },
@@ -206,7 +233,12 @@ export async function decideStaffInvite(
         data: { vendorId: vendor.id, userId: input.userId, role: invite.role, invitedBy: invite.invitedBy },
       });
     }
+    await closePendingStaffInvites(tx, vendor.id, input.userId, input.now, input.inviteId);
     await close('ACCEPTED');
     return { decision: 'ACCEPTED' as const, storeName: vendor.name, role: (existing?.role ?? invite.role) as StaffInviteRole };
   });
+  // Rejected-but-closed invitations must commit before returning the HTTP
+  // error; throwing inside the transaction would resurrect the pending card.
+  if ('error' in outcome) throw outcome.error;
+  return outcome;
 }

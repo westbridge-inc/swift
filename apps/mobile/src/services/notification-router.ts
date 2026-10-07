@@ -32,7 +32,7 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
 
   // [Row 55] A store team invite is answered on the inbox, where its Accept /
   // Decline card sits (the invitee joins only by accepting there).
-  if (kind === 'staff_invite') return { screen: 'Notifications' };
+  if (kind === 'staff_invite') return { screen: 'Storefront', params: { screen: 'Notifications' } };
 
   // Rides: queue outcomes + anything ride-flavoured lands on the taxi screen
   // (it reads the active ride itself — T21 restore does the rest).
