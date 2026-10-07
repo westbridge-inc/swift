@@ -272,12 +272,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 

@@ -9,6 +9,7 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
 import { sendStepUpOtp, verifyStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import {
@@ -142,6 +143,8 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post('/register', authRateLimit, async (request, reply) => {
     const body = registerSchema.parse(request.body);
+    // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only — checked before the signup proof is spent.
+    assertNameNotReserved(body.firstName, body.phone);
     // Read at request time so the flag flips without a restart (tsx watch) and
     // tests can exercise both modes.
     // [REPORT-021 F-021-05] Fail CLOSED: consent is required unless the

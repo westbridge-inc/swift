@@ -65,6 +65,7 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
+import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { vendorActivationNext, disclosureMissingWords } from './vendor-activation';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
@@ -1064,8 +1065,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/users', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { role, status, search } = usersQuerySchema.parse(request.query);
+    // [MC-PR3] test data is left out unless asked for, in the query, so the total stays true
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(role && { activeRole: role }),
       ...(status && { status }),
       ...(search && {
@@ -1077,8 +1080,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_USER, excludeFixtures);
 
-    const [users, total] = await Promise.all([
+    const [users, total, hiddenTestRecords] = await Promise.all([
       app.prisma.user.findMany({
         where,
         select: {
@@ -1100,9 +1104,11 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
       }),
       app.prisma.user.count({ where }),
+      hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(users, total, { page, limit, skip }) };
+    const result = paginatedResponse(users, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
@@ -1280,8 +1286,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/vendors', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = vendorsQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { vendorType: type }),
       ...(search && {
@@ -1291,8 +1298,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_VENDOR, excludeFixtures);
 
-    const [vendors, total] = await Promise.all([
+    const [vendors, total, hiddenTestRecords] = await Promise.all([
       app.prisma.vendor.findMany({
         where,
         include: {
@@ -1305,9 +1313,11 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
       }),
       app.prisma.vendor.count({ where }),
+      hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors, total, { page, limit, skip }) };
+    const result = paginatedResponse(vendors, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1547,8 +1557,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1565,8 +1576,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [riders, total] = await Promise.all([
+    const [riders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.rider.findMany({
         where,
         include: {
@@ -1578,9 +1590,11 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
       }),
       app.prisma.rider.count({ where }),
+      hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(riders, total, { page, limit, skip }) };
+    const result = paginatedResponse(riders, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1729,8 +1743,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1746,8 +1761,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [drivers, total] = await Promise.all([
+    const [drivers, total, hiddenTestRecords] = await Promise.all([
       app.prisma.driver.findMany({
         where,
         include: {
@@ -1759,9 +1775,11 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
       }),
       app.prisma.driver.count({ where }),
+      hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(drivers, total, { page, limit, skip }) };
+    const result = paginatedResponse(drivers, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1922,8 +1940,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/orders', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, dateFrom, dateTo, search } = adminOrdersQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { orderType: type }),
       ...(dateFrom || dateTo
@@ -1941,8 +1960,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_ORDER, excludeFixtures);
 
-    const [orders, total] = await Promise.all([
+    const [orders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.order.findMany({
         where,
         // [A-15] The handover secrets never enter the admin DTO. `include`
@@ -1961,11 +1981,13 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
       }),
       app.prisma.order.count({ where }),
+      hiddenWhere ? app.prisma.order.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // 13 Decimal columns on the order + 7 more on every included OrderItem,
     // all of which the admin client types as `number`. Coerce at the seam.
-    return { success: true, ...paginatedResponse(coerceMoney(orders), total, { page, limit, skip }) };
+    const result = paginatedResponse(coerceMoney(orders), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** Live ops snapshot for the command map: every online mover's position +
