@@ -91,6 +91,13 @@ describe('the card self-check', () => {
     expect(formatSelfCheck(await runPaymentsSelfCheck(['card'], { ...CARD_ENV, POWERTRANZ_PASSWORD: '' }, { redis }))).toBe('FAIL card: settings complete (POWERTRANZ_PASSWORD)');
     expect(formatSelfCheck(await runPaymentsSelfCheck(['card'], { ...CARD_ENV, CARD_RAIL_PROVIDER: 'simulator' }, { redis }))).toBe('FAIL card: CARD_RAIL_PROVIDER is set to powertranz');
   });
+
+  it('[#1520 review S3] live cards on any server but production: FAIL, naming the setting — a test server never takes real cards', async () => {
+    const gw = gateway();
+    const printed = formatSelfCheck(await runPaymentsSelfCheck(['card'], { ...CARD_ENV, CARD_RAIL_ENVIRONMENT: 'live', POWERTRANZ_API_URL: 'https://gateway.ptranz.com' }, { redis, fetch: gw.fetch }));
+    expect(printed).toBe('FAIL card: settings complete (CARD_RAIL_ENVIRONMENT)');
+    expect(gw.paths).toEqual([]);
+  });
 });
 
 describe('the MMG checkout self-check', () => {
@@ -162,6 +169,14 @@ describe('the owner tool: deploy/owner/swift-payments-setup.command', () => {
     expect(code).not.toMatch(/echo\s+"?\$value|say\s+"?\$value|\$\{value\}/);
     expect(code).not.toMatch(/mktemp|> ?\/tmp|tee /);
     expect(code).toMatch(/echo "saved \$name"/);
+  });
+
+  it('[review S4] asks for the account label and this server\'s public address; uses a gateway key only when entered in this run; says plainly when the check could not run', () => {
+    expect(code).toMatch(/"CARD_RAIL_ACCOUNT=\$account"/);
+    expect(code).toMatch(/"API_PUBLIC_URL=\$public_url"/);
+    expect(code).not.toMatch(/swift-secrets list/);
+    expect(code).toMatch(/gateway_key_saved="\$LAST_SAVED"/);
+    expect(code).toMatch(/no OK \/ FAIL lines came back/);
   });
 
   it('checks on the server with the self-check, in a one-off container, and switches nothing on', () => {

@@ -64,7 +64,7 @@ async function cardLines(env: Record<string, string | undefined>, deps: SelfChec
   const lines = await provider.selfCheck({
     preprocess: provider.binding.environment === 'sandbox',
     returnUrl: `${base}/api/v1/billing/card/return?session=selfcheck&state=${'0'.repeat(43)}`,
-  }).catch(() => [{ check: 'gateway reachable', ok: false }]);
+  }).catch(() => [{ check: 'the provider checks could finish', ok: false }]);
   for (const line of lines) out.push({ ok: line.ok, check: `card: ${line.check}` });
   return out;
 }

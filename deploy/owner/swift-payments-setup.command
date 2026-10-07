@@ -9,7 +9,8 @@
 #   card  (the card provider, PowerTranz)
 #         POWERTRANZ_ID, POWERTRANZ_PASSWORD ........ hidden prompts
 #         POWERTRANZ_GATEWAY_KEY ..................... hidden, optional (Enter = none issued yet)
-#         test system or live cards; the hosted payment page's set and name (not secrets);
+#         test system or live cards; the hosted payment page's set and name; a short label
+#         for the merchant account; this server's public API address (none of them secrets);
 #         for live cards, the production API address PowerTranz gave you (not a secret)
 #   mmg   (the MMG checkout)
 #         MMG_CHECKOUT_PRIVATE_KEY, MMG_CHECKOUT_PUBLIC_KEY .. PEM key FILES, by path (never pasted)
@@ -57,13 +58,16 @@ SSH=(ssh -i "$key" -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInte
 "${SSH[@]}" -n true </dev/null || die "cannot connect to $target with $key"
 
 # ask_hidden NAME OPTIONAL — a value typed twice at a hidden prompt, sent on stdin only.
+# LAST_SAVED says whether THIS run saved it (an optional one may be skipped).
+LAST_SAVED=0
 ask_hidden() {
   local name="$1" optional="$2" value again
+  LAST_SAVED=0
   while :; do
     IFS= read -r -s -p "Value for $name (hidden${optional:+, Enter to skip}): " value || die "no input for $name"
     say ""
     if [ -z "$value" ]; then
-      if [ -n "$optional" ]; then say "skipped $name"; return 0; fi
+      if [ -n "$optional" ]; then say "skipped $name (none will be used)"; return 0; fi
       say "nothing was entered for $name, asking again"; continue
     fi
     IFS= read -r -s -p "Repeat $name (hidden): " again || die "no input for $name"
@@ -74,6 +78,7 @@ ask_hidden() {
   unset again
   if printf '%s' "$value" | "${SSH[@]}" "sudo -n swift-secrets set $name" >/dev/null; then
     unset value
+    LAST_SAVED=1
     echo "saved $name"
   else
     unset value
@@ -117,6 +122,9 @@ if [ "$which" = card ] || [ "$which" = both ]; then
   say ""
   say "Card payments (PowerTranz). Use the values PowerTranz sent you."
   env_choice="$(ask_setting "Test system (sandbox) or live cards? type sandbox or live" '^(sandbox|live)$')"
+  if [ "$env_choice" = live ]; then say "Live cards are accepted only by the PRODUCTION server: any other server answers FAIL and refuses to start with them."; fi
+  account="$(ask_setting "A short label for this merchant account (letters, digits . _ -), e.g. swift-gy" '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')"
+  public_url="$(ask_setting "This server's own public API address (https://... with no path)" '^https://[A-Za-z0-9.-]+$')"
   page_set="$(ask_setting "Hosted payment page SET (pages made in the merchant portal start with PTZ/)" '^[A-Za-z0-9 _./-]{1,50}$')"
   page_name="$(ask_setting "Hosted payment page NAME" '^[A-Za-z0-9 _./-]{1,50}$')"
   api_url=""
@@ -127,12 +135,15 @@ if [ "$which" = card ] || [ "$which" = both ]; then
   ask_hidden POWERTRANZ_ID ""
   ask_hidden POWERTRANZ_PASSWORD ""
   ask_hidden POWERTRANZ_GATEWAY_KEY optional
-  CHECK_ENV+=(-e CARD_RAIL_PROVIDER=powertranz -e "CARD_RAIL_ENVIRONMENT=$env_choice"
+  gateway_key_saved="$LAST_SAVED"
+  CHECK_ENV+=(-e CARD_RAIL_PROVIDER=powertranz -e "CARD_RAIL_ENVIRONMENT=$env_choice" -e "CARD_RAIL_ACCOUNT=$account" -e "API_PUBLIC_URL=$public_url"
     -e "POWERTRANZ_PAGE_SET=$page_set" -e "POWERTRANZ_PAGE_NAME=$page_name"
     -e POWERTRANZ_ID_FILE=/run/secrets/POWERTRANZ_ID -e POWERTRANZ_PASSWORD_FILE=/run/secrets/POWERTRANZ_PASSWORD)
-  ENV_LINES+=("CARD_RAIL_PROVIDER=powertranz" "CARD_RAIL_ENVIRONMENT=$env_choice" "POWERTRANZ_PAGE_SET=$page_set" "POWERTRANZ_PAGE_NAME=$page_name"
+  ENV_LINES+=("CARD_RAIL_PROVIDER=powertranz" "CARD_RAIL_ENVIRONMENT=$env_choice" "CARD_RAIL_ACCOUNT=$account" "API_PUBLIC_URL=$public_url" "POWERTRANZ_PAGE_SET=$page_set" "POWERTRANZ_PAGE_NAME=$page_name"
     "POWERTRANZ_ID_FILE=/run/secrets/POWERTRANZ_ID" "POWERTRANZ_PASSWORD_FILE=/run/secrets/POWERTRANZ_PASSWORD")
-  if "${SSH[@]}" -n "sudo -n swift-secrets list" </dev/null | grep -qx POWERTRANZ_GATEWAY_KEY; then
+  # Only a gateway key entered in THIS run is used: one left from an earlier
+  # (for example, test-system) run is never carried into this setup.
+  if [ "$gateway_key_saved" = 1 ]; then
     CHECK_ENV+=(-e POWERTRANZ_GATEWAY_KEY_FILE=/run/secrets/POWERTRANZ_GATEWAY_KEY)
     ENV_LINES+=("POWERTRANZ_GATEWAY_KEY_FILE=/run/secrets/POWERTRANZ_GATEWAY_KEY")
   fi
@@ -166,13 +177,18 @@ remote+=" api node dist/boot/payments-self-check.js ${PARTS[*]}"
 say ""
 say "Checking on the server (OK / FAIL only; nothing is charged)..."
 set +e
-"${SSH[@]}" -n "$remote" </dev/null 2>/dev/null | grep -E '^(OK  |FAIL) '
-status=${PIPESTATUS[0]}
+answer="$("${SSH[@]}" -n "$remote" </dev/null 2>/dev/null)"
+status=$?
 set -e
+lines="$(printf '%s\n' "$answer" | grep -E '^(OK  |FAIL) ' || true)"
+unset answer
+if [ -n "$lines" ]; then printf '%s\n' "$lines"; fi
 
 say ""
 say "Send these settings lines to the coordinator for the server's deploy/.env (no secrets in them):"
 for line in "${ENV_LINES[@]}"; do say "  $line"; done
 say "Card payments stay OFF until your go: the coordinator switches them on with you."
-if [ "$status" -eq 0 ]; then say "All checks passed."; else say "Some checks did not pass: see the FAIL lines above."; fi
+if [ "$status" -eq 0 ]; then say "All checks passed."
+elif [ -z "$lines" ]; then say "The check could not run on the server (no OK / FAIL lines came back). Nothing was shown; tell the coordinator."
+else say "Some checks did not pass: see the FAIL lines above."; fi
 exit "$status"
