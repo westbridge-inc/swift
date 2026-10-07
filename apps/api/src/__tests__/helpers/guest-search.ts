@@ -96,6 +96,8 @@ export async function guestSearchApp(max = 200) {
   const categories: Row[] = [{ id: 'licensed', tenantId: 'public', status: 'ACTIVE', slug: 'licensed', kind: 'PRODUCT' }];
   const tags: Row[] = [{ tenantId: 'public', itemId: 'gated-item', categoryId: 'licensed' }];
   const sessions = new Map<string, Row>();
+  // A session row names its account; each account (one tenant, as in the database) is its own read.
+  const users = new Map<string, Row>();
   function delegate(rows: Row[]) {
     const findMany = vi.fn(async (args: Row = {}) => {
       const tenantId = getTenantId();
@@ -108,6 +110,7 @@ export async function guestSearchApp(max = 200) {
     tenant: delegate(tenants), vendor: delegate(vendors), item: delegate(items),
     actorRatingStat: { findMany: vi.fn(async () => []) },
     session: { findUnique: vi.fn(async ({ where }: Row) => sessions.get(where.token) ?? null) },
+    user: { findUnique: vi.fn(async ({ where }: Row) => users.get(where.id) ?? null) },
     discoveryCategory: delegate(categories),
     categoryDocumentGate: { findMany: vi.fn(async () => [{ code: 'licence', categorySlug: 'licensed', categoryKind: null, enforcement: 'BLOCK_LISTING', requiredDocType: { legacyCode: 'LICENCE', displayName: 'Licence' } }]) },
     verificationDocument: { findFirst: vi.fn(async (): Promise<{ id: string } | null> => null) },
@@ -124,10 +127,10 @@ export async function guestSearchApp(max = 200) {
   await app.register(marketRoutes, { prefix: '/api/v1/market' });
   await app.ready();
   function token(tenantId = 'other', role = 'CUSTOMER') {
-    const value = app.jwt.sign({ userId: 'test-user', role, jti: `${tenantId}-${role}` });
-    sessions.set(value, { id: 'test-session', expiresAt: new Date(Date.now() + 60_000), authMethod: 'OTP', user: {
-      id: 'test-user', tenantId, tenant: { kind: 'PRODUCTION' }, status: 'ACTIVE', roles: [role], activeRole: role,
-    } });
+    const userId = `test-user-${tenantId}-${role}`;
+    const value = app.jwt.sign({ userId, role, jti: `${tenantId}-${role}` });
+    users.set(userId, { id: userId, tenantId, tenant: { kind: 'PRODUCTION' }, status: 'ACTIVE', roles: [role], activeRole: role });
+    sessions.set(value, { id: 'test-session', userId, expiresAt: new Date(Date.now() + 60_000), authMethod: 'OTP' });
     return value;
   }
   return { app, db, tenants, vendors, items, categories, tags, token, sessions };

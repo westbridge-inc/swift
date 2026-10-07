@@ -3,7 +3,8 @@ import { reviewGate } from '../modules/review/gate';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { TenantKind } from '@prisma/client';
-import { enterTenant, runWithTenant } from './prisma';
+import { enterTenant } from './prisma';
+import { runWithTenant } from './tenant-context';
 import { resolveIdentityById } from '../modules/auth/preauth-identity';
 import { AuthService } from '../modules/auth/auth.service';
 import {
