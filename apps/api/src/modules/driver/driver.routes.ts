@@ -1,3 +1,4 @@
+import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
@@ -15,11 +16,12 @@ import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
+import { loadTaxiStops, offerItinerary, readRideItinerary } from '../rides/taxi-stops-read';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
-import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
@@ -30,6 +32,7 @@ import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handove
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
@@ -54,6 +57,7 @@ import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integr
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { normalizeRegistrationMark } from '../verification/subjects';
+import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -163,13 +167,19 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return {
       success: true,
-      data: driver ? { ...driver, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
+      data: driver ? { ...driver, subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
     };
   });
 
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: its taxi
+    // driver has no MMG pay link to set or clear. Refused before any step-up,
+    // money-surface command or owner notice (whose SMS would reach a fictional number).
+    if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') {
+      throw new ReviewDemoMoneyRefusedError();
+    }
     // [High #9 · DS109] Changing the plate re-identifies the vehicle the driver operates.
     // Step-up first (the same proof as a money surface), and the old vehicle links close so
     // GO re-checks the EXACT new vehicle — a retyped plate never carries another subject's
@@ -190,53 +200,61 @@ export async function driverRoutes(app: FastifyInstance) {
       await assertVelocity(app, request, 'money.mmg-link'); // [R048-007] a money surface: fails closed when the control is down
     }
 
-    const driver = await app.prisma.driver.update({
-      where: { userId: request.user.userId },
-      data: {
-        ...(body.vehicleMake !== undefined && { vehicleMake: body.vehicleMake }),
-        ...(body.vehicleModel !== undefined && { vehicleModel: body.vehicleModel }),
-        ...(body.vehicleYear !== undefined && { vehicleYear: body.vehicleYear }),
-        ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
-        ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
-        // [REPORT-014 F-014-01] rideClass and vehicleCapacity are TAXONOMY
-        // authority (derived from the verified vehicle type at provisioning/
-        // admin verification), never self-serve: an online driver could
-        // otherwise tag a 4-seat car GROUP and receive 14-passenger work.
-        // The fields remain accepted-and-ignored so legacy clients don't 400.
-        ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
-        ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
-        ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
-        ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
-        ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
-        // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
-        // NOW (same atomic shape as the admin reject path) and clear the legacy verification
-        // flag, so the new vehicle must be verified before this driver is dispatchable again.
-        ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            phone: true,
-            email: true,
-            avatar: true,
-            activeRole: true,
-            lastMoverRole: true,
+    const driver = await app.prisma.$transaction(async (tx) => {
+      await lockUserRoleAuthority(tx, request.user.userId);
+      const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
+        SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
+      if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
+      const driver = await tx.driver.update({
+        where: { userId: request.user.userId },
+        data: {
+          ...(body.vehicleMake !== undefined && { vehicleMake: body.vehicleMake }),
+          ...(body.vehicleModel !== undefined && { vehicleModel: body.vehicleModel }),
+          ...(body.vehicleYear !== undefined && { vehicleYear: body.vehicleYear }),
+          ...(body.vehicleColor !== undefined && { vehicleColor: body.vehicleColor }),
+          ...(body.licensePlate !== undefined && { licensePlate: body.licensePlate }),
+          // [REPORT-014 F-014-01] rideClass and vehicleCapacity are TAXONOMY
+          // authority (derived from the verified vehicle type at provisioning/
+          // admin verification), never self-serve: an online driver could
+          // otherwise tag a 4-seat car GROUP and receive 14-passenger work.
+          // The fields remain accepted-and-ignored so legacy clients don't 400.
+          ...(body.profilePhotoUrl !== undefined && { profilePhotoUrl: body.profilePhotoUrl }),
+          ...(body.nationalIdUrl !== undefined && { nationalIdUrl: body.nationalIdUrl }),
+          ...(body.driverLicenseUrl !== undefined && { driverLicenseUrl: body.driverLicenseUrl }),
+          ...(body.vehicleInsuranceUrl !== undefined && { vehicleInsuranceUrl: body.vehicleInsuranceUrl }),
+          ...(body.vehicleInspectionUrl !== undefined && { vehicleInspectionUrl: body.vehicleInspectionUrl }),
+          // [High #9 · DS109] A real plate change re-identifies the vehicle: retire live supply
+          // NOW (same atomic shape as the admin reject path) and clear the legacy verification
+          // flag, so the new vehicle must be verified before this driver is dispatchable again.
+          ...(plateChanged ? { isOnline: false, locationSessionId: null, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } : {}),
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              phone: true,
+              email: true,
+              avatar: true,
+              activeRole: true,
+              lastMoverRole: true,
+            },
           },
         },
-      },
-    });
-    if (plateChanged) {
-      // A plate change never inherits another subject's approved documents: every open
-      // vehicle link closes. New submissions for the new plate create a PENDING assignment
-      // that an admin must approve before its evidence propagates.
-      await app.prisma.subjectLink.updateMany({
-        where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
-        data: { validTo: new Date() },
       });
-    }
+      if (plateChanged) {
+        // A plate change never inherits another subject's approved documents: every open
+        // vehicle link closes. New submissions for the new plate create a PENDING assignment
+        // that an admin must approve before its evidence propagates.
+        await tx.subjectLink.updateMany({
+          where: { accountId: request.user.userId, relation: 'ASSIGNED_DRIVER', validTo: null, subject: { kind: 'VEHICLE' } },
+          data: { validTo: new Date() },
+        });
+      }
+
+      return driver;
+    });
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'DRIVER', entityId: me.id, userId: request.user.userId });
     } else if (mmgPayUrl !== undefined) {
@@ -335,7 +353,10 @@ export async function driverRoutes(app: FastifyInstance) {
 
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — drivers require a
     // subscription row; the verdict maps onto this route's historical codes.
-    const operability = subscriptionOperability(driver.subscription, { missingRow: 'BLOCK' });
+    // [REVIEW-PARTNER] Except in the store-review fiction, which has no money
+    // rail and therefore never holds one (review/demo-policy.ts).
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
@@ -358,6 +379,10 @@ export async function driverRoutes(app: FastifyInstance) {
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'DRIVER');
+      await lockMoverSources(tx, feePayer);
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') })).operable) {
+        throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active shared weekly fee is required to go online.');
+      }
 
       // Revalidate the exact authenticated session under the User lock. A
       // logout/reuse-revocation that completed during the slower gates must
@@ -393,32 +418,21 @@ export async function driverRoutes(app: FastifyInstance) {
       // User lock document decisions take — an expiry/rejection committing
       // after the route's preview can no longer write stale supply online.
       // Persisted vehicle class; legacy flag from the LOCKED snapshot.
-      const liveGate = await verification.getLiveOperationStatus(request.user.userId, {
-        vehicleType: driver.vehicleType,
-        legacyVerified: snapshot.documentsVerified,
-      }, tx);
-      if (!liveGate.allowed) {
-        throw liveGate.reason === 'insurance'
-          ? new AppError(403, 'INSURANCE_HIRE_CLASS_REQUIRED', 'A current hire-class motor insurance must be verified before you can carry passengers')
-          : new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
-      }
-
-      const activated = await tx.driver.update({
-        where: { id: driver.id },
-        data: {
-          isOnline: true,
-          isAvailable: !snapshot.currentRideId,
-          currentLat: location.latitude,
-          currentLng: location.longitude,
-          lastLocationUpdate: new Date(),
-          locationSessionId,
-        },
-      });
+      const liveGate = await lockMoverDocuments(tx, request.user.userId, 'DRIVER');
+      assertMoverDocuments(liveGate);
+      const activated = await tx.$queryRaw<Array<{ isOnline: boolean; isAvailable: boolean }>>`
+        UPDATE drivers SET "isOnline" = true, "isAvailable" = ${!snapshot.currentRideId},
+          "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
+          "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          "updatedAt" = clock_timestamp()
+        WHERE id = ${driver.id} AND ${documentDeadlineSql(liveGate)}
+        RETURNING "isOnline", "isAvailable"`;
+      if (!activated[0]) throw expiredDocumentAuthority();
       await tx.user.update({
         where: { id: request.user.userId },
         data: { lastMoverRole: 'DRIVER' },
       });
-      return { updated: activated, retiredRiderId };
+      return { updated: activated[0], retiredRiderId };
     });
 
     // PostgreSQL is authoritative. Redis only debounces later GPS writes; a
@@ -718,6 +732,9 @@ export async function driverRoutes(app: FastifyInstance) {
     // one batched read from the ONE mapper.
     const { ratingSurfaces } = await import('../rating/rating-surface');
     const passengerSurfaces = await ratingSurfaces(app.prisma, 'CUSTOMER', orders.map((o) => o.customer?.id).filter((x): x is string => !!x));
+    // [TAXI multi-stop] The stops of the rides that have them, in one read (none
+    // when no ride on the board has stops).
+    const itineraries = await loadTaxiStops(app.prisma, orders.filter((o) => o.taxiStopCount != null).map((o) => o.id));
 
     // Enrich with distance from driver to pickup
     const enriched = orders.map((order) => {
@@ -750,6 +767,10 @@ export async function driverRoutes(app: FastifyInstance) {
           ? { ...order.customer, displayRating: passengerSurfaces.get(order.customer.id)?.displayRating ?? null }
           : order.customer,
         createdAt: order.createdAt,
+        // [TAXI multi-stop] A ride with stops: how many and where, in order. The
+        // dropoff above stays the FINAL destination; distance, duration and
+        // fare are the whole route's. A ride without stops gains no key.
+        ...offerItinerary(order, itineraries),
       };
     });
 
@@ -783,7 +804,10 @@ export async function driverRoutes(app: FastifyInstance) {
       const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [order.customer.id])).get(order.customer.id);
       (order.customer as { displayRating?: number | null }).displayRating = surface?.displayRating ?? null;
     }
-    return { success: true, data: order };
+    // [TAXI multi-stop] A ride with stops: each with its progress, in order, and
+    // the one the ride is heading for. A ride without them gains no key.
+    const itinerary = order ? await readRideItinerary(app.prisma, order) : null;
+    return { success: true, data: order && itinerary ? { ...order, ...itinerary } : order };
   });
 
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
@@ -1700,6 +1724,18 @@ export async function driverRoutes(app: FastifyInstance) {
 
   // ─── Subscription ──────────────────────────────────────────────────────
 
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the driver starts and
+  // follows a checkout for their own weekly fee: the payer's ONE canonical
+  // subscription [#1393 mover fee authority], the same one GET /subscription
+  // shows, which may sit on the mover's rider profile.
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
+    subscriptionFor: async (request) => {
+      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+    },
+  });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },
@@ -1712,12 +1748,23 @@ export async function driverRoutes(app: FastifyInstance) {
       },
     });
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-    const sub = driver!.subscription;
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const sub = (await readMoverFeeSubscription(app.prisma, feePayer))?.subscription;
     if (!sub) return { success: true, data: null };
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
-    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-    return { success: true, data: { ...sub, ...(await sanDisplay(app.prisma, sub)), ...(await payInfo(app.prisma, sub)) } };
+    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1], then
+    // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+    return {
+      success: true,
+      data: {
+        ...sub,
+        moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
+        ...(await sanDisplay(app.prisma, sub)),
+        ...(await payInfo(app.prisma, sub)),
+        ...(await mmgCheckout.feePayload(sub, request.headers)),
+      },
+    };
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (CASH prepaid vs
@@ -1731,8 +1778,10 @@ export async function driverRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     await requireStepUp(app, request);
-    const sub = await app.prisma.subscription.findFirst({ where: { driverId: driver.id } });
+    const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
     const updated = body.method === 'NONE'

@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { Card, LabeledInput, PillButton, Screen, T } from '../../../kit';
+import { Card, LabeledInput, PillButton, T } from '../../../kit';
 import { GUTTER } from '../shared';
 import { API_URL } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
@@ -23,6 +23,7 @@ import {
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { STORE_PIN_COPY, businessSetupBlocker, storeCreateErrorCopy, vendorBusinessPayload } from '../../../lib/storePin';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { BackToSwiftScreen, useBackToSwift } from '../../../components/onboarding/backToSwift';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { TYPES, TabHeader } from '../shared';
 
@@ -87,6 +88,10 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
 export function BusinessSetup() {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // [Owner, 1 Oct] Picking "Swift Business" by mistake is never a one-way door:
+  // "‹ Swift", Android's back and the iOS edge swipe go back to ordering, and
+  // what was typed waits in its draft store for the trip back.
+  const back = useBackToSwift('vendor');
   const [pinPickerOpen, setPinPickerOpen] = useState(false);
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   // The form outlives this screen (stores/businessSetupDraft): a failed
@@ -141,12 +146,14 @@ export function BusinessSetup() {
   };
 
   return (
-    <Screen>
+    <BackToSwiftScreen onBack={back.leave}>
       {/* The draft lives in memory and the auth store clears it at logout, so
           the ask says so: nothing here reaches Swift until it is submitted. */}
       <TabHeader
         title="Sell on Swift"
         onSwitch={() => setSwitcherOpen(true)}
+        onBack={back.leave}
+        backBusy={back.leaving}
         logoutBody="Nothing on this form has been sent yet, so what you’ve typed is cleared from this device."
       />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
@@ -287,18 +294,21 @@ export function BusinessSetup() {
           </T>
         </View>
       </ScrollView>
-    </Screen>
+    </BackToSwiftScreen>
   );
 }
 
 export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => void }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // Going back changes only which app is open: the store, its application
+  // and its documents stay on the server.
+  const back = useBackToSwift('vendor');
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
   return (
-    <Screen>
+    <BackToSwiftScreen onBack={back.leave}>
       {/* Waiting for approval is not a reason to be kept out of Swift. */}
-      <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} />
+      <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} onBack={back.leave} backBusy={back.leaving} />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <PricingCard kind="vendor" vendorType={store.vendorType} />
@@ -310,6 +320,6 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
           Look around while you wait — selling unlocks the moment you&apos;re approved.
         </T>
       </ScrollView>
-    </Screen>
+    </BackToSwiftScreen>
   );
 }

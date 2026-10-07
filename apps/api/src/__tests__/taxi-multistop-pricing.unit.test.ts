@@ -4,7 +4,7 @@ import { ZodError } from 'zod';
 import { AppError } from '../utils/errors';
 import { FareService, formulaFare } from '../modules/rides/fare.service';
 import { planTaxiStops, taxiMaxStops } from '../modules/rides/taxi-stops-flag';
-import { DEFAULT_TAXI_RATES } from '../modules/country/pricing-config';
+import { LEGACY_GY_TAXI_CARD } from './helpers/legacy-taxi-card';
 import { OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type RouteLegsEstimate, type RouteSource } from '../providers/maps/maps-provider';
 
 // ---------------------------------------------------------------------------
@@ -15,6 +15,12 @@ import { OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type R
 // (503), never priced from a guess; a route the zone table prices is refused
 // (409) before anything is routed. Default GY rates throughout: base 1000,
 // perKm 300, perMin 25, minimum 1500; Comfort ×1.35, Group ×2.5.
+//
+// [PRICING-GY-OCT] Guyana's default is now the owner's October fare (pinned in
+// fares-georgetown-defaults.test.ts, its included kilometres once per trip
+// with stops too). The fake Guyana row below carries the card these numbers
+// were derived from (LEGACY_GY_TAXI_CARD, which names no included kilometres):
+// the formula with included kilometres must price every one of them unchanged.
 // ---------------------------------------------------------------------------
 
 const PICKUP = { lat: 6.90, lng: -58.10 };
@@ -44,15 +50,16 @@ function engine(legs: RouteLeg[], opts: { km?: number; minutes?: number | null; 
 }
 
 /** The slice of Prisma the pricing path reads, with no zones by default and
- *  GY at its declared defaults (a null rates column reads as the defaults). */
+ *  GY on the legacy card (a valid column, recorded as a version on first read). */
 function fakePrisma(zones: { rows?: unknown[]; fares?: Array<{ fromZoneId: string; toZoneId: string }> } = {}) {
   const reads: string[] = [];
   const prisma = {
     zone: { findMany: async () => { reads.push('zone'); return zones.rows ?? []; } },
     zoneFare: { findMany: async () => { reads.push('zoneFare'); return zones.fares ?? []; } },
     countryConfig: {
-      findUnique: async () => { reads.push('countryConfig'); return { code: 'GY', currencyCode: 'GYD', taxiRates: null, taxiClassRates: null }; },
+      findUnique: async () => { reads.push('countryConfig'); return { code: 'GY', currencyCode: 'GYD', taxiRates: LEGACY_GY_TAXI_CARD, taxiClassRates: null }; },
     },
+    pricingConfigVersion: { findFirst: async () => null, create: async (args: { data: unknown }) => args.data },
   } as unknown as PrismaClient;
   return { prisma, reads };
 }
@@ -81,7 +88,7 @@ describe('the formula is applied once, to the whole route', () => {
     expect(est).toMatchObject({ billableKm: 10.15, distanceKm: 10.2, durationMin: 27, routeSource: 'osrm', currencyCode: 'GYD' });
     expect(est.tiers.every((t) => t.source === 'formula')).toBe(true);
     // Pricing each leg as its own trip would have charged 2500 + 3300.
-    expect(formulaFare(DEFAULT_TAXI_RATES, 4, 10) + formulaFare(DEFAULT_TAXI_RATES, 6.15, 17)).toBe(5800);
+    expect(formulaFare(LEGACY_GY_TAXI_CARD, 4, 10) + formulaFare(LEGACY_GY_TAXI_CARD, 6.15, 17)).toBe(5800);
   });
 
   it('the base fare once: four short legs are one 2 km trip (1700), not four trips (4 × 1500)', async () => {
@@ -102,7 +109,7 @@ describe('the formula is applied once, to the whole route', () => {
     const two = await price([STOP_1], engine([{ km: 3, minutes: 6 }, { km: 3, minutes: 6 }]).maps);
     const four = await price([STOP_1, STOP_2, STOP_3], engine([{ km: 1.5, minutes: 3 }, { km: 1.5, minutes: 3 }, { km: 1.5, minutes: 3 }, { km: 1.5, minutes: 3 }]).maps);
     expect(fares(four)).toEqual(fares(two));
-    expect(fares(two)['ECONOMY']).toBe(formulaFare(DEFAULT_TAXI_RATES, 6, 12)); // 1000 + 1800 + 300 = 3100
+    expect(fares(two)['ECONOMY']).toBe(formulaFare(LEGACY_GY_TAXI_CARD, 6, 12)); // 1000 + 1800 + 300 = 3100
   });
 });
 

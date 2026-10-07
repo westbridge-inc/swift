@@ -1,3 +1,4 @@
+import { lockSubscriptionPayer } from '../subscription/mover-fee-authority';
 import type { OnAudit } from '../../lib/audit-writer';
 import { Prisma, type MmgAgentPayment, type ProviderPayment, type PrismaClient } from '@prisma/client';
 import type { BillingService } from './billing.service';
@@ -443,6 +444,7 @@ export class AgentCashService {
   ): Promise<IngestResult> {
     const committed = await this.prisma.$transaction(async (tx) => {
       await bindTenantTransaction(tx);
+      await lockSubscriptionPayer(tx, requestedSubscriptionId);
       // A same-value compare-and-set acquires the row lock at the beginning of
       // the transaction. A concurrent attach waits, rechecks the predicate,
       // and gets count=0 after the winner commits — before it can move money.

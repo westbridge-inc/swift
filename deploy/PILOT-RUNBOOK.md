@@ -626,3 +626,102 @@ openssl s_client -connect api.swiftgy.com:443 -servername api.swiftgy.com -showc
 The last issuer must be ISRG Root X1, ISRG Root X2 or GTS Root R1. A proxied host (for example, behind Cloudflare)
 can be issued under a different root. In that case, a pinned app cannot reach the API until either the certificate or
 the pins change, and changing the pins is an app update.
+
+## 10. Taxi zone pricing: per-km rates and fixed fares
+
+How a taxi trip is priced, in order:
+
+1. **A fixed fare for the pair.** If the pickup and the dropoff resolve to two zones (in that direction) that have a
+   fixed fare, that fare is the price. It replaces the formula and any per-km rate. A pair is one direction: the
+   return trip is its own fare. A pair inside one zone is a flat fare for every trip within it.
+2. **Otherwise, the market's formula** (`TAXI_RATES`: the base, the included kilometres, the rate per kilometre after
+   them), with one change: if the pickup's or the dropoff's zone sets its own **taxi rate per km** (`taxiPerKm`),
+   that rate is charged for every kilometre beyond the included ones. When both ends set one, the higher applies.
+   The base and the included kilometres stay the market's. A stop on the way never sets the rate.
+
+The owner ruled (1 Oct 2026) that airports price per kilometre, never as a fixed pair, because a fixed fare is unfair
+to people who live near an airport. A fresh install's seed creates `cjia-airport` and `ogle-airport` at 295 a
+kilometre and seeds no fixed fare.
+
+Every change below is platform pricing. The request needs a stated reason (`x-swift-reason`, at least 12
+characters). It first answers `202 APPROVAL_REQUIRED` with an approval id. A second admin approves it
+(`POST /api/v1/admin/approvals/:id/decide`), then the admin who asked applies it
+(`POST /api/v1/admin/approvals/:id/apply`), or uses the console's approvals queue. Only the founder on the default
+tenant may do it, and each change writes its audit row in the same transaction. **A change prices new quotes only.**
+A ride already requested keeps the fare frozen on its order, through to payment.
+
+- **List** the fixed fares and the zones: `GET /api/v1/admin/zone-fares` returns `{ fares, zones }`. Each fare is
+  shown with both zone names and its `id`.
+- **Add** a fixed fare: `POST /api/v1/admin/zone-fares` with `{ "fromZoneId", "toZoneId", "fare" }`. The fare is a
+  whole amount from 100 to 1,000,000 in the zones' currency. Both zones must be the operator's and in one market.
+- **Change** one: `PUT /api/v1/admin/zone-fares/:id` with the same three fields. The pair must be the row's pair.
+- **Remove** one: `DELETE /api/v1/admin/zone-fares/:id` with `{ "fromZoneId", "toZoneId" }`.
+- **Set or clear a zone's per-km rate:** `PUT /api/v1/admin/zones/:id` with `{ "taxiPerKm": 295 }` (a whole amount
+  from 1 to 10,000) or `{ "taxiPerKm": null }`. The change raises the zone's version.
+- **Draw a zone the seed would also create** with its seed id, so a later seed run finds it rather than adding an
+  overlapping copy: `POST /api/v1/admin/zones` with `"id": "cjia-airport"` (a lowercase slug).
+- **Roll back** all zone pricing at once: set `FARE_ZONE_TABLE_KILL=1` and restart the API. Every ride then prices by
+  the market's formula, with no fixed fares and no zone rates.
+
+The console's **Zones** page shows the zones with their per-km rates and adds, changes and removes fixed fares.
+
+The seed only creates rows; it never changes or deletes them. An install seeded before October still has the old
+Georgetown Central ↔ South 2,000 pair until an admin removes it, and it gains the airport zones only by a seed run or
+the admin calls above.
+
+## 11. Audit evidence and retention authority
+
+The current retention decision is a draft pending legal confirmation. The admin
+audit trail (`audit_logs`) is permanent legal evidence. Sensitive access records
+(`sensitive_read_logs`) have no approved expiry window or implemented legal-hold
+release check. The daily `retention-sweep` deliberately retains both: every run
+reports `audit_logs(permanent-evidence)` and
+`sensitive_read_logs(policy-unapproved)` with zero deletions. Its completion log
+includes each skipped class and reason. Adding an enabled registry clock does
+not override these decisions. No purge executor membership is granted to the
+API login or the ordinary retention worker. The API must use a non-owner,
+non-superuser login with no replication or role-administration privilege; a
+table owner can alter triggers. The role-contract cutover remains a separate
+release gate.
+
+The migration creates two NOLOGIN roles. `swift_audit_purge_owner` owns the
+bounded SECURITY DEFINER functions and must have no members.
+`swift_audit_purge_executor` can read the two trails and invoke those functions;
+it cannot delete, update or truncate tables directly. Function grants inherited
+from creation defaults are removed before granting this executor access.
+The functions enforce an explicit batch of at most 1,000 IDs and a reason, but
+do **not** determine retention eligibility or release legal holds. The admin
+trail function is retained for isolated synthetic test cleanup; it is not an
+approved live-data retention policy.
+
+Do not provision an automated purge job yet. Before enabling sensitive-read
+retention, obtain the approved configurable window and build a reviewed
+legal-hold check and deletion receipt that commit with deletion. Separate that
+job's sensitive-read authority from the permanent admin trail before granting
+it access; the current executor covers both functions.
+
+For a separately authorized maintenance executor, the database administrator
+can grant `swift_audit_purge_executor` to a dedicated, least-privilege NOINHERIT
+login provisioned outside the repository. That login must not be an API or
+ordinary worker login, table owner, superuser, or member of
+`swift_audit_purge_owner`. Use `GRANT swift_audit_purge_executor TO
+<approved_maintenance_login>` with the actual reviewed login identifier. On the
+dedicated connection, begin a transaction, run
+`SET LOCAL ROLE swift_audit_purge_executor`, select only the approved explicit
+IDs, invoke the relevant helper/function with the recorded authorization
+reason, and commit. `SET LOCAL` ends the elevated role at commit or rollback.
+Never grant the owner role. Revoke executor membership when the authorization
+ends. This procedure does not authorize purging permanent evidence.
+
+The migration's `rollback.sql` sidecar restores the exact previous trigger
+bodies and clears the new function search-path settings. It restores the legacy
+caller-setting authority, so roll back callers first and explicitly acknowledge
+that change with `SET swift.audit_purge_rollback = 'restore-legacy-guard'` on the
+same migration-runner connection before executing the sidecar. The sidecar
+locks both trails and refuses while either purge role has members or the purge
+function owner differs. It removes local purge functions, policies, grants and
+the new sensitive-read TRUNCATE trigger. It drops unused roles; cluster-wide
+roles with other database/object dependencies remain NOLOGIN with this
+database's purge grants removed. Do not remove another database's role to make
+rollback pass. Reset the acknowledgement after the rehearsal. Rollback cannot
+restore rows already deleted.

@@ -30,6 +30,7 @@ import {
   ORDER_TRANSITIONS,
   RECOVERY_TRANSITIONS,
   isAppointmentStatus,
+  TAXI_STOP_OPEN_STATUSES,
 } from './order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
@@ -61,6 +62,7 @@ import { subscriptionOperability } from '../subscription/operate-gate';
 import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
+import { syncCaseOnOrderTransition } from '../custody/custody-case';
 
 interface CheckoutInput {
   userId: string;
@@ -855,7 +857,7 @@ export class OrderService {
       const vendorSub = await this.prisma.subscription.findFirst({
         where: { vendorId: vendor.id },
         orderBy: { createdAt: 'desc' },
-        select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
+        select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
       });
       const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
       if (!vendorOperability.operable) {
@@ -1237,7 +1239,7 @@ export class OrderService {
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },
           orderBy: { createdAt: 'desc' },
-          select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true },
+          select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
         });
         const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
         if (!lockedOperability.operable) {
@@ -1920,6 +1922,26 @@ export class OrderService {
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
     // MMG payment-first gate lives here, on the freshly locked row.
     assertMmgFulfilmentAllowed(source, input.target);
+    // [TAXI multi-stop 3/8] A ride is over only when every stop the passenger
+    // asked for is done: arrived at and left, or skipped with a reason the
+    // passenger is told. Every way to DELIVERED passes this seam (the fare
+    // outcome, the completion tap, ops and agent callers), so the rule lives
+    // here, on the locked row, read from the stop rows themselves (never the
+    // header count). A stop still PENDING or ARRIVED refuses the close before
+    // anything is written. FAILED is not refused: a passenger who did not come
+    // back to the car is the no-show rail's to close.
+    if (input.target === 'DELIVERED' && source.orderType === 'TAXI') {
+      const open = await tx.taxiTripStop.findFirst({
+        where: { orderId: input.orderId, status: { in: TAXI_STOP_OPEN_STATUSES } },
+        orderBy: { sequence: 'asc' },
+        select: { sequence: true },
+      });
+      if (open) {
+        throw new AppError(409, 'STOPS_REMAINING',
+          'This ride still has a stop to finish. Arrive at it and continue, or skip it, before you end the trip.',
+          { nextStopSequence: open.sequence });
+      }
+    }
     // Defense in depth for every generic/ops caller (including the approved
     // agent, admin-refund, and courier-sender actions): neither a physical
     // delivery handoff nor a verified taxi handoff can be terminalized through
@@ -1992,6 +2014,12 @@ export class OrderService {
       data.courierProofPhotoUrl = input.terminalMetadata.courierProofPhotoUrl;
     }
     await tx.order.update({ where: { id: input.orderId }, data });
+
+    // [AF-MOB-006] The custody recovery case moves WITH its order, on this
+    // lock, in this commit: a return is owned the moment it starts, and an
+    // open case resolves the moment its order ends. Costs no query unless the
+    // order is entering RETURNING or leaving rider custody for a terminal.
+    await syncCaseOnOrderTransition(tx, source, input.target, input.changedBy, input.note);
 
     // A REFUNDED transition after CANCELLED/DELIVERED/COMPLETED is accounting
     // only. Replaying operational cleanup here could cancel historical booking

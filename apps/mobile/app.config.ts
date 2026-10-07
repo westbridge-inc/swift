@@ -1,5 +1,13 @@
 import type { ExpoConfig } from 'expo/config';
 
+// Expo still consumes this native-build flag, while the installed ExpoConfig
+// declaration does not yet include it. Keep the runtime configuration typed
+// without removing the setting from generated native builds.
+interface SwiftExpoConfig extends ExpoConfig {
+  newArchEnabled: boolean;
+  [key: string]: unknown;
+}
+
 // One "Swift" app. The role you pick on the entry screen ("How will you use
 // Swift?") chooses the experience at runtime — there is no longer a build-time
 // variant. Background location + push belong to the driver/rider flow and are
@@ -28,9 +36,10 @@ const photosPermission =
  *
  * Everything below is `AppFunctionality` and nothing is tracking, which is the
  * honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
- * `src/lib/analytics.ts`, which is a deliberate no-op. If a crash reporter is
- * ever wired up, Diagnostics must be added here in the SAME change that adds
- * it, not afterwards.
+ * `src/lib/analytics.ts`, which is a deliberate no-op. The crash reporter
+ * (L13 item 7, off unless a crash-report address is configured) is declared
+ * below as CrashData, not linked to the person, in the same change that added
+ * it.
  *
  * The accessed-API reasons stay as Expo generates them (FileTimestamp C617.1,
  * UserDefaults CA92.1, SystemBootTime 35F9.1). `DiskSpace` is deliberately NOT
@@ -69,6 +78,14 @@ const privacyManifests = {
     collected('UserID'),
     collected('DeviceID'), // push token
     collected('PurchaseHistory'), // order and trip history
+    // [L13 item 7] Crash reports: diagnostics only, scrubbed on the phone and
+    // carrying no user, so NOT linked to the person (src/lib/crash-scrub.ts).
+    {
+      NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
+      NSPrivacyCollectedDataTypeLinked: false,
+      NSPrivacyCollectedDataTypeTracking: false,
+      NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+    },
   ],
 };
 /** The brand ground. Splash and the Android adaptive-icon background are the
@@ -98,6 +115,10 @@ const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
  * would be the gate doing more harm than the bug.
  */
 const androidMapsApiKey = process.env['ANDROID_GOOGLE_MAPS_API_KEY'];
+// EAS materialises the sensitive FILE_BASE64 variable as a local file and
+// exposes its path here during the Android build. Local builds intentionally
+// omit the field: Expo then does not try to resolve a Firebase config file.
+const googleServicesFile = process.env['GOOGLE_SERVICES_JSON'];
 const isDistributableBuild =
   process.env['EAS_BUILD'] === 'true' || process.env['CI'] === 'true';
 
@@ -128,7 +149,7 @@ if (!androidMapsApiKey && buildsAndroidArtifact) {
   console.warn(`[swift] WARNING — ${consequence} Maps screens will crash in this local build.`);
 }
 
-const config: ExpoConfig = {
+const config: SwiftExpoConfig = {
   // Native project/module name — 'Swift' itself is reserved by Apple's
   // standard library, so the Xcode target needs a distinct name. What users
   // see is CFBundleDisplayName below: 'Swift'.
@@ -136,6 +157,22 @@ const config: ExpoConfig = {
   slug: 'swift',
   scheme: 'swift',
   version: '1.0.0',
+  // [L13 item 7 · owner decision 4] Over-the-air updates. The runtime is pinned
+  // explicitly to the app version: an update published for 1.0.0 only reaches
+  // binaries built as 1.0.0, so JavaScript never lands on native code it was
+  // not built against. The channel comes from the EAS build profile
+  // (eas.json: production / staging / preview). Launch never waits on the
+  // network: the embedded or cached bundle starts at once and a downloaded
+  // update applies on the next launch.
+  runtimeVersion: { policy: 'appVersion' },
+  updates: process.env['EAS_PROJECT_ID']
+    ? {
+        enabled: true,
+        url: `https://u.expo.dev/${process.env['EAS_PROJECT_ID']}`,
+        checkAutomatically: 'ON_LOAD',
+        fallbackToCacheTimeout: 0,
+      }
+    : { enabled: false },
   icon: './assets/icon.png',
   orientation: 'portrait',
   userInterfaceStyle: 'light',
@@ -205,6 +242,7 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'gy.swift.app',
+    ...(googleServicesFile ? { googleServicesFile } : {}),
     // Android adaptive icon [LAUNCH-3]. Only `backgroundColor` was set, and it
     // was WHITE behind a maroon brand mark — but it never showed, because with
     // no `foregroundImage` Expo emits no adaptive icon at all and the launcher
@@ -290,8 +328,39 @@ const config: ExpoConfig = {
         resizeMode: 'contain',
       },
     ],
-    ['expo-notifications', { color: '#803B3B' }],
-    'react-native-maps',
+    [
+      'expo-notifications',
+      {
+        // The runtime registers this same channel before asking Expo for the
+        // device token. It is the safe default for background FCM v1 messages;
+        // versioned loud-alert channels remain owned by their separate lane.
+        defaultChannel: 'default',
+        // Android notification icons are white silhouettes on transparency.
+        icon: './assets/notification-icon.png',
+        color: brandMaroon,
+      },
+    ],
+    // react-native-maps ships its own config plugin, and Expo gives IT the
+    // manifest instead of the built-in step that reads
+    // `android.config.googleMaps.apiKey` above. That plugin writes
+    // com.google.android.geo.API_KEY only from `androidGoogleMapsApiKey`, and
+    // REMOVES it when the option is absent. Without this option a build that
+    // HAS the key still ships a keyless manifest (it happened with the
+    // 1 Oct preview and Play builds). android-maps-key-manifest.test.ts
+    // compiles the real manifest to keep it that way.
+    //
+    // Only when EAS says the build IS Android (it sets EAS_BUILD_PLATFORM on
+    // the builder, where prebuild writes the manifest): plugin options, unlike
+    // android.config, survive into the public config the app embeds, and iOS
+    // has no Google Maps. An unset platform (CI, a local `expo export`) gets
+    // no option, while the missing-key gate above stays strict for it. A local
+    // Android build that needs maps sets EAS_BUILD_PLATFORM=android too.
+    [
+      'react-native-maps',
+      androidMapsApiKey && process.env['EAS_BUILD_PLATFORM'] === 'android'
+        ? { androidGoogleMapsApiKey: androidMapsApiKey }
+        : {},
+    ],
     'expo-image',
     'expo-secure-store',
     'expo-video',
