@@ -1422,7 +1422,13 @@ export class BillingService {
    * row's compare-and-set and the success / bank event keys make a repeat a
    * no-op. Returns what durably happened.
    */
-  async settleHostedCardPayment(input: { subscriptionId: string; paymentId: string; providerRef: string; now?: Date }): Promise<
+  async settleHostedCardPayment(input: {
+    subscriptionId: string; paymentId: string; providerRef: string; now?: Date;
+    /** [PT-4] Runs INSIDE the booking's own transaction, only when this call
+     *  books it (advanced or banked): the card session is marked with its
+     *  money, atomically. If it throws, nothing is booked. */
+    inSettlement?: (tx: Prisma.TransactionClient) => Promise<void>;
+  }): Promise<
     { outcome: 'advanced' | 'banked' | 'not_settled' } | { outcome: 'held'; failureCode: string }
   > {
     const now = input.now ?? new Date();
@@ -1442,7 +1448,7 @@ export class BillingService {
     // The amount and currency booked are the SESSION's, read inside the
     // settlement transaction (applySuccessfulChargeInTx) — never this
     // snapshot's current currency [AX297 F2].
-    await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), input.providerRef, now, periodKey, payment.id);
+    await this.applySuccessfulCharge(sub as SubWithRelations, Number(payment.amount), input.providerRef, now, periodKey, payment.id, undefined, undefined, input.inSettlement);
     const [after, banked] = await Promise.all([
       this.prisma.subscriptionPayment.findUnique({ where: { id: payment.id } }),
       this.prisma.billingEvent.findUnique({ where: { idempotencyKey: `bank:${payment.id}` }, select: { id: true } }),
@@ -1924,6 +1930,8 @@ export class BillingService {
     usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number },
     /** Prepaid rail: debit this much inside the same transaction. */
     spendPrepaid?: number,
+    /** [PT-4] Joins the booking's transaction when it books (advanced or banked). */
+    inSettlement?: (tx: Prisma.TransactionClient) => Promise<void>,
   ): Promise<boolean> {
     // One transaction for the whole advance [tollgate M-13]: the prepaid debit,
     // payment row, period move, audit event, and the balanced ledger posting
@@ -1934,6 +1942,7 @@ export class BillingService {
     // key rolls the loser back whole.
     const settled = await this.prisma.$transaction(async (tx) => {
       const disposition = await this.applySuccessfulChargeInTx(tx, sub, amount, paymentRef, now, periodKey, settlePaymentId, usdTrio, spendPrepaid);
+      if (inSettlement && (disposition === 'advanced' || disposition === 'banked')) await inSettlement(tx);
       if (disposition !== 'advanced') return { disposition };
       const payment = settlePaymentId ? await tx.subscriptionPayment.findUnique({ where: { id: settlePaymentId } }) : null;
       const settledPeriodKey = payment?.periodStart.toISOString().slice(0, 10) ?? periodKey;

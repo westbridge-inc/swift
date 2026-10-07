@@ -70,6 +70,9 @@ async function partner(opts: { status?: SubscriptionStatus; due?: Date; failedAt
     },
   });
   subIds.push(sub.id);
+  // [PT-4 · review S2-1] The simulator moves no money: it books a week only for
+  // a subscription listed as a TEST subscription. Every partner here is one.
+  process.env['CARD_RAIL_TEST_SUBSCRIPTIONS'] = subIds.join(',');
   return { userId: user.id, subId: sub.id };
 }
 
@@ -134,6 +137,7 @@ afterEach(() => {
 afterAll(async () => {
   await cleanupBillingClocks(app.prisma, subIds);
   delete process.env['CARD_RAIL_V2'];
+  delete process.env['CARD_RAIL_TEST_SUBSCRIPTIONS'];
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();
   // Purge the synthetic payers before their preserved authority sources.

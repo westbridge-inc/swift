@@ -48,6 +48,8 @@ describe('the allowlist', () => {
       // key sealed inside every request token.
       'MMG_CHECKOUT_PUBLIC_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_SECRET_KEY',
       'PAYMENT_GATEWAY_KEY', 'PAYMENT_GATEWAY_SECRET',
+      // [PT-4] The real card provider's credentials (its guide, sec. 4).
+      'POWERTRANZ_ID', 'POWERTRANZ_PASSWORD', 'POWERTRANZ_GATEWAY_KEY',
       'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
       // [R2 C1] Every other secret the API reads; each could otherwise only
       // arrive through the plaintext env file the owner ruled out.

@@ -79,7 +79,7 @@ Otherwise it is `off`. Reading the subscription never fails because of the card 
 - `cardOnFile` is `null`;
 - an Add card session is refused with `409 ADD_CARD_OFF` (section 5).
 
-**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. The simulator moves no money, yet its "Approve" books a paid week, so it serves **only the test subscriptions listed by id** in `CARD_RAIL_SIMULATOR_SUBSCRIPTIONS`; for every other partner the card routes answer `409 PAY_ACTION_OFF` and `CARD` is `off`. It never runs on the public API host (the server refuses to start). `payActions` shows `CARD` as `off` even for a listed test subscription unless the server also sets `CARD_RAIL_SIMULATOR_LIVE=1`: then `CARD` is `live` with `testMode: true` and `testModeLabel`, so a normal build shows the whole card choice end to end. Every screen must show `testModeLabel` whenever `testMode` is true. The store-review demo never sees a card choice, test or real.
+**Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. The simulator moves no money, yet its "Approve" books a paid week, so it — like any card TEST system, including the provider's sandbox — serves **only the test subscriptions listed by id** in `CARD_RAIL_TEST_SUBSCRIPTIONS`; for every other partner the card routes answer `409 PAY_ACTION_OFF` and `CARD` is `off`. It never runs on the public API host (the server refuses to start). `payActions` shows `CARD` as `off` even for a listed test subscription unless the server also sets `CARD_RAIL_SIMULATOR_LIVE=1`: then `CARD` is `live` with `testMode: true` and `testModeLabel`, so a normal build shows the whole card choice end to end. Every screen must show `testModeLabel` whenever `testMode` is true. The store-review demo never sees a card choice, test or real.
 
 **`payNow`** buttons read `Pay <currency> <amount, grouped> by card`.
 - When a week is owed, the amount is that week.
@@ -128,7 +128,11 @@ At most one card is `ACTIVE`: the weekly fee is charged to it.
 { purpose: 'ENROLL' | 'PAY_NOW'; consentVersion?: 'card-on-file-v1' }  // consentVersion is required for ENROLL
 ```
 
-- **ENROLL (Add card)** needs the partner to accept the weekly-charge consent on screen first. Send the version they accepted. The words live with the screen; the version is `card-on-file-v1`.
+- **ENROLL (Add card)** needs the partner to accept the weekly-charge consent on screen first. Send the version they accepted: `card-on-file-v1`, whose words (owner sign-off, 7 Oct 2026) are exactly:
+
+  > Swift will charge the card you add for your weekly fee each week, when it is due, until you remove it. Your bank may ask you to confirm a charge. You can remove the card here at any time.
+
+  New words are a new version, never an edit of this one. Saving cards stays off on the server (`CARD_RAIL_ENROLL`) until the owner's go.
 - **PAY_NOW** is priced by the server. The body carries no amount.
 
 **Success:** `201` for a new session; `200` when the same `Idempotency-Key` asks again. A repeat answers the same session **with its `hostedUrl` while the page can still be used** (open and inside its window), so "Continue on the card page" opens it again; once the page is finished or expired, `hostedUrl` is `null`.
@@ -222,7 +226,7 @@ type CardSessionView = {
 | `FAILED` | the bank declined, or the card has expired | "The card was not added." / "The payment didn't go through. You can try again." |
 | `EXPIRED` | the page ran out of time with nothing done | "This page expired. You can start again." |
 | `CANCELLED` | the provider could not open the page | "Try again in a moment." |
-| `HELD` | the provider's answer does not match (amount, currency or wallet); a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
+| `HELD` | the provider's answer does not match (amount, currency or wallet), or the bank may have taken a payment Swift could not confirm and its cancellation could not be confirmed either; a person reviews it | "We're checking this payment by hand. Don't pay again. Support will contact you." |
 
 Never say "paid" or "added" before `SUCCEEDED`.
 
@@ -232,7 +236,7 @@ Never say "paid" or "added" before `SUCCEEDED`.
 
 The provider sends the partner's browser back to Swift's return address, `/api/v1/billing/card/return?session=<id>&state=<one-time value>`. It is the provider's `MerchantResponseUrl`. The app and the web never call it themselves.
 
-- **It accepts GET and POST.** Query parameters and form or JSON fields, up to 16 KB.
+- **It accepts GET and POST.** Query parameters and form, JSON or JSON-as-text fields, up to 16 KB. (The real provider's card frame posts the bank's 3-D Secure result here "as Json", which a form sends as text.)
 - **It records what came back and grants nothing by itself.**
   - Only the first return that carries the session's one-time `state`, while the session is open and inside its window, prompts the server to ask the provider, server to server.
   - Everything else (a wrong or reused `state`, a closed or expired session, an unknown session) is recorded with its reason and ends there.
@@ -255,6 +259,13 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
 - **It is rate-limited per source address** (60 a minute), whoever is signed in: rotating sign-ins from one address buys nothing.
 - **It is inert while card payments are off** (`CARD_RAIL_V2=0` and not draining): nothing is read or written, and the page says `UNKNOWN`.
 
+**The real provider (PT-4)** — `hostedUrl` is a Swift page on the API origin, `/api/v1/billing/card/pay/{ref}`:
+- Swift's header and words ("Pay GY$2,100 by card", "Type your card on your bank's secure form below. Swift never sees your card number or security code.") around an iframe holding the bank's secure card form; the provider's name is never shown.
+- On the provider's test system it carries the test label (`testMode: true`, `testModeLabel`), as the CARD entry and the session do.
+- The card is typed and the bank's 3-D Secure check runs inside the iframe. When the check is done, the return page above appears inside the same frame with the same two links ("Back to the Swift app" closes the in-app sheet).
+- Once the page is finished or expired it shows "This card page has ended" and no form. It sends its own strict content policy, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and is never logged.
+- Nothing about opening it changes for the app: open `hostedUrl` in the in-app sheet (phone) or the same tab (web), then poll the session.
+
 **The simulator** (staging only; production refuses it) serves its page at `hostedUrl`:
 - four buttons: Approve / Approve, but weekly charges need 3-D Secure / Decline / Time out;
 - no input of any kind;
@@ -262,7 +273,7 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
 
 Pressing a button sends the browser to the return page, exactly as a real provider would.
 
-## 8. Admin (read only)
+## 8. Admin
 
 | Route | Returns |
 |---|---|
@@ -270,8 +281,21 @@ Pressing a button sends the browser to the return page, exactly as a real provid
 | `GET /api/v1/admin/billing/card-sessions/{id}` | one session and its evidence: every observation's source, parsed status, verdict and raw-payload SHA-256 |
 | `GET /api/v1/admin/billing/subscriptions/{subscriptionId}/cards` | the subscription's cards: brand, last 4, expiry, status, the provider setup it is bound to, consent, and how it left service |
 
-- No view ever returns a vault token, the session's state or hash, a provider page address, or anything else that could move money.
-- Reversal and manual resolution of a `HELD` session are not in this contract yet (section 11).
+| `POST /api/v1/admin/billing/card-sessions/{id}/resolve` | finance's decision on a `HELD` Pay now, after checking the provider's portal (money: a second admin approves) |
+
+- No view ever returns a vault token, the session's state or hash, a provider page address, or anything else that could move money. Views show the provider's transaction reference (what finance looks up) and the session's void, refund, booking-claim and resolution markers.
+- **Resolve** body: `{ action, providerReference, amount }`. `providerReference` must be the transaction recorded on the session. `action`:
+  - `BOOK` requires the stored provider-approved completion, including its own `RiskManagement.ThreeDSecure` proof, bound to this session and exact price; typed portal facts and two-person approval cannot replace that proof. Missing proof returns `409 PROVIDER_COMPLETION_EVIDENCE_REQUIRED`. It books once — never after a void or refund that may have worked, and never on a card test system for a partner who is not a listed test subscription;
+  - `REFUND` sends one refund of that transaction (never resent; never once the week is booked);
+  - `REFUNDED_IN_PORTAL` records a refund made in the provider's portal;
+  - `NOTHING_TAKEN` records that the provider shows nothing taken.
+  Each decision is taken once, under the session's lock; a booking and a refund can never both happen. The general payment-confirmation review refuses to close such a card payment as unpaid (`409 CARD_SESSION_RESOLVE_REQUIRED`).
+- **A payment Swift cannot book** (the provider's answer lacks its own 3-D Secure proof, names another transaction, order, type or amount, or was lost) is voided at once — one void, durably claimed. Voided: the session is `FAILED` (no `failure` category). The void refused or unanswered: `HELD`, and admins are paged with the provider's transaction reference.
+- **The completion is claimed on the session first.** Immediately before Swift sends the one completion, it records the claim on the session (under the same locks finance takes). A session closed before that moment never has its completion sent (nothing was taken). A claimed completion is never sent twice.
+  - While a claimed completion may still be answering (its own deadline plus a margin, 35 s), nobody treats its answer as lost, and the general payment-confirmation review refuses to close it as unpaid (`409 CARD_COMPLETION_IN_FLIGHT`); afterwards it refuses with `409 CARD_SESSION_RESOLVE_REQUIRED` (the session is voided, or held for the card-session decision above).
+  - A claimed completion whose answer can no longer arrive (lost) is voided under the recorded transaction, like any payment Swift cannot book.
+- **An approval that arrives after its session was closed** is never booked: Swift claims one void, the session becomes `HELD` (`LATE_PROVIDER_APPROVAL`), its payment confirmation is reopened, and admins are paged. The void confirmed: `FAILED` again. Refused or unanswered: it stays `HELD`, `BOOK` is refused, and no new collection of the fee (card or MMG) starts while it is held. A session finance had already decided keeps that decision; admins are paged.
+
 
 ## 9. Operations
 
@@ -300,15 +324,20 @@ Pressing a button sends the browser to the return page, exactly as a real provid
 
 ## 11. Not in this contract yet
 
-- The PowerTranz provider (PT-4). Until then `CARD` is `off` everywhere, and the simulator (staging only) is the only provider.
-- **Questions for PowerTranz** (asked through the coordinator). Until they are answered, `addCard` stays `false`:
+- **What the real provider (PT-4) does and does not do**, from its own guide v2.7 only:
+  - Pay now by card, on its hosted page with 3-D Secure; Swift completes the payment only when the bank's check passed (verified or attempted), and only the provider's answer to that completion books the week, once.
+  - No saved cards: the guide documents no weekly charge without the partner present and returns no last 4 or expiry. `addCard` is `false` with it, whatever the switch says.
+  - Refund and void of a payment exist in the provider; the two-person admin flow that uses them is not in this contract yet.
+- **Questions for PowerTranz** (asked through the coordinator):
   - how a saved card is charged each week without the partner present (a merchant-initiated or recurring indicator, and the 3-D Secure and CVV rules);
   - GYD (ISO 4217 `328`) acceptance and settlement;
-  - our hosted `PageSet` / `PageName`, and styling it as Swift;
-  - whether `MerchantResponseUrl` must be registered;
+  - our hosted `PageSet` / `PageName`, and styling it as Swift; whether the hosted page collects the cardholder details 3-D Secure 2 needs (guide sec. 9.3) or Swift must send them;
+  - whether `MerchantResponseUrl` must be registered, and the exact shape of the frame's post to it;
+  - whether the payment completion's answer carries the original `TransactionIdentifier`, and how to look up a completion whose answer was lost (the guide documents no inquiry call);
+  - whether the hosted page works inside an iframe in iPhone Safari (third-party cookies) and Android in-app browsers;
+  - the production API root (the guide says it is provided after staging is validated);
   - enabling `PanToken` on a Pay now.
-- Admin reversal / manual resolution of a `HELD` session, and refunds.
 - The UI (a separate lane builds it against this contract and the simulator).
-- The credential setup tool (PT-5, for MMG and the card provider together).
+- The credential setup tool (PT-5, for MMG and the card provider together): `deploy/owner/swift-payments-setup.command`.
 
 Changes to this contract are made here first, in the same PR as the code that changes.

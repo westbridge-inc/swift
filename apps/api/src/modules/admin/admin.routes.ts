@@ -1,4 +1,4 @@
-import { adminCardSession, adminCardSessions, adminSubscriptionCards } from '../billing/card-rail.routes';
+import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
 import { identityAuthority, IdentityReviewRequiredError, lockIdentityAuthority, stageIdentityReviewCases, retainIdentityReview } from '../integrity/identity-review';
@@ -6518,5 +6518,12 @@ export async function adminRoutes(app: FastifyInstance) {
   }));
   app.get<{ Params: { subscriptionId: string } }>('/billing/subscriptions/:subscriptionId/cards', { preHandler: [adminGuard] }, async (request) => ({
     success: true, data: await adminSubscriptionCards(app.prisma, request.params.subscriptionId),
+  }));
+  // [PT-4 · review S2-2] Finance resolves a HELD card payment (C4: two people).
+  // [ADM-002] Its audit row commits with the decision's claim or closure.
+  app.post<{ Params: { id: string } }>('/billing/card-sessions/:id/resolve', { preHandler: [adminGuard] }, async (request) => ({
+    success: true,
+    data: await adminResolveCardSession(app, request.params.id, request.body, request.user.userId,
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts })),
   }));
 }

@@ -1,14 +1,14 @@
 import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import { log } from '../../utils/logger';
-import { cardEnrollEnabled, cardRailKilled, cardRailV2Enabled, cardSimulatorLiveEnabled, cardSimulatorSubscriptions } from '../../utils/card-rail';
-import { SIMULATOR_PAGE } from '../../providers/card/simulator-provider';
+import { cardEnrollEnabled, cardRailKilled, cardRailV2Enabled, cardSimulatorLiveEnabled, cardTestSubscriptions } from '../../utils/card-rail';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import { weeklyFeeAmount } from './subscription-fee';
 import { readFeePaymentDecision } from './fee-payment-authority';
 import type { ClientPlatform } from './fee-pay-actions';
-import { INSTRUMENT_DTO_SELECT, type PaymentInstrumentDto } from './card-rail.service';
+import { INSTRUMENT_DTO_SELECT, cardTestLabel, type PaymentInstrumentDto } from './card-rail.service';
 import type { CardRailProvider, CardRailSource } from '../../providers/card/card-provider';
+import { SIMULATOR_PROVIDER } from '../../providers/card/simulator-provider';
 
 // ---------------------------------------------------------------------------
 // [PT-2] May this partner pay the weekly fee by card, here, now? Decided in
@@ -42,8 +42,8 @@ export type CardPayAction =
       addCard: boolean;
       /** The ACTIVE card, if any. */
       cardOnFile: CardView | null;
-      /** True when the card choice is a TEST (the simulator on a test server):
-       *  every screen shows testModeLabel. */
+      /** True when the card choice is a TEST — the simulator on a test server, or
+       *  the provider's sandbox [PT-4]: every screen shows testModeLabel. */
       testMode: boolean;
       testModeLabel?: string;
     };
@@ -118,8 +118,9 @@ type PayableSub = Pick<Subscription, 'id' | 'status' | 'feeWaived' | 'weeklyRate
  * (an unknown platform counts only when every platform is on), a payable
  * subscription with a fee above zero, and a payer in a production tenant (the
  * store-review demo and the crawler never reach a card page, test or real).
- * [Review S2] The simulator — no real money, yet its "Approve" books a week —
- * serves only the TEST subscriptions listed in CARD_RAIL_SIMULATOR_SUBSCRIPTIONS.
+ * [Reviews S2 / S2-1] A TEST card system — the simulator or a provider's
+ * sandbox: no real money, yet an approval books a week — serves only the TEST
+ * subscriptions listed in CARD_RAIL_TEST_SUBSCRIPTIONS.
  */
 export async function cardSessionsAllowed(
   prisma: PrismaClient,
@@ -136,7 +137,7 @@ export async function cardSessionsAllowed(
     log().error({ err }, '[PT-2] the card rail configuration could not be loaded; card payment is off');
     return { allowed: false, reason: 'NO_PROVIDER' };
   }
-  if (provider.simulator && !cardSimulatorSubscriptions().has(sub.id)) return { allowed: false, reason: 'NOT_TEST_SUBSCRIPTION' };
+  if ((provider.simulator || provider.binding.environment !== 'live') && !cardTestSubscriptions().has(sub.id)) return { allowed: false, reason: 'NOT_TEST_SUBSCRIPTION' };
   const switches = await cardCheckoutPlatforms(prisma);
   const platformOn = platform === 'unknown' ? switches.ios && switches.android && switches.web : switches[platform];
   if (!platformOn) return { allowed: false, reason: 'PLATFORM_OFF' };
@@ -183,6 +184,8 @@ export async function cardPayAction(
   const cardOnFile = addCard
     ? await prisma.paymentInstrument.findFirst({ where: { subscriptionId: sub.id, status: 'ACTIVE' }, select: INSTRUMENT_DTO_SELECT })
     : null;
-  const testModeLabel = decision.provider.simulator ? SIMULATOR_PAGE.testModeLabel : undefined;
+  const testModeLabel = decision.provider.simulator
+    ? cardTestLabel({ provider: SIMULATOR_PROVIDER, environment: 'sandbox' })
+    : cardTestLabel({ provider: decision.provider.binding.provider, environment: decision.provider.binding.environment });
   return { id: 'CARD', state: 'live', payNow, addCard, cardOnFile, testMode: testModeLabel !== undefined, ...(testModeLabel ? { testModeLabel } : {}) };
 }
