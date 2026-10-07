@@ -62,6 +62,12 @@ const RULES: RouteRule[] = [
     door: { title: 'You’re browsing as a guest', body: 'Sign in to see your orders and your delivery addresses.' },
   },
   {
+    // [WEB-REDESIGN] Account's own pages (addresses, details, favourites, help,
+    // safety) light Profile and go back to Account. Private, like Account.
+    match: under('/account'), public: false, tab: 'profile', parent: '/account',
+    door: { title: 'Sign in to your account', body: 'Sign in to see your orders, addresses and favourites.' },
+  },
+  {
     match: exact('/orders'), public: false, tab: 'profile', parent: '/account',
     door: { title: 'Sign in to see your orders', body: 'Your orders and their live tracking are kept on your account.' },
   },

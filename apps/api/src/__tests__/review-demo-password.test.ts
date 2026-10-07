@@ -20,6 +20,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-context';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { storePasswordResetOtp } from '../modules/auth/signup-continuation';
+import { grantStepUp } from './helpers/step-up';
 import { REVIEW_DEMO_NO_CREDENTIALS } from '../modules/review/demo-policy';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
@@ -99,6 +100,7 @@ describe('[REVIEW-PARTNER] a shared store-review demo login cannot set or reset 
 
   it('a production account still sets and resets its password', async () => {
     const real = await account(undefined);
+    await grantStepUp(app, real.token);
     const set = await app.inject({ method: 'POST', url: '/api/v1/auth/password/set', headers: { authorization: `Bearer ${real.token}` }, payload: { password: 'a real new password' } });
     expect(set.statusCode, set.body).toBe(200);
     const afterSet = await hashOf(real.id);
