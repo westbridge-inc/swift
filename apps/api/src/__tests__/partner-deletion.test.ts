@@ -12,7 +12,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import type { PrismaClient } from '@prisma/client';
 import { retryAccountErasures } from '../modules/user/account-erasure-retry';
 import { AccountService } from '../modules/user/account.service';
-import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS } from '../modules/user/partner-wind-down';
+import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS, windDownPartner } from '../modules/user/partner-wind-down';
+import { restoreBillingAccess } from '../modules/billing/billing-access';
 
 // ---------------------------------------------------------------------------
 // [Apple 5.1.1(v)] A mover or vendor closes their own account.
@@ -211,6 +212,48 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     await app.prisma.deliveryCashSettlement.update({ where: { id: settlement.id }, data: { status: 'SETTLED' } });
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
     expect(await app.prisma.vendor.findUnique({ where: { id: vendor.id } })).toMatchObject({ status: 'SUSPENDED', acceptingOrders: false });
+  });
+
+  // A store already on a billing hold when its owner closes the account must
+  // stay closed: a later fee payment, or the nightly billing heal, reopens only
+  // a store whose suspension billing itself recorded.
+  async function billingHeldStore() {
+    const p = await makePartner(['CUSTOMER', 'VENDOR_OWNER']);
+    const owner = await app.prisma.vendorOwner.create({ data: { userId: p.userId } });
+    const vendor = await app.prisma.vendor.create({ data: {
+      ownerId: owner.id, name: 'Synthetic billing-held store', slug: `held-${nanoid(12)}`, vendorType: 'RESTAURANT',
+      phone: 'synthetic', addressLine1: 'Synthetic', city: 'Synthetic', region: 'Synthetic', latitude: 0, longitude: 0,
+      status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false, isCurrentlyOpen: false, isVerified: true,
+    } });
+    vendorIds.push(vendor.id);
+    return { p, vendorId: vendor.id };
+  }
+  const billingReopens = (vendorId: string) => app.prisma.$transaction((tx) => restoreBillingAccess(tx, vendorId));
+
+  it('winding down a store already on a billing hold marks it wound down, so a fee payment never reopens it', async () => {
+    const { p, vendorId } = await billingHeldStore();
+    await windDownPartner(app.prisma, p.userId);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' });
+    expect(await billingReopens(vendorId)).toBe(false);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } })).toMatchObject({ status: 'SUSPENDED', acceptingOrders: false });
+  });
+
+  it('the deletion cutoff itself marks owned stores wound down, before any later cleanup can fail', async () => {
+    const { p, vendorId } = await billingHeldStore();
+    // Read the store the moment the cutoff transaction commits: the later
+    // wind-down can fail and be retried, and a billing heal may run between.
+    const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let atCutoff: unknown;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (work: unknown, options?: unknown) => {
+      const result = await realTransaction(work, options);
+      if (atCutoff === undefined) atCutoff = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, suspensionSource: true } });
+      return result;
+    }) as never);
+    try {
+      await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+    } finally { spy.mockRestore(); }
+    expect(atCutoff).toEqual({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' });
+    expect(await billingReopens(vendorId)).toBe(false);
   });
 
   it('does not bypass cash obligations when only the customer role remains', async () => {

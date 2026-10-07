@@ -177,7 +177,7 @@ export async function windDownPartner(
     vendorIds.length
       ? prisma.vendor.updateMany({
           where: { id: { in: vendorIds } },
-          data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false },
+          data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN' },
         })
       : Promise.resolve({ count: 0 }),
     vendorIds.length
