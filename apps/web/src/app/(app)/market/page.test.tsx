@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '@/test/test-utils';
 import AppLayout from '../layout';
-import MarketPage from './page';
+import { MarketScreen as MarketPage } from './market-screen';
 
 vi.mock('next/navigation', () => ({
   usePathname: () => '/market',
