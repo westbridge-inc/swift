@@ -888,7 +888,7 @@ async function openOrderHolding(store: Store, itemId: string, units: number, sta
   });
   createdOrderIds.push(order.id);
   await app.prisma.$transaction((tx) => applyStockMovement(tx, { itemId, delta: -units, reason: 'SALE', orderId: order.id }));
-  return order;
+  return Object.assign(order, { customerToken: customer.token });
 }
 
 describe('availability: a big file never turns a checkout into a server error (S2)', () => {
@@ -976,6 +976,45 @@ describe('units sold on Swift but not yet collected (S3)', () => {
     const { preview: p2 } = await syncOk(store, csvOf(row('HELD-1', 'h', '100', '2')));
     expect(p2.changes.find((c) => c.itemId === item.id)!.stock).toEqual({ from: 9, to: 0, till: 2, held: 3 });
     expect((await itemOf(item.id)).stockQuantity).toBe(0);
+  });
+});
+
+describe('units given back at the store are not held (refund movements carry their order)', () => {
+  const asStore = (store: Store, url: string, payload?: unknown) => app.inject({
+    method: 'POST', url: `/api/v1/vendor${url}`,
+    ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
+    headers: { authorization: `Bearer ${store.owner.token}`, ...(payload !== undefined ? { 'content-type': 'application/json' } : {}) },
+  });
+
+  it('a line the store refunds (back on the shelf) holds nothing: its refund nets its sale', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'HELD-R', 10, 100);
+    const order = await openOrderHolding(store, item.id, 3, 'PREPARING'); // 10 -> 7
+    const line = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: order.id } });
+    const refund = await asStore(store, `/orders/${order.id}/items/${line.id}/refund-line`);
+    expect(refund.statusCode, refund.body).toBe(200);
+    expect((await itemOf(item.id)).stockQuantity).toBe(10);
+    // The till counts the 10 on the shelf less 5 sold over the counter: 5, and Swift holds none of them.
+    const { preview: p } = await syncOk(store, csvOf(row('HELD-R', 'h', '100', '5')));
+    expect(p.changes.find((c) => c.itemId === item.id)!.stock).toEqual({ from: 10, to: 5, till: 5, held: 0 });
+    expect((await itemOf(item.id)).stockQuantity).toBe(5);
+  });
+
+  it('an approved substitute: the original back on the shelf holds nothing; the substitute taken holds its units', async () => {
+    const store = await makeStore();
+    const original = await makeItem(store, 'HELD-A', 10, 100);
+    const substitute = await makeItem(store, 'HELD-B', 10, 100);
+    const order = await openOrderHolding(store, original.id, 3, 'PREPARING'); // A 10 -> 7
+    const line = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: order.id } });
+    const proposed = await asStore(store, `/orders/${order.id}/items/${line.id}/substitute`, { substituteItemId: substitute.id });
+    expect(proposed.statusCode, proposed.body).toBe(200);
+    const approved = await asCustomer(order.customerToken, 'POST', `/orders/${order.id}/items/${line.id}/substitution`, { approve: true });
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect((await itemOf(original.id)).stockQuantity).toBe(10); // back on the shelf
+    expect((await itemOf(substitute.id)).stockQuantity).toBe(7); // 3 taken for the order, still in the store
+    const { preview: p } = await syncOk(store, csvOf(row('HELD-A', 'a', '100', '5'), row('HELD-B', 'b', '100', '8')));
+    expect(p.changes.find((c) => c.itemId === original.id)!.stock).toEqual({ from: 10, to: 5, till: 5, held: 0 });
+    expect(p.changes.find((c) => c.itemId === substitute.id)!.stock).toEqual({ from: 7, to: 5, till: 8, held: 3 });
   });
 });
 
