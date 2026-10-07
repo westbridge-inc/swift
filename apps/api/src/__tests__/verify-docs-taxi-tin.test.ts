@@ -31,6 +31,7 @@ import { verificationRoutes } from '../modules/verification/verification.routes'
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { VerificationService } from '../modules/verification/verification.service';
+import { evaluateMoverDocuments } from '../modules/verification/mover-document-authority';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
@@ -116,6 +117,8 @@ const statusOf = async (token: string) => (await app.inject({ method: 'GET', url
   checklist: string[]; missing: string[]; roleVerified: boolean; documents: Array<{ docType: string; status: string }>;
 };
 const live = (userId: string) => service.getLiveOperationStatus(userId, { vehicleType: 'CAR', kind: 'DRIVER' });
+/** The live verdict's deadline: the moment a job claim (checked again under lock) stops trusting it. */
+const validUntil = async (userId: string) => (await evaluateMoverDocuments(app.prisma, userId, { vehicleType: 'CAR', kind: 'DRIVER' })).validUntil;
 
 /** A taxi driver from before the split: every document of today's world approved, including the old permit. */
 async function legacyTaxi(permitDays = 300) {
@@ -191,6 +194,8 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     await setSplitStarted(10);
     const m = await legacyTaxi();
     expect(await live(m.userId)).toEqual({ allowed: true, reason: 'ok' });
+    // The permit (300 days) stands in only until the window closes (60 days from the switch-over, 10 days ago).
+    expect(Math.abs((await validUntil(m.userId))!.getTime() - (Date.now() + 50 * DAY))).toBeLessThan(5 * 60_000);
     const s = await statusOf(m.token);
     expect(s.roleVerified).toBe(true);
     expect(s.missing).toEqual([]);
@@ -204,6 +209,10 @@ describe('[V5 · transition] an approved permit counts as both new licences for 
     await setSplitStarted(10);
     const m = await legacyTaxi(5);
     expect((await live(m.userId)).allowed).toBe(true);
+    // Before it expires, the stand-in already ends with the permit (5 days), not with the window (50 days).
+    const until = (await validUntil(m.userId))!.getTime();
+    expect(until).toBeLessThanOrEqual(Date.now() + 5 * DAY + 60_000);
+    expect(until).toBeGreaterThan(Date.now() + 3 * DAY);
     await app.prisma.verificationDocument.update({ where: { id: m.permitId }, data: { expiresAt: new Date(Date.now() - DAY) } });
     expect((await live(m.userId)).allowed).toBe(false);
   });
