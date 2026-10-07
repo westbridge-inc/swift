@@ -2071,6 +2071,12 @@ model Order {
   doorCashShortfallAmount Decimal?  @db.Decimal(12, 2)
   /// [L02 · row 34] The short handover is HELD for a person from this moment.
   doorCashMismatchAt      DateTime?
+  /// Partial cash taken before a refused goods handover (7 Oct owner ruling).
+  /// RETURNED = rider attests handing it back; HELD = still with the rider for
+  /// operations. Separate from completed-delivery cash and rider shortfalls.
+  doorCashReturnAmount     Decimal? @db.Decimal(12, 2)
+  doorCashReturnStatus     String?  @db.VarChar(16)
+  doorCashReturnRecordedAt DateTime?
 
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])

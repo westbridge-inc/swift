@@ -84,18 +84,59 @@ export function decideDoorCash(
 
 /**
  * The "customer cannot pay in full" outcome: the goods are NOT handed over and
- * go back to the store. An offer of the full amount is not short — that
- * customer can pay, so the mover hands over and records it.
+ * go back to the store. A reported full amount is not partial cash; the caller
+ * must check the amount and select the matching outcome.
  */
-export function assertGenuinelyShort(order: { totalAmount: unknown }, offered: number | undefined): { due: number; offered: number | null } {
+export function assertGenuinelyShort(order: { totalAmount: unknown }, collected: number | undefined): { due: number; collected: number | null } {
   const due = doorCashDue(order);
-  if (offered !== undefined) assertCashAmount(offered);
-  if (offered !== undefined && cents(offered) >= cents(due)) {
+  if (collected !== undefined) assertCashAmount(collected);
+  if (collected !== undefined && cents(collected) >= cents(due)) {
     throw new AppError(409, 'CASH_NOT_SHORT',
-      `The customer is offering the full GY$${gyd(due)}. Take it, hand the order over and record the payment.`,
-      { due, offered });
+      `The amount recorded is at least the full GY$${gyd(due)}. Check the cash and choose the correct outcome.`,
+      { due, collected });
   }
-  return { due, offered: offered ?? null };
+  return { due, collected: collected ?? null };
+}
+
+export interface DoorCashReturnRecord {
+  amount: number;
+  status: 'RETURNED' | 'HELD';
+  heldForReview: boolean;
+}
+
+/** Owner ruling, 7 Oct: hand partial cash back before returning the goods.
+ * If that could not happen, record what the rider still holds for operations.
+ * Omitted fields retain the old client's unstated behavior. */
+export function decideDoorCashReturn(
+  order: { totalAmount: unknown },
+  input: { collectedAmount?: number; cashReturned?: boolean },
+): DoorCashReturnRecord | undefined {
+  const { collected } = assertGenuinelyShort(order, input.collectedAmount);
+  if (input.cashReturned !== undefined && (collected === null || collected === 0)) {
+    throw new AppError(400, 'CASH_AMOUNT_REQUIRED', 'Record the positive amount of partial cash taken from the customer.');
+  }
+  if (collected === null || collected === 0) return undefined;
+  if (typeof input.cashReturned !== 'boolean') {
+    throw new AppError(409, 'CASH_RETURN_CONFIRMATION_REQUIRED',
+      'Hand the partial cash back to the customer, then tap "Cash returned". If you could not return it, report that so operations can help. Do not hand over the goods.');
+  }
+  return { amount: collected, status: input.cashReturned ? 'RETURNED' : 'HELD', heldForReview: !input.cashReturned };
+}
+
+export function assertDoorCashOutcome(input: { outcome: string; cashReturned?: boolean; handedOverShort?: boolean }): void {
+  if ((input.cashReturned !== undefined && input.outcome !== 'short_payment')
+      || (input.outcome === 'short_payment' && input.handedOverShort === true)) {
+    throw new AppError(400, 'CASH_OUTCOME_CONFLICT', 'Check whether the goods were handed over and choose the matching cash outcome.');
+  }
+}
+
+/** Read the durable fact on a retry; never let a new body rewrite it. */
+export function recordedDoorCashReturn(order: {
+  doorCashReturnAmount: unknown; doorCashReturnStatus: string | null;
+}): DoorCashReturnRecord | undefined {
+  const status = order.doorCashReturnStatus;
+  if (status !== 'RETURNED' && status !== 'HELD') return undefined;
+  return { amount: Number(order.doorCashReturnAmount), status, heldForReview: status === 'HELD' };
 }
 
 function assertCashAmount(amount: number): void {
@@ -118,7 +159,9 @@ export function shortHandoverPage(orderNumber: string, d: { due: number; collect
 }
 
 /** The note written to the order's status trail when a customer cannot pay in full. */
-export function shortPaymentNote(d: { due: number; offered: number | null }, gpsNote: string): string {
-  const offered = d.offered === null ? 'amount not stated' : `offered GY$${gyd(d.offered)}`;
-  return `customer could not pay in full (${offered} of GY$${gyd(d.due)} due) — not handed over, returning to the store — ${gpsNote}`;
+export function shortPaymentNote(cash: DoorCashReturnRecord | undefined, gpsNote: string): string {
+  const detail = !cash ? 'no partial cash reported'
+    : cash.status === 'RETURNED' ? `cash returned GY$${gyd(cash.amount)} to the customer`
+      : `cash GY$${gyd(cash.amount)} held by the rider for operations; could not return it to the customer`;
+  return `customer could not pay in full (${detail}) — not handed over, returning to the store — ${gpsNote}`;
 }

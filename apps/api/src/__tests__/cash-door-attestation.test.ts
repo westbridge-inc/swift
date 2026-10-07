@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -16,6 +16,7 @@ import { handoverAuthorityFor } from '../modules/order/handover-authority';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
+import { doorCashHoldAudience, stageDoorCashHoldPage } from '../modules/cash/door-cash-hold';
 
 // ---------------------------------------------------------------------------
 // [L02 · row 34] CASH AT THE DOOR IS RECORDED AS THE REAL AMOUNT.
@@ -38,12 +39,14 @@ import { NotificationService } from '../modules/notification/notification.servic
 const GEO = { lat: 6.7413, lng: -58.2553 };
 const DOOR = { lat: GEO.lat + 0.004, lng: GEO.lng + 0.004 };
 const RUN = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
+const PHONE_RUN = String(Date.now()).slice(-8);
 const SUBTOTAL = 3000;
 const FEE = 500;
 const DUE = SUBTOTAL + FEE;
 
 let app: FastifyInstance;
 const createdUserIds: string[] = [];
+const createdTenantIds: string[] = [];
 const sessionIds: string[] = [];
 let vendorId = '';
 let adminUserId = '';
@@ -62,7 +65,7 @@ async function makeRider() {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+5920041${String(seq).padStart(3, '0')}${String(Date.now()).slice(-2)}`,
+      phone: `+592${PHONE_RUN}${String(seq).padStart(3, '0')}`,
       firstName: `Door${seq}`, lastName: 'Rider',
       roles: ['MOVER', 'CUSTOMER'] as UserRole[], activeRole: 'MOVER' as UserRole,
       countryCode: 'GY', isPhoneVerified: true, status: 'ACTIVE',
@@ -85,7 +88,7 @@ async function makeCustomer() {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+5920042${String(seq).padStart(3, '0')}${String(Date.now()).slice(-2)}`,
+      phone: `+592${PHONE_RUN}${String(seq).padStart(3, '0')}`,
       firstName: 'Cust', lastName: `Door${seq}`,
       roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER' as UserRole,
       countryCode: 'GY', isPhoneVerified: true, status: 'ACTIVE',
@@ -182,7 +185,7 @@ beforeAll(async () => {
 
   const admin = await app.prisma.user.create({
     data: {
-      phone: `+5920043${String(Date.now()).slice(-5)}`, firstName: 'Ops', lastName: `Door${RUN}`,
+      phone: `+592${PHONE_RUN}999`, firstName: 'Ops', lastName: `Door${RUN}`,
       roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
       admin: { create: { permissions: ['*'] } },
     },
@@ -195,6 +198,9 @@ afterAll(async () => {
   await runWithoutTenant(async () => {
     const orders = await app.prisma.order.findMany({ where: { orderNumber: { startsWith: `CDA-${RUN}-` } }, select: { id: true } });
     const ids = orders.map((o) => o.id);
+    await app.prisma.opsAlert.deleteMany({ where: { OR: [
+      { body: { contains: `Order CDA-${RUN}-` } }, { tenantId: { in: createdTenantIds } },
+    ] } }).catch(() => {});
     await app.prisma.earning.deleteMany({ where: { orderId: { in: ids } } }).catch(() => {});
     await app.prisma.order.deleteMany({ where: { id: { in: ids } } }).catch(() => {});
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } }).catch(() => {});
@@ -233,6 +239,7 @@ describe('[row 34] exact cash: the amount the rider took is the amount recorded'
 
     const res = await handover(holder.token, order.id, { outcome: 'paid' });
     expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toEqual({ orderId: order.id, status: 'DELIVERED', claim: null });
     const f = await facts(order.id);
     expect(f.order.status).toBe('DELIVERED');
     expect(f.order.paymentStatus).toBe('CAPTURED');
@@ -284,13 +291,13 @@ describe('[row 34] short cash: NO HANDOVER is the default (owner ruling, 5 Oct)'
     const customer = await makeCustomer();
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
 
-    const res = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 2000, handoverVersion: await shownVersion(order.id) });
+    const res = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 2000, cashReturned: true, handoverVersion: await shownVersion(order.id) });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().data.status).toBe('RETURNING');
 
     const f = await facts(order.id);
     expect(f.order.status).toBe('RETURNING');
-    // Nothing was handed over, so nothing was collected or captured.
+    // No goods were handed over; the partial cash was handed back, not captured.
     expect(f.order.paymentStatus).toBe('PENDING');
     expect(f.order['doorCashCollectedAmount']).toBeNull();
     expect(f.order['doorCashMismatchAt']).toBeNull();
@@ -330,14 +337,14 @@ describe('[row 34] short cash: NO HANDOVER is the default (owner ruling, 5 Oct)'
     const holder = await makeRider();
     const customer = await makeCustomer();
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
-    const body = { outcome: 'short_payment', collectedAmount: 1500, handoverVersion: await shownVersion(order.id) };
+    const body = { outcome: 'short_payment', collectedAmount: 1500, cashReturned: true, handoverVersion: await shownVersion(order.id) };
     const key = `cda-${nanoid(10)}`;
     const first = await handover(holder.token, order.id, body, { 'idempotency-key': key });
     expect(first.statusCode, first.body).toBe(200);
     const replay = await handover(holder.token, order.id, body, { 'idempotency-key': key });
     expect(replay.statusCode, replay.body).toBe(200);
     // A retry without the key (the answer was lost) answers the committed fact.
-    const lost = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 1500 });
+    const lost = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 1500, cashReturned: true });
     expect(lost.statusCode, lost.body).toBe(200);
     expect(lost.json().data.status).toBe('RETURNING');
 
@@ -366,7 +373,7 @@ describe('[row 34] short cash: NO HANDOVER is the default (owner ruling, 5 Oct)'
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
     await app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CAPTURED' } });
     const res = await handover(holder.token, order.id, {
-      outcome: 'short_payment', collectedAmount: 100, handoverVersion: await shownVersion(order.id),
+      outcome: 'short_payment', collectedAmount: 100, cashReturned: true, handoverVersion: await shownVersion(order.id),
     });
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json().error.code).toBe('CASH_ALREADY_RECORDED');
@@ -539,5 +546,341 @@ describe('[row 34] cash attestation commits with all terminal facts', () => {
     expect(Number(committed.earnings[0]!.amount)).toBe(FEE);
     expect(committed.committedFloat).toBe(0);
     expect(await adminPages(order.id, 'ops_cash_door_short')).toHaveLength(1);
+  });
+});
+
+
+describe('[row 34] partial cash is returned at the door or held for operations (owner, 7 Oct)', () => {
+  it('requires cash-return confirmation before a positive partial-cash report can move the goods', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const res = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 2000 });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('CASH_RETURN_CONFIRMATION_REQUIRED');
+    const f = await facts(order.id);
+    expect(f.order.status).toBe('ARRIVED');
+    expect(f.order.paymentStatus).toBe('PENDING');
+    expect(f.cases).toHaveLength(0);
+    expect(f.earnings).toHaveLength(0);
+  });
+
+  it('cash returned records the actual amount handed back with the goods return, without capturing or refunding', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const res = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 2000, cashReturned: true });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.cashReturn).toEqual({ amount: 2000, status: 'RETURNED', heldForReview: false });
+    const f = await facts(order.id);
+    expect(f.order.status).toBe('RETURNING');
+    expect(f.order.paymentStatus).toBe('PENDING');
+    expect(f.order['doorCashCollectedAmount']).toBeNull();
+    expect(Number(f.order['doorCashReturnAmount'])).toBe(2000);
+    expect(f.order['doorCashReturnStatus']).toBe('RETURNED');
+    expect(f.order['doorCashReturnRecordedAt']).toBeInstanceOf(Date);
+    expect(f.order.refundOwedAmount).toBeNull();
+    expect(f.order.refundPaidAmount).toBeNull();
+    expect(f.claims).toBe(0);
+    expect(f.strikes).toBe(0);
+    expect(f.earnings).toHaveLength(0);
+    expect(f.committedFloat).toBe(SUBTOTAL);
+    expect(f.cases).toHaveLength(1);
+    expect(f.cases[0]!.reasonNote).toMatch(/cash returned.*2,000/i);
+    expect(await adminPages(order.id, 'ops_cash_return_held')).toHaveLength(0);
+  });
+
+  it('partial cash that could not be returned stays recorded and held, pages operations once, and cannot be overwritten by a retry', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const body = { outcome: 'short_payment', collectedAmount: 2000, cashReturned: false };
+    const first = await handover(holder.token, order.id, body);
+    expect(first.statusCode, first.body).toBe(200);
+    expect(first.json().data.cashReturn).toEqual({ amount: 2000, status: 'HELD', heldForReview: true });
+    const replay = await handover(holder.token, order.id, body);
+    expect(replay.statusCode, replay.body).toBe(200);
+    expect(replay.json().data.cashReturn).toEqual(first.json().data.cashReturn);
+    const contradictory = await handover(holder.token, order.id, { ...body, cashReturned: true });
+    expect(contradictory.statusCode, contradictory.body).toBe(409);
+    expect(contradictory.json().error.code).toBe('CASH_RETURN_ALREADY_RECORDED');
+    const changedAmount = await handover(holder.token, order.id, { ...body, collectedAmount: 1000 });
+    expect(changedAmount.statusCode, changedAmount.body).toBe(409);
+    expect(changedAmount.json().error.code).toBe('CASH_RETURN_ALREADY_RECORDED');
+    const f = await facts(order.id);
+    expect(f.order.status).toBe('RETURNING');
+    expect(f.order.paymentStatus).toBe('PENDING');
+    expect(Number(f.order['doorCashReturnAmount'])).toBe(2000);
+    expect(f.order['doorCashReturnStatus']).toBe('HELD');
+    expect(f.order['doorCashReturnRecordedAt']).toBeInstanceOf(Date);
+    expect(f.order['doorCashCollectedAmount']).toBeNull();
+    expect(f.order['doorCashShortfallAmount']).toBeNull();
+    expect(f.order.refundOwedAmount).toBeNull();
+    expect(f.order.refundPaidAmount).toBeNull();
+    expect(f.claims).toBe(0);
+    expect(f.strikes).toBe(0);
+    expect(f.earnings).toHaveLength(0);
+    expect(f.committedFloat).toBe(SUBTOTAL);
+    expect(f.cases).toHaveLength(1);
+    expect(f.cases[0]!.reasonNote).toMatch(/cash.*2,000.*held/i);
+    expect(f.statuses.filter((s) => s === 'RETURNING')).toHaveLength(1);
+    const pages = await adminPages(order.id, 'ops_cash_return_held');
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.body).toMatch(/2,000/);
+  });
+
+  it('keeps an unstated old request unchanged without inventing a cash-return record', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const res = await handover(holder.token, order.id, { outcome: 'short_payment' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).not.toHaveProperty('cashReturn');
+    const f = await facts(order.id);
+    expect(f.order.status).toBe('RETURNING');
+    expect(f.order.paymentStatus).toBe('PENDING');
+    expect(f.order['doorCashReturnAmount']).toBeNull();
+    expect(f.order['doorCashReturnStatus']).toBeNull();
+  });
+
+  it.each([
+    { outcome: 'short_payment', cashReturned: false },
+    { outcome: 'short_payment', collectedAmount: 0, cashReturned: false },
+    { outcome: 'short_payment', collectedAmount: 2000, cashReturned: true, handedOverShort: true },
+    { outcome: 'paid', collectedAmount: DUE, cashReturned: true },
+  ])('rejects contradictory or unknown partial cash: %j', async (body) => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const res = await handover(holder.token, order.id, body);
+    expect(res.statusCode, res.body).toBe(400);
+    const f = await facts(order.id);
+    expect(f.order.status).toBe('ARRIVED');
+    expect(f.cases).toHaveLength(0);
+    expect(f.earnings).toHaveLength(0);
+  });
+});
+
+
+describe('[row 34] partial cash and its operations page are one durable generation', () => {
+  it('rechecks the cash-return version under the order lock', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const handoverVersion = await shownVersion(order.id);
+    const orders = new OrderService(app.prisma, app.io);
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), orders);
+    const transition = orders.transitionOrderAtomically.bind(orders);
+    const seam = vi.spyOn(orders, 'transitionOrderAtomically').mockImplementationOnce(async (...args) => {
+      await app.prisma.order.update({ where: { id: order.id }, data: { totalAmount: DUE + 100 } });
+      return transition(...args);
+    });
+    try {
+      await expect(cash.handover(order.id, holder.user.id, {
+        outcome: 'short_payment', collectedAmount: 2000, cashReturned: true, handoverVersion, gps: DOOR,
+      })).rejects.toMatchObject({ code: 'HANDOVER_STALE' });
+      expect(seam).toHaveBeenCalledOnce();
+      const f = await facts(order.id);
+      expect(f.order.status).toBe('ARRIVED');
+      expect(f.order['doorCashReturnAmount']).toBeNull();
+      expect(f.cases).toHaveLength(0);
+    } finally { seam.mockRestore(); }
+  });
+
+  it('rolls back held cash, custody and the operations page together, then retries once', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const observer = { afterCashReturnFacts: vi.fn().mockRejectedValueOnce(new Error('cash-return-cut')) };
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), new OrderService(app.prisma, app.io), observer);
+    const input = { outcome: 'short_payment' as const, collectedAmount: 2000, cashReturned: false, gps: DOOR };
+    await expect(cash.handover(order.id, holder.user.id, input)).rejects.toThrow('cash-return-cut');
+    const failed = await facts(order.id);
+    expect(failed.order.status).toBe('ARRIVED');
+    expect(failed.order['doorCashReturnStatus']).toBeNull();
+    expect(failed.order['doorCashReturnAmount']).toBeNull();
+    expect(failed.cases).toHaveLength(0);
+    expect(await adminPages(order.id, 'ops_cash_return_held')).toHaveLength(0);
+    expect(await app.prisma.opsAlert.count({ where: { body: { contains: order.orderNumber } } })).toBe(0);
+    const retried = await cash.handover(order.id, holder.user.id, input);
+    expect(retried.cashReturn).toEqual({ amount: 2000, status: 'HELD', heldForReview: true });
+    expect(await adminPages(order.id, 'ops_cash_return_held')).toHaveLength(1);
+    expect(await app.prisma.opsAlert.count({ where: { body: { contains: order.orderNumber } } })).toBe(1);
+  });
+
+  it('retains the held amount and durable operations inbox if post-commit fanout fails', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const notifications = new NotificationService(app.prisma, app.io);
+    const fanout = vi.spyOn(notifications, 'publishPersisted').mockRejectedValue(new Error('fanout-offline'));
+    const cash = new CashRulesService(app.prisma, notifications, new OrderService(app.prisma, app.io));
+    const result = await cash.handover(order.id, holder.user.id, { outcome: 'short_payment', collectedAmount: 2000, cashReturned: false, gps: DOOR });
+    expect(result.cashReturn?.status).toBe('HELD');
+    expect(fanout).toHaveBeenCalled();
+    const pages = await adminPages(order.id, 'ops_cash_return_held');
+    expect(pages).toHaveLength(1);
+    const data = pages[0]!.data as { opsAlertId: string };
+    const alert = await app.prisma.opsAlert.findUniqueOrThrow({ where: { id: data.opsAlertId }, include: { recipients: true } });
+    expect(alert.acknowledgedAt).toBeNull();
+    expect(alert.closedAt).toBeNull();
+    expect(alert.recipients.some((r) => r.userId === adminUserId && r.notificationId === pages[0]!.id)).toBe(true);
+    expect((await facts(order.id)).order['doorCashReturnStatus']).toBe('HELD');
+  });
+
+  it('checks partial cash against the locked total and leaves no hold if the total changed', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const orders = new OrderService(app.prisma, app.io);
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), orders);
+    const transition = orders.transitionOrderAtomically.bind(orders);
+    const seam = vi.spyOn(orders, 'transitionOrderAtomically').mockImplementationOnce(async (...args) => {
+      await app.prisma.order.update({ where: { id: order.id }, data: { totalAmount: 1000 } });
+      return transition(...args);
+    });
+    try {
+      await expect(cash.handover(order.id, holder.user.id, { outcome: 'short_payment', collectedAmount: 2000, cashReturned: false, gps: DOOR }))
+        .rejects.toMatchObject({ code: 'CASH_NOT_SHORT' });
+      expect(seam).toHaveBeenCalledOnce();
+      const f = await facts(order.id);
+      expect(f.order.status).toBe('ARRIVED');
+      expect(f.order['doorCashReturnStatus']).toBeNull();
+      expect(f.cases).toHaveLength(0);
+      expect(await adminPages(order.id, 'ops_cash_return_held')).toHaveLength(0);
+    } finally { seam.mockRestore(); }
+  });
+});
+
+
+describe('[row 34] cash-return retries and operations scope', () => {
+  it.each(['failed', 'missing'])('refuses to resolve a cash page when tenant classification is %s', async (state) => {
+    const unavailable = new Error('tenant lookup unavailable');
+    const findUnique = state === 'failed' ? vi.fn().mockRejectedValue(unavailable) : vi.fn().mockResolvedValue(null);
+    const findMany = vi.fn().mockResolvedValue([]);
+    const client = { tenant: { findUnique }, user: { findMany } } as unknown as PrismaClient;
+    await expect(doorCashHoldAudience(client, 'unresolved-cash-tenant')).rejects.toThrow();
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses an operations audience resolved for a different tenant before any cash page is written', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const foreign = await app.prisma.tenant.create({ data: { name: 'Cash audience fixture', slug: `cash-audience-${nanoid(10)}` } });
+    createdTenantIds.push(foreign.id);
+    seq += 1;
+    const user = await app.prisma.user.create({ data: {
+      phone: `+592${PHONE_RUN}${String(seq).padStart(3, '0')}`, firstName: 'Ops', lastName: 'CashAudience',
+      tenantId: foreign.id, roles: ['ADMIN'], activeRole: 'ADMIN', status: 'ACTIVE',
+    } });
+    createdUserIds.push(user.id);
+    const audience = await doorCashHoldAudience(app.prisma, foreign.id);
+    await expect(app.prisma.$transaction((tx) => stageDoorCashHoldPage(tx, order, 2000, audience)))
+      .rejects.toMatchObject({ code: 'HANDOVER_STALE' });
+    expect(await app.prisma.opsAlert.count({ where: { body: { contains: order.orderNumber } } })).toBe(0);
+  });
+
+  it('never acknowledges an unrecorded positive cash amount on a previously unstated return', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    expect((await handover(holder.token, order.id, { outcome: 'short_payment' })).statusCode).toBe(200);
+    const changed = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 2000, cashReturned: false });
+    expect(changed.statusCode, changed.body).toBe(409);
+    expect(changed.json().error.code).toBe('CASH_RETURN_ALREADY_RECORDED');
+    const f = await facts(order.id);
+    expect(f.order['doorCashReturnAmount']).toBeNull();
+    expect(f.cases).toHaveLength(1);
+  });
+
+  it('two concurrent partial-cash reports produce one held fact, one case and one operations obligation', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const body = { outcome: 'short_payment', collectedAmount: 2000, cashReturned: false };
+    const responses = await Promise.all([handover(holder.token, order.id, body), handover(holder.token, order.id, body)]);
+    expect(responses.map((r) => r.statusCode)).toContain(200);
+    expect(responses.every((r) => r.statusCode === 200 || r.statusCode === 409)).toBe(true);
+    const f = await facts(order.id);
+    expect(f.cases).toHaveLength(1);
+    expect(f.statuses.filter((s) => s === 'RETURNING')).toHaveLength(1);
+    expect(Number(f.order['doorCashReturnAmount'])).toBe(2000);
+    expect(f.order['doorCashReturnStatus']).toBe('HELD');
+    expect(await adminPages(order.id, 'ops_cash_return_held')).toHaveLength(1);
+    expect(await app.prisma.opsAlert.count({ where: { body: { contains: order.orderNumber } } })).toBe(1);
+  });
+
+  it('pages the order tenant and platform admins without disclosing held cash to another tenant admin', async () => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const foreign = await app.prisma.tenant.create({ data: { name: 'Cash test tenant', slug: `cash-foreign-${nanoid(10)}` } });
+    createdTenantIds.push(foreign.id);
+    const ids: string[] = [];
+    for (const tenantId of [order.tenantId, foreign.id]) {
+      seq += 1;
+      const user = await app.prisma.user.create({ data: {
+        phone: `+592${PHONE_RUN}${String(seq).padStart(3, '0')}`, firstName: 'Ops', lastName: 'CashScope',
+        tenantId, roles: ['ADMIN'], activeRole: 'ADMIN', status: 'ACTIVE',
+      } });
+      createdUserIds.push(user.id); ids.push(user.id);
+    }
+    const res = await handover(holder.token, order.id, { outcome: 'short_payment', collectedAmount: 2000, cashReturned: false });
+    expect(res.statusCode, res.body).toBe(200);
+    const notices = await runWithoutTenant(() => app.prisma.notification.findMany({
+      where: { userId: { in: ids }, dedupeKey: `cash-return-held:${order.id}` }, select: { userId: true },
+    }), 'test:cash-return-tenant');
+    expect(notices).toEqual([{ userId: ids[0] }]);
+    expect(await adminPages(order.id, 'ops_cash_return_held')).toHaveLength(1);
+  });
+
+  it('never pages real operators about review-tenant partial cash', async () => {
+    const tenant = await app.prisma.tenant.create({ data: { name: 'Cash review fixture', slug: `cash-review-${nanoid(10)}`, kind: 'REVIEW' } });
+    createdTenantIds.push(tenant.id);
+    const audience = await doorCashHoldAudience(app.prisma, tenant.id);
+    expect(audience).toEqual({ tenantId: tenant.id, suppressed: true, userIds: [] });
+    const order = { id: `review-${nanoid(10)}`, orderNumber: `REVIEW-CASH-${nanoid(10)}`, tenantId: tenant.id };
+    const ids = await app.prisma.$transaction((tx) => stageDoorCashHoldPage(tx, order, 2000, audience));
+    expect(ids).toEqual([]);
+    expect(await app.prisma.opsAlert.count({ where: { tenantId: tenant.id } })).toBe(0);
+  });
+});
+
+
+describe('[row 34] the database refuses contradictory cash-return evidence', () => {
+  it.each(['collected', 'shortfall', 'return'])('refuses numeric NaN in persisted %s cash', async (column) => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    const statement = column === 'collected'
+      ? Prisma.sql`UPDATE orders SET "doorCashCollectedAmount" = 'NaN'::numeric WHERE id = ${order.id}`
+      : column === 'shortfall'
+        ? Prisma.sql`UPDATE orders SET "doorCashCollectedAmount" = 0, "doorCashShortfallAmount" = 'NaN'::numeric, "doorCashMismatchAt" = NOW() WHERE id = ${order.id}`
+        : Prisma.sql`UPDATE orders SET "doorCashReturnAmount" = 'NaN'::numeric, "doorCashReturnStatus" = 'HELD', "doorCashReturnRecordedAt" = NOW() WHERE id = ${order.id}`;
+    await expect(app.prisma.$executeRaw(statement)).rejects.toThrow(/check constraint/i);
+    const f = await facts(order.id);
+    expect(f.order['doorCashCollectedAmount']).toBeNull();
+    expect(f.order['doorCashShortfallAmount']).toBeNull();
+    expect(f.order['doorCashReturnAmount']).toBeNull();
+  });
+
+  it.each([
+    { doorCashReturnAmount: -1, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date() },
+    { doorCashReturnAmount: 0, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date() },
+    { doorCashReturnAmount: 0.5, doorCashReturnStatus: 'RETURNED', doorCashReturnRecordedAt: new Date() },
+    { doorCashReturnAmount: 2000, doorCashReturnStatus: null, doorCashReturnRecordedAt: new Date() },
+    { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: null },
+    { doorCashReturnAmount: 2000, doorCashReturnStatus: 'UNKNOWN', doorCashReturnRecordedAt: new Date() },
+    { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(), doorCashCollectedAmount: 2000 },
+  ])('rejects invalid persisted evidence: %j', async (data) => {
+    const holder = await makeRider();
+    const customer = await makeCustomer();
+    const order = await orderAtDoor(holder.rider.id, customer.user.id);
+    await expect(app.prisma.order.update({ where: { id: order.id }, data })).rejects.toThrow(/check constraint/i);
+    const f = await facts(order.id);
+    expect(f.order['doorCashReturnAmount']).toBeNull();
+    expect(f.order['doorCashReturnStatus']).toBeNull();
+    expect(f.order['doorCashReturnRecordedAt']).toBeNull();
   });
 });

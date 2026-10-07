@@ -134,6 +134,9 @@ const handoverSchema = z.object({
   /** [L02 · row 34] The cash actually taken (whole units). Older apps omit it
    *  and complete as before. See cash/door-cash.ts for what it means. */
   collectedAmount: zMoneyWhole.optional(),
+  /** Partial cash was handed back at the door. False reports cash still held
+   * by the rider for operations; neither choice executes a platform refund. */
+  cashReturned: z.boolean().optional(),
   /** [L02 · row 34] The door authority version the screen rendered (the
    *  `handover.version` of GET /orders/active); a stale one is refused. */
   handoverVersion: z.string().min(1).max(64).optional(),
@@ -333,6 +336,7 @@ export async function riderRoutes(app: FastifyInstance) {
         claim: result.claim
           ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags }
           : null,
+        ...(result.cashReturn ? { cashReturn: result.cashReturn } : {}),
         // [L02 · row 34] What was recorded about the cash, when the app stated it.
         ...(result.doorCash && result.doorCash.kind !== 'UNSTATED'
           ? {
