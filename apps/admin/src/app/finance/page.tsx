@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRevenue,
   fetchCashSettlements,
@@ -10,8 +10,7 @@ import {
   processSettlement,
   type CashSettlementRow,
 } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
-import { MutationError } from '@/components/MutationError';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 /**
  * `Number(n || 0)` rendered a MISSING amount as `$0` — and on a finance page a
@@ -168,12 +167,22 @@ function MmgSection() {
 function SettlementsSection() {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
-  const process = useMutation({
-    mutationFn: ({ id, reference, reason }: { id: string; reference?: string; reason: string }) => processSettlement(id, reference, reason),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['settlements'] }),
-  });
+  // [MC-MONEY] One panel: what acknowledging means (no money moves), an
+  // optional note, the reason; the answer stays on screen.
+  const actions = useActionRunner(() => void qc.invalidateQueries({ queryKey: ['settlements'] }));
+  const acknowledge = (s: any) => {
+    const name = s.vendor?.name ?? 'this vendor';
+    void actions.run({
+      title: `Acknowledge ${name}'s sales digest?`,
+      body: <p>Swift moves no money — this records that you reviewed it.</p>,
+      confirmLabel: 'Acknowledge',
+      fields: [{ kind: 'text', name: 'note', label: 'Note (optional)', maxLength: 200 }],
+      submit: ({ reason, values }) => processSettlement(s.id, String(values['note'] ?? '') || undefined, reason),
+      success: () => `${name}'s sales digest is acknowledged.`,
+    });
+  };
   const rows: any[] = data?.data ?? [];
-  if (!isLoading && rows.length === 0) return null; // nothing pending → no noise
+  if (!isLoading && rows.length === 0 && !actions.result) return null; // nothing pending → no noise
 
   return (
     <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 mb-6">
@@ -181,11 +190,7 @@ function SettlementsSection() {
       <p className="text-[var(--muted)] text-xs mb-4">
         Each vendor’s own completed sales for the week. Swift takes no cut and pays nothing out — acknowledge a digest once you have reviewed it.
       </p>
-      {process.error && (
-        <div className="mb-3">
-          <MutationError error={process.error} label="Settlement update failed" />
-        </div>
-      )}
+      {actions.banner}
       {isLoading ? (
         <p className="text-sm text-[var(--muted)]">Loading…</p>
       ) : (
@@ -199,17 +204,11 @@ function SettlementsSection() {
               </span>
               <span className="ml-auto font-semibold">{gyd(s.netSales ?? s.totalBase ?? s.amount)}</span>
               <button
-                onClick={() => {
-                  const ref = window.prompt(`Note for ${s.vendor?.name ?? 'this digest'} (optional):`) ?? undefined;
-                  if (window.confirm(`Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.`)) {
-                    const reason = askReason({ action: 'acknowledge this sales digest', subject: s.vendor?.name ?? 'this digest' });
-                    if (reason) process.mutate({ id: s.id, reference: ref || undefined, reason });
-                  }
-                }}
-                disabled={process.isPending}
+                onClick={() => acknowledge(s)}
+                aria-label={`Acknowledge ${s.vendor?.name ?? 'this vendor'}'s digest…`}
                 className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
               >
-                Acknowledge
+                Acknowledge…
               </button>
             </div>
           ))}
