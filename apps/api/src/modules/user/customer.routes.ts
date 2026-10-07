@@ -45,6 +45,7 @@ import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
 import { AccountService, closesByRequest } from './account.service';
+import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
@@ -835,35 +836,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     const body = updateProfileSchema.parse(request.body);
 
-    if (body.email) {
-      const existing = await app.prisma.user.findFirst({
-        where: { email: body.email, id: { not: userId } },
-      });
-      if (existing) {
-        throw new AppError(409, 'EMAIL_TAKEN', 'This email is already in use by another account');
-      }
-    }
-
-    // [REPORT-022 F-022-21] conditional write: a deletion that finished
-    // between auth and here cannot be re-personalized.
-    const updated = await app.prisma.user.updateMany({
-      where: { id: userId, status: { notIn: ['DEACTIVATED', 'BANNED', 'SUSPENDED'] } },
-      data: {
-        ...(body.firstName !== undefined && { firstName: body.firstName }),
-        ...(body.lastName !== undefined && { lastName: body.lastName }),
-        ...(body.email !== undefined && { email: body.email }),
-      },
-    });
-    if (updated.count === 0) {
-      throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
-    }
-    const user = await app.prisma.user.findUniqueOrThrow({
-      where: { id: userId },
-      select: {
-        id: true, phone: true, firstName: true, lastName: true,
-        email: true, avatar: true, activeRole: true, lastMoverRole: true, updatedAt: true,
-      },
-    });
+    const user = await updateCustomerProfile(app, userId, request.authSessionId, body);
 
     return { success: true, data: { ...user, avatar: await resolveAvatarUrl(user.avatar) } };
   });

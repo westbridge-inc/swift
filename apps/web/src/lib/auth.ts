@@ -114,6 +114,19 @@ export function getSessionPrincipal(): string | null {
   return typeof window !== 'undefined' ? sessionPrincipal : null;
 }
 
+/** A multi-request confirmation belongs to one login generation, including
+ * when somebody signs out and signs back in as the same account. */
+export function captureSessionGuard(): () => void {
+  const snapshot = authSnapshot();
+  const check = () => {
+    if (!snapshot.principal || !snapshotIsCurrent(snapshot)) {
+      throw new ApiRequestError('Your session changed. Please start again.', 409, 'SESSION_CHANGED');
+    }
+  };
+  check();
+  return check;
+}
+
 /**
  * [W-01] THE SERVER'S WORD on whether this browser has a session. Pages gate on
  * this, never on a stored token — there is no token to be present. It also

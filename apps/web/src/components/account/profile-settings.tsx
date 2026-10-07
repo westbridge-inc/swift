@@ -4,6 +4,7 @@ import { useRef, useState, type FormEvent } from 'react';
 import { accountApi, type Profile } from './account-api';
 import { AccountFrame, buttonClass, fieldClass, useAccountQuery } from './account-frame';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { StepUpDismissed, useStepUp } from './use-step-up';
 
 export function ProfileSettings() {
   const profile = useAccountQuery('profile', accountApi.profile);
@@ -15,6 +16,7 @@ export function ProfileSettings() {
 }
 
 function ProfileForm({ profile }: { profile: Profile }) {
+  const stepUp = useStepUp();
   const [firstName, setFirstName] = useState(profile.firstName ?? '');
   const [lastName, setLastName] = useState(profile.lastName ?? '');
   const [email, setEmail] = useState(profile.email ?? '');
@@ -27,12 +29,13 @@ function ProfileForm({ profile }: { profile: Profile }) {
     if (sending.current) return;
     sending.current = true; setBusy(true); setError(null); setSaved(false);
     try {
-      await accountApi.updateProfile({ firstName: firstName.trim(), lastName: lastName.trim(), ...(email.trim() ? { email: email.trim() } : {}) });
+      const body = { firstName: firstName.trim(), lastName: lastName.trim(), ...(email.trim() ? { email: email.trim() } : {}) };
+      await stepUp.withStepUp(() => accountApi.updateProfile(body));
       setSaved(true);
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) { if (!(e instanceof StepUpDismissed)) setError((e as Error).message); }
     finally { sending.current = false; setBusy(false); }
   }
-  return <form onSubmit={save} className="space-y-4 sw-card p-5">
+  return <><form onSubmit={save} className="space-y-4 sw-card p-5">
     <fieldset disabled={busy} className="space-y-4">
     <label className="block space-y-1"><span className="text-sm font-semibold">First name</span><input className={fieldClass} autoComplete="given-name" required maxLength={50} value={firstName} onChange={(e) => { setFirstName(e.target.value); setSaved(false); }} /></label>
     <label className="block space-y-1"><span className="text-sm font-semibold">Last name</span><input className={fieldClass} autoComplete="family-name" required maxLength={50} value={lastName} onChange={(e) => { setLastName(e.target.value); setSaved(false); }} /></label>
@@ -44,7 +47,7 @@ function ProfileForm({ profile }: { profile: Profile }) {
     {error && <p role="alert">{error}</p>}
     {saved && <p role="status">Your details are saved.</p>}
     <button className={buttonClass} disabled={busy || !firstName.trim() || !lastName.trim()}>{busy ? 'Saving…' : 'Save details'}</button>
-  </form>;
+  </form>{stepUp.dialog}</>;
 }
 
 function MarketingPreference() {

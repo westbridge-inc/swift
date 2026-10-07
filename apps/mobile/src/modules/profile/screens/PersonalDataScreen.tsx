@@ -7,6 +7,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { customerApi } from '../../../services/api';
 import { useProfile } from '../../../hooks/customer';
+import { useStepUp } from '../../../hooks/useStepUp';
+import { isStepUpDismissed } from '../../../lib/stepUp';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -22,6 +24,7 @@ const GUTTER = space['2xl'];
 // key (read-only); the avatar comes from the mandatory signup selfie.
 export function PersonalDataScreen() {
   const qc = useQueryClient();
+  const stepUp = useStepUp();
   const profile = useProfile<any>();
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const logoutIfCurrent = useAuthStore((s) => s.logoutIfCurrent);
@@ -48,11 +51,12 @@ export function PersonalDataScreen() {
       if (!operationUser || operationUser.id !== owner.userId) {
         throw new AuthSessionBoundaryError();
       }
-      const res = await customerApi.updateProfile({
+      const body = {
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         ...(email.trim() ? { email: email.trim() } : {}),
-      }, owner);
+      };
+      const res = await stepUp.withStepUp(() => customerApi.updateProfile(body, requireAuthSessionForPrincipal(owner)))();
       requireAuthSessionForPrincipal(owner);
       const updated = res.data?.data;
       if (updated && !setUserIfCurrent(owner, {
@@ -120,7 +124,7 @@ export function PersonalDataScreen() {
     );
   }
 
-  const err = save.isError
+  const err = save.isError && !isStepUpDismissed(save.error) && !(save.error instanceof AuthSessionBoundaryError)
     ? ((save.error as any)?.response?.data?.error?.message ?? 'Could not save. Try again.')
     : undefined;
 
@@ -206,6 +210,7 @@ export function PersonalDataScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
 
+      {stepUp.sheet}
       <PopupCard visible={confirmDelete} onClose={() => setConfirmDelete(false)}>
         <IconChip icon="alert-triangle" size={56} tone="error" />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
