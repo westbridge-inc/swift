@@ -389,9 +389,9 @@ export function readCompletion(json: unknown, held: { txnId: string }): Completi
 // ---------------------------------------------------------------------------
 
 type HttpAnswer =
-  | { kind: 'json'; status: number; json: unknown }
-  | { kind: 'http'; status: number }
-  | { kind: 'transport'; reason: 'timeout' | 'network' };
+  | { shape: 'json'; status: number; json: unknown }
+  | { shape: 'http'; status: number }
+  | { shape: 'transport'; reason: 'timeout' | 'network' };
 
 export interface PowerTranzDeps {
   /** The HTTP client (tests pass a fake that speaks the guide's examples). */
@@ -466,12 +466,12 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       });
       const text = await res.text();
       try {
-        return { kind: 'json', status: res.status, json: text ? JSON.parse(text) : null };
+        return { shape: 'json', status: res.status, json: text ? JSON.parse(text) : null };
       } catch {
-        return { kind: 'http', status: res.status };
+        return { shape: 'http', status: res.status };
       }
     } catch (err) {
-      return { kind: 'transport', reason: (err as Error)?.name === 'AbortError' ? 'timeout' : 'network' };
+      return { shape: 'transport', reason: (err as Error)?.name === 'AbortError' ? 'timeout' : 'network' };
     } finally {
       clearTimeout(timer);
     }
@@ -513,8 +513,8 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       },
     };
     const answer = await this.call(PATH.sale, { method: 'POST', headers: this.headers(true), body: JSON.stringify(body) });
-    if (answer.kind !== 'json' || !isObject(answer.json)) {
-      return { status: 'failed', reason: answer.kind === 'transport' ? `NO_ANSWER_${answer.reason}` : `HTTP_${answer.status}`, rawSha256: rawDigest({ createFailed: answer.kind, status: 'status' in answer ? answer.status : null }) };
+    if (answer.shape !== 'json' || !isObject(answer.json)) {
+      return { status: 'failed', reason: answer.shape === 'transport' ? `NO_ANSWER_${answer.reason}` : `HTTP_${answer.status}`, rawSha256: rawDigest({ createFailed: answer.shape, status: 'status' in answer ? answer.status : null }) };
     }
     const json = answer.json;
     const rawSha256 = blindedDigest(json);
@@ -642,19 +642,19 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
     });
     let reading: CompletionReading;
     let rawSha256: string;
-    if (answer.kind === 'json') {
+    if (answer.shape === 'json') {
       rawSha256 = blindedDigest(answer.json);
       reading = answer.status >= 500 || answer.status === 408 || answer.status === 429
         ? { status: 'unknown', reason: `HTTP_${answer.status}` }
         : answer.status >= 400 && !isObject(answer.json)
           ? { status: 'failed', reason: `HTTP_${answer.status}` }
           : readCompletion(answer.json, { txnId: rec['txnId'] ?? '' });
-    } else if (answer.kind === 'http' && answer.status >= 400 && answer.status < 500 && answer.status !== 408 && answer.status !== 429) {
+    } else if (answer.shape === 'http' && answer.status >= 400 && answer.status < 500 && answer.status !== 408 && answer.status !== 429) {
       rawSha256 = rawDigest({ completionHttp: answer.status });
       reading = { status: 'failed', reason: `HTTP_${answer.status}` };
     } else {
       // No answer, or an answer that cannot be read: the bank may have taken it. Never repeated.
-      return { status: 'unknown', reason: answer.kind === 'transport' ? `COMPLETION_${answer.reason.toUpperCase()}` : 'COMPLETION_UNREADABLE', rawSha256: rawDigest({ completion: answer.kind }) };
+      return { status: 'unknown', reason: answer.shape === 'transport' ? `COMPLETION_${answer.reason.toUpperCase()}` : 'COMPLETION_UNREADABLE', rawSha256: rawDigest({ completion: answer.shape }) };
     }
     await this.redis.hset(k, { completion: 'done', result: JSON.stringify({ ...reading, rawSha256 }), completedAtMs: String(this.now().getTime()) });
     await this.redis.hdel(k, 'spiToken', 'redirectData');
@@ -721,18 +721,18 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
     return this.adjust('void', input.idempotencyKey, { TransactionIdentifier: input.providerRef });
   }
 
-  private async adjust(kind: 'refund' | 'void', idempotencyKey: string, body: Record<string, unknown>): Promise<CardRefundOutcome> {
-    const k = this.key.refund(`${kind}:${idempotencyKey}`);
+  private async adjust(action: 'refund' | 'void', idempotencyKey: string, body: Record<string, unknown>): Promise<CardRefundOutcome> {
+    const k = this.key.refund(`${action}:${idempotencyKey}`);
     if (Number(await this.redis.hsetnx(k, 'state', 'sending')) !== 1) {
       const rec = await this.redis.hgetall(k);
       if (rec['state'] === 'done' && rec['result']) return JSON.parse(rec['result']) as CardRefundOutcome;
       // Sent once already and its answer never arrived: never sent again blindly (no inquiry call, sec. 3).
-      return { status: 'unknown', reason: `${kind.toUpperCase()}_SENT_ANSWER_LOST`, rawSha256: rawDigest({ [kind]: idempotencyKey }) };
+      return { status: 'unknown', reason: `${action.toUpperCase()}_SENT_ANSWER_LOST`, rawSha256: rawDigest({ [action]: idempotencyKey }) };
     }
     await this.redis.pexpire(k, RECORD_RETAIN_MS);
-    const answer = await this.call(kind === 'refund' ? PATH.refund : PATH.void, { method: 'POST', headers: this.headers(true), body: JSON.stringify(body) });
+    const answer = await this.call(action === 'refund' ? PATH.refund : PATH.void, { method: 'POST', headers: this.headers(true), body: JSON.stringify(body) });
     let outcome: CardRefundOutcome;
-    if (answer.kind === 'json' && isObject(answer.json) && answer.status < 500) {
+    if (answer.shape === 'json' && isObject(answer.json) && answer.status < 500) {
       const json = answer.json;
       const rawSha256 = blindedDigest(json);
       const iso = str(json['IsoResponseCode']) ?? '';
@@ -740,15 +740,15 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       if (json['Approved'] === true && iso === '00') {
         outcome = { status: 'succeeded', providerRef: str(json['TransactionIdentifier']) ?? '', rawSha256 };
       } else if (json['Approved'] === false && !AMBIGUOUS_ISO.has(iso) && !codes.some((c) => DUPLICATE_CODES.has(c))) {
-        outcome = { status: 'failed', reason: `${kind.toUpperCase()}_REFUSED_${iso || 'NO_CODE'}${codes.length ? `_${codes.join('_')}` : ''}`, rawSha256 };
+        outcome = { status: 'failed', reason: `${action.toUpperCase()}_REFUSED_${iso || 'NO_CODE'}${codes.length ? `_${codes.join('_')}` : ''}`, rawSha256 };
       } else {
-        outcome = { status: 'unknown', reason: `${kind.toUpperCase()}_UNCLEAR_${iso || 'NO_CODE'}`, rawSha256 };
+        outcome = { status: 'unknown', reason: `${action.toUpperCase()}_UNCLEAR_${iso || 'NO_CODE'}`, rawSha256 };
       }
-    } else if (answer.kind !== 'transport' && answer.status >= 400 && answer.status < 500 && answer.status !== 408 && answer.status !== 429) {
-      outcome = { status: 'failed', reason: `${kind.toUpperCase()}_HTTP_${answer.status}`, rawSha256: rawDigest({ [kind]: answer.status }) };
+    } else if (answer.shape !== 'transport' && answer.status >= 400 && answer.status < 500 && answer.status !== 408 && answer.status !== 429) {
+      outcome = { status: 'failed', reason: `${action.toUpperCase()}_HTTP_${answer.status}`, rawSha256: rawDigest({ [action]: answer.status }) };
     } else {
       // Leave the claim in place: the answer is lost, and a second call could refund twice.
-      return { status: 'unknown', reason: `${kind.toUpperCase()}_NO_ANSWER`, rawSha256: rawDigest({ [kind]: 'no-answer' }) };
+      return { status: 'unknown', reason: `${action.toUpperCase()}_NO_ANSWER`, rawSha256: rawDigest({ [action]: 'no-answer' }) };
     }
     await this.redis.hset(k, { state: 'done', result: JSON.stringify(outcome) });
     return outcome;
@@ -770,11 +770,11 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
   async selfCheck(opts: { preprocess: boolean; returnUrl: string }): Promise<Array<{ check: string; ok: boolean }>> {
     const out: Array<{ check: string; ok: boolean }> = [];
     const alive = await this.call(PATH.alive, { method: 'GET', headers: { accept: 'application/json' } });
-    out.push({ check: 'gateway reachable', ok: alive.kind !== 'transport' && alive.status >= 200 && alive.status < 300 });
+    out.push({ check: 'gateway reachable', ok: alive.shape !== 'transport' && alive.status >= 200 && alive.status < 300 });
     const probe = await this.call(PATH.riskMgmt, { method: 'POST', headers: this.headers(true), body: '{}' });
-    const refusedCredentials = probe.kind === 'transport'
+    const refusedCredentials = probe.shape === 'transport'
       || probe.status === 401 || probe.status === 403
-      || (probe.kind === 'json' && isObject(probe.json) && (str(probe.json['IsoResponseCode']) === '89' || errorCodes(probe.json).includes('312')));
+      || (probe.shape === 'json' && isObject(probe.json) && (str(probe.json['IsoResponseCode']) === '89' || errorCodes(probe.json).includes('312')));
     out.push({ check: 'credentials accepted', ok: !refusedCredentials });
     if (opts.preprocess && this.binding.environment === 'sandbox') {
       const created = await this.createSession({
