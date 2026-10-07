@@ -27,10 +27,14 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
   const stepUp = useStepUp();
   const profile = useProfile<any>();
   // A store or advertiser owner closes by a request the support team
-  // completes. The server says so on the profile (the same rule its delete
-  // applies), so the customer profile's confirmation never promises erasure
-  // that will not happen. The business screens also pass the flag.
-  const closureRequest = route?.params?.closureRequest === true || profile.data?.accountClosure === 'REQUEST';
+  // completes; anyone else (store staff included) deletes directly. The server
+  // says which on the profile (the same rule its delete applies), and that
+  // answer wins. The business screens' flag is only a fallback for a server
+  // too old to answer.
+  const answer = profile.data?.accountClosure;
+  const closureRequest = answer === 'REQUEST' || answer === 'DELETE'
+    ? answer === 'REQUEST'
+    : route?.params?.closureRequest === true;
   const setUserIfCurrent = useAuthStore((s) => s.setUserIfCurrent);
   const logoutIfCurrent = useAuthStore((s) => s.logoutIfCurrent);
 

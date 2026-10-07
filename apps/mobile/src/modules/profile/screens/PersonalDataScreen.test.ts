@@ -97,6 +97,24 @@ describe('account deletion confirmation', () => {
     expect(mocks.logout).not.toHaveBeenCalled();
   });
 
+  it('the profile\u2019s answer wins over the business screen\u2019s flag: store staff delete directly', async () => {
+    // [Review S4] The store and advertiser screens open this screen as a
+    // closure request, but staff who own nothing delete their own account.
+    mocks.profile = { ...mocks.profile, accountClosure: 'DELETE' };
+    mocks.deleteAccount.mockResolvedValue({ data: { data: { deleted: true } } });
+    const tree = PersonalDataScreen({ route: { params: { closureRequest: true } }, navigation: { navigate: vi.fn() } });
+    expect(textOf(tree, 'PopupTitle')).toEqual(['Delete your account?']);
+    await button(tree).props.onPress();
+    expect(mocks.deleteAccount).toHaveBeenCalledWith(mocks.owner);
+    expect(mocks.requestAccountClosure).not.toHaveBeenCalled();
+    expect(mocks.logout).toHaveBeenCalledOnce();
+  });
+
+  it('with a server too old to answer, the business screen\u2019s flag still asks for a closure request', () => {
+    const tree = PersonalDataScreen({ route: { params: { closureRequest: true } } });
+    expect(textOf(tree, 'PopupTitle')).toEqual(['Request account closure?']);
+  });
+
   it('a person whose Delete erases the account sees the deletion wording', () => {
     mocks.profile = { ...mocks.profile, accountClosure: 'DELETE' };
     const tree = PersonalDataScreen();
