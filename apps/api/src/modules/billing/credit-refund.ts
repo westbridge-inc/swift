@@ -182,6 +182,7 @@ export async function recordCreditRefundPaid(prisma: PrismaClient, input: {
       const [inbound] = await tx.$queryRaw<Array<{ n: number }>>`
         SELECT (
           (SELECT count(*) FROM provider_payments p WHERE mmg_txn_canon(p."providerTxnId") = mmg_txn_canon(${reference}))
+          + (SELECT count(*) FROM provider_payment_aliases a WHERE mmg_txn_canon(a."aliasKey") = mmg_txn_canon(${reference}))
           + (SELECT count(*) FROM topup_commands t WHERE upper(t."providerRef") = ${reference})
           + (SELECT count(*) FROM subscription_payments s WHERE upper(s."externalRef") = ${reference})
         )::int AS n`;

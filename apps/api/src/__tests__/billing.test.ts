@@ -2,7 +2,9 @@ import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
+import { withSuiteCapability } from '../lib/test-target-lock';
+import { recordCreditRefundPaid } from '../modules/billing/credit-refund';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -968,6 +970,65 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     expect(res.statusCode, res.payload).toBe(409);
     expect(res.json().error.code).toBe('REFUND_REFERENCE_IS_A_PAYMENT');
     expect(await events(fx.subId, 'PREPAID_REFUND')).toHaveLength(0);
+  });
+
+  it('a permanent inbound payment alias is refused as a refund transfer', async () => {
+    const fx = await storeWithCredit(7000);
+    expect((await setAside(fx.subId, 7000)).statusCode).toBe(200);
+    const historical = ref('HISTORICAL');
+    const inbound = await app.prisma.providerPayment.create({ data: {
+      provider: 'MMG', providerTxnId: ref('CURRENT'), amount: 7000, currencyCode: 'GYD', status: 'CREDITED', subscriptionId: fx.subId,
+    } });
+    // Historical aliases can only be created by the migration. Install one
+    // in a rolled-back owner fixture, restore its immutable trigger BEFORE
+    // exercising the real refund service, and roll back all DDL and writes.
+    const approval = await app.prisma.privilegedApproval.create({ data: {
+      action: 'POST /subscriptions/:id/refund-credit/paid', cls: 'C4', capability: 'subscription.refund',
+      entityId: fx.subId, fingerprint: ref('FINGERPRINT'), requestedBy: admin.userId, approvedBy: other.userId,
+      status: 'APPLIED', reason: TEST_ADMIN_REASON, expiresAt: new Date(Date.now() + DAY),
+    } });
+    const rollback = new Error('ROLLBACK_REFUND_ALIAS_FIXTURE');
+    try {
+      await app.prisma.$transaction(async (tx) => {
+        await withSuiteCapability('ddl', async () => {
+          await tx.$executeRawUnsafe('ALTER TABLE provider_payment_aliases DISABLE TRIGGER provider_payment_aliases_immutable');
+          await tx.providerPaymentAlias.create({ data: { provider: 'MMG', aliasKey: historical.toUpperCase(), providerPaymentId: inbound.id } });
+          await tx.$executeRawUnsafe('ALTER TABLE provider_payment_aliases ENABLE TRIGGER provider_payment_aliases_immutable');
+        });
+        const [guard] = await tx.$queryRaw<Array<{ enabled: boolean }>>`SELECT tgenabled = 'O' AS enabled FROM pg_trigger WHERE tgname = 'provider_payment_aliases_immutable'`;
+        expect(guard?.enabled).toBe(true);
+        const db = new Proxy(tx, { get(target, key) {
+          if (key === '$transaction') return (work: (client: Prisma.TransactionClient) => unknown) => work(tx);
+          return Reflect.get(target, key);
+        } }) as PrismaClient;
+        const error = await recordCreditRefundPaid(db, {
+          adminId: admin.userId, approvalId: approval.id, subscriptionId: fx.subId,
+          amount: 7000, method: 'MMG', reference: historical.toLowerCase(),
+        }).then(() => null, (e: unknown) => e);
+        expect(error).toMatchObject({ code: 'REFUND_REFERENCE_IS_A_PAYMENT' });
+        expect(await tx.billingEvent.count({ where: { subscriptionId: fx.subId, type: 'PREPAID_REFUND' } })).toBe(0);
+        throw rollback;
+      });
+    } catch (error) { if (error !== rollback) throw error; }
+    expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(7000);
+    await booksAgree(fx.subId);
+  });
+
+  it.each([150_000_000.02, 9_999_999_999.97, 9_999_999_999.99])('refunds a valid large balance with cents (%s)', async (amount) => {
+    const fx = await storeWithCredit(0);
+    // Existing balances can have cents even though the manual top-up form
+    // accepts whole dollars. Seed through the transaction credit seam.
+    await app.prisma.$transaction((tx) => billing.recordTopUpInTransaction(tx, {
+      subscriptionId: fx.subId, amount, recordedBy: 'refund-cent-fixture', eventKey: `cent-fixture:${fx.subId}`,
+    }));
+    const aside = await setAside(fx.subId, amount);
+    expect(aside.statusCode, aside.payload).toBe(200);
+    expect(aside.json().data.refundSetAside).toBe(amount);
+    const result = await paid(fx.subId, { amount, method: 'BANK_TRANSFER', reference: ref('LARGECENTS') });
+    expect(result.statusCode, result.payload).toBe(200);
+    expect(result.json().data.refundSetAside).toBe(0);
+    expect(await wallet(fx.subId)).toBe(0);
+    await booksAgree(fx.subId);
   });
 
   it('[Sol S1] once set aside, the amount is frozen: credit that arrives while the payout record waits for approval never makes the payout unrecordable', async () => {

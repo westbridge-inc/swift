@@ -208,6 +208,34 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
     expect((await screen.findByRole('status')).textContent).toContain('Payout recorded');
   });
 
+  it('a replay of an earlier payout does not say a new set-aside is complete', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'EARLIER9001' : REASON)));
+    refundServer(setAsideRow, () => ({ body: { success: true, replayed: true, data: { amount: 5000, currencyCode: 'GYD', balance: 0, refundSetAside: 5000 } } }));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    const message = (await screen.findByRole('status')).textContent;
+    expect(message).toContain('earlier payout');
+    expect(message).toContain('still set aside');
+    expect(message).not.toContain('refund is complete');
+  });
+
+  it('a queued payout record says payment was reported and prevents another payment or release', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'SENT9001' : REASON)));
+    refundServer(setAsideRow, () => queued);
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    await screen.findByText('Shanta Kitchen');
+    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    const message = (await screen.findByRole('status')).textContent;
+    expect(message).toContain('Payment reported');
+    expect(message).not.toContain('Nothing has moved');
+    expect(screen.queryByText(/set aside: pay it outside Swift/)).toBeNull();
+    expect((screen.getByRole('button', { name: 'Record payout' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('a payout refusal (a bad reference) is shown, not swallowed', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('Paid back by') ? 'BANK' : String(msg).includes('Reference of the refund') ? 'x' : REASON)));

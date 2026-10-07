@@ -3673,7 +3673,7 @@ export async function adminRoutes(app: FastifyInstance) {
    */
   // A wallet is Decimal(12,2): any balance it can hold can be refunded whole.
   const refundAmount = z.number().positive().max(9_999_999_999.99)
-    .refine((n) => Math.abs(n * 100 - Math.round(n * 100)) < 1e-6, 'At most two decimal places');
+    .refine((n) => new Prisma.Decimal(n).decimalPlaces() <= 2, 'At most two decimal places');
   const refundSubject = async (request: { params: unknown }) => {
     requireDefaultTenantBilling();
     const tenantId = getTenantId();

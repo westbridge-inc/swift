@@ -45,7 +45,7 @@ const DONE_COPY = {
 } as const;
 const QUEUED_COPY = {
   'set-aside': 'Do not pay anything yet. Once a second admin approves, apply it from the approvals queue; the credit is then set aside and you pay it.',
-  paid: 'Once a second admin approves, apply it from the approvals queue to record the payout.',
+  paid: 'Payment reported. A second admin must approve its record in the approvals queue. Do not pay again or release this refund.',
   release: 'Once a second admin approves, apply it from the approvals queue to return the money to the credit.',
 } as const;
 
@@ -110,12 +110,25 @@ export default function SubscriptionsPage() {
   // Every answer is shown: a money action answers 202 APPROVAL_REQUIRED, which
   // apiFetch throws, so "queued" is read on the error path, never hidden.
   const [refundOutcome, setRefundOutcome] = useState<Record<string, MoneyActionOutcome>>({});
+  const [reportedRefunds, setReportedRefunds] = useState<Record<string, boolean>>({});
   const told = (id: string, outcome: MoneyActionOutcome) => setRefundOutcome((all) => ({ ...all, [id]: outcome }));
   const refundStep = (step: 'set-aside' | 'paid' | 'release') => ({
-    onSuccess: (_res: unknown, v: { id: string }) => { told(v.id, { kind: 'done', message: DONE_COPY[step] }); invalidate(); },
+    onSuccess: (res: unknown, v: { id: string }) => {
+      const answer = res as { replayed?: boolean; data?: { refundSetAside?: number } };
+      const message = step === 'paid' && Number(answer.data?.refundSetAside ?? 0) > 0
+        ? answer.replayed
+          ? 'The earlier payout was already recorded. Credit is still set aside for another refund.'
+          : 'Payout recorded. Credit is still set aside for another refund.'
+        : DONE_COPY[step];
+      told(v.id, { kind: 'done', message });
+      invalidate();
+    },
     onError: (e: unknown, v: { id: string }) => {
       const outcome = outcomeOfThrown(e);
-      told(v.id, outcome.kind === 'queued' ? { ...outcome, message: `${outcome.message} ${QUEUED_COPY[step]}` } : outcome);
+      if (outcome.kind === 'queued' && step === 'paid') setReportedRefunds((all) => ({ ...all, [v.id]: true }));
+      told(v.id, outcome.kind === 'queued' ? {
+        ...outcome, message: step === 'paid' ? QUEUED_COPY.paid : `${outcome.message} ${QUEUED_COPY[step]}`,
+      } : outcome);
     },
   });
   const setAside = useMutation({
@@ -177,6 +190,7 @@ export default function SubscriptionsPage() {
               rows.map((s: any) => {
                 const h = holder(s);
                 const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
+                const payoutReported = reportedRefunds[s.id] || s.refundPayoutReported === true;
                 return (
                   <Fragment key={s.id}>
                     <tr className="border-b border-[var(--border)] hover:bg-white/5">
@@ -237,7 +251,7 @@ export default function SubscriptionsPage() {
                                   const reason = askReason({ action: 'record this refund payout', subject: `${h.name} (${reference})` });
                                   if (reason) recordPaid.mutate({ id: s.id, amount: owed, method, reference, reason });
                                 }}
-                                disabled={refundBusy}
+                                disabled={refundBusy || payoutReported}
                                 className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                               >
                                 Record payout
@@ -249,7 +263,7 @@ export default function SubscriptionsPage() {
                                   const reason = askReason({ action: 'return this refund set-aside to credit', subject: h.name });
                                   if (reason) release.mutate({ id: s.id, amount: owed, reason });
                                 }}
-                                disabled={refundBusy}
+                                disabled={refundBusy || payoutReported}
                                 className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                               >
                                 Release
@@ -286,7 +300,9 @@ export default function SubscriptionsPage() {
                           )}
                         </div>
                         {Number(s.refundSetAside ?? 0) > 0 && (
-                          <p className="text-xs text-amber-500 mt-2">GY${Number(s.refundSetAside).toLocaleString()} set aside: pay it outside Swift, then record the payout.</p>
+                          <p className="text-xs text-amber-500 mt-2">{payoutReported
+                            ? 'Payment reported; recording awaits approval. Do not pay again or release this refund.'
+                            : `GY$${Number(s.refundSetAside).toLocaleString()} set aside: pay it outside Swift, then record the payout.`}</p>
                         )}
                         {refundOutcome[s.id] && <RefundOutcome outcome={refundOutcome[s.id]!} />}
                       </td>
