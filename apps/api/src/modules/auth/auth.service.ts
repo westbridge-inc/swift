@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
 import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
@@ -522,6 +523,10 @@ export class AuthService {
       if (!user) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
+
+      // This service remains authoritative if another caller is added later.
+      const authority = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenant: { select: { kind: true } } } });
+      if (authority.tenant.kind === 'REVIEW') throw new ReviewDemoCredentialRefusedError();
 
       const sessions = await tx.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
         SELECT "id", "expiresAt"

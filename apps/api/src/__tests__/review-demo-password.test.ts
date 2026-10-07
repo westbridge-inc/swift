@@ -21,6 +21,9 @@ import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-c
 import { authRoutes } from '../modules/auth/auth.routes';
 import { storePasswordResetOtp } from '../modules/auth/signup-continuation';
 import { grantStepUp } from './helpers/step-up';
+import { AuthService } from '../modules/auth/auth.service';
+import { devChannelLog } from '../providers/notifications/channels';
+import { requestPasswordResetOtp } from './helpers/otp';
 import { REVIEW_DEMO_NO_CREDENTIALS } from '../modules/review/demo-policy';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
@@ -78,6 +81,27 @@ afterAll(async () => {
 });
 
 describe('[REVIEW-PARTNER] a shared store-review demo login cannot set or reset a password', () => {
+  it('a REVIEW account without a credential row receives no reset text', async () => {
+    const demo = await account(REVIEW);
+    const start = devChannelLog.length;
+    const res = await app.inject({ method: 'POST', url: '/api/v1/auth/password/reset-request', payload: { phone: demo.phone } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ message: 'OTP sent successfully', expiresIn: 300 });
+    expect(devChannelLog.slice(start).filter((entry) => entry.to === demo.phone)).toHaveLength(0);
+    expect(await hashOf(demo.id)).toBe('unchanged-hash-marker');
+  });
+
+  it('the service itself refuses a REVIEW password change with a valid step-up', async () => {
+    const demo = await account(REVIEW);
+    await grantStepUp(app, demo.token);
+    const session = await app.prisma.session.findUniqueOrThrow({ where: { token: demo.token } });
+    const result = await new AuthService(app).setPassword(demo.id, session.id, 'another demo password')
+      .then(() => ({ changed: true }), (error: { code: string }) => ({ code: error.code }));
+    expect(result).toEqual({ code: REVIEW_DEMO_NO_CREDENTIALS });
+    expect(await hashOf(demo.id)).toBe('unchanged-hash-marker');
+    expect(await sessionsOf(demo.id)).toBe(1);
+  });
+
   it('/password/set: a demo account gets the plain demo refusal; its password and sessions are untouched', async () => {
     const demo = await account(REVIEW);
     const res = await app.inject({ method: 'POST', url: '/api/v1/auth/password/set', headers: { authorization: `Bearer ${demo.token}` }, payload: { password: 'a new demo password' } });
@@ -105,8 +129,8 @@ describe('[REVIEW-PARTNER] a shared store-review demo login cannot set or reset 
     expect(set.statusCode, set.body).toBe(200);
     const afterSet = await hashOf(real.id);
     expect(afterSet).not.toBe('unchanged-hash-marker');
-    await storePasswordResetOtp(app.redis, real.phone, '864202');
-    const reset = await app.inject({ method: 'POST', url: '/api/v1/auth/password/reset', payload: { phone: real.phone, code: '864202', newPassword: 'another real password' } });
+    const code = await requestPasswordResetOtp(app, real.phone);
+    const reset = await app.inject({ method: 'POST', url: '/api/v1/auth/password/reset', payload: { phone: real.phone, code, newPassword: 'another real password' } });
     expect(reset.statusCode, reset.body).toBe(200);
     expect(await hashOf(real.id)).not.toBe(afterSet);
   });
