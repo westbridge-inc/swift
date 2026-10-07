@@ -1,10 +1,12 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { webOrderingOpen } from '@/lib/web-ordering';
+import { webOrderingState } from '@/lib/launch-switch';
 
 /**
  * [Item 7] The pre-launch front door.
  *
- * Until the switch in site.config.ts says ordering is live on the PUBLIC site,
+ * Until the switch (lib/launch-switch.ts, read on every request) says ordering
+ * is live on the PUBLIC site,
  * every way into ordering there — the home feed, store pages and their cart
  * and checkout, the customer's orders and account — is answered by the
  * "Launching soon" page instead, at the same address. The policy, company,
@@ -18,7 +20,7 @@ import { webOrderingOpen } from '@/lib/web-ordering';
 export function middleware(request: NextRequest) {
   // The deletion instructions sit under /account but are public by policy
   // (Google Play requires them reachable without the app).
-  if (request.nextUrl.pathname === '/account/delete' || webOrderingOpen(request.headers.get('host'))) {
+  if (request.nextUrl.pathname === '/account/delete' || webOrderingOpen(request.headers.get('host'), webOrderingState())) {
     return NextResponse.next();
   }
   const frontDoor = request.nextUrl.clone();

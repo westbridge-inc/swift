@@ -567,7 +567,11 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         web = model["services"]["web"]
         self.assertNotIn("ports", web)
         self.assertEqual(list((web.get("networks") or {}).keys()), ["private"])
-        self.assertEqual(sorted((web.get("environment") or {}).keys()), ["NODE_OPTIONS"])
+        # [S1] Besides its memory limit, the site's only setting is the public
+        # site's pre-launch switch, read while it runs (closed unless WEB_ORDERING=live).
+        self.assertEqual(sorted((web.get("environment") or {}).keys()), ["NODE_OPTIONS", "SWIFT_WEB_ORDERING"])
+        self.assertEqual(web["environment"]["SWIFT_WEB_ORDERING"], "")
+        self.assertNotIn("NEXT_PUBLIC_WEB_ORDERING", web["build"]["args"])
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_API_URL"], "https://api-staging.example.invalid")
         self.assertEqual(web["build"]["args"]["SWIFT_WEB_CHANNEL"], "staging")
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_ALLOW_SITE_TOKENS"], "1")
@@ -1742,10 +1746,13 @@ class PublicSiteWebAliasHosts(unittest.TestCase):
         caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
         self.assertIn("WEB_ALIAS_HOSTS: ${WEB_ALIAS_HOSTS:-}", caddy)
 
-    def test_the_website_build_takes_the_pre_launch_switch_closed_by_default(self):
+    def test_the_website_reads_the_pre_launch_switch_at_run_time_closed_by_default(self):
+        # [S1] The switch is the running site's own environment, never a build
+        # argument: flipping it recreates the container, it never rebuilds it.
         web = service_block(DEPLOY / "docker-compose.yml", "web")
-        self.assertIn("NEXT_PUBLIC_WEB_ORDERING: ${WEB_ORDERING:-}", web)
-        self.assertIn("ARG NEXT_PUBLIC_WEB_ORDERING", dockerfile_stages(WEB_DOCKERFILE)["build"])
+        self.assertIn("SWIFT_WEB_ORDERING: ${WEB_ORDERING:-}", web)
+        self.assertNotIn("NEXT_PUBLIC_WEB_ORDERING", web)
+        self.assertNotRegex(dockerfile_stages(WEB_DOCKERFILE)["build"], r"(?m)^ARG \S*WEB_ORDERING")
 
     def test_the_example_settings_document_both_and_leave_them_empty(self):
         example = (DEPLOY / ".env.deploy.example").read_text()

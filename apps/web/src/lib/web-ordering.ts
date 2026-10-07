@@ -16,16 +16,20 @@ import { launch, type LaunchState } from '@/site.config';
  */
 export const PUBLIC_SITE_HOSTS: readonly string[] = [SITE_DOMAIN, `www.${SITE_DOMAIN}`];
 
+/** Is this one of the public site's names (the only hosts the switch governs)? */
+export function isPublicSiteHost(host: string | null | undefined): boolean {
+  const name = siteHost(host);
+  return name === '' || PUBLIC_SITE_HOSTS.includes(name);
+}
+
 /** Lower-case, without a port or a trailing dot: "Example.COM.:443" → "example.com". */
 export function siteHost(host: string | null | undefined): string {
   return (host ?? '').trim().toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
 }
 
-/** May a customer order on this host? */
-export function webOrderingOpen(host: string | null | undefined, state: LaunchState = launch.webOrdering): boolean {
-  const name = siteHost(host);
-  const publicSite = name === '' || PUBLIC_SITE_HOSTS.includes(name);
-  return !publicSite || state === 'live';
+/** May a customer order on this host, given the public site's switch (lib/launch-switch.ts)? */
+export function webOrderingOpen(host: string | null | undefined, state: LaunchState): boolean {
+  return !isPublicSiteHost(host) || state === 'live';
 }
 
 /** Where the market is, for the front door's headline: "Georgetown, Guyana" → "Georgetown".

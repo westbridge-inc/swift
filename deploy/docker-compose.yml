@@ -289,14 +289,17 @@ services:
         # company detail is still a {{TOKEN}}; WEB_ALLOW_SITE_TOKENS=1 in
         # deploy/.env lets the staging site build with them (PILOT-RUNBOOK.md).
         NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}
-        # [Item 7] The pre-launch switch for the PUBLIC site (swiftgy.com and
-        # www): WEB_ORDERING=live in deploy/.env opens ordering there; empty
-        # (the default) shows the "Launching soon" front door. Every other host
-        # this image answers, staging included, keeps the full marketplace.
-        NEXT_PUBLIC_WEB_ORDERING: ${WEB_ORDERING:-}
     image: swift-web:${SWIFT_TAG:-local}
     restart: unless-stopped
     environment:
+      # [Item 7 · S1] The pre-launch switch for the PUBLIC site (swiftgy.com and
+      # www), read by the site while it runs (apps/web/src/lib/launch-switch.ts),
+      # never baked into the image: WEB_ORDERING=live in deploy/.env opens
+      # ordering there; empty (the default) shows the "Launching soon" front
+      # door. Changing it recreates this container with the new setting; no
+      # rebuild. Every other host this image answers, staging included, keeps
+      # the full marketplace.
+      SWIFT_WEB_ORDERING: ${WEB_ORDERING:-}
       # V8 collects well below the container's ceiling, so a leak restarts the
       # site instead of pressing on the database's memory.
       NODE_OPTIONS: --max-old-space-size=384
