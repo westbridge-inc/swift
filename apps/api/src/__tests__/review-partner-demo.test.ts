@@ -282,7 +282,8 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
     // national ID is optional and the pack partner still presents it (so it stays L2); no police clearance.
     expect(riderChecklist).toEqual(expect.arrayContaining(['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance']));
     expect(riderChecklist).not.toContain('police_clearance');
-    expect(driverChecklist).toEqual(expect.arrayContaining(['vehicle_insurance', 'hire_car_permit']));
+    // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
+    expect(driverChecklist).toEqual(expect.arrayContaining(['vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence']));
     expect(first.partnerDocumentsCommitted).toBe(riderChecklist.length + driverChecklist.length);
     const again = await system(() => seedReviewContentPack(app.prisma, { slug: REVIEW }));
     expect([again.state, again.partnerDocumentsCommitted]).toEqual(['PRESENT', 0]);
