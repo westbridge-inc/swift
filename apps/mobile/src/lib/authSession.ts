@@ -71,6 +71,9 @@ export class AuthRefreshCoordinator {
     private readonly source: AuthSessionSource,
     private readonly refresh: (refreshToken: string) => Promise<RotatedAuthTokens>,
     private readonly shouldLogoutAfterRefreshFailure: (error: unknown) => boolean = () => false,
+    /** [NO-DEAD-ENDS] Told only when the refresh failure actually ended the
+     *  current session, so the app can say why instead of a silent sign-out. */
+    private readonly onSessionEndedByRefresh: (error: unknown) => void = () => {},
   ) {}
 
   resolve(session: AuthSessionSnapshot): Promise<AuthRefreshOutcome | null> {
@@ -100,7 +103,7 @@ export class AuthRefreshCoordinator {
         // rejection may end the exact session that attempted this refresh.
         if (this.shouldLogoutAfterRefreshFailure(error)) {
           // A stale failure from account A must never log out account B.
-          this.source.logoutIfCurrent(session);
+          if (this.source.logoutIfCurrent(session)) this.onSessionEndedByRefresh(error);
         }
         return null;
       })
