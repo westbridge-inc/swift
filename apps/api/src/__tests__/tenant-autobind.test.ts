@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
-import { scopedPrisma as prisma, scopedClientFor, TenantSwitchInTransactionError } from '../plugins/prisma';
+import { scopedPrisma as prisma, scopedClientFor, TenantSwitchInTransactionError, TenantInUnboundTransactionError, SystemWorkOutsideTransactionError } from '../plugins/prisma';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
-import { tenantBindCounter } from '../plugins/observability';
+import { tenantBindCounter, tenantUnscopedAccessCounter } from '../plugins/observability';
 
 // [R048-001] the same NOLOGIN probe group and logins the tenant-wall suites use, by raw DDL.
 grantSuiteCapability('ddl');
@@ -144,6 +144,39 @@ describe('[R5 auto-bind] a transaction that begins under a tenant is bound for i
     const attempt = runWithTenant(T, () => walled.$transaction(async (tx) =>
       runWithTenant(U, () => tx.user.findUnique({ where: { id: userU }, select: { id: true } }))));
     await expect(attempt).rejects.toBeInstanceOf(TenantSwitchInTransactionError);
+  });
+});
+
+describe('[R5 follow-up · S3-1] a tenant query on a transaction that did NOT begin bound', () => {
+  it('is refused by name — never bound on another connection, where it would commit outside the transaction and survive its rollback', async () => {
+    const firstName = () => runAsSystem('test-read', async () => (await prisma.user.findUniqueOrThrow({ where: { id: userT }, select: { firstName: true } })).firstName);
+    const outcome = walled.$transaction(async (tx) => {
+      await runWithTenant(T, () => tx.user.update({ where: { id: userT }, data: { firstName: 'Escaped' } }));
+      throw new Error('ROLLBACK');
+    });
+    const error = await outcome.then(() => null, (e: unknown) => e);
+    expect(await firstName()).toBe('Bound'); // nothing escaped the rolled-back transaction
+    expect(error).toBeInstanceOf(TenantInUnboundTransactionError);
+  });
+});
+
+describe('[R5 follow-up · S3-3] raw SQL with no tenant is seen, and system raw SQL runs on the system login', () => {
+  const unscoped = async (mode: string, capability: string) => (await tenantUnscopedAccessCounter.get()).values
+    .filter((v) => v.labels['model'] === '$raw' && v.labels['operation'] === '$queryRaw' && v.labels['mode'] === mode && v.labels['capability'] === capability)
+    .reduce((n, v) => n + v.value, 0);
+
+  it('unbound raw SQL is counted like an unscoped model query; system raw SQL is counted under its capability and reads on the system login', async () => {
+    const unboundBefore = await unscoped('unbound', 'none');
+    expect(await countUser(walled, userT)).toBe(0); // the walled login, unbound: nothing (fail closed)
+    expect(await unscoped('unbound', 'none')).toBe(unboundBefore + 1);
+    const systemBefore = await unscoped('system', 'raw-system-probe');
+    expect(await runAsSystem('raw-system-probe', () => countUser(walled, userT))).toBe(1); // re-issued on the system login
+    expect(await unscoped('system', 'raw-system-probe')).toBe(systemBefore + 1);
+  });
+
+  it('system raw SQL inside a caller’s request transaction is refused by name — it never leaves that transaction', async () => {
+    const outcome = walled.$transaction(async (tx) => runAsSystem('raw-system-probe', () => countUser(tx, userT)));
+    await expect(outcome).rejects.toBeInstanceOf(SystemWorkOutsideTransactionError);
   });
 });
 
