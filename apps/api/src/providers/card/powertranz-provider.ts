@@ -686,6 +686,12 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
         await this.notSent(k, 'SESSION_CLOSED_BEFORE_COMPLETION');
         return { status: 'failed', reason: 'SESSION_CLOSED_BEFORE_COMPLETION', rawSha256: digest({ completion: 'abandoned', why: 'SESSION_CLOSED_BEFORE_COMPLETION' }) };
       }
+      // [race audit] The durable claim may have waited on a lock: the five
+      // minutes (sec. 2.2 1.7) are checked again right before sending.
+      if (claim === 'send' && this.now().getTime() - Number(rec['returnedAtMs']) > SPI_TOKEN_LIFETIME_MS) {
+        await this.notSent(k, 'SPI_TOKEN_EXPIRED');
+        return { status: 'failed', reason: 'SPI_TOKEN_EXPIRED', rawSha256: digest({ completion: 'abandoned', why: 'SPI_TOKEN_EXPIRED' }) };
+      }
       if (claim === 'claimed') {
         // A durable claim already exists (this store lost its own): a completion
         // may already have been sent. Never sent again; voided by the service.
