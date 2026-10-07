@@ -1,5 +1,8 @@
 import { normalizeDocNumber } from '../integrity/normalize';
-import { IDENTITY_DOC_TYPES } from './doc-registry';
+import { IDENTITY_DOC_TYPES, ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES } from './doc-registry';
+
+// The two type lists live in the registry's own text (DOC-INV-2); re-exported for this module's callers.
+export { ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES };
 
 /** The synthetic L2 flow always receives a government identity document. */
 const L2_IDENTITY_DOC_TYPE = 'identity_l2';
@@ -48,7 +51,6 @@ export function approvedIdentityDocumentNumber(
  * person. It lives in its own namespace (`DL:`): a licence number never
  * matches an identity-card number made of the same characters.
  */
-export const LICENCE_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set(['drivers_licence']);
 export const REVIEWER_TYPED_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set([
   ...IDENTITY_NUMBER_DOC_TYPES,
   ...LICENCE_NUMBER_DOC_TYPES,
@@ -63,9 +65,6 @@ export function reviewerTypedDocumentSignal(docType: string, raw: unknown): stri
   if (normalized.length < MIN_TYPED_NUMBER_LENGTH) return null;
   return LICENCE_NUMBER_DOC_TYPES.has(docType) ? `DL:${normalized}` : normalized;
 }
-
-/** The document types whose ISSUE date the reviewer types (the re-check falls due a year later). */
-export const ISSUE_DATE_DOC_TYPES: ReadonlySet<string> = new Set(['police_clearance']);
 
 export type ReviewerTypedField = 'documentNumber' | 'issuedOn';
 
