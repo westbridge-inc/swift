@@ -5,7 +5,7 @@ import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/cl
 import { AppError } from '../../utils/errors';
 import { reviewCredentialFor, armReviewCode, verifyReviewCode } from '../review/credentials';
 import { generateOtp, checkOtpRateLimit, markOtpCooldownDelivered, readOtpCooldown } from '../../utils/otp';
-import { checkOtpDailyBudget } from '../../utils/sms-budget';
+import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budget';
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
@@ -40,6 +40,15 @@ import {
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
 import { runWithoutTenant } from '../../plugins/tenant-context';
+import {
+  clearPasswordFailures,
+  isPasswordSignInLocked,
+  passwordPausedNoticeKeys,
+  passwordBudgetSubject,
+  recordPasswordFailure,
+  resetPasswordAttemptBudget,
+} from './password-attempts';
+import { stepUpKey } from './step-up';
 
 interface DeviceInfo {
   deviceId: string;
@@ -51,8 +60,6 @@ interface DeviceInfo {
 /** Public signup roles (locked model) mapped to internal UserRole values. */
 export type SignupRole = 'CUSTOMER' | 'MOVER' | 'VENDOR';
 
-const MAX_FAILED_LOGINS = 5;
-const LOCKOUT_MINUTES = 15;
 /** What a one-time code was texted for. A code works only for its own purpose. */
 export type OtpPurpose = 'sign-in' | 'password-reset';
 /** [L04 · AUTH-2] Account states that may not start a session by any credential. */
@@ -489,15 +496,24 @@ export class AuthService {
   // Email + password (secondary to phone OTP)
   // -------------------------------------------------------------------------
 
+  /**
+   * [L04 · MASTER-003] Set or change the password from a signed-in session.
+   * The route has already required a fresh step-up on THIS session. A new
+   * credential is a new generation: every other session of the account ends
+   * (with the same mover-authority and outbox handling as a logout), this
+   * session's tokens are replaced so its old refresh token stops working, and
+   * the owner is told by an inbox notice and a text to the phone on the
+   * account. Returns this session's new tokens.
+   */
   async setPassword(userId: string, sessionId: string, password: string) {
     const passwordHash = await bcrypt.hash(password, 12);
-    await this.app.prisma.$transaction(async (tx) => {
+    const changed = await this.app.prisma.$transaction(async (tx) => {
       // Authenticate-time proof is not enough for a security mutation: a
       // password reset, ban, or logout may revoke this session while bcrypt is
       // running. Serialize with those paths (User -> Session), then prove the
       // exact request generation still exists before changing the credential.
-      const users = await tx.$queryRaw<Array<{ status: UserStatus }>>`
-        SELECT "status"
+      const users = await tx.$queryRaw<Array<{ status: UserStatus; phone: string; activeRole: UserRole }>>`
+        SELECT "status", "phone", "activeRole"
         FROM "users"
         WHERE "id" = ${userId}
         FOR UPDATE
@@ -517,19 +533,130 @@ export class AuthService {
       if (!session || session.expiresAt <= new Date()) {
         throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
       }
-      if (
-        user.status === 'SUSPENDED'
-        || user.status === 'BANNED'
-        || user.status === 'DEACTIVATED'
-      ) {
-        throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
-      }
+      if (BLOCKED_STATUSES.has(user.status)) throw accountSuspended();
 
       await tx.user.update({
         where: { id: userId },
         data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
       });
+
+      // Every OTHER session of the account ends, each exactly as a logout of
+      // that device would end it (its mover authority retired, its outbox row
+      // written), in this transaction. Locked in id order.
+      const others = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id"
+        FROM "sessions"
+        WHERE "userId" = ${userId} AND "id" <> ${sessionId}
+        ORDER BY "id"
+        FOR UPDATE
+      `;
+      const revoked: Array<{ sessionId: string; cleanup: MoverSessionRevocationCleanup }> = [];
+      for (const other of others) {
+        revoked.push({ sessionId: other.id, cleanup: await this.revokeLockedSession(tx, other.id, userId) });
+      }
+      // An ended device must stop receiving pushes too — the notice below
+      // included. Push registrations belong to installs, not sessions, so every
+      // one is retired here, as a reset does; this device re-registers its own
+      // on its next launch.
+      await tx.deviceToken.updateMany({ where: { userId, isActive: true }, data: { isActive: false } });
+
+      // This session continues under new credentials: the old access and
+      // refresh tokens (and the previous refresh token's grace) are gone.
+      const accessToken = this.app.jwt.sign({ userId, role: user.activeRole, jti: nanoid(8) });
+      const refreshToken = nanoid(64);
+      await tx.session.update({
+        where: { id: sessionId },
+        data: {
+          token: accessToken,
+          refreshToken,
+          previousRefreshToken: null,
+          rotatedAt: new Date(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      });
+      return { phone: user.phone, revoked, tokens: { accessToken, refreshToken, expiresIn: 900 } };
     });
+
+    // PostgreSQL committed the security decision; the rest is best-effort and
+    // never turns a completed change into an error.
+    await resetPasswordAttemptBudget(this.app.redis, userId)
+      .catch((error) => this.app.log.error({ err: error, userId }, 'password-set attempt budget reset failed'));
+    await this.app.redis.del(stepUpKey(sessionId)).catch(() => {});
+    for (const { sessionId: revokedId, cleanup } of changed.revoked) {
+      this.disconnectSessionSockets(revokedId);
+      await completeMoverSessionRevocation(this.app, cleanup)
+        .catch((error) => this.app.log.error({ err: error, sessionId: revokedId }, 'post-password-set mover cleanup failed'));
+    }
+    await this.sendPasswordChangedNotice(userId, changed.phone);
+    return changed.tokens;
+  }
+
+  /** [MASTER-056] Count a wrong password. A store failure is logged, never a
+   *  different answer. When the account-wide ceiling trips, the account holder
+   *  gets ONE in-app notice for that pause (no text: that would be a spam lever). */
+  private async countPasswordFailure(subject: string, source: string, userId: string | null): Promise<void> {
+    let outcome: { accountLocked: boolean };
+    try {
+      outcome = await recordPasswordFailure(this.app.redis, subject, source);
+    } catch (error) {
+      this.app.log.error({ err: error }, '[auth] password failure could not be counted');
+      return;
+    }
+    if (!outcome.accountLocked || !userId) return;
+    // Off the request path: the attempt that trips the pause answers exactly
+    // as fast as any other refusal, so its timing says nothing about whether
+    // the account exists (DS695). The per-pause dedupe key keeps it to one.
+    void this.sendPasswordPausedNotice(userId);
+  }
+
+  /**
+   * [review r2 S3-1] Anyone who knows a number can re-trip the pause every 15
+   * minutes, so the notice is limited: at most ONE per account per day, and
+   * only the first in a month is a pushed (sounding) notice — later ones are a
+   * quiet inbox row with no push. A budget-store failure sends nothing.
+   */
+  private async sendPasswordPausedNotice(userId: string): Promise<void> {
+    const title = 'Password sign-in paused';
+    const body = 'We paused password sign-in on your account for 15 minutes after many wrong attempts. You can still sign in with a code.';
+    try {
+      const keys = passwordPausedNoticeKeys(userId);
+      if ((await this.app.redis.set(keys.daily, '1', 'EX', 24 * 60 * 60, 'NX')) !== 'OK') return;
+      const loud = (await this.app.redis.set(keys.recent, '1', 'EX', 30 * 24 * 60 * 60, 'NX')) === 'OK';
+      if (loud) {
+        const { NotificationService } = await import('../notification/notification.service');
+        await new NotificationService(this.app.prisma, this.app.io).send({
+          userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' },
+        });
+      } else {
+        // Inbox only: persisted, never fanned out to a push.
+        await this.app.prisma.notification.create({
+          data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } },
+        });
+      }
+    } catch (error) {
+      this.app.log.error({ err: error, userId }, 'password-sign-in-paused notice failed');
+    }
+  }
+
+  /** [MASTER-003] The security notice: an inbox row (with push), and a text to the phone on the account. */
+  private async sendPasswordChangedNotice(userId: string, phone: string): Promise<void> {
+    const body = "Your Swift password was just changed and your other devices were signed out. If this wasn't you, contact Swift support now.";
+    try {
+      const { NotificationService } = await import('../notification/notification.service');
+      await new NotificationService(this.app.prisma, this.app.io).send({
+        userId,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'Your password was changed',
+        body,
+        data: { kind: 'password_changed' },
+      });
+    } catch (error) {
+      this.app.log.error({ err: error, userId }, 'password-changed inbox notice failed');
+    }
+    // The launch-market destination gate every other text passes.
+    if (!smsDestinationAllowed(phone)) return;
+    await this.channels.sms.sendSms(phone, body)
+      .catch((error) => this.app.log.error({ err: error, userId }, 'password-changed text failed'));
   }
 
   async loginWithPassword(
@@ -548,7 +675,24 @@ export class AuthService {
     // work done tells an account that exists from one that does not.
     const invalid = new AppError(401, 'INVALID_CREDENTIALS', 'Invalid phone/email or password');
     const matches = await bcrypt.compare(password, user?.passwordHash ?? NO_ACCOUNT_PASSWORD_HASH);
-    if (!user || !user.passwordHash) throw invalid;
+
+    // [L04 · MASTER-056] Five wrong passwords from one source lock that source
+    // only; a wider ceiling across all sources pauses password sign-in for the
+    // account. SMS-code sign-in reads neither, so the owner always has a way in.
+    // An unknown account is budgeted under a pseudonym the same way (same
+    // store calls, same answers), and a store failure is a refusal for every
+    // account alike — never a different answer for one that exists.
+    const source = deviceInfo.ipAddress;
+    const subject = passwordBudgetSubject(user?.passwordHash ? user : null, identifier.phone ?? identifier.email ?? '');
+    const locked = await isPasswordSignInLocked(this.app.redis, subject, source).catch((error) => {
+      this.app.log.error({ err: error }, '[auth] password attempt budget unavailable — refusing password sign-in');
+      return true;
+    });
+    if (locked) throw invalid;
+    if (!user || !user.passwordHash) {
+      await this.countPasswordFailure(subject, source, null);
+      throw invalid;
+    }
 
     // Password hashing stays outside the lock so one expensive comparison does
     // not block every security mutation for this user. Once it finishes, both
@@ -589,23 +733,23 @@ export class AuthService {
       const now = new Date();
       // A locked account answers exactly like a wrong password (MASTER-054):
       // the lock is enforced, never announced. The OTP sign-in stays open.
+      // [MASTER-056] Sign-in no longer writes an account-wide lock (the lock is
+      // per source, above); a lock stored before that change is honoured until
+      // it expires.
       if (locked.lockedUntil && locked.lockedUntil > now) {
         return { kind: 'invalid' as const };
       }
 
       if (!matches) {
-        const failed = locked.failedLoginAttempts + 1;
-        const shouldLock = failed >= MAX_FAILED_LOGINS;
+        // The account-wide count stays as a linearizable record of failures
+        // (visible to operations; cleared by success and by reset) — it no
+        // longer locks anyone out.
         await tx.user.update({
           where: { id: user.id },
-          data: {
-            failedLoginAttempts: shouldLock ? 0 : failed,
-            ...(shouldLock && {
-              lockedUntil: new Date(now.getTime() + LOCKOUT_MINUTES * 60_000),
-            }),
-          },
+          data: { failedLoginAttempts: locked.failedLoginAttempts + 1 },
         });
-        return { kind: 'invalid' as const };
+        // (Not a new `kind` literal: those strings are the notification census's namespace.)
+        return { kind: 'invalid' as const, countAsFailure: true as const };
       }
 
       if (BLOCKED_STATUSES.has(locked.status)) throw accountSuspended();
@@ -640,7 +784,12 @@ export class AuthService {
         tokens: { accessToken, refreshToken, expiresIn: 900 },
       };
     });
+    if (login.kind === 'invalid' && 'countAsFailure' in login) {
+      await this.countPasswordFailure(subject, source, user.id);
+      throw invalid;
+    }
     if (login.kind === 'invalid') throw invalid;
+    await clearPasswordFailures(this.app.redis, user.id, source).catch(() => {});
     return {
       user: sanitizeUser({ ...user, activeRole: login.activeRole, status: login.status }),
       tokens: login.tokens,
@@ -706,6 +855,10 @@ export class AuthService {
     if (!reset) {
       throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     }
+    // A new credential: every source's wrong-password count and lock is left
+    // behind with the old one [MASTER-056].
+    await resetPasswordAttemptBudget(this.app.redis, reset.userId)
+      .catch((error) => this.app.log.error({ err: error, userId: reset.userId }, 'password-reset attempt budget reset failed'));
 
     // PostgreSQL already committed the complete security decision. Realtime
     // eviction and low-latency outbox processing are best-effort accelerators;
