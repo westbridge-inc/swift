@@ -16,12 +16,23 @@ export interface MediaPattern {
   pathname: string;
 }
 
+/**
+ * [PUBLIC-PHOTOS] A store's photo kept in object storage is saved as its key
+ * ("items/<store>/<file>") and served by the API at that address (apps/api
+ * utils/public-store-photos.ts: only that folder, only photos a store still
+ * uses). Exactly two segments under it: a store, then a photo.
+ */
+export const STORE_PHOTO_PATHNAME = /^\/items\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{16}(?:\.[A-Za-z0-9]{1,10})?$/;
+
 export function mediaRemotePatterns(apiOrigin: string): MediaPattern[] {
   const origin = new URL(apiOrigin);
-  return PUBLIC_MEDIA_FOLDERS.map((folder) => ({
+  const host = {
     protocol: origin.protocol.replace(':', '') as 'http' | 'https',
     hostname: origin.hostname,
     port: origin.port,
-    pathname: `/uploads/${folder}/**`,
-  }));
+  };
+  return [
+    ...PUBLIC_MEDIA_FOLDERS.map((folder) => ({ ...host, pathname: `/uploads/${folder}/**` })),
+    { ...host, pathname: '/items/*/*' },
+  ];
 }

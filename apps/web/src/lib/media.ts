@@ -1,11 +1,11 @@
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
-import { PUBLIC_MEDIA_FOLDERS } from '@/lib/media-patterns';
+import { PUBLIC_MEDIA_FOLDERS, STORE_PHOTO_PATHNAME } from '@/lib/media-patterns';
 
 /**
  * [W2b] Where a photo lives, and whether the web server may resize it.
  *
- * Stores' photos are saved by the API as a path ("/uploads/items/…"), not a
- * full address. The phone app has always put the API's origin in front
+ * Stores' photos are saved by the API as a path ("/uploads/items/…" on local
+ * disk, "items/<store>/<file>" in object storage), not a full address. The phone app has always put the API's origin in front
  * (apps/mobile lib/images.ts mediaUrl); the website used the bare path, which
  * points at the website itself and draws nothing. Same rule here.
  *
@@ -23,7 +23,8 @@ export function optimizable(url: string, apiOrigin: string = BROWSER_API_ORIGIN)
   try {
     const parsed = new URL(url);
     if (parsed.origin !== new URL(apiOrigin).origin) return false;
-    return PUBLIC_MEDIA_FOLDERS.some((folder) => parsed.pathname.startsWith(`/uploads/${folder}/`)) && !parsed.pathname.includes('..');
+    if (parsed.pathname.includes('..')) return false;
+    return PUBLIC_MEDIA_FOLDERS.some((folder) => parsed.pathname.startsWith(`/uploads/${folder}/`)) || STORE_PHOTO_PATHNAME.test(parsed.pathname);
   } catch {
     return false;
   }

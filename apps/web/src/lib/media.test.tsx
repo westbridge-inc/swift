@@ -42,6 +42,20 @@ describe('[W2b] where a stored photo lives', () => {
     expect(photo('https://elsewhere.test/a.jpg', API)).toEqual({ src: 'https://elsewhere.test/a.jpg', unoptimized: true });
   });
 
+  it('a store photo kept in object storage (saved as "items/<store>/<file>") goes to the optimiser too — that address only', () => {
+    const key = 'items/cm1store0000000000000001/AbCdEfGh_jKlMn-p.jpg';
+    expect(mediaUrl(key, API)).toBe(`${API}/${key}`);
+    expect(photo(key, API)).toEqual({ src: `${API}/${key}`, unoptimized: false });
+    expect(optimizable(`${API}/${key}`, API)).toBe(true);
+    // A store, then a photo: nothing deeper or shallower, no other folder, no climbing.
+    expect(optimizable(`${API}/items/cm1store/sub/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(false);
+    expect(optimizable(`${API}/items/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(false);
+    expect(optimizable(`${API}/verification/u1/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(false);
+    expect(optimizable(`${API}/items/cm1store/..%2F..%2Fverification%2Fid.jpg`, API)).toBe(false);
+    expect(optimizable(`${API}/items/../verification/u1/AbCdEfGh_jKlMn-p.jpg`, API)).toBe(false);
+    expect(optimizable(`https://elsewhere.test/${key}`, API)).toBe(false);
+  });
+
   it('a store’s photo card asks the web server for a resized copy of the API’s photo, sized for the card', () => {
     // The test origin (vitest.config) is the browser API origin here.
     const { container } = render(<Photo src="/uploads/items/v1/rice.jpg" name="Cook-up rice" sizes="160px" />);
@@ -49,6 +63,11 @@ describe('[W2b] where a stored photo lives', () => {
     expect(img.getAttribute('src')).toMatch(/^\/_next\/image\?url=http%3A%2F%2Fvendor-api\.test%2Fuploads%2Fitems%2Fv1%2Frice\.jpg&w=\d+&q=75$/);
     expect(img.getAttribute('srcset')).toContain('/_next/image?url=');
     expect(img.getAttribute('sizes')).toBe('160px');
+  });
+
+  it('a store photo saved as an object-storage key is resized by the web server like any other', () => {
+    const { container } = render(<Photo src="items/cm1store/AbCdEfGh_jKlMn-p.jpg" name="Pepperpot" sizes="160px" />);
+    expect(container.querySelector('img')!.getAttribute('src')).toMatch(/^\/_next\/image\?url=http%3A%2F%2Fvendor-api\.test%2Fitems%2Fcm1store%2FAbCdEfGh_jKlMn-p\.jpg&w=\d+&q=75$/);
   });
 
   it('a photo on any other host is drawn as it is, never through the optimiser', () => {
@@ -76,11 +95,13 @@ describe('[W2b] the web server’s image optimiser', () => {
 
   it('may fetch only the public photo folders on the release’s own API origin', () => {
     const host = new URL(RELEASE_BROWSER_API_ORIGIN).hostname;
-    expect(release.images?.remotePatterns).toEqual(['items', 'avatars', 'vehicles'].map((folder) => ({
-      protocol: 'https', hostname: host, port: '', pathname: `/uploads/${folder}/**`,
-    })));
+    expect(release.images?.remotePatterns).toEqual([
+      ...['items', 'avatars', 'vehicles'].map((folder) => ({ protocol: 'https', hostname: host, port: '', pathname: `/uploads/${folder}/**` })),
+      // [PUBLIC-PHOTOS] stores' photos kept in object storage: a store, then a photo.
+      { protocol: 'https', hostname: host, port: '', pathname: '/items/*/*' },
+    ]);
     expect(staging.images?.remotePatterns?.map((pattern) => (pattern as { hostname: string }).hostname))
-      .toEqual(Array(3).fill(new URL(STAGING_BROWSER_API_ORIGIN).hostname));
+      .toEqual(Array(4).fill(new URL(STAGING_BROWSER_API_ORIGIN).hostname));
     for (const pattern of release.images?.remotePatterns ?? []) {
       expect(JSON.stringify(pattern)).not.toMatch(/\*\*?\./);
     }
