@@ -16,12 +16,15 @@ import { loginWithOtp } from './helpers/otp';
 import { purgeSensitiveReadLogs } from '../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
-// [MISSION CONTROL · PR-3] "Hide test data" is a server filter, on by default.
+// [MISSION CONTROL · PR-3] "Hide test data" is a server filter the console
+// turns on by default.
 //
 // The journey suite's +5920 people and their stores live in staging's real
-// tenant and were listed as real. Every admin list now leaves them out unless
-// asked (`excludeFixtures=false`), in the query itself, so the pager's total
-// counts only what is shown — and says how many it left out.
+// tenant and were listed as real. Every admin list leaves them out when asked
+// (`excludeFixtures=true`, which the console sends unless "Show test data" is
+// ticked), in the query itself, so the pager's total counts only what is shown
+// — and says how many it left out. With no parameter the API lists every row,
+// as it always has, so no other caller changes behaviour.
 //
 // [security review] A fixture is keyed ONLY on the phone, a server-controlled
 // fact. A real account or store NAMED "TEST-…" must stay visible (a name is
@@ -135,9 +138,9 @@ afterAll(async () => {
 
 const ids = (res: { json: () => { data: Array<{ id: string }> } }) => res.json().data.map((r) => r.id).sort();
 
-describe('[MC-PR3] test data is left out of every admin list by default — keyed on the phone only', () => {
+describe('[MC-PR3] test data is left out of every admin list when the console asks — keyed on the phone only', () => {
   it('people: a +5920 phone is hidden and counted; a real account NAMED "TEST-…" stays visible', async () => {
-    const shown = await get(`/api/v1/admin/users?search=List${RUN}`);
+    const shown = await get(`/api/v1/admin/users?search=List${RUN}&excludeFixtures=true`);
     expect(shown.statusCode).toBe(200);
     expect(ids(shown)).toEqual([real.id, testName.id].sort());
     expect(shown.json().meta).toMatchObject({ total: 2, hiddenTestRecords: 1 });
@@ -147,28 +150,40 @@ describe('[MC-PR3] test data is left out of every admin list by default — keye
   });
 
   it('stores: a fixture owner hides the store; a store of a real owner NAMED "TEST-…" stays visible', async () => {
-    const shown = await get(`/api/v1/admin/vendors?search=${RUN}`);
+    const shown = await get(`/api/v1/admin/vendors?search=${RUN}&excludeFixtures=true`);
     expect(ids(shown)).toEqual([realStore.id, testStore.id].sort());
     expect(shown.json().meta.hiddenTestRecords).toBe(1);
     expect(ids(await get(`/api/v1/admin/vendors?search=${RUN}&excludeFixtures=false`))).toEqual([realStore.id, testStore.id, fixtureOwnerStore.id].sort());
   });
 
   it('riders and drivers: only a +5920 person is a fixture mover', async () => {
-    const riders = (await get(`/api/v1/admin/riders?search=List${RUN}`)).json();
+    const riders = (await get(`/api/v1/admin/riders?search=List${RUN}&excludeFixtures=true`)).json();
     expect(riders.data.map((r: { userId: string }) => r.userId).sort()).toEqual([real.id, testName.id].sort());
     expect(riders.meta.hiddenTestRecords).toBe(1);
     const drivers = (await get(`/api/v1/admin/drivers?search=List${RUN}&excludeFixtures=false`)).json().data.map((r: { userId: string }) => r.userId).sort();
     expect(drivers).toEqual([real.id, fixturePhone.id, testName.id].sort());
-    expect((await get(`/api/v1/admin/drivers?search=List${RUN}`)).json().meta).toMatchObject({ total: 2, hiddenTestRecords: 1 });
+    expect((await get(`/api/v1/admin/drivers?search=List${RUN}&excludeFixtures=true`)).json().meta).toMatchObject({ total: 2, hiddenTestRecords: 1 });
   });
 
   it('orders: an order a fixture placed is left out and counted; one at a real store named "TEST-…" stays', async () => {
-    const shown = await get(`/api/v1/admin/orders?search=LIST-${RUN}`);
+    const shown = await get(`/api/v1/admin/orders?search=LIST-${RUN}&excludeFixtures=true`);
     expect(shown.json().data.map((o: { id: string }) => o.id)).not.toContain(fixtureOrder.id);
     expect(shown.json().data.map((o: { id: string }) => o.id)).toContain(realOrder.id);
     expect(shown.json().meta).toMatchObject({ total: 2, hiddenTestRecords: 1 });
     const all = await get(`/api/v1/admin/orders?search=LIST-${RUN}&excludeFixtures=false`);
     expect(all.json().meta.total).toBe(3);
+  });
+
+  it('with no parameter every list shows every row, as before — the console asks to hide; other callers are unchanged', async () => {
+    const users = await get(`/api/v1/admin/users?search=List${RUN}`);
+    expect(ids(users)).toEqual([real.id, fixturePhone.id, testName.id].sort());
+    expect(users.json().meta).toMatchObject({ total: 3, hiddenTestRecords: 0 });
+    expect(ids(await get(`/api/v1/admin/vendors?search=${RUN}`))).toEqual([realStore.id, testStore.id, fixtureOwnerStore.id].sort());
+    expect((await get(`/api/v1/admin/riders?search=List${RUN}`)).json().meta).toMatchObject({ total: 3, hiddenTestRecords: 0 });
+    expect((await get(`/api/v1/admin/drivers?search=List${RUN}`)).json().meta).toMatchObject({ total: 3, hiddenTestRecords: 0 });
+    const orders = await get(`/api/v1/admin/orders?search=LIST-${RUN}`);
+    expect(orders.json().data.map((o: { id: string }) => o.id)).toContain(fixtureOrder.id);
+    expect(orders.json().meta).toMatchObject({ total: 3, hiddenTestRecords: 0 });
   });
 
   it('anything other than true/false is refused, not guessed', async () => {

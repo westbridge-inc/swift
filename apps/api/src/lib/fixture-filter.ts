@@ -25,7 +25,10 @@ import { AppError } from '../utils/errors';
 //
 // Filtering happens in the query, so the pager's totals stay true, and every
 // list reports how many fixture rows it left out, so nothing disappears
-// without a count.
+// without a count. It happens only when the caller asks (`excludeFixtures=
+// true`, which the console sends unless "Show test data" is ticked): with no
+// parameter a list returns every row, as it always has, so the API's other
+// callers — the journey and contract suites among them — see no change.
 // ---------------------------------------------------------------------------
 
 export const FIXTURE_PHONE_PREFIX = '+5920';
@@ -45,9 +48,9 @@ export const FIXTURE_ORDER = {
   OR: [{ customer: FIXTURE_USER }, { vendor: FIXTURE_VENDOR }],
 } satisfies Prisma.OrderWhereInput;
 
-/** `?excludeFixtures=` — test data is hidden unless the caller asks for it (`false`). */
+/** `?excludeFixtures=true` hides test data; absent or `false` lists every row. */
 export const excludeFixturesQuerySchema = z.object({
-  excludeFixtures: z.enum(['true', 'false']).optional().transform((v) => v !== 'false'),
+  excludeFixtures: z.enum(['true', 'false']).optional().transform((v) => v === 'true'),
 });
 
 /** The list's where, with fixtures left out when asked; and the where that counts what was left out. */
