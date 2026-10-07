@@ -9,7 +9,7 @@ import { GET, POST, PUT, req, sleep, brief, pick, waitFor, codeOf } from './comm
 import type { Ctx } from './context.js';
 import { mover, onlineOf, setOnline, pollOffer, driverArrives, releaseDrivers, closeRide } from './dispatch.js';
 import { registerFresh } from './auth.js';
-import { asAdmin, uploadDoc } from '../provision.js';
+import { asAdmin, reviewerTypedBody, uploadDoc } from '../provision.js';
 import { uniquePng } from '../roster.js';
 import { twoPerson } from './admin-util.js';
 
@@ -55,7 +55,7 @@ async function freshL2(rec: Recorder, ctx: Ctx, slot: string): Promise<Session |
   const face = await upload('/verification/upload', acct.session.token, { name: 'face.png', type: 'image/png', bytes: uniquePng(`${slot}-face`) });
   const idv = await POST('/verification/identity', { idDocumentUrl: id.url, selfieUrl: face.json?.data?.url, consent: true, privacyNoticeVersion: '2026-09-23' }, acct.session.token);
   if (!rec.expect(`${slot}: identity submitted for review`, idv, 201)) return null;
-  const ok = await asAdmin(ctx.admin.token, 'approve the synthetic identity check of a taxi journey passenger', 'PUT', `/admin/verification/${idv.json?.data?.id}/approve`, {});
+  const ok = await asAdmin(ctx.admin.token, 'approve the synthetic identity check of a taxi journey passenger', 'PUT', `/admin/verification/${idv.json?.data?.id}/approve`, reviewerTypedBody('identity_l2', String(idv.json?.data?.id ?? '')));
   if (!rec.expect(`${slot}: identity approved (L2)`, ok, 200)) return null;
   return acct.session;
 }

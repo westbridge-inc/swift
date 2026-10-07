@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createGolden, DAY, type Actor } from './gold-7-helpers';
 import { documentHarness } from './gold-7-documents';
+import { reviewerTyped } from '../helpers/reviewer-typed';
 
 // ---------------------------------------------------------------------------
 // GOLD-7 · VEND-01 — agreement refusal → join → encrypted documents → review
@@ -30,10 +31,10 @@ async function submit(actor: Actor, docType: string) {
     role: 'STORE', docType, fileUrl: uploaded.json().data.url, consent: true, privacyNoticeVersion: 'v1',
   });
   expect(submitted.statusCode, submitted.json().error?.code).toBe(201);
-  return { id: submitted.json().data.id as string, bytes };
+  return { id: submitted.json().data.id as string, bytes, docType };
 }
 
-async function review(admin: Actor, document: { id: string; bytes: Buffer }, approve: boolean) {
+async function review(admin: Actor, document: { id: string; bytes: Buffer; docType?: string }, approve: boolean) {
   const link = await h.call('GET', `/api/v1/admin/verification/${document.id}/document-url`, admin.token, undefined, REASON);
   expect(link.statusCode).toBe(200);
   const rendered = await h.app.inject({ method: 'GET', url: link.json().data.url });
@@ -47,7 +48,7 @@ async function review(admin: Actor, document: { id: string; bytes: Buffer }, app
   expect(claimed.statusCode, claimed.json().error?.code).toBe(200);
   expect(claimed.json().data.assignedTo).toBe(admin.userId);
   const result = await h.call('PUT', `/api/v1/admin/verification/${document.id}/${approve ? 'approve' : 'reject'}`, admin.token,
-    approve ? { expiresAt: new Date(Date.now() + 365 * DAY).toISOString() }
+    approve ? { expiresAt: new Date(Date.now() + 365 * DAY).toISOString(), ...reviewerTyped(document.docType ?? '', document.id) }
       : { reasonCode: 'UNREADABLE', reason: 'The registration number is unreadable' }, REASON);
   expect(result.statusCode, result.json().error?.code).toBe(200);
   const decided = await h.sys(() => h.app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: document.id } }));

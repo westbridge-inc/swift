@@ -32,3 +32,46 @@ export function approvedIdentityDocumentNumber(
   const normalized = normalizeDocNumber(raw);
   return normalized.length > 0 ? normalized : null;
 }
+
+/**
+ * [VERIFY-DOCS · owner ruling 6 Oct 2026] Numbers a REVIEWER types at approval.
+ *
+ * With manual review nothing is extracted, so the reviewer reads the number off
+ * the document and types it; it is kept only as the HMAC blind index of an
+ * identity key (never stored as typed), for the duplicate-account check.
+ *
+ * The driver's licence joins here and NOT in `approvedIdentityDocumentNumber`
+ * above: a processor's generic `documentNumber` on a licence may be any number
+ * printed on it, but a reviewer is asked for the licence number itself. A
+ * licence is issued to one person, and for a motorised mover it is now the
+ * photo ID (owner ruling 4), so the same licence on two accounts is one
+ * person. It lives in its own namespace (`DL:`): a licence number never
+ * matches an identity-card number made of the same characters.
+ */
+export const LICENCE_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set(['drivers_licence']);
+export const REVIEWER_TYPED_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set([
+  ...IDENTITY_NUMBER_DOC_TYPES,
+  ...LICENCE_NUMBER_DOC_TYPES,
+]);
+/** Fewer characters than this identify nobody (and would union strangers). */
+export const MIN_TYPED_NUMBER_LENGTH = 4;
+
+/** The identity-key value for a number a reviewer typed, or null if the type takes none or the number is too short. */
+export function reviewerTypedDocumentSignal(docType: string, raw: unknown): string | null {
+  if (!REVIEWER_TYPED_NUMBER_DOC_TYPES.has(docType) || typeof raw !== 'string') return null;
+  const normalized = normalizeDocNumber(raw);
+  if (normalized.length < MIN_TYPED_NUMBER_LENGTH) return null;
+  return LICENCE_NUMBER_DOC_TYPES.has(docType) ? `DL:${normalized}` : normalized;
+}
+
+/** The document types whose ISSUE date the reviewer types (the re-check falls due a year later). */
+export const ISSUE_DATE_DOC_TYPES: ReadonlySet<string> = new Set(['police_clearance']);
+
+export type ReviewerTypedField = 'documentNumber' | 'issuedOn';
+
+/** What the console must ask the reviewer for, for this document type. */
+export function reviewerTypedFields(docType: string): ReviewerTypedField[] {
+  if (REVIEWER_TYPED_NUMBER_DOC_TYPES.has(docType)) return ['documentNumber'];
+  if (ISSUE_DATE_DOC_TYPES.has(docType)) return ['issuedOn'];
+  return [];
+}

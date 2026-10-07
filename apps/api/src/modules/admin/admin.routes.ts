@@ -28,6 +28,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
@@ -330,6 +331,11 @@ const settleRefundSchema = z.object({
 const approveDocSchema = z.object({
   // Optional document expiry (e.g. licence end date entered during review)
   expiresAt: z.coerce.date().optional(),
+  // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer TYPES, per type
+  // (the queue's `reviewerTypes` says which): the ID or licence number — kept
+  // only as a blind-index identity key — and a police clearance's issue date.
+  documentNumber: z.string().trim().min(1).max(40).optional(),
+  issuedOn: z.coerce.date().optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -5281,14 +5287,21 @@ export async function adminRoutes(app: FastifyInstance) {
       tenantPrisma.verificationDocument.count({ where }),
     ]);
 
-    return { success: true, ...paginatedResponse(documents, total, { page, limit, skip }) };
+    // [VERIFY-DOCS] Each row says what the reviewer must type to approve it.
+    const rows = documents.map((document) => ({ ...document, reviewerTypes: reviewerTypedFields(document.docType) }));
+    return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
 
   app.put('/verification/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = approveDocSchema.parse(request.body ?? {});
 
-    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance);
+    // [VERIFY-DOCS] A reviewer approving here must type what the type needs (`required`).
+    const doc = await verification.approveDocument(id, request.user.userId, body.expiresAt, body.insurance, {
+      required: true,
+      ...(body.documentNumber !== undefined ? { documentNumber: body.documentNumber } : {}),
+      ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
+    });
     await audit(
       request.user.userId,
       'APPROVE_VERIFICATION_DOC',
