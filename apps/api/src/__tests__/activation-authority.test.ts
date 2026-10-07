@@ -253,7 +253,7 @@ describe('[#1516 review S4] a store awaiting approval whose weekly fee billing h
       .toMatchObject({ status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
   });
 
-  it('activation waits for a settling payer before reading the fee and writing the store', async () => {
+  it.each(['settled', 'payer-only'] as const)('activation waits for a settling payer before reading the fee and writing the store (%s)', async (stage) => {
     const { vendor, sub } = await pendingStoreWithFee('SUSPENDED', true);
     const owner = await app.prisma.vendorOwner.findUniqueOrThrow({ where: { id: vendor.ownerId } });
     let releasePayment!: () => void;
@@ -263,11 +263,20 @@ describe('[#1516 review S4] a store awaiting approval whose weekly fee billing h
     // Hold exactly the payer/subscription locks used by confirmed settlement.
     // Its restore sees the still-pending store and has nothing to reopen.
     const payment = app.prisma.$transaction(async (tx) => {
+      if (stage === 'payer-only') {
+        // If projection takes a subscription before its payer, this schedule
+        // deadlocks when settlement advances to its next lock.
+        await tx.$queryRaw`SELECT id FROM users WHERE id = ${owner.userId} FOR UPDATE`;
+        paymentReady();
+        await release;
+      }
       await lockBillingAuthority(tx, sub.id);
       await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null } });
       expect(await restoreBillingAccess(tx, vendor.id)).toBe(false);
-      paymentReady();
-      await release;
+      if (stage === 'settled') {
+        paymentReady();
+        await release;
+      }
     }, { timeout: 15000 });
     await ready;
     let activationDone = false;
@@ -291,7 +300,8 @@ describe('[#1516 review S4] a store awaiting approval whose weekly fee billing h
       }
     } finally {
       releasePayment();
-      await Promise.all([payment, activation]);
+      const outcomes = await Promise.allSettled([payment, activation]);
+      expect(outcomes.map((result) => result.status), 'settlement and activation must both commit without a lock-order deadlock').toEqual(['fulfilled', 'fulfilled']);
     }
     expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).toMatchObject({ status: 'ACTIVE' });
     expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))

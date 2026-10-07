@@ -54,6 +54,14 @@ async function fixture(status = 'ACTIVE') {
     return snapshot;
   };
   const prisma = prismaDouble(orderStore([]), {
+    // Projection now takes billing's payer/subscription locks. This double
+    // accepts only those reads; the database activation suite proves ordering.
+    $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
+      const sql = parts.join('?').replace(/\s+/g, ' ').trim();
+      if (sql === 'SELECT id FROM users WHERE id = ? FOR UPDATE'
+        || sql === 'SELECT s.id FROM subscriptions s JOIN vendors v ON v.id = s."vendorId" JOIN vendor_owners o ON o.id = v."ownerId" WHERE o."userId" = ? ORDER BY s.id FOR UPDATE OF s') return [];
+      throw new Error(`Unexpected projection query: ${sql}`);
+    }),
     vendor: { findFirst: readVendor, findUnique: readVendor,
       update: vi.fn(async ({ data }: { data: Row }) => Object.assign(vendor, data)),
       updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => {
