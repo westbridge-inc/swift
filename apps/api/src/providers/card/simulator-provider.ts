@@ -129,6 +129,8 @@ const hex = (bytes: number) => randomBytes(bytes).toString('hex');
 
 export class SimulatorCardRailProvider implements CardRailProvider {
   readonly simulator = true;
+  /** The simulator exercises the whole Add card loop on a test server. */
+  readonly savesCards = true;
   readonly binding: CardRailBinding;
   /** The Redis namespace this simulator reads and writes (SIMULATOR_KEY_PREFIX by default). */
   readonly keyPrefix: string;

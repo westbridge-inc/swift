@@ -10,7 +10,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { runWithoutTenant } from '../plugins/tenant-context';
+import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { rateLimitKey } from '../utils/rate-limit-key';
@@ -20,6 +20,7 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { stepUpKey } from '../modules/auth/step-up';
 import { BillingService } from '../modules/billing/billing.service';
+import { readDunningClock } from '../modules/billing/dunning-clock';
 import { CARD_ON_FILE_CONSENT_VERSION, CardRailService } from '../modules/billing/card-rail.service';
 import { CARD_CHECKOUT_PLATFORMS_KEY, resetCardCheckoutSwitchCache } from '../modules/billing/card-pay-action';
 import {
@@ -32,9 +33,12 @@ import {
   type CardRailRuntime,
 } from '../modules/billing/card-rail.routes';
 import { NotificationService } from '../modules/notification/notification.service';
+import { REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
 import { SandboxPaymentProvider } from '../providers/payment/payment-provider';
+import type { CardRailProvider } from '../providers/card/card-provider';
 import { SIMULATOR_PAGE, SimulatorCardRailProvider, type SimulatorScenario } from '../providers/card/simulator-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
 
 // ---------------------------------------------------------------------------
@@ -46,7 +50,9 @@ import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
 // itself [C5]; only the provider's server-side answer enrols or books, once;
 // sessions are one-use and bound to their partner [C8]; a card is brand,
 // last 4 and expiry [C9]; the kill switch stops new sessions, never the
-// draining of returns [C7]; outsiders are refused before anything is read.
+// draining of returns [C7]; outsiders are refused before anything is read;
+// the store-review demo reaches no card surface; the server alone says, per
+// platform, whether the Pay screen shows a card button (payActions CARD).
 // Phones: +592648… (checked unused in the monorepo).
 // ---------------------------------------------------------------------------
 
@@ -61,10 +67,13 @@ let redis: Redis;
 let sim: SimulatorCardRailProvider;
 let runtime: CardRailRuntime;
 let kekBefore: string | undefined;
+/** What the ROUTES see as the configured provider (the service keeps the simulator). */
+let railOverride: CardRailProvider | null = null;
 
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const subIds: string[] = [];
+const tenantIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_648_000_000 + Math.floor(Math.random() * 900_000);
 const key = () => `tap-${nanoid(12)}`;
@@ -73,11 +82,17 @@ type Family = 'vendor' | 'rider' | 'driver';
 type Actor = { userId: string; token: string; authSessionId: string };
 type Partner = Actor & { subId: string; family: Family; vendorId?: string };
 
-async function makeUser(roles: UserRole[], activeRole: UserRole): Promise<Actor> {
+/** Fixtures are written in an explicit tenant scope: `tenantId`'s, or none (the schema's production tenant). */
+const inTenant = <T>(tenantId: string | undefined, fn: () => Promise<T>) => (tenantId ? runWithTenant(tenantId, fn) : runWithoutTenant(fn, 'pt2-card-test-fixture'));
+
+async function makeUser(roles: UserRole[], activeRole: UserRole, tenantId?: string): Promise<Actor> {
   seq += 1;
-  const user = await app.prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Card', lastName: `R${seq}`, roles, activeRole, isPhoneVerified: true, selfieCapturedAt: new Date() },
-  });
+  const user = await inTenant(tenantId, () => app.prisma.user.create({
+    data: {
+      phone: `+${phoneBase + seq}`, firstName: 'Card', lastName: `R${seq}`, roles, activeRole, isPhoneVerified: true, selfieCapturedAt: new Date(),
+      ...(tenantId ? { tenantId } : {}),
+    },
+  }));
   userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
   const session = await app.prisma.session.create({
@@ -86,54 +101,94 @@ async function makeUser(roles: UserRole[], activeRole: UserRole): Promise<Actor>
   return { userId: user.id, token, authSessionId: session.id };
 }
 
-type SubOpts = { status?: SubscriptionStatus; due?: Date };
+/** `tenantId`: the partner's tenant (default: production). `mapped: false`: the shared billing
+ *  confirmation clock has not mapped the subscription yet ([#1393]; reading never maps it). */
+type SubOpts = { status?: SubscriptionStatus; due?: Date; tenantId?: string; mapped?: boolean };
 function period(opts: SubOpts) {
   const due = opts.due ?? new Date(Date.now() + 3 * DAY);
   return { currentPeriodStart: new Date(due.getTime() - 7 * DAY), currentPeriodEnd: due, nextBillingDate: due };
 }
+async function mappedUnless<T extends { subId: string }>(partner: T, opts: SubOpts): Promise<T> {
+  if (opts.mapped !== false) await inTenant(opts.tenantId, () => readDunningClock(app.prisma, partner.subId));
+  return partner;
+}
 
 async function makeStore(opts: SubOpts = {}): Promise<Partner> {
-  const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
-  const ownerRow = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
-  const vendor = await app.prisma.vendor.create({
-    data: {
-      ownerId: ownerRow.id, name: `Card Store ${seq}`, slug: `card-store-${nanoid(6).toLowerCase()}`,
-      vendorType: 'RESTAURANT', phone: `+${phoneBase + 5000 + seq}`,
-      addressLine1: '1 Card Street', city: 'Georgetown', region: 'Demerara-Mahaica',
-      latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
-    },
+  const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER', opts.tenantId);
+  const { vendorId, subId } = await inTenant(opts.tenantId, async () => {
+    const ownerRow = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
+    const vendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: ownerRow.id, name: `Card Store ${seq}`, slug: `card-store-${nanoid(6).toLowerCase()}`,
+        vendorType: 'RESTAURANT', phone: `+${phoneBase + 5000 + seq}`,
+        addressLine1: '1 Card Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+        latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
+        ...(opts.tenantId ? { tenantId: opts.tenantId } : {}),
+      },
+    });
+    vendorIds.push(vendor.id);
+    const sub = await app.prisma.subscription.create({
+      data: { vendorId: vendor.id, type: 'RESTAURANT', status: opts.status ?? 'ACTIVE', weeklyRate: 2100, ...period(opts), prepaidBalance: { create: { balance: 0 } } },
+    });
+    subIds.push(sub.id);
+    return { vendorId: vendor.id, subId: sub.id };
   });
-  vendorIds.push(vendor.id);
-  const sub = await app.prisma.subscription.create({
-    data: { vendorId: vendor.id, type: 'RESTAURANT', status: opts.status ?? 'ACTIVE', weeklyRate: 2100, ...period(opts) },
-  });
-  subIds.push(sub.id);
-  return { ...owner, subId: sub.id, family: 'vendor', vendorId: vendor.id };
+  return mappedUnless({ ...owner, subId, family: 'vendor' as const, vendorId }, opts);
 }
 
 async function makeRider(opts: SubOpts = {}): Promise<Partner> {
-  const actor = await makeUser(['MOVER'], 'MOVER');
-  const rider = await app.prisma.rider.create({ data: { userId: actor.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
-  const sub = await app.prisma.subscription.create({
-    data: { riderId: rider.id, type: 'DELIVERY_RIDER', status: opts.status ?? 'ACTIVE', weeklyRate: 6000, ...period(opts) },
+  const actor = await makeUser(['MOVER'], 'MOVER', opts.tenantId);
+  const subId = await inTenant(opts.tenantId, async () => {
+    const rider = await app.prisma.rider.create({ data: { userId: actor.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
+    const sub = await app.prisma.subscription.create({
+      data: { riderId: rider.id, type: 'DELIVERY_RIDER', status: opts.status ?? 'ACTIVE', weeklyRate: 6000, ...period(opts), prepaidBalance: { create: { balance: 0 } } },
+    });
+    subIds.push(sub.id);
+    return sub.id;
   });
-  subIds.push(sub.id);
-  return { ...actor, subId: sub.id, family: 'rider' };
+  return mappedUnless({ ...actor, subId, family: 'rider' as const }, opts);
 }
 
 async function makeDriver(opts: SubOpts = {}): Promise<Partner> {
-  const actor = await makeUser(['MOVER'], 'MOVER');
-  const driver = await app.prisma.driver.create({
-    data: {
-      userId: actor.userId, vehicleType: 'CAR', documentsVerified: true, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
-      vehicleColor: 'Silver', licensePlate: `HC-${RUN}-${seq}`, driverLicenseUrl: 'test/lic', vehicleInsuranceUrl: 'test/ins',
-    },
+  const actor = await makeUser(['MOVER'], 'MOVER', opts.tenantId);
+  const subId = await inTenant(opts.tenantId, async () => {
+    const driver = await app.prisma.driver.create({
+      data: {
+        userId: actor.userId, vehicleType: 'CAR', documentsVerified: true, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020,
+        vehicleColor: 'Silver', licensePlate: `HC-${RUN}-${seq}`, driverLicenseUrl: 'test/lic', vehicleInsuranceUrl: 'test/ins',
+      },
+    });
+    const sub = await app.prisma.subscription.create({
+      data: { driverId: driver.id, type: 'TAXI_DRIVER', status: opts.status ?? 'ACTIVE', weeklyRate: 7000, ...period(opts), prepaidBalance: { create: { balance: 0 } } },
+    });
+    subIds.push(sub.id);
+    return sub.id;
   });
-  const sub = await app.prisma.subscription.create({
-    data: { driverId: driver.id, type: 'TAXI_DRIVER', status: opts.status ?? 'ACTIVE', weeklyRate: 7000, ...period(opts) },
-  });
-  subIds.push(sub.id);
-  return { ...actor, subId: sub.id, family: 'driver' };
+  return mappedUnless({ ...actor, subId, family: 'driver' as const }, opts);
+}
+
+/** The store-review demo tenant: its requests pass the review gate while a review session is live. */
+async function makeReviewTenant(): Promise<string> {
+  const id = `pt2-review-${nanoid(6).toLowerCase()}`;
+  await runWithoutTenant(() => app.prisma.tenant.create({ data: { id, slug: id, name: 'Card rail review fiction', kind: 'REVIEW', isActive: true } }), 'pt2-card-test-fixture');
+  tenantIds.push(id);
+  await runWithTenant(id, () => app.prisma.reviewSession.create({ data: { tenantId: id, expiresAt: new Date(Date.now() + DAY) } }));
+  return id;
+}
+
+/** A provider the routes treat as REAL (never the simulator): it answers with the simulator's truth. */
+function realProvider(opts: { savesCards: boolean }): CardRailProvider {
+  return {
+    binding: sim.binding,
+    simulator: false,
+    savesCards: opts.savesCards,
+    createSession: (i) => sim.createSession(i),
+    parseReturn: (params) => sim.parseReturn(params),
+    confirm: (i) => sim.confirm(i),
+    chargeInstrument: (i) => sim.chargeInstrument(i),
+    retrieve: (i) => sim.retrieve(i),
+    refund: (i) => sim.refund(i),
+  };
 }
 
 const headersOf = (p: Actor & { vendorId?: string }, extra: Record<string, string> = {}) => ({
@@ -155,6 +210,15 @@ const startSession = (p: Partner, purpose: 'ENROLL' | 'PAY_NOW', opts: { key?: s
     payload: opts.payload ?? { purpose, ...(purpose === 'ENROLL' ? { consentVersion: CARD_ON_FILE_CONSENT_VERSION } : {}) },
     headers: { 'idempotency-key': opts.key ?? key(), ...opts.headers },
   });
+
+/** The CARD entry of GET /{family}/subscription's payActions. */
+async function cardActionOf(p: Partner, headers: Record<string, string> = {}) {
+  const res = await partnerCall(p, 'GET', '/subscription', { headers });
+  expect(res.statusCode, res.body).toBe(200);
+  const actions = res.json().data.payActions as Array<{ id: string }>;
+  expect(actions.map((a) => a.id)).toEqual(['MMG_CHECKOUT', 'CARD']);
+  return actions[1] as Record<string, unknown>;
+}
 
 /** The partner's browser on the simulator's page presses a button; answers where it is sent next. */
 async function press(hostedUrl: string, scenario: SimulatorScenario) {
@@ -216,7 +280,7 @@ beforeAll(async () => {
   sim = new SimulatorCardRailProvider(redis, { account: ACCOUNT, keyPrefix: PREFIX });
   const notifications = new NotificationService(app.prisma, app.io);
   const billing = new BillingService(app.prisma, notifications, new SandboxPaymentProvider(), undefined, () => sim);
-  runtime = { service: new CardRailService(app.prisma, notifications, billing, () => sim), billing, rail: () => sim };
+  runtime = { service: new CardRailService(app.prisma, notifications, billing, () => sim), billing, rail: () => railOverride ?? sim };
   app.decorate(CARD_RAIL_RUNTIME_DECORATION, runtime);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
@@ -230,6 +294,7 @@ afterEach(async () => {
   process.env['CARD_RAIL_V2'] = '1';
   delete process.env['CARD_RAIL_V2_DRAIN'];
   delete process.env['CARD_RAIL_KILL'];
+  railOverride = null;
   await app.prisma.platformConfig.deleteMany({ where: { key: CARD_CHECKOUT_PLATFORMS_KEY } });
   resetCardCheckoutSwitchCache();
 });
@@ -239,12 +304,19 @@ afterAll(async () => {
   if (kekBefore === undefined) delete process.env['MASTER_KEK']; else process.env['MASTER_KEK'] = kekBefore;
   resetKeyProviderForTests();
   await runWithoutTenant(async () => {
+    // [#1393] The shared confirmation clock's evidence (holds, notices, transitions, clocks) goes first.
+    await cleanupBillingClocks(app.prisma, subIds);
     // Deleting the subscriptions cascades their cards, sessions and payments;
     // observations are append-only evidence and stay, keyed to this run's ids.
     await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    // [#1393] A mover's fee authority lives exactly as long as its payer and names the canonical
+    // subscription: the mover payers go first, then the subscriptions.
+    const payers = await app.prisma.moverFeeAuthority.findMany({ where: { userId: { in: userIds } }, select: { userId: true } });
+    await app.prisma.user.deleteMany({ where: { id: { in: payers.map((a) => a.userId) } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+    await app.prisma.vendorStaff.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
@@ -253,6 +325,8 @@ afterAll(async () => {
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await app.prisma.reviewSession.deleteMany({ where: { tenantId: { in: tenantIds } } });
+    await app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
   }, 'test-cleanup:card-rail-routes');
   await deleteRunKeys(redis, PREFIX);
   await redis.quit();
@@ -314,7 +388,8 @@ describe('Add card, end to end through HTTP: the return grants nothing; the prov
     expect(await observations(session.sessionId)).toEqual([
       { source: 'RETURN', parsedStatus: 'SUCCEEDED', verdict: 'ACCEPTED' },
       { source: 'CONFIRM', parsedStatus: 'SUCCEEDED', verdict: 'ACCEPTED' },
-      { source: 'RETURN', parsedStatus: 'SUCCEEDED', verdict: 'REJECTED_REPLAY' },
+      // The session is no longer open: the closed-session verdict comes before the replay check.
+      { source: 'RETURN', parsedStatus: 'SUCCEEDED', verdict: 'REJECTED_CLOSED' },
     ]);
 
     const followed = await partnerCall(p, 'GET', `${SESSIONS}/${session.sessionId}`);
@@ -372,8 +447,11 @@ describe('Pay now through HTTP: priced by the server, booked once, and only on t
     expect(pageState((await follow(location)).body)).toBe('SUCCEEDED');
     const after = await money(p.subId);
     expect(after.successes).toBe(1);
-    expect(after.payments.filter((x) => x.status === 'SUCCEEDED')).toHaveLength(1);
+    expect(after.payments.filter((x) => x.status === 'CAPTURED')).toHaveLength(1);
     expect(after.sub.currentPeriodEnd.getTime()).toBe(periodEndBefore + 7 * DAY);
+    // The partner's view says what happened to the money: the paid week moved.
+    const followed = (await partnerCall(p, 'GET', `${SESSIONS}/${session.sessionId}`)).json().data;
+    expect(followed).toMatchObject({ status: 'SUCCEEDED', settlement: 'advanced', amount: quote.amount, currencyCode: quote.currencyCode });
 
     for (let i = 0; i < 3; i += 1) expect(pageState((await follow(location)).body)).toBe('SUCCEEDED');
     await runtime.service.confirm(session.sessionId);
@@ -428,7 +506,8 @@ describe('Pay now through HTTP: priced by the server, booked once, and only on t
     // The same name twice is ambiguous: refused before it is read or written down.
     expect(pageState((await follow(`${location}&sim_outcome=decline`)).body)).toBe('UNKNOWN');
     expect((await money(p.subId)).successes).toBe(0);
-    expect(await observations(session.sessionId)).toEqual([{ source: 'RETURN', parsedStatus: 'INVALID', verdict: 'REJECTED_STATE' }]);
+    // Written down with what the browser claimed, and refused at the state check: nothing more is read.
+    expect(await observations(session.sessionId)).toEqual([{ source: 'RETURN', parsedStatus: 'SUCCEEDED', verdict: 'REJECTED_STATE' }]);
     // The real return still works afterwards: nothing above spent it.
     expect(pageState((await follow(location)).body)).toBe('SUCCEEDED');
     expect((await money(p.subId)).successes).toBe(1);
@@ -490,6 +569,25 @@ describe('who may do what: the family’s own gate first, then the session’s o
           expect(res.statusCode, `${method} ${url} as a wrong role`).toBe(403);
         }
       }
+    }
+  });
+
+  it('[REVIEW-PARTNER] the store-review demo reaches no card route, in any family: 403 REVIEW_DEMO_NO_MONEY, nothing opened', async () => {
+    const review = await makeReviewTenant();
+    for (const p of [await makeStore({ tenantId: review }), await makeRider({ tenantId: review }), await makeDriver({ tenantId: review })]) {
+      for (const [method, path, payload] of [
+        ['GET', '/subscription/cards', undefined],
+        ['DELETE', '/subscription/cards/somecard', undefined],
+        ['GET', `${SESSIONS}/somesession`, undefined],
+        ['POST', SESSIONS, { purpose: 'PAY_NOW' }],
+      ] as const) {
+        const res = await partnerCall(p, method, path, { ...(payload ? { payload } : {}), headers: { 'idempotency-key': key() } });
+        expect(res.statusCode, `${p.family} ${method} ${path}: ${res.body}`).toBe(403);
+        expect(res.json().error.code).toBe(REVIEW_DEMO_NO_MONEY);
+      }
+      // Its subscription payload never shows a card button either.
+      expect(await cardActionOf(p)).toEqual({ id: 'CARD', state: 'off' });
+      expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(0);
     }
   });
 
@@ -558,6 +656,20 @@ describe('the switches: the flag, the kill switch, the platform, the subscriptio
     expect((await startSession(p, 'PAY_NOW', { headers: { 'x-client-platform': 'web' } })).json().error.code).toBe('PAY_ACTION_OFF');
   });
 
+  it('[DS633, as MMG] only a real true/false counts: any other value switches that platform off, and a row that is not an object switches every platform off', async () => {
+    const p = await makeRider();
+    await app.prisma.platformConfig.create({ data: { key: CARD_CHECKOUT_PLATFORMS_KEY, value: { ios: 'true', android: 'false' } } });
+    resetCardCheckoutSwitchCache();
+    expect((await startSession(p, 'ENROLL', { headers: { 'x-client-platform': 'ios' } })).json().error.code).toBe('PAY_ACTION_OFF');
+    expect((await startSession(p, 'ENROLL', { headers: { 'x-client-platform': 'android' } })).json().error.code).toBe('PAY_ACTION_OFF');
+    expect((await startSession(p, 'ENROLL', { headers: { 'x-client-platform': 'web' } })).statusCode).toBe(201);
+    await app.prisma.platformConfig.update({ where: { key: CARD_CHECKOUT_PLATFORMS_KEY }, data: { value: ['ios', 'android', 'web'] } });
+    resetCardCheckoutSwitchCache();
+    for (const platform of ['ios', 'android', 'web']) {
+      expect((await startSession(p, 'PAY_NOW', { headers: { 'x-client-platform': platform } })).json().error.code, platform).toBe('PAY_ACTION_OFF');
+    }
+  });
+
   it('a subscription that cannot pay (billing stopped, or waived) opens no card page', async () => {
     const paused = await makeRider({ status: 'PAUSED' });
     expect((await startSession(paused, 'PAY_NOW')).json().error.code).toBe('PAY_ACTION_OFF');
@@ -565,6 +677,110 @@ describe('the switches: the flag, the kill switch, the platform, the subscriptio
     await app.prisma.subscription.update({ where: { id: waived.subId }, data: { feeWaived: true } });
     expect((await startSession(waived, 'PAY_NOW')).json().error.code).toBe('PAY_ACTION_OFF');
     expect(await app.prisma.cardSession.count({ where: { subscriptionId: { in: [paused.subId, waived.subId] } } })).toBe(0);
+  });
+});
+
+describe('Add card needs a provider that can charge a saved card each week', () => {
+  it('a provider that cannot save cards: ENROLL is 409 ADD_CARD_OFF before any page or row; Pay now still opens', async () => {
+    railOverride = realProvider({ savesCards: false });
+    const p = await makeRider();
+    const refused = await startSession(p, 'ENROLL');
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('ADD_CARD_OFF');
+    expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(0);
+    const payNow = await startSession(p, 'PAY_NOW');
+    expect(payNow.statusCode, payNow.body).toBe(201);
+    expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId, purpose: 'ENROLL' } })).toBe(0);
+  });
+});
+
+describe('payActions CARD: the server alone decides, per platform, whether the Pay screen shows a card button', () => {
+  it('flag off, or the simulator (a test page), or no provider: CARD is off in every family’s subscription payload', async () => {
+    const parts = [await makeStore(), await makeRider(), await makeDriver()];
+    for (const p of parts) expect(await cardActionOf(p), `${p.family} on the simulator`).toEqual({ id: 'CARD', state: 'off' });
+    railOverride = realProvider({ savesCards: false });
+    process.env['CARD_RAIL_V2'] = '0';
+    for (const p of parts) expect(await cardActionOf(p), `${p.family} with the flag off`).toEqual({ id: 'CARD', state: 'off' });
+  });
+
+  it('a real provider: live with the server’s Pay-now price in every family; Add card only when the provider saves cards', async () => {
+    railOverride = realProvider({ savesCards: false });
+    for (const p of [await makeStore(), await makeRider(), await makeDriver()]) {
+      const quote = await runtime.billing.quoteCardPayNow(p.subId);
+      expect(await cardActionOf(p), p.family).toEqual({
+        id: 'CARD', state: 'live', payNow: { amount: quote.amount, currencyCode: quote.currencyCode }, addCard: false, cardOnFile: null,
+      });
+    }
+  });
+
+  it('the card on file is the ACTIVE card as brand / last 4 / expiry / status — nothing else', async () => {
+    const p = await makeRider();
+    const opened = (await startSession(p, 'ENROLL')).json().data;
+    expect(pageState((await follow(await press(opened.hostedUrl, 'APPROVE'))).body)).toBe('SUCCEEDED');
+    railOverride = realProvider({ savesCards: true });
+    const card = await cardActionOf(p);
+    expect(card).toMatchObject({ state: 'live', addCard: true, cardOnFile: { brand: 'SIMULATED', last4: '4242', status: 'ACTIVE' } });
+    expect(Object.keys(card['cardOnFile'] as object).sort()).toEqual(['brand', 'expMonth', 'expYear', 'id', 'last4', 'status']);
+  });
+
+  it('per platform: iOS off unless switched on; Android and web on unless switched off; an unknown platform only when all are on', async () => {
+    railOverride = realProvider({ savesCards: false });
+    const p = await makeStore();
+    const state = async (platform: string) => (await cardActionOf(p, { 'x-client-platform': platform }))['state'];
+    expect(await state('ios')).toBe('off');
+    expect(await state('android')).toBe('live');
+    expect(await state('web')).toBe('live');
+    expect(await state('')).toBe('off');
+    await app.prisma.platformConfig.create({ data: { key: CARD_CHECKOUT_PLATFORMS_KEY, value: { ios: true } } });
+    resetCardCheckoutSwitchCache();
+    expect(await state('ios')).toBe('live');
+    expect(await state('')).toBe('live');
+    await app.prisma.platformConfig.update({ where: { key: CARD_CHECKOUT_PLATFORMS_KEY }, data: { value: { ios: true, web: false } } });
+    resetCardCheckoutSwitchCache();
+    expect(await state('web')).toBe('off');
+    expect(await state('')).toBe('off');
+  });
+
+  it('[#1393, as MMG] never live while a payment of this fee is being confirmed, nor before the billing clock covers the subscription', async () => {
+    railOverride = realProvider({ savesCards: false });
+    const unmapped = await makeRider({ mapped: false });
+    expect(await cardActionOf(unmapped)).toEqual({ id: 'CARD', state: 'off' });
+    expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: unmapped.subId } })).toBe(0);
+
+    const p = await makeRider();
+    expect((await cardActionOf(p))['state']).toBe('live');
+    const opened = (await startSession(p, 'PAY_NOW')).json().data;
+    // A card page is open for this fee: no second way to pay is offered until it is settled.
+    expect(await cardActionOf(p)).toEqual({ id: 'CARD', state: 'off' });
+    railOverride = null; // the simulator's own page serves the button
+    expect(pageState((await follow(await press(opened.hostedUrl, 'APPROVE'))).body)).toBe('SUCCEEDED');
+    railOverride = realProvider({ savesCards: false });
+    expect((await cardActionOf(p))['state']).toBe('live');
+  });
+
+  it('a subscription that cannot pay (billing stopped, waived): CARD off', async () => {
+    railOverride = realProvider({ savesCards: false });
+    const paused = await makeRider({ status: 'PAUSED' });
+    expect(await cardActionOf(paused)).toEqual({ id: 'CARD', state: 'off' });
+    const waived = await makeRider();
+    await app.prisma.subscription.update({ where: { id: waived.subId }, data: { feeWaived: true } });
+    expect(await cardActionOf(waived)).toEqual({ id: 'CARD', state: 'off' });
+  });
+
+  it('the payload never fails because the card rail cannot answer: CARD off, the rest of the Pay screen intact', async () => {
+    const p = await makeStore();
+    await partnerCall(p, 'GET', '/subscription'); // the first read assigns the store's Swift Number
+    const healthy = await partnerCall(p, 'GET', '/subscription');
+    const { rail } = runtime;
+    Object.defineProperty(runtime, 'rail', { configurable: true, get() { throw new Error('the card rail configuration is broken'); } });
+    try {
+      const res = await partnerCall(p, 'GET', '/subscription');
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().data.payActions).toEqual([{ id: 'MMG_CHECKOUT', state: 'off' }, { id: 'CARD', state: 'off' }]);
+      expect({ ...res.json().data, payActions: null }).toEqual({ ...healthy.json().data, payActions: null });
+    } finally {
+      Object.defineProperty(runtime, 'rail', { configurable: true, writable: true, value: rail });
+    }
   });
 });
 
@@ -582,6 +798,17 @@ describe('rate limits', () => {
     let last = 0;
     for (let i = 0; i < CARD_RETURN_RATE.max + 1; i += 1) last = (await app.inject({ method: 'GET', url: `${RETURN}?session=x&state=y`, remoteAddress: '203.0.113.77' })).statusCode;
     expect(last).toBe(429);
+  });
+
+  it('[Sol #1404, as the MMG doors] the return is limited per SOURCE: one address rotating signed-in principals gets no extra allowance', async () => {
+    const codes: number[] = [];
+    for (let i = 0; i < CARD_RETURN_RATE.max + 1; i += 1) {
+      // A fresh verified principal every time: the global key would give each its own bucket.
+      const token = app.jwt.sign({ userId: `rotating-${RUN}-${i}`, role: 'CUSTOMER', jti: nanoid(8) });
+      codes.push((await app.inject({ method: 'GET', url: `${RETURN}?session=x&state=y`, remoteAddress: '203.0.113.78', headers: { authorization: `Bearer ${token}` } })).statusCode);
+    }
+    expect(codes.slice(0, CARD_RETURN_RATE.max).every((c) => c === 200)).toBe(true);
+    expect(codes[CARD_RETURN_RATE.max]).toBe(429);
   });
 });
 

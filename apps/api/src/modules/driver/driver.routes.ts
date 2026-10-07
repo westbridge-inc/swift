@@ -1,6 +1,6 @@
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -57,7 +57,7 @@ import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integr
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { normalizeRegistrationMark } from '../verification/subjects';
-import { registerPartnerCardRoutes } from '../billing/card-rail.routes';
+import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
 const updateDriverProfileSchema = z.object({
@@ -1729,13 +1729,16 @@ export async function driverRoutes(app: FastifyInstance) {
   // follows a checkout for their own weekly fee: the payer's ONE canonical
   // subscription [#1393 mover fee authority], the same one GET /subscription
   // shows, which may sit on the mover's rider profile.
-  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
-    subscriptionFor: async (request) => {
-      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
-      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
-    },
-  });
+  const feeSubscriptionFor = async (request: FastifyRequest) => {
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+  };
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the driver
+  // lists, removes, adds and pays by card for the same subscription. Card rail
+  // v2 stays behind CARD_RAIL_V2 (default off).
+  const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
 
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
@@ -1763,7 +1766,7 @@ export async function driverRoutes(app: FastifyInstance) {
         moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
-        ...(await mmgCheckout.feePayload(sub, request.headers)),
+        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers), await cardRail.payAction(sub, request.headers)),
       },
     };
   });
@@ -1789,16 +1792,5 @@ export async function driverRoutes(app: FastifyInstance) {
       ? await billing.stopBilling(sub.id, request.user.userId)
       : await billing.setBillingRail(sub.id, body.method, body.mmgPayerMsisdn);
     return { success: true, data: { billingMethod: updated.billingMethod, mmgPayerMsisdn: updated.mmgPayerMsisdn } };
-  });
-
-  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the driver
-  // lists, removes, adds and pays by card for their own subscription, the one
-  // GET /subscription shows. Card rail v2 stays behind CARD_RAIL_V2 (default off).
-  registerPartnerCardRoutes(app, {
-    subscriptionFor: async (request) => {
-      const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
-      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-      return app.prisma.subscription.findFirst({ where: { driverId: found!.id } });
-    },
   });
 }

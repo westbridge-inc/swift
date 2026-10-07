@@ -8,6 +8,7 @@ import { cardRailV2DrainEnabled, cardRailV2Enabled } from '../../utils/card-rail
 import { formatAmount, fromMinor } from '../../utils/currency-amount';
 import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import { requireStepUp } from '../auth/step-up';
+import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { NotificationService } from '../notification/notification.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getCardRailProvider } from '../../providers/card/card-rail-factory';
@@ -15,7 +16,8 @@ import type { CardRailProvider, CardRailSource } from '../../providers/card/card
 import { SIMULATOR_PAGE, SimulatorCardRailProvider, SimulatorRefusal } from '../../providers/card/simulator-provider';
 import { BillingService } from './billing.service';
 import { CARD_ON_FILE_CONSENT_VERSION, CardRailService, INSTRUMENT_DTO_SELECT, type CardSessionDto, type PaymentInstrumentDto } from './card-rail.service';
-import { cardPayAction, cardSessionsAllowed, clientPlatform, type CardPayAction } from './card-pay-action';
+import { CARD_OFF, cardPayAction, cardSessionsAllowed, type CardPayAction } from './card-pay-action';
+import { clientPlatform, type PayAction } from './fee-pay-actions';
 
 // ---------------------------------------------------------------------------
 // [PT-2] The card rail v2 ROUTES (CARD-CHECKOUT-API.md). They call PT-1's
@@ -63,6 +65,13 @@ const rateLimited = {
     new AppError(429, 'RATE_LIMITED', 'Too many attempts. Wait a minute and try again.', { retryAfterSeconds: Math.max(1, Math.ceil(context.ttl / 1000)) }),
 };
 
+/** [Sol · #1404, as the MMG doors] The public doors are limited per SOURCE:
+ *  the proxy-resolved address (Fastify's trustProxy, never a raw
+ *  X-Forwarded-For). Never the global key's per-user bucket, which a bearer
+ *  token selects: one source rotating signed-in principals would multiply
+ *  its allowance. */
+const perSource = { keyGenerator: (request: FastifyRequest) => request.ip };
+
 // ---------------------------------------------------------------------------
 // The runtime: one service, one billing engine and one provider source,
 // shared by every family. Tests decorate the app with their own (a simulator
@@ -96,8 +105,23 @@ export function cardRailRuntimeOf(app: FastifyInstance): CardRailRuntime {
 
 export interface PartnerCardRouteOptions {
   /** The caller's OWN subscription after the family's own gate has run (an
-   *  outsider throws 403 there; a partner still onboarding gets null). */
+   *  outsider throws 403 there; a partner still onboarding gets null): the
+   *  same lookup the family's MMG checkout and GET /subscription use. */
   subscriptionFor: (request: FastifyRequest) => Promise<Subscription | null>;
+}
+
+export interface PartnerCardRoutes {
+  /** The CARD entry for this family's GET /subscription payActions. */
+  payAction: (sub: Subscription, headers: Record<string, unknown>) => Promise<CardPayAction>;
+}
+
+/**
+ * The subscription payload's payActions with the card rail's own CARD entry in
+ * place of the placeholder (fee-pay-actions.ts keeps CARD `off`). Order and
+ * every other entry are unchanged.
+ */
+export function withCardPayAction<T extends { payActions: PayAction[] }>(payload: T, card: CardPayAction): T {
+  return { ...payload, payActions: payload.payActions.map((action) => (action.id === 'CARD' ? card : action)) };
 }
 
 export interface CardSessionView {
@@ -108,6 +132,9 @@ export interface CardSessionView {
   amount?: number;
   currencyCode?: string;
   card?: PaymentInstrumentDto;
+  /** PAY_NOW that SUCCEEDED: the paid week moved (`advanced`), or the money
+   *  went to the balance because that week was already covered (`banked`). */
+  settlement?: 'advanced' | 'banked';
   subscriptionStatus: string;
   testMode: boolean;
   testModeLabel?: string;
@@ -128,26 +155,39 @@ function mapNotFound<T>(promise: Promise<T>, code: string, message: string): Pro
   });
 }
 
-export function registerPartnerCardRoutes(app: FastifyInstance, options: PartnerCardRouteOptions): void {
+export function registerPartnerCardRoutes(app: FastifyInstance, options: PartnerCardRouteOptions): PartnerCardRoutes {
   let runtime: CardRailRuntime | null = null;
   const rt = () => (runtime ??= cardRailRuntimeOf(app));
 
   const ownSubscription = async (request: FastifyRequest): Promise<Subscription> => {
     // The family's gate first: an outsider is 403 before anything else is read.
     const sub = await options.subscriptionFor(request);
+    // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail: no
+    // card page, no card list, no card removal — before any key, body or id.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     if (!sub) throw notFound('SUBSCRIPTION_NOT_FOUND', 'There is no subscription for this account.');
     return sub;
+  };
+
+  /** Read by GET /subscription, the screen a partner pays on: it never fails
+   *  that payload. Flag off: off, without building anything. Any error while
+   *  deciding: off (fail closed), logged. */
+  const payAction = async (sub: Subscription, headers: Record<string, unknown>): Promise<CardPayAction> => {
+    if (!cardRailV2Enabled()) return CARD_OFF;
+    try {
+      const r = rt();
+      return await cardPayAction(app.prisma, (id) => r.billing.quoteCardPayNow(id), sub, clientPlatform(headers), r.rail);
+    } catch (err) {
+      log().error({ err, subscriptionId: sub.id }, '[PT-2] the CARD pay action could not be decided; it is off');
+      return CARD_OFF;
+    }
   };
 
   /** GET …/subscription/cards — every card the subscription ever had, newest first, and the CARD pay action. */
   app.get('/subscription/cards', { preHandler: [app.authenticate] }, async (request) => {
     const sub = await ownSubscription(request);
-    const r = rt();
-    const cards = await mapNotFound(r.service.listInstruments(request.user.userId, sub.id), 'SUBSCRIPTION_NOT_FOUND', 'There is no subscription for this account.');
-    const payAction: CardPayAction = await cardPayAction(
-      app.prisma, (id) => r.billing.quoteCardPayNow(id), sub, clientPlatform(request.headers), r.rail,
-    );
-    return { success: true, data: { cards, payAction } };
+    const cards = await mapNotFound(rt().service.listInstruments(request.user.userId, sub.id), 'SUBSCRIPTION_NOT_FOUND', 'There is no subscription for this account.');
+    return { success: true, data: { cards, payAction: await payAction(sub, request.headers) } };
   });
 
   /** DELETE …/subscription/cards/:cardId — REVOKED at once; nothing falls back silently. */
@@ -183,6 +223,11 @@ export function registerPartnerCardRoutes(app: FastifyInstance, options: Partner
       if (decision.reason === 'KILLED') throw new AppError(503, 'CARD_RAIL_DISABLED', 'Card payments are paused right now. Please use another way to pay.');
       throw new AppError(409, 'PAY_ACTION_OFF', 'Paying by card is not available for this account here.');
     }
+    // Saving a card needs a provider that can charge it each week without the
+    // partner present; otherwise only Pay now exists (`addCard: false`).
+    if (purpose === 'ENROLL' && !decision.provider.savesCards) {
+      throw new AppError(409, 'ADD_CARD_OFF', 'Saving a card is not available. You can pay this week by card instead.');
+    }
     if (purpose === 'ENROLL' && consentVersion !== CARD_ON_FILE_CONSENT_VERSION) {
       throw new AppError(400, 'CARD_CONSENT_REQUIRED', 'Agree to weekly card charges before adding a card.');
     }
@@ -211,6 +256,8 @@ export function registerPartnerCardRoutes(app: FastifyInstance, options: Partner
     if (!view) throw notFound('CARD_SESSION_NOT_FOUND', 'There is no such card session.');
     return { success: true, data: view };
   });
+
+  return { payAction };
 }
 
 /** A session as its own partner may see it: no page address, no state, no provider reference. */
@@ -220,12 +267,16 @@ async function cardSessionView(
 ): Promise<CardSessionView | null> {
   const s = await prisma.cardSession.findFirst({
     where: { id: input.sessionId, subscriptionId: input.subscription.id, userId: input.userId },
-    select: { id: true, purpose: true, status: true, expiresAt: true, amount: true, currencyCode: true, instrumentId: true, provider: true },
+    select: { id: true, purpose: true, status: true, expiresAt: true, amount: true, currencyCode: true, instrumentId: true, paymentId: true, provider: true },
   });
   if (!s) return null;
   const card = s.instrumentId
     ? await prisma.paymentInstrument.findUnique({ where: { id: s.instrumentId }, select: INSTRUMENT_DTO_SELECT })
     : null;
+  // The same evidence settleHostedCardPayment reads: a bank event for this payment means it was banked.
+  const settlement = s.purpose === 'PAY_NOW' && s.status === 'SUCCEEDED' && s.paymentId
+    ? ((await prisma.billingEvent.findUnique({ where: { idempotencyKey: `bank:${s.paymentId}` }, select: { id: true } })) ? 'banked' as const : 'advanced' as const)
+    : undefined;
   const testMode = s.provider === 'simulator';
   return {
     sessionId: s.id,
@@ -234,6 +285,7 @@ async function cardSessionView(
     expiresAt: s.expiresAt.toISOString(),
     ...(s.purpose === 'PAY_NOW' ? { amount: Number(s.amount), currencyCode: s.currencyCode ?? undefined } : {}),
     ...(card ? { card } : {}),
+    ...(settlement ? { settlement } : {}),
     subscriptionStatus: input.subscription.status,
     testMode,
     ...(testMode ? { testModeLabel: SIMULATOR_PAGE.testModeLabel } : {}),
@@ -413,7 +465,7 @@ export async function cardRailPublicRoutes(app: FastifyInstance): Promise<void> 
   const returnOptions = {
     logLevel: 'silent' as const,
     bodyLimit: CARD_RETURN_BODY_LIMIT,
-    config: { rateLimit: { ...CARD_RETURN_RATE, ...rateLimited } },
+    config: { rateLimit: { ...CARD_RETURN_RATE, ...perSource, ...rateLimited } },
   };
   app.get('/return', returnOptions, returnHandler);
   app.post('/return', returnOptions, returnHandler);
@@ -421,7 +473,7 @@ export async function cardRailPublicRoutes(app: FastifyInstance): Promise<void> 
   const simulatorOptions = {
     logLevel: 'silent' as const,
     bodyLimit: 1024,
-    config: { rateLimit: { ...CARD_SIMULATOR_RATE, ...rateLimited } },
+    config: { rateLimit: { ...CARD_SIMULATOR_RATE, ...perSource, ...rateLimited } },
   };
   const simulatorMissing = (reply: FastifyReply, status = 404, words = 'There is no such test page.') =>
     privatePage(reply).status(status).send(page(SIMULATOR_PAGE.title, `<h1>${escapeHtml(SIMULATOR_PAGE.title)}</h1><p>${escapeHtml(words)}</p>`));

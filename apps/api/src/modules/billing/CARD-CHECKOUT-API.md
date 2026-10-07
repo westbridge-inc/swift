@@ -7,7 +7,9 @@ This is the contract the phone app and the web build the Swift card screens agai
 
 Until PT-2 is merged, these routes do not exist.
 
-Until PT-4 is merged **and** PowerTranz is configured, `CARD` is `off` in `payActions`: hidden, and the app shows no card button at all.
+Until PT-4 is merged **and** the card provider is configured, `CARD` is `off` in `payActions`: hidden, and the app shows no card button at all.
+
+The provider's name is never shown to a partner: the screens say "card", "Visa" or "Mastercard", and "your bank".
 
 ## 0. Rules every client follows
 
@@ -61,14 +63,19 @@ type CardPayAction =
 ```
 
 `CARD` is `live` only when **all** of these hold:
-- card payments are switched on on the server (`CARD_RAIL_V2=1`);
-- the server's card provider is PowerTranz with a complete configuration (PT-4). The simulator never makes `CARD` live;
+- card payments are switched on on the server (`CARD_RAIL_V2=1`) and not paused (`CARD_RAIL_KILL`);
+- the server's card provider is the real one with a complete configuration (PT-4). The simulator never makes `CARD` live;
 - the per-platform switch allows the caller's platform (section 9);
-- the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED`, not waived, with a fee above zero.
+- the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED`, not waived, with a fee above zero;
+- the partner is a real partner (the store-review demo never sees a card button);
+- no payment of this fee is being confirmed (an MMG checkout or a card page still open or unclear), and the billing clock covers the subscription: the same rule as `MMG_CHECKOUT`.
 
-Otherwise it is `off`.
+Otherwise it is `off`. Reading the subscription never fails because of the card rail: if the server cannot decide, `CARD` is `off`.
 
-**`addCard`** is `false` until PowerTranz confirms how a saved card is charged each week without the partner present (section 11). When `addCard` is `false`, the app shows **Pay now by card** only: no Add card, no saved-card screens.
+**`addCard`** is `true` only when the server's provider can charge a saved card each week without the partner present. The real provider's guide documents no such charge, so it is `false` (section 11). When `addCard` is `false`:
+- the app shows **Pay now by card** only: no Add card, no saved-card screens;
+- `cardOnFile` is `null`;
+- an Add card session is refused with `409 ADD_CARD_OFF` (section 5).
 
 **Testing before PowerTranz.** On a staging server that runs the card simulator (`CARD_RAIL_V2=1`, `CARD_RAIL_PROVIDER=simulator`), the routes in sections 4 to 7 work and answer `testMode: true`. `payActions` still shows `CARD` as `off` there, so a normal build shows no card button. To exercise the screens, a debug build may call the routes directly. Every screen must show `testModeLabel` whenever `testMode` is true.
 
@@ -78,10 +85,10 @@ Otherwise it is `off`.
 
 ## 4. Cards
 
-**`GET /api/v1/{family}/subscription/cards`** returns every card the subscription ever had, newest first:
+**`GET /api/v1/{family}/subscription/cards`** returns every card the subscription ever had, newest first, and the same `CARD` entry as `payActions`:
 
 ```ts
-{ success: true, data: { cards: CardView[] } }
+{ success: true, data: { cards: CardView[]; payAction: CardPayAction } }
 
 type CardView = {
   id: string;
@@ -96,13 +103,16 @@ type CardView = {
 At most one card is `ACTIVE`: the weekly fee is charged to it.
 
 **`DELETE /api/v1/{family}/subscription/cards/{cardId}`** removes a card.
+- It needs a fresh step-up (the same confirmation as changing the billing method): without one the answer is `403 STEP_UP_REQUIRED`.
 - The card becomes `REVOKED` at once and is never charged again.
 - Nothing falls back silently: the weekly fee stays due until the partner adds a card or chooses another way to pay.
-- The answer is `{ success: true, data: { card: CardView } }`.
+- The answer is `{ success: true, data: { card: CardView; paymentInProgress: boolean } }`. `paymentInProgress: true` means a weekly charge on this card had already been sent to the bank before the removal: it finishes and is checked, and it is never repeated. Say: "A payment already on its way will finish. Nothing more will be charged to this card."
 - Removing a card that is already out of service answers the same card, unchanged.
 
 | Status | Code | Meaning |
 |---|---|---|
+| 403 | `STEP_UP_REQUIRED` | confirm it is you first |
+| 403 | `REVIEW_DEMO_NO_MONEY` | the store-review demo: no money moves there |
 | 404 | `CARD_NOT_FOUND` | unknown card, or not this partner's |
 
 ## 5. Start a card session (add a card, or pay now)
@@ -140,11 +150,17 @@ type CardSession = {
 | Status | Code | Meaning | What the client does |
 |---|---|---|---|
 | 400 | `IDEMPOTENCY_KEY_REQUIRED` | the header is missing or malformed | send a key |
+| 400 | `INVALID_CARD_SESSION` | the body is not exactly `{ purpose, consentVersion? }` (an amount, or anything else, is refused) | fix the client |
 | 400 | `CARD_CONSENT_REQUIRED` | ENROLL without the accepted consent version | show the consent |
 | 401 / 403 | (existing auth codes) | not signed in, or not this store's owner | the usual |
+| 403 | `REVIEW_DEMO_NO_MONEY` | the store-review demo: no money moves there | show its message |
 | 404 | `SUBSCRIPTION_NOT_FOUND` | no subscription | refetch |
 | 409 | `PAY_ACTION_OFF` | card payment is not available here: switched off on the server, no provider, the platform switched off, or the subscription cannot pay | refetch the subscription; hide card |
+| 409 | `ADD_CARD_OFF` | ENROLL, but saving a card is not available (`addCard: false`) | offer Pay now by card |
 | 409 | `CARD_SESSION_OPEN` | a page for this purpose is already open | wait, or finish it there |
+| 409 | `PAYMENT_CONFIRMING` | a payment of this fee is still being confirmed | "We're checking a payment. Don't pay again." Refetch later |
+| 409 | `MOVER_FEE_PRICE_CHANGED` | the weekly fee changed while the page was being opened | refetch, then try again |
+| 409 | `MOVER_FEE_REVIEW_REQUIRED` | the fee needs a person's review before another payment | "Support will contact you." |
 | 409 | `NOTHING_TO_PAY` | PAY_NOW with no fee | refetch |
 | 409 | `SUBSCRIPTION_CLOSED` | the subscription has ended | refetch |
 | 429 | `RATE_LIMITED` | too many attempts | wait and retry |
@@ -182,6 +198,7 @@ type CardSessionView = {
   settlement?: 'advanced' | 'banked';     // PAY_NOW that SUCCEEDED
   subscriptionStatus: string;             // the subscription now, so the screen updates in place
   testMode: boolean;
+  testModeLabel?: string;                 // when testMode is true
 };
 ```
 
@@ -226,7 +243,9 @@ The provider sends the partner's browser back to Swift's return address, `/api/v
 - **Every state shows two links:**
   - "Back to the Swift app" → `swift://pay/card/return`, with no parameters;
   - "Continue on the web" → the same neutral fee route as the MMG return page.
-- **It is never logged or cached.** Swift never writes its query or body to a log line. It sends `X-Robots-Tag: noindex`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and it is rate-limited.
+- **It is never logged or cached.** Swift never writes its query or body to a log line. It sends `X-Robots-Tag: noindex`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+- **It is rate-limited per source address** (60 a minute), whoever is signed in: rotating sign-ins from one address buys nothing.
+- **It is inert while card payments are off** (`CARD_RAIL_V2=0` and not draining): nothing is read or written, and the page says `UNKNOWN`.
 
 **The simulator** (staging only; production refuses it) serves its page at `hostedUrl`:
 - four buttons: Approve / Approve, but weekly charges need 3-D Secure / Decline / Time out;
@@ -256,9 +275,11 @@ Pressing a button sends the browser to the return page, exactly as a real provid
   - `CARD_RAIL_ACCOUNT`: a label, never a merchant number;
   - `API_PUBLIC_URL`: where the return page lives;
   - `CARD_RAIL_KILL=1`: stops new sessions and charges, never reconciliation.
-- **The per-platform switch** is the same platform-config key as the MMG checkout, `billing.feeCheckout.platforms`: `{ "ios": true, "android": true, "web": true }`.
-  - A missing row, or a missing platform, counts as on (owner ruling "3 b").
-  - `false` hides `CARD` on that platform within a minute, with no deploy.
+- **The per-platform switch** is the card's own platform-config key, `billing.cardCheckout.platforms`: `{ "ios": true, "android": true, "web": true }`. It is separate from MMG's (`billing.feeCheckout.platforms`), so either can be closed alone.
+  - iOS is **off** unless the row says `"ios": true` (owner ruling 6 Oct: Apple 3.1.1, iOS off by default).
+  - Android and web are on unless the row says `false`.
+  - Only a real `true` / `false` counts: any other value switches that platform off, and a row that is not an object switches every platform off (as MMG's switch).
+  - A change shows within a minute, with no deploy.
   - An unknown platform counts as on only if every platform is on.
 
 ## 10. Notices
@@ -279,7 +300,7 @@ Pressing a button sends the browser to the return page, exactly as a real provid
   - whether `MerchantResponseUrl` must be registered;
   - enabling `PanToken` on a Pay now.
 - Admin reversal / manual resolution of a `HELD` session, and refunds.
-- The UI (the Codex lane builds it against this contract).
-- The credential setup tool (a separate lane, for MMG and PowerTranz together).
+- The UI (a separate lane builds it against this contract and the simulator).
+- The credential setup tool (PT-5, for MMG and the card provider together).
 
 Changes to this contract are made here first, in the same PR as the code that changes.

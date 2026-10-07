@@ -1,6 +1,6 @@
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
@@ -65,7 +65,7 @@ import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice }
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
-import { registerPartnerCardRoutes } from '../billing/card-rail.routes';
+import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -3579,12 +3579,15 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /subscription — Current subscription details */
   // The MMG weekly-fee checkout [mmg checkout 3/6]: the store's OWNER starts
   // and follows a checkout for the selected store's subscription.
-  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
-    subscriptionFor: async (request) => {
-      const { vendorId } = await requireVendor(app, request, 'OWNER');
-      return app.prisma.subscription.findFirst({ where: { vendorId } });
-    },
-  });
+  const feeSubscriptionFor = async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    return app.prisma.subscription.findFirst({ where: { vendorId } });
+  };
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the store's
+  // OWNER lists, removes, adds and pays by card for the selected store's
+  // subscription. Card rail v2 stays behind CARD_RAIL_V2 (default off).
+  const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
 
   app.get('/subscription', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
@@ -3606,7 +3609,7 @@ export async function vendorRoutes(app: FastifyInstance) {
             ...(await sanDisplay(app.prisma, subscription)),
             ...(await payInfo(app.prisma, subscription)),
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-            ...(await mmgCheckout.feePayload(subscription, request.headers)),
+            ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.payAction(subscription, request.headers)),
             weeklyRate: Number(subscription.weeklyRate),
           }
         : null,
@@ -3732,17 +3735,5 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     return { success: true, data: updated };
-  });
-
-  // =========================================================================
-  // [PT-2] CARD PAYMENT FOR THE WEEKLY FEE (CARD-CHECKOUT-API.md): the store's
-  // OWNER lists, removes, adds and pays by card for the selected store's
-  // subscription. Card rail v2 stays behind CARD_RAIL_V2 (default off).
-  // =========================================================================
-  registerPartnerCardRoutes(app, {
-    subscriptionFor: async (request) => {
-      const { vendorId } = await requireVendor(app, request, 'OWNER');
-      return app.prisma.subscription.findFirst({ where: { vendorId } });
-    },
   });
 }
