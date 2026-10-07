@@ -84,7 +84,9 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     expect((customer as HTMLButtonElement).disabled).toBe(true);
     expect(customer.textContent).toContain('Launching soon in Georgetown');
     expect((screen.getByRole('button', { name: /Put my business on Swift/ }) as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByRole('button', { name: /Drive & deliver/ }) as HTMLButtonElement).disabled).toBe(false);
+    // [W9] Riders and taxi drivers are now two doors; both stay open.
+    expect((screen.getByRole('button', { name: /Deliver with Swift/ }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: /Drive a taxi with Swift/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('the footer never says store ordering works in the browser where it does not', async () => {
