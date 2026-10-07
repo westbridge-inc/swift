@@ -290,7 +290,10 @@ export class CardRailService {
   /** Provider creation and stored-key replay share the final payable-URL
    * decision. Provider fields stay stored even when another hold wins. */
   private async handoffSession(session: CardSession, userId: string): Promise<CardSessionDto> {
-    if (session.purpose !== 'PAY_NOW') return sessionDto(session);
+    // [PT-2] A page address is handed out only while its page can still be used.
+    if (session.purpose !== 'PAY_NOW') {
+      return sessionDto({ ...session, hostedUrl: session.status === 'OPEN' && session.expiresAt > new Date() ? session.hostedUrl : null });
+    }
     const result = await this.prisma.$transaction(async (tx) => {
       const owner = await lockBillingAuthority(tx, session.subscriptionId);
       if (owner.userId !== userId) throw new NotFoundError('Subscription', session.subscriptionId);
