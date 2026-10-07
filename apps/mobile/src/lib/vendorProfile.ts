@@ -21,6 +21,8 @@
  * most privileged one.
  */
 
+import { isTerminalOrderStatus } from './orderStatus';
+
 export type VendorMemberRole = 'OWNER' | 'MANAGER' | 'STAFF';
 
 /** Why the profile could not be read. Each is a different thing to tell the
@@ -178,11 +180,10 @@ export function storeHoldOf(store: {
 
 /** The order states a store can still finish under a fee hold: accepted and
  *  not yet done (the server's IN_FLIGHT work). New orders wait to be declined. */
-const TERMINAL_ORDER = new Set(['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED']);
 const NEW_ORDER = new Set(['PENDING', 'PLACED']);
 export function heldStoreOrders(orders: unknown): { accepted: any[]; waiting: any[] } {
   const list = Array.isArray(orders) ? orders : [];
-  const open = list.filter((o: any) => o && typeof o.id === 'string' && !TERMINAL_ORDER.has(String(o.status ?? '').toUpperCase()));
+  const open = list.filter((o: any) => o && typeof o.id === 'string' && !isTerminalOrderStatus(o.status));
   return {
     accepted: open.filter((o: any) => !NEW_ORDER.has(String(o.status ?? '').toUpperCase())),
     waiting: open.filter((o: any) => NEW_ORDER.has(String(o.status ?? '').toUpperCase())),

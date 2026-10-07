@@ -198,6 +198,18 @@ describe('[NO-DEAD-ENDS] storeHoldOf names the hold the server actually wrote', 
 });
 
 describe('[NO-DEAD-ENDS] heldStoreOrders splits what can be finished from what waits to be declined', () => {
+  it('returned deliveries are finished; a return still in progress remains open', () => {
+    const returning = { id: 'returning', status: 'RETURNING' };
+    expect(heldStoreOrders([
+      { id: 'returned', status: 'RETURNED' },
+      { id: 'returned-lowercase', status: 'returned' },
+      { id: 'refunded', status: 'REFUNDED' },
+      { id: 'failed', status: 'FAILED' },
+      returning,
+      { id: 'new', status: 'PENDING' },
+    ])).toEqual({ accepted: [returning], waiting: [{ id: 'new', status: 'PENDING' }] });
+  });
+
   it('accepted, cooking and ready orders are finished; new ones wait; done ones are gone', () => {
     const split = heldStoreOrders([
       { id: 'a', status: 'ACCEPTED' }, { id: 'p', status: 'PREPARING' }, { id: 'r', status: 'READY_FOR_PICKUP' },
