@@ -51,6 +51,7 @@ declare const styles: {
   readonly modalTitle: string;
   readonly notice: string;
   readonly noticeLink: string;
+  readonly optionBlock: string;
   readonly optionChoice: string;
   readonly optionGroup: string;
   readonly optionGuidance: string;

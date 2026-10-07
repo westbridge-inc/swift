@@ -1254,42 +1254,44 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
               const multiLimitReached = group.maxSelect > 1 && selectedCount >= group.maxSelect;
               const onSale = group.options.filter((option) => option.isAvailable !== false);
               return (
-                <fieldset key={group.id} className={styles.optionGroup} data-option-group={group.id}>
-                  <legend className={styles.optionHeading}>
-                    <span className={styles.optionTitle}>{group.name}</span>
-                    <span className={styles.optionMeta}>
-                      {group.isRequired ? <span className={styles.required}>Required</span> : <span className={styles.optionGuidance}>{optionGuidance(group)}</span>}
-                    </span>
-                  </legend>
-                  {group.isRequired && group.maxSelect > 1 ? <p className={styles.optionGuidance}>{optionGuidance(group)}</p> : null}
-                  {onSale.length === 0 ? <p className={styles.optionGuidance}>Every choice here is sold out right now.</p> : null}
-                  {onSale.map((option) => {
-                    const checked = (selectedOptions[group.id] ?? []).includes(option.id);
-                    const single = group.maxSelect <= 1;
-                    const clearableSingle = single && !group.isRequired && group.minSelect === 0;
-                    const blockedByLimit = multiLimitReached && !checked;
-                    const extra = parseAmount(option.additionalPrice);
-                    return (
-                      <label key={option.id} className={`${styles.optionLabel} ${blockedByLimit ? styles.optionLabelDisabled : ''}`}>
-                        <span className={styles.optionChoice}>
-                          <input
-                            type={single && !clearableSingle ? 'radio' : 'checkbox'}
-                            name={group.id}
-                            checked={checked}
-                            disabled={blockedByLimit}
-                            onChange={() => chooseOption(group, option.id)}
-                          />
-                          {option.name}
-                        </span>
-                        {extra === null ? (
-                          <span className={styles.optionPrice}>Price unavailable</span>
-                        ) : extra > 0 ? (
-                          <span className={styles.optionPrice}>+{gyMoney(extra)}</span>
-                        ) : null}
-                      </label>
-                    );
-                  })}
-                </fieldset>
+                <div key={group.id} className={styles.optionBlock}>
+                  <fieldset className={styles.optionGroup} data-option-group={group.id}>
+                    <legend className={styles.optionHeading}>
+                      <span className={styles.optionTitle}>{group.name}</span>
+                      <span className={styles.optionMeta}>
+                        {group.isRequired ? <span className={styles.required}>Required</span> : <span className={styles.optionGuidance}>{optionGuidance(group)}</span>}
+                      </span>
+                    </legend>
+                    {group.isRequired && group.maxSelect > 1 ? <p className={styles.optionGuidance}>{optionGuidance(group)}</p> : null}
+                    {onSale.length === 0 ? <p className={styles.optionGuidance}>Every choice here is sold out right now.</p> : null}
+                    {onSale.map((option) => {
+                      const checked = (selectedOptions[group.id] ?? []).includes(option.id);
+                      const single = group.maxSelect <= 1;
+                      const clearableSingle = single && !group.isRequired && group.minSelect === 0;
+                      const blockedByLimit = multiLimitReached && !checked;
+                      const extra = parseAmount(option.additionalPrice);
+                      return (
+                        <label key={option.id} className={`${styles.optionLabel} ${blockedByLimit ? styles.optionLabelDisabled : ''}`}>
+                          <span className={styles.optionChoice}>
+                            <input
+                              type={single && !clearableSingle ? 'radio' : 'checkbox'}
+                              name={group.id}
+                              checked={checked}
+                              disabled={blockedByLimit}
+                              onChange={() => chooseOption(group, option.id)}
+                            />
+                            {option.name}
+                          </span>
+                          {extra === null ? (
+                            <span className={styles.optionPrice}>Price unavailable</span>
+                          ) : extra > 0 ? (
+                            <span className={styles.optionPrice}>+{gyMoney(extra)}</span>
+                          ) : null}
+                        </label>
+                      );
+                    })}
+                  </fieldset>
+                </div>
               );
             })}
           </div>

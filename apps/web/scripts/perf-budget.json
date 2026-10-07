@@ -2,7 +2,6 @@
   "targetKb": 120,
   "firstLoadJsKb": {
     "/(app)/page": 159,
-    "/(app)/order/vendor/[id]/page": 159,
     "/(app)/store/[slug]/page": 170,
     "/(app)/market/page": 155,
     "/(app)/order/browse/page": 154,

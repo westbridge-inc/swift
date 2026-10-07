@@ -7,7 +7,7 @@ import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
 import HomePage from './page';
 import StorePage from './store/[slug]/page';
-import LegacyStorePage from './order/vendor/[id]/page';
+import { GET as legacyStore } from './order/vendor/[id]/route';
 import { storefrontFixture } from '@/test/storefront-fixture';
 import BrowsePage from './order/browse/page';
 import MarketPage from './market/page';
@@ -19,7 +19,6 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(state.query),
   useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
   notFound: () => { throw new Error('NEXT_NOT_FOUND'); },
-  permanentRedirect: (path: string) => { throw Object.assign(new Error('NEXT_REDIRECT'), { path }); },
 }));
 // The real config refuses to load while company details are placeholders.
 vi.mock('@/site.config', () => ({
@@ -193,15 +192,17 @@ describe('[W2] a store, a category and the Market arrive with their content in t
   });
 
   it('the old store address finds the store as a guest and sends it to that page', async () => {
-    await expect(LegacyStorePage({ params: Promise.resolve({ id: 'v1' }), searchParams: Promise.resolve({ item: 'm1' }) }))
-      .rejects.toMatchObject({ message: 'NEXT_REDIRECT', path: '/store/shanta-kitchen?item=m1' });
+    const response = await legacyStore(new Request('https://web.test/order/vendor/v1?item=m1'), { params: Promise.resolve({ id: 'v1' }) });
+    expect(response.status).toBe(301);
+    expect(response.headers.get('Location')).toBe('/store/shanta-kitchen?item=m1');
     const reads = calls('/api/v1/customer/vendors/v1');
     expect(reads).toHaveLength(1);
     expect(carriesAPerson(reads[0]!.init)).toBe(false);
   });
 
   it('a made-up store id is never read on the server', async () => {
-    await expect(LegacyStorePage({ params: Promise.resolve({ id: '../../admin' }) })).rejects.toThrow('NEXT_NOT_FOUND');
+    const response = await legacyStore(new Request('https://web.test/order/vendor/x'), { params: Promise.resolve({ id: '../../admin' }) });
+    expect(response.status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -242,7 +243,7 @@ describe('[W2] the server never reads who is visiting', () => {
   it.each([
     'lib/browse-server.ts',
     'app/(app)/page.tsx',
-    'app/(app)/order/vendor/[id]/page.tsx',
+    'app/(app)/order/vendor/[id]/route.ts',
     'app/(app)/store/[slug]/page.tsx',
     'components/storefront/storefront-page.tsx',
     'lib/api.ts',

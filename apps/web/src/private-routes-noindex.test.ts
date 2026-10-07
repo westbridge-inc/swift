@@ -24,7 +24,6 @@ const PUBLIC_PAGES = [
   '(app)/order/page.tsx', // legacy Home redirect
   '(app)/order/browse/page.tsx',
   '(app)/order/search/page.tsx',
-  '(app)/order/vendor/[id]/page.tsx', // [W6] legacy store address, a permanent redirect to /store/<slug>
   '(app)/taxi/page.tsx', // public app handoff, no web booking
   '(marketing)/about/page.tsx',
   '(marketing)/account/delete/page.tsx', // public deletion instructions
@@ -91,6 +90,7 @@ const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[...path]/route.ts'];
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
 const PUBLIC_RESOURCES = [
+  '(app)/order/vendor/[id]/route.ts', // [W6] the old store address: a 301 to /store/<slug>, or a noindex 404
   'manifest.ts',
   'opengraph-image.tsx',
   'robots.ts',

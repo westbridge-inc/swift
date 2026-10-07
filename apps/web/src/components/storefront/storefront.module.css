@@ -929,7 +929,9 @@
   border: 0;
 }
 
-.optionGroup + .optionGroup {
+/* A fieldset's legend sits inside its top border, so the line between two
+   groups belongs to the wrapper, not the fieldset. */
+.optionBlock + .optionBlock {
   padding-block-start: var(--swift-space-xl);
   border-block-start: thin solid var(--swift-border);
 }
@@ -1011,6 +1013,11 @@
   line-height: var(--swift-leading-body);
 }
 
+.optionChoice input:focus-visible {
+  /* The whole choice row shows the focus ring (above). */
+  outline: none;
+}
+
 .optionChoice input {
   width: calc(var(--swift-space-xl) + var(--swift-space-xs));
   height: calc(var(--swift-space-xl) + var(--swift-space-xs));
@@ -1072,6 +1079,12 @@
 
   .content {
     padding-block-end: calc(var(--swift-space-5xl) + var(--swift-space-3xl));
+  }
+
+  /* Above the floating "View your order" button, never over it. */
+  .notice,
+  .errorNotice {
+    inset-block-end: calc(var(--swift-dock, 0px) + var(--swift-space-lg) + var(--swift-touch) + var(--swift-space-md) * 2);
   }
 }
 
