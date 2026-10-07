@@ -34,6 +34,12 @@ describe('[L09 · price lock] the PRICE_CHANGED refusal is bounded', () => {
     );
   });
 
+  it('six changed lines: five named, then "and 1 other line" (singular)', () => {
+    const lines = cartOf(6);
+    const error = refusal(() => assertPricesAsSeen({ lines: lines.map((l) => ({ lineId: l.id, unitPrice: 0 })) }, lines, 6));
+    expect(error.message).toContain('Item 4 GYD 0 → GYD 1; and 1 other line. Review your cart');
+  });
+
   it('a small change still names every changed line, and nothing is refused when the prices match', () => {
     const lines = cartOf(3);
     const error = refusal(() => assertPricesAsSeen({ lines: [{ lineId: 'line-1', unitPrice: 0.5 }] }, lines, 3));

@@ -185,7 +185,7 @@ export function assertPricesAsSeen(
   const totalChanged = expected.total != null && !sameMoney(total, expected.total);
   if (changed.length === 0 && !totalChanged) return;
   const parts = changed.slice(0, 5).map((c) => `${c.name} ${gyd(c.seen)} → ${gyd(c.now)}`);
-  if (changed.length > 5) parts.push(`and ${changed.length - 5} other lines`);
+  if (changed.length > 5) parts.push(`and ${changed.length - 5} other line${changed.length - 5 === 1 ? '' : 's'}`);
   if (totalChanged) parts.push(`total ${gyd(expected.total!)} → ${gyd(total)}`);
   throw new AppError(
     409,
