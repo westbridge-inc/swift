@@ -21,7 +21,7 @@ export default function HomePage() {
   return (
     <>
       <CustomerHome market={launch.markets[0]} />
-      <div className="-mx-4 mt-12 overflow-hidden md:mx-0 md:rounded-3xl">
+      <div className="-mx-6 mt-12 overflow-hidden wide:-mx-10">
         <SiteFooter />
       </div>
     </>

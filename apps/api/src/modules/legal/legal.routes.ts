@@ -25,8 +25,8 @@ import type { FastifyInstance } from 'fastify';
 // stays in every ledger that holds it, and these words get their own stamp.
 // [LEGAL-FEE · owner 2026-09-29] Partner weekly fees are paid through MMG's
 // checkout in the Swift app, or by card where offered. New words, new version.
-export const LEGAL_VERSION = '2026-09-30';
-const LAST_UPDATED = '30 September 2026'; // human form of LEGAL_VERSION
+export const LEGAL_VERSION = '2026-10-04';
+const LAST_UPDATED = '4 October 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -168,7 +168,7 @@ export const PRIVACY = page(
 <p><b>Business changes:</b> if Swift's business is transferred to a successor, your data moves with it under this policy's protections, and you are told before any materially different use begins.</p>
 
 <h2>6. Retention and deletion</h2>
-<p>We keep personal data only as long as its purpose or a legal duty requires. Verification documents are purged on a schedule after they stop being needed, with the purge itself logged; purged documents are irrecoverable. Order, ride and settlement history is retained for the period required for disputes, guarantees, tax and legal obligations, and order-scoped chat is retained with its order's record. The consent ledger is retained as legal evidence of what was agreed — it is append-only by design and is kept even after account deletion, holding only what it must. You can delete your account from inside the app — <b>Profile &rarr; Personal data &rarr; Delete my account</b> — which permanently destroys your documents, revokes every signed-in session, and deletes or de-identifies personal data not subject to a legal retention duty. Business, driver and advertiser accounts are closed through Help &amp; Support instead, so outstanding listings and settlement records are handled correctly first.</p>
+<p>We keep personal data only as long as its purpose or a legal duty requires. Verification documents are purged on a schedule after they stop being needed, with the purge itself logged; purged documents are irrecoverable. Order, ride and settlement history is retained for the period required for disputes, guarantees, tax and legal obligations, and order-scoped chat is retained with its order's record. The consent ledger is retained as legal evidence of what was agreed — it is append-only by design and is kept even after account deletion, holding only what it must. You can delete your account from inside the app — <b>Profile &rarr; Personal data &rarr; Delete my account</b> — which closes your account, revokes signed-in access, and deletes or de-identifies personal data not subject to a legal retention duty. Customers, riders and drivers can start deletion from their profile in the app. Active jobs and unsettled cash must be resolved first; historical earnings records do not prevent deletion. Documents under a legal or safety hold remain protected until the hold ends, and incomplete erasure is retried automatically. Business and advertiser profiles offer an in-app account closure request, tracked in Help &amp; Support, so outstanding listings, campaigns and settlement records are handled correctly first.</p>
 
 <h2>7. Security</h2>
 <p>Data in transit is encrypted (the app pins Swift's certificates), access to production data is restricted and audit-logged, verification documents are encrypted at rest and readable only through short-lived signed links, security-sensitive account changes require step-up confirmation, and administrative actions on your account leave a permanent trail. No system is perfectly secure; if a breach creates a risk to you, we will notify the Data Protection Commissioner and affected users as the Act requires.</p>

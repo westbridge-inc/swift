@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
+import { completeAccountClosure, fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
 
 const FILTERS = ['OPEN', 'IN_PROGRESS', 'RESOLVED'] as const;
 
@@ -27,6 +27,10 @@ const RESOLUTIONS: { value: SupportResolution; label: string; safety: boolean }[
   { value: 'UNABLE_TO_CONTACT', label: 'Unable to contact the reporter', safety: false },
 ];
 const SAFETY_NOTE_MIN = 20;
+// [DELETION-INTEGRITY] The subject the server gives a closure request that was
+// confirmed in the app. Only these can be completed from the queue.
+const CLOSURE_SUBJECT = 'Account closure request';
+const isClosureRequest = (t: { category?: string; subject?: string }) => t.category === 'ACCOUNT' && t.subject === CLOSURE_SUBJECT;
 
 export default function SupportPage() {
   const qc = useQueryClient();
@@ -51,6 +55,16 @@ export default function SupportPage() {
     }) => resolveSupportTicket(id, status, note, resolution, expectedStatus),
     onSuccess: () => {
       setClosing(null);
+      qc.invalidateQueries({ queryKey: ['support'] });
+    },
+  });
+
+  /** [DELETION-INTEGRITY] The closure request being completed, with the stated reason. */
+  const [completing, setCompleting] = useState<{ id: string; reason: string } | null>(null);
+  const closeAccount = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => completeAccountClosure(id, reason),
+    onSuccess: () => {
+      setCompleting(null);
       qc.invalidateQueries({ queryKey: ['support'] });
     },
   });
@@ -106,6 +120,7 @@ export default function SupportPage() {
         ) : (
           tickets.map((t: any) => {
             const isSafety = t.category === 'SAFETY';
+            const completion = completing?.id === t.id ? completing : null;
             const open = closing?.id === t.id;
             const choices = RESOLUTIONS.filter((r) => !isSafety || r.safety);
             const noteTooShort = isSafety && (closing?.note ?? '').trim().length < SAFETY_NOTE_MIN;
@@ -138,6 +153,56 @@ export default function SupportPage() {
                     </span>
                   ) : null}
                 </div>
+
+                {t.status !== 'RESOLVED' && isClosureRequest(t) && (
+                  <div className="mt-4">
+                    {!completion ? (
+                      <button
+                        onClick={() => { closeAccount.reset(); setCompleting({ id: t.id, reason: '' }); }}
+                        className="px-4 py-2 rounded-lg text-sm border border-red-500/40 text-red-400 hover:bg-red-500/10"
+                      >
+                        Complete account closure
+                      </button>
+                    ) : (
+                      <div className="rounded-lg border border-red-500/40 p-4">
+                        <p className="text-sm font-semibold">Close this account and de-identify the person?</p>
+                        <p className="text-xs text-[var(--muted)] mt-1">
+                          This cannot be undone. Financial and legal records are kept. If orders, jobs or cash are still
+                          open, the server refuses and says what is outstanding; the request stays open.
+                        </p>
+                        <label className="mt-3 block text-xs text-[var(--muted)]" htmlFor={`closure-reason-${t.id}`}>
+                          Why you are closing this account (recorded in the audit trail)
+                        </label>
+                        <textarea
+                          id={`closure-reason-${t.id}`}
+                          value={completion.reason}
+                          onChange={(e) => setCompleting({ id: t.id, reason: e.target.value })}
+                          rows={2}
+                          className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
+                        />
+                        {closeAccount.isError ? (
+                          <p className="mt-2 text-sm text-red-400">{(closeAccount.error as Error).message}</p>
+                        ) : null}
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            onClick={() => closeAccount.mutate({ id: t.id, reason: completion.reason.trim() })}
+                            disabled={closeAccount.isPending || completion.reason.trim().length === 0}
+                            className="px-4 py-2 rounded-lg text-sm bg-red-600 hover:bg-red-600/80 disabled:opacity-50"
+                          >
+                            {closeAccount.isPending ? 'Closing…' : 'Close the account'}
+                          </button>
+                          <button
+                            onClick={() => setCompleting(null)}
+                            disabled={closeAccount.isPending}
+                            className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {t.status !== 'RESOLVED' && (
                   <div className="mt-4">

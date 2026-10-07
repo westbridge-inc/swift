@@ -1,3 +1,5 @@
+import { eraseMoverObjects } from './mover-object-erasure';
+import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
   openAvatarErasureObligationIds,
@@ -8,7 +10,7 @@ import {
 } from '../../lib/storage-orphans';
 import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
-import type { ServiceJobStatus } from '@prisma/client';
+import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
@@ -17,50 +19,41 @@ import { partnerObligations, verdictFor, refusalMessage, windDownPartner } from 
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { isOwnedAvatarKey } from '../verification/object-authority';
 
-// ---------------------------------------------------------------------------
-// SWIFT-AUD-D9-05 — the DPA-2023 rights of access, portability and erasure,
-// self-serve and in-app (previously the privacy policy pointed people at
-// Support with no mechanism behind it).
-//
-//  • exportData  — everything we hold about the person, as portable JSON.
-//  • deleteAccount — crypto-shred verification docs, revoke access, and
-//    de-identify the account. Records the law REQUIRES us to keep (orders, for
-//    disputes/guarantees) stay, but the person behind them is anonymised.
-//
-// Scope: EVERY account type the app can create.
-//
-// It used to be "a pure CUSTOMER account" — mover and vendor accounts closed
-// through Support, because they carry payouts, live listings and staff and a
-// self-delete would orphan a running catalogue. That reasoning was right about
-// the risk and wrong about the remedy, and App Review names the remedy
-// specifically: 5.1.1(v) requires in-app deletion for every account type an
-// app can create, and pointing at Support does not satisfy it. The app has a
-// Delete account button, so a driver pressing it was told to write an email.
-//
-// What a partner holds divides cleanly. Money in flight REFUSES — cash they
-// are holding, an unconfirmed settlement, earnings owed — because erasing over
-// any of it loses somebody's money, and each one ends on its own with a next
-// step the person can take themselves. Everything else WINDS DOWN in the purge
-// phase: storefront off sale, staff keys revoked, subscription stopped. See
-// partner-wind-down.ts.
-//
-// [LAUNCH-2] That old scope sentence was only ever true of the `roles` array, and
-// two kinds of authority deliberately live outside it: advertiser membership
-// (AdvertiserMember, ads §4 — "NOT a new UserRole") and vendor staff access
-// (VendorStaff). Both belong to people the role filter sees as plain
-// CUSTOMERs, so both could always self-delete — leaving a LIVE ad campaign
-// with no owner, and staff rows pointing at "Deleted User". Step 0b now winds
-// those down. Closing MOVER and VENDOR_OWNER accounts in-app was the remaining
-// half; it is done, above.
-// ---------------------------------------------------------------------------
+// Account erasure closes authority before storage work, preserves financial and
+// legal records, and de-identifies the account. The exact phone tombstone is a
+// durable retry marker consumed by the retention worker. Direct-payment earnings
+// never prevent erasure; live work and open cash obligations do. Business and
+// advertiser self-service requests enter the support queue for closure handling.
 
 // A closed order is safe to leave behind; anything else is in-flight and must
 // finish (or be cancelled) before the customer can erase themselves.
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
+/** The subject of a closure request confirmed in the app. Support completes
+ *  only these: a typed-in ticket is not a confirmed request. */
+export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
+/** The server-written record that a closure request was confirmed in the app
+ *  (behind the deletion step-up). Anyone can type the subject into a support
+ *  ticket; only the confirmed request writes this record, so support completes
+ *  only a ticket that carries it. */
+export const ACCOUNT_CLOSURE_CONFIRMED = 'ACCOUNT_CLOSURE_CONFIRMED_IN_APP';
+
+/** The server, not a navigation flag or active role, chooses the business
+ *  closure flow: anyone who owns a store or belongs to an advertiser closes
+ *  through a request the support team completes, keeping sign-in until
+ *  listings, campaigns and obligations are resolved. The profile reports the
+ *  same answer so the app's confirmation copy matches what Delete does. */
+export async function closesByRequest(
+  db: Pick<Prisma.TransactionClient, 'vendorOwner' | 'advertiserMember'>, userId: string, roles: readonly string[],
+): Promise<boolean> {
+  return roles.includes('VENDOR_OWNER')
+    || !!await db.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
+    || !!await db.advertiserMember.findFirst({ where: { userId }, select: { advertiserId: true } });
+}
+
 export class AccountService {
-  constructor(private app: FastifyInstance) {}
+  constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
   /** DPA right of access + portability: a copy of the person's own data. */
   async exportData(userId: string) {
@@ -122,8 +115,51 @@ export class AccountService {
     };
   }
 
+  private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
+    const where = { userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
+    const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
+      ?? await tx.supportTicket.create({ data: {
+        userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
+        message: 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.',
+      } });
+    // Same transaction as the request: the confirmation and its ticket commit
+    // together. One record per ticket; a repeated request reuses it.
+    const confirmed = await tx.auditLog.findFirst({
+      where: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
+    });
+    if (!confirmed) {
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id } });
+    }
+    return ticket;
+  }
+
+  private async closureReceipt(userId: string, ticketId: string) {
+    try {
+      await notifyAdmins(this.app.prisma, new NotificationService(this.app.prisma, this.app.io), {
+        tenantId: await tenantOfUser(this.app.prisma, userId),
+        title: 'Account closure requested', body: 'An in-app closure request needs review in the support queue.',
+        data: { kind: 'support_ticket', ticketId },
+      });
+    } catch (error) {
+      this.app.log.error({ err: error, ticketId }, 'Closure notification failed; support ticket remains open');
+    }
+    return { deleted: false, status: 'CLOSURE_REQUESTED' as const, ticketId,
+      message: 'Your account closure request is received. Track it in Get help. Keep access while the team resolves listings, campaigns and any outstanding obligations.' };
+  }
+
+  /** The existing support queue owns the human business wind-down. */
+  async requestClosure(userId: string) {
+    const ticket = await this.app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { status: true } });
+      if (!user || user.status !== 'ACTIVE') throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
+      return this.closureTicket(tx, userId);
+    });
+    return this.closureReceipt(userId, ticket.id);
+  }
+
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
-  async deleteAccount(userId: string) {
+  async deleteAccount(userId: string, selfServe = false) {
     const prisma = this.app.prisma;
     const preflight = await prisma.$transaction(async (tx) => {
       // Service-job creation, provider profile changes and verification events
@@ -151,43 +187,49 @@ export class AccountService {
           tenantId: user.tenantId,
         });
       };
-      if (user.status === 'DEACTIVATED' && user.phone.startsWith('deleted:')) {
+      const revokeAccessBeforeCleanup = async () => {
+        await tx.session.deleteMany({ where: { userId } });
+        await tx.deviceToken.deleteMany({ where: { userId } });
+      };
+      if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
         // late write landed — fall through and RE-SWEEP (every purge step is
         // idempotent), instead of short-circuiting on the marker.
         await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
         const avatarOrphan = await queueAvatarBeforePointerClear();
         if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
-        return { alreadyComplete: false, resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
+        await revokeAccessBeforeCleanup();
+        return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
       }
 
-      // [Apple 5.1.1(v)] A partner closes their own account, in the app.
-      //
-      // This used to refuse every non-CUSTOMER role outright and point at
-      // Support. The app has a Delete account button, so a driver pressing it
-      // was told to write an email — which App Review names specifically as
-      // not satisfying the guideline. The comment at the top of this file has
-      // said so all along while nothing acted on it.
-      //
-      // The refusal was right about the risk and wrong about the remedy. What
-      // a partner holds divides cleanly: money in flight BLOCKS (and each
-      // blocker ends on its own, with a next step the person can take), and
-      // everything else — a live storefront, staff keys, a subscription —
-      // WINDS DOWN in the purge phase below, exactly as ad campaigns already
-      // do. See partner-wind-down.ts.
-      const partnerRoles = user.roles.filter((role) => role !== 'CUSTOMER');
-      if (partnerRoles.length > 0) {
-        const verdict = verdictFor(await partnerObligations(tx, userId));
-        if (!verdict.clear) {
-          throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers));
-        }
+      // The server, not a navigation flag or active role, chooses the business
+      // closure flow. Keep sign-in until the support team resolves obligations.
+      if (selfServe && await closesByRequest(tx, userId, user.roles)) {
+        const ticket = await this.closureTicket(tx, userId);
+        return { closureTicketId: ticket.id, hold: null, avatarOrphanId: null };
       }
 
+      // Profile ownership, not the active role, defines obligations. Switching
+      // to customer mode must never hide cash or live mover work.
+      const obligations = await partnerObligations(tx, userId);
+      const verdict = verdictFor(obligations);
+      if (!verdict.clear) {
+        throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers, obligations));
+      }
+      // Checkout locks these same vendor rows before its live eligibility read.
+      // Closing commerce under this lock prevents a new order after the census.
+      await tx.$queryRaw`
+        SELECT v.id FROM vendors v JOIN vendor_owners o ON o.id = v."ownerId"
+        WHERE o."userId" = ${userId} ORDER BY v.id FOR UPDATE OF v
+      `;
+
       const [inFlightOrders, inFlightServiceJobs] = await Promise.all([
-        tx.order.count({ where: { customerId: userId, status: { notIn: TERMINAL_ORDER } } }),
+        tx.order.count({ where: { status: { notIn: TERMINAL_ORDER }, OR: [
+          { customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } },
+        ] } }),
         tx.serviceJob.count({
           where: {
             status: { notIn: TERMINAL_SERVICE_JOB },
@@ -196,7 +238,7 @@ export class AccountService {
         }),
       ]);
       if (inFlightOrders > 0) {
-        throw new AppError(409, 'ACTIVE_ORDERS', 'Finish or cancel your active orders before deleting your account.');
+        throw new AppError(409, 'ACTIVE_ORDERS', 'Finish or cancel your active orders and jobs before deleting your account. For a job already collected, finish the handover or open Get help to resolve it.');
       }
       if (inFlightServiceJobs > 0) {
         throw new AppError(409, 'ACTIVE_SERVICE_JOBS', 'Finish or cancel your active service jobs before deleting your account.');
@@ -226,14 +268,18 @@ export class AccountService {
       // escrow above has already captured any needed contact authority.
       await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
+      // Marked wound down with the cutoff, so no billing repair or fee payment
+      // can reopen a closed account's store (it reopens billing holds only).
+      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN' } });
       const avatarOrphan = await queueAvatarBeforePointerClear();
+      await revokeAccessBeforeCleanup();
       await tx.user.update({
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
-      return { alreadyComplete: false, hold, avatarOrphanId: avatarOrphan?.id ?? null };
+      return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
-    if (preflight.alreadyComplete) return { deleted: true };
+    if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);
     if ((preflight as { resweep?: boolean }).resweep) {
       this.app.log.info({ userId }, 'account deletion re-sweep: purging any late writes');
     }
@@ -250,35 +296,10 @@ export class AccountService {
       this.app.log.warn({ err: error, userId }, 'account deletion socket cleanup failed');
     }
 
-    // 0b. [LAUNCH-2] Access that is NOT a UserRole.
-    //
-    //     The partner guard above filters `user.roles`, but two kinds of
-    //     authority never appear there: advertiser membership is keyed on
-    //     AdvertiserMember by design (ads §4 — "NOT a new UserRole"), and
-    //     vendor staff access is keyed on VendorStaff. To that role filter a
-    //     person running live ad campaigns, or a manager with keys to someone
-    //     else's storefront, is an ordinary CUSTOMER — so they never hit the
-    //     PARTNER_ACCOUNT guard and could always delete themselves. What they
-    //     left behind was a LIVE campaign with no owner and vendor_staff rows
-    //     pointing at "Deleted User".
-    //
-    //     Campaigns are PAUSED, never cancelled: pausing stops serving
-    //     immediately, while cancelling would reach into refund intents and
-    //     booked inventory — money movement has no business riding an erasure
-    //     request. The Advertiser company row itself survives with its
-    //     invoices, which are financial records under the same legal-obligation
-    //     basis as the rest. This runs in the purge phase so the re-sweep
-    //     repairs it, and every step is idempotent.
-    // [Apple 5.1.1(v)] Close what leaving implies: a storefront off sale, staff
-    // keys revoked, the subscription stopped. Taken off sale rather than
-    // deleted — orders, receipts and sales history are financial records under
-    // the same legal-obligation basis as everything else kept here. What must
-    // stop is a customer ordering from a business that no longer has an owner.
-    // Idempotent, so the re-sweep repairs a partial run; moves no money.
-    const wound = await windDownPartner(prisma, userId).catch((error) => {
-      this.app.log.error({ err: error, userId }, '[5.1.1v] partner wind-down failed — re-sweep will retry');
-      return null;
-    });
+    // Wind down commercial access without moving money. A failure propagates;
+    // the API returns a pending receipt and the retention sweep retries the
+    // durable marker even though the person can no longer sign in.
+    const wound = await windDownPartner(prisma, userId);
     if (wound && (wound.vendorsClosed || wound.itemsWithdrawn || wound.staffRevoked || wound.subscriptionsCancelled)) {
       this.app.log.info({ userId, ...wound }, '[5.1.1v] partner wound down on account deletion');
     }
@@ -370,6 +391,9 @@ export class AccountService {
       });
     }
 
+    const moverObjects = await eraseMoverObjects(prisma, storage, userId, this.app.log);
+    pendingDocuments += moverObjects.pending;
+
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
     //     which is PUBLIC for the local provider. Nulling the column (step 4)
     //     leaves the object reachable — a DPA deletion-barrier breach. Delete
@@ -428,9 +452,29 @@ export class AccountService {
       });
     }
 
-    // 2. Revoke access everywhere: refresh sessions + push tokens.
-    await prisma.session.deleteMany({ where: { userId } });
-    await prisma.deviceToken.deleteMany({ where: { userId } });
+    // 2. [Owner decision + coordinator ruling 2026-10-05] Ratings this person
+    //    wrote, and ratings others wrote about them, stay counted — score and
+    //    tags keep every rating, average and history unchanged — but free text
+    //    can name or describe them and automatic redaction is unreliable, so
+    //    the comment AND any reply to it are deleted, as is any queued copy of
+    //    the comment. Idempotent, so a re-sweep repeats it safely.
+    await prisma.rating.updateMany({
+      where: {
+        AND: [
+          { OR: [{ raterId: userId }, { rateeId: userId }] },
+          { OR: [{ comment: { not: null } }, { response: { not: null } }, { respondedBy: { not: null } }] },
+        ],
+      },
+      data: { comment: null, response: null, respondedAt: null, respondedBy: null },
+    });
+    await prisma.$executeRaw`
+      UPDATE rating_outbox SET payload = payload - 'comment'
+      WHERE "ratingId" IN (SELECT id FROM ratings WHERE "raterId" = ${userId} OR "rateeId" = ${userId})
+        AND jsonb_typeof(payload) = 'object' AND payload ? 'comment'
+      /* account-erasure-review-text */
+    `;
+
+    // Sessions and push tokens were revoked atomically with authority cutoff.
 
     // 3. Drop precise saved locations (home/work) outright.
     await prisma.address.deleteMany({ where: { userId } });
@@ -470,6 +514,14 @@ export class AccountService {
         lastKnownLng: null,
       },
     });
+
+    if (deferred.count > 0 || moverObjects.held > 0) {
+      return {
+        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held,
+        pendingDocuments, pendingAvatarObjects,
+        message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
+      };
+    }
 
     if (pendingDocuments > 0 || pendingAvatarObjects > 0) {
       return {

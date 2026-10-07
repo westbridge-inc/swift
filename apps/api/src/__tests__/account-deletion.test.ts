@@ -1,3 +1,4 @@
+import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -9,9 +10,11 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { AccountService } from '../modules/user/account.service';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { lockMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { RatingService } from '../modules/rating/rating.service';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -46,6 +49,7 @@ async function makeUser(roles: UserRole[]) {
   await app.prisma.session.create({
     data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'del', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) },
   });
+  await grantStepUp(app, token);
   return { userId: user.id, token };
 }
 
@@ -82,6 +86,7 @@ afterAll(async () => {
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.order.deleteMany({ where: { customerId: { in: createdUserIds } } });
   await app.prisma.address.deleteMany({ where: { userId: { in: createdUserIds } } });
+  await app.prisma.supportTicket.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.customer.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
@@ -237,8 +242,12 @@ describe('D9-05 — account deletion (erasure)', () => {
       },
     });
 
-    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
-    expect(res.statusCode).toBe(200);
+    const res = await inject('DELETE', '/api/v1/customer/account?receipts=v2', u.token);
+    expect(res.statusCode).toBe(202);
+    expect(res.json().data.status).toBe('CLOSURE_REQUESTED');
+    expect(await app.prisma.session.count({ where: { userId: u.userId } })).toBe(1);
+    // Authorized closure completion retains the existing wind-down invariants.
+    await new AccountService(app).deleteAccount(u.userId);
 
     const afterCampaign = await app.prisma.adCampaign.findUnique({ where: { id: campaign.id } });
     expect(afterCampaign?.status).toBe('PAUSED'); // stops serving; NOT cancelled — no refund/inventory money moves on an erasure
@@ -263,7 +272,8 @@ describe('D9-05 — account deletion (erasure)', () => {
     });
     advertiserIds.push(adv.id);
 
-    expect((await inject('DELETE', '/api/v1/customer/account', owner.token)).statusCode).toBe(200);
+    expect((await inject('DELETE', '/api/v1/customer/account?receipts=v2', owner.token)).statusCode).toBe(202);
+    await new AccountService(app).deleteAccount(owner.userId);
 
     const afterAdv = await app.prisma.advertiser.findUnique({ where: { id: adv.id } });
     expect(afterAdv?.status).toBe('APPROVED'); // the company still has an owner
@@ -296,3 +306,63 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(res.json().error.code).toBe('ACTIVE_ORDERS');
   });
 });
+
+// [DELETION-INTEGRITY · owner decision 2026-10-05] A store's rating keeps the
+// reviews a deleted person wrote — score and tags still count — but free text
+// can identify them, so the comment AND the store's reply to it are deleted.
+describe('DELETION-INTEGRITY — reviews by and about the person are kept anonymised', () => {
+  it('keeps the score and tags, deletes the comment and the store reply, and leaves the store rating unchanged', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const vendor = await app.prisma.vendor.findFirstOrThrow({ select: { id: true } });
+    const order = await app.prisma.order.create({ data: {
+      orderNumber: `RV-${nanoid(10).toUpperCase()}`, customerId: u.userId, vendorId: vendor.id,
+      orderType: 'FOOD_DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Test St', deliveryLat: 6.8055, deliveryLng: -58.1553,
+      subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+    } });
+    const rating = await app.prisma.rating.create({ data: {
+      orderId: order.id, raterId: u.userId, vendorId: vendor.id, type: 'CUSTOMER_TO_VENDOR', score: 2,
+      tags: ['cold_food'], comment: 'Del here from the blue house by the market, food was cold',
+      response: 'Sorry Del, we will call you about the blue house order', respondedAt: new Date(), respondedBy: u.userId,
+      visibleAt: new Date(),
+    } });
+    await app.prisma.ratingOutbox.create({ data: { ratingId: rating.id, command: 'SYNTHETIC_PAYLOAD', payload: { comment: 'Del here from the blue house', score: 2 } } });
+    // [coordinator ruling 2026-10-05] A rating someone ELSE wrote about the
+    // person can name or describe them too: it keeps its score and tags only.
+    const author = await makeUser(['CUSTOMER']);
+    const about = await app.prisma.rating.create({ data: {
+      orderId: order.id, raterId: author.userId, rateeId: u.userId, type: 'RIDER_TO_CUSTOMER', score: 4,
+      tags: ['friendly'], comment: 'Del was waiting at the blue house gate', response: 'Thanks, Del', respondedAt: new Date(), respondedBy: u.userId,
+      visibleAt: new Date(),
+    } });
+    await app.prisma.ratingOutbox.create({ data: { ratingId: about.id, command: 'SYNTHETIC_PAYLOAD', payload: { comment: 'Del at the gate', score: 4 } } });
+    try {
+      const reviews = new RatingService(app.prisma);
+      const before = await reviews.getVendorReviews(vendor.id, 100);
+
+      const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+      expect(res.statusCode, res.payload).toBe(200);
+
+      const kept = await app.prisma.rating.findUniqueOrThrow({ where: { id: rating.id } });
+      expect(kept).toMatchObject({ score: 2, tags: ['cold_food'], state: 'ACTIVE', comment: null, response: null, respondedAt: null, respondedBy: null });
+      const outbox = await app.prisma.ratingOutbox.findFirstOrThrow({ where: { ratingId: rating.id } });
+      expect(outbox.payload).toEqual({ score: 2 });
+
+      expect(await app.prisma.rating.findUniqueOrThrow({ where: { id: about.id } })).toMatchObject({
+        score: 4, tags: ['friendly'], raterId: author.userId, comment: null, response: null, respondedAt: null, respondedBy: null,
+      });
+      expect((await app.prisma.ratingOutbox.findFirstOrThrow({ where: { ratingId: about.id } })).payload).toEqual({ score: 4 });
+
+      const after = await reviews.getVendorReviews(vendor.id, 100);
+      expect(after.distribution).toEqual(before.distribution);
+      expect(after.total).toBe(before.total);
+      const shown = after.reviews.find((r) => r.id === rating.id)!;
+      expect(shown).toMatchObject({ score: 2, comment: null, response: null });
+      expect(JSON.stringify(shown)).not.toMatch(/Del\b|blue house/);
+      expect(shown.rater).toMatchObject({ firstName: 'Deleted', avatar: null });
+    } finally {
+      await app.prisma.ratingOutbox.deleteMany({ where: { ratingId: { in: [rating.id, about.id] } } });
+      await app.prisma.rating.deleteMany({ where: { id: { in: [rating.id, about.id] } } });
+    }
+  });
+});
+
