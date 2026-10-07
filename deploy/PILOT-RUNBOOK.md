@@ -281,8 +281,10 @@ What the public names get:
   pages, cart, checkout, orders and the customer's account show "Launching
   soon in Georgetown"; the company, policy, pricing and partner pages stay
   visible. `WEB_ORDERING=live` (exactly that; pilot-up refuses anything else)
-  opens ordering on the public names. It is fixed when the site is built:
-  change it, then redeploy. The staging name always keeps the full marketplace.
+  opens ordering on the public names. The site reads it while it runs: change
+  it, then recreate the website container (`docker compose up -d web`, or
+  redeploy as usual); no rebuild is needed, and closing it again is the same
+  one change. The staging name always keeps the full marketplace.
 
 What the front door is: presentation-only. It decides what the website shows
 on the public names. The API stays open to the apps, and to any API client, by

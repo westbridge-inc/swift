@@ -73,9 +73,10 @@ if [ -n "$WEB_ALIAS_HOSTS" ]; then
     seen="$seen$web_alias_lc "
   done
 fi
-# [Item 7] The website's pre-launch switch is baked into its build: `live`, or
-# nothing (the public site shows the "Launching soon" front door). A near miss
-# such as `Live` would quietly keep the public site closed, so it is refused.
+# [Item 7 · S1] The website's pre-launch switch, read by the site while it runs
+# (not baked into its build): `live`, or nothing (the public site shows the
+# "Launching soon" front door). A near miss such as `Live` would quietly keep
+# the public site closed, so it is refused.
 case "$(env_value WEB_ORDERING)" in
   "" | live) ;;
   *) die "WEB_ORDERING must be live or empty" ;;

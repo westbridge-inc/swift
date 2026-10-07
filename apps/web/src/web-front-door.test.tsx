@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -24,11 +24,28 @@ async function load<T>(relativePath: string): Promise<T> {
   return (await import(/* @vite-ignore */ path)) as T;
 }
 
-/** A fresh module graph built the way a deployment builds it: with the switch baked in. */
+/**
+ * [S1] A fresh page load against a web server whose switch (SWIFT_WEB_ORDERING,
+ * read while it runs) is `webOrdering`. The browser learns it by asking the
+ * server (/api/launch-state); this answers exactly as the route would.
+ */
+let launchQuestions = 0;
 async function configWith(webOrdering: string) {
   vi.resetModules();
-  vi.stubEnv('NEXT_PUBLIC_WEB_ORDERING', webOrdering);
+  vi.stubEnv('SWIFT_WEB_ORDERING', webOrdering);
+  launchQuestions = 0;
+  const { GET } = await import('@/app/api/launch-state/route');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).endsWith('/api/launch-state')) { launchQuestions += 1; return GET(); }
+    return new Response('{}', { status: 404 });
+  }));
   return import('@/site.config');
+}
+
+/** Lets the page's one question to the server be answered before asserting what it shows. */
+async function answered() {
+  await waitFor(() => expect(launchQuestions).toBeGreaterThan(0));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
 /** The address bar the page is opened at. */
@@ -62,6 +79,7 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     openAt('https://swiftgy.com/welcome');
     const { default: WelcomePage } = await import('@/app/(marketing)/welcome/page');
     render(<WelcomePage />);
+    await answered();
     expect(screen.queryByRole('link', { name: 'Order on the web' })).toBeNull();
     expect(screen.getByText('Launching soon in Georgetown')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'List your business' }).getAttribute('href')).toBe('/vendors');
@@ -80,6 +98,7 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     openAt('https://swiftgy.com/signup');
     const { default: SignupPage } = await import('@/app/signup/page');
     render(<SignupPage />);
+    await answered();
     const customer = screen.getByRole('button', { name: /Order on Swift/ });
     expect((customer as HTMLButtonElement).disabled).toBe(true);
     expect(customer.textContent).toContain('Launching soon in Georgetown');
@@ -97,6 +116,7 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
       openAt(url);
       const { SiteFooter } = await import('@/components/site');
       const view = render(<SiteFooter />);
+      if (url.startsWith('https://swiftgy.com')) await answered();
       const footerText = view.container.textContent ?? '';
       expect(footerText, url).toContain(note);
       expect(footerText, url).toContain('Taxi rides require the Swift mobile app.');
@@ -119,6 +139,7 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
         openAt(url);
         const { default: Page } = (await import(/* @vite-ignore */ route)) as { default: () => React.ReactNode };
         const view = render(<>{Page()}</>);
+        if (url.startsWith('https://swiftgy.com')) await answered();
         const words = view.container.textContent ?? '';
         if (open) expect(words, `${route} at ${url}`).toContain(openClaim);
         else {
@@ -131,12 +152,28 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     }
   });
 
+  it('until the server has answered, and if it cannot, the public site shows no ordering', async () => {
+    await configWith('live');
+    let answer!: (_value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { answer = resolve; })));
+    openAt('https://swiftgy.com/signup');
+    const { default: SignupPage } = await import('@/app/signup/page');
+    render(<SignupPage />);
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
+    // Waiting for the answer: closed, even though the server's switch is live.
+    expect((screen.getByRole('button', { name: /Order on Swift/ }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { answer(new Response('busy', { status: 503 })); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    // The question failed: still closed.
+    expect((screen.getByRole('button', { name: /Order on Swift/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('sign-up on staging, or once live, starts a customer account as before', async () => {
     for (const [switchValue, url] of [['', 'https://staging.swiftgy.com/signup'], ['live', 'https://swiftgy.com/signup']] as const) {
       await configWith(switchValue);
       openAt(url);
       const { default: SignupPage } = await import('@/app/signup/page');
       const view = render(<SignupPage />);
+      if (url.startsWith('https://swiftgy.com')) await answered();
       expect((screen.getByRole('button', { name: /Order on Swift/ }) as HTMLButtonElement).disabled, url).toBe(false);
       view.unmount();
     }

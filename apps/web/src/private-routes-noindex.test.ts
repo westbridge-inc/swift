@@ -91,6 +91,7 @@ const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[...path]/route.ts'];
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
 const PUBLIC_RESOURCES = [
+  'api/launch-state/route.ts', // [S1] the public site's switch, as the server holds it (no personal data)
   'manifest.ts',
   'opengraph-image.tsx',
   'robots.ts',
