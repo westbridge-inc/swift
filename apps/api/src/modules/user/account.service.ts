@@ -214,9 +214,10 @@ export class AccountService {
 
       // Profile ownership, not the active role, defines obligations. Switching
       // to customer mode must never hide cash or live mover work.
-      const verdict = verdictFor(await partnerObligations(tx, userId));
+      const obligations = await partnerObligations(tx, userId);
+      const verdict = verdictFor(obligations);
       if (!verdict.clear) {
-        throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers));
+        throw new AppError(409, 'PARTNER_OBLIGATIONS', refusalMessage(verdict.blockers, obligations));
       }
       // Checkout locks these same vendor rows before its live eligibility read.
       // Closing commerce under this lock prevents a new order after the census.

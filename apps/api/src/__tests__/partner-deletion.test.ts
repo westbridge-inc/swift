@@ -423,7 +423,7 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
   const refused = async (userId: string, blocker: 'FEE_PAYMENT_PENDING' | 'FEE_CREDIT') => {
     const error = await new AccountService(app).deleteAccount(userId).then(() => null, (e: unknown) => e);
     expect(error, 'deletion must be refused while fee money is unsettled').toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
-    expect((error as Error).message).toContain((BLOCKER_MESSAGE as Record<string, string>)[blocker]);
+    expect((error as Error).message).toContain((BLOCKER_MESSAGE as Record<string, string>)[blocker].split('{amount}').at(-1));
   };
   // A settled checkout: MMG proved it unpaid and no further check is due.
   const settledUnpaid = { status: 'NOT_PAID', nextCheckAt: null };
@@ -494,8 +494,11 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
   it('weekly-fee credit Swift holds for the person blocks deletion until it is used or returned', async () => {
     const p = await makePartner(['CUSTOMER', 'MOVER']);
     const sub = await feeSubscription(p.riderId);
-    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 500 } });
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 1500 } });
     await refused(p.userId, 'FEE_CREDIT');
+    // [Owner ruling 2026-10-07] The person is told the amount and that it is refunded.
+    const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
+    expect(error?.message).toContain('You have GY$1,500 of unused weekly-fee credit. Open Get help and we\u2019ll refund it, then your account can be deleted.');
     await untouched(p.userId);
     await app.prisma.prepaidBalance.update({ where: { subscriptionId: sub.id }, data: { balance: 0 } });
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
