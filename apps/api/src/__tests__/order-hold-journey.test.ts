@@ -17,6 +17,8 @@ import { escalateVendorAlert } from '../modules/notification/notification.servic
 import { autoCancelUnresponsiveOrder, enqueueVendorAlertFollowup, releaseHeldOrdersJob } from '../jobs/queue';
 import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/checkout-outbox';
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
+import { guyanaDayKey, startOfGuyanaDay } from '../utils/guyana-day';
+import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
 
 // ---------------------------------------------------------------------------
 // Q12 · THE FIVE-MINUTE WINDOW NEVER REACHES THE STORE. The owner, 2026-09-24:
@@ -306,6 +308,14 @@ async function storeDashboard(store: Store) {
     busyHours: busy.json().data.total as number, tierToday: tier.json().data.usage.ordersToday as number,
   };
 }
+/** The store counts an order in the GUYANA day it was placed (#1491). The
+ *  journey moves placement minutes into the past, so a run in the first
+ *  minutes after Guyana midnight places the order in yesterday: today's
+ *  counters then read 0 for it, never 2. Week and month are rolling windows. */
+async function countedToday(orderId: string): Promise<0 | 1> {
+  const { placedAt } = await orderRow(orderId);
+  return placedAt >= startOfGuyanaDay(guyanaDayKey(new Date())) ? 1 : 0;
+}
 const DASHBOARD_EMPTY = { today: 0, week: 0, month: 0, pending: 0, totalOrders: 0, itemTotalOrdered: 0, itemRecent: 0, busyHours: 0, tierToday: 0 };
 
 /** The store's low-stock notices for its item: inbox rows and pushes. */
@@ -361,6 +371,10 @@ async function waitFor(what: string, predicate: () => boolean, ms = 5_000) {
 }
 
 const priorHoldMinutes = process.env['ORDER_HOLD_MINUTES'];
+
+// "Five minutes later" moves an order back, and the store's counters read the
+// Guyana day: never run across Guyana midnight (helpers/guyana-day-clock).
+beforeAll(waitClearOfGuyanaMidnight, GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -577,7 +591,8 @@ describe.each([
     expect(row.releasedToVendorAt).not.toBeNull();
     expect(row.status).toBe('PENDING'); // release is visibility, not a transition
     // Counted by the store's own counters at the release — once.
-    const counted = { today: 1, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1, tierToday: 1 };
+    const today = await countedToday(order.id);
+    const counted = { today, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1, tierToday: today };
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, banner: true, dashboard: counted });
 
     // Exactly once: every later sweep is a no-op on every channel and counter.
@@ -794,7 +809,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
 
     // The board shows it from the moment its hold lapsed; only the lifetime
     // counters wait for a release.
-    expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, dashboard: { today: 1, totalOrders: 0, itemTotalOrdered: 0 } });
+    expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, dashboard: { today: await countedToday(order.id), totalOrders: 0, itemTotalOrdered: 0 } });
     const res = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, store.owner.token, {});
     expect(res.statusCode, res.body).toBe(200);
     const row = await orderRow(order.id);

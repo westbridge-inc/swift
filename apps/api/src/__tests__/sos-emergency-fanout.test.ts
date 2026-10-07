@@ -100,7 +100,15 @@ describe('SOS fan-out → emergency contacts', () => {
     const alert = await sos.create({ actorUserId: user.id, actorRole: 'CUSTOMER', triggerSource: 'OPS_MANUAL' }); // ACTIVE
     alertIds.push(alert.id);
     resetDevChannelLog();
-    await sos.markSafe(alert.id);
+    const operator = await prisma.user.create({ data: { phone: `synthetic-safe-operator-${Date.now()}`, firstName: 'Synthetic', lastName: 'Operator', roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN' } });
+    try {
+      await sos.markSafe(alert.id);
+      expect(await prisma.notification.count({ where: { userId: operator.id, data: { path: ['kind'], equals: 'sos_marked_safe' } } })).toBe(1);
+    } finally {
+      await prisma.notification.deleteMany({ where: { userId: operator.id } });
+      await prisma.alertDelivery.deleteMany({ where: { recipientId: operator.id } });
+      await prisma.user.delete({ where: { id: operator.id } });
+    }
     const sms = devChannelLog.find((e) => e.channel === 'sms' && e.to === verifiedPhone);
     expect(sms).toBeFalsy(); // a coerced tap must not tell contacts the coast is clear
   });

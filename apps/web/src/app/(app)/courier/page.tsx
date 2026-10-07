@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Package } from 'lucide-react';
+import { Pictogram } from '@/components/glyphs';
 import { courierEstimate, requestCourier, money } from '@/lib/customer';
 import { currentCoords } from '@/lib/geolocate';
 import { submittablePlace, type PickedPlace } from '@/lib/place';
@@ -101,72 +101,77 @@ export default function CourierPage() {
   }
 
   return (
-    <div className="mx-auto max-w-lg space-y-4">
-      <h1 className="flex items-center gap-2 text-2xl font-extrabold"><Package className="h-6 w-6 text-[var(--swift-red)]" /> Send a package</h1>
+    <div className="flex flex-col">
+      <span className="sw-eyebrow">Send</span>
+      <h1 className="sw-title mt-1">A parcel across town</h1>
+      <div className="mt-5 grid grid-cols-1 items-start gap-x-12 gap-y-6 split:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="flex min-w-0 flex-col gap-3">
+          <LocationField
+            label="Pick up from"
+            text={pickupText}
+            place={pickup}
+            onChange={(t, p) => { setPickupText(t); setPickup(p); }}
+            near={pickup}
+          />
+          {pickupError && !pickup && (
+            <p role="alert" className="sw-note sw-note-error">{pickupError} You can search for it above instead.</p>
+          )}
 
-      <LocationField
-        label="Pick up from"
-        text={pickupText}
-        place={pickup}
-        onChange={(t, p) => { setPickupText(t); setPickup(p); }}
-        near={pickup}
-      />
-      {pickupError && !pickup && (
-        <p role="alert" className="-mt-2 text-sm font-semibold text-[var(--swift-red)]">{pickupError} You can search for it above instead.</p>
-      )}
+          <LocationField
+            label="Deliver to"
+            text={dropoffText}
+            place={dropoff}
+            onChange={(t, p) => { setDropoffText(t); setDropoff(p); }}
+            near={pickup}
+          />
 
-      <LocationField
-        label="Deliver to"
-        text={dropoffText}
-        place={dropoff}
-        onChange={(t, p) => { setDropoffText(t); setDropoff(p); }}
-        near={pickup}
-      />
+          <h2 className="sw-heading mt-3">What are you sending?</h2>
+          <div className="grid grid-cols-2 gap-2 wide:grid-cols-4">
+            {SIZES.map((s) => (
+              <button key={s.k} type="button" aria-pressed={size === s.k} onClick={() => setSize(s.k)}
+                className={`flex cursor-pointer flex-col items-start gap-2 rounded-2xl border p-3.5 text-left text-[var(--swift-ink)] transition-colors ${size === s.k ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-[var(--swift-border)] bg-[var(--swift-card)]'}`}>
+                <Pictogram name="send" size={28} />
+                <span className="flex flex-col"><span className="text-[15px] font-semibold leading-5">{s.l}</span><span className="text-[13px] leading-[18px] text-[var(--swift-muted)]">{s.d}</span></span>
+              </button>
+            ))}
+          </div>
 
-      <div>
-        <p className="mb-2 font-bold">Package size</p>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {SIZES.map((s) => (
-            <button key={s.k} onClick={() => setSize(s.k)} className={`rounded-2xl border p-3 text-left ${size === s.k ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-black/10 bg-white'}`}>
-              <span className="block font-bold">{s.l}</span><span className="block text-xs text-[var(--swift-muted)]">{s.d}</span>
-            </button>
-          ))}
+          {/* [W-20] Who receives it. The API has always accepted these; the form
+              never asked, so a rider arrived with a parcel and no one to ask for. */}
+          <h2 className="sw-heading mt-3">Who’s receiving it?</h2>
+          <div className="grid grid-cols-1 gap-2 wide:grid-cols-2">
+            <input value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Recipient name (optional)" aria-label="Recipient name (optional)" className="sw-input" />
+            <input value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} placeholder="Recipient phone (optional)" aria-label="Recipient phone (optional)" type="tel" className="sw-input" />
+          </div>
+          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes for the rider (optional)" aria-label="Notes for the rider (optional)" className="sw-input" />
         </div>
+
+        <aside className="flex flex-col gap-3 split:sticky split:top-4">
+          <span className="sw-eyebrow">Fee · cash on delivery</span>
+          {fee !== null ? (
+            <>
+              <p className="sw-money-xl">{money(fee)}</p>
+              <p className="sw-caption">Paid in cash to your rider. Swift never holds your money.</p>
+            </>
+          ) : !estimateFailed ? (
+            <p className="sw-caption text-[15px] leading-[22px]">{!pickup || !dropoff ? 'Set both addresses to see the fee.' : 'Pricing this delivery…'}</p>
+          ) : null}
+          {/* [W-20] A failed estimate used to hide this block and leave the button
+              live, so a parcel could be sent with no price ever shown. */}
+          {estimateFailed && (
+            <div role="alert" className="sw-note sw-note-error flex-col gap-1">
+              <p className="font-semibold">We couldn&apos;t price this delivery.</p>
+              <p>You can&apos;t send it without a price — try again in a moment.</p>
+            </div>
+          )}
+
+          {error && <p role="alert" className="sw-note sw-note-error">{error}</p>}
+
+          <button type="button" onClick={send} disabled={!readyToSend} className="sw-btn sw-btn-block mt-1">
+            {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : `Request courier · ${money(fee)}`}
+          </button>
+        </aside>
       </div>
-
-      {/* [W-20] Who receives it. The API has always accepted these; the form
-          never asked, so a rider arrived with a parcel and no one to ask for. */}
-      <div className="space-y-2 rounded-2xl border border-black/5 bg-white p-3">
-        <p className="font-bold">Who is receiving it?</p>
-        <input value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Recipient name (optional)" className="w-full rounded-xl border border-black/10 px-3 py-2" />
-        <input value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} placeholder="Recipient phone (optional)" className="w-full rounded-xl border border-black/10 px-3 py-2" />
-        <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes for the rider (optional)" className="w-full rounded-xl border border-black/10 px-3 py-2" />
-      </div>
-
-      {fee !== null && (
-        <div className="rounded-2xl border border-black/5 bg-white p-4">
-          <div className="flex justify-between"><span className="text-[var(--swift-muted)]">Estimated fee</span><span className="text-lg font-extrabold">{money(fee)}</span></div>
-          <p className="mt-1 text-xs text-[var(--swift-muted)]">Cash on delivery — paid to your rider.</p>
-        </div>
-      )}
-      {/* [W-20] A failed estimate used to hide this block and leave the button
-          live, so a parcel could be sent with no price ever shown. */}
-      {estimateFailed && (
-        <div role="alert" className="rounded-2xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
-          <p className="text-sm font-bold text-[var(--swift-red)]">We couldn&apos;t price this delivery.</p>
-          <p className="mt-1 text-sm">You can&apos;t send it without a price — try again in a moment.</p>
-        </div>
-      )}
-
-      {error && <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">{error}</p>}
-
-      <button
-        onClick={send}
-        disabled={!readyToSend}
-        className="w-full rounded-full bg-[var(--swift-red)] py-3.5 font-bold text-white disabled:opacity-50"
-      >
-        {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : `Request courier · ${money(fee)}`}
-      </button>
     </div>
   );
 }

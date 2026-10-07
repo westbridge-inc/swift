@@ -1,3 +1,4 @@
+import { taxiNotificationData } from './rides/taxi-notification';
 import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
@@ -179,6 +180,7 @@ export async function persistMoverRevocationOutboxInTransaction(
       title: customer.title,
       body: customer.body,
       data: {
+        ...(order.pool === 'DRIVER' ? taxiNotificationData(order.orderId, { status: order.status }) : {}),
         audience: 'customer',
         kind: 'mover_session_revocation',
         eventId: `${outboxId}:${order.orderId}`,

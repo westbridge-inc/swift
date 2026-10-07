@@ -1,4 +1,5 @@
 import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -229,6 +230,27 @@ function dedupedOpsAlertId(dedupeKey: string, recipientId: string): string {
   return `ops_alert_${createHash('sha256').update(`${dedupeKey}:${recipientId}`).digest('hex').slice(0, 24)}`;
 }
 
+/**
+ * [144 · OPS-PAGING] The ONE definition of who an admin notice or an ops page
+ * reaches in-app, shared by notifyAdmins and the OpsAlert outbox
+ * (safety/ops-alert.ts) so the two can never drift:
+ *  - a tenant's notice: that tenant's ACTIVE ADMINs plus every ACTIVE SUPER_ADMIN;
+ *  - `null` (platform): every ACTIVE SUPER_ADMIN, and nobody else;
+ *  - the store-review fiction (a REVIEW tenant): that tenant's own ADMINs and
+ *    NOBODY else — an app-store reviewer's demo never reaches a real operator
+ *    (GUARDRAILS §3).
+ * Platform pages ALSO text the configured OPS_ONCALL_PHONES list (ops-alert.ts,
+ * coordinator ruling 5 Oct 2026), never for the fiction. Whether launch
+ * responders keep SUPER_ADMIN or get a narrower responder role is an open
+ * owner question; until it is answered this stays today's audience.
+ */
+export function adminAudienceWhere(tenantId: string | null, opts: { review?: boolean } = {}): Prisma.UserWhereInput {
+  if (tenantId && opts.review) return { status: 'ACTIVE', tenantId, roles: { has: 'ADMIN' }, NOT: { roles: { has: 'SUPER_ADMIN' } } };
+  return tenantId
+    ? { status: 'ACTIVE', roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] }, OR: [{ tenantId }, { roles: { has: 'SUPER_ADMIN' } }] }
+    : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } };
+}
+
 /** [REVIEW-PARTNER] Is this the store-review fiction? Tenants are not tenant-scoped rows.
  *  A lookup that fails answers "no": a real operator page is never lost to a lookup failure. */
 export async function isReviewTenantId(prisma: Pick<PrismaClient, 'tenant'>, tenantId: string): Promise<boolean> {
@@ -239,6 +261,12 @@ export async function isReviewTenantId(prisma: Pick<PrismaClient, 'tenant'>, ten
     log().error({ err }, '[REVIEW-PARTNER] could not read the tenant kind for a page — delivering it');
     return false;
   }
+}
+
+/** The audience for a page or notice about `tenantId`, the fiction resolved. */
+export async function adminAudienceFor(prisma: PrismaClient, tenantId: string | null): Promise<{ where: Prisma.UserWhereInput; review: boolean }> {
+  const review = tenantId ? await runWithoutTenant(() => isReviewTenantId(prisma, tenantId)) : false;
+  return { where: adminAudienceWhere(tenantId, { review }), review };
 }
 
 export async function notifyAdmins(
@@ -310,14 +338,9 @@ export async function notifyAdmins(
     log().info({ kind: input.data?.['kind'] ?? null }, 'review-tenant send suppressed: admin page');
     return 0;
   }
+  const { where: audience } = await adminAudienceFor(prisma, input.tenantId);
   const admins = await runWithoutTenant(() => prisma.user.findMany({
-    where: input.tenantId
-      ? {
-        status: 'ACTIVE',
-        roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] },
-        OR: [{ tenantId: input.tenantId }, { roles: { has: 'SUPER_ADMIN' } }],
-      }
-      : { status: 'ACTIVE', roles: { has: 'SUPER_ADMIN' } },
+    where: audience,
     select: { id: true },
   }));
   // [REPORT-035 F-035-06 · S0 evidence] Count DELIVERIES, not candidates.
@@ -620,6 +643,20 @@ export class NotificationService {
     });
   }
 
+  /** [73 · owner ruling] The rider's taxi assignment push, from either entrance (an offer-card
+   *  accept or a direct accept, both through dispatch.claimOrder): the driver's first name, the
+   *  car and its plate (checking the plate before getting in is a safety step), tagged as a taxi
+   *  so a tap opens the ride, never a delivery. */
+  async driverFound(customerId: string, orderId: string, driver: { firstName: string; vehicleColor: string; vehicleMake: string; vehicleModel: string; licensePlate: string }): Promise<void> {
+    await this.send({
+      userId: customerId,
+      type: 'ORDER_UPDATE',
+      title: 'Driver Found!',
+      body: `${driver.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
+      data: taxiNotificationData(orderId, { status: 'DRIVER_ASSIGNED' }),
+    });
+  }
+
   async riderAssigned(customerId: string, orderNumber: string, riderName: string, orderId: string): Promise<void> {
     await this.send({
       userId: customerId,
@@ -668,13 +705,13 @@ export class NotificationService {
     });
   }
 
-  async orderDelivered(customerId: string, orderNumber: string, orderId: string): Promise<void> {
+  async orderDelivered(customerId: string, orderNumber: string, orderId: string, orderType?: string): Promise<void> {
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
-      title: 'Delivered!',
-      body: `Your order ${orderNumber} has been delivered. Enjoy your meal!`,
-      data: { orderId, orderNumber, status: 'DELIVERED' },
+      title: orderType === 'TAXI' ? 'Ride completed' : 'Delivered!',
+      body: orderType === 'TAXI' ? 'Your ride is complete. Open Swift to view your trip.' : `Your order ${orderNumber} has been delivered. Enjoy your meal!`,
+      data: orderType === 'TAXI' ? taxiNotificationData(orderId, { status: 'DELIVERED' }) : { orderId, orderNumber, status: 'DELIVERED' },
     });
   }
 
