@@ -571,6 +571,10 @@ jobs:
       # certifies THIS artifact and writes a receipt for it; both stay with the run as the scan attestation.
       - name: Artifact manifest (mobile)
         run: node scripts/artifact-manifest.js apps/mobile/dist --app mobile --commit ${{ github.sha }} --entry ios/metadata.json --entry android/metadata.json --out artifact-mobile.manifest.json
+      - name: Test and record mobile JS size budgets
+        run: |
+          node --test scripts/mobile-size-budget.test.js
+          node scripts/mobile-size-budget.js --manifest artifact-mobile.manifest.json --out artifact-mobile-size.json
       - name: No unlisted public variable reached the mobile bundles
         run: node scripts/public-secrets-gate.js --bundle apps/mobile/dist --manifest artifact-mobile.manifest.json --app mobile --commit ${{ github.sha }} --receipt artifact-mobile.receipt.json
       - name: Keep the mobile manifest and scan receipt with the run
@@ -585,6 +589,34 @@ jobs:
         run: node scripts/secret-canary.js --scan apps/mobile/dist
       - name: No secret-shaped value in the mobile bundles
         run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/mobile/dist --redact --exit-code 1
+      # Reference ARM64 builds measure native overhead without signing credentials,
+      # stores or EAS. These are CI measurements, never distributed binaries.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Generate Android release project
+        working-directory: apps/mobile
+        env:
+          ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
+        run: npx expo prebuild --platform android --no-install
+      - name: Build reference release APK and AAB with R8
+        working-directory: apps/mobile/android
+        env:
+          ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
+          NODE_OPTIONS: --max-old-space-size=3072
+        run: ./gradlew :app:assembleRelease :app:bundleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2
+      - name: Record and enforce native size budgets
+        run: node scripts/mobile-size-budget.js --apk apps/mobile/android/app/build/outputs/apk/release/app-release.apk --aab apps/mobile/android/app/build/outputs/bundle/release/app-release.aab --out artifact-native-size.json
+      - name: Keep mobile size measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-size-budget
+          path: |
+            artifact-mobile-size.json
+            artifact-native-size.json
+          if-no-files-found: warn
 
   public-env-gate:
     name: Public Env Gate
