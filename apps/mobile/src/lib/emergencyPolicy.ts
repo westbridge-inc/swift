@@ -41,14 +41,16 @@ export type EmergencyDial =
 const NUMBER_RE = /^\+?[0-9]{2,15}$/;
 
 /**
- * The offline fallback. GUYANA is the launch market and its police number is
- * what the app has always dialed. Every other entry is a widely published
- * national number that ops has NOT yet verified for Swift: offered with a
- * confirm, never auto-dialed, until the server's policy marks it verified.
- * Add a market here only with its source; never guess a number.
+ * The offline fallback. GUYANA is the launch market: its police (911), fire
+ * (912) and ambulance (913) numbers were confirmed by the owner on 5 Oct 2026
+ * and are verified. Every other entry is a widely published national number
+ * that ops has NOT yet verified for Swift: offered with a confirm, never
+ * auto-dialed, until the server's policy marks it verified. The server's
+ * policy (CountryConfig, scripts/set-emergency-policy.ts) always wins when it
+ * can be read. Add a market here only with its source; never guess a number.
  */
 export const BUNDLED_EMERGENCY_POLICIES: Readonly<Record<string, EmergencyNumbers>> = Object.freeze({
-  GY: { police: { number: '911', verified: true }, fire: { number: '912', verified: false }, ambulance: { number: '913', verified: false } },
+  GY: { police: { number: '911', verified: true }, fire: { number: '912', verified: true }, ambulance: { number: '913', verified: true } },
   TT: { police: { number: '999', verified: false }, fire: { number: '990', verified: false }, ambulance: { number: '811', verified: false } },
   JM: { police: { number: '119', verified: false }, fire: { number: '110', verified: false }, ambulance: { number: '110', verified: false } },
   BB: { police: { number: '211', verified: false }, fire: { number: '311', verified: false }, ambulance: { number: '511', verified: false } },

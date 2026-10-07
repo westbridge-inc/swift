@@ -134,14 +134,14 @@ export function InstallPrompt({ enabled }: { enabled: boolean }) {
     <>
     <div aria-hidden="true" data-install-clearance style={{ height: clearance }} />
     <aside ref={card} aria-label="Install Swift" className="fixed inset-x-0 bottom-0 z-40 px-4 pb-[calc(1rem_+_var(--swift-dock,env(safe-area-inset-bottom)))]">
-      <div className="mx-auto max-w-md rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-3 shadow-[var(--swift-elevation-floating)]">
+      <div className="mx-auto max-w-md sw-card p-3 shadow-[var(--swift-elevation-floating)]">
         <div className="flex items-center gap-3">
           <Image src="/icons/icon-192.png" alt="" width={44} height={44} unoptimized className="h-11 w-11 shrink-0 rounded-xl" />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-bold">Install Swift</p>
             <p className="text-xs text-[var(--swift-muted)]">Open Swift from your home screen.</p>
           </div>
-          {offer === 'install' && <button type="button" onClick={install} className="rounded-full bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white hover:bg-[var(--swift-red-600)]">Install</button>}
+          {offer === 'install' && <button type="button" onClick={install} className="sw-btn sw-btn-sm">Install</button>}
           <button type="button" onClick={dismiss} aria-label="Dismiss" className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-[var(--swift-muted)] hover:bg-[var(--swift-subtle)]"><X className="h-4 w-4" aria-hidden /></button>
         </div>
         {offer === 'ios-hint' && (

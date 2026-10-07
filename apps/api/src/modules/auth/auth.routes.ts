@@ -7,6 +7,7 @@ import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
@@ -158,6 +159,8 @@ export async function authRoutes(app: FastifyInstance) {
     const result = await authService.register({
       ...body,
       registrationProof,
+      // [F-021-21] The Terms and Privacy consent is recorded on the surface it was given on.
+      surface: consentSurfaceOf(request),
       deviceId: (request.headers['x-device-id'] as string) || null,
       ipAddress: request.ip || null,
     });

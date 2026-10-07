@@ -7,8 +7,8 @@ import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
 import { verifyCustomerLogin } from '@/lib/customer';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
-import { SwiftLogo } from '@/components/swift-logo';
-import styles from '../auth-flow.module.css';
+import { customerRoute } from '@/lib/customer-routes';
+import { AuthError, AuthHeading, AuthPage, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
 
 const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market'];
 
@@ -17,6 +17,13 @@ const CUSTOMER_ROUTES = ['/order', '/cart', '/orders', '/taxi', '/account', '/ex
 function isCustomerReturn(next: string): boolean {
   const path = next.split(/[?#]/)[0] ?? '';
   return path === '/' || CUSTOMER_ROUTES.some((route) => path.startsWith(route));
+}
+
+/** "Keep browsing as a guest" goes back to the page that sent them here when a
+ *  guest may open it (a store, Market), and to Home when it is private. */
+function guestReturn(next: string): string {
+  const path = next.split(/[?#]/)[0] ?? '';
+  return next && customerRoute(path).public ? next : '/';
 }
 
 function LoginInner() {
@@ -36,7 +43,9 @@ function LoginInner() {
   const isCustomer = isCustomerReturn(next);
 
   const [step, setStep] = useState<'phone' | 'code'>('phone');
-  const [phone, setPhone] = useState('+592');
+  // [WEB-REDESIGN] The field holds the local number beside the +592 chip;
+  // the server is sent the whole number, exactly as before.
+  const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -46,7 +55,7 @@ function LoginInner() {
     if (busyNow.current) return;
     busyNow.current = true;
     setError(null); setBusy(true);
-    try { await sendOtp(phone.trim()); setStep('code'); }
+    try { await sendOtp(fullPhone(phone)); setStep('code'); }
     catch (e) { setError((e as Error).message); }
     finally { busyNow.current = false; setBusy(false); }
   }
@@ -57,77 +66,70 @@ function LoginInner() {
     setError(null); setBusy(true);
     try {
       if (isCustomer) {
-        await verifyCustomerLogin(phone.trim(), code.trim());
+        await verifyCustomerLogin(fullPhone(phone), code.trim());
         continueJourney();
         router.replace(next || '/');
       } else {
-        const { home } = await verifyPartnerLogin(phone.trim(), code.trim());
+        const { home } = await verifyPartnerLogin(fullPhone(phone), code.trim());
         router.replace(next === '/weekly-fee' ? next : home);
       }
     } catch (e) { setError((e as Error).message); }
     finally { busyNow.current = false; setBusy(false); }
   }
 
+  const shownPhone = fullPhone(phone).replace(/^\+592/, `${DIAL_CODE} `);
   return (
-    <main className={styles.page}>
-      <section className={`${styles.card} ${styles.cardNarrow}`} aria-labelledby="login-title">
-        <Link href="/" aria-label="Swift home" onClick={clearStorefrontContinuation} className={styles.brandLink}><SwiftLogo /></Link>
-        <h1 id="login-title" className={styles.heading}>Sign in to Swift</h1>
-        <p className={styles.bodyCopy}>
-          {step === 'code' ? `Enter the code sent to ${phone}.`
-            : isCustomer ? 'Sign in with your phone number to order on Swift.'
-            : 'Businesses and earners — sign in with the phone number on your Swift account.'}
-        </p>
-
+    <AuthPage onBrandClick={clearStorefrontContinuation}>
+      <section aria-labelledby="login-title" className="flex flex-col gap-6">
         {step === 'phone' ? (
-          <div className={styles.stack}>
-            <div className={styles.field}>
-              <label htmlFor="login-phone" className={styles.label}>Phone number</label>
-              <input id="login-phone" type="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void handleSend()}
-                placeholder="+592 600 0001" className={styles.input} />
-            </div>
-            <button type="button" onClick={() => void handleSend()} disabled={busy || phone.trim().length < 6}
-              className={styles.primaryButton}>
-              {busy ? 'Sending…' : 'Send code'}
+          <>
+            <AuthHeading id="login-title" eyebrow={isCustomer ? 'Sign in or create an account' : 'Swift for businesses and earners'} title="What’s your number?">
+              {isCustomer ? 'We’ll text a 6-digit code to confirm it’s you.' : 'Sign in with the phone number on your Swift account. We’ll text you a 6-digit code.'}
+            </AuthHeading>
+            <PhoneField id="login-phone" value={phone} onChange={setPhone} onEnter={() => void handleSend()} autoFocus />
+            <button type="button" onClick={() => void handleSend()} disabled={busy || !phoneReady(phone)} className="sw-btn sw-btn-block">
+              {busy ? 'Sending…' : 'Continue'}
             </button>
-          </div>
+          </>
         ) : (
-          <div className={styles.stack}>
-            <div className={styles.field}>
-              <label htmlFor="login-code" className={styles.label}>Verification code</label>
-              <input id="login-code" type="text" inputMode="numeric" autoComplete="one-time-code" autoFocus value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void handleVerify()}
-                placeholder="000000" className={`${styles.input} ${styles.codeInput}`} />
-            </div>
-            <button type="button" onClick={() => void handleVerify()} disabled={busy || code.trim().length < 4}
-              className={styles.primaryButton}>
-              {busy ? 'Signing in…' : 'Sign in'}
+          <>
+            <AuthHeading id="login-title" eyebrow="Verify" title="Enter the code">
+              Sent to {shownPhone} ·{' '}
+              <button type="button" onClick={() => { setStep('phone'); setCode(''); setError(null); }} className="sw-link cursor-pointer border-0 bg-transparent p-0 text-[13px] leading-[18px]">
+                Change
+              </button>
+            </AuthHeading>
+            <CodeBoxes id="login-code" value={code} onChange={setCode} onEnter={() => void handleVerify()} />
+            <button type="button" onClick={() => void handleVerify()} disabled={busy || code.trim().length < 6} className="sw-btn sw-btn-block">
+              {busy ? 'Signing in…' : 'Verify'}
             </button>
-            <button type="button" onClick={() => { setStep('phone'); setCode(''); setError(null); }} className={styles.textButton}>Use a different number</button>
-          </div>
+          </>
         )}
 
-        {error ? <p className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
+        {error ? <AuthError>{error}</AuthError> : null}
 
         {pendingReturn ? (
-          <Link href={pendingReturn} onClick={clearStorefrontContinuation} className={styles.textButton}>Cancel and return to menu</Link>
+          <Link href={pendingReturn} onClick={clearStorefrontContinuation} className="sw-link-btn self-center py-2">Cancel and return to menu</Link>
+        ) : isCustomer && step === 'phone' ? (
+          <Link href={guestReturn(next)} className="sw-link-btn self-center py-2">Keep browsing as a guest</Link>
         ) : null}
 
-        <p className={styles.dividerCopy}>
+        <p className="sw-caption border-t border-[var(--swift-border)] pt-5">
           New to Swift?{' '}
           <Link
             href={next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'}
             onClick={continueJourney}
-            className={styles.inlineLink}
+            className="sw-link"
           >
             Create an account
           </Link>{' '}
           — order, sell, or drive.
         </p>
       </section>
-    </main>
+    </AuthPage>
   );
 }
 
 export default function LoginPage() {
-  return <Suspense fallback={<main className={styles.loading}>Loading…</main>}><LoginInner /></Suspense>;
+  return <Suspense fallback={<main className="grid min-h-dvh place-items-center bg-[var(--swift-canvas)] text-[var(--swift-muted)]">Loading…</main>}><LoginInner /></Suspense>;
 }

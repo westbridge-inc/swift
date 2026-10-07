@@ -101,7 +101,7 @@ async function makeCourierOrder(
       orderNumber: `PKP-${nanoid(8)}`, orderType: 'COURIER', customerId, riderId, status, fulfillment: 'DELIVERY',
       pickupAddress: 'a', pickupLat: PICKUP_GPS.lat, pickupLng: PICKUP_GPS.lng, deliveryAddress: 'b', deliveryLat: 6.82, deliveryLng: -58.16,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 500, totalAmount: 1500,
-      paymentMethod: 'CASH', courierPayer: payer, courierTrackingToken: nanoid(16),
+      paymentMethod: 'CASH', courierPayer: payer,
     },
   });
 }
@@ -464,7 +464,11 @@ describe('[E16] who can see the pickup photo', () => {
     expect(detail.statusCode, detail.body).toBe(200);
     expect(detail.json().data.courierPickupProofPhotoUrl).toBe(issuedUrl);
 
-    const track = await app.inject({ method: 'GET', url: `/api/v1/courier/track/${order.courierTrackingToken}` });
+    const rotated = await app.inject({ method: 'POST', url: `/api/v1/courier/order/${order.id}/tracking`, headers: { authorization: `Bearer ${sender.token}` } });
+    expect(rotated.statusCode, rotated.body).toBe(200);
+    const trackingToken = rotated.json().data.trackingToken as string;
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).courierTrackingToken).not.toBe(trackingToken);
+    const track = await app.inject({ method: 'GET', url: `/api/v1/courier/track/${trackingToken}` });
     expect(track.statusCode, track.body).toBe(200);
     expect(track.json().data.status).toBe('PICKED_UP');
     expect(track.body).not.toContain('/pickup/');

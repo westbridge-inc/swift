@@ -9,7 +9,7 @@ import { checkOtpDailyBudget, smsDestinationAllowed } from '../../utils/sms-budg
 import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
-import { publishLegalDocument, recordConsent } from '../legal/consent.service';
+import { publishLegalDocument, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import {
   completeMoverSessionRevocation,
   emptyMoverSessionRevocationCleanup,
@@ -55,7 +55,7 @@ import {
   recordPasswordFailure,
   resetPasswordAttemptBudget,
 } from './password-attempts';
-import { stepUpKey } from './step-up';
+import { requireStepUp } from './step-up';
 
 interface DeviceInfo {
   deviceId: string;
@@ -367,6 +367,8 @@ export class AuthService {
      *  for anything but SOFT signals (households/CGNAT never punish alone). */
     deviceId?: string | null;
     ipAddress?: string | null;
+    /** [F-021-21] The surface the Terms and Privacy consent was given on (the route reads it from the client). */
+    surface: ConsentSurface;
   }) {
     // Consume caller authority before any account lookup or write. This is a
     // single Redis script: two callers presenting the same proof cannot both
@@ -422,7 +424,7 @@ export class AuthService {
   }
 
   private async createAccount(
-    data: { phone: string; firstName: string; lastName: string; email?: string; acceptTerms?: boolean; deviceId?: string | null; ipAddress?: string | null },
+    data: { phone: string; firstName: string; lastName: string; email?: string; acceptTerms?: boolean; surface: ConsentSurface; deviceId?: string | null; ipAddress?: string | null },
     plan: { signupRole: SignupRole; roles: UserRole[]; activeRole: UserRole; countryCode: string },
   ) {
     const { signupRole, roles, activeRole, countryCode } = plan;
@@ -461,7 +463,7 @@ export class AuthService {
             documentType,
             version: LEGAL_VERSION,
             action: 'granted',
-            surface: 'mobile',
+            surface: data.surface,
             ip: data.ipAddress,
             evidence: { control: 'accept_terms_checkbox', path: 'auth/register', role: signupRole },
           });
@@ -567,6 +569,8 @@ export class AuthService {
       }
       if (BLOCKED_STATUSES.has(user.status)) throw accountSuspended();
 
+      await requireStepUp(this.app, { user: { userId }, authSessionId: sessionId }, { consume: true });
+
       await tx.user.update({
         where: { id: userId },
         data: { passwordHash, failedLoginAttempts: 0, lockedUntil: null },
@@ -613,7 +617,6 @@ export class AuthService {
     // never turns a completed change into an error.
     await resetPasswordAttemptBudget(this.app.redis, userId)
       .catch((error) => this.app.log.error({ err: error, userId }, 'password-set attempt budget reset failed'));
-    await this.app.redis.del(stepUpKey(sessionId)).catch(() => {});
     for (const { sessionId: revokedId, cleanup } of changed.revoked) {
       this.disconnectSessionSockets(revokedId);
       await completeMoverSessionRevocation(this.app, cleanup)
@@ -978,6 +981,26 @@ export class AuthService {
       if (session.expiresAt < new Date()) {
         return { kind: 'invalid' as const };
       }
+      // Match the credential and retire reused rotations before any account
+      // status answer. Even a blocked account must invalidate this family.
+      const previous = session.refreshToken !== refreshToken;
+      if (previous) {
+        if (session.previousRefreshToken !== refreshToken) return { kind: 'invalid' as const };
+        const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
+        const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
+        if (!(age <= graceMs)) {
+          const cleanup = await this.revokeLockedSession(tx, session.id, session.userId);
+          return {
+            kind: 'reuse' as const,
+            userId: session.userId,
+            sessionId: session.id,
+            deviceId: session.deviceId,
+            deviceType: session.deviceType,
+            cleanup,
+          };
+        }
+      }
+
       // SEC: a suspended/banned/deactivated account cannot rotate new tokens.
       if (['SUSPENDED', 'BANNED', 'DEACTIVATED'].includes(user.status)) {
         throw new AppError(403, 'ACCOUNT_SUSPENDED', 'This account is suspended.');
@@ -995,35 +1018,12 @@ export class AuthService {
         };
       }
 
-      if (session.refreshToken !== refreshToken) {
-        if (session.previousRefreshToken !== refreshToken) {
-          return { kind: 'invalid' as const };
-        }
-
-        // A legitimate double-fire immediately after rotation receives the
-        // already-current pair. Outside the grace period, the same credential
-        // is theft evidence and revokes the locked session atomically.
-        const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
-        const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
-        if (age <= graceMs) {
-          return {
-            kind: 'success' as const,
-            tokens: {
-              accessToken: session.token,
-              refreshToken: session.refreshToken,
-              expiresIn: 900,
-            },
-          };
-        }
-
-        const cleanup = await this.revokeLockedSession(tx, session.id, session.userId);
+      // A legitimate double-fire receives the current pair only AFTER the
+      // same account-status and assurance checks as a current credential.
+      if (previous) {
         return {
-          kind: 'reuse' as const,
-          userId: session.userId,
-          sessionId: session.id,
-          deviceId: session.deviceId,
-          deviceType: session.deviceType,
-          cleanup,
+          kind: 'success' as const,
+          tokens: { accessToken: session.token, refreshToken: session.refreshToken, expiresIn: 900 },
         };
       }
 
