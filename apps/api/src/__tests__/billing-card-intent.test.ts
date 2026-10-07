@@ -12,6 +12,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import type { ChargeLookup, ChargeResult, PaymentProvider } from '../providers/payment/payment-provider';
 import { cardIntentsUnknownGauge } from '../plugins/observability';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [M-01 / M-02 · S0] The card rail: the intent before the effect, an honest
@@ -148,10 +149,14 @@ afterEach(() => {
 
 afterAll(async () => {
   delete process.env['CARD_RAIL_KILL'];
+  // The synthetic subscriptions own clock evidence (RESTRICT in production): remove it first.
+  await cleanupBillingClocks(app.prisma, subIds);
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+  // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
@@ -247,6 +252,52 @@ describe('[M-02] an ambiguous result is not a decline', () => {
   });
 });
 
+// [July P0 · coordinator item 9] The card twin of the MMG double charge: an
+// instruction handed to the processor that never answered cannot be closed by
+// our own deadline (absence is not proof), so it is never billed again as a
+// fresh instruction for the same week, and the fee stays paused, with no
+// dunning and no suspension, while it is being confirmed (owner decision 2).
+describe('[July P0] a card instruction nobody answered is never charged twice', () => {
+  it('past its deadline it stays UNKNOWN with no failure, no dunning and no second instruction; the fee stays paused past 48 hours', async () => {
+    const due = new Date(Date.now() - DAY); const periodKey = due.toISOString().slice(0, 10);
+    const subId = await makeCardSub(due);
+    const hours = (n: number) => new Date(due.getTime() + n * 60 * 60 * 1000);
+    fake.mode = 'timeout-no-capture';
+    expect(await billing.billSubscription((await load(subId)) as never, hours(0))).toBe('pending');
+    fake.mode = 'ok';
+    const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId } });
+    expect(intent).toMatchObject({ status: 'UNKNOWN', paymentMethod: 'CARD' });
+
+    // The processor keeps saying it has no such charge, past our deadline.
+    for (const offset of [1, 60_000]) {
+      await billing.reconcileUnknownCardCharges(new Date(intent.expiresAt!.getTime() + offset));
+      expect(await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).toMatchObject({ status: 'UNKNOWN' });
+    }
+    // Every later cycle, past 48 wall hours and well beyond, sends nothing new.
+    for (const at of [hours(25), hours(49), hours(100)]) {
+      expect(await billing.billSubscription((await load(subId)) as never, at)).toBe('pending');
+      expect(fake.keysSeen).toEqual([expect.stringMatching(/:a0$/)]);
+      expect(fake.captures.size).toBe(0);
+      expect(await facts(subId, periodKey)).toMatchObject({ status: 'ACTIVE', failedAttempts: 0, attempts: 1, failures: 0, successes: 0 });
+      expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } }))).toMatchObject({
+        billingConfirmationPausedAt: expect.any(Date), billingEnforcementDueAt: null });
+    }
+    const hold = await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: intent.id } });
+    expect(hold.status).toBe('ACTIVE');
+    expect((await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { id: hold.clockId } })).pausedAt).not.toBeNull();
+    expect(await app.prisma.billingFeeNotice.count({ where: { subscriptionId: subId } })).toBe(0);
+
+    // The processor finally reports the capture: the ONE instruction settles, once.
+    fake.captures.set(intent.clientKey!, { status: 'succeeded', providerRef: `ch_late_${nanoid(6)}` });
+    await billing.reconcileUnknownCardCharges(hours(101));
+    await billing.reconcileUnknownCardCharges(hours(102));
+    expect(await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).toMatchObject({ status: 'CAPTURED' });
+    expect(await facts(subId, periodKey)).toMatchObject({ attempts: 1, failures: 0, successes: 1 });
+    expect(fake.keysSeen).toHaveLength(1);
+    expect((await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: intent.id } })).status).toBe('PAID');
+  });
+});
+
 describe('[M-01 · operations] the kill switch and the unreachable processor', () => {
   it('the processor cannot say: the intent waits, its age is published, no instruction is sent; when it can, it settles', async () => {
     const due = new Date(Date.now() - DAY); const periodKey = due.toISOString().slice(0, 10);
@@ -286,12 +337,21 @@ describe('[M-01 · operations] the kill switch and the unreachable processor', (
     fake.lookupMode = 'normal';
     expect((await billing.reconcileUnknownCardCharges()).settled).toBeGreaterThanOrEqual(1);
     expect(await facts(first, periodKey)).toMatchObject({ successes: 1, failures: 0, ledger: 1, nextBillingDate: due.getTime() + 7 * DAY });
-    // Reachable: retrieved and settled inside the charge path — nothing sent.
+    // Reachable: [#1393] the live intent is a payment being confirmed, so it
+    // holds the shared clock and the charge path stops before any instruction
+    // (the belt behind it stays as defence in depth). Nothing is sent; the
+    // reconciler retrieves the intent by its key and settles it once.
     const second = await makeCardSub(due); await plant(second);
-    expect(await bill(second)).toBe('succeeded');
+    const lookupsBefore = fake.lookups;
+    expect(await bill(second)).toBe('pending');
     expect(fake.keysSeen).toHaveLength(0);
-    expect(fake.lookups).toBeGreaterThanOrEqual(2);
+    const planted = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: second, paymentMethod: 'CARD' } });
+    expect(await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: planted.id } })).toMatchObject({ status: 'ACTIVE' });
+    expect((await billing.reconcileUnknownCardCharges()).settled).toBeGreaterThanOrEqual(1);
+    expect(fake.keysSeen).toHaveLength(0);
+    expect(fake.lookups).toBeGreaterThan(lookupsBefore);
     expect(await facts(second, periodKey)).toMatchObject({ successes: 1, failures: 0, ledger: 1, nextBillingDate: due.getTime() + 7 * DAY });
+    expect(await app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: planted.id } })).toMatchObject({ status: 'PAID' });
   });
 
   it('CARD_RAIL_KILL=1 stops new instructions — and never the reconciler', async () => {

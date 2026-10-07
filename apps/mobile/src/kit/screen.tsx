@@ -6,6 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { T } from './text';
+import { touchTarget } from './touch-target';
 
 /** Full-screen scaffold on paper. `bleed` skips the top inset (masthead screens
  *  paint their own gradient under the status bar).
@@ -61,6 +62,7 @@ export function CircleChip({
       hitSlop={8}
       accessibilityRole="button"
       accessibilityLabel={label ?? icon.replace(/-/g, ' ')}
+      style={touchTarget(size)}
     >
       {({ pressed }) => (
         <View

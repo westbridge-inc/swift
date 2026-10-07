@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -61,6 +61,7 @@ const post = (url: string, payload: unknown, token: string) =>
   app.inject({ method: 'POST', url, payload: payload as Record<string, unknown>, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` } });
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
@@ -75,6 +76,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   // [R045-ADS] a cancel now leaves a durable refund intent that references the invoice
   // The refund outbox, intents and items are IMMUTABLE by trigger (deletes are refused) and they RESTRICT

@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useRef, useState } from 'react';
 import { View } from 'react-native';
 import MapView, { type Region } from 'react-native-maps';
@@ -124,6 +125,7 @@ export function LocationPickerScreen() {
             </T>
           </View>
         ) : null}
+        <MapCredits />
         <PillButton label={confirmable ? 'Confirm Pin' : 'Move the map to confirm'} disabled={!confirmable} onPress={confirm} />
       </View>
     </View>

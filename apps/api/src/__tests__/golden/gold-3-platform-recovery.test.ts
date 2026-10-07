@@ -431,9 +431,8 @@ beforeAll(async () => {
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  // The courier routes' storage provider has read UPLOAD_DIR at registration;
-  // nothing else may inherit it (the worker processes spawned below included).
-  vi.unstubAllEnvs();
+  // API and worker keep the same explicit storage root for the whole journey.
+  // Changing live configuration after registration must refuse new uploads.
   await purgeFixtures();
   // Files run one at a time (the guard at the top of this file refuses to load
   // otherwise): nothing another file left in the shared queues (jobs,
@@ -453,6 +452,7 @@ afterAll(async () => {
   const added = [...now].filter((k) => !redisKeysBefore.has(k));
   if (added.length > 0) await app.redis.del(...added);
   await app.close();
+  vi.unstubAllEnvs();
   rmSync(UPLOAD_DIR, { recursive: true, force: true });
 }, 120_000);
 
@@ -508,7 +508,9 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
       });
     } finally {
       vi.unstubAllEnvs();
+      vi.stubEnv('UPLOAD_DIR', UPLOAD_DIR);
     }
+    expect(process.env['UPLOAD_DIR']).toBe(UPLOAD_DIR);
     expect(process.env['LIFECYCLE_V2']).toBe('');
     expect(process.env['ORDER_HOLD_MINUTES']).toBeUndefined();
     expect(held.statusCode, held.body).toBe(201);

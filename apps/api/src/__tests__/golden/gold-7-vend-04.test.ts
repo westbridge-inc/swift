@@ -20,6 +20,7 @@ import { agentCashRoutes } from '../../modules/billing/agent-cash.routes';
 import { SubscriptionService } from '../../modules/subscription/subscription.service';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { startGoldenWorker } from './gold-7-worker';
+import { cleanupBillingClocks } from '../helpers/billing-clock-cleanup';
 
 
 // ---------------------------------------------------------------------------
@@ -157,6 +158,8 @@ async function purgeFixtures() {
     const vendorIds = vendors.map((v) => v.id);
     if (ids.length === 0 && vendorIds.length === 0) return;
     const subIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
+    // The synthetic stores own their clock evidence (RESTRICT in production): remove it first.
+    await cleanupBillingClocks(app.prisma, subIds);
     const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
     const imports = await app.prisma.settlementImport.findMany({ where: { source: { startsWith: 'gold7-vend04-' } }, select: { id: true } });
     await app.prisma.mmgAgentPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { externalId: { startsWith: 'G7AC-' } }] } });
@@ -345,8 +348,10 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
     advanceTo(born.trialEndDate!.getTime() + 1);
     await tick('convert-trials');
     const converted = await subRow(p.subId);
+    // [#1393] The first fee is due at the trial's own end, not whenever the
+    // conversion job happened to run.
     expect({ status: converted.status, isTrialActive: converted.isTrialActive, due: converted.nextBillingDate.getTime() })
-      .toEqual({ status: 'ACTIVE', isTrialActive: false, due: Date.now() });
+      .toEqual({ status: 'ACTIVE', isTrialActive: false, due: born.trialEndDate!.getTime() });
     const period = converted.nextBillingDate;
     const periodKey = period.toISOString().slice(0, 10);
     const ladder = ['PAST_DUE', 'PAST_DUE', 'SUSPENDED'];
@@ -366,20 +371,24 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
       expect(row.nextRetryAt!.getTime()).toBe(Date.now() + DAY);
     }
     const notices = await noticesTo(p.owner.userId);
-    for (const title of ['Subscription payment failed', 'Final warning — payment needed', 'Subscription suspended', 'Subscription billing history']) {
+    for (const title of ['Subscription payment failed', 'Final warning — payment needed', 'Subscription suspended']) {
       expect(notices.filter((n) => n === title)).toHaveLength(1);
     }
     expect(await countEvents(p.subId, 'CHARGE_ATTEMPT')).toBe(3);
     expect(await countEvents(p.subId, 'CHARGE_FAILED')).toBe(3);
     expect(await countEvents(p.subId, 'SUSPENDED')).toBe(1);
-    expect((await eventsOf(p.subId)).filter((e) => e.key.startsWith(`nudge:${p.subId}:`))).toHaveLength(1);
+    // [#1393] The reinstatement nudges run on the shared clock's active time:
+    // the first comes one day after the suspension notice, never with it.
+    const nudges = async () => (await eventsOf(p.subId)).filter((e) => e.key.startsWith(`nudge:${p.subId}:`));
+    expect(await nudges()).toHaveLength(0);
+    expect(notices.filter((n) => n === 'Subscription billing history')).toHaveLength(0);
     expect(await sys(() => app.prisma.notification.count({ where: { userId: admin.userId, title: 'Dunning — final warning issued', data: { path: ['subscriptionId'], equals: p.subId } } }))).toBe(1);
     expect(await vendorRow(p.vendorId)).toEqual({ status: 'SUSPENDED', acceptingOrders: false });
     const suspended = await moneySnapshot(p.subId);
     await tick('process-billing');
     expect(await moneySnapshot(p.subId)).toEqual(suspended);
     expect(await noticesTo(p.owner.userId)).toEqual(notices);
-    expect((await eventsOf(p.subId)).filter((e) => e.key.startsWith(`nudge:${p.subId}:`))).toHaveLength(1);
+    expect(await nudges()).toHaveLength(0); // (the nudge cadence itself: billing-dunning-depth.test.ts)
 
     // The owner can still reach the payment screen. The agent's real signed
     // inquiry and receipt are the boundary; physical collection is excluded.

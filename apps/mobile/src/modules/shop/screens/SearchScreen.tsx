@@ -27,6 +27,7 @@ import {
   SectionHeader,
   T,
 } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 
 // Kit 57–60: idle = headline + history chips + popular rows.
 //
@@ -264,6 +265,7 @@ export function SearchScreen() {
             hitSlop={14}
             accessibilityRole="button"
             accessibilityLabel="Go back"
+            style={touchTarget(24)}
           >
             <Feather name="chevron-left" size={24} color={color.text.primary} />
           </Pressable>

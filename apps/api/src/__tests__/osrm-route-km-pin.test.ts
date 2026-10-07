@@ -15,6 +15,7 @@ import { DEFAULT_DELIVERY_RATES } from '../utils/markup';
 import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
 import { osrmOutcomeCounter } from '../plugins/observability';
 import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // ---------------------------------------------------------------------------
 // [money] The single-leg route as it prices TODAY, pinned before a present but
@@ -46,7 +47,7 @@ const OSRM = 'http://osrm.test';
 // Outside every zone: the formula prices it.
 const PICKUP = { lat: 6.90, lng: -58.10 };
 const DROPOFF = { lat: 6.95, lng: -58.05 };
-// The seeded Central → South zone fare.
+// The Central → South zone fare (2000): no longer seeded, planted by this suite (helpers/zone-fare-fixture).
 const CENTRAL = { lat: 6.81, lng: -58.155 };
 const SOUTH = { lat: 6.755, lng: -58.155 };
 
@@ -79,6 +80,7 @@ let app: FastifyInstance;
 let token: string;
 let seq = 0;
 let restoreTaxiCard: () => Promise<void> = async () => {};
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -144,12 +146,14 @@ beforeAll(async () => {
     delete process.env['OSRM_URL'];
   }
   restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
   await restoreTaxiCard();
+  await removeGeorgetownPair();
   await purgeFixtures(app);
   await app.close();
 });

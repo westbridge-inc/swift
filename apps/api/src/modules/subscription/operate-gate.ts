@@ -1,4 +1,4 @@
-import type { Prisma, SubscriptionStatus } from '@prisma/client';
+import type { Prisma, Subscription, SubscriptionStatus } from '@prisma/client';
 
 // THE canOperate predicate (lifecycle/billing spec §14, G-BILL-03) — the ONE
 // place that answers "may this subscription state operate right now?". Before
@@ -24,8 +24,10 @@ export type SubscriptionOperability =
   | { operable: true }
   | { operable: false; why: 'MISSING' | 'STATUS' | 'GRACE_LAPSED' | 'BILLING_STOPPED'; status?: SubscriptionStatus };
 
+export type OperabilitySubscription = Pick<Subscription, 'status' | 'gracePeriodEnd' | 'autoRenew' | 'currentPeriodEnd' | 'billingConfirmationPausedAt' | 'billingEnforcementDueAt' | 'autoSuspendEnabled'>;
+
 export function subscriptionOperability(
-  sub: { status: SubscriptionStatus; gracePeriodEnd: Date | null; autoRenew: boolean; currentPeriodEnd: Date } | null | undefined,
+  sub: OperabilitySubscription | null | undefined,
   opts: { missingRow: 'BLOCK' | 'GRANDFATHER' },
   now = new Date(),
 ): SubscriptionOperability {
@@ -35,7 +37,8 @@ export function subscriptionOperability(
   if (!OPERABLE_STATUSES.includes(sub.status)) {
     return { operable: false, why: 'STATUS', status: sub.status };
   }
-  if (sub.status === 'PAST_DUE' && sub.gracePeriodEnd && sub.gracePeriodEnd < now) {
+  const graceEnd = sub.billingEnforcementDueAt;
+  if (sub.status === 'PAST_DUE' && sub.autoSuspendEnabled && !sub.billingConfirmationPausedAt && graceEnd && graceEnd <= now) {
     return { operable: false, why: 'GRACE_LAPSED', status: sub.status };
   }
   // [E12] A partner who stopped weekly billing works exactly until the period
@@ -53,7 +56,7 @@ export function inoperableSubscriptionWhere(now = new Date()): Prisma.Subscripti
   return {
     OR: [
       { status: { notIn: [...OPERABLE_STATUSES] } },
-      { status: 'PAST_DUE', gracePeriodEnd: { lt: now } },
+      { status: 'PAST_DUE', autoSuspendEnabled: true, billingConfirmationPausedAt: null, billingEnforcementDueAt: { lte: now } },
       // [E12] Billing stopped and the paid period (or trial) over — the same
       // refusal subscriptionOperability makes, so a catalogue read never shows
       // a store the gate would refuse.

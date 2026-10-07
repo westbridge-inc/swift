@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
@@ -106,6 +106,7 @@ function multipartBody(fields: Record<string, string>, file?: { mime: string; co
 }
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   process.env['NODE_ENV'] = 'development';
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
@@ -124,6 +125,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await app.prisma.houseAd.deleteMany({ where: { id: { in: houseAdIds } } });
   await app.prisma.adCreative.deleteMany({ where: { campaignId: { in: campaignIds } } });
   await app.prisma.advertiserMember.deleteMany({ where: { advertiserId: { in: advertiserIds } } });

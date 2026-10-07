@@ -10,8 +10,10 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { BillingService, type BillingObserver } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
-import { SandboxMmgProvider } from '../providers/mmg/mmg-provider';
+import { SandboxMmgProvider, sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
+import { mmgTerminalProof } from '../modules/billing/mmg-terminal-evidence';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // [M-04 · S0] MMG terminal status and dunning outcome are ONE transition.
@@ -82,20 +84,17 @@ async function makeMoverWithMmgSub(opts: { due: Date; failedAttempts?: number })
   return { userId: user.id, riderId: rider.id, subId: sub.id };
 }
 
-/** A live MMG request whose sandbox lookup will come back with `outcome`. */
-async function pendingPayment(subId: string, due: Date, outcome: 'reversed' | 'expired' | 'pending', ageMs = HOUR) {
-  return app.prisma.subscriptionPayment.create({
-    data: {
-      subscriptionId: subId,
-      amount: 12000,
-      status: 'PENDING',
-      paymentMethod: 'MOBILE_MONEY',
-      externalRef: `mmgtx_${outcome}_amt1200000_${nanoid(8)}`,
-      periodStart: due,
-      periodEnd: new Date(due.getTime() + 7 * DAY),
-      createdAt: new Date(Date.now() - ageMs),
-    },
-  });
+/** [#1393] A live MMG request issued by the real intent machine (our merchant
+ *  reference, the attempt's amount and pinned currency), whose sandbox lookup
+ *  then answers `outcome`. Only an answer bound to the request it was asked
+ *  about may terminalize it; a hand-written row is held for a person instead
+ *  (billing-mmg-negative-integration.test.ts). */
+async function issuedRequest(subId: string, outcome: 'reversed' | 'expired' | 'pending') {
+  expect(await billing.billSubscription(await subWithRelations(subId))).toBe('pending');
+  const payment = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: subId }, orderBy: { createdAt: 'desc' } });
+  expect(payment).toMatchObject({ status: 'PENDING', paymentMethod: 'MOBILE_MONEY' });
+  sandboxSetTxStatus(payment.externalRef!, outcome);
+  return payment;
 }
 
 async function subWithRelations(subId: string) {
@@ -127,11 +126,14 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, subIds);
   vi.restoreAllMocks();
   await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+  // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
@@ -141,7 +143,7 @@ describe('[M-04] the poller: terminal status and dunning outcome land together o
   it('a crash after the terminal CAS rolls the payment back to PENDING — and the next tick applies exactly one outcome', async () => {
     const due = new Date(Date.now() - 60_000);
     const { subId, userId } = await makeMoverWithMmgSub({ due });
-    const payment = await pendingPayment(subId, due, 'reversed');
+    const payment = await issuedRequest(subId, 'reversed');
     const before = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
 
     armed = true;
@@ -175,10 +177,13 @@ describe('[M-04] the poller: terminal status and dunning outcome land together o
     expect(await failedEvents(subId)).toBe(1);
   });
 
-  it('the suspending failure is one transition too: payment, event, SUSPENDED state, the rider offline, the SUSPENDED event', async () => {
-    const due = new Date(Date.now() - 60_000);
-    const { subId, riderId } = await makeMoverWithMmgSub({ due, failedAttempts: 2 }); // the third failure suspends
-    const payment = await pendingPayment(subId, due, 'reversed');
+  it('the suspending failure is one transition too: payment, event and the exhausted ladder; the suspension that follows is one transition: SUSPENDED state, the rider offline, the SUSPENDED event', async () => {
+    // [#1393] The owner's two days of grace have run (due 49 hours ago); the
+    // third failure is the last rung. A confirmation's resolution never
+    // suspends in its own instant: the next billing run does, in one step.
+    const due = new Date(Date.now() - 49 * HOUR);
+    const { subId, riderId } = await makeMoverWithMmgSub({ due, failedAttempts: 2 }); // the third failure exhausts the ladder
+    const payment = await issuedRequest(subId, 'reversed');
 
     armed = true;
     await billing.pollPendingMmgCharges();
@@ -193,9 +198,17 @@ describe('[M-04] the poller: terminal status and dunning outcome land together o
     const p2 = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: payment.id } });
     const s2 = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
     const r2 = await app.prisma.rider.findUniqueOrThrow({ where: { id: riderId } });
-    expect({ payment: p2.status, sub: s2.status, attempts: s2.failedAttempts, online: r2.isOnline, available: r2.isAvailable })
-      .toEqual({ payment: 'FAILED', sub: 'SUSPENDED', attempts: 3, online: false, available: false });
-    expect(s2.suspendedAt).not.toBeNull();
+    expect({ payment: p2.status, sub: s2.status, attempts: s2.failedAttempts, online: r2.isOnline })
+      .toEqual({ payment: 'FAILED', sub: 'PAST_DUE', attempts: 3, online: true });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } })).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'SUSPENDED' } })).toBe(0);
+
+    await billing.runBillingCycle(tick(2));
+    const s3 = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    const r3 = await app.prisma.rider.findUniqueOrThrow({ where: { id: riderId } });
+    expect({ sub: s3.status, attempts: s3.failedAttempts, online: r3.isOnline, available: r3.isAvailable })
+      .toEqual({ sub: 'SUSPENDED', attempts: 3, online: false, available: false });
+    expect(s3.suspendedAt).not.toBeNull();
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'CHARGE_FAILED' } })).toBe(1);
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'SUSPENDED' } })).toBe(1);
   });
@@ -203,7 +216,7 @@ describe('[M-04] the poller: terminal status and dunning outcome land together o
   it('two pollers racing on the same terminal payment produce ONE outcome', async () => {
     const due = new Date(Date.now() - 60_000);
     const { subId } = await makeMoverWithMmgSub({ due });
-    await pendingPayment(subId, due, 'reversed');
+    await issuedRequest(subId, 'reversed');
     await Promise.all([billing.pollPendingMmgCharges(), billing.pollPendingMmgCharges()]);
     const s = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
     expect({ status: s.status, failedAttempts: s.failedAttempts }).toEqual({ status: 'PAST_DUE', failedAttempts: 1 });
@@ -294,14 +307,26 @@ describe('[M-04] the biller: a synchronous MMG decline is the same one transitio
 });
 
 describe('[M-04 · operations clause] the repair pass: a terminal payment without an outcome is applied once, and only where it belongs', () => {
+  /** [#1393] The residue the repair pass applies: a request issued under our
+   *  reference whose terminal status landed WITH MMG's bound terminal proof
+   *  (the versioned record a bound lookup leaves), while its dunning outcome
+   *  never did. Historical status text alone is not proof: such a row is held
+   *  for a person (billing-mmg-negative-integration.test.ts). */
   async function terminalPayment(subId: string, due: Date, status: 'FAILED' | 'EXPIRED') {
-    return app.prisma.subscriptionPayment.create({
+    const periodKey = due.toISOString().slice(0, 10);
+    const clientKey = `sub:${subId}:${periodKey}:a0`;
+    await app.prisma.billingEvent.create({ data: { subscriptionId: subId, type: 'CHARGE_ATTEMPT', amount: 12000, currencyCode: 'GYD', idempotencyKey: `charge:${clientKey.slice(4)}` } });
+    const externalRef = `mmgtx_expired_amt1200000_${nanoid(8)}`;
+    const row = await app.prisma.subscriptionPayment.create({
       data: {
         subscriptionId: subId, amount: 12000, status, paymentMethod: 'MOBILE_MONEY', failureCode: 'REQUEST_EXPIRED',
-        externalRef: `mmgtx_expired_amt1200000_${nanoid(8)}`, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+        externalRef, clientKey, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
         createdAt: new Date(Date.now() - 2 * HOUR), lastPolledAt: new Date(Date.now() - HOUR),
       },
     });
+    const proof = mmgTerminalProof(row, 'GYD', { status: 'expired', transactionId: externalRef, reference: clientKey, amountMinor: 1_200_000, currencyCode: 'GYD' },
+      'LOOKUP', `fixture-lookup-${row.id}`, new Date(Date.now() - HOUR));
+    return app.prisma.subscriptionPayment.update({ where: { id: row.id }, data: { failureRaw: { mmgTerminalEvidence: proof } } });
   }
 
   it('a FAILED row whose period has no outcome gets exactly one, and a second pass finds nothing', async () => {

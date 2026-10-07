@@ -170,3 +170,45 @@ export async function consumeSignupContinuation(
   ));
   return consumed === 1;
 }
+
+// ── [L04 · AUTH-2] Password-reset purpose ───────────────────────────────────
+// A code texted by /password/reset-request lives in its OWN record and
+// generation keys, so it can only reset a password: verify-otp reads the
+// sign-in record above and never this one, and reset reads only this one. A
+// sign-in code therefore cannot reset a password, and a reset code cannot open
+// a session. Same hash tag as the sign-in keys (one Redis Cluster slot).
+function passwordResetKeysFor(phone: string): { record: string; generation: string } {
+  const slot = phoneSlot(phone);
+  return {
+    record: `password_reset_otp:{${slot}}:record`,
+    generation: `password_reset_otp:{${slot}}:generation`,
+  };
+}
+
+export async function storePasswordResetOtp(
+  redis: Pick<Redis, 'eval'>,
+  phone: string,
+  otp: string,
+): Promise<void> {
+  const generation = randomBytes(24).toString('base64url');
+  await storeFencedOtp(redis, passwordResetKeysFor(phone), otp, generation, SIGNUP_CONTINUATION_TTL_S);
+}
+
+export async function verifyPasswordResetOtp(
+  redis: Pick<Redis, 'eval'>,
+  phone: string,
+  code: string,
+): Promise<{ valid: boolean; reason?: string; generation?: string }> {
+  const keys = passwordResetKeysFor(phone);
+  // Nothing else to supersede on success: the record itself is the third key.
+  return verifyFencedOtp(redis, { ...keys, invalidateOnSuccess: keys.record }, code);
+}
+
+export async function consumePasswordResetOtpGeneration(
+  redis: Pick<Redis, 'eval'>,
+  phone: string,
+  generation: string,
+): Promise<boolean> {
+  const { generation: key } = passwordResetKeysFor(phone);
+  return Number(await redis.eval(DISCARD_GENERATION_SCRIPT, 1, key, generation)) === 1;
+}

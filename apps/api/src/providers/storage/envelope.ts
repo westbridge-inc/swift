@@ -22,6 +22,15 @@ export interface KeyProvider {
   unwrapDek(wrapped: Buffer): Promise<Buffer>;
 }
 
+const KEY_BYTES = 32;
+const IV_BYTES = 12;
+const TAG_BYTES = 16;
+const WRAPPED_KEY_BYTES = IV_BYTES + TAG_BYTES + KEY_BYTES;
+
+function requireLength(value: Buffer, length: number, name: string): void {
+  if (!Buffer.isBuffer(value) || value.length !== length) throw new Error(`Invalid ${name} length`);
+}
+
 /** KEK from MASTER_KEK (base64, 32 bytes); wrap = AES-256-GCM over the DEK. */
 export class EnvKeyProvider implements KeyProvider {
   private kek: Buffer;
@@ -35,18 +44,20 @@ export class EnvKeyProvider implements KeyProvider {
   }
 
   async wrapDek(dek: Buffer): Promise<Buffer> {
+    requireLength(dek, KEY_BYTES, 'DEK');
     const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', this.kek, iv);
+    const cipher = crypto.createCipheriv('aes-256-gcm', this.kek, iv, { authTagLength: TAG_BYTES });
     const ct = Buffer.concat([cipher.update(dek), cipher.final()]);
     // One blob: iv (12) | authTag (16) | ciphertext
     return Buffer.concat([iv, cipher.getAuthTag(), ct]);
   }
 
   async unwrapDek(wrapped: Buffer): Promise<Buffer> {
+    requireLength(wrapped, WRAPPED_KEY_BYTES, 'wrapped DEK');
     const iv = wrapped.subarray(0, 12);
     const tag = wrapped.subarray(12, 28);
     const ct = wrapped.subarray(28);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', this.kek, iv);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', this.kek, iv, { authTagLength: TAG_BYTES });
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(ct), decipher.final()]);
   }
@@ -57,14 +68,18 @@ export function generateDek(): Buffer {
 }
 
 export function encryptBuffer(plaintext: Buffer, dek: Buffer): { ciphertext: Buffer; iv: Buffer; authTag: Buffer } {
+  requireLength(dek, KEY_BYTES, 'DEK');
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', dek, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', dek, iv, { authTagLength: TAG_BYTES });
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   return { ciphertext, iv, authTag: cipher.getAuthTag() };
 }
 
 export function decryptBuffer(ciphertext: Buffer, dek: Buffer, iv: Buffer, authTag: Buffer): Buffer {
-  const decipher = crypto.createDecipheriv('aes-256-gcm', dek, iv);
+  requireLength(dek, KEY_BYTES, 'DEK');
+  requireLength(iv, IV_BYTES, 'IV');
+  requireLength(authTag, TAG_BYTES, 'authentication tag');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', dek, iv, { authTagLength: TAG_BYTES });
   decipher.setAuthTag(authTag);
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }

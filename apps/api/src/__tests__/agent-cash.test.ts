@@ -6,6 +6,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { ensureSan } from '../modules/billing/san.service';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // Agent-cash ingestion [san spec PARTS 4/13] against the real engine:
@@ -87,6 +88,9 @@ afterAll(async () => {
     await prisma.$transaction(async (tx) => {
       const kept = await retainedCohort(tx, { subscriptionIds: subIds });
       const goneSubs = without(subIds, kept.subscriptionIds);
+      // [#1393] Every suite subscription's shared dunning clock evidence goes (a
+      // kept one keeps its money records, never a pending fee demand or hold).
+      await cleanupBillingClocks(tx, subIds);
       await tx.mmgAgentPayment.deleteMany({ where: { id: { in: paymentIds }, OR: [{ subscriptionId: null }, { subscriptionId: { in: goneSubs } }] } });
       await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
       await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: goneSubs } } });

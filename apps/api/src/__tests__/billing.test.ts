@@ -1,3 +1,4 @@
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -34,12 +35,13 @@ let billing: BillingService;
 const createdUserIds: string[] = [];
 const createdSubIds: string[] = [];
 
+const phoneRun = Date.now().toString().slice(-7);
 let phoneSeq = 0;
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   phoneSeq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200055${String(phoneSeq).padStart(2, '0')}`,
+      phone: `+59255${phoneRun}${String(phoneSeq).padStart(2, '0')}`,
       firstName: 'Step5',
       lastName: `User${phoneSeq}`,
       roles,
@@ -73,7 +75,7 @@ async function makeVendorWithSub(opts: { rate: number; prepaid: number; due: Dat
     data: {
       ownerId: owner.id,
       name: `Billing Vendor ${phoneSeq}`,
-      slug: `billing-vendor-${phoneSeq}`,
+      slug: `billing-vendor-${phoneRun}-${phoneSeq}`,
       vendorType: 'RESTAURANT',
       phone: `+5920006${String(phoneSeq).padStart(3, '0')}`,
       addressLine1: '1 Billing Street',
@@ -167,6 +169,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupPayerBillingClocks(app.prisma, createdUserIds);
   if (createdUserIds.length) {
     await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
@@ -407,6 +410,16 @@ describe('Suspended movers are kicked and blocked', () => {
     await billing.runBillingCycle(new Date(now.getTime() + 25 * HOUR));
     await billing.runBillingCycle(new Date(now.getTime() + 50 * HOUR));
 
+    // [#1393] Each card charge holds the shared clock while it is confirmed. A
+    // confirmation resolution never suspends in its own instant: the third
+    // decline leaves the payer PAST_DUE with the 48-hour grace spent and the
+    // next run due now, and that next hourly run suspends.
+    const third = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
+    expect(third).toMatchObject({ status: 'PAST_DUE', failedAttempts: 3 });
+    expect(third.billingEnforcementDueAt!.getTime()).toBeLessThanOrEqual(now.getTime() + 50 * HOUR);
+    expect(third.nextRetryAt!.getTime()).toBeLessThanOrEqual(now.getTime() + 51 * HOUR);
+    await billing.runBillingCycle(new Date(now.getTime() + 51 * HOUR));
+
     const sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
     expect(sub.status).toBe('SUSPENDED');
 
@@ -592,9 +605,12 @@ describe('Subscription trial lifecycle', () => {
     const subscriptions = new SubscriptionService(app.prisma);
     const sub = await subscriptions.startTrialForVendor(await makeBareVendor('RESTAURANT'));
     createdSubIds.push(sub.id);
+    // [#1393] A trial ends when its period does: the trial end, the period end
+    // and the first due date are one instant (startTrial writes them together).
+    const ended = new Date(Date.now() - 1000);
     await app.prisma.subscription.update({
       where: { id: sub.id },
-      data: { trialEndDate: new Date(Date.now() - 1000) },
+      data: { trialEndDate: ended, currentPeriodStart: new Date(ended.getTime() - 14 * DAY), currentPeriodEnd: ended, nextBillingDate: ended },
     });
 
     const converted = await subscriptions.convertExpiredTrials();
@@ -604,13 +620,17 @@ describe('Subscription trial lifecycle', () => {
     expect(after.status).toBe('ACTIVE');
     expect(after.isTrialActive).toBe(false);
     expect(after.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now());
+    // The obligation keeps its own due instant, the trial end, not the run time of the job.
+    expect(after.nextBillingDate.getTime()).toBe(ended.getTime());
   });
 });
 
 describe('F-012-05 — suspension is ONE authority generation [REPORT-012]', () => {
   it('with the vendor row locked, the subscription cannot flip SUSPENDED ahead of the vendor write', async () => {
-    // A store one failed charge from suspension, with nothing prepaid.
-    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - HOUR) });
+    // A store one failed charge from suspension, with nothing prepaid. [#1393]
+    // One charge from suspension now also means the owner's 48-hour grace has
+    // run: due 49 hours ago on the shared clock.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - 49 * HOUR) });
     await app.prisma.subscription.update({
       where: { id: fx.subId },
       data: {
@@ -699,8 +719,40 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     expect(vendB.acceptingOrders).toBe(false); // document truth gates commerce
   });
 
+  it.each([
+    ['SUSPENDED', 'ADMIN'], ['SUSPENDED', null], ['PENDING_APPROVAL', null], ['CLOSED', null],
+  ] as const)('a store already %s (source %s) keeps its state when its fee then goes unpaid, so a fee payment never reopens it', async (status, source) => {
+    const adminToken = (await makeUserWithSession(['ADMIN'], 'ADMIN')).token;
+    // [#1393] Due 49 hours ago: the 48-hour grace has run, so the third failure suspends.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - 49 * HOUR) });
+    // Suspended first for another reason (an admin, or a suspension that
+    // recorded none), or not open at all (awaiting approval, or closed).
+    await app.prisma.vendor.update({ where: { id: fx.vendorId }, data: { status, acceptingOrders: false, suspensionSource: source } });
+    // The weekly fee then goes unpaid: the third failure suspends billing.
+    await app.prisma.subscription.update({
+      where: { id: fx.subId },
+      data: { status: 'PAST_DUE', failedAttempts: 2, nextRetryAt: new Date(Date.now() - HOUR), isInGracePeriod: true, gracePeriodEnd: new Date(Date.now() - HOUR) },
+    });
+    await billing.runBillingCycle(new Date());
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } })).status).toBe('SUSPENDED');
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: fx.vendorId } }))
+      .toMatchObject({ status, acceptingOrders: false, suspensionSource: source });
+
+    // The owner pays the fee: billing gives back only what billing took.
+    const res = await injectWithApproval(app, {
+      method: 'POST', url: `/api/v1/admin/subscriptions/${fx.subId}/topup`,
+      payload: { amount: 100000, reference: `KEEPSOURCE-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` },
+    });
+    expect(res.statusCode, res.payload).toBe(200);
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } })).status).toBe('ACTIVE');
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: fx.vendorId } }))
+      .toMatchObject({ status, acceptingOrders: false, suspensionSource: source });
+  });
+
   it('a crash between the failure record and its outcome cannot suppress retries forever — the outcome RESUMES [F-013-09]', async () => {
-    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - HOUR) });
+    // [#1393] Due 49 hours ago: the 48-hour grace has run, so the third failure suspends.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - 49 * HOUR) });
     const sub = await app.prisma.subscription.update({
       where: { id: fx.subId },
       data: {

@@ -10,6 +10,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { postLedger, topupPostings, ensureLedgerAccounts } from '../modules/billing/ledger';
 import { runBillingInvariants } from '../modules/billing/invariants';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
 grantSuiteCapability('ddl');
@@ -151,6 +152,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, createdSubIds);
   // Ledger rows are append-only BY LAW — they stay. Everything else cleans up;
   // orphaned subledger rows are invisible to the invariants (no wallet row).
   if (createdSubIds.length) {

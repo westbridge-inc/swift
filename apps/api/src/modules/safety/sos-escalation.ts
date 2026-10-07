@@ -1,9 +1,9 @@
 import type { PrismaClient, SosEscalationChannel } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, isReviewTenantId } from '../notification/notification.service';
 import { openOpsAlert } from './ops-alert';
-import { warRoomsFor } from './war-room';
+import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { isOwnNumber } from './emergency-contact.service';
 import { log } from '../../utils/logger';
 import { sosEscalationCounter, sosEscalationGauge } from '../../plugins/observability';
@@ -121,7 +121,9 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
     }
     case 'WAR_ROOM': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
-      const rooms = warRoomsFor(alert.tenantId);
+      // [GUARDRAILS §3] the store-review fiction's SOS stays in its own tenant's room: no platform operator sees a demo emergency
+      const fiction = alert.tenantId ? await isReviewTenantId(prisma, alert.tenantId) : false;
+      const rooms = warRoomsFor(alert.tenantId).filter((room) => !(fiction && room === OPS_WAR_ROOM));
       // [PRIV2-S2] The war room is the one live surface that may carry the
       // words the person typed: only ADMIN / SUPER_ADMIN sockets join these
       // rooms (war-room.ts), in-process, no relay, no lock screen. The other
@@ -153,7 +155,9 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       const { getChannels } = await import('../../providers/notifications/channels');
       const who = authority.who || 'Someone you know';
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';
-      await getChannels().sms.sendSms(contact.phoneE164, `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`);
+      // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
+      const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
+      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
       return { status: 'SENT', receipt: { id: contact.id, ok: true, ...(authority.fromEscrow ? { source: 'safety-escrow' } : {}) } };
     }
     case 'EVIDENCE': {

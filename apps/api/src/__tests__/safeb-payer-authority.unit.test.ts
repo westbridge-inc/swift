@@ -6,6 +6,23 @@ import { IdentityService } from '../modules/integrity/identity.service';
 import { runIdentityBackfill } from '../modules/integrity/backfill';
 import { TrialEntitlementService } from '../modules/integrity/trial-entitlement.service';
 
+// [#1393] setBillingRail now runs inside the shared weekly-fee authority (the
+// payer and mover-fee locks and the dunning clock). This suite doubles that
+// authority exactly as it doubles persistence: the declaration -> capture ->
+// identity chain below is what it grades, unchanged.
+vi.mock('../modules/subscription/mover-fee-authority', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../modules/subscription/mover-fee-authority')>(),
+  lockFeeCollectionAuthority: async () => ({ allowed: true }),
+}));
+vi.mock('../modules/billing/dunning-clock', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../modules/billing/dunning-clock')>(),
+  lockBillingAuthority: async (db: any, subscriptionId: string) => ({
+    sub: await db.subscription.findUnique({ where: { id: subscriptionId } }), userId: 'synthetic-payer', tenantId: 'safeb-tenant', userStatus: 'ACTIVE',
+  }),
+  currentDunningClock: async () => ({ pausedAt: null }),
+  projectDunningClock: async () => undefined,
+}));
+
 // Real declaration -> capture hook -> identity matcher -> union -> enforcement.
 // Only persistence is doubled. All accounts, payer numbers and grants are synthetic.
 afterEach(() => vi.restoreAllMocks());
@@ -49,6 +66,7 @@ function fixture() {
     subscription: {
       findFirst: vi.fn(async () => null),
       findUnique: vi.fn(async ({ where }: any) => by(state.subscriptions, 'id', where.id)),
+      findUniqueOrThrow: vi.fn(async ({ where }: any) => by(state.subscriptions, 'id', where.id)),
       findMany: vi.fn(async () => state.subscriptions.filter(s => s.mmgPayerMsisdn)),
       update: vi.fn(async ({ where, data }: any) => Object.assign(by(state.subscriptions, 'id', where.id), data)),
     },

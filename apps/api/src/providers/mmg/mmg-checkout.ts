@@ -16,9 +16,9 @@ import { isProduction } from '../../utils/runtime-mode';
 // ---------------------------------------------------------------------------
 // MMG hosted checkout — the partner pays the weekly fee on the MMG page.
 //
-// The source of truth is the MMG UAT package ONLY: the Checkout Flow demo
-// (Python, pyca/cryptography) for the wire format, and the Initiate Flow
-// Postman collection for endpoint and field NAMES. Nothing here is taken from
+// The official merchant page supplies current request/reply fields and codes.
+// The earlier Checkout Flow demo supplies serialization and OAEP parameters;
+// the Initiate Flow Postman collection supplies endpoint and field NAMES. Nothing here is taken from
 // a third-party integration, and no value from either file is in this repo.
 // providers/mmg/CHECKOUT-CONTRACT.md lists what is confirmed and what is not.
 //
@@ -27,10 +27,9 @@ import { isProduction } from '../../utils/runtime-mode';
 //            under MMG_CHECKOUT_PUBLIC_KEY, standard base64 with + → - and
 //            / → _ and the '=' padding KEPT, placed raw in the page URL:
 //            <page>?token=…&merchantId=…&X-Client-ID=…
-//   reply    base64url (padding optional) → the same OAEP under
-//            MMG_CHECKOUT_PRIVATE_KEY → UTF-8 → JSON. Its FIELD NAMES are
-//            UNCONFIRMED, so this module returns the generic object and
-//            describeShape() — never a parsed outcome.
+//   reply    canonical Base64 or Base64-URL (padding optional) → same OAEP
+//            under MMG_CHECKOUT_PRIVATE_KEY → UTF-8 → JSON. This module
+//            returns an object; the billing service validates official fields.
 //
 // [I2] A decrypted reply is a HINT, never proof of payment. The UAT key pair
 // is ONE pair shared with MMG, so anyone holding its public half can mint a
@@ -52,6 +51,9 @@ export const MMG_CHECKOUT_UAT_URL = 'https://mmgpg.mmgtest.net/mmg-pg/web/paymen
 /** Where the sandbox points: a reserved name (RFC 2606) that never resolves.
  *  A sandbox URL can never reach MMG, or anyone else. */
 export const MMG_CHECKOUT_SANDBOX_URL = 'https://mmg-checkout.sandbox.invalid/mmg-pg/web/payments';
+
+/** The obviously fake merchant the sandbox pays. */
+export const SANDBOX_MERCHANT_ID = '0000000';
 
 /** The productDescription of every checkout: the fee is the only thing sold. */
 export const MMG_CHECKOUT_PRODUCT_DESCRIPTION = 'Swift weekly fee';
@@ -90,8 +92,8 @@ export interface MmgCheckoutRequest {
   merchantId: string;
   merchantTransactionId: string;
   productDescription: string;
-  /** Unix SECONDS, an integer — the demo sends int(time.time()). */
-  requestInitiationTime: number;
+  /** Decimal unix seconds string, as shown by the official merchant-page sample. */
+  requestInitiationTime: string;
   merchantName: string;
 }
 
@@ -160,15 +162,15 @@ export function checkoutPageUrl(env: Record<string, string | undefined> = proces
   return `${url.origin}${url.pathname}`;
 }
 
-/** Unix seconds, as the demo computes int(time.time()). */
-export function requestInitiationTime(now: Date): number {
-  return Math.floor(now.getTime() / 1000);
+/** The newer official sample represents whole unix seconds as a string. */
+export function requestInitiationTime(now: Date): string {
+  return String(Math.floor(now.getTime() / 1000));
 }
 
 // -- The request ----------------------------------------------------------------
 
 const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
-const MERCHANT_MSISDN = /^\d{7,15}$/;
+const MERCHANT_MSISDN = /^\d{7}$/;
 
 function shortAscii(value: string, what: string, max: number): string {
   if (!PRINTABLE_ASCII.test(value) || value.length > max || value.trim() !== value) {
@@ -180,14 +182,14 @@ function shortAscii(value: string, what: string, max: number): string {
 /** Validates every field and returns them in the demo order. */
 export function buildCheckoutRequest(input: MmgCheckoutRequest): MmgCheckoutRequest {
   if (!/^\d+$/.test(input.amount)) throw new MmgCheckoutError('INVALID_REQUEST', 'amount must be a string of digits.');
-  if (!MERCHANT_MSISDN.test(input.merchantId)) {
-    throw new MmgCheckoutError('INVALID_REQUEST', 'merchantId must be the merchant MSISDN, 7-15 digits.');
+  if (input.merchantId.length !== 7 || !MERCHANT_MSISDN.test(input.merchantId)) {
+    throw new MmgCheckoutError('INVALID_REQUEST', 'merchantId must be the merchant MSISDN, exactly 7 digits.');
   }
   if (!MERCHANT_TRANSACTION_ID_SHAPE.test(input.merchantTransactionId)) {
     throw new MmgCheckoutError('INVALID_REQUEST', 'merchantTransactionId must be 18 digits (newMerchantTransactionId).');
   }
-  if (!Number.isSafeInteger(input.requestInitiationTime) || input.requestInitiationTime <= 0) {
-    throw new MmgCheckoutError('INVALID_REQUEST', 'requestInitiationTime must be a positive integer of unix seconds.');
+  if (typeof input.requestInitiationTime !== 'string' || !/^[1-9][0-9]{0,9}$/.test(input.requestInitiationTime) || input.requestInitiationTime.trim() !== input.requestInitiationTime) {
+    throw new MmgCheckoutError('INVALID_REQUEST', 'requestInitiationTime must be a positive decimal string of unix seconds, at most 10 digits.');
   }
   return {
     secretKey: shortAscii(input.secretKey, 'The secret key', 256),
@@ -267,23 +269,26 @@ export function buildCheckoutUrl(page: string, token: string, merchantId: string
 
 // -- The reply ------------------------------------------------------------------
 
-/**
- * base64url with the padding optional: a token may arrive with its '='
- * padding or without it (the demo re-pads before decoding). The re-padding is
- * to a multiple of four — never four '=' on an already-aligned token — and a
- * token that IS padded must be padded correctly. Any character outside the
- * base64url alphabet is refused, never skipped.
- */
+/** Strict standard Base64 (official response instructions) or Base64-URL
+ *  (UAT demo), with optional correct padding and canonical unused bits.
+ *  A mixed alphabet, whitespace or malformed encoding is never repaired. */
 export function decodeCheckoutToken(token: string): Buffer {
-  const match = /^([A-Za-z0-9_-]+)(={0,2})$/.exec(token);
-  if (!match) throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token is not base64url.');
+  const match = /^([A-Za-z0-9+/_-]+)(={0,2})$/.exec(token);
+  if (!match || match[0].length !== token.length || (/[+/]/.test(token) && /[-_]/.test(token))) {
+    throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token is not canonical Base64 or Base64-URL.');
+  }
   const body = match[1] as string;
   const padding = (match[2] as string).length;
   const leftover = body.length % 4;
   if (leftover === 1) throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token has an impossible base64 length.');
   const needed = (4 - leftover) % 4;
   if (padding !== 0 && padding !== needed) throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token is padded wrongly.');
-  return Buffer.from(`${body.replace(/-/g, '+').replace(/_/g, '/')}${'='.repeat(needed)}`, 'base64');
+  const normalized = body.replace(/-/g, '+').replace(/_/g, '/');
+  const decoded = Buffer.from(`${normalized}${'='.repeat(needed)}`, 'base64');
+  if (decoded.toString('base64').replace(/=+$/, '') !== normalized) {
+    throw new MmgCheckoutError('TOKEN_MALFORMED', 'The MMG token has noncanonical base64 bits.');
+  }
+  return decoded;
 }
 
 /** Strict UTF-8 (the demo decodes with .decode()): an invalid byte is a
@@ -292,10 +297,8 @@ export function decodeCheckoutToken(token: string): Buffer {
 const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /**
- * Opens an MMG reply token into the generic object it carries. The field
- * names inside are UNCONFIRMED (CHECKOUT-CONTRACT.md U1–U3): read nothing
- * from it but describeShape() until MMG or the first sandbox run confirms
- * them — and even then it is a hint, never proof [I2].
+ * Opens an MMG reply into an object. The billing service validates the official
+ * response fields; decryption alone is never proof of payment [I2].
  */
 export function decryptCheckoutResultToken(token: string, resultPrivateKey: KeyObject): Record<string, unknown> {
   const k = rsaModulusBytes(resultPrivateKey);
@@ -399,6 +402,36 @@ export function describeShape(value: unknown): Record<string, string> {
 
 // -- Configuration --------------------------------------------------------------
 
+/**
+ * [DS632] How MMG's lookup `creationDate` is read: MMG_CHECKOUT_CREATION_ZONE.
+ *  - GUYANA_WALL_CLOCK: a stamp ending in "Z", or with no zone, is Guyana
+ *    wall-clock time; an explicit numeric offset is honoured as stated. This
+ *    is what MMG writes (UAT verified 1 Oct; owner ruling 4 Oct: production
+ *    too): staging and production set it.
+ *  - UTC: "Z" is UTC and an explicit offset is honoured as stated; a stamp
+ *    with no zone cannot be read.
+ * Unset, MMG's payment time cannot be checked against the checkout, so no MMG
+ * payment is confirmed automatically: each one is held for a person. That is
+ * the safety net for a missing setting, never a configuration.
+ */
+export const MMG_CREATION_ZONES = ['GUYANA_WALL_CLOCK', 'UTC'] as const;
+export type MmgCreationZone = (typeof MMG_CREATION_ZONES)[number];
+
+/** The setting exactly as written: a zone, null when unset or empty, or INVALID. */
+function creationZoneSetting(raw: string | undefined): MmgCreationZone | null | 'INVALID' {
+  if (raw === undefined || raw === '') return null;
+  return (MMG_CREATION_ZONES as readonly string[]).includes(raw) ? (raw as MmgCreationZone) : 'INVALID';
+}
+
+/** [DS632] The zone the verifier reads `creationDate` in, or null: unverified,
+ *  and every MMG payment is held for a person. Never throws and never guesses:
+ *  a value that is not exactly one of the two words is null here, and the boot
+ *  guard refuses to start with it (assertMmgCheckoutConfig). */
+export function mmgCreationZone(env: Record<string, string | undefined> = process.env): MmgCreationZone | null {
+  const setting = creationZoneSetting(env['MMG_CHECKOUT_CREATION_ZONE']);
+  return setting === 'INVALID' ? null : setting;
+}
+
 export interface MmgCheckoutConfig {
   /** The MMG hosted-checkout page (checkoutPageUrl). */
   checkoutPage: string;
@@ -416,6 +449,8 @@ export interface MmgCheckoutConfig {
   requestPublicKey: KeyObject;
   /** MMG_CHECKOUT_PRIVATE_KEY — what replies are decrypted with. */
   resultPrivateKey: KeyObject;
+  /** [DS632] MMG_CHECKOUT_CREATION_ZONE (mmgCreationZone); null = unverified. */
+  creationZone: MmgCreationZone | null;
 }
 
 /** On only at exactly '1'. The boot guard refuses any other non-zero spelling. */
@@ -510,7 +545,7 @@ function configValue(raw: string | undefined, name: string, rule: RegExp, what: 
 export function loadMmgCheckoutConfig(env: Record<string, string | undefined> = process.env): MmgCheckoutConfig {
   const production = isProduction(env);
   const checkoutPage = checkoutPageUrl(env);
-  const merchantId = configValue(env['MMG_CHECKOUT_MERCHANT_ID'], 'MMG_CHECKOUT_MERCHANT_ID', MERCHANT_MSISDN, 'the merchant MSISDN, 7-15 digits');
+  const merchantId = configValue(env['MMG_CHECKOUT_MERCHANT_ID'], 'MMG_CHECKOUT_MERCHANT_ID', MERCHANT_MSISDN, 'the merchant MSISDN, exactly 7 digits');
   const clientId = configValue(env['MMG_CHECKOUT_CLIENT_ID'], 'MMG_CHECKOUT_CLIENT_ID', /^[\x21-\x7e]{1,128}$/, '1-128 printable ASCII characters with no spaces');
   const merchantName = configValue(env['MMG_CHECKOUT_MERCHANT_NAME'], 'MMG_CHECKOUT_MERCHANT_NAME', /^[\x20-\x7e]{1,64}$/, 'the merchant name registered with MMG: 1-64 printable ASCII characters with no surrounding spaces');
   const secretKey = configValue(env['MMG_CHECKOUT_SECRET_KEY'], 'MMG_CHECKOUT_SECRET_KEY', /^[\x20-\x7e]{1,256}$/, '1-256 printable ASCII characters with no surrounding spaces');
@@ -524,7 +559,7 @@ export function loadMmgCheckoutConfig(env: Record<string, string | undefined> = 
     merchantId,
     merchantTransactionId: '9'.repeat(18),
     productDescription: MMG_CHECKOUT_PRODUCT_DESCRIPTION,
-    requestInitiationTime: 9_999_999_999,
+    requestInitiationTime: '9999999999',
     merchantName,
   }));
   const k = rsaModulusBytes(requestPublicKey);
@@ -535,19 +570,26 @@ export function loadMmgCheckoutConfig(env: Record<string, string | undefined> = 
         `but a checkout request for this merchant can reach ${widest.length}. Shorten MMG_CHECKOUT_MERCHANT_NAME or use the key MMG issued. Refusing to start.`,
     );
   }
-  return { checkoutPage, merchantId, clientId, merchantName, returnOrigin, secretKey, requestPublicKey, resultPrivateKey };
+  return { checkoutPage, merchantId, clientId, merchantName, returnOrigin, secretKey, requestPublicKey, resultPrivateKey, creationZone: mmgCreationZone(env) };
 }
 
 /**
  * The boot guard (called by assertSafeBootConfig in EVERY mode — staging runs
- * in development mode against MMG UAT). The flag is exactly 0 or 1; once on,
- * the live driver needs its whole configuration, and production never runs
- * the sandbox or a UAT page.
+ * in development mode against MMG UAT). The flag is exactly 0 or 1, and the
+ * creationDate zone one of its two words or unset; once on, the live driver
+ * needs its whole configuration, and production never runs the sandbox or a
+ * UAT page.
  */
 export function assertMmgCheckoutConfig(env: Record<string, string | undefined> = process.env): void {
   const flag = env['MMG_CHECKOUT_ENABLED'];
   if (flag !== undefined && flag !== '' && flag !== '0' && flag !== '1') {
     throw new Error('FATAL: MMG_CHECKOUT_ENABLED must be exactly 0 or 1 — a misspelled switch is not guessed at. Refusing to start.');
+  }
+  // [DS632] The creationDate zone is exactly one of two words, or unset (then
+  // every MMG payment is held for a person). A misspelled zone is not guessed
+  // at, whatever the switch says.
+  if (creationZoneSetting(env['MMG_CHECKOUT_CREATION_ZONE']) === 'INVALID') {
+    throw new Error(`FATAL: MMG_CHECKOUT_CREATION_ZONE must be exactly ${MMG_CREATION_ZONES.join(' or ')}, or unset (then no MMG payment is confirmed automatically) — a misspelled zone is not guessed at. Refusing to start.`);
   }
   if (flag !== '1') return;
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
@@ -569,7 +611,7 @@ export interface MmgCheckoutSession {
   /** Where the partner goes to pay: the MMG page with our encrypted token. */
   checkoutUrl: string;
   merchantTransactionId: string;
-  requestInitiationTime: number;
+  requestInitiationTime: string;
   /** The amount exactly as sent (formatCheckoutAmount). */
   amount: string;
 }
@@ -583,6 +625,10 @@ export interface MmgCheckoutCreate {
 
 export interface MmgCheckoutProvider {
   readonly driver: 'disabled' | 'sandbox' | 'live';
+  /** The merchant MSISDN a checkout pays: what a verifier matches MMG's creditParty against. */
+  readonly merchantId: string | null;
+  /** [DS632] How MMG's lookup creationDate is read; null = unverified, nothing confirms automatically. */
+  readonly creationZone: MmgCreationZone | null;
   /** Builds the MMG page URL for one attempt. Local only: no network. */
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession;
   /** Opens a reply token into its generic object. A hint, never proof [I2]. */
@@ -620,6 +666,8 @@ function createCheckoutWith(parties: CheckoutParties, input: MmgCheckoutCreate):
 /** The flag is off: every door refuses, like the disabled card rail. */
 class DisabledMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'disabled' as const;
+  readonly merchantId = null;
+  readonly creationZone = null;
   createCheckout(_input: MmgCheckoutCreate): MmgCheckoutSession {
     throw new AppError(503, 'MMG_CHECKOUT_DISABLED', 'Paying on the MMG checkout page is not available.');
   }
@@ -630,6 +678,12 @@ class DisabledMmgCheckoutProvider implements MmgCheckoutProvider {
 
 export class LiveMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'live' as const;
+  get merchantId(): string {
+    return this.config.merchantId;
+  }
+  get creationZone(): MmgCreationZone | null {
+    return this.config.creationZone;
+  }
   constructor(private readonly config: MmgCheckoutConfig) {}
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession {
     return createCheckoutWith(this.config, input);
@@ -661,10 +715,12 @@ function oneSharedPair(): SandboxCheckoutKeys {
  */
 export class SandboxMmgCheckoutProvider implements MmgCheckoutProvider {
   readonly driver = 'sandbox' as const;
+  readonly merchantId = SANDBOX_MERCHANT_ID;
   private generated: SandboxCheckoutKeys | null = null;
 
-  /** Keys are made on first use (a 4096-bit pair takes a moment), unless given. */
-  constructor(private readonly given?: SandboxCheckoutKeys) {}
+  /** Keys are made on first use (a 4096-bit pair takes a moment), unless given.
+   *  The creationDate zone is MMG_CHECKOUT_CREATION_ZONE unless given. */
+  constructor(private readonly given?: SandboxCheckoutKeys, readonly creationZone: MmgCreationZone | null = mmgCreationZone()) {}
 
   private keys(): SandboxCheckoutKeys {
     if (this.given) return this.given;
@@ -675,7 +731,7 @@ export class SandboxMmgCheckoutProvider implements MmgCheckoutProvider {
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession {
     return createCheckoutWith({
       checkoutPage: MMG_CHECKOUT_SANDBOX_URL,
-      merchantId: '0000000000',
+      merchantId: SANDBOX_MERCHANT_ID,
       clientId: 'sandbox',
       merchantName: 'Swift Sandbox',
       secretKey: 'sandbox',
@@ -698,7 +754,7 @@ export class SandboxMmgCheckoutProvider implements MmgCheckoutProvider {
   }
 
   /** Plays the MMG return: a reply token carrying whatever object the caller
-   *  chooses (the real field names are UNCONFIRMED), as UTF-8 JSON. */
+   *  chooses (including malformed objects for negative tests), as UTF-8 JSON. */
   sandboxReplyToken(reply: Record<string, unknown>, options: { padded?: boolean } = {}): string {
     const token = toCheckoutToken(publicEncrypt(
       { key: this.keys().result.publicKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
@@ -720,7 +776,7 @@ export function getMmgCheckoutProvider(env: Record<string, string | undefined> =
   }
   switch (driver) {
     case 'sandbox':
-      sandboxProvider ??= new SandboxMmgCheckoutProvider();
+      sandboxProvider ??= new SandboxMmgCheckoutProvider(undefined, mmgCreationZone(env));
       return sandboxProvider;
     case 'live':
       return new LiveMmgCheckoutProvider(loadMmgCheckoutConfig(env));

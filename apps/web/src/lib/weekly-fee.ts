@@ -1,10 +1,14 @@
-// MMG-CHECKOUT-API ca425ee7. Kept identical across the two independently built apps.
+// MMG-CHECKOUT-API ca425ee7, plus the receipt references of section 5. Kept identical across the two independently built apps.
 export type FeeFamily = 'vendor' | 'rider' | 'driver';
 export type CheckoutState = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
 export type PayAction = { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' } | { id: 'MMG_CHECKOUT' | 'CARD'; state: 'off' };
 export interface CheckoutStatus {
   ref: string; status: CheckoutState; amountGyd: number; currencyCode: 'GYD';
   createdAt: string; expiresAt: string; confirmedAt: string | null; subscriptionStatus: string;
+  /** Ours, the reference MMG was sent; what support finds the payment by. Absent from an older API. */
+  swiftReference?: string;
+  /** MMG's transaction, sent only once CONFIRMED. */
+  mmgTransactionId?: string | null;
 }
 export interface FeeSubscription {
   id?: string; status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
@@ -40,6 +44,15 @@ export function checkoutWords(c: CheckoutStatus, returned = false): string {
     case 'EXPIRED': return 'This checkout expired. If you paid, it will be credited once MMG confirms it.';
     case 'HELD': return "We're checking this payment by hand. Don't pay again. Support will contact you.";
   }
+}
+/** The references a partner can quote to support: the Swift reference, and
+ *  MMG's transaction ID only once the payment is CONFIRMED (a transaction MMG
+ *  merely named is never shown as a receipt). */
+export function checkoutReferences(c: CheckoutStatus): Array<{ label: string; value: string }> {
+  return [
+    ...(c.swiftReference ? [{ label: 'Swift reference', value: c.swiftReference }] : []),
+    ...(c.status === 'CONFIRMED' && c.mmgTransactionId ? [{ label: 'MMG transaction ID', value: c.mmgTransactionId }] : []),
+  ];
 }
 export function pollDelay(elapsed: number, state?: CheckoutState): number | null {
   if (state === 'CONFIRMED' || state === 'NOT_PAID' || state === 'HELD' || elapsed >= 660_000) return null;

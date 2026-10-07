@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { pointInPolygon, polygonArea, polygonsOverlap, type GeoPoint } from '../../utils/geo';
 import { AppError } from '../../utils/errors';
+import { PRICE_OUTLIER_CEILING } from '../country/pricing-config';
 import { fareZoneCounter, fareZoneGauge } from '../../plugins/observability';
 
 /**
@@ -36,6 +37,9 @@ export interface ZoneCandidate {
   boundary: unknown;
   priority: number;
   version: number;
+  /** [ZONE-FARES] The zone's own taxi per-km rate (a Prisma Decimal from the
+   *  database), or null/absent when it sets none. */
+  taxiPerKm?: { toString(): string } | number | null;
 }
 
 export interface ZonePick {
@@ -81,7 +85,7 @@ export async function resolveFareZonePath(prisma: PrismaClient, market: ZoneMark
   }
   const rows = await prisma.zone.findMany({
     where: { isActive: true, tenantId: market.tenantId, countryCode: market.countryCode },
-    select: { id: true, name: true, boundary: true, priority: true, version: true },
+    select: { id: true, name: true, boundary: true, priority: true, version: true, taxiPerKm: true },
   });
   const resolve = (point: GeoPoint, end: 'from' | 'to' | 'stop'): ZonePick => {
     const containing = rows.filter((z) => pointInPolygon(point, z.boundary));
@@ -104,6 +108,29 @@ export async function resolveFareZones(prisma: PrismaClient, market: ZoneMarket,
   return { from: picks[0]!, to: picks[1]!, killed };
 }
 
+/** [ZONE-FARES] A zone's own taxi per-km rate as a number, or null when it
+ *  sets none. The column is CHECKed whole and positive at the database, so
+ *  anything else cannot be stored; it would read as no rate, never as a price. */
+export function zonePerKmOf(zone: ZoneCandidate | null | undefined): number | null {
+  const raw = zone?.taxiPerKm;
+  if (raw === null || raw === undefined) return null;
+  const rate = Number(raw.toString());
+  return Number.isFinite(rate) && rate > 0 ? rate : null;
+}
+
+/**
+ * [ZONE-FARES] The per-km rate a trip's ENDS set: the pickup's zone rate or
+ * the dropoff's, the HIGHER of the two when both set one, or null when neither
+ * does (the market's own per-km applies). Only the ends count — the zones the
+ * precedence law picked for the pickup and the destination — so a stop on the
+ * way never sets it. With the table killed nothing resolves, so nothing is
+ * overridden: every ride prices by the market's formula, exactly as today.
+ */
+export function zoneTaxiPerKm(from: ZonePick, to: ZonePick): number | null {
+  const rates = [zonePerKmOf(from.zone), zonePerKmOf(to.zone)].filter((rate): rate is number => rate !== null);
+  return rates.length === 0 ? null : Math.max(...rates);
+}
+
 /** [TAXI multi-stop] A pair of points of a route that the zone table prices:
  *  indexes into the points, and the two zones. */
 export interface ZonePricedPair {
@@ -119,9 +146,11 @@ export interface ZonePricedPair {
  *  by the formula over the whole road, so v1 refuses one the table prices
  *  anywhere, rather than let a stop move a trip off (or onto) a fixed fare.
  *  One zone read and one fare read. With the table killed nothing resolves,
- *  so nothing is priced by it: the answer is empty, exactly as today. */
-export async function zonePricedPairs(prisma: PrismaClient, market: ZoneMarket, points: readonly GeoPoint[]): Promise<ZonePricedPair[]> {
-  const { picks } = await resolveFareZonePath(prisma, market, points);
+ *  so nothing is priced by it: the answer is empty, exactly as today.
+ *  [ZONE-FARES] A caller that already resolved these points passes its path,
+ *  so the zones are read once. */
+export async function zonePricedPairs(prisma: PrismaClient, market: ZoneMarket, points: readonly GeoPoint[], path?: ResolvedZonePath): Promise<ZonePricedPair[]> {
+  const { picks } = path ?? await resolveFareZonePath(prisma, market, points);
   const last = points.length - 1;
   const pairs: Array<[number, number]> = [];
   for (let i = 1; i <= last; i++) pairs.push([i - 1, i]);
@@ -181,3 +210,27 @@ export async function scanFareZones(prisma: PrismaClient): Promise<FareZoneScan>
   fareZoneGauge.labels('ambiguous_pairs').set(ambiguousPairs.length);
   return { ambiguousPairs };
 }
+
+// ---------------------------------------------------------------------------
+// [ZONE-FARES] The write-time bounds of zone pricing, in whole units of the
+// market's currency (GYD today). The admin routes refuse anything outside
+// them; the fare engine reads only what they let through.
+// ---------------------------------------------------------------------------
+
+/** A fixed fare is at least the formula's own rounding unit (formulaFare
+ *  rounds every fare to 100) and at most the line the fare engine already
+ *  counts as an outlier: a single fare above it is never real. */
+export const ZONE_FARE_MIN = 100;
+export const ZONE_FARE_MAX = PRICE_OUTLIER_CEILING;
+
+/** A zone's per-km rate: positive (null, not 0, is "no rate"), and at most
+ *  10,000 a kilometre — more than fifty times the national rate. */
+export const ZONE_TAXI_PER_KM_MIN = 1;
+export const ZONE_TAXI_PER_KM_MAX = 10_000;
+
+/** A zone id an admin may choose: a lowercase slug, the shape the seeded zones
+ *  carry (`georgetown-central`, `cjia-airport`), so a zone drawn by hand on an
+ *  existing install can be the very row a fresh install's seed creates. */
+export const ZONE_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+export const ZONE_ID_MIN = 3;
+export const ZONE_ID_MAX = 48;

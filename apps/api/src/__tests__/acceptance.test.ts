@@ -15,6 +15,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { issueSyntheticHandoverPhoto } from './helpers/handover-proof';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
@@ -63,6 +64,7 @@ async function purge() {
   });
   const ids = users.map((u) => u.id);
   if (!ids.length) return;
+  await cleanupPayerBillingClocks(app.prisma, ids);
   const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
   const riderIds = riders.map((r) => r.id);
   const orders = await app.prisma.order.findMany({

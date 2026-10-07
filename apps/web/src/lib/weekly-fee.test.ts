@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { checkoutWords, dueLine, FeeCheckoutSession, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weekly-fee';
+import { checkoutReferences, checkoutWords, dueLine, FeeCheckoutSession, liveMmg, pollDelay, type CheckoutStart, type CheckoutStatus, type CheckoutView } from './weekly-fee';
 const checkout = (status: CheckoutStatus['status']): CheckoutStatus => ({ ref: 'reference-1', status, amountGyd: 1200, currencyCode: 'GYD', createdAt: '2026-09-29T12:00:00Z', expiresAt: '2026-09-29T13:00:00Z', confirmedAt: status === 'CONFIRMED' ? '2026-09-29T12:02:00Z' : null, subscriptionStatus: 'ACTIVE' });
 function setup() {
   const views: CheckoutView[] = [];
@@ -26,6 +26,16 @@ describe('weekly fee contract', () => {
     ['EXPIRED', 'This checkout expired. If you paid, it will be credited once MMG confirms it.'],
     ['HELD', "We're checking this payment by hand. Don't pay again. Support will contact you."],
   ] as const)('%s has truthful words', (state, words) => expect(checkoutWords(checkout(state))).toBe(words));
+  it("references: the Swift reference always, MMG's transaction ID only on CONFIRMED, nothing invented", () => {
+    const ids = { swiftReference: '175933829900012345', mmgTransactionId: '20402048536279' };
+    expect(checkoutReferences({ ...checkout('CONFIRMED'), ...ids })).toEqual([
+      { label: 'Swift reference', value: '175933829900012345' }, { label: 'MMG transaction ID', value: '20402048536279' },
+    ]);
+    for (const state of ['OPEN', 'CONFIRMING', 'NOT_PAID', 'EXPIRED', 'HELD'] as const) {
+      expect(checkoutReferences({ ...checkout(state), ...ids }), state).toEqual([{ label: 'Swift reference', value: '175933829900012345' }]);
+    }
+    expect(checkoutReferences(checkout('CONFIRMED'))).toEqual([]);
+  });
   it('sets the two cadence windows and only the three terminal states stop early', () => {
     expect(pollDelay(0, 'OPEN')).toBe(3000); expect(pollDelay(59_999, 'CONFIRMING')).toBe(3000);
     expect(pollDelay(60_000, 'EXPIRED')).toBe(15_000); expect(pollDelay(659_999, 'OPEN')).toBe(15_000);

@@ -10,6 +10,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { sandboxSetTxStatus, sandboxAddHistory, sandboxResetMmg } from '../providers/mmg/mmg-provider';
 import { windDownPartner } from '../modules/user/partner-wind-down';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // TOLLGATE A2 — the intent machine. UNKNOWN is a first-class state [LAW M-5]:
@@ -101,6 +102,7 @@ beforeAll(async () => {
 afterEach(() => sandboxResetMmg());
 
 afterAll(async () => {
+  await cleanupBillingClocks(app.prisma, createdSubIds);
   if (createdSubIds.length) {
     await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: createdSubIds } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: createdSubIds } } });
@@ -512,43 +514,43 @@ describe('late MMG outcomes preserve stopped subscription authority', () => {
     expect(await app.prisma.notification.count({ where: { userId, data: { path: ['kind'], equals: 'billing_success' } } })).toBe(0);
   });
 
-  it.each([false, true])('proves PostgreSQL lock ordering against an arrived poller (remove prepaid lock: %s)', async (removePrepaidLock) => {
+  it.each([false, true])('proves PostgreSQL lock ordering against an arrived poller (prepaid path without its locks: %s)', async (removePrepaidLocks) => {
+    // [#1393] While MMG confirms a request it holds the shared clock, so a
+    // prepaid charge for the same week can no longer run AHEAD of the late
+    // approval (it is held). The ordering that remains: the poller has locked
+    // payer -> subscription to settle the approval; a prepaid charge for the
+    // same week arrives and must wait on those same locks, never debit the
+    // wallet beside it. PostgreSQL naming the poller as the prepaid backend's
+    // blocker is the positive oracle; a deadline is never evidence.
     const due = new Date(Date.now() - HOUR);
     const { sub } = await makeVendorMmgSub({ due, msisdn: '5926095109' });
-    const prepaidDebited = deferred();
-    const releasePrepaid = deferred();
-    const lateArrived = deferred();
+    const lateLocked = deferred();
     const releaseLate = deferred();
-    let lateAuthorityLocked = false;
-    let prepaidPid = 0;
     let latePid = 0;
+    let lateHolding = false;
+    let prepaidDebitedWhileLateHeld = false;
     const observer: BillingObserver = {
-      afterSuccessfulChargePrepaidDebit: async (subscriptionId, tx) => {
-        if (subscriptionId !== sub.id) return;
-        const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
-        if (!backend) throw new Error('Missing prepaid backend identity');
-        prepaidPid = backend.pid;
-        prepaidDebited.resolve();
-        await releasePrepaid.promise;
-      },
       beforeLateMmgAuthorityLock: async (subscriptionId, tx) => {
         if (subscriptionId !== sub.id) return;
         const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
         if (!backend) throw new Error('Missing poller backend identity');
         latePid = backend.pid;
-        lateArrived.resolve();
       },
       afterLateMmgAuthorityLocked: async (subscriptionId) => {
         if (subscriptionId !== sub.id) return;
-        lateAuthorityLocked = true;
+        lateHolding = true;
+        lateLocked.resolve();
         await releaseLate.promise;
-        // The mutation is diagnostic: stop after proving it took the lock,
-        // before it can form the actual wallet/subscription deadlock.
-        if (removePrepaidLock) throw new Error('LOCK_ORDER_MUTATION_DETECTED');
+        lateHolding = false;
+      },
+      afterSuccessfulChargePrepaidDebit: async (subscriptionId) => {
+        if (subscriptionId !== sub.id) return;
+        if (lateHolding) prepaidDebitedWhileLateHeld = true;
+        // The mutation is diagnostic: stop after proving the debit ran beside
+        // the poller's authority, before a real double spend can form.
+        if (removePrepaidLocks) throw new Error('LOCK_ORDER_MUTATION_DETECTED');
       },
     };
-    // Fixture dispatch itself takes the authority lock. Only arm the barriers
-    // after it has committed, so they observe the intended prepaid/poller race.
     expect(await billing.billSubscription(await subWithRelations(sub.id))).toBe('pending');
     const intent = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: sub.id } });
     sandboxSetTxStatus(intent.externalRef!, 'approved');
@@ -557,25 +559,13 @@ describe('late MMG outcomes preserve stopped subscription authority', () => {
     const concurrent = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider(), observer);
     const cashSnapshot = { ...await subWithRelations(sub.id), billingMethod: 'CASH' as const };
     const internals = concurrent as unknown as {
-      lockSubscriptionMoneyAuthority(tx: Prisma.TransactionClient, snapshot: typeof cashSnapshot): Promise<{
-        payerStatus: string; payerPhone: string; status: typeof cashSnapshot.status; autoRenew: boolean;
-      }>;
+      lockSubscriptionMoneyAuthority(tx: Prisma.TransactionClient, snapshot: typeof cashSnapshot): Promise<unknown>;
+      subscriptionHasConfirmationHold(): Promise<boolean>;
       applySuccessfulCharge(
         snapshot: typeof cashSnapshot, amount: number, ref: string, now: Date, periodKey: string,
         settlePaymentId?: string, usdTrio?: undefined, spendPrepaid?: number,
       ): Promise<boolean>;
     };
-    if (removePrepaidLock) {
-      // One-call mutation: prepaid skips its authority locks. MMG still takes
-      // the real PostgreSQL locks, so the same oracle must detect the defect.
-      vi.spyOn(internals, 'lockSubscriptionMoneyAuthority').mockResolvedValueOnce({
-        payerStatus: 'ACTIVE', payerPhone: '', status: cashSnapshot.status, autoRenew: cashSnapshot.autoRenew,
-      });
-    }
-    const prepaid = internals.applySuccessfulCharge(
-      cashSnapshot, 2100, 'prepaid', new Date(), due.toISOString().slice(0, 10), undefined, undefined, 2100,
-    );
-    let late: ReturnType<BillingService['pollPendingMmgCharges']> | undefined;
     const awaitBarrier = async (barrier: Promise<void>, operation: Promise<unknown>, label: string) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -586,44 +576,56 @@ describe('late MMG outcomes preserve stopped subscription authority', () => {
         ]);
       } finally { if (timer) clearTimeout(timer); }
     };
-    let blockedByPrepaid = false;
+
+    const late = concurrent.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+    let prepaid: Promise<boolean> | undefined;
+    let blockedByLate = false;
     try {
-      await awaitBarrier(prepaidDebited.promise, prepaid, 'prepaid debit');
-      late = concurrent.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
-      await awaitBarrier(lateArrived.promise, late, 'late poller arrival');
+      await awaitBarrier(lateLocked.promise, late, 'late poller authority');
+      if (removePrepaidLocks) {
+        // Mutation: the prepaid path takes none of its locks (neither its
+        // authority lock nor the confirmation gate's payer lock).
+        vi.spyOn(internals, 'lockSubscriptionMoneyAuthority').mockResolvedValueOnce({
+          payerStatus: 'ACTIVE', payerPhone: '', status: cashSnapshot.status, autoRenew: cashSnapshot.autoRenew, collectionAllowed: true,
+          bankInsteadOfAdvance: false, suppressNotice: false,
+        });
+        vi.spyOn(internals, 'subscriptionHasConfirmationHold').mockResolvedValue(false);
+      }
+      prepaid = internals.applySuccessfulCharge(cashSnapshot, 2100, 'prepaid', new Date(), due.toISOString().slice(0, 10), undefined, undefined, 2100);
+      prepaid.catch(() => undefined);
       const deadline = Date.now() + 4000;
-      // An elapsed deadline is a failure, never evidence of blocking. The
-      // positive oracle is PostgreSQL naming the exact prepaid backend.
-      while (!blockedByPrepaid && !lateAuthorityLocked) {
-        const [row] = await app.prisma.$queryRaw<Array<{ blockers: number[] }>>`
-          SELECT pg_blocking_pids(${latePid}::integer) AS blockers
+      while (!blockedByLate && !prepaidDebitedWhileLateHeld) {
+        const waiting = await app.prisma.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity WHERE ${latePid}::integer = ANY(pg_blocking_pids(pid))
         `;
-        if (!row) throw new Error('Missing PostgreSQL blocking proof');
-        blockedByPrepaid = row.blockers.includes(prepaidPid);
-        if (Date.now() > deadline) throw new Error('Poller neither acquired authority nor proved blocked by prepaid');
-        if (!blockedByPrepaid && !lateAuthorityLocked) await new Promise<void>((resolve) => setImmediate(resolve));
+        blockedByLate = waiting.length > 0;
+        if (Date.now() > deadline) throw new Error('The prepaid charge neither waited for the poller nor debited beside it');
+        if (!blockedByLate && !prepaidDebitedWhileLateHeld) await new Promise<void>((resolve) => setImmediate(resolve));
       }
     } finally {
-      releasePrepaid.resolve();
       releaseLate.resolve();
-      await Promise.allSettled([prepaid, ...(late ? [late] : [])]);
+      await Promise.allSettled([late, ...(prepaid ? [prepaid] : [])]);
     }
-    const outcomes = await Promise.allSettled([prepaid, late!]);
-
-    expect(blockedByPrepaid).toBe(!removePrepaidLock);
+    const [lateOutcome, prepaidOutcome] = await Promise.allSettled([late, prepaid!]);
     vi.restoreAllMocks();
-    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fulfilled', 'fulfilled']);
-    if (removePrepaidLock) {
-      expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('PENDING');
+
+    expect(blockedByLate).toBe(!removePrepaidLocks);
+    expect(prepaidDebitedWhileLateHeld).toBe(removePrepaidLocks);
+    expect(lateOutcome!.status).toBe('fulfilled');
+    if (removePrepaidLocks) {
+      expect(prepaidOutcome).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ message: 'LOCK_ORDER_MUTATION_DETECTED' }) });
       return;
     }
+    // The approval paid the week once; the prepaid charge, serialized behind
+    // it, finds the week settled and charges nothing.
+    expect(prepaidOutcome).toEqual({ status: 'fulfilled', value: false });
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(after.nextBillingDate.getTime()).toBe(due.getTime() + WEEK);
     expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    expect((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: intent.id } })).status).toBe('CAPTURED');
     expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `success:${sub.id}:${due.toISOString().slice(0, 10)}` } })).toBe(1);
-    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `bank:${intent.id}` } })).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `bank:${intent.id}` } })).toBe(0);
     expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: `ledger:success:${sub.id}:${due.toISOString().slice(0, 10)}` } })).toBe(1);
-    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: `ledger:bank:${intent.id}` } })).toBe(1);
   });
 
   it('banks an approval while PAUSED without treating the old prompt as resume authority', async () => {

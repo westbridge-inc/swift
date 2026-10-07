@@ -3,7 +3,8 @@ import type { MutationGuard } from './useStepUp';
 import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { customerApi, riderApi, driverApi } from '../services/api';
+import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
+import { TAXI_STOPS_CAPABILITY, maxStopsFrom } from '../lib/taxiItinerary';
 import { track } from '../lib/analytics';
 import {
   publishMoverLocation,
@@ -52,6 +53,16 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
 }
 
 export type { MoverKind } from '../lib/moverLocation';
+
+/** [TAXI multi-stop] Has THIS server advertised rides with stops
+ *  (GET /rides/capabilities, maxStops > 0)? Every failure is "no". */
+async function serverOffersTaxiStops(session: AuthSessionSnapshot): Promise<boolean> {
+  try {
+    return maxStopsFrom(await unwrap(rideApi.capabilities(session))) > 0;
+  } catch {
+    return false;
+  }
+}
 function svc(kind: MoverKind) {
   return kind === 'DRIVER' ? driverApi : riderApi;
 }
@@ -351,7 +362,14 @@ export function useGoOnline(kind: MoverKind) {
       } as unknown as Parameters<typeof setUserIfCurrent>[1])) {
         throw new AuthSessionBoundaryError();
       }
-      const result = await unwrap(svc(kind).goOnline(latitude, longitude, current));
+      // [TAXI multi-stop] A driver declares the stop capability only to a
+      // server that has advertised rides with stops; any other answer (an older
+      // server's 404, 0, an error) sends exactly today's go-online body.
+      const capabilities = kind === 'DRIVER' && await serverOffersTaxiStops(current) ? [TAXI_STOPS_CAPABILITY] : null;
+      if (capabilities) current = requireAuthSessionForPrincipal(owner);
+      const result = await unwrap(capabilities
+        ? driverApi.goOnline(latitude, longitude, current, capabilities)
+        : svc(kind).goOnline(latitude, longitude, current));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['mover'] });
       track('go_online', { kind });
@@ -838,6 +856,37 @@ export interface BoardJob {
   deliveryFee?: number | string | null;
   // Load-bearing for the MMG fare lock: movers must never submit an MMG fare.
   paymentMethod?: 'CASH' | 'MOBILE_MONEY' | (string & {}) | null;
+  // [TAXI multi-stop] A ride WITH stops; `dropoffAddress` stays the final stop.
+  stopCount?: number;
+  stops?: { sequence: number; address: string; lat: number; lng: number }[];
+}
+
+export type TaxiStopActionInput =
+  | { id: string; sequence: number; action: 'arrived' | 'depart' }
+  /** A skip always carries the driver's reason: the passenger is told it. */
+  | { id: string; sequence: number; action: 'skip'; reason: string };
+
+/**
+ * [TAXI multi-stop · part 4] The driver's stop actions on the next open stop:
+ * arrived, done (depart) and skip with a reason. The server holds the order
+ * (409 STOP_OUT_OF_ORDER) and repeat taps are safe; the screen offers these
+ * only when the active ride shows the server has them. Read-only in preview.
+ */
+export function useTaxiStopAction() {
+  const pv = usePreview();
+  const qc = useQueryClient();
+  const m = useMutation({
+    mutationFn: (input: TaxiStopActionInput) => {
+      if (input.action === 'skip') return unwrap(driverApi.stopSkip(input.id, input.sequence, input.reason));
+      return unwrap(input.action === 'arrived'
+        ? driverApi.stopArrived(input.id, input.sequence)
+        : driverApi.stopDepart(input.id, input.sequence));
+    },
+    // The screen says what went wrong in its own words; no second toast.
+    meta: { silent: true },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+  });
+  return pv ? PV.previewMutation() : m;
 }
 
 // The live offer cards (the dispatch:offer stream, the queue, recovery, render

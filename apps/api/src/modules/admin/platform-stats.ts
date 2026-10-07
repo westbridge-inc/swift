@@ -9,6 +9,7 @@
  */
 import type { PrismaClient } from '@prisma/client';
 import { PRODUCTION_TENANT, REAL_PEOPLE } from '../../lib/production-only';
+import { readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 
 export interface PlatformStatsInput {
   tenantId: string;
@@ -28,7 +29,7 @@ export async function platformStats(prisma: PrismaClient, { tenantId, today, sub
     activeDrivers,
     activeVendors,
     totalVendors,
-    activeSubscriptions,
+    subscriptionSources,
     todayNewUsers,
     pendingVendors,
     pastDueSubs,
@@ -59,7 +60,7 @@ export async function platformStats(prisma: PrismaClient, { tenantId, today, sub
       // scoping, which raw SQL would not.
       prisma.subscription.findMany({
         where: { status: 'ACTIVE', ...subscriptionScope },
-        select: { type: true, weeklyRate: true, customRate: true, feeWaived: true },
+        select: { id: true, type: true, weeklyRate: true, customRate: true, feeWaived: true },
       }),
       prisma.user.count({ where: { createdAt: { gte: today }, ...REAL_PEOPLE } }),
       // SWIFT-118: the weeklyTrend raw SQL was removed — it was computed on every
@@ -80,5 +81,10 @@ export async function platformStats(prisma: PrismaClient, { tenantId, today, sub
         },
       }),
       ]);
+  const activeSubscriptions = (await Promise.all(subscriptionSources.map(async (sub) => {
+    const authority = await readFeeCollectionAuthority(prisma, sub.id);
+    if (!authority.allowed) return null;
+    return { ...sub, type: authority.mover?.feeType ?? sub.type };
+  }))).filter((sub): sub is NonNullable<typeof sub> => sub !== null);
   return { totalUsers, totalOrders, todayOrders, todayRevenue, activeRiders, activeDrivers, activeVendors, totalVendors, activeSubscriptions, todayNewUsers, pendingVendors, pastDueSubs, unassignedOrders };
 }

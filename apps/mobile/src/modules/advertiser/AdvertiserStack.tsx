@@ -7,6 +7,8 @@ import { Feather } from '@expo/vector-icons';
 import { color } from '@swift/ui';
 import { ErrorState, LoadingBlock } from '../../kit';
 import { useMyAdvertisers } from '../../hooks/advertiser';
+import { useAdsEnabled } from '../../hooks/useAdsEnabled';
+import { RolePickerScreen } from '../../screens/auth/RolePickerScreen';
 import { AdvertiserRegisterScreen } from './screens/AdvertiserRegisterScreen';
 import { AdvertiserHomeScreen } from './screens/AdvertiserHomeScreen';
 import { NewCampaignScreen } from './screens/NewCampaignScreen';
@@ -47,6 +49,11 @@ function AdvertiserTabs() {
 }
 
 export function AdvertiserStack() {
+  const adsEnabled = useAdsEnabled();
+  return adsEnabled ? <EnabledAdvertiserStack /> : <RolePickerScreen />;
+}
+
+function EnabledAdvertiserStack() {
   const me = useMyAdvertisers();
 
   if (me.isLoading) {

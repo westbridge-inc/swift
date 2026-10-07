@@ -80,7 +80,7 @@ export const ADMIN_ACTION_CLASSES: Record<AdminActionClass, AdminActionMeaning> 
  * [C-01] The model columns a snapshot may select on. A CLOSED set: adding one
  * is a deliberate edit here, never a string inferred from a route.
  */
-export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code'] as const;
+export const SNAPSHOT_UNIQUE_FIELDS = ['id', 'key', 'code', 'userId'] as const;
 export type SnapshotUniqueField = (typeof SNAPSHOT_UNIQUE_FIELDS)[number];
 
 export interface AdminRouteEntity {
@@ -109,6 +109,14 @@ export interface AdminRouteEntity {
    *  regardless, so this is what a reader sees first, not the limit of what is
    *  detected. */
   readonly fields: readonly string[];
+  /**
+   * [ZONE-FARES] For a model with no tenant column of its own, walled only
+   * through its parents: the relations whose `tenantId` must be the caller's
+   * tenant. The snapshot puts them IN its query, so another operator's row is
+   * never read — not read and then refused. With no tenant bound it reads
+   * nothing at all.
+   */
+  readonly tenantVia?: readonly string[];
 }
 
 export interface AdminRouteAuthority {
@@ -139,16 +147,22 @@ const E = {
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
   // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
+  moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
   promo: { model: 'promoCode', fields: ['isActive', 'discountValue', 'validFrom', 'validUntil'] },
-  zone: { model: 'zone', fields: ['isActive', 'name', 'priority'] },
+  // [ZONE-FARES] taxiPerKm is a price: a change to it is named in the diff.
+  zone: { model: 'zone', fields: ['isActive', 'name', 'priority', 'taxiPerKm'] },
+  // [ZONE-FARES] A fixed zone-to-zone fare: the price and the pair it joins.
+  // A fare has no tenant column: both of its zones must be the caller's.
+  zoneFare: { model: 'zoneFare', fields: ['fare', 'fromZoneId', 'toZoneId', 'updatedBy'], tenantVia: ['fromZone', 'toZone'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
   adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
+  paymentConfirmation: { model: 'paymentConfirmationHold', fields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionEvidence'] },
   agentPayment: { model: 'mmgAgentPayment', fields: ['status', 'amount', 'subscriptionId'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
@@ -165,6 +179,10 @@ const E = {
   complianceReview: { model: 'complianceReviewCase', fields: ['status', 'decidedAt'] },
   complianceViolation: { model: 'complianceViolation', fields: ['actionTaken', 'resolvedAt'] },
   discoveryCategory: { model: 'discoveryCategory', fields: ['status', 'slug', 'name', 'sortWeight'] },
+  // A ticket has no tenant column: its requester must be the caller's tenant.
+  supportTicket: { model: 'supportTicket', fields: ['status', 'resolution', 'resolvedAt', 'resolvedById'], tenantVia: ['user'] },
+  // [AF-MOB-006] A custody recovery case: who owns it, where it stands, who holds the goods.
+  custodyCase: { model: 'custodyRecoveryCase', fields: ['state', 'ownerUserId', 'holderRiderId', 'relayRiderId', 'resolvedAt', 'escalationCount'] },
 } as const satisfies Record<string, AdminRouteEntity>;
 
 /**
@@ -224,6 +242,16 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
+  // [AF-MOB-006] Custody recovery after pickup. Reading a case discloses rider
+  // positions and phones (C1). Owning it is workflow (C2). Directing a return
+  // or relay, naming the relay rider and confirming a return decide where
+  // someone else's goods and a rider's fronted cash go, so a reason is owed (C3).
+  'GET /custody-cases': c('C1', 'custody.read'),
+  'GET /custody-cases/:id': c('C1', 'custody.read'),
+  'POST /custody-cases/:id/claim': c('C2', 'custody.claim', E.custodyCase),
+  'POST /custody-cases/:id/direct': c('C3', 'custody.decide', E.custodyCase),
+  'POST /custody-cases/:id/relay': c('C3', 'custody.decide', E.custodyCase),
+  'POST /custody-cases/:id/confirm-return': c('C3', 'custody.decide', E.custodyCase),
 
   // ── Moderation ──────────────────────────────────────────────────────────
   'GET /moderation/reports': c('C1', 'moderation.read'),
@@ -259,6 +287,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /zones': c('C5', 'platform.zone.write'),
   'PUT /zones/:id': c('C5', 'platform.zone.write', E.zone),
   'DELETE /zones/:id': c('C5', 'platform.zone.write', E.zone),
+  // [ZONE-FARES] Fixed zone-to-zone fares are pricing: C5, its own capability
+  // (drawing a zone and pricing a pair are different powers).
+  'GET /zone-fares': c('C0', 'platform.zonefare.read'),
+  'POST /zone-fares': c('C5', 'platform.zonefare.write'),
+  'PUT /zone-fares/:id': c('C5', 'platform.zonefare.write', E.zoneFare),
+  'DELETE /zone-fares/:id': c('C5', 'platform.zonefare.write', E.zoneFare),
   'POST /notifications/broadcast': c('C5', 'platform.broadcast'),
 
   // ── Subscriptions ───────────────────────────────────────────────────────
@@ -314,7 +348,15 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/agent-payments': c('C0', 'billing.read'),
   'GET /billing/agent-payments/unmatched': c('C0', 'billing.read'),
   'GET /billing/agent-cash-config': c('C0', 'billing.read'),
+  'GET /billing/confirmations': c('C0', 'billing.read'),
+  // [MMG support lookup] A partner's payment, found by any of its ids or the partner's phone: identity, so C1.
+  'GET /billing/mmg-checkouts': c('C1', 'billing.mmg.read'),
+  'GET /billing/mmg-checkouts/:id': c('C1', 'billing.mmg.read'),
+  'POST /billing/confirmations/:id/resolve': c('C4', 'billing.payment.attach', E.paymentConfirmation),
   'GET /billing/collections': c('C0', 'billing.read'),
+  'GET /billing/mover-fees': c('C0', 'billing.read'),
+  'GET /billing/mover-fees/:userId': c('C0', 'billing.read'),
+  'POST /billing/mover-fees/:userId/resolve': c('C4', 'billing.payment.attach', E.moverFee),
   'GET /billing/cash-journal': c('C0', 'billing.read'),
   'GET /billing/settlement-batches': c('C0', 'billing.read'),
   'GET /billing/cash-kpis': c('C0', 'billing.read'),
@@ -334,6 +376,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /billing/settlement-batches/:id/confirm-deposit': c('C4', 'billing.deposit.confirm', E.settlementBatch),
   'POST /billing/settlement-batches/:id/adjust-deposit': c('C4', 'billing.deposit.adjust', E.settlementBatch),
   'POST /billing/collections/:subscriptionId/contact': c('C2', 'billing.collections.contact'),
+  // [PT-2] Card rail v2 read views: sessions, their evidence as hashes, and a
+  // subscription's cards as brand / last 4 / expiry. Nothing that moves money.
+  'GET /billing/card-sessions': c('C0', 'billing.read'),
+  'GET /billing/card-sessions/:id': c('C0', 'billing.read'),
+  'GET /billing/subscriptions/:subscriptionId/cards': c('C0', 'billing.read'),
 
   // ── Algorithms ──────────────────────────────────────────────────────────
   'GET /algo/eta/report': c('C0', 'algo.read'),
@@ -398,6 +445,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /audit-logs': c('C1', 'audit.read'),
   'GET /support': c('C1', 'support.read'),
   'PUT /support/:id/resolve': c('C2', 'support.resolve'),
+  // [DELETION-INTEGRITY] Completes an in-app closure request: the account is
+  // closed and de-identified. Consequential and irreversible, so a reason is owed.
+  'POST /support/:id/complete-account-closure': c('C3', 'user.close', E.supportTicket),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),
@@ -674,6 +724,7 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',
+  'POST /zone-fares': 'creates the row; there is no before state to digest — the audit facts carry the pair and the fare',
   'POST /notifications/broadcast': 'addresses every user; the subject is the audience, not a row',
   'PUT /countries/:code/pricing/:kind': 'writes a versioned price book, which keeps its own before/after by version',
   'POST /countries/:code/pricing/:kind/rollback': 'pins an earlier price-book version; the version register is the record',

@@ -194,6 +194,10 @@ export default function createNextConfig(phase: string): NextConfig {
         // These rules come after the site-wide ones, so they win for these paths
         // (Referrer-Policy included), and Next sends a config header in place of
         // the route handler's own.
+        // [M053] The public trip and parcel pages carry a bearer token in their
+        // path: nothing they load or link to is told the page's address.
+        { source: '/trip/:path*', headers: [{ key: 'Referrer-Policy', value: 'no-referrer' }] },
+        { source: '/track/:path*', headers: [{ key: 'Referrer-Policy', value: 'no-referrer' }] },
         { source: '/pay/mmg/:path*', headers: [
           { key: 'X-Robots-Tag', value: 'noindex' },
           { key: 'Cache-Control', value: 'no-store' },

@@ -229,7 +229,12 @@ describe('tenant isolation (stage 2)', () => {
         isPhoneVerified: true, tenantId: TENANT_B,
       },
       update: { firstName: 'MustNotUpdate', tenantId: 'swift-default' },
-    }))).rejects.toMatchObject({ code: 'P2025' });
+      // [#1393] users carries a compound (id, tenantId) unique (the mover fee
+      // authority's composite key), so the scoped upsert becomes a native
+      // INSERT ... ON CONFLICT (id, tenantId): the other tenant's row is no
+      // conflict on that key, and the insert is refused on the primary key.
+      // Either way the refusal is total and the row below is untouched.
+    }))).rejects.toMatchObject({ code: 'P2002' });
     const untouched = await runWithoutTenant(() => prisma.user.findUniqueOrThrow({ where: { id: victim.id } }));
     expect(untouched.firstName).not.toBe('MustNotUpdate');
     expect(untouched.tenantId).toBe(TENANT_B);

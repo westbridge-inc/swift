@@ -20,6 +20,7 @@ datasource db {
 // ==========================================
 
 model User {
+  billingFeeNotices BillingFeeNotice[]
   id               String     @id @default(cuid())
   phone            String     @unique
   email            String?    @unique
@@ -64,6 +65,7 @@ model User {
   /// so every existing + new row is assigned with no app change (stage 1).
   tenantId    String @default("swift-default")
   tenant      Tenant @relation(fields: [tenantId], references: [id])
+  moverFeeAuthority MoverFeeAuthority?
 
   /// Email+password login lands later; phone OTP remains primary.
   passwordHash        String?
@@ -135,6 +137,7 @@ model User {
   @@index([tenantId])
   @@index([isSynthetic])
   @@map("users")
+  @@unique([id, tenantId], map: "users_id_tenantId_key")
 }
 
 enum UserRole {
@@ -392,11 +395,14 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  moverFeeAuthorities MoverFeeAuthority[]
+  moverFeeSubscriptions MoverFeeSubscription[]
   users            User[]
   vendors          Vendor[]
   orders           Order[]
   rideQueueEntries RideQueueEntry[]
   taxiTripStops    TaxiTripStop[]
+  custodyRecoveryCases CustodyRecoveryCase[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -1828,6 +1834,9 @@ model Order {
   deliveryCashSettlement DeliveryCashSettlement?
   items                  OrderItem[]
   supportTickets         SupportTicket[]
+  /// [AF-MOB-006] Recovery cases for goods already in a rider's custody. At most
+  /// one is open at a time (a partial unique index); resolved ones stay as history.
+  custodyRecoveryCases   CustodyRecoveryCase[]
 
   pickupAddress        String?
   pickupLat            Float?
@@ -2169,6 +2178,92 @@ model TaxiTripStop {
   @@unique([orderId, sequence])
   @@index([tenantId])
   @@map("taxi_trip_stops")
+}
+
+/// [AF-MOB-006] Where a custody recovery case stands. Its classification
+/// (open or resolved) and its edges live in modules/order/order-status.ts
+/// (CUSTODY_CASE_LAW, CUSTODY_CASE_TRANSITIONS), never here.
+enum CustodyRecoveryState {
+  SUPPORT_HOLD
+  RETURN_REQUIRED
+  RELAY_REQUIRED
+  TRANSFER_IN_PROGRESS
+  DELIVERED
+  RETURNED
+  TRANSFERRED
+  CLOSED
+}
+
+/// [AF-MOB-006] Why a delivery needed recovery after pickup. The first eleven
+/// are what a rider reports; the last three are recorded by the system.
+enum CustodyIncidentReason {
+  VEHICLE_BREAKDOWN
+  CRASH
+  MEDICAL
+  UNSAFE_RECIPIENT
+  RECIPIENT_ABSENT
+  INACCESSIBLE_PROPERTY
+  DAMAGED_OR_PROHIBITED
+  WRONG_PACKAGE
+  POLICE_OR_ROAD_CLOSURE
+  DEVICE_FAILURE
+  OTHER
+  MOVER_SIGNAL_LOST
+  MOVER_SESSION_ENDED
+  RETURN_STARTED
+}
+
+/// [AF-MOB-006] ONE owned recovery case for a delivery that went wrong after
+/// pickup: the goods (and, on cash, the float the rider fronted the store) are
+/// in someone's custody, so somebody must own what happens next. At most one
+/// case per order is open (a partial unique index), and the database ties
+/// `resolvedAt` to the open states (a CHECK). `holderRiderId` is the one
+/// custody holder and equals the order's riderId while the case is open; a
+/// relay rider becomes the holder only through the verified transfer. The
+/// trail of every step is in audit_logs (entity CustodyRecoveryCase).
+/// Mover and operator ids are plain ids (audit-log style): no cascade from a
+/// person's deletion may erase a custody record.
+model CustodyRecoveryCase {
+  id               String                @id @default(cuid())
+  tenantId         String                @default("swift-default")
+  tenant           Tenant                @relation(fields: [tenantId], references: [id])
+  orderId          String
+  order            Order                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  state            CustodyRecoveryState  @default(SUPPORT_HOLD)
+  reason           CustodyIncidentReason
+  reasonNote       String?
+  /// Who opened it: a user id, or null when the system did.
+  openedBy         String?
+  holderRiderId    String
+  relayRiderId     String?
+  /// The handoff code the holder shows the relay rider. Returned to nobody
+  /// but the holder; cleared when the transfer ends either way.
+  transferCode     String?
+  /// When THIS code stops working: set when the code is minted and never moved
+  /// (a later bump of the case deadline can never revive it). Null with no code.
+  transferCodeExpiresAt DateTime?
+  transferAttempts Int                   @default(0)
+  /// The operations owner (an admin user id).
+  ownerUserId      String?
+  ownerAssignedAt  DateTime?
+  /// When humans are paged if nothing has moved.
+  deadlineAt       DateTime
+  escalationCount  Int                   @default(0)
+  lastEscalatedAt  DateTime?
+  /// Bumped on every change, so a client acting on an old screen is refused.
+  version          Int                   @default(0)
+  incidentLat      Float?
+  incidentLng      Float?
+  resolvedAt       DateTime?
+  resolution       String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@index([tenantId])
+  @@index([orderId])
+  @@index([state, deadlineAt])
+  @@index([relayRiderId])
+  @@map("custody_recovery_cases")
 }
 
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle
@@ -2888,7 +2983,60 @@ enum RatingType {
 // SUBSCRIPTIONS
 // ==========================================
 
+enum MoverFeeAuthorityState {
+  ACTIVE
+  FINANCE_HOLD
+}
+
+/// One future weekly fee for a payer who may have both mover profiles.
+/// Original money/source ownership stays on Subscription; feeType is the
+/// activated entitlement that determines the shared future tariff.
+model MoverFeeAuthority {
+  dunningClock BillingDunningClock?
+  userId                  String @id
+  tenantId                String
+  payer                   User @relation(fields: [userId, tenantId], references: [id, tenantId], onDelete: Cascade, onUpdate: Restrict)
+  tenant                  Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  canonicalSubscriptionId String @unique
+  canonicalSubscription   Subscription @relation("CanonicalMoverFee", fields: [canonicalSubscriptionId], references: [id], onDelete: NoAction, onUpdate: Restrict)
+  feeType                 SubscriptionType
+  state                   MoverFeeAuthorityState @default(ACTIVE)
+  holdReason              String?
+  revision                Int @default(1)
+  decisionId              String @unique
+  decision                AuditLog @relation(fields: [decisionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  members                 MoverFeeSubscription[]
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@unique([userId, tenantId])
+  @@index([tenantId, state, updatedAt])
+  @@map("mover_fee_authorities")
+}
+
+/// Immutable source membership. Existing issued charges, SANs and wallets
+/// keep their original subscription ID even after future fees are shared.
+model MoverFeeSubscription {
+  subscriptionId String @id
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade, onUpdate: Restrict)
+  userId         String
+  tenantId       String
+  authority      MoverFeeAuthority @relation(fields: [userId, tenantId], references: [userId, tenantId], onDelete: Cascade, onUpdate: Restrict)
+  tenant         Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdAt      DateTime @default(now())
+
+  @@index([userId, tenantId])
+  @@index([tenantId])
+  @@map("mover_fee_subscriptions")
+}
+
 model Subscription {
+  obligationTransitions BillingObligationTransition[] @relation("ObligationSource")
+  priorObligationTransitions BillingObligationTransition[] @relation("ObligationPreviousSource")
+  confirmationHolds PaymentConfirmationHold[]
+  billingFeeNotices BillingFeeNotice[]
+  moverFeeAuthority MoverFeeAuthority? @relation("CanonicalMoverFee")
+  moverFeeMembership MoverFeeSubscription?
   id                 String                @id @default(cuid())
   riderId            String?               @unique
   rider              Rider?                @relation(fields: [riderId], references: [id])
@@ -2936,6 +3084,11 @@ model Subscription {
   /// cleared on reinstatement.
   suspendedAt    DateTime?
 
+  /// Query projection of the one shared confirmation/dunning clock.
+  billingConfirmationPausedAt DateTime?
+  billingEnforcementDueAt      DateTime?
+  dunningClock                 BillingDunningClock?
+
   /// Swift Account Number [san spec PART 2] — the universal payment reference
   /// for platform fees across every rail (agent cash / checkout / card).
   /// 10 digits, Luhn-checked, IMMUTABLE: never changes, never re-issued,
@@ -2965,6 +3118,8 @@ model Subscription {
 /// idempotencyKey is the double-charge guard: one CHARGE_ATTEMPT per
 /// subscription per period per retry level, enforced at the database.
 model BillingEvent {
+  obligationTransitions BillingObligationTransition[] @relation("ObligationSuccess")
+  voluntaryResumes BillingObligationTransition[] @relation("ObligationLapse")
   id             String           @id @default(cuid())
   subscriptionId String
   subscription   Subscription     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
@@ -2997,6 +3152,158 @@ model BillingEvent {
   @@index([type])
   @@index([type, deliveredAt])
   @@map("billing_events")
+}
+
+/// One active-time clock for the canonical subscription's current fee obligation.
+/// Provider uncertainty stops this clock; it never rewrites the original due date.
+model BillingDunningClock {
+  obligationTransitions BillingObligationTransition[]
+  id String @id @default(cuid())
+  /// Audited canonical projection; the clock ID never changes.
+  subscriptionId String @unique
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  tenantId String
+  moverPayerUserId String? @unique
+  moverAuthority MoverFeeAuthority? @relation(fields: [moverPayerUserId, tenantId], references: [userId, tenantId], onDelete: Restrict, onUpdate: Restrict)
+  dueAt DateTime
+  epoch Int @default(1)
+  version Int @default(0)
+  elapsedMs BigInt @default(0)
+  runningSince DateTime?
+  pausedAt DateTime?
+  resumedAt DateTime?
+  authorityHoldReason String?
+  authorityRevision Int?
+  retryAtMs BigInt?
+  nudgeAtMs BigInt?
+  churnAtMs BigInt?
+  holds PaymentConfirmationHold[]
+  notices BillingFeeNotice[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([moverPayerUserId, tenantId])
+  @@index([tenantId])
+  @@map("billing_dunning_clocks")
+}
+
+/// Immutable consumed coverage. The database binds each epoch change to its
+/// original captured payment, successful charge, audit, and voluntary lapse.
+model BillingObligationTransition {
+  id String @id @default(cuid())
+  tenantId String
+  clockId String
+  clock BillingDunningClock @relation(fields: [clockId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  fromSubscriptionId String
+  previousSource Subscription @relation("ObligationPreviousSource", fields: [fromSubscriptionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  subscriptionId String
+  source Subscription @relation("ObligationSource", fields: [subscriptionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  kind String
+  fromEpoch Int
+  toEpoch Int
+  fromDue DateTime
+  toDue DateTime
+  effectiveAt DateTime
+  paymentId String
+  payment SubscriptionPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  successEventId String
+  successEvent BillingEvent @relation("ObligationSuccess", fields: [successEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  lapseEventId String? @unique
+  lapseEvent BillingEvent? @relation("ObligationLapse", fields: [lapseEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  auditId String @unique
+  audit AuditLog @relation(fields: [auditId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  amount Decimal @db.Decimal(10, 2)
+  currencyCode String
+  periodStart DateTime
+  periodEnd DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([clockId, toEpoch])
+  @@unique([paymentId, kind])
+  @@index([tenantId])
+  @@map("billing_obligation_transitions")
+}
+
+/// Exactly one original payment source. Resolved evidence is retained; a
+/// second source can keep the aggregate paused after this one resolves.
+model PaymentConfirmationHold {
+  id String @id @default(cuid())
+  tenantId String
+  subscriptionId String
+  originalSubscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  clockId String
+  clock BillingDunningClock @relation(fields: [clockId], references: [id], onDelete: Restrict)
+  sourceEpoch Int
+  paymentId String? @unique
+  payment SubscriptionPayment? @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  checkoutId String? @unique
+  checkout MmgCheckoutIntent? @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  cardSessionId String? @unique
+  cardSession CardSession? @relation(fields: [cardSessionId], references: [id], onDelete: Restrict)
+  /// ACTIVE | SETTLEMENT_APPLY_PENDING | PAID | PROVEN_UNPAID | PROVEN_NO_EFFECT
+  status String @default("ACTIVE")
+  reason String
+  beganAt DateTime
+  resolvedAt DateTime?
+  resolvedBy String?
+  resolutionEvidence String?
+  /// Append-only prior resolutions, including a proven negative superseded by
+  /// a later verified credit. Provider payloads never enter this history.
+  resolutionHistory Json @default("[]")
+  reviewDueAt DateTime
+  reviewNotifiedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([subscriptionId, status])
+  @@index([status, reviewDueAt])
+  @@map("payment_confirmation_holds")
+}
+
+/// A fee-demand stage survives pause/restart without acquiring another identity.
+model BillingFeeNotice {
+  id String @id @default(cuid())
+  tenantId String
+  subscriptionId String
+  originalSubscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  clockId String
+  clock BillingDunningClock @relation(fields: [clockId], references: [id], onDelete: Restrict)
+  epoch Int
+  stageKey String
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+  /// PENDING | DELIVERED | OBSOLETE
+  status String @default("PENDING")
+  payload Json
+  channels BillingNoticeHandoff[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([clockId, epoch, stageKey, userId])
+  @@index([tenantId])
+  @@index([status, createdAt])
+  @@map("billing_fee_notices")
+}
+
+/// Persist UNKNOWN before a network handoff; never blindly resend a demand
+/// whose provider acknowledgement was lost. Inbox/push/SMS have separate keys.
+model BillingNoticeHandoff {
+  id String @id @default(cuid())
+  tenantId String
+  noticeId String
+  notice BillingFeeNotice @relation(fields: [noticeId], references: [id], onDelete: Restrict)
+  channel String
+  part String
+  /// PREPARED | UNKNOWN | DELIVERED | NOT_SENT
+  status String
+  completedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([noticeId, channel, part])
+  @@index([tenantId])
+  @@map("billing_notice_handoffs")
 }
 
 enum BillingEventType {
@@ -3094,6 +3401,113 @@ model ProviderPayment {
   @@index([tenantId])
   @@index([status])
   @@map("provider_payments")
+}
+
+/// [MMG checkout 2/6] One partner's attempt to pay the weekly fee on the MMG
+/// hosted page (modules/billing/MMG-CHECKOUT-API.md). A table of its own [I7]:
+/// the merchant-initiated poller and the SWIFT-004 guard never see it. Nothing
+/// on this row credits money. The credit is the ProviderPayment compare-and-set,
+/// taken only after the MMG lookup confirms the exact amount, currency and
+/// merchant [I2]. Ids, not foreign keys, like the other M-18 money rows: money
+/// evidence is never removed by a cascade.
+///
+/// [I4] One OPEN or CONFIRMING checkout per subscription: a PARTIAL unique index
+/// in the migration (Prisma cannot express partial uniques, so it lives in SQL),
+/// with CHECKs on the status, the whole-dollar amount and the 18-digit reference.
+model MmgCheckoutIntent {
+  id                    String    @id @default(cuid())
+  tenantId              String    @default("swift-default")
+  subscriptionId        String
+  /// Ours, sent to MMG: 18 digits (providers/mmg newMerchantTransactionId).
+  merchantTransactionId String    @unique
+  /// Exactly what MMG was asked for, in whole GYD [I1].
+  amount                Decimal   @db.Decimal(12, 2)
+  currencyCode          String    @db.Char(3)
+  /// OPEN | CONFIRMING | CONFIRMED | NOT_PAID | EXPIRED | HELD
+  status                String    @default("OPEN")
+  /// The partner whose tap created it. Every Idempotency-Key it answered is
+  /// an MmgCheckoutKey row [F3].
+  createdByUserId       String
+  /// ios | android | web | unknown — where the checkout was started.
+  platform              String
+  /// The MMG page handed to the partner, SEALED at rest with the platform's
+  /// envelope encryption (providers/storage/envelope.ts, as card-vault.ts):
+  /// iv(12) | authTag(16) | ciphertext, under a data key wrapped by the master
+  /// key. Opened only for its owner's answer; never logged.
+  checkoutUrlSealed     Bytes
+  checkoutUrlDek        Bytes
+  expiresAt             DateTime
+  /// When a reply first named this checkout, and the path it came back on — a
+  /// hint for the partner-facing state, never evidence of payment.
+  replyAt               DateTime?
+  outcomeHint           String?
+  /// MMG transaction ids a reply named, checked with the lookup until one confirms.
+  candidates            String[]  @default([])
+  /// The MMG transaction the lookup confirmed, normalized. One MMG transaction,
+  /// one checkout [I3]; the ProviderPayment row enforces it across every channel.
+  mmgTransactionId      String?   @unique
+  providerPaymentId     String?   @unique
+  confirmedAt           DateTime?
+  /// Why NOT_PAID, EXPIRED or HELD — for operators, never shown as-is.
+  reason                String?
+  checkAttempts         Int       @default(0)
+  nextCheckAt           DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  keys                  MmgCheckoutKey[]
+  confirmationHold      PaymentConfirmationHold?
+
+  @@index([tenantId])
+  @@index([subscriptionId, createdAt])
+  @@index([status, nextCheckAt])
+  // [MMG support lookup] Support finds a checkout by a transaction a reply named (candidates @> {id}).
+  @@index([candidates], type: Gin)
+  @@map("mmg_checkout_intents")
+}
+
+/// [MMG checkout F3] Every Idempotency-Key a checkout answered. Once a key has
+/// been answered with a checkout it keeps answering with THAT checkout, whatever
+/// becomes of it, so a retry can never open a second payable page.
+model MmgCheckoutKey {
+  id              String            @id @default(cuid())
+  tenantId        String            @default("swift-default")
+  /// A key is its sender's alone.
+  createdByUserId String
+  clientKey       String
+  intentId        String
+  intent          MmgCheckoutIntent @relation(fields: [intentId], references: [id], onDelete: Cascade)
+  createdAt       DateTime          @default(now())
+
+  @@unique([createdByUserId, clientKey])
+  @@index([intentId])
+  @@index([tenantId])
+  @@map("mmg_checkout_keys")
+}
+
+/// [I9] Every reply, callback and lookup of an MMG checkout, written BEFORE
+/// anything is decided on it, in one insert that nothing updates. The decrypted
+/// reply is kept as MMG sent it (keys that name a secret dropped); the token
+/// itself never is.
+model MmgCheckoutObservation {
+  id        String   @id @default(cuid())
+  tenantId  String   @default("swift-default")
+  /// The checkout the observation was matched to, if any.
+  intentId  String?
+  /// RETURN | NOTIFY | LOOKUP
+  source    String
+  /// RETURN/NOTIFY: the path the partner came back on. LOOKUP: the transaction id asked about.
+  detail    String?
+  /// The decrypted reply (RETURN/NOTIFY) or the lookup answer (LOOKUP).
+  body      Json?
+  /// Key names and JSON types only (describeShape): safe for any log.
+  shape     Json?
+  /// Why nothing could be used: NO_TOKEN | NO_CHECKOUT | LOOKUP_NOT_FOUND | LOOKUP_FAILED
+  failure   String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([intentId, createdAt])
+  @@map("mmg_checkout_observations")
 }
 
 /// Immutable historical SQL-canonical references reserved before identity rekey.
@@ -3363,9 +3777,11 @@ enum SubscriptionStatus {
 /// provider unreachable past TTL) — UNKNOWN is never auto-failed; it ages
 /// into the admin queue and resolves by poller, portal check, or settlement.
 model SubscriptionPayment {
+  obligationTransitions BillingObligationTransition[]
   id             String               @id @default(cuid())
   subscriptionId String
   subscription   Subscription         @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  confirmationHold PaymentConfirmationHold?
   amount         Decimal              @db.Decimal(10, 2)
   status         PaymentStatus
   paymentMethod  PaymentMethod
@@ -3515,6 +3931,7 @@ model CardSession {
   paymentId          String?            @unique
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
+  confirmationHold   PaymentConfirmationHold?
 
   @@unique([subscriptionId, purpose, idempotencyKey])
   @@index([tenantId])
@@ -4037,6 +4454,15 @@ model Zone {
   version         Int        @default(1)
   deliveryBaseFee Decimal?   @db.Decimal(10, 2)
   deliveryPerKm   Decimal?   @db.Decimal(10, 2)
+  /// [ZONE-FARES] The taxi per-km rate for a trip that starts or ends here,
+  /// in whole units of the market's currency; null = no override (the
+  /// market's rate). The formula charges it for every kilometre beyond the
+  /// included ones; the base and the included kilometres stay the market's.
+  /// When both ends set one, the higher applies. A fixed fare for the pair
+  /// (ZoneFare) still wins over it. Owner, 1 Oct 2026: an airport prices per
+  /// kilometre, never as a fixed pair — a fixed fare is unfair to people who
+  /// live near the airport. CHECKed whole and positive in the migration.
+  taxiPerKm       Decimal?   @db.Decimal(10, 2)
   surgeMultiplier Float      @default(1.0)
   riders          Rider[]    @relation("riderZones")
   faresFrom       ZoneFare[] @relation("zoneFareFrom")
@@ -4141,6 +4567,8 @@ model PlatformConfig {
 }
 
 model AuditLog {
+  obligationTransition BillingObligationTransition?
+  moverFeeDecision MoverFeeAuthority?
   id        String   @id @default(cuid())
   userId    String?
   action    String

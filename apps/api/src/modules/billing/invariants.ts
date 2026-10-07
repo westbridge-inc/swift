@@ -1,5 +1,7 @@
+import { activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS, lockBillingAuthority } from './dunning-clock';
 import type { PrismaClient } from '@prisma/client';
 import { log } from '../../utils/logger';
+import { restoreBillingAccess } from './billing-access';
 
 // Nightly invariants [san spec 24.2 mapped onto the real engine]. The DB
 // testifies; any failure pages. The wrongful-suspension detector AUTO-HEALS:
@@ -10,7 +12,13 @@ export interface InvariantReport {
   walletsChecked: number;
   walletMismatches: { subscriptionId: string; ledger: number; balance: number }[];
   wrongfulSuspensions: string[]; // auto-healed subscription ids
+  earlyBillingSuspensions: string[]; // historical timing evidence; never clears unrelated restrictions
   enforcementLeaks: string[]; // ACTIVE but unpaid past grace+6h — alert only
+  /** Subscriptions whose payer or shared clock could not be read, so neither
+   *  detector could judge them (ownership needs review) — alert only. One such
+   *  row never stops the run: every later check, the S0 ledger ones included,
+   *  still runs. */
+  unjudgedSubscriptions: string[];
   receiptGaps: { tenantId: string; year: number; expected: number; actual: number }[];
   /** Σdebits ≠ Σcredits across the whole double-entry ledger — S0, the books are broken [tollgate 16.2]. */
   ledgerTrialImbalance: { debits: number; credits: number } | null;
@@ -20,7 +28,7 @@ export interface InvariantReport {
 
 export async function runBillingInvariants(prisma: PrismaClient, now = new Date()): Promise<InvariantReport> {
   const report: InvariantReport = {
-    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], enforcementLeaks: [], receiptGaps: [],
+    walletsChecked: 0, walletMismatches: [], wrongfulSuspensions: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [], receiptGaps: [],
     ledgerTrialImbalance: null, ledgerWalletMismatches: [],
   };
 
@@ -49,36 +57,60 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
     where: { status: 'SUSPENDED', currentPeriodEnd: { gt: now } },
     select: { id: true },
   });
-  for (const sub of wrongful) {
-    await prisma.$transaction([
-      prisma.subscription.update({
-        where: { id: sub.id },
-        data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 },
-      }),
-      prisma.billingEvent.create({
-        data: {
-          subscriptionId: sub.id,
-          type: 'REINSTATED',
+  const unjudged = (subscriptionId: string, err: unknown) => {
+    if (!report.unjudgedSubscriptions.includes(subscriptionId)) report.unjudgedSubscriptions.push(subscriptionId);
+    log().error({ err, subscriptionId }, '[billing invariants] subscription payer or clock unreadable; reported, the run continues');
+  };
+  for (const candidate of wrongful) {
+    let healed = false;
+    try {
+      healed = await prisma.$transaction(async (tx) => {
+        const authority = await lockBillingAuthority(tx, candidate.id);
+        const sub = await tx.subscription.findUniqueOrThrow({ where: { id: candidate.id }, include: { vendor: true } });
+        const recorded = await tx.billingEvent.findUnique({ where: { idempotencyKey: `suspended:${sub.id}:${sub.nextBillingDate.toISOString().slice(0, 10)}` } });
+        if (sub.status !== 'SUSPENDED' || !sub.autoRenew || authority.userStatus !== 'ACTIVE'
+          || sub.currentPeriodEnd <= now || sub.nextBillingDate < sub.currentPeriodEnd || !recorded
+          || (sub.vendor && sub.vendor.suspensionSource !== 'BILLING')) return false;
+        await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null, failedAttempts: 0 } });
+        // [SUSPENSION-HEAL · AUD-L8b-003 · owner ruling] The heal gives back
+        // everything the billing suspension took, in this transaction: the
+        // store's ACTIVE status AND its order intake (the same restore a real
+        // payment runs, billing-access.ts). An admin/safety/moderation hold is
+        // never a BILLING suspension and is refused above.
+        if (sub.vendor) await restoreBillingAccess(tx, sub.vendor.id);
+        await tx.billingEvent.create({ data: { subscriptionId: sub.id, type: 'REINSTATED',
           idempotencyKey: `wrongful-heal:${sub.id}:${now.toISOString().slice(0, 10)}`,
-          note: 'wrongful-suspension detector: paid-through account was suspended — auto-reactivated',
-        },
-      }),
-    ]).catch((e) => {
-      // A same-day duplicate heal is fine; anything else must surface.
-      if (!(e instanceof Error && e.message.includes('Unique constraint'))) throw e;
-    });
-    report.wrongfulSuspensions.push(sub.id);
+          note: 'wrongful-suspension detector: a recorded billing suspension conflicted with paid coverage; current billing authority and store access restored',
+        } });
+        return true;
+      });
+    } catch (err) {
+      unjudged(candidate.id, err);
+    }
+    if (healed) report.wrongfulSuspensions.push(candidate.id);
   }
 
-  // 3. Enforcement leak: ACTIVE but unpaid past grace + 6h (revenue leaking
-  //    silently). Alert only — enforcement decisions belong to dunning.
-  const graceHours = 48;
-  const leakCutoff = new Date(now.getTime() - (graceHours + 6) * 3_600_000);
-  const leaks = await prisma.subscription.findMany({
-    where: { status: 'ACTIVE', autoSuspendEnabled: true, feeWaived: false, currentPeriodEnd: { lt: leakCutoff } },
-    select: { id: true },
+  // 3. The shared active-time clock also governs the detector. A confirmation
+  // pause is not an enforcement leak, however many wall-clock days it lasts.
+  const candidates = await prisma.subscription.findMany({
+    where: { status: { in: ['ACTIVE', 'SUSPENDED'] }, autoSuspendEnabled: true, feeWaived: false },
+    select: { id: true, status: true, suspendedAt: true },
   });
-  report.enforcementLeaks = leaks.map((l) => l.id);
+  for (const sub of candidates) {
+    let clock: Awaited<ReturnType<typeof currentDunningClock>>;
+    try {
+      clock = await prisma.$transaction((tx) => currentDunningClock(tx, sub.id, now));
+    } catch (err) {
+      unjudged(sub.id, err);
+      continue;
+    }
+    if (sub.status === 'ACTIVE' && !clock.pausedAt && activeOverdueMs(clock, now) > FULL_FEE_GRACE_MS + 6 * 3_600_000) {
+      report.enforcementLeaks.push(sub.id);
+    }
+    if (sub.status === 'SUSPENDED' && sub.suspendedAt && sub.suspendedAt.getTime() < clock.dueAt.getTime() + FULL_FEE_GRACE_MS) {
+      report.earlyBillingSuspensions.push(sub.id);
+    }
+  }
 
   // 4. Receipt gaplessness per tenant-year [scenario R].
   const counters = await prisma.receiptCounter.findMany();
@@ -122,7 +154,7 @@ export async function runBillingInvariants(prisma: PrismaClient, now = new Date(
   }
 
   const broken =
-    report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+    report.walletMismatches.length + report.wrongfulSuspensions.length + report.earlyBillingSuspensions.length + report.enforcementLeaks.length +
     report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
   if (broken > 0) {
     log().error({ report }, 'billing invariants: FAILURES detected (wrongful suspensions auto-healed)');

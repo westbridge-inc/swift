@@ -57,10 +57,13 @@ describe('[PT-1] sub.paymentToken stays null', () => {
     expect(writes).toEqual([]);
   });
 
-  it('the only readers are the two lines of the legacy card branch; the v2 code never names it', () => {
+  it('the only readers are the two lines of the legacy card branch and one absence check; the v2 code never names it', () => {
     expect(paymentTokenLines()).toEqual([
       { file: 'modules/billing/billing.service.ts', line: "if (sub.billingMethod === 'CARD' && sub.paymentToken) {" },
       { file: 'modules/billing/billing.service.ts', line: 'token: sub.paymentToken,' },
+      // [#1393] The one mover fee authority merges only trials with no payment
+      // set up at all: it reads the legacy token solely to require its absence.
+      { file: 'modules/subscription/mover-fee-authority.ts', line: "&& s.billingMethod === 'CASH' && !s.paymentToken && !s.mmgPayerMsisdn" },
     ]);
     for (const f of V2_FILES) expect(read(f), f).not.toMatch(/paymentToken/);
   });

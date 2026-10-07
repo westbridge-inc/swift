@@ -11,6 +11,8 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isPassengerVehicle, isVehicleOffered } from '../config/vehicle-classes';
 import { partnerRateFor, type SubscriptionTiers } from '../modules/country/country-config.service';
 import { PartnerService } from '../modules/partner/partner.service';
+import { lockMoverFeeAuthority, resolveMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
+import { cleanupBillingClocks, cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // The mover weekly fee follows the ROLE first, then the VEHICLE — never the
@@ -139,6 +141,7 @@ describe('mover fee band — what a mover is actually charged', () => {
   let subscriptions: SubscriptionService;
   const createdUserIds: string[] = [];
   let seq = 0;
+  const fixtureStamp = Date.now().toString().slice(-6);
 
   beforeAll(async () => {
     app = Fastify({ logger: false });
@@ -153,6 +156,7 @@ describe('mover fee band — what a mover is actually charged', () => {
   });
 
   afterAll(async () => {
+    await cleanupPayerBillingClocks(app.prisma, createdUserIds);
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
     await app.close();
   });
@@ -163,7 +167,7 @@ describe('mover fee band — what a mover is actually charged', () => {
     const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
     const seeded = gy.subscriptionTiers as unknown as SubscriptionTiers;
     expect(seeded, 'GY rate card — re-run the seed if this fails').toMatchObject({
-      mover: 6000, moverHeavy: 9000, taxiDriver: 9000, serviceVendor: 8000,
+      mover: 6000, moverHeavy: 9000, taxiDriver: 8000, serviceVendor: 8000,
       smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000,
       largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000,
       franchiseMinLocations: 5, franchiseDiscountPct: 50,
@@ -174,7 +178,7 @@ describe('mover fee band — what a mover is actually charged', () => {
     seq += 1;
     const user = await app.prisma.user.create({
       data: {
-        phone: `+59200077${String(seq).padStart(2, '0')}`,
+        phone: `+59200077${fixtureStamp}${String(seq).padStart(2, '0')}`,
         firstName: 'Band',
         lastName: `Mover${seq}`,
         roles: ['MOVER', 'CUSTOMER'] as UserRole[],
@@ -217,12 +221,118 @@ describe('mover fee band — what a mover is actually charged', () => {
     expect(Number(sub.weeklyRate)).toBe(9000);
   });
 
-  it('every taxi driver signs up on 9,000 — a car or a 15-seater bus', async () => {
+  it('every taxi driver signs up on 8,000 — a car or a 15-seater bus', async () => {
     const car = await makeDriver(await makeMoverUser(), 'CAR');
-    expect(Number((await subscriptions.startTrialForDriver(car.id)).weeklyRate)).toBe(9000);
+    expect(Number((await subscriptions.startTrialForDriver(car.id)).weeklyRate)).toBe(8000);
 
     const bus = await makeDriver(await makeMoverUser(), 'BUS_15');
-    expect(Number((await subscriptions.startTrialForDriver(bus.id)).weeklyRate)).toBe(9000);
+    expect(Number((await subscriptions.startTrialForDriver(bus.id)).weeklyRate)).toBe(8000);
+  });
+
+  it.each(['taxi-first', 'delivery-first'] as const)('a driver who also delivers has one taxi subscription, in %s activation order', async (order) => {
+    const userId = await makeMoverUser();
+    const partners = new PartnerService(app.prisma);
+    const driver = await partners.becomePartner(userId, { role: 'MOVER', vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Test', year: 2020, color: 'White', licensePlate: `DUAL-${seq}` } });
+    const rider = await partners.becomePartner(userId, { role: 'MOVER', vehicleType: 'MOTORCYCLE' });
+    expect(driver.kind).toBe('DRIVER');
+    expect(rider.kind).toBe('RIDER');
+    await app.prisma.driver.update({ where: { id: driver.id }, data: { documentsVerified: true } });
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { documentsVerified: true } });
+    const first = order === 'taxi-first'
+      ? await subscriptions.startTrialForDriver(driver.id)
+      : await subscriptions.startTrialForRider(rider.id);
+    const second = order === 'taxi-first'
+      ? await subscriptions.startTrialForRider(rider.id)
+      : await subscriptions.startTrialForDriver(driver.id);
+    const owned = await app.prisma.subscription.findMany({ where: { OR: [{ driverId: driver.id }, { riderId: rider.id }] } });
+    const due = new Date(Date.now() - 60_000);
+    for (const sub of owned) {
+      // [#1393] Aging input: the trial is over and the week is due. The shared
+      // clock is born at the trial's due date, so compressing time re-anchors
+      // this test-owned clock (no money, hold or notice exists before the first fee).
+      await cleanupBillingClocks(app.prisma, [sub.id]);
+      await app.prisma.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', isTrialActive: false, currentPeriodStart: new Date(due.getTime() - 7 * 86_400_000), currentPeriodEnd: due, nextBillingDate: due } });
+      await app.prisma.prepaidBalance.upsert({ where: { subscriptionId: sub.id }, create: { subscriptionId: sub.id, balance: 20000, currencyCode: 'GYD' }, update: { balance: 20000 } });
+      const ready = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id }, include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } } });
+      expect(await billing.billSubscription(ready)).toBe('succeeded');
+    }
+    const charges = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: owned.map((s) => s.id) }, status: 'CAPTURED' } });
+    const total = charges.reduce((sum, p) => sum + Number(p.amount), 0);
+    // Aggregate diagnostic only: no account identifiers, session or contact data.
+    console.info('TAXI_DUAL_BILLING', { order, subscriptions: owned.length, chargeCount: charges.length, total });
+    expect(owned).toHaveLength(1);
+    expect(charges).toHaveLength(1);
+    expect(total).toBe(8000);
+    expect(first.id).toBe(second.id);
+    expect(owned[0]?.type).toBe(order === 'taxi-first' ? 'TAXI_DRIVER' : 'DELIVERY_RIDER');
+    expect(await resolveMoverFeeAuthority(app.prisma, { userId, tenantId: 'swift-default' })).toMatchObject({ canonicalSubscriptionId: first.id, feeType: 'TAXI_DRIVER', state: 'ACTIVE' });
+    expect(await app.prisma.trialGrant.count({ where: { accountId: userId } })).toBe(1);
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: first.id } })).balance)).toBe(12000);
+    expect(Number(owned[0]?.weeklyRate)).toBe(8000);
+    expect(await subscriptions.priceForActivation({ driverId: driver.id })).toBeNull();
+    expect(await subscriptions.priceForActivation({ riderId: rider.id })).toBeNull();
+  });
+
+  it('concurrent Driver and Rider activation shares one trial, source and future taxi fee', async () => {
+    const userId = await makeMoverUser();
+    const driver = await makeDriver(userId, 'CAR');
+    const rider = await makeRider(userId, 'MOTORCYCLE');
+    const results = await Promise.all([
+      subscriptions.startTrialForDriver(driver.id), subscriptions.startTrialForRider(rider.id),
+      subscriptions.startTrialForDriver(driver.id), subscriptions.startTrialForRider(rider.id),
+    ]);
+    expect(new Set(results.map((s) => s.id)).size).toBe(1);
+    expect(await app.prisma.subscription.count({ where: { OR: [{ riderId: rider.id }, { driverId: driver.id }] } })).toBe(1);
+    expect(await app.prisma.trialGrant.count({ where: { accountId: userId } })).toBe(1);
+    const authority = await resolveMoverFeeAuthority(app.prisma, { userId, tenantId: 'swift-default' });
+    expect(authority).toMatchObject({ canonicalSubscriptionId: results[0]!.id, feeType: 'TAXI_DRIVER', state: 'ACTIVE' });
+    const source = await app.prisma.subscription.findUniqueOrThrow({ where: { id: authority!.canonicalSubscriptionId } });
+    expect(Number(source.weeklyRate)).toBe(8000);
+    expect(new Set(results.map((s) => s.trialEndDate?.getTime())).size).toBe(1);
+  });
+
+  it('taxi adoption preserves a delivery paid period, issued amount and manual restrictions', async () => {
+    const userId = await makeMoverUser();
+    const rider = await makeRider(userId, 'MOTORCYCLE');
+    const first = await subscriptions.startTrialForRider(rider.id);
+    const due = new Date(Date.now() + 3 * 86_400_000);
+    await app.prisma.subscription.update({ where: { id: first.id }, data: { status: 'PAUSED', autoRenew: false, weeklyRate: 4500, customRate: 4500, currentPeriodEnd: due, nextBillingDate: due } });
+    const issued = await app.prisma.subscriptionPayment.create({ data: { subscriptionId: first.id, amount: 6000, status: 'PENDING', paymentMethod: 'MOBILE_MONEY', periodStart: new Date(), periodEnd: due } });
+    const driver = await makeDriver(userId, 'CAR');
+    const adopted = await subscriptions.startTrialForDriver(driver.id);
+    expect(adopted.id).toBe(first.id);
+    expect(adopted.type).toBe('DELIVERY_RIDER');
+    expect(adopted.status).toBe('PAUSED');
+    expect(adopted.autoRenew).toBe(false);
+    expect(Number(adopted.weeklyRate)).toBe(4500);
+    expect(adopted.currentPeriodEnd.getTime()).toBe(due.getTime());
+    expect(adopted.nextBillingDate.getTime()).toBe(due.getTime());
+    expect(adopted.trialEndDate?.getTime()).toBe(first.trialEndDate?.getTime());
+    expect(Number((await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: issued.id } })).amount)).toBe(6000);
+    expect(await app.prisma.trialGrant.count({ where: { accountId: userId } })).toBe(1);
+  });
+
+  it('a legacy pair projects a hold on GET without writes and persists it on an authorized worker', async () => {
+    const userId = await makeMoverUser();
+    const rider = await makeRider(userId, 'MOTORCYCLE');
+    const driver = await makeDriver(userId, 'CAR');
+    const now = new Date();
+    const common = { status: 'ACTIVE' as const, weeklyRate: 6000, currencyCode: 'GYD', currentPeriodStart: now, currentPeriodEnd: now, nextBillingDate: now };
+    const r = await app.prisma.subscription.create({ data: { ...common, riderId: rider.id, type: 'DELIVERY_RIDER' } });
+    const d = await app.prisma.subscription.create({ data: { ...common, driverId: driver.id, type: 'TAXI_DRIVER', weeklyRate: 9000 } });
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: r.id, balance: 1000, currencyCode: 'GYD' } });
+    const payer = { userId, tenantId: 'swift-default' };
+    expect(await resolveMoverFeeAuthority(app.prisma, payer)).toMatchObject({ state: 'FINANCE_HOLD', sourceSubscriptionIds: [r.id, d.id].sort() });
+    expect(await app.prisma.moverFeeAuthority.findUnique({ where: { userId } })).toBeNull();
+    const held = await app.prisma.$transaction((tx) => lockMoverFeeAuthority(tx, payer));
+    expect(held).toMatchObject({ state: 'FINANCE_HOLD', revision: 1 });
+    expect(await app.prisma.moverFeeSubscription.count({ where: { userId } })).toBe(2);
+    expect((await app.prisma.$transaction((tx) => lockMoverFeeAuthority(tx, payer)))?.revision).toBe(1);
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: r.id } })).balance)).toBe(1000);
+    await expect(app.prisma.subscription.delete({ where: { id: r.id } })).rejects.toThrow();
+    await expect(app.prisma.subscription.delete({ where: { id: d.id } })).rejects.toThrow();
+    await expect(app.prisma.moverFeeAuthority.delete({ where: { userId } })).rejects.toThrow();
+    await expect(app.prisma.moverFeeAuthority.update({ where: { userId }, data: { state: 'ACTIVE', holdReason: null } })).rejects.toThrow();
   });
 
   it('a rider who buys a canter moves onto the heavy-delivery rate, with an audit event', async () => {
@@ -251,9 +361,9 @@ describe('mover fee band — what a mover is actually charged', () => {
     expect(Number(back.weeklyRate)).toBe(6000);
   });
 
-  it('a rider still on the old 8,000 moves to 6,000 at the next weekly re-tier, with an audit event — taxi stays 9,000', async () => {
+  it('a rider still on the old 8,000 moves to 6,000 at the next weekly re-tier, with an audit event — taxi is already on 8,000', async () => {
     // The owner, 2026-09-29: delivery riders pay 6,000 a week, down from 8,000;
-    // taxi drivers are unchanged. A subscription born on the previous card must
+    // the following day taxi moved to 8,000. A rider subscription on the previous card must
     // not keep paying 8,000: the weekly re-tier moves it, and says so.
     const rider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
     const sub = await subscriptions.startTrialForRider(rider.id);
@@ -270,20 +380,20 @@ describe('mover fee band — what a mover is actually charged', () => {
     expect(Number(event?.amount)).toBe(6000);
 
     const taxi = await app.prisma.subscription.findUniqueOrThrow({ where: { id: taxiSub.id } });
-    expect(Number(taxi.weeklyRate)).toBe(9000);
+    expect(Number(taxi.weeklyRate)).toBe(8000);
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: taxiSub.id, type: 'TIER_CHANGE' } })).toBe(0);
   });
 
   it('a taxi driver who buys a bus stays on the taxi rate — the role decides, not the vehicle', async () => {
     const driver = await makeDriver(await makeMoverUser(), 'CAR');
     const sub = await subscriptions.startTrialForDriver(driver.id);
-    expect(Number(sub.weeklyRate)).toBe(9000);
+    expect(Number(sub.weeklyRate)).toBe(8000);
 
     await app.prisma.driver.update({ where: { id: driver.id }, data: { vehicleType: 'BUS_15' } });
     await billing.recalculateMoverTiers();
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(Number(after.weeklyRate)).toBe(9000);
+    expect(Number(after.weeklyRate)).toBe(8000);
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } })).toBe(0);
   });
 

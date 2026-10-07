@@ -9,6 +9,7 @@ import {
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
@@ -508,11 +509,47 @@ export interface TierEstimate {
   capacity: number;
   source: 'zone_table' | 'formula';
 }
+/** [TAXI multi-stop] One intermediate stop as /rides/estimate and
+ *  /rides/request take it — no sequence: the server numbers them in order. */
+export interface TaxiStopInput {
+  lat: number;
+  lng: number;
+  address: string;
+}
+/** [TAXI multi-stop] One leg of a quoted route, in route order (PICKUP,
+ *  STOP_1..STOP_3, DESTINATION). `seconds` is null when routing gave none. */
+export interface EstimateLeg {
+  from: string;
+  to: string;
+  meters: number;
+  seconds: number | null;
+}
 export interface TieredEstimate {
   tiers: TierEstimate[];
   currencyCode: string;
   distanceKm: number;
   durationMin: number;
+  /** Server routing provenance, separate from the native basemap provider. */
+  routeSource?: 'osrm' | 'haversine';
+  /** Present on a quote WITH stops only (the multi-stop contract). */
+  legs?: EstimateLeg[];
+  maxStops?: number;
+  stopCount?: number;
+  /** [TAXI waiting charge] The terms shown beside the fare, when the server sends them. */
+  waiting?: unknown;
+}
+/** The ride request body. `stops` and `expectedFare` travel only on a ride
+ *  WITH stops; a ride without them sends exactly today's body. */
+export interface RideRequestBody {
+  pickup: Point;
+  dropoff: Point;
+  pickupAddress: string;
+  dropoffAddress: string;
+  passengerCount?: number;
+  rideClass?: RideClass;
+  stops?: TaxiStopInput[];
+  /** The fare of the chosen class from the latest quote of exactly this itinerary. */
+  expectedFare?: number;
 }
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */
@@ -635,7 +672,13 @@ export const moderationApi = {
 };
 
 export const rideApi = {
-  estimate: (pickup: Point, dropoff: Point) => api.post('/rides/estimate', { pickup, dropoff }),
+  // [TAXI multi-stop] With stops, the whole route is quoted as one trip; with
+  // none (absent or empty) the body is exactly today's — no `stops` key at all.
+  estimate: (pickup: Point, dropoff: Point, stops?: readonly TaxiStopInput[]) =>
+    api.post('/rides/estimate', stops && stops.length > 0 ? { pickup, dropoff, stops } : { pickup, dropoff }),
+  /** [TAXI multi-stop] How many stops this server takes ({ maxStops }). An
+   *  older server has no such read; the app treats that as 0 (no stops). */
+  capabilities: (session?: AuthSessionSnapshot) => api.get('/rides/capabilities', capturedAuthConfig(session)),
   // Availability spec §1/§2.1: buckets only (GOOD/LOW/NONE), never counts.
   availability: (p: Point) => api.get(`/rides/availability?lat=${p.lat}&lng=${p.lng}`),
   watchAvailability: (p: Point) => api.post('/rides/availability/watch', p),
@@ -654,14 +697,13 @@ export const rideApi = {
   }) => api.post('/rides/queue/join', data),
   queueLeave: () => api.post('/rides/queue/leave', {}),
   queueStatus: () => api.get('/rides/queue'),
-  request: (data: {
-    pickup: Point;
-    dropoff: Point;
-    pickupAddress: string;
-    dropoffAddress: string;
-    passengerCount?: number;
-    rideClass?: RideClass;
-  }) => api.post('/rides/request', data),
+  // [TAXI multi-stop] The key is the booking INTENT's (lib/rideRequestAttempt):
+  // the same on every retry of this trip, so a lost answer is replayed by the
+  // server instead of becoming a second booking.
+  // Pinned to the account that tapped Request (`session`), never to whoever is
+  // signed in by the time the request leaves.
+  request: (data: RideRequestBody, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.post('/rides/request', data, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
   active: () => api.get('/rides/active'),
   get: (id: string) => api.get(`/rides/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
@@ -863,6 +905,19 @@ export const partnerApi = {
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
 export const riderApi = {
   profile: () => api.get('/rider/profile'),
+  // [AF-MOB-006] Custody recovery after pickup. The holder reports a problem
+  // and reads the case (with the handoff code while a relay is pending); a
+  // relay rider reads their handoffs and completes one with the holder's code.
+  // The transfer carries an Idempotency-Key so an offline retry replays the
+  // original answer instead of spending a second attempt.
+  recovery: (orderId: string) => api.get(`/rider/orders/${orderId}/recovery`),
+  reportProblem: (orderId: string, body: { reason: string; note?: string; gps?: { lat: number; lng: number } }, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/orders/${orderId}/recovery`, body, capturedAuthConfig(session)),
+  relayTasks: () => api.get('/rider/recovery/relays'),
+  transferCustody: (caseId: string, body: { code: string; gps: { lat: number; lng: number }; version?: number }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    api.post(`/rider/recovery/${caseId}/transfer`, body, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
+  // An absent reason is dropped by JSON; the server accepts a decline with or without one.
+  declineRelay: (caseId: string, reason?: string) => api.post(`/rider/recovery/${caseId}/decline`, { reason }),
   standing: () => api.get('/rider/standing'),
   currentOffer: () => api.get('/rider/offers/current'),
   offerSeen: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/seen', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
@@ -936,8 +991,13 @@ export const driverApi = {
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/driver/profile/mmg-pay-url/pending'),
-  goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot) =>
-    api.post('/driver/go-online', { latitude, longitude }, capturedAuthConfig(session)),
+  // [TAXI multi-stop] `capabilities` is sent ONLY when the caller passes it —
+  // that is, only when the server has advertised rides with stops (CONTRACT
+  // §6.4). Without it the body is exactly today's { latitude, longitude }.
+  goOnline: (latitude: number, longitude: number, session?: AuthSessionSnapshot, capabilities?: readonly string[]) =>
+    api.post('/driver/go-online', capabilities && capabilities.length > 0
+      ? { latitude, longitude, capabilities: [...capabilities] }
+      : { latitude, longitude }, capturedAuthConfig(session)),
   goOffline: () => api.post('/driver/go-offline'),
   location: (latitude: number, longitude: number, session?: AuthSessionSnapshot, fix?: { accuracy?: number | null; mocked?: boolean | null }) =>
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
@@ -954,6 +1014,12 @@ export const driverApi = {
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
   verifyPin: (id: string, pin: string) => api.put(`/driver/rides/${id}/verify-pin`, { pin }),
   start: (id: string) => api.put(`/driver/rides/${id}/start`),
+  // [TAXI multi-stop · part 4] The stop actions, each on the NEXT open stop
+  // only (else 409 STOP_OUT_OF_ORDER); a repeat tap is safe server-side. The
+  // screen offers them only when the server shows it has them (stopWait).
+  stopArrived: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/arrived`),
+  stopDepart: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/depart`),
+  stopSkip: (id: string, sequence: number, reason: string) => api.post(`/driver/rides/${id}/stops/${sequence}/skip`, { reason }),
   // [M-29] The fare outcome at the destination — a cash ride's completion.
   // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
   // captures the fare and completes the ride in one commit; 'refused' /
@@ -1049,6 +1115,8 @@ export const vendorApi = {
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
+  /** [AF-MOB-006] The store confirms returned goods are back (closes the return). */
+  returnReceived: (id: string) => api.post(`/vendor/orders/${id}/recovery/return-received`, {}),
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
@@ -1243,6 +1311,37 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     },
     read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
       const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}
+
+/** The card half of the fee page (CARD-CHECKOUT-API): the same captured principal and store as
+ *  weeklyFeeApi. The server prices a Pay now; no amount and no card detail is ever sent. */
+export function cardFeeApi(family: import('../lib/cardFee').CardFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = `/${family}/subscription`;
+  const signedOut = async (): Promise<never> => { throw new Error('Sign in to pay.'); };
+  if (!session) return { start: signedOut, read: signedOut, remove: signedOut };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => family === 'vendor'
+    ? capturedVendorAuthConfig(current(), storeId, { headers })
+    : capturedAuthConfig(current(), { headers });
+  return {
+    start: async (purpose: import('../lib/cardFee').CardPurpose, key: string): Promise<import('../lib/cardFee').CardSessionStart> => {
+      const body = purpose === 'ENROLL' ? { purpose, consentVersion: CARD_CONSENT_VERSION } : { purpose };
+      const response = await api.post(`${base}/card-sessions`, body, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (sessionId: string): Promise<import('../lib/cardFee').CardSessionView> => {
+      const response = await api.get(`${base}/card-sessions/${encodeURIComponent(sessionId)}`, config());
+      current(); return response.data.data;
+    },
+    remove: async (cardId: string): Promise<unknown> => {
+      const response = await api.delete(`${base}/cards/${encodeURIComponent(cardId)}`, config());
       current(); return response.data.data;
     },
   };

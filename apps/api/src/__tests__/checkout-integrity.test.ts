@@ -10,6 +10,8 @@ import { OrderService } from '../modules/order/order.service';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { expressDeliveryFee } from '../utils/markup';
+import { readDunningClock } from '../modules/billing/dunning-clock';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 // ---------------------------------------------------------------------------
 // Pre-launch audit gaps: (1) checkout money math was only asserted "> 0" —
@@ -150,22 +152,27 @@ describe('checkout money math', () => {
     // The vendor flags still say sellable (ACTIVE/open/accepting) — only the
     // subscription knows the grace ran out a minute ago. Checkout must
     // re-evaluate operability live, not wait for the billing sweep.
+    // [#1393] The owner's grace is 48 hours of unpaused overdue time on the
+    // shared clock: due 48 hours and a minute ago, it ran out a minute ago.
+    const due = new Date(Date.now() - 2 * 86_400_000 - 60_000);
     const sub = await app.prisma.subscription.create({
       data: {
         vendorId, type: 'RESTAURANT', status: 'PAST_DUE', weeklyRate: 20000,
         billingMethod: 'CASH', isInGracePeriod: true,
         gracePeriodEnd: new Date(Date.now() - 60_000),
-        currentPeriodStart: new Date(Date.now() - 8 * 86_400_000),
-        currentPeriodEnd: new Date(Date.now() - 86_400_000),
-        nextBillingDate: new Date(Date.now() - 86_400_000),
+        currentPeriodStart: new Date(due.getTime() - 7 * 86_400_000),
+        currentPeriodEnd: due,
+        nextBillingDate: due,
       },
     });
+    await readDunningClock(app.prisma, sub.id);
     try {
       const c = await makeCustomer();
       const res = await cartAndCheckout(c, {});
       expect(res.statusCode).toBe(400);
       expect(res.json().error.code).toBe('VENDOR_CLOSED');
     } finally {
+      await cleanupBillingClocks(app.prisma, [sub.id]);
       await app.prisma.subscription.delete({ where: { id: sub.id } });
     }
   });

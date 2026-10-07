@@ -16,6 +16,8 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { readDunningClock } from '../modules/billing/dunning-clock';
 
 // ---------------------------------------------------------------------------
 // [ACTIVATION AUTHORITY — task #2 slice 1] Document truth drives activation:
@@ -108,7 +110,14 @@ beforeAll(async () => {
 afterAll(async () => {
   if (userIds.length > 0) {
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.subscription.deleteMany({ where: { OR: [{ rider: { userId: { in: userIds } } }, { driver: { userId: { in: userIds } } }, { vendor: { owner: { userId: { in: userIds } } } }] } });
+    // Collect the payers' subscriptions before the payers go (a removed owner leaves the row unreachable by relation).
+    const subIds = (await app.prisma.subscription.findMany({ where: { OR: [{ rider: { userId: { in: userIds } } }, { driver: { userId: { in: userIds } } }, { vendor: { owner: { userId: { in: userIds } } } }] }, select: { id: true } })).map((s) => s.id);
+    await cleanupBillingClocks(app.prisma, subIds);
+    // A mover payer's fee authority and sources survive while the payer does: remove the payer first.
+    await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: userIds } } } });
@@ -296,18 +305,22 @@ describe('F-012-05 — one authority generation [REPORT-012]', () => {
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { acceptingOrders: false } });
     // [SAFE-B] Activation starts the store's trial in the same transaction (and identity lock) as the activation
     // itself, so the store already holds its one subscription: it lapses into PAST_DUE with the grace over.
+    // [#1393] The owner's grace is 48 hours of unpaused overdue time on the
+    // shared clock: due 48 hours and a minute ago, it ran out a minute ago.
+    const due = new Date(Date.now() - 2 * 86_400_000 - 60_000);
     const trial = await app.prisma.subscription.findUniqueOrThrow({ where: { vendorId: vendor.id } });
-    await app.prisma.subscription.update({
+    const lapsed = await app.prisma.subscription.update({
       where: { id: trial.id },
       data: {
         status: 'PAST_DUE', weeklyRate: 20000,
         billingMethod: 'CASH', isInGracePeriod: true,
         gracePeriodEnd: new Date(Date.now() - 60_000),
-        currentPeriodStart: new Date(Date.now() - 8 * 86_400_000),
-        currentPeriodEnd: new Date(Date.now() - 86_400_000),
-        nextBillingDate: new Date(Date.now() - 86_400_000),
+        currentPeriodStart: new Date(due.getTime() - 7 * 86_400_000),
+        currentPeriodEnd: due,
+        nextBillingDate: due,
       },
     });
+    await readDunningClock(app.prisma, lapsed.id);
 
     await app.prisma.user.update({ where: { id: owner.id }, data: { activeRole: 'VENDOR_OWNER' as never } });
     const login = await loginWithOtp(app, owner.phone);
@@ -334,6 +347,18 @@ describe('EV-ACT-11 — admin vendor approve is checklist-gated and exactly-once
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(fresh.status).toBe('PENDING_APPROVAL');
     expect(fresh.isVerified).toBe(false);
+  });
+
+  it('[Fable #1481 S4-2] approving a billing-suspended store clears its suspension source (no stale BILLING for a later heal)', async () => {
+    const owner = await makeUser('Reinstate');
+    const vendor = await makePendingVendor(owner.id, 'SUSPENDED');
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { suspensionSource: 'BILLING' } });
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    const ok = await app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
+    expect(ok.statusCode).toBe(200);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', suspensionSource: null });
   });
 
   it('activates once the checklist is complete; a double-tap has exactly one winner', async () => {

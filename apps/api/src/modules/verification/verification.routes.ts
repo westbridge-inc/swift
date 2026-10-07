@@ -144,7 +144,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       // ID. Flag it to the reviewers; it must never quietly auto-progress.
       const dup = await app.prisma.encryptedObject.findFirst({
         where: { sha256, createdBy: { not: request.user.userId } },
-        select: { createdBy: true },
+        select: { sha256: true },
       });
 
       const dek = generateDek();
@@ -172,16 +172,18 @@ export async function verificationRoutes(app: FastifyInstance) {
       });
 
       if (dup) {
-        // The hash, not the document, goes to admins — never the PII itself.
+        // Global correlation is a platform review signal. Tenant-local
+        // administrators and applicants must not learn another account's
+        // membership, identifier, or document hash from upload completion.
         await notifyAdmins(app.prisma, notifications, {
-          // Follows the uploader [NOC-A F45].
-          tenantId: await tenantOfUser(app.prisma, request.user.userId),
-          title: 'Duplicate verification document',
-          body: 'A document just uploaded is byte-identical to one already on another account. Review both before approving — possible multi-accounting or a reused/forged document.',
-          data: { kind: 'dup_doc', sha256, uploader: request.user.userId, matchesUser: dup.createdBy },
+          // notifyAdmins(null) selects SUPER_ADMIN only, never tenant admins.
+          tenantId: null,
+          title: 'Verification upload needs review',
+          body: 'Review this applicant’s verification submission before approval.',
+          data: { kind: 'dup_doc', uploader: request.user.userId },
         }).catch(() => {});
       }
-      return { success: true, data: { url, duplicate: !!dup } };
+      return { success: true, data: { url } };
     }
 
     throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Document upload is temporarily unavailable. Try again later.');

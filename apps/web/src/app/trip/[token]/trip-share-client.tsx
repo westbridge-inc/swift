@@ -1,5 +1,7 @@
 'use client';
 
+import { SwiftLogo } from '@/components/swift-logo';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createSequence, freshness, mapEmbedUrl, mapLinkUrl, validPoint } from '@/lib/live-tracking';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
@@ -9,6 +11,21 @@ import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 // revoked share is a clear "no longer available", never a spinner forever.
 
 const POLL_MS = 5000;
+
+/** [M053] The only images this public page draws are Swift's own: https on
+ *  the API's origin (where owned storage is signed). Anything else — a URL a
+ *  profile field happens to hold — renders as the initial, so no third party
+ *  learns who is watching whose trip. Exported for the page test. */
+export function ownedImageSrc(url: string | null | undefined, apiOrigin: string = API_URL): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const owned = new URL(apiOrigin).origin;
+    return parsed.protocol === 'https:' && parsed.origin === owned ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 interface TripView {
   status: string;
@@ -23,9 +40,12 @@ interface TripView {
   } | null;
   location: { lat: number; lng: number; at: string | null } | null;
   emergencyNote: string;
+  /** [L10 §2] The verified number from the market's emergency setting, or null. */
+  emergencyDial?: string | null;
 }
 
-export function TripShareClient({ token }: { token: string }) {
+/** `imageOrigin` is the origin whose images count as Swift's own (the API's). */
+export function TripShareClient({ token, imageOrigin = API_URL }: { token: string; imageOrigin?: string }) {
   const [view, setView] = useState<TripView | null>(null);
   const [gone, setGone] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -90,22 +110,25 @@ export function TripShareClient({ token }: { token: string }) {
 
   return (
     <main className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
-      <header className="bg-[var(--swift-red)] px-5 py-4">
-        <p className="text-lg font-bold text-white">Swift — live trip</p>
+      <header className="border-b border-[var(--swift-border)] bg-[var(--swift-card)] px-6 pb-4 pt-[calc(16px_+_env(safe-area-inset-top))]">
+        <div className="mx-auto max-w-md">
+        <SwiftLogo />
+        <p className="sw-eyebrow mt-3">Swift · live trip</p>
         {view ? (
-          <p className="mt-0.5 text-sm text-white/85">
+          <p className="sw-title mt-1">
             {view.passengerFirstName} shared this trip with you
           </p>
         ) : null}
+        </div>
       </header>
 
       <div className="mx-auto max-w-md px-4 pb-12">
         {loading ? (
-          <p className="pt-16 text-center text-sm text-[#786C6C]">Loading trip…</p>
+          <p className="pt-16 text-center text-[13px] leading-[18px] text-[var(--swift-muted)]">Loading trip…</p>
         ) : gone ? (
           <div className="pt-16 text-center">
-            <p className="text-lg font-semibold">This trip share is no longer available</p>
-            <p className="mt-2 text-sm text-[#786C6C]">
+            <p className="sw-heading">This trip share is no longer available</p>
+            <p className="mt-2 text-sm text-[var(--swift-muted)]">
               Shares end shortly after a trip finishes, or when the sharer turns them off.
             </p>
           </div>
@@ -114,21 +137,21 @@ export function TripShareClient({ token }: { token: string }) {
           // a connectivity problem on a safety surface — say that, keep
           // polling (the interval is still running), never dress it as "ended".
           <div className="pt-16 text-center">
-            <p className="text-lg font-semibold">Can&apos;t reach this trip right now</p>
-            <p className="mt-2 text-sm text-[#786C6C]">
+            <p className="sw-heading">Can&apos;t reach this trip right now</p>
+            <p className="mt-2 text-sm text-[var(--swift-muted)]">
               Check your connection — this page keeps retrying on its own.
             </p>
           </div>
         ) : (
           <>
-            <div className="mt-4 rounded-2xl bg-white p-4 shadow-sm">
+            <div className="mt-4 sw-card p-4">
               <p className="text-base font-semibold">{view.status}</p>
               {/* [W-47] aria-live, and red once it stops being current. Someone is
                   watching this because they are worried about the person in the car. */}
               {freshnessLabel && !view.ended ? (
                 <p
                   aria-live="polite"
-                  className={`mt-0.5 text-xs ${age.kind === 'fresh' ? 'text-[#786C6C]' : 'font-semibold text-[var(--swift-red)]'}`}
+                  className={`mt-0.5 text-xs ${age.kind === 'fresh' ? 'text-[var(--swift-muted)]' : 'font-semibold text-[var(--swift-red)]'}`}
                 >
                   {freshnessLabel}
                 </p>
@@ -136,10 +159,10 @@ export function TripShareClient({ token }: { token: string }) {
             </div>
 
             {view.driver ? (
-              <div className="mt-3 flex items-center gap-3 rounded-2xl bg-white p-4 shadow-sm">
-                {view.driver.photoUrl ? (
+              <div className="mt-3 flex items-center gap-3 sw-card p-4">
+                {ownedImageSrc(view.driver.photoUrl, imageOrigin) ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={view.driver.photoUrl} alt={`Driver ${view.driver.firstName}`} className="h-14 w-14 rounded-full object-cover" />
+                  <img src={ownedImageSrc(view.driver.photoUrl, imageOrigin)!} alt={`Driver ${view.driver.firstName}`} referrerPolicy="no-referrer" className="h-14 w-14 rounded-full object-cover" />
                 ) : (
                   <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--swift-red-50)] text-lg font-bold text-[var(--swift-red)]">
                     {view.driver.firstName.slice(0, 1)}
@@ -147,7 +170,7 @@ export function TripShareClient({ token }: { token: string }) {
                 )}
                 <div className="min-w-0 flex-1">
                   <p className="font-semibold">{view.driver.firstName}</p>
-                  <p className="truncate text-sm text-[#786C6C]">{view.driver.vehicle}</p>
+                  <p className="truncate text-sm text-[var(--swift-muted)]">{view.driver.vehicle}</p>
                 </div>
                 <div className="rounded-lg border-2 border-[var(--swift-ink)] px-2 py-1 font-mono text-sm font-bold">
                   {view.driver.plate}
@@ -156,7 +179,7 @@ export function TripShareClient({ token }: { token: string }) {
             ) : null}
 
             {showMap && point ? (
-              <div className="mt-3 overflow-hidden rounded-2xl bg-white shadow-sm">
+              <div className="mt-3 overflow-hidden sw-card">
                 {/* [W-47] Coarsened to about 110 m and sent with no referer. The exact
                     position of a person in a moving car, and the token identifying who
                     was watching, used to reach a third party on every map load. */}
@@ -178,21 +201,23 @@ export function TripShareClient({ token }: { token: string }) {
                 </a>
               </div>
             ) : view.ended ? (
-              <div className="mt-3 rounded-2xl bg-white p-4 text-sm text-[#786C6C] shadow-sm">
+              <div className="mt-3 sw-card p-4 text-sm text-[var(--swift-muted)]">
                 The trip has ended — live location is off.
               </div>
             ) : (
-              <div className="mt-3 rounded-2xl bg-white p-4 text-sm text-[#786C6C] shadow-sm">
+              <div className="mt-3 sw-card p-4 text-sm text-[var(--swift-muted)]">
                 Waiting for the driver&apos;s location…
               </div>
             )}
 
-            <div className="mt-3 rounded-2xl border border-[#EAE2E1] bg-white p-4 text-sm shadow-sm">
+            <div className="mt-3 rounded-2xl border border-[#EAE2E1] bg-[var(--swift-card)] p-4 text-sm shadow-[var(--swift-elevation-card)]">
               <p className="font-semibold text-[#DC2626]">Emergency?</p>
-              <p className="mt-1 text-[#786C6C]">{view.emergencyNote}</p>
-              <a href="tel:911" className="mt-2 inline-block rounded-full bg-[#DC2626] px-4 py-2 text-sm font-semibold text-white">
-                Call 911
-              </a>
+              <p className="mt-1 text-[var(--swift-muted)]">{view.emergencyNote}</p>
+              {view.emergencyDial ? (
+                <a href={`tel:${view.emergencyDial}`} className="mt-2 inline-block rounded-full bg-[#DC2626] px-4 py-2 text-sm font-semibold text-[var(--swift-white)]">
+                  Call {view.emergencyDial}
+                </a>
+              ) : null}
             </div>
           </>
         )}

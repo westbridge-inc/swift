@@ -222,7 +222,7 @@ export const adminAuditCounter = new client.Counter({
  */
 export const adminAuditSnapshotCounter = new client.Counter({
   name: 'swift_admin_audit_snapshot_total',
-  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate) and model',
+  help: 'Admin audit subject reads by outcome (found|missing|failed|selector|no_id|no_delegate|no_tenant) and model',
   labelNames: ['outcome', 'model'] as const,
   registers: [registry],
 });
@@ -234,6 +234,14 @@ export const browserSessionCounter = new client.Counter({
   name: 'swift_browser_session_total',
   help: 'Browser cookie-session events (cookie_issued/cookie_refreshed/cookie_auth/cookie_cleared/cookie_rejected_header/cookie_rejected_origin)',
   labelNames: ['event'] as const,
+  registers: [registry],
+});
+
+/** [REVIEW-PARTNER] Sends of the store-review fiction stopped at the outbound seal, by channel and reason. */
+export const reviewSendSuppressedCounter = new client.Counter({
+  name: 'swift_review_send_suppressed_total',
+  help: 'Outbound SMS/push/email of the store-review fiction suppressed at the channel seal',
+  labelNames: ['channel', 'reason'] as const,
   registers: [registry],
 });
 
@@ -451,6 +459,15 @@ export const notificationFailuresCounter = new client.Counter({
   registers: [registry],
 });
 
+/** [L04 · SMS allowlist] Outside production, a text to a number that is not on
+ *  SMS_RECIPIENT_ALLOWLIST is not sent and counted here. No label carries the
+ *  number: the count is the evidence, never the recipient. */
+export const smsRecipientNotAllowlistedCounter = new client.Counter({
+  name: 'swift_sms_recipient_not_allowlisted_total',
+  help: 'Non-production SMS not sent because the recipient is not on SMS_RECIPIENT_ALLOWLIST',
+  registers: [registry],
+});
+
 /** [M-04] Terminal MMG payments (FAILED/EXPIRED) whose subscription carries no
  *  recorded outcome for that period — the state a crash between the terminal
  *  CAS and the dunning application used to leave behind. Set by the repair
@@ -656,6 +673,26 @@ export const agentCashProviderIdConflictsCounter = new client.Counter({
   name: 'swift_agent_cash_provider_id_conflicts_total',
   help: 'Agent-cash observations whose provider transaction id already exists with a different amount or currency',
   labelNames: ['channel'] as const,
+  registers: [registry],
+});
+
+/** [MMG checkout 2/6] Every checkout transition, by event: created, reply,
+ *  reply_unmatched, confirmed, held, not_paid, expired. `held` pages (a person
+ *  must look); `reply_unmatched` is a reply naming no checkout Swift knows. */
+export const mmgCheckoutEventsCounter = new client.Counter({
+  name: 'swift_mmg_checkout_events_total',
+  help: 'MMG hosted-checkout transitions, by event',
+  labelNames: ['event'] as const,
+  registers: [registry],
+});
+
+/** [MMG checkout 2/6] The lookups that verify a checkout, by outcome (found,
+ *  not_found, error). A run of errors means MMG cannot be asked, and nothing
+ *  confirms until it can. */
+export const mmgCheckoutLookupsCounter = new client.Counter({
+  name: 'swift_mmg_checkout_lookups_total',
+  help: 'MMG lookups made to verify a checkout, by outcome',
+  labelNames: ['outcome'] as const,
   registers: [registry],
 });
 
@@ -1044,10 +1081,12 @@ export const tenantUnscopedAccessCounter = new client.Counter({
   registers: [registry],
 });
 /** [TEN-03] Transaction-local bindings performed (tenant / system) and the
- *  in-transaction fallbacks that could not be batched. */
+ *  in-transaction fallbacks that could not be batched. [MASTER-019] system_tx:
+ *  a system transaction opened on the system connection; system_refused_in_tx:
+ *  a system query refused rather than moved out of a caller's transaction. */
 export const tenantBindCounter = new client.Counter({
   name: 'swift_tenant_bind_total',
-  help: 'RLS bindings by kind (tenant, system, tenant_fallback_in_tx, system_fallback_in_tx)',
+  help: 'RLS bindings by kind (tenant, tenant_fallback_in_tx, tenant_tx, tenant_switch_refused, raw_system, raw_unbound, system, system_no_client, system_tx, system_refused_in_tx)',
   labelNames: ['kind'] as const,
   registers: [registry],
 });

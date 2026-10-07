@@ -28,7 +28,7 @@ import {
   Radar,
   Globe,
   Scale,
-  ListRestart, Compass,
+  ListRestart, Compass, Receipt,
 } from 'lucide-react';
 
 // Grouped by what the operator is doing, not by table name. Sections only list
@@ -62,6 +62,8 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Finance', href: '/finance', icon: DollarSign },
       { label: 'Subscriptions', href: '/subscriptions', icon: RefreshCw },
       { label: 'Cash rail', href: '/cash', icon: Banknote },
+      // Support finds a partner's MMG weekly-fee payment by either id or their phone.
+      { label: 'MMG payments', href: '/mmg-payments', icon: Receipt },
       { label: 'Claims', href: '/claims', icon: ShieldAlert },
       { label: 'Promos', href: '/promos', icon: Tag },
     ],
@@ -74,6 +76,7 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
       { label: 'Integrity', href: '/integrity', icon: Fingerprint },
       { label: 'Discovery', href: '/discovery', icon: Compass },
       { label: 'Ads review', href: '/ads', icon: AdsIcon },
+      { label: 'Custody cases', href: '/custody', icon: LifeBuoy },
       { label: 'Returns', href: '/returns', icon: PackageOpen },
       { label: 'Broadcast', href: '/broadcast', icon: Megaphone },
     ],
@@ -90,11 +93,11 @@ const NAV_SECTIONS: { title: string; items: { label: string; href: string; icon:
   },
 ];
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
 
   return (
-    <aside className="w-64 bg-[var(--panel)] border-r border-[var(--border)] flex flex-col">
+    <aside className="w-64 h-full shrink-0 bg-[var(--panel)] border-r border-[var(--border)] flex flex-col">
       <div className="p-6 border-b border-[var(--border)]">
         <h1 className="text-xl font-bold">
           <span className="text-[var(--accent)]">Swift</span> Admin
@@ -113,7 +116,8 @@ export function Sidebar() {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                    onClick={onNavigate}
+                    className={`flex items-center gap-3 px-3 py-2 min-h-11 rounded-lg text-sm transition-colors ${
                       isActive
                         ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
                         : 'text-[var(--muted)] hover:text-white hover:bg-white/5'

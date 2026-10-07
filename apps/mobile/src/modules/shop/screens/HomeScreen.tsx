@@ -49,6 +49,7 @@ import {
   T,
   VendorRow,
 } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 // Per-vertical identity colour lives in the KIT [F-263] — it was a local hex
 // map here once and the no-literal-hex-in-screens rule cleaned it away, which
 // is how the grid ended up as eight identical squares.
@@ -458,6 +459,7 @@ export function HomeScreen() {
                 hitSlop={14}
                 accessibilityRole="button"
                 accessibilityLabel="Notifications"
+                style={touchTarget(22)}
               >
                 <Feather name="bell" size={22} color={color.text.primary} />
               </Pressable>

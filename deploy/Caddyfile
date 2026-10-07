@@ -1,3 +1,17 @@
+{
+    # Runtime proxy failures log requests even when access logging is off.
+    # Neither path credentials nor signed queries/headers belong in logs.
+    log {
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers delete
+            }
+        }
+    }
+}
+
 # API_HOST is a single staging DNS name set in deploy/.env. A hostname site
 # address enables Caddy's automatic certificate issuance and renewal.
 #

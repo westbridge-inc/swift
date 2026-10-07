@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
@@ -29,6 +30,8 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
+import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 
@@ -715,6 +718,7 @@ export function DeliveryScreen() {
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
   const mmgClaim = parseMmgClaimView(o.mmgClaim);
+  const custodyRecovery = parsePartyCaseView(o.custodyRecovery);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
   const ringHidden = terminal || mmgCaptured || !o.canCancel;
   // Hold lifecycle and cancel eligibility are separate server facts. A paid or
@@ -978,6 +982,7 @@ export function DeliveryScreen() {
           ...elevation.raised,
         }}
       >
+        {initialRegion ? <MapCredits /> : null}
         <ScrollView contentContainerStyle={{ padding: GUTTER, paddingBottom: insets.bottom + space['2xl'] }}>
           {/* The "#NNNN · held" caption moved onto the map as the reference's
               floating chip — one statement of the state, where it belongs. */}
@@ -1408,6 +1413,10 @@ export function DeliveryScreen() {
               />
             </View>
           ) : null}
+
+          {/* [AF-MOB-006] After pickup, a delivery problem is an owned case:
+              the server's sentence says who is handling it and what happens. */}
+          {partyCaseWorthShowing(custodyRecovery) ? <CustodyRecoveryNotice view={custodyRecovery} /> : null}
 
           {mmgClaim && !cancelled && !failed ? (
             <MmgPaymentClaimCard

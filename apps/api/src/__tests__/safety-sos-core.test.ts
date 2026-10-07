@@ -180,7 +180,16 @@ describe('SOS state machine [safety M2]', () => {
   it('C: "I\'m safe" flags but NEVER resolves — only ops close it (coercion doctrine)', async () => {
     const a = track(await sos.create({ actorUserId: u(), actorRole: 'CUSTOMER', triggerSource: 'BUTTON' }));
     await sos.confirm(a.id);
-    const safe = await sos.markSafe(a.id);
+    const operator = await prisma.user.create({ data: { phone: `synthetic-safe-operator-${Date.now()}`, firstName: 'Synthetic', lastName: 'Operator', roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN' } });
+    let safe;
+    try {
+      safe = await sos.markSafe(a.id);
+      expect(await prisma.notification.count({ where: { userId: operator.id, data: { path: ['kind'], equals: 'sos_marked_safe' } } })).toBe(1);
+    } finally {
+      await prisma.notification.deleteMany({ where: { userId: operator.id } });
+      await prisma.alertDelivery.deleteMany({ where: { recipientId: operator.id } });
+      await prisma.user.delete({ where: { id: operator.id } });
+    }
     expect(safe.userSafeFlaggedAt).toBeInstanceOf(Date);
     expect(safe.status).toBe('ACTIVE'); // still open — a human must resolve
   });

@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
+import './lib/crashReportingBoot';
 import 'react-native-gesture-handler';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View } from 'react-native';
+import { StatusBar, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -267,6 +268,11 @@ export default function App() {
     <ErrorBoundary>
       <GestureHandlerRootView style={{ flex: 1 }} onLayout={onLayoutRootView}>
         <SafeAreaProvider>
+          {/* [ANDROID-QA A3] Edge-to-edge Android draws the app under a
+              transparent status bar, and nothing set its icon colour, so the
+              clock and icons were white on Swift's light paper. Every screen
+              is light, so the icons are dark everywhere. */}
+          <StatusBar barStyle="dark-content" translucent backgroundColor="transparent" />
           <AppSurface>
             {storageStatus === 'error' ? (
               <SecureStorageRecovery

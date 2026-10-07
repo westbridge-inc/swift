@@ -15,6 +15,7 @@ import {
 
 const baseDocument = {
   id: 'document-target',
+  userId: 'target-user',
   status: 'PENDING',
   docType: 'national_id',
   role: 'RIDER',
@@ -31,6 +32,7 @@ const baseDocument = {
 const otherDocument = {
   ...baseDocument,
   id: 'document-other',
+  userId: 'other-user',
   user: {
     ...baseDocument.user,
     firstName: 'Other',
@@ -47,6 +49,10 @@ function verificationHandler(
   documents = [baseDocument],
 ) {
   return (request: ApiRequest) => {
+    if (request.url.pathname.endsWith('/queue/counts')) return { body: { data: {} } };
+    if (request.url.pathname.includes('/users/')) return { body: { data: {} } };
+    if (request.url.pathname.endsWith('/custody')) return { body: { data: { timeline: [] } } };
+    if (request.url.pathname.endsWith('/queue') && request.url.searchParams.get('status') !== 'PENDING') return { body: { data: [] } };
     // [A-19] Approving now requires the evidence to have been OPENED, so every
     // review flow fetches a signed URL first.
     if (request.method === 'GET' && request.url.pathname.endsWith('/document-url')) {
@@ -65,7 +71,7 @@ function verificationHandler(
     }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/verification/queue') {
       expect(request.url.searchParams.get('status')).toBe('PENDING');
-      expect(request.url.searchParams.get('limit')).toBe('100');
+      expect(request.url.searchParams.get('limit')).toBe('50');
       // [G6] every test in this file works the routine queue — the operator lane.
       expect(request.url.searchParams.get('role')).toBe('operator');
       return { body: { success: true, data: documents } };
@@ -91,6 +97,8 @@ async function openReview(
 async function reviewEvidence(user: UserEvent, opts: { expires?: boolean } = {}) {
   vi.stubGlobal('open', vi.fn()); // happy-dom has no real window.open
   await user.click(screen.getByRole('button', { name: /View document/ }));
+  const image = await screen.findByRole('img', { name: /evidence/ });
+  fireEvent.load(image);
   await screen.findByRole('button', { name: 'View document again' });
   if (opts.expires) {
     const future = new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -107,101 +115,68 @@ function deferredReply() {
   return { promise, resolve };
 }
 
+async function startApproval(user: UserEvent) {
+  await user.click(screen.getByRole('button', { name: 'Approve' }));
+  await user.type(screen.getByLabelText('Decision note'), REAL_REASON);
+}
+async function startRejection(user: UserEvent, reason = 'Document is unreadable') {
+  await user.click(screen.getByRole('button', { name: 'Reject' }));
+  await user.type(screen.getByLabelText('Decision note'), reason);
+  await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
+}
+
 describe('verification mutations', () => {
   it('approves insurance through the exact endpoint with the complete review payload', async () => {
     const insuranceDocument = { ...baseDocument, docType: 'vehicle_insurance' };
-    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
-    vi.stubGlobal('confirm', confirm);
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REAL_REASON));
-    const fetchMock = mockApi(
-      verificationHandler((request) => {
-        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/approve') {
-          return { body: { success: true, data: {} } };
-        }
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-      }, [otherDocument, insuranceDocument]),
-    );
+    const fetchMock = mockApi(verificationHandler((request) => {
+      if (request.method === 'PUT') return { body: { data: { ...insuranceDocument, status: 'APPROVED' } } };
+      throw new Error(`Unexpected request: ${request.url}`);
+    }, [otherDocument, insuranceDocument]));
     const { user } = renderWithQuery(<VerificationPage />);
-
     await openReview(user);
-    // [A-19] vehicle insurance carries a printed expiry, so a reviewer keys it
     await reviewEvidence(user, { expires: true });
     await user.type(screen.getByPlaceholderText(/Insurer/), 'Test Insurer');
     await user.type(screen.getByPlaceholderText('Policy number'), 'POLICY-TEST-1');
-    const approveButton = screen.getByRole('button', { name: 'Approve' });
-    expect((approveButton as HTMLButtonElement).disabled).toBe(true);
+    const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
     await user.click(screen.getByRole('checkbox', { name: /Hire class confirmed/ }));
-    expect((approveButton as HTMLButtonElement).disabled).toBe(true);
+    expect(approve.disabled).toBe(true);
     await user.click(screen.getByRole('checkbox', { name: /Cross-checked/ }));
-    expect((approveButton as HTMLButtonElement).disabled).toBe(false);
-
-    await user.click(approveButton);
-    expect(confirm).toHaveBeenNthCalledWith(
-      1,
-      'Approve vehicle insurance for Target Applicant? This changes their operating eligibility.',
-    );
+    expect(approve.disabled).toBe(false);
+    await startApproval(user);
+    expect(screen.getByRole('dialog').textContent).toContain('For Target Applicant. This changes their operating eligibility.');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
-
-    await user.click(approveButton);
-
+    await startApproval(user);
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
-    expect(confirm).toHaveBeenNthCalledWith(
-      2,
-      'Approve vehicle insurance for Target Applicant? This changes their operating eligibility.',
-    );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/verification/document-target/approve`);
     expect(init?.method).toBe('PUT');
     expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe(REAL_REASON);
-    const sent = JSON.parse(String(init?.body));
-    expect(sent.insurance).toEqual({
-      insurerName: 'Test Insurer',
-      policyNumber: 'POLICY-TEST-1',
-      coverageClass: 'HIRE',
-      hireClassConfirmed: true,
-      plateCrossChecked: true,
+    const future = new Date(Date.now() + 200 * 86_400_000).toISOString().slice(0, 10);
+    expect(JSON.parse(String(init?.body))).toEqual({
+      expiresAt: new Date(future).toISOString(),
+      insurance: { insurerName: 'Test Insurer', policyNumber: 'POLICY-TEST-1', coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true },
     });
-    // [A-19] and the printed expiry the reviewer keyed rides with it — without
-    // it the server refuses, and an approved policy would never lapse.
-    expect(typeof sent.expiresAt).toBe('string');
-    expect(new Date(sent.expiresAt).getTime()).toBeGreaterThan(Date.now());
   });
 
   it('rejects through the exact endpoint with the entered reason', async () => {
-    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
-    vi.stubGlobal('confirm', confirm);
-    const fetchMock = mockApi(
-      verificationHandler((request) => {
-        if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/verification/document-target/reject') {
-          return { body: { success: true, data: {} } };
-        }
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-      }, [otherDocument, baseDocument]),
-    );
+    const fetchMock = mockApi(verificationHandler((request) => {
+      if (request.method === 'PUT') return { body: { data: { ...baseDocument, status: 'REJECTED' } } };
+      throw new Error(`Unexpected request: ${request.url}`);
+    }, [otherDocument, baseDocument]));
     const { user } = renderWithQuery(<VerificationPage />);
-
     await openReview(user);
     await reviewEvidence(user);
-    await user.type(screen.getByPlaceholderText('Rejection reason'), '  Document is unreadable  ');
-    // [ADMIN-CONSOLE] every rejection names the server's reason code
-    await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
-    const rejectButton = screen.getByRole('button', { name: 'Reject' });
-
-    await user.click(rejectButton);
-    expect(confirm).toHaveBeenNthCalledWith(
-      1,
-      'Reject national id for Target Applicant with reason: "Document is unreadable"?',
-    );
+    await startRejection(user, '  Document is unreadable  ');
+    expect(screen.getByRole('dialog').textContent).toContain('For Target Applicant.');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
-
-    await user.click(rejectButton);
-
+    await startRejection(user, '  Document is unreadable  ');
+    await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
-    expect(confirm).toHaveBeenNthCalledWith(
-      2,
-      'Reject national id for Target Applicant with reason: "Document is unreadable"?',
-    );
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/verification/document-target/reject`);
     expect(init?.method).toBe('PUT');
     expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Document is unreadable', reasonCode: 'UNREADABLE' });
@@ -210,132 +185,59 @@ describe('verification mutations', () => {
   it.each([
     ['approval', 'Approve', '/api/v1/admin/verification/document-target/approve'],
     ['rejection', 'Reject', '/api/v1/admin/verification/document-target/reject'],
-  ])('renders a failed %s honestly and keeps the review open', async (_action, buttonName, path) => {
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REAL_REASON));
-    const fetchMock = mockApi(
-      verificationHandler((request) => {
-        if (request.method === 'PUT' && request.url.pathname === path) {
-          return {
-            status: 400,
-            body: {
-              success: false,
-              error: {
-                code: 'NOT_PENDING',
-                message: 'Document is APPROVED, only PENDING documents can be reviewed',
-              },
-            },
-          };
-        }
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-      }),
-    );
+  ])('renders a failed %s honestly and keeps the review open', async (action, buttonName, path) => {
+    const fetchMock = mockApi(verificationHandler((request) => {
+      if (request.method === 'PUT' && request.url.pathname === path) return { status: 400, body: { success: false, error: { code: 'NOT_PENDING', message: 'Document is APPROVED, only PENDING documents can be reviewed' } } };
+      throw new Error(`Unexpected request: ${request.url}`);
+    }));
     const { user } = renderWithQuery(<VerificationPage />);
-
     await openReview(user);
     await reviewEvidence(user);
-    if (buttonName === 'Reject') {
-      await user.type(screen.getByPlaceholderText('Rejection reason'), 'Document is unreadable');
-      await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
-    }
-    await user.click(screen.getByRole('button', { name: buttonName }));
-
-    expect((await screen.findByRole('alert')).textContent).toContain(
-      'Verification action failed: Document is APPROVED, only PENDING documents can be reviewed',
-    );
-    expect((screen.getByRole('button', { name: buttonName }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getAllByText('target-phone')).not.toHaveLength(0);
+    if (buttonName === 'Reject') await startRejection(user); else await startApproval(user);
+    await user.click(screen.getByRole('button', { name: `Confirm ${action}` }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Verification action failed: Document is APPROVED, only PENDING documents can be reviewed');
+    expect((screen.getByRole('button', { name: `Confirm ${action}` }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole('heading', { name: 'Target Applicant' })).toBeTruthy();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
-    // one QUEUE read (the signed-URL evidence read is also a GET now)
-    expect(requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/queue'))).toHaveLength(1);
+    expect(requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/queue?status=PENDING'))).toHaveLength(1);
   });
 
   it('requires confirmation before approving a document', async () => {
-    const confirm = vi.fn().mockReturnValue(false);
-    vi.stubGlobal('confirm', confirm);
-    const fetchMock = mockApi(
-      verificationHandler((request) => {
-        if (request.method === 'PUT') return { body: { success: true, data: {} } };
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-      }),
-    );
+    const fetchMock = mockApi(verificationHandler(() => { throw new Error('No mutation expected'); }));
     const { user } = renderWithQuery(<VerificationPage />);
-
-    await openReview(user);
-    await reviewEvidence(user);
-    await user.click(screen.getByRole('button', { name: 'Approve' }));
-
-    expect(confirm).toHaveBeenCalledWith(
-      'Approve national id for Target Applicant? This changes their operating eligibility.',
-    );
+    await openReview(user); await reviewEvidence(user); await startApproval(user);
+    expect(screen.getByRole('dialog').textContent).toContain('Approve National ID');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
-
   it('requires confirmation before rejecting a document', async () => {
-    const confirm = vi.fn().mockReturnValue(false);
-    vi.stubGlobal('confirm', confirm);
-    const fetchMock = mockApi(
-      verificationHandler((request) => {
-        if (request.method === 'PUT') return { body: { success: true, data: {} } };
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-      }),
-    );
+    const fetchMock = mockApi(verificationHandler(() => { throw new Error('No mutation expected'); }));
     const { user } = renderWithQuery(<VerificationPage />);
-
-    await openReview(user);
-    await reviewEvidence(user);
-    await user.type(screen.getByPlaceholderText('Rejection reason'), 'Document is unreadable');
-    await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
-
-    expect(confirm).toHaveBeenCalledWith(
-      'Reject national id for Target Applicant with reason: "Document is unreadable"?',
-    );
+    await openReview(user); await reviewEvidence(user); await startRejection(user);
+    expect(screen.getByRole('dialog').textContent).toContain('Reject National ID');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
-
   it('blocks a contradictory second decision while the first decision is pending', async () => {
     const pending = deferredReply();
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REAL_REASON));
-    const fetchMock = mockApi(
-      verificationHandler((request) => {
-        if (
-          request.method === 'PUT' &&
-          request.url.pathname === '/api/v1/admin/verification/document-target/approve'
-        ) {
-          return pending.promise;
-        }
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-      }),
-    );
+    const fetchMock = mockApi(verificationHandler((request) => {
+      if (request.method === 'PUT' && request.url.pathname.endsWith('/approve')) return pending.promise;
+      throw new Error(`Unexpected request: ${request.url}`);
+    }));
     const { user } = renderWithQuery(<VerificationPage />);
-
-    await openReview(user);
-    await reviewEvidence(user);
-    await user.type(screen.getByPlaceholderText('Rejection reason'), 'Document is unreadable');
-    // reject is live before the approval starts, so its lock below is the pending decision's
-    await user.selectOptions(screen.getByLabelText('Reason code'), 'UNREADABLE');
-    const approveButton = screen.getByRole('button', { name: 'Approve' });
-    const rejectButton = screen.getByRole('button', { name: 'Reject' });
-    expect(rejectButton.hasAttribute('disabled')).toBe(false);
-
-    await user.click(approveButton);
+    await openReview(user); await reviewEvidence(user);
+    const approve = screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement;
+    const reject = screen.getByRole('button', { name: 'Reject' }) as HTMLButtonElement;
+    expect(reject.disabled).toBe(false);
+    await startApproval(user);
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
-    expect((approveButton as HTMLButtonElement).disabled).toBe(true);
-    expect((rejectButton as HTMLButtonElement).disabled).toBe(true);
-
-    await user.click(rejectButton);
+    expect(approve.disabled).toBe(true); expect(reject.disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Saving decision…' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(reject);
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
-
-    pending.resolve({ body: { success: true, data: {} } });
-    // the signed-URL read and its same-origin load check are GETs of their own;
-    // the queue itself must have been read exactly twice (initial + refresh)
-    await waitFor(() =>
-      expect(
-        requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/verification/queue')),
-      ).toHaveLength(2),
-    );
+    pending.resolve({ body: { data: { ...baseDocument, status: 'APPROVED' } } });
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/queue?status=PENDING'))).toHaveLength(2));
   });
 });
 
@@ -504,13 +406,15 @@ describe('[DS110-15] the document must actually load before Approve unlocks', ()
     await openReview(user);
 
     await user.click(screen.getByRole('button', { name: /View document/ }));
-    await screen.findByRole('button', { name: 'View document again' });
+    const preview = await screen.findByRole('img', { name: /evidence/ });
+    expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.load(preview);
 
     // opened on the ADMIN origin through the proxy — never the bare relative
     // path, which is what 404'd before
     const expected = new URL(renderPath, window.location.origin).toString();
-    expect(open).toHaveBeenCalledTimes(1);
-    expect(String(open.mock.calls[0]?.[0])).toBe(expected);
+    expect(open).not.toHaveBeenCalled();
+    expect(preview.getAttribute('src')).toBe(expected);
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -539,7 +443,8 @@ describe('[DS110-15] the document must actually load before Approve unlocks', ()
     await openReview(user);
 
     await user.click(screen.getByRole('button', { name: /View document/ }));
-    await waitFor(() => expect(alert).toHaveBeenCalledTimes(1));
+    expect((await screen.findByRole('alert')).textContent).toContain('removed under the retention policy');
+    expect(alert).not.toHaveBeenCalled();
 
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(true);
     // the button never switched to "view again" — nothing was marked previewed
@@ -594,6 +499,7 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user);
 
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
     const offered = within(screen.getByLabelText('Reason code'))
       .getAllByRole('option')
       .map((option) => (option as HTMLOptionElement).value)
@@ -610,6 +516,7 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user);
 
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
     const warned: string[] = [];
     for (const code of serverCodes('REJECTION_REASON_CODES')) {
       await user.selectOptions(screen.getByLabelText('Reason code'), code);
@@ -632,8 +539,9 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user);
     await reviewEvidence(user);
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
     await user.type(screen.getByPlaceholderText('Rejection reason'), PLATE_REASON);
-    const rejectButton = screen.getByRole('button', { name: 'Reject' }) as HTMLButtonElement;
+    const rejectButton = screen.getByRole('button', { name: 'Confirm rejection' }) as HTMLButtonElement;
     expect(rejectButton.disabled).toBe(true);
 
     await user.selectOptions(screen.getByLabelText('Reason code'), 'WRONG_PLATE_CLASS');
@@ -665,12 +573,13 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user);
     await reviewEvidence(user);
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
     await user.type(screen.getByPlaceholderText('Rejection reason'), 'The edges of the photo look edited around the name');
     await user.selectOptions(screen.getByLabelText('Reason code'), 'SUSPECTED_TAMPERING');
     expect(screen.getByText(/a different reviewer must confirm/i)).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
 
-    expect(String(confirm.mock.calls[0]?.[0])).toMatch(/second reviewer/i);
+    expect(confirm).not.toHaveBeenCalled();
     const notice = await screen.findByRole('status');
     expect(notice.textContent).toMatch(/sent for a second review/i);
     expect(notice.textContent).toMatch(/not rejected/i);
@@ -690,9 +599,10 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user);
     await reviewEvidence(user);
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
     await user.type(screen.getByPlaceholderText('Rejection reason'), 'The photo was clearly edited around the name');
     await user.selectOptions(screen.getByLabelText('Reason code'), 'SUSPECTED_TAMPERING');
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
 
     expect((await screen.findByRole('alert')).textContent).toContain(refusal);
     expect(screen.queryByRole('status')).toBeNull();
@@ -716,12 +626,15 @@ describe('[ADMIN-CONSOLE] a rejection carries one of the server’s reason codes
     const { user } = renderWithQuery(<VerificationPage />);
     await openReview(user);
     await reviewEvidence(user);
-    await user.click(screen.getByRole('button', { name: 'Approve' }));
+    await startApproval(user);
+    await user.click(screen.getByRole('button', { name: 'Confirm approval' }));
     expect((await screen.findByRole('alert')).textContent).toContain(plateRefusal);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
 
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
     await user.type(screen.getByPlaceholderText('Rejection reason'), PLATE_REASON);
     await user.selectOptions(screen.getByLabelText('Reason code'), 'WRONG_PLATE_CLASS');
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(2));
     expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[1]![1]?.body)).reasonCode).toBe('WRONG_PLATE_CLASS');
   });

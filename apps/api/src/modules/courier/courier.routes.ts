@@ -22,6 +22,7 @@ import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { redactCounterpartyPhone, redactLiveLocation, riderCounterpartySelect } from '../../utils/counterparty';
 import { invalidateHomeCache } from '../user/home-cache';
 import { SupportService } from '../support/support.service';
+import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -197,8 +198,12 @@ export default async function courierRoutes(app: FastifyInstance) {
     const userId = request.user.userId;
     const customer = await app.prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { tenantId: true },
+      select: { tenantId: true, tenant: { select: { kind: true } } },
     });
+    // [REVIEW-PARTNER · DL-5] The store-review fiction books no parcels: its
+    // rider's board stays honestly empty, and nothing is quoted, written or
+    // dispatched — refused before the routing provider is asked for a quote.
+    if (customer.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError(REVIEW_DEMO_NO_BOOKINGS_MESSAGE);
 
     const restriction = await orderingRestriction(app.prisma, userId);
     if (restriction === 'banned') {

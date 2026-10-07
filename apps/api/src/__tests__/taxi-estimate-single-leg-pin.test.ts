@@ -12,6 +12,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { FareService } from '../modules/rides/fare.service';
 import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
 import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] Today's single-leg estimate, pinned BEFORE multi-stop
@@ -36,7 +37,7 @@ const DAY = 86_400_000;
 const PHONE_PREFIX = '+5923417';
 
 // Fixtures. Both ends of A and C sit in Georgetown Central; B runs Central →
-// South (the seeded zone fare); D leaves the zones; E is outside every zone.
+// South (the 2000 zone fare, planted by this suite: helpers/zone-fare-fixture); D leaves the zones; E is outside every zone.
 const A = { pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 } };
 const B = { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.755, lng: -58.155 } };
 const C = { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.8105, lng: -58.155 } };
@@ -113,6 +114,7 @@ let app: FastifyInstance;
 let token: string;
 let seq = 0;
 let restoreTaxiCard: () => Promise<void> = async () => {};
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -161,12 +163,14 @@ beforeAll(async () => {
   delete process.env['OSRM_URL'];
   app = await buildApp();
   restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
   await restoreTaxiCard();
+  await removeGeorgetownPair();
   await purgeFixtures(app);
   await app.close();
 });

@@ -51,6 +51,10 @@ export interface DispatchOffer {
   // the split — the card must render nothing rather than a breakdown that does
   // not add up. Never compute these client-side.
   cashMath?: { collectFromCustomer: number; payToVendor: number; youKeep: number } | null;
+  // [TAXI multi-stop] A ride WITH stops carries them on the live card and on
+  // the recovered one (the board's shape); a ride without stops has neither.
+  stopCount?: number;
+  stops?: { sequence: number; address: string; lat: number; lng: number }[];
 }
 
 type RecoveredDispatchOffer = Omit<DispatchOffer, 'offerAttemptId'> & {

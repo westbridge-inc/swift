@@ -1,6 +1,7 @@
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
-import type { FastifyInstance } from 'fastify';
+import { taxiNotificationData } from '../rides/taxi-notification';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -21,17 +22,19 @@ import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
-import { subscriptionOperability } from '../subscription/operate-gate';
+import { lockMoverSources, moverFeeOperability, moverFeePayer, moverFeeSourceSummary, readMoverFeeSubscription } from '../subscription/mover-fee-authority';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { goOnlineRefusal } from '../subscription/go-online-refusals';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
+import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
@@ -56,6 +59,8 @@ import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integr
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
 import { normalizeRegistrationMark } from '../verification/subjects';
+import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
+import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -165,13 +170,19 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return {
       success: true,
-      data: driver ? { ...driver, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
+      data: driver ? { ...driver, subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
     };
   });
 
   app.put('/profile', { preHandler: [app.authenticate] }, async (request) => {
     const me = await getDriver(request.user.userId); // authz before validation
     const body = updateDriverProfileSchema.parse(request.body);
+    // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: its taxi
+    // driver has no MMG pay link to set or clear. Refused before any step-up,
+    // money-surface command or owner notice (whose SMS would reach a fictional number).
+    if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') {
+      throw new ReviewDemoMoneyRefusedError();
+    }
     // [High #9 · DS109] Changing the plate re-identifies the vehicle the driver operates.
     // Step-up first (the same proof as a money surface), and the old vehicle links close so
     // GO re-checks the EXACT new vehicle — a retyped plate never carries another subject's
@@ -340,17 +351,20 @@ export async function driverRoutes(app: FastifyInstance) {
       if (live.reason === 'insurance') {
         throw new AppError(403, 'INSURANCE_HIRE_CLASS_REQUIRED', 'A current hire-class motor insurance must be verified before you can carry passengers');
       }
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
+      throw goOnlineRefusal('DOCUMENTS', 'DRIVER');
     }
 
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — drivers require a
     // subscription row; the verdict maps onto this route's historical codes.
-    const operability = subscriptionOperability(driver.subscription, { missingRow: 'BLOCK' });
+    // [REVIEW-PARTNER] Except in the store-review fiction, which has no money
+    // rail and therefore never holds one (review/demo-policy.ts).
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
-        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+        throw goOnlineRefusal('FEE_GRACE_LAPSED', 'DRIVER');
       }
-      throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active subscription is required to go online');
+      throw goOnlineRefusal('FEE_INACTIVE', 'DRIVER');
     }
 
     // Identity assurance (safety spec §7.1): when the tenant enables liveness,
@@ -368,6 +382,10 @@ export async function driverRoutes(app: FastifyInstance) {
       const authority = await lockUserRoleAuthority(tx, request.user.userId);
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'DRIVER');
+      await lockMoverSources(tx, feePayer);
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') })).operable) {
+        throw goOnlineRefusal('FEE_INACTIVE', 'DRIVER');
+      }
 
       // Revalidate the exact authenticated session under the User lock. A
       // logout/reuse-revocation that completed during the slower gates must
@@ -871,14 +889,8 @@ export async function driverRoutes(app: FastifyInstance) {
       request.log.warn({ err: error, orderId: id }, 'direct taxi assignment socket publication failed after commit');
     }
 
-    await notifications.send({
-      userId: order.customerId,
-      type: 'ORDER_UPDATE',
-      title: 'Driver Found!',
-      body: `${driver.user.firstName} is heading to pick you up in a ${driver.vehicleColor} ${driver.vehicleMake} ${driver.vehicleModel} (${driver.licensePlate}).`,
-      data: { orderId: id, status: 'DRIVER_ASSIGNED' },
-    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'direct taxi assignment notification failed after commit'));
-
+    // The rider's "Driver Found!" push (car and plate, owner ruling) is sent once, by
+    // dispatch.claimOrder above, for this entrance and the offer card alike.
     return { success: true, data: responseOrder };
   });
 
@@ -1045,7 +1057,7 @@ export async function driverRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Finding you another driver',
       body: 'Your driver had to cancel — we’re matching you with the nearest available driver now.',
-      data: { orderId: id, status: 'PENDING' },
+      data: taxiNotificationData(id, { status: 'PENDING' }),
     });
 
     let reDispatched = false;
@@ -1103,7 +1115,7 @@ export async function driverRoutes(app: FastifyInstance) {
       body: etaMinutes
         ? `Your driver is on the way. Arriving in ~${etaMinutes} minutes.`
         : 'Your driver is on the way to pick you up.',
-      data: { orderId: id, status: 'DRIVER_EN_ROUTE', eta: etaMinutes },
+      data: taxiNotificationData(id, { status: 'DRIVER_EN_ROUTE', ...(etaMinutes !== null ? { eta: etaMinutes } : {}) }),
     });
 
     return { success: true, data: updatedOrder };
@@ -1177,7 +1189,7 @@ export async function driverRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Driver Arrived',
       body: `Your driver has arrived. Please share your ride PIN to begin the trip.`,
-      data: { orderId: id, status: 'DRIVER_ARRIVED' },
+      data: taxiNotificationData(id, { status: 'DRIVER_ARRIVED' }),
     });
 
     return { success: true, data: updatedOrder };
@@ -1293,7 +1305,7 @@ export async function driverRoutes(app: FastifyInstance) {
       body: previous.taxiDuration
         ? `Your ride has started. Estimated arrival in ~${previous.taxiDuration} minutes.`
         : 'Your ride has started. Enjoy the trip!',
-      data: { orderId: id, status: 'RIDE_IN_PROGRESS' },
+      data: taxiNotificationData(id, { status: 'RIDE_IN_PROGRESS' }),
     });
 
     return { success: true, data: updatedOrder };
@@ -1365,7 +1377,7 @@ export async function driverRoutes(app: FastifyInstance) {
           type: 'ORDER_UPDATE',
           title: 'Ride Complete',
           body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
-          data: { orderId: id, status: 'DELIVERED' },
+          data: taxiNotificationData(id, { status: 'DELIVERED' }),
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
       }
     }
@@ -1431,7 +1443,7 @@ export async function driverRoutes(app: FastifyInstance) {
       type: 'ORDER_UPDATE',
       title: 'Ride Complete',
       body: `You have arrived at your destination. Total fare: $${Number(order.taxiFareTotal || order.totalAmount).toLocaleString()} GYD.`,
-      data: { orderId: id, status: 'DELIVERED' },
+      data: taxiNotificationData(id, { status: 'DELIVERED' }),
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'taxi completion notification failed after commit'));
 
     return { success: true, data: updatedOrder };
@@ -1709,6 +1721,21 @@ export async function driverRoutes(app: FastifyInstance) {
 
   // ─── Subscription ──────────────────────────────────────────────────────
 
+  // The MMG weekly-fee checkout [mmg checkout 3/6]: the driver starts and
+  // follows a checkout for their own weekly fee: the payer's ONE canonical
+  // subscription [#1393 mover fee authority], the same one GET /subscription
+  // shows, which may sit on the mover's rider profile.
+  const feeSubscriptionFor = async (request: FastifyRequest) => {
+    const found = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
+    return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+  };
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the driver
+  // lists, removes, adds and pays by card for the same subscription. Card rail
+  // v2 stays behind CARD_RAIL_V2 (default off).
+  const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
+
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await app.prisma.driver.findUnique({
       where: { userId: request.user.userId },
@@ -1721,12 +1748,23 @@ export async function driverRoutes(app: FastifyInstance) {
       },
     });
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
-    const sub = driver!.subscription;
+    const feePayer = await moverFeePayer(app.prisma, request.user.userId);
+    const sub = (await readMoverFeeSubscription(app.prisma, feePayer))?.subscription;
     if (!sub) return { success: true, data: null };
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
-    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1].
-    return { success: true, data: { ...sub, ...(await sanDisplay(app.prisma, sub)), ...(await payInfo(app.prisma, sub)) } };
+    // "My Swift Number" + Pay-screen block [san spec 2.4/6.1], then
+    // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
+    return {
+      success: true,
+      data: {
+        ...sub,
+        moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
+        ...(await sanDisplay(app.prisma, sub)),
+        ...(await payInfo(app.prisma, sub)),
+        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers), await cardRail.subscriptionFields(sub, request)),
+      },
+    };
   });
 
   /** PUT /subscription/billing-method — §13 rail selection (CASH prepaid vs
@@ -1740,8 +1778,10 @@ export async function driverRoutes(app: FastifyInstance) {
       method: z.enum(['CASH', 'MOBILE_MONEY', 'NONE']),
       mmgPayerMsisdn: z.string().trim().min(5).max(30).optional(),
     }).parse(request.body);
+    // [REVIEW-PARTNER · DL-5] No weekly fee in the fiction: no rail to choose, no step-up to run.
+    if (request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
     await requireStepUp(app, request);
-    const sub = await app.prisma.subscription.findFirst({ where: { driverId: driver.id } });
+    const sub = (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription;
     if (!sub) throw new NotFoundError('Subscription');
     const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
     const updated = body.method === 'NONE'

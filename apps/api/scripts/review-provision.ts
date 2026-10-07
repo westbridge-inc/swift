@@ -1,8 +1,8 @@
 /**
  * [STA-1 operator runbook] review:provision | review:seed | review:status | review:rotate | review:expire <sessionId>
  *
- *   pnpm review:provision -- --slug review-apple-2026-09 [--ttl-days 14]
- *   pnpm review:seed      -- --slug review-apple-2026-09   (the Part 6 content pack; idempotent; REVIEW tenants only)
+ *   pnpm review:provision -- --slug review-apple-2026-09 [--ttl-days 14]   (CUSTOMER, RIDER and DRIVER logins)
+ *   pnpm review:seed      -- --slug review-apple-2026-09   (the Part 6 content pack + the verified rider and taxi driver; idempotent; REVIEW tenants only)
  *   pnpm review:status    -- --slug review-apple-2026-09
  *   pnpm review:rotate    -- --slug review-apple-2026-09
  *   pnpm review:expire    -- <sessionId>
@@ -12,7 +12,7 @@
  */
 import { PrismaClient } from '@prisma/client';
 import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, reviewStatus } from '../src/modules/review/provision';
-import { seedReviewContentPack, PACK_IMAGE_LICENCE } from '../src/modules/review/content-pack';
+import { seedReviewContentPack, partnersComplete, PACK_IMAGE_LICENCE } from '../src/modules/review/content-pack';
 
 const prisma = new PrismaClient();
 const [cmd, ...rest] = process.argv.slice(2);
@@ -32,8 +32,10 @@ async function main(): Promise<number> {
       const slug = flag('slug'); if (!slug) { console.error('usage: seed --slug review-<name>'); return 2; }
       const r = await seedReviewContentPack(prisma, { slug });
       console.log(`content pack ${r.version} on ${r.tenantId} (REVIEW): ${r.stores}/${r.expectedStores} stores (${r.orderableStores} open for orders), ${r.categories} categories, ${r.items}/${r.expectedItems} items in GYD — ${r.state}`);
+      console.log(`partners: rider ${r.partners.RIDER.ready}/${r.partners.RIDER.credentials} ready to go online, taxi driver ${r.partners.DRIVER.ready}/${r.partners.DRIVER.credentials} ready to go online (${r.partnerDocumentsCommitted} fixture document(s) committed this run)`);
+      if (!partnersComplete(r.partners)) console.log(`partners incomplete: mint the rider and driver logins with: pnpm review:provision -- --slug ${r.tenantId}, then run this seed again`);
       console.log(`images: ${PACK_IMAGE_LICENCE}`);
-      console.log('checkout in this tenant is refused with a friendly message (DL-5): no order, no money, no provider');
+      console.log('checkout, taxi and parcel bookings in this tenant are refused with a friendly message (DL-5): no order, no money, no provider; the partners’ job boards are empty by design, they owe no weekly fee and receive no SMS');
       return r.state === 'PRESENT' ? 0 : 1;
     }
     case 'status': {

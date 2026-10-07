@@ -10,6 +10,8 @@ import {
   requireAuthSessionSnapshot,
 } from '../../stores/authStore';
 import { openPayLink, safePayUrl } from '../../lib/payLink';
+import { rideStops } from '../../lib/taxiItinerary';
+import { fareBreakdownOf } from '../../lib/taxiWaiting';
 
 /**
  * Post-trip closure for a completed ride: rate the driver. Tipping is CASH in
@@ -29,7 +31,12 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
 
   if (!ride) return null;
 
-  const fare = Number(ride.taxiFareTotal ?? ride.totalAmount ?? 0);
+  // [TAXI waiting charge §8.4] When the server sends the finished fare's
+  // breakdown, the amount to pay is its total (route fare + waiting), and the
+  // receipt itemises it. Without one, today's single fare.
+  const breakdown = fareBreakdownOf(ride);
+  const fare = breakdown ? breakdown.total : Number(ride.taxiFareTotal ?? ride.totalAmount ?? 0);
+  const stops = rideStops(ride);
   const driverName = ride.driver?.user?.firstName ?? 'your driver';
   // Validated once, here — the button only exists if the destination passes.
   const driverPayUrl = safePayUrl(ride.driver?.mmgPayUrl);
@@ -103,6 +110,17 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
             </T>
           </View>
         ) : null}
+        {/* [TAXI multi-stop] The stops, in order, between pickup and drop-off. */}
+        {stops.map((stop) => (
+          <View key={stop.sequence} style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 6 }}>
+            <View style={{ width: 9, alignItems: 'center' }}>
+              <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: color.text.muted }} />
+            </View>
+            <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+              Stop {stop.sequence}: {stop.address}
+            </T>
+          </View>
+        ))}
         {ride.deliveryAddress ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 6 }}>
             <View style={{ width: 9, alignItems: 'center' }}>
@@ -113,9 +131,23 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
             </T>
           </View>
         ) : null}
+        {breakdown ? (
+          <View testID="taxi-receipt-breakdown" style={{ marginTop: space.sm, paddingTop: space.sm, borderTopWidth: 1, borderTopColor: color.border.subtle, gap: space.xs }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+              <T variant="caption" tone="muted">Trip</T>
+              <T variant="caption">{money(breakdown.routeFare)}</T>
+            </View>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+              <T variant="caption" tone="muted">Waiting {breakdown.waitingMinutes} min</T>
+              <T variant="caption">{money(breakdown.waitingCharge)}</T>
+            </View>
+          </View>
+        ) : null}
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: space.sm, paddingTop: space.sm, borderTopWidth: 1, borderTopColor: color.border.subtle }}>
           <T variant="caption" tone="muted">
-            {[rideClassLabel, when ? new Date(when).toLocaleString() : null].filter(Boolean).join(' · ')}
+            {breakdown
+              ? ['Total', rideClassLabel, when ? new Date(when).toLocaleString() : null].filter(Boolean).join(' · ')
+              : [rideClassLabel, when ? new Date(when).toLocaleString() : null].filter(Boolean).join(' · ')}
           </T>
           <T variant="caption" weight="bold">
             {money(fare)}

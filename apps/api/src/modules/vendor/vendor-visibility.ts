@@ -1,6 +1,7 @@
 import { Prisma, type SubscriptionStatus } from '@prisma/client';
 import { inoperableSubscriptionWhere, subscriptionOperability } from '../subscription/operate-gate';
 import { getTenantId } from '../../plugins/tenant-context';
+import { PRODUCTION_TENANT } from '../../lib/production-only';
 // ---------------------------------------------------------------------------
 // THE customer-facing vendor-visibility predicate — ONE implementation
 // [B2/#790]. A store is visible to customers only when all of these hold:
@@ -40,6 +41,24 @@ export const VISIBLE_VENDOR = {
 /** Spread into an ITEM query's `vendor:` relation filter. */
 export const VISIBLE_VENDOR_REL = VISIBLE_VENDOR;
 
+/** The tenant part of guest visibility, also used by public slug lookups. */
+export const PUBLIC_VENDOR_TENANT = {
+  tenant: { ...VISIBLE_VENDOR.tenant, ...PRODUCTION_TENANT.tenant },
+} as const;
+
+/**
+ * DL-7: direct links retain their existing paused-store behavior, but never
+ * bypass the tenant wall. Reuse the browse rule without its store-status or
+ * subscription conditions. Pin a bound caller explicitly so nested relation
+ * reads (favorites and item slots) have the same wall as top-level vendors.
+ */
+export function vendorTenantForCaller(): Prisma.VendorWhereInput {
+  const tenantId = getTenantId();
+  return tenantId
+    ? { tenantId, tenant: VISIBLE_VENDOR.tenant }
+    : PUBLIC_VENDOR_TENANT;
+}
+
 /**
  * [STA-1 RLS-N3 / DL-7] The visible-vendor relation filter, pinned to the
  * CALLER's tenant. Child tables without a tenantId column (items, categories)
@@ -62,9 +81,7 @@ export function visibleVendorRelForCaller(): Prisma.VendorWhereInput {
  * not cross-kind.
  */
 export function visibleVendorForCaller(): Prisma.VendorWhereInput {
-  return getTenantId()
-    ? VISIBLE_VENDOR
-    : { ...VISIBLE_VENDOR, tenant: { isActive: true, kind: 'PRODUCTION' } };
+  return { ...VISIBLE_VENDOR, ...vendorTenantForCaller() };
 }
 
 /**
@@ -92,7 +109,7 @@ export function isVendorVisible(vendor: {
   status: string;
   isVerified: boolean;
   tenant?: { isActive: boolean } | null;
-  subscription?: { status: SubscriptionStatus; gracePeriodEnd: Date | null; autoRenew: boolean; currentPeriodEnd: Date } | null;
+  subscription?: { status: SubscriptionStatus; gracePeriodEnd: Date | null; billingConfirmationPausedAt: Date | null; billingEnforcementDueAt: Date | null; autoSuspendEnabled: boolean; autoRenew: boolean; currentPeriodEnd: Date } | null;
 }): boolean {
   return (
     vendor.status === VISIBLE_VENDOR.status &&
@@ -110,7 +127,7 @@ export const VISIBLE_VENDOR_SELECT = {
   status: true,
   isVerified: true,
   tenant: { select: { isActive: true } },
-  subscription: { select: { status: true, gracePeriodEnd: true, autoRenew: true, currentPeriodEnd: true } },
+  subscription: { select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true } },
 } as const;
 
 /** [R048-003] The visibility predicate INSIDE one tenant — for relation
@@ -149,4 +166,16 @@ export function visibleVendorSqlForCaller(now = new Date()): Prisma.Sql {
     AND NOT EXISTS (SELECT 1 FROM "subscriptions" s WHERE s."vendorId" = v."id"
       AND (${Prisma.join(refusals, ' OR ')}))
   `;
+}
+
+/** [DL-7 · SX397 F3] The visibility predicate for an actual catalogue read.
+ *  A PUBLIC request (the resolver bound `request.publicTenantId`) re-states the
+ *  public requirements — an ACTIVE, PRODUCTION operator — at the read itself,
+ *  so a tenant reclassified (REVIEW, CRAWLER) or switched off after the
+ *  resolver admitted it is never read for a guest. A bound caller keeps its
+ *  own tenant's semantics: a REVIEW or CRAWLER customer still sees its own
+ *  operator's catalogue. */
+export function catalogueVendorInTenant(tenantId: string, publicMode: boolean) {
+  const inTenant = visibleVendorInTenant(tenantId);
+  return publicMode ? { ...inTenant, tenant: { ...VISIBLE_VENDOR.tenant, ...PRODUCTION_TENANT.tenant } } : inTenant;
 }

@@ -46,8 +46,9 @@ export function matches(row: Row, where: Row = {}): boolean {
     if ('contains' in value) return typeof actual === 'string' && actual.toLowerCase().includes(value.contains.toLowerCase());
     if ('hasSome' in value) return actual.some((s: string) => value.hasSome.includes(s));
     if ('has' in value) return actual.includes(value.has);
-    if ('gt' in value) return actual > value.gt;
-    if ('lte' in value) return actual <= value.lte;
+    // SQL comparison semantics: a NULL column never satisfies a range predicate.
+    if ('gt' in value) return actual != null && actual > value.gt;
+    if ('lte' in value) return actual != null && actual <= value.lte;
     if (actual && typeof actual === 'object') return matches(actual, value);
     throw new Error(`Unsupported test predicate: ${key}`);
   });

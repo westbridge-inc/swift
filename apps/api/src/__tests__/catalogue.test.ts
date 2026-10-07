@@ -213,6 +213,20 @@ describe('CSV import', () => {
     expect(res.json().error.code).toBe('TOO_MANY_ROWS');
   });
 
+  it.each(['/items/import', '/items/import/automap'])('bounds CSV before expansion on %s', async (route) => {
+    const before = await app.prisma.item.count({ where: { vendorId } });
+    for (const [csv, code] of [
+      ['category,name,basePrice\n' + 'Mains,Bounded,100\n'.repeat(5001), 'TOO_MANY_ROWS'],
+      [Array(101).fill('name').join(',') + '\nx', 'CSV_TOO_WIDE'],
+      ['name\n"' + 'x'.repeat(2049) + '"', 'CSV_CELL_TOO_LONG'],
+    ]) {
+      const response = await inject('POST', '/api/v1/vendor' + route, { csv }, vendorToken);
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe(code);
+    }
+    expect(await app.prisma.item.count({ where: { vendorId } })).toBe(before);
+  });
+
   it('the listing gate applies to imports too', async () => {
     const unverifiedUser = await makeUserWithSession(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
     await makeVendor(unverifiedUser, { verified: false });

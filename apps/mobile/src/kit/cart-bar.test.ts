@@ -216,3 +216,35 @@ describe('the bar reads the cart through the shared hook', () => {
     expect(src).not.toMatch(/getCart/);
   });
 });
+
+describe('[ANDROID-QA A8] the storefront bar reads the cart the API actually returns', () => {
+  // GET /customer/cart has no top-level vendorId: each line carries its store,
+  // plus `vendor` (the first store) and `vendors[]` (one plan per store; the
+  // basket can hold more than one store). Captured from the real API on 5 Oct.
+  const realCart = (lines: Array<{ vendorId: string; quantity: number }>) => ({
+    id: 'cart-1',
+    vendor: { id: lines[0]?.vendorId, name: 'Store' },
+    items: lines.map((l, i) => ({ id: `ci${i}`, itemId: `i${i}`, vendorId: l.vendorId, quantity: l.quantity })),
+    vendors: [...new Set(lines.map((l) => l.vendorId))].map((vendorId) => ({ vendorId })),
+    subtotalCustomer: 700,
+  });
+
+  it("shows on the storefront whose items are in the basket", () => {
+    mocks.cart.data = realCart([{ vendorId: 'vendor-1', quantity: 2 }]);
+    expect(CartBar({ vendorId: 'vendor-1' })).not.toBeNull();
+    expect(useCartBarClearance({ vendorId: 'vendor-1' })).toBe(34 + 16 + 52);
+  });
+
+  it("stays hidden on a storefront with nothing in the basket", () => {
+    mocks.cart.data = realCart([{ vendorId: 'vendor-1', quantity: 2 }]);
+    expect(CartBar({ vendorId: 'vendor-2' })).toBeNull();
+    expect(useCartBarClearance({ vendorId: 'vendor-2' })).toBe(0);
+  });
+
+  it('shows on every store of a two-store basket', () => {
+    mocks.cart.data = realCart([{ vendorId: 'vendor-1', quantity: 1 }, { vendorId: 'vendor-2', quantity: 1 }]);
+    expect(CartBar({ vendorId: 'vendor-1' })).not.toBeNull();
+    expect(CartBar({ vendorId: 'vendor-2' })).not.toBeNull();
+    expect(CartBar({ vendorId: 'vendor-3' })).toBeNull();
+  });
+});

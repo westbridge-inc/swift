@@ -4,12 +4,14 @@ import type { FastifyInstance } from 'fastify';
 import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
 import { makeDispatchService } from './dispatch/dispatch.service';
 import { reopenPreCustodyLeg } from './dispatch/delivery-watchdog';
+import { openCaseInTransaction } from './custody/custody-case';
 import { closeOnlineSession } from './rider/online-hours';
 import { processMoverRevocationOutboxById } from './mover-revocation-outbox';
 import {
   TERMINAL_ORDER_STATUSES,
   RIDER_PRE_CUSTODY_STATUSES as RIDER_PRE_HANDOFF,
   DRIVER_PRE_CUSTODY_STATUSES as DRIVER_PRE_HANDOFF,
+  isMoverHolding,
 } from './order/order-status';
 import { settleRiderLegs } from './dispatch/concurrency-policy';
 import {
@@ -367,6 +369,16 @@ export async function retireMoverSessionAuthorityInTransaction(
           });
         } else {
           // Goods WITH the rider: never reassign — preserve and page.
+          // [AF-MOB-006] ...and own it: the order's ONE recovery case opens
+          // on this lock (idempotent, so a repeated revocation keeps the one
+          // already open) and its deadline pages humans until someone acts.
+          if (isMoverHolding(order.status)) {
+            await openCaseInTransaction(tx, {
+              order, reason: 'MOVER_SESSION_ENDED', actor: { userId: null, role: 'SYSTEM' },
+              note: 'Rider session ended while holding the goods',
+              state: order.status === 'RETURNING' ? 'RETURN_REQUIRED' : 'SUPPORT_HOLD',
+            });
+          }
           cleanup.orders.push({
             orderId: order.id, orderNumber: order.orderNumber, customerId: order.customerId,
             pool: 'RIDER', status: order.status, action: 'ESCALATE',
@@ -618,6 +630,20 @@ export interface UserStatusTransitionAuditEvidence {
   userAgent?: string;
 }
 
+/**
+ * [Row 90] What a status transition hands back to its caller — and so what the
+ * admin suspend/unsuspend/ban/unban routes answer with. Never the whole User
+ * row: that carries the password hash, OTP and recovery material, phone, email
+ * and other personal data an operator's browser has no reason to receive.
+ */
+export const ACCOUNT_STATUS_RESULT_SELECT = {
+  id: true,
+  status: true,
+  roles: true,
+  activeRole: true,
+  updatedAt: true,
+} as const;
+
 export interface UserStatusTransitionOptions {
   /** For an ACTIVE target: the restriction being lifted. SUSPENDED (an
    *  unsuspend) unless the caller says BANNED (an unban), so a route can never
@@ -722,6 +748,7 @@ export async function transitionUserStatusAuthority(
     const updated = await tx.user.update({
       where: { id: userId },
       data: { status: targetStatus },
+      select: ACCOUNT_STATUS_RESULT_SELECT,
     });
     if (targetStatus === 'BANNED') {
       await tx.session.deleteMany({ where: { userId } });

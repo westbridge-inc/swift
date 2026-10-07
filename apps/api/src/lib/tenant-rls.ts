@@ -106,13 +106,22 @@ export const TENANT_TABLES = [
   'discovery_categories', 'discovery_category_requests',
   'discovery_category_suggestions', 'fee_receipts', 'house_ads',
   'identity_keys', 'item_discovery_categories', 'item_feedbacks',
-  'mmg_agent_payments', 'order_outbox', 'orders', 'pending_attributions',
+  'mmg_agent_payments',
+  // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
+  // walled like the provider payment that credits it.
+  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
+  // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
+  'billing_obligation_transitions',
+  'order_outbox', 'orders', 'pending_attributions',
   // [M-18] One provider transaction, one identity, one credit.
   'provider_payments', 'qr_codes',
   'rating_reports', 'rating_tag_defs', 'receipt_counters',
   'ride_queue_entries', 'safety_deletion_holds', 'san_tombstones',
   // [TAXI multi-stop] The intermediate stops of one ride, walled like the ride itself.
   'taxi_trip_stops',
+  // [AF-MOB-006] A custody recovery case, walled like the order it recovers.
+  'custody_recovery_cases',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -120,6 +129,7 @@ export const TENANT_TABLES = [
   // [M-20] A settlement file as one staged, validated import.
   'settlement_imports', 'slug_redirects', 'storage_orphans', 'supply_watches',
   'tenant_billing_currency',
+  'mover_fee_authorities', 'mover_fee_subscriptions',
   // [M-08] The prepaid top-up as one persisted command.
   'topup_commands', 'trial_grants', 'trip_share_tokens',
   // [PT-1] Card rail v2: enrolled cards, hosted sessions and their evidence.
@@ -223,6 +233,8 @@ export interface TenantLineageRule {
   parentTenantSql?: string;
   /** Columns whose UPDATE re-checks lineage (the fk by default). */
   watch?: readonly string[];
+  /** QR lineage never exempts an UPDATE whose non-null parent is missing or RLS-hidden. */
+  requiredParent?: boolean;
 }
 export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
@@ -260,12 +272,34 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'document_record', trigger: 'document_record_tenant_matches_account', parent: 'users', fk: 'accountId' },
   { table: 'rectification_request', trigger: 'rectification_request_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'fraud_case', trigger: 'fraud_case_tenant_matches_subject', parent: 'users', fk: 'subjectUserId' },
+  // QR parents are locked FOR SHARE until commit, so a child insert cannot race
+  // a change to its parent. (A vendor's tenant never changes at all:
+  // vendors_tenant_immutable, migration 20261005210200.)
+  // Optional code links explicitly retain null; a non-null missing/hidden
+  // parent is refused on UPDATE as well as INSERT.
+  { table: 'qr_codes', trigger: 'qr_codes_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'], requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
+  { table: 'slug_redirects', trigger: 'slug_redirects_tenant_matches_vendor', parent: 'vendors', fk: 'entityId', watch: ['entityId', 'entityType'], requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.vendors WHERE id = NEW."entityId" AND NEW."entityType" = 'VENDOR' FOR SHARE` },
+  { table: 'pending_attributions', trigger: 'pending_attributions_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
+  { table: 'attribution_claims', trigger: 'attribution_claims_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
+  { table: 'scan_events', trigger: 'scan_events_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT CASE WHEN NEW."qrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE) END` },
+  { table: 'scan_daily_rollups', trigger: 'scan_daily_rollups_tenant_matches_code', parent: 'qr_codes', fk: 'qrCodeId', requiredParent: true,
+    parentTenantSql: `SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."qrCodeId" FOR SHARE` },
+  // Order credit must identify THIS store, as well as this tenant.
+  { table: 'orders', trigger: 'orders_tenant_matches_attribution_code', parent: 'qr_codes', fk: 'attributionQrCodeId', watch: ['attributionQrCodeId', 'vendorId'], requiredParent: true,
+    parentTenantSql: `SELECT CASE WHEN NEW."attributionQrCodeId" IS NULL THEN NEW."tenantId" ELSE (SELECT "tenantId" FROM public.qr_codes WHERE id = NEW."attributionQrCodeId" AND "entityType" = 'VENDOR' AND "entityId" = NEW."vendorId" FOR SHARE) END` },
   { table: 'earnings', trigger: 'earnings_tenant_matches_mover', parent: 'users', fk: 'orderId', watch: ['riderId', 'driverId', 'orderId'],
     // rider → driver → the ORDER: an earning exists before a mover is bound (order.service creates the
     // rows at placement), so the order is the owner of last resort; an earning with none is refused.
     parentTenantSql: `SELECT COALESCE((SELECT u."tenantId" FROM users u JOIN riders r ON r."userId" = u.id WHERE r.id = NEW."riderId"), (SELECT u."tenantId" FROM users u JOIN drivers d ON d."userId" = u.id WHERE d.id = NEW."driverId"), (SELECT o."tenantId" FROM orders o WHERE o.id = NEW."orderId"))` },
   // [TAXI multi-stop] one hop: a stop inherits the tenant of its ride (the delivery_cash_settlements shape)
   { table: 'taxi_trip_stops', trigger: 'taxi_trip_stops_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [AF-MOB-006] one hop: a custody recovery case inherits the tenant of the order it recovers
+  { table: 'custody_recovery_cases', trigger: 'custody_recovery_cases_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
   // card and a hosted session belong to the person who pays the fee
   { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },
@@ -277,15 +311,15 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
     parentTenantSql: `SELECT COALESCE((SELECT s."tenantId" FROM card_sessions s WHERE s.id = NEW."sessionId"), (SELECT i."tenantId" FROM payment_instruments i WHERE i.id = NEW."instrumentId"))` },
 ];
 export function tenantLineageDdl(): string[] {
-  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch }) => [
+  return TENANT_LINEAGE_TABLES.flatMap(({ table, trigger, parent, fk, parentTenantSql, watch, requiredParent }) => [
     `CREATE OR REPLACE FUNCTION ${trigger}() RETURNS trigger AS $$
       DECLARE parent_tenant TEXT;
       BEGIN
         ${parentTenantSql ?? `SELECT "tenantId" FROM ${parent} WHERE id = NEW."${fk}"`} INTO parent_tenant;
         IF parent_tenant IS NULL THEN
-          -- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
+          ${requiredParent ? '-- A QR UPDATE with a missing/hidden non-null parent is refused too.' : `-- An UPDATE that unlinks the owner (an FK SET NULL when a mover or user is
           -- deleted) leaves the row's tenant as it was; only a NEW row with no owner is refused.
-          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;
+          IF TG_OP = 'UPDATE' THEN RETURN NEW; END IF;`}
           RAISE EXCEPTION '${table} row % names ${parent} row %, which does not exist or is not visible from this tenant [STA-1 lineage]',
             NEW.id, NEW."${fk}" USING ERRCODE = 'check_violation';
         END IF;
@@ -365,7 +399,22 @@ export function appRoleDdl(): string[] {
     `GRANT USAGE ON SCHEMA public TO swift_app`,
     `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO swift_app`,
     `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO swift_app`,
-    `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO swift_app`,
+    // Purge functions are operator-only. Never re-grant them when healing an
+    // app-role environment, even if creation defaults previously granted them.
+    `DO $app_functions$
+      DECLARE fn record;
+      BEGIN
+        FOR fn IN SELECT p.oid::regprocedure AS signature, p.proname
+          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'public' AND p.prokind IN ('f', 'w')
+        LOOP
+          IF fn.proname IN ('swift_purge_audit_logs', 'swift_purge_sensitive_read_logs') THEN
+            EXECUTE format('REVOKE ALL ON FUNCTION %s FROM swift_app', fn.signature);
+          ELSE
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO swift_app', fn.signature);
+          END IF;
+        END LOOP;
+      END $app_functions$`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO swift_app`,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO swift_app`,

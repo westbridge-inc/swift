@@ -80,6 +80,31 @@ afterAll(async () => {
 });
 
 describe('retention clocks [DCR-1 NR-2]', () => {
+  it('reports the permanent audit trail and unapproved sensitive-read policy on every sweep', async () => {
+    const results = await runRetentionSweep(app.prisma);
+    expect(results.find(r => r.dataClass === 'audit_logs')).toMatchObject({ deleted: 0, skipped: 'permanent-evidence' });
+    expect(results.find(r => r.dataClass === 'sensitive_read_logs')).toMatchObject({ deleted: 0, skipped: 'policy-unapproved' });
+  });
+
+  it('an enabled registry clock cannot authorize deletion of either audit trail', async () => {
+    for (const dataClass of ['audit_logs', 'sensitive_read_logs']) {
+      await app.prisma.retentionPolicy.create({ data: {
+        dataClass, description: 'synthetic unapproved clock', retainDays: 7, legalBasis: 'test fixture',
+      } });
+    }
+    try {
+      const results = await runRetentionSweep(app.prisma);
+      expect(results.filter(r => ['audit_logs', 'sensitive_read_logs'].includes(r.dataClass))).toHaveLength(2);
+      expect(results.filter(r => ['audit_logs', 'sensitive_read_logs'].includes(r.dataClass)))
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ dataClass: 'audit_logs', deleted: 0, skipped: 'permanent-evidence' }),
+          expect.objectContaining({ dataClass: 'sensitive_read_logs', deleted: 0, skipped: 'policy-unapproved' }),
+        ]));
+    } finally {
+      await app.prisma.retentionPolicy.deleteMany({ where: { dataClass: { in: ['audit_logs', 'sensitive_read_logs'] } } });
+    }
+  });
+
   it('seeds conservative defaults idempotently and never overwrites tuned rows', async () => {
     await seedRetentionDefaults(app.prisma);
     const rows = await app.prisma.retentionPolicy.findMany();

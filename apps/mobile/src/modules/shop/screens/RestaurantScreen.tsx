@@ -68,6 +68,11 @@ function StatCol({
     <Pressable
       onPress={onPress}
       disabled={!onPress}
+      // One spoken name from the visible words. Without it a screen reader
+      // reads the icon-font glyph too ("\uf1e5, New, See reviews").
+      accessible
+      accessibilityRole={onPress ? 'button' : 'text'}
+      accessibilityLabel={`${value}, ${caption}`}
       style={{
         flex: 1,
         borderRightWidth: last ? 0 : 1,
@@ -405,7 +410,7 @@ export function RestaurantScreen() {
               alignItems: 'center',
             }}
           >
-            <CircleChip icon="chevron-left" onPress={() => navigation.goBack()} />
+            <CircleChip icon="chevron-left" label="Back" onPress={() => navigation.goBack()} />
             <View style={{ flex: 1 }} />
             <View style={{ flexDirection: 'row', gap: space.md }}>
               <HeartBadge
@@ -417,6 +422,7 @@ export function RestaurantScreen() {
               />
               <CircleChip
                 icon="share-2"
+                label="Share this store"
                 onPress={() => void Share.share({ message: `${v.name} is on Swift — ${v.description ?? 'order in the app'}` }).catch(() => toast.show("Couldn't open the share sheet."))}
               />
               {/* [B15] The flag beside the share — quiet, auth-gated like the

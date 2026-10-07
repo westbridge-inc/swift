@@ -5,7 +5,10 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { rejectReasonsFor } from '../rejectReasons';
-import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu } from '../../../hooks/vendorops';
+import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
+import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
+import { toast } from '../../../kit/toast';
+import { parsePartyCaseView, partyCaseWorthShowing, storeCanConfirmReturn } from '../../../lib/custodyRecovery';
 import { money } from '../../../lib/money';
 import { openExternal } from '../../../lib/openExternal';
 import {
@@ -16,6 +19,7 @@ import {
   fmtClock,
   fmtWhen,
   formatSlot,
+  MmgDisputeNotice,
   orderActions,
   prettyStatus,
 } from '../shared';
@@ -105,6 +109,7 @@ function ContactCard({
 export function VendorOrderDetailScreen({ navigation, route }: any) {
   const orderId: string | undefined = route.params?.orderId;
   const { data: order, isLoading, isError, refetch } = useVendorOrder(orderId);
+  const returnReceived = useReturnReceived();
   const orderAction = useOrderAction();
   const retryDispatch = useRetryDispatch();
   const fulfillmentMode = useSetOrderFulfillmentMode();
@@ -148,6 +153,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
 
   const items: any[] = order.items ?? [];
   const s = (order.status || '').toUpperCase();
+  const custodyRecovery = parsePartyCaseView(order.custodyRecovery);
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
   // Shelf-pick UI: quantity-tracked store types, while the bag is still open.
   const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
@@ -219,6 +225,26 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
             {fmtWhen(order.placedAt)}
           </T>
         </View>
+        {/* [NO-DEAD-ENDS · S1-6] A disputed MMG order is paused: say so and what happens next. */}
+        <MmgDisputeNotice order={order} />
+
+        {/* [AF-MOB-006] A delivery that went wrong after pickup: the store sees
+            the case, and confirms when returned goods are back with it. */}
+        {partyCaseWorthShowing(custodyRecovery) ? (
+          <CustodyRecoveryNotice
+            view={custodyRecovery}
+            action={storeCanConfirmReturn(custodyRecovery, order.status, order.orderType)
+              ? {
+                  label: 'The order is back with us',
+                  pending: returnReceived.isPending,
+                  onPress: () => returnReceived.mutate(order.id, {
+                    onSuccess: () => { void refetch(); },
+                    onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't confirm the return — try again."),
+                  }),
+                }
+              : undefined}
+          />
+        ) : null}
 
         {/* Risk flag — surfaced exactly as the trust engine recorded it */}
         {order.riskFlagged ? (

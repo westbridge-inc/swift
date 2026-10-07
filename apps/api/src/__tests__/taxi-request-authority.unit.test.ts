@@ -46,6 +46,8 @@ describe('taxi request authority', () => {
             countryCode: 'GY',
             trustLevel: 'L2',
             selfieCapturedAt: new Date('2026-09-12T00:00:00Z'),
+            // The ride gates read the caller's tenant kind with the account (the review fiction books no rides).
+            tenant: { kind: 'PRODUCTION' },
           })),
         },
         order: {

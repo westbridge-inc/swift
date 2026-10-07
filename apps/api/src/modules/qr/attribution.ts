@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { normalizeShortCode, sanitizeTemplate } from './qr-codes';
-import { isProduction } from '../../utils/runtime-mode';
+import { qrSalt } from './qr-config';
 
 // ---------------------------------------------------------------------------
 // Install attribution — pure pieces. Android is deterministic (the Play URL
@@ -14,12 +14,7 @@ export const ATTRIB_MAX_OPEN_PER_FP = Math.max(1, Number(process.env['ATTRIB_MAX
 
 /** Mirrors the identitySalt()/scanIpSalt() contract. */
 export function attribSalt(): string {
-  const salt = process.env['ATTRIB_SALT'];
-  if (!salt) {
-    if (isProduction()) throw new Error('ATTRIB_SALT is required in production');
-    return 'dev-attrib-salt';
-  }
-  return salt;
+  return qrSalt('ATTRIB_SALT');
 }
 
 /** IPv4 → full address; IPv6 → /64 prefix (carrier-grade NAT reality: good

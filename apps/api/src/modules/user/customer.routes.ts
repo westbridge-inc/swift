@@ -1,3 +1,5 @@
+import { requireRecentOtpOrStepUp } from '../auth/step-up';
+import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { velocityGuard } from '../integrity/velocity';
@@ -21,12 +23,17 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import {
+  publicOperatingHours,
+  publicStorefrontCategory,
+  publicStorefrontImage,
+} from './storefront-projection';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { visibleVendorRelForCaller, visibleVendorForCaller, visibleVendorSqlForCaller } from '../vendor/vendor-visibility';
-import { compileStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { visibleVendorRelForCaller, visibleVendorForCaller, visibleVendorSqlForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
+import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -37,7 +44,7 @@ import { scheduleVendorSearchSync } from '../search/search-sync';
 import { NotificationService } from '../notification/notification.service';
 import { completeMmgClaimNotice, isRejectedMmgAttempt, mmgClaimView, recordCustomerMmgClaim } from '../order/mmg-claim.service';
 import { SupportService } from '../support/support.service';
-import { AccountService } from './account.service';
+import { AccountService, closesByRequest } from './account.service';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
@@ -45,19 +52,13 @@ import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
-
-/** [F-021-21] Consent surface from the client's own attestation header,
- *  constrained to the known set — never a hardcoded guess. */
-function consentSurface(request: { headers: Record<string, unknown> }): 'ios' | 'android' | 'mobile' | 'web' {
-  const h = String(request.headers['x-client-platform'] ?? '').toLowerCase();
-  return h === 'ios' || h === 'android' || h === 'web' ? h : 'mobile';
-}
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -315,7 +316,8 @@ async function buildCartResponse(
   choices: CartQuoteChoices = {},
 ) {
   const cart = await app.prisma.cart.findUnique({
-    where: { customerId: userId },
+    // Historical cart relations need the same caller wall as direct reads.
+    where: { customerId: userId, vendor: vendorTenantForCaller() },
     include: {
       vendor: {
         select: {
@@ -326,6 +328,7 @@ async function buildCartResponse(
         },
       },
       items: {
+        where: { item: { vendor: vendorTenantForCaller() } },
         include: {
           item: {
             select: {
@@ -810,6 +813,9 @@ export async function customerRoutes(app: FastifyInstance) {
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
         roles: user.roles,
+        // [DELETION-INTEGRITY] What Delete starts for this person: erasure, or a
+        // closure request the support team completes (store or advertiser).
+        accountClosure: await closesByRequest(app.prisma, userId, user.roles) ? 'REQUEST' : 'DELETE',
         customer: {
           id: customer.id,
           totalOrders: customer.totalOrders,
@@ -871,8 +877,37 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
+  app.post('/account/closure-request', async (request: AuthRequest, reply) => {
+    await requireRecentOtpOrStepUp(app, request);
+    const result = await account.requestClosure(request.user.userId);
+    reply.code(202);
+    return { success: true, data: result };
+  });
+
   app.delete('/account', async (request: AuthRequest, reply) => {
-    const result = await account.deleteAccount(request.user.userId);
+    // [DELETION-INTEGRITY] Build 9 (in store review, frozen) says "Your account
+    // has been deleted." and signs out on every success except
+    // PENDING_DOCUMENT_ERASURE, where it shows this server's message. Newer
+    // builds show every receipt by its own message and say so with
+    // ?receipts=v2. Without it the answer uses build 9's words, so build 9
+    // never reports an open account, or an unfinished erasure, as deleted.
+    const modernReceipts = (request.query as Record<string, unknown> | undefined)?.['receipts'] === 'v2';
+    await requireRecentOtpOrStepUp(app, request).catch((error: unknown) => {
+      // Build 9 has no code sheet on this screen and shows the message as is:
+      // name the step it can take (a fresh code sign-in counts as step-up).
+      if (!modernReceipts && error instanceof AppError && error.code === 'STEP_UP_REQUIRED') {
+        throw new AppError(403, 'STEP_UP_REQUIRED',
+          'For your security, sign out and sign back in with a code sent to your phone, then delete your account within 10 minutes.', error.details);
+      }
+      throw error;
+    });
+    const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
+      const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      if (user?.phone !== `deleted:${request.user.userId}`) throw error;
+      app.log.error({ err: error, userId: request.user.userId }, 'Account erasure pending automatic retry');
+      return { deleted: false, status: 'PENDING_ACCOUNT_ERASURE' as const,
+        message: 'Your account is closed. Personal-data erasure is pending and will be retried automatically; no further sign-in is needed.' };
+    });
     if (!result.deleted) reply.code(202);
     // Leave an audit trail (the de-identified row is retained, so its id stays a
     // valid FK). Best-effort; a pending document obligation is not completion.
@@ -880,11 +915,13 @@ export async function customerRoutes(app: FastifyInstance) {
       .create({
         data: {
           userId: request.user.userId,
-          action: result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
+          action: result.status === 'CLOSURE_REQUESTED' ? 'ACCOUNT_CLOSURE_REQUESTED'
+            : result.deleted ? 'ACCOUNT_SELF_DELETED' : 'ACCOUNT_SELF_DELETION_PENDING',
           entity: 'User',
           entityId: request.user.userId,
           changes: {
             reason: 'DPA right to erasure (self-serve)',
+            ...(result.status && { status: result.status }),
             ...(result.status === 'PENDING_DOCUMENT_ERASURE' && {
               status: result.status,
               pendingDocuments: result.pendingDocuments,
@@ -894,6 +931,15 @@ export async function customerRoutes(app: FastifyInstance) {
         },
       })
       .catch(() => {});
+    if (!modernReceipts && result.status === 'CLOSURE_REQUESTED') {
+      // Not a success to build 9: the account stays open and signed in, and the
+      // request (already recorded) is described in the server's own words.
+      throw new AppError(409, 'ACCOUNT_CLOSURE_REQUESTED', result.message, { status: result.status, ticketId: result.ticketId });
+    }
+    if (!modernReceipts && !result.deleted && result.status !== 'PENDING_DOCUMENT_ERASURE') {
+      // Closed, with some erasure still pending: build 9's own word for that.
+      return { success: true, data: { ...result, status: 'PENDING_DOCUMENT_ERASURE' as const, pendingReason: result.status } };
+    }
     return { success: true, data: result };
   });
 
@@ -1356,7 +1402,7 @@ export async function customerRoutes(app: FastifyInstance) {
       total = Number(counts[0]?.total ?? 0);
       const pageIds = ids.map((r) => r.id);
       // A current visibility reread fences eligibility changes after ranking.
-      const rows = await app.prisma.vendor.findMany({ where: { ...where, id: { in: pageIds } } });
+      const rows = await app.prisma.vendor.findMany({ where: { AND: [where, { id: { in: pageIds } }] } });
       const byId = new Map(rows.map((r) => [r.id, r]));
       vendors = pageIds.map((id) => byId.get(id)).filter((v): v is NonNullable<typeof v> => v != null);
     } else {
@@ -1446,7 +1492,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // renders its closed state); tenant deactivation is the operator-level
     // kill switch and nothing of a dead tenant may serve.
     const vendor = await app.prisma.vendor.findFirst({
-      where: { id, tenant: { isActive: true } },
+      where: { id, ...vendorTenantForCaller() },
       include: {
         categories: {
           orderBy: { sortOrder: 'asc' },
@@ -1488,15 +1534,10 @@ export async function customerRoutes(app: FastifyInstance) {
         })) > 0
       : false;
 
-    // Zero markup — customers pay the vendor base price (revenue = subscriptions).
-    const categories = vendor.categories.map((cat) => ({
-      ...cat,
-      items: cat.items.map((item) => ({
-        ...item,
-        basePrice: Number(item.basePrice),
-        customerPrice: Number(item.basePrice),
-      })),
-    }));
+    // [Row 77] Field-by-field guest allowlist (storefront-projection.ts) —
+    // never a spread of the raw category/item rows. A category the store has
+    // switched off is not on its public page.
+    const categories = vendor.categories.filter((cat) => cat.isActive).map(publicStorefrontCategory);
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1532,7 +1573,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cuisineTypes: vendor.cuisineTypes,
         logoUrl: vendor.logoUrl,
         coverImageUrl: vendor.coverImageUrl,
-        images: vendor.images,
+        images: vendor.images.map(publicStorefrontImage),
         addressLine1: vendor.addressLine1,
         city: vendor.city,
         latitude: vendor.latitude,
@@ -1561,12 +1602,12 @@ export async function customerRoutes(app: FastifyInstance) {
         estimatedPrepTime: vendor.estimatedPrepTime,
         minOrderAmount: Number(vendor.minOrderAmount),
         deliveryRadius: vendor.deliveryRadius,
-        operatingHours: vendor.operatingHours,
+        operatingHours: vendor.operatingHours.map(publicOperatingHours),
         categories,
         isFavorite,
         // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
         // records on every read — never hand-written prose; incomplete blocks say what is missing.
-        disclosure: await compileStorefrontDisclosure(app.prisma, id),
+        disclosure: await compilePublicStorefrontDisclosure(app.prisma, id),
         distanceKm,
         deliveryFee,
         etaMin,
@@ -1580,8 +1621,8 @@ export async function customerRoutes(app: FastifyInstance) {
     const query = request.query as Record<string, string | undefined>;
     const { page, limit, skip } = parsePagination(query);
 
-    const vendor = await app.prisma.vendor.findUnique({
-      where: { id },
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id, ...vendorTenantForCaller() },
       select: { id: true, averageRating: true, totalRatings: true },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
@@ -1621,7 +1662,7 @@ export async function customerRoutes(app: FastifyInstance) {
       where: { userId },
       include: {
         favoriteVendors: {
-          where: { status: 'ACTIVE' },
+          where: { status: 'ACTIVE', ...vendorTenantForCaller() },
           orderBy: { name: 'asc' },
         },
       },
@@ -1648,7 +1689,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { vendorId } = request.params as { vendorId: string };
     const { userId } = request.user;
 
-    const vendor = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { id: true, name: true } });
+    const vendor = await app.prisma.vendor.findFirst({ where: { id: vendorId, ...vendorTenantForCaller() }, select: { id: true, name: true } });
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
 
     await resolveCustomer(app, userId);
@@ -1689,7 +1730,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const { date } = itemSlotsQuerySchema.parse(request.query);
 
     const item = await app.prisma.item.findUnique({
-      where: { id },
+      where: { id, vendor: vendorTenantForCaller() },
       select: { id: true, vendorId: true, fulfillment: true, bookingConfig: true, isAvailable: true },
     });
     if (!item) throw new NotFoundError('Listing', id);
@@ -1794,7 +1835,7 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Validate item
     const item = await app.prisma.item.findFirst({
-      where: { id: body.itemId, vendorId: body.vendorId, isAvailable: true },
+      where: { id: body.itemId, vendorId: body.vendorId, isAvailable: true, vendor: vendorTenantForCaller() },
       include: { optionGroups: { include: { options: true } } },
     });
     if (!item) throw new AppError(404, 'ITEM_NOT_FOUND', 'Item not found or unavailable');
@@ -1986,26 +2027,25 @@ export async function customerRoutes(app: FastifyInstance) {
     });
     if (!address) throw new NotFoundError('Address', addressId);
 
-    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId } });
+    const cart = await app.prisma.cart.findUnique({ where: { customerId: userId, vendor: vendorTenantForCaller() } });
     if (!cart) throw new AppError(400, 'NO_CART', 'No active cart');
 
     // Check delivery radius
-    const vendor = await app.prisma.vendor.findUnique({
-      where: { id: cart.vendorId },
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id: cart.vendorId, ...vendorTenantForCaller() },
       select: { latitude: true, longitude: true, deliveryRadius: true, name: true },
     });
-    if (vendor) {
-      const dist = estimateDrivingDistance(
-        vendor.latitude, vendor.longitude,
-        address.latitude, address.longitude,
-      );
-      if (dist > (vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM)) {
-        throw new AppError(400, 'OUT_OF_RANGE',
-          `${vendor.name} only delivers within ${vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM} km. This address is ${dist.toFixed(1)} km away.`);
-      }
+    if (!vendor) throw new AppError(400, 'NO_CART', 'No active cart');
+    const dist = estimateDrivingDistance(
+      vendor.latitude, vendor.longitude,
+      address.latitude, address.longitude,
+    );
+    if (dist > (vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM)) {
+      throw new AppError(400, 'OUT_OF_RANGE',
+        `${vendor.name} only delivers within ${vendor.deliveryRadius || MAX_DELIVERY_RADIUS_KM} km. This address is ${dist.toFixed(1)} km away.`);
     }
 
-    await app.prisma.cart.update({ where: { id: cart.id }, data: { deliveryAddressId: addressId, lastActivityAt: new Date() } });
+    await app.prisma.cart.update({ where: { id: cart.id, vendor: vendorTenantForCaller() }, data: { deliveryAddressId: addressId, lastActivityAt: new Date() } });
     await app.redis.del(`cart:${userId}`).catch(() => {});
 
     const updatedCart = await buildCartResponse(app, userId);
@@ -2586,6 +2626,9 @@ export async function customerRoutes(app: FastifyInstance) {
         estimatedDeliveryTime: order.estimatedDeliveryTime,
         // [ALG-12] The promise and its range — what a countdown reads (L7).
         promise: promiseView(order),
+        // [AF-MOB-006] After pickup, a delivery problem is an owned case: the
+        // customer sees its state and a plain sentence, never only "call support".
+        custodyRecovery: mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'CUSTOMER', order) : null,
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
           lastName: order.rider.user?.lastName,
@@ -3188,7 +3231,7 @@ export async function customerRoutes(app: FastifyInstance) {
       await recordConsent(tx, {
         subjectType: 'customer', subjectId: userId,
         documentType: 'marketing_consent', version: LEGAL_VERSION,
-        action, surface: consentSurface(request), ip: request.ip,
+        action, surface: consentSurfaceOf(request), ip: request.ip,
         evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
       });
       return { marketing: granted, changed: true };
@@ -3334,8 +3377,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // Compute estimated discount using current cart if available
     let estimatedDiscount: number | null = null;
     const cart = await app.prisma.cart.findUnique({
-      where: { customerId: userId },
-      include: { items: { include: { item: true } } },
+      where: { customerId: userId, vendor: vendorTenantForCaller() },
+      include: { items: { where: { item: { vendor: vendorTenantForCaller() } }, include: { item: true } } },
     });
 
     if (cart && cart.items.length > 0) {
@@ -3371,7 +3414,7 @@ export async function customerRoutes(app: FastifyInstance) {
       estimatedDiscount = promoDiscount(promo, { subtotal, deliveryFee: assumedDeliveryFee });
 
       // Apply promo to cart
-      await app.prisma.cart.update({ where: { id: cart.id }, data: { promoCodeId: promo.id } });
+      await app.prisma.cart.update({ where: { id: cart.id, vendor: vendorTenantForCaller() }, data: { promoCodeId: promo.id } });
       await app.redis.del(`cart:${userId}`).catch(() => {});
     }
 

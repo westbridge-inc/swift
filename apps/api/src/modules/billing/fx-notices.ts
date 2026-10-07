@@ -4,6 +4,7 @@ import { NotificationService } from '../notification/notification.service';
 import { convertUsdToLocal, noticeRequired, formatMoney, resolveRateForRun, resolveUpcomingRate, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { fxNoticesUndeliveredGauge, fxChargesWithoutNoticeGauge } from '../../plugins/observability';
 import { log } from '../../utils/logger';
+import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 
 // System 2 Part 12 — the >2% notice rule: when a fee payer's NEXT local
 // amount will differ >2% from their LAST charged amount (an FX move), they
@@ -84,6 +85,8 @@ export async function runFxChangeNotices(
   for (const event of owed) {
     if (!event.amountUsd || !event.fxRateUsed) continue;
     const sub = event.subscription as unknown as PayerSub;
+    const authority = await readFeeCollectionAuthority(prisma, sub.id);
+    if (!authority.canonical) continue;
     const userId = payerOf(sub);
     if (!userId) continue;
     out.retried += 1;
@@ -121,8 +124,11 @@ export async function runFxChangeNotices(
   });
   for (const rate of rates) {
     for (const sub of subs) {
-      const role = SUB_ROLE[sub.type] ?? 'VENDOR';
-      const amountUsd = book.get(`${role}|${sub.type}`) ?? book.get(`${role}|`);
+      const authority = await readFeeCollectionAuthority(prisma, sub.id);
+      if (!authority.canonical) continue;
+      const feeType = authority.mover?.feeType ?? sub.type;
+      const role = SUB_ROLE[feeType] ?? 'VENDOR';
+      const amountUsd = book.get(`${role}|${feeType}`) ?? book.get(`${role}|`);
       if (amountUsd === undefined) continue;
       // "Last amount" = the most recent successful charge; a payer who never
       // paid yet has nothing to compare against (their first bill needs no
@@ -138,7 +144,12 @@ export async function runFxChangeNotices(
       // One notice per (subscription, rate) — the idempotency key IS the dedup.
       let eventId: string;
       try {
-        const created = await prisma.billingEvent.create({
+        const created = await prisma.$transaction(async (tx) => {
+          const current = await lockFeeCollectionAuthority(tx, sub.id);
+          // Neutral price disclosure remains allowed during a finance hold.
+          // An alias or changed tariff waits for a new canonical projection.
+          if (current.mover && (current.mover.canonicalSubscriptionId !== sub.id || current.mover.feeType !== feeType)) return null;
+          return tx.billingEvent.create({
           data: {
             subscriptionId: sub.id,
             type: 'REMINDER',
@@ -148,7 +159,9 @@ export async function runFxChangeNotices(
             amountUsd, fxRateId: rate.id, fxRateUsed: rate.rate,
           },
           select: { id: true },
+          });
         });
+        if (!created) continue;
         eventId = created.id;
       } catch (err) {
         // Already noticed for this rate — dedup at the DB (delivery is step 1's

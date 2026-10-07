@@ -1,15 +1,19 @@
+import { lockFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
-import { weeklyFeeAmount } from './subscription-fee';
-import { CHECKOUT_PAY_WAY } from './fee-notice-copy';
+import { payInfo } from './agent-cash.service';
+import { feeCoveredLine, feeDueLine, mmgPayLine } from './fee-notice-copy';
+import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 
-// Trial first-payment funnel [san spec 21.4]: teach HOW to pay before the
-// first bill ever exists. Day 10 (trial end − 4d): "how you'll pay your
-// weekly fee": with MMG in the app (the owner, 29 Sep: never an agent or the
-// Swift Number). Day 13 (− 1d): the exact GY$. Dedup rides
-// the same BillingEvent unique-key idiom as every other reminder — restart
-// and overlap safe. first_payment_before_trial_end is THE pilot metric; it
-// derives from rows this sequence leaves behind.
+// Trial first-payment funnel [san spec 21.4]: the first fee, told before the
+// first bill ever exists. Day 10 (trial end − 4d) and day 13 (− 1d): the exact
+// GY$ and when it is due, and — only while the MMG checkout is live — the one
+// way to pay it, the checkout in the Swift app (fee-notice-copy.ts; never an
+// agent, cash or a Swift Number: the owner's rule of 2026-09-29). A wallet
+// that already covers the fee is told so, never asked to pay again. Dedup
+// rides the same BillingEvent unique-key idiom as every other reminder —
+// restart and overlap safe. first_payment_before_trial_end is THE pilot
+// metric; it derives from rows this sequence leaves behind.
 
 const DAY_MS = 86_400_000;
 
@@ -40,7 +44,9 @@ export async function sweepTrialFeeEducation(
     const userId = sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId;
     if (!userId) continue;
     try {
-      await prisma.billingEvent.create({
+      const allowed = await prisma.$transaction(async (tx) => {
+        if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
+        await tx.billingEvent.create({
         data: {
           subscriptionId: sub.id,
           type: 'REMINDER',
@@ -48,30 +54,41 @@ export async function sweepTrialFeeEducation(
           idempotencyKey: `trialedu:${sub.id}:${stage}`,
           note: stage === 'd10' ? 'Trial fee education (day 10)' : 'Trial fee reminder with amount (day 13)',
         },
+        });
+        return true;
       });
-    } catch {
-      continue; // this stage already sent — the unique key is the gate
+      if (!allowed) continue;
+    } catch (error) {
+      if ((error as { code?: string }).code !== 'P2002') throw error;
+      // A saved stage whose delivery was interrupted still enters the durable outbox.
     }
-    const weekly = weeklyFeeAmount(sub);
+    const fee = await payInfo(prisma, sub);
+    const payLine = fee.amountDueGyd <= 0
+      ? feeCoveredLine(fee.weeklyFeeGyd, sub.currencyCode, { first: true })
+      : await mmgCheckoutLive(prisma, sub, 'unknown')
+        ? mmgPayLine(checkoutAmountGyd(fee))
+        : feeDueLine(fee.amountDueGyd, sub.currencyCode, sub.trialEndDate, { first: true });
     const audience = sub.vendor ? 'VENDOR' : 'MOVER';
     if (stage === 'd10') {
       await notifications.send({
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'How you’ll pay your weekly fee',
-        body: `Your trial ends in ${daysLeft} days. ${CHECKOUT_PAY_WAY}.`,
+        title: 'Your trial ends soon',
+        body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
+        feeStageKey: `trial:${stage}`,
       });
       out.day10 += 1;
     } else {
       await notifications.send({
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Your trial ends tomorrow',
-        body: `Your first weekly fee is GY$${weekly.toLocaleString()}. ${CHECKOUT_PAY_WAY}.`,
+        title: 'Your trial ends soon',
+        body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
         audience: audience as never,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
+        feeStageKey: `trial:${stage}`,
       });
       out.day13 += 1;
     }

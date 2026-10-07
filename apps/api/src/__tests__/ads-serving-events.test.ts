@@ -89,6 +89,7 @@ function failNextTransactionAfterAdEventCreate(failure: Error | string) {
 }
 
 beforeAll(async () => {
+  vi.stubEnv('ADS_ENABLED', '1');
   await prisma.$connect();
   httpApp = Fastify({ logger: false });
   registerErrorHandler(httpApp);
@@ -102,6 +103,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  vi.unstubAllEnvs();
   await prisma.adEvent.deleteMany({ where: { campaignId: { in: campaignIds } } });
   await prisma.adEventDedupe.deleteMany({ where: {} }).catch(() => {});
   await prisma.adFreqCounter.deleteMany({ where: {} }).catch(() => {});
