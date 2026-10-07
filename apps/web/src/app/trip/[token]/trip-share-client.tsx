@@ -41,6 +41,8 @@ interface TripView {
   } | null;
   location: { lat: number; lng: number; at: string | null } | null;
   emergencyNote: string;
+  /** [L10 §2] The verified number from the market's emergency setting, or null. */
+  emergencyDial?: string | null;
 }
 
 /** `imageOrigin` is the origin whose images count as Swift's own (the API's). */
@@ -198,9 +200,11 @@ export function TripShareClient({ token, imageOrigin = API_URL }: { token: strin
             <div className="mt-3 rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-4 text-sm shadow-[var(--swift-elevation-card)]">
               <p className="font-semibold text-[var(--swift-error)]">Emergency?</p>
               <p className="mt-1 text-[var(--swift-muted)]">{view.emergencyNote}</p>
-              <a href="tel:911" className="mt-2 inline-block rounded-full bg-[var(--swift-error)] px-4 py-2 text-sm font-semibold text-[var(--swift-white)]">
-                Call 911
-              </a>
+              {view.emergencyDial ? (
+                <a href={`tel:${view.emergencyDial}`} className="mt-2 inline-block rounded-full bg-[var(--swift-error)] px-4 py-2 text-sm font-semibold text-[var(--swift-white)]">
+                  Call {view.emergencyDial}
+                </a>
+              ) : null}
             </div>
           </>
         )}
