@@ -349,6 +349,18 @@ describe('EV-ACT-11 — admin vendor approve is checklist-gated and exactly-once
     expect(fresh.isVerified).toBe(false);
   });
 
+  it('[Fable #1481 S4-2] approving a billing-suspended store clears its suspension source (no stale BILLING for a later heal)', async () => {
+    const owner = await makeUser('Reinstate');
+    const vendor = await makePendingVendor(owner.id, 'SUSPENDED');
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { suspensionSource: 'BILLING' } });
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    const ok = await app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON,  authorization: `Bearer ${adminToken}` }, payload: {} });
+    expect(ok.statusCode).toBe(200);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', suspensionSource: null });
+  });
+
   it('activates once the checklist is complete; a double-tap has exactly one winner', async () => {
     const owner = await makeUser('Approve');
     const vendor = await makePendingVendor(owner.id);

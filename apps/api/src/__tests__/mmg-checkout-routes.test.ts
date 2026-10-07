@@ -506,7 +506,9 @@ describe('live: starting and following a checkout (sections 4-5)', () => {
     const view = await follow(p, data.ref);
     expect(view.statusCode).toBe(200);
     expect(view.json().data).toMatchObject({ ref: data.ref, status: 'OPEN', amountGyd: 1500, currencyCode: 'GYD', confirmedAt: null, subscriptionStatus: 'ACTIVE' });
-    expect(Object.keys(view.json().data).sort()).toEqual(['amountGyd', 'confirmedAt', 'createdAt', 'currencyCode', 'expiresAt', 'ref', 'status', 'subscriptionStatus']);
+    expect(Object.keys(view.json().data).sort()).toEqual(['amountGyd', 'confirmedAt', 'createdAt', 'currencyCode', 'expiresAt', 'mmgTransactionId', 'ref', 'status', 'subscriptionStatus', 'swiftReference']);
+    // [support lookup] The receipt references (section 5): ours always, MMG's only once CONFIRMED.
+    expect(view.json().data).toMatchObject({ swiftReference: row.merchantTransactionId, mmgTransactionId: null });
 
     const payload = (await subscriptionOf(p)).json().data;
     expect(payload.latestMmgCheckout).toMatchObject({ ref: data.ref, status: 'OPEN', subscriptionStatus: 'ACTIVE' });

@@ -65,6 +65,8 @@ const BRAND_INDIAN_RED: BrandRamp = {
 export const color = {
   brand: BRAND_INDIAN_RED,
   white: '#FFFFFF',
+  /** Provider attribution uses the required neutral text colour on white. */
+  attribution: { text: '#1F1F1F' },
   /** Masthead wash — brand 500 → 600, replacing the kit's golden gradient. */
   masthead: { from: '#803B3B', to: '#5C2A2C' },
   surface: {

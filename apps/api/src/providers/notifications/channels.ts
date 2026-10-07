@@ -9,6 +9,8 @@ import { isProduction } from '../../utils/runtime-mode';
 import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
+import { sealReviewChannels } from './review-seal';
+import { guardNonProductionSms } from './sms-recipient-allowlist';
 
 export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
 export interface SmsOptions { handoff?: NotificationHandoff }
@@ -195,41 +197,55 @@ class TwilioSmsProvider implements SmsProvider {
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
     if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: 'suppressed' };
     const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
-    // Bound the call: a hung Twilio must not hang the login request behind it.
+    // Bound the WHOLE call, body read included: a hung Twilio must not hang
+    // the login request or the ops page behind it. Abort releases the
+    // connection; the deadline's own rejection also settles an HTTP stack
+    // that never honours its abort signal.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SMS_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error('Twilio SMS timed out'));
+        controller.abort();
+      }, SMS_TIMEOUT_MS);
+      timer.unref?.();
+    });
     try {
-      let res: Response;
-      try {
-        // A Messaging Service sends on its own sender pool; a bare From
-        // number is the legacy path. Validation guarantees exactly one.
-        const sender: Record<string, string> = this.messagingServiceSid
-          ? { MessagingServiceSid: this.messagingServiceSid }
-          : { From: this.from };
-        const effect = () => fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({ To: to, ...sender, Body: body }).toString(),
-          signal: controller.signal,
-        });
-        res = await effect();
-      } catch {
-        throw new Error(controller.signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS request failed');
-      }
-      // Provider bodies can echo request metadata. Keep all response and fetch
-      // exception text outside application errors and their downstream logs.
-      if (!res.ok) throw new Error(`Twilio SMS failed (${res.status})`);
-      let data: { sid?: unknown };
-      try {
-        data = (await res.json()) as { sid?: unknown };
-      } catch {
-        throw new Error('Twilio SMS response invalid');
-      }
-      if (!data || !isTwilioMessageSid(data.sid)) throw new Error('Twilio SMS response invalid');
-      return { ref: data.sid };
+      return await Promise.race([this.post(auth, to, body, controller.signal), deadline]);
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private async post(auth: string, to: string, body: string, signal: AbortSignal): Promise<{ ref: string }> {
+    let res: Response;
+    try {
+      // A Messaging Service sends on its own sender pool; a bare From
+      // number is the legacy path. Validation guarantees exactly one.
+      const sender: Record<string, string> = this.messagingServiceSid
+        ? { MessagingServiceSid: this.messagingServiceSid }
+        : { From: this.from };
+      const effect = () => fetch(`https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`, {
+        method: 'POST',
+        headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ To: to, ...sender, Body: body }).toString(),
+        signal,
+      });
+      res = await effect();
+    } catch {
+      throw new Error(signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS request failed');
+    }
+    // Provider bodies can echo request metadata. Keep all response and fetch
+    // exception text outside application errors and their downstream logs.
+    if (!res.ok) throw new Error(`Twilio SMS failed (${res.status})`);
+    let data: { sid?: unknown };
+    try {
+      data = (await res.json()) as { sid?: unknown };
+    } catch {
+      throw new Error(signal.aborted ? 'Twilio SMS timed out' : 'Twilio SMS response invalid');
+    }
+    if (!data || !isTwilioMessageSid(data.sid)) throw new Error('Twilio SMS response invalid');
+    return { ref: data.sid };
   }
 }
 
@@ -294,33 +310,45 @@ export class ExpoPushProvider implements PushProvider {
       const chunk = deviceTokens.slice(i, i + ExpoPushProvider.CHUNK);
       const controller = new AbortController();
       const timeoutMs = pushProviderTimeoutMs();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      timer.unref?.();
-      let res: Response;
+      type Tickets = { data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }> };
+      // The deadline includes reading both success and error bodies. Abort
+      // releases the connection; the rejection also bounds adapters that do
+      // not settle when their signal is aborted.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Expo push request failed: timed out after ${timeoutMs}ms`));
+          controller.abort();
+        }, timeoutMs);
+        timer.unref?.();
+      });
+      let payload: Tickets;
       try {
-        const effect = () => fetch(this.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify(chunk.map((to) => expoMessage(to, title, body, data, options, window))),
-          signal: controller.signal,
-        });
-        res = await effect();
-      } catch (error) {
-        const reason = controller.signal.aborted
-          ? `timed out after ${timeoutMs}ms`
-          : (error as Error).message;
-        throw new Error(`Expo push request failed: ${reason}`);
+        payload = await Promise.race([
+          (async (): Promise<Tickets> => {
+            let res: Response;
+            try {
+              res = await fetch(this.url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify(chunk.map((to) => expoMessage(to, title, body, data, options, window))),
+                signal: controller.signal,
+              });
+            } catch (error) {
+              throw new Error(`Expo push request failed: ${(error as Error).message}`);
+            }
+            if (!res.ok) {
+              const detail = await res.text().catch(() => '');
+              throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
+            }
+            // Tickets come back in message order — index maps ticket -> token.
+            return await res.json() as Tickets;
+          })(),
+          deadline,
+        ]);
       } finally {
         clearTimeout(timer);
       }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        throw new Error(`Expo push failed (${res.status}): ${detail.slice(0, 200)}`);
-      }
-      // Tickets come back in message order — index maps ticket -> token.
-      const payload = (await res.json()) as {
-        data?: Array<{ status: 'ok' | 'error'; details?: { error?: string } }>;
-      };
       (payload.data ?? []).forEach((ticket, idx) => {
         if (ticket.status === 'ok') {
           sent += 1;
@@ -423,10 +451,14 @@ function getEmailProvider(): EmailProvider {
 export function getChannels(): NotificationChannels {
   const provider = process.env['NOTIFICATION_PROVIDER'] ?? 'dev';
   switch (provider) {
+    // [REVIEW-PARTNER] Every channel handed out is sealed for the store-review fiction
+    // (review-seal.ts); the dev SMS stays ONE shared object, as it always was.
     case 'dev':
-      return { sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() };
+      return sealReviewChannels({ sms: devChannels.sms, push: withPushRetry(getPushProvider()), email: getEmailProvider() });
     case 'twilio':
-      return { sms: new TwilioSmsProvider(), push: withPushRetry(getPushProvider()), email: getEmailProvider() };
+      // [L04 · SMS allowlist] Outside production a real provider texts only allowlisted numbers.
+      // The review seal stays the outermost layer every send passes.
+      return sealReviewChannels({ sms: guardNonProductionSms(new TwilioSmsProvider()), push: withPushRetry(getPushProvider()), email: getEmailProvider() });
     default:
       throw new Error('Unknown NOTIFICATION_PROVIDER');
   }
