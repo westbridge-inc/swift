@@ -10,6 +10,7 @@ import { getChannels } from '../../providers/notifications/channels';
 import { moneySurfaceCounter } from '../../plugins/observability';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
+import { ReviewDemoMoneyRefusedError, isReviewAccount } from '../review/demo-policy';
 
 // ---------------------------------------------------------------------------
 // [ALG-34 / ALG-INV-14] THE MONEY SURFACE — where a store's or a driver's money
@@ -117,15 +118,40 @@ async function nextGeneration(tx: Tx, entityId: string): Promise<number> {
   return (last?.generation ?? 0) + 1;
 }
 
-async function readLink(tx: Tx, actor: LinkActor, entityId: string): Promise<{ mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null; userId: string }> {
+/** Does this store or driver belong to the store-review fiction? */
+async function entityIsFiction(prisma: PrismaClient, actor: LinkActor, entityId: string): Promise<boolean> {
+  const kind = actor === 'VENDOR'
+    ? (await prisma.vendor.findUnique({ where: { id: entityId }, select: { tenant: { select: { kind: true } } } }))?.tenant.kind
+    : (await prisma.driver.findUnique({ where: { id: entityId }, select: { user: { select: { tenant: { select: { kind: true } } } } } }))?.user.tenant.kind;
+  return kind === 'REVIEW';
+}
+
+type LinkState = { mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null; userId: string; fiction: boolean };
+
+/**
+ * The authority read every transition makes first, under the entity lock.
+ * [REVIEW-PARTNER · DL-5] It also says whether the entity belongs to the
+ * store-review fiction (a REVIEW tenant), which has no money rail: stage,
+ * cancel and clear REFUSE it here — before any write, decision, command or
+ * owner notice (whose SMS would reach a fictional number) — and the executor
+ * skips it. One check, at the one place every MMG-link change passes.
+ */
+async function readLink(tx: Tx, actor: LinkActor, entityId: string, onFiction: 'refuse' | 'report' = 'refuse'): Promise<LinkState> {
+  let state: LinkState;
   if (actor === 'VENDOR') {
-    const v = await tx.vendor.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, owner: { select: { userId: true } } } });
+    const v = await tx.vendor.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, tenant: { select: { kind: true } }, owner: { select: { userId: true } } } });
     if (!v) throw new AppError(404, 'NOT_FOUND', 'Store not found');
-    return { mmgPayUrl: v.mmgPayUrl, mmgPayUrlPending: v.mmgPayUrlPending, mmgPayUrlApplyAt: v.mmgPayUrlApplyAt, userId: v.owner.userId };
+    state = { mmgPayUrl: v.mmgPayUrl, mmgPayUrlPending: v.mmgPayUrlPending, mmgPayUrlApplyAt: v.mmgPayUrlApplyAt, userId: v.owner.userId, fiction: v.tenant.kind === 'REVIEW' };
+  } else {
+    const d = await tx.driver.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, userId: true, user: { select: { tenant: { select: { kind: true } } } } } });
+    if (!d) throw new AppError(404, 'NOT_FOUND', 'Driver not found');
+    state = { mmgPayUrl: d.mmgPayUrl, mmgPayUrlPending: d.mmgPayUrlPending, mmgPayUrlApplyAt: d.mmgPayUrlApplyAt, userId: d.userId, fiction: d.user.tenant.kind === 'REVIEW' };
   }
-  const d = await tx.driver.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, userId: true } });
-  if (!d) throw new AppError(404, 'NOT_FOUND', 'Driver not found');
-  return { mmgPayUrl: d.mmgPayUrl, mmgPayUrlPending: d.mmgPayUrlPending, mmgPayUrlApplyAt: d.mmgPayUrlApplyAt, userId: d.userId };
+  if (state.fiction && onFiction === 'refuse') {
+    moneySurfaceCounter.labels('refused_review_fiction').inc();
+    throw new ReviewDemoMoneyRefusedError();
+  }
+  return state;
 }
 
 /** A compare-and-set write on the entity: the authority moves only from the state this transition read. */
@@ -186,6 +212,15 @@ type CommandRow = Prisma.MoneySurfaceCommandGetPayload<Record<string, never>>;
 
 export async function deliverCommandNotice(deps: MoneySurfaceDeps, cmd: CommandRow): Promise<boolean> {
   if (!cmd.noticeKind || cmd.noticeSentAt) return false;
+  // [REVIEW-PARTNER · DL-5] A command owned by the store-review fiction is never delivered — no
+  // notification, no SMS — including one committed before the fiction was sealed. It is retired
+  // from the retry sweep (attempts at the sweep's bound) with the reason, and never marked sent.
+  if (await isReviewAccount(deps.prisma, cmd.userId)) {
+    await deps.prisma.moneySurfaceCommand.update({ where: { id: cmd.id }, data: { noticeAttempts: NOTICE_MAX_ATTEMPTS, noticeLastError: 'review-tenant send suppressed' } }).catch(() => undefined);
+    moneySurfaceCounter.labels('notice_review_suppressed').inc();
+    log().info({ commandId: cmd.id }, 'review-tenant send suppressed: money-surface notice');
+    return false;
+  }
   const payload = (cmd.noticePayload ?? {}) as { title?: string; body?: string; sms?: string };
   try {
     const id = await new NotificationService(deps.prisma, deps.io).send({
@@ -212,10 +247,13 @@ export async function deliverCommandNotice(deps: MoneySurfaceDeps, cmd: CommandR
   }
 }
 
+/** The sweep's retry bound: a notice that has failed this often is no longer retried. */
+const NOTICE_MAX_ATTEMPTS = 20;
+
 /** The retry sweep, run by the cool-off job: every committed intent not yet sent. */
 export async function deliverPendingMoneySurfaceNotices(deps: MoneySurfaceDeps, now = new Date()): Promise<{ delivered: number; pending: number }> {
   const rows = await deps.prisma.moneySurfaceCommand.findMany({
-    where: { noticeKind: { not: null }, noticeSentAt: null, createdAt: { lt: new Date(now.getTime() - 15_000) }, noticeAttempts: { lt: 20 } },
+    where: { noticeKind: { not: null }, noticeSentAt: null, createdAt: { lt: new Date(now.getTime() - 15_000) }, noticeAttempts: { lt: NOTICE_MAX_ATTEMPTS } },
     orderBy: { createdAt: 'asc' },
     take: 100,
   });
@@ -377,6 +415,8 @@ export async function applyDueMmgLinkChanges(deps: MoneySurfaceDeps, now = new D
   const drivers = await deps.prisma.driver.findMany({ where: { mmgPayUrlApplyAt: { lte: now }, mmgPayUrlPending: { not: null } }, select: { id: true }, take: 200 });
   due.push(...vendors.map((v) => ({ actor: 'VENDOR' as const, id: v.id })), ...drivers.map((d) => ({ actor: 'DRIVER' as const, id: d.id })));
   for (const item of due) {
+    // [REVIEW-PARTNER · DL-5] The fiction's links never go live: skipped before ANY write (no lease).
+    if (await entityIsFiction(deps.prisma, item.actor, item.id)) { moneySurfaceCounter.labels('apply_review_skipped').inc(); continue; }
     // lease the command (when there is one) so two executors never apply the same change
     const open = await deps.prisma.moneySurfaceCommand.findFirst({ where: { entityId: item.id, kind: 'MMG_LINK_STAGE', state: 'DECIDED' } });
     if (open) {
@@ -388,8 +428,9 @@ export async function applyDueMmgLinkChanges(deps: MoneySurfaceDeps, now = new D
     }
     const done = await deps.prisma.$transaction(async (tx) => {
       await lockEntity(tx, item.id);
-      const current = await readLink(tx, item.actor, item.id);
+      const current = await readLink(tx, item.actor, item.id, 'report');
       await deps.failpoint?.('tx:after-read');
+      if (current.fiction) return false; // [REVIEW-PARTNER] the fiction's links never go live (and are never staged)
       if (!current.mmgPayUrlPending || !current.mmgPayUrlApplyAt || current.mmgPayUrlApplyAt > now) return false;
       const stage = await tx.moneySurfaceCommand.findFirst({ where: { entityId: item.id, kind: 'MMG_LINK_STAGE', state: 'DECIDED' } });
       if (open && (!stage || stage.id !== open.id)) return false; // moved under us: cancelled or superseded

@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -251,6 +252,7 @@ export function CourierScreen({ navigation }: any) {
         backgroundStyle={{ backgroundColor: color.surface.subtle, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl }}
         handleIndicatorStyle={{ backgroundColor: color.border.strong, width: 44 }}
       >
+        <MapCredits />
         <BottomSheetScrollView
           contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
           keyboardShouldPersistTaps="handled"

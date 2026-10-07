@@ -97,6 +97,30 @@ describe('rendered weekly fee', () => {
     view.unmount();
   });
 
+  it("each recent checkout shows the Swift reference, and MMG's transaction ID only once confirmed", async () => {
+    const base = { amountGyd: 2100, currencyCode: 'GYD', createdAt: '2026-10-01T19:38:19Z', expiresAt: '2026-10-01T20:08:19Z', subscriptionStatus: 'ACTIVE' };
+    const recentCheckouts = [
+      { ...base, ref: 'paid-ref', status: 'CONFIRMED', confirmedAt: '2026-10-01T19:39:42Z', swiftReference: '175933829900012345', mmgTransactionId: '20402048536279' },
+      // A held payment never shows an MMG id, even if one were sent.
+      { ...base, ref: 'held-ref', status: 'HELD', confirmedAt: null, swiftReference: '175933840000054321', mmgTransactionId: '20402048599999' },
+      // An older API sends neither: nothing is invented.
+      { ...base, ref: 'old-ref', status: 'NOT_PAID', confirmedAt: null },
+    ];
+    mockApi(() => ({ body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', recentCheckouts } } }));
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await screen.findByText('Recent checkouts');
+    await screen.findByText('175933829900012345');
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('Swift reference: 175933829900012345');
+    expect(text).toContain('MMG transaction ID: 20402048536279');
+    expect(text).toContain('Swift reference: 175933840000054321');
+    expect(text).not.toContain('20402048599999');
+    expect(text.match(/Swift reference:/g)).toHaveLength(2);
+    expect(text.match(/MMG transaction ID:/g)).toHaveLength(1);
+    expect(text).toContain("We're checking this payment by hand. Don't pay again. Support will contact you.");
+    view.unmount();
+  });
+
   it.each(['subscription', 'subscription/mmg-checkout/ref-A', 'subscription/mmg-checkout'])('refuses stale captured context before sending %s', async (path) => {
     setSelectedStore('store-A');
     const policy = { storeId: 'store-A' };
