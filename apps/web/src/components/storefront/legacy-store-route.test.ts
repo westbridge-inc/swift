@@ -25,7 +25,7 @@ describe('the old store address', () => {
 
   it('drops an item or code that cannot be one, and a source that is not only a scan', async () => {
     vi.mocked(vendorSeed).mockResolvedValue({ data: { id: 'v1', slug: 'sample-kitchen' } as never, at: 0 });
-    for (const query of ['?item=..%2Fadmin&src=share&c=no%20spaces', '?src=qr&src=share']) {
+    for (const query of ['?item=..%2Fadmin&src=share&c=no%20spaces', '?src=qr&src=share', '?src=share&src=qr', '?src=qr&src=qr']) {
       const response = await open('v1', query);
       expect(response.status, query).toBe(301);
       expect(response.headers.get('Location'), query).toBe('/store/sample-kitchen');
