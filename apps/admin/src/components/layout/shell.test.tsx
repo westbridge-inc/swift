@@ -104,3 +104,8 @@ describe('[MC shell] calls are not a console feature (owner ruling, 6 Oct)', () 
     expect(offenders).toEqual([]);
   });
 });
+
+it('names the cash screen for received agent money only', () => {
+  expect(navItemFor('/cash')?.label).toBe('Received agent cash');
+  expect(navItemFor('/cash')?.blurb).toBe('Attach or refund cash already received');
+});

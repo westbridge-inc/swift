@@ -69,7 +69,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Subscribers', href: '/subscriptions', icon: RefreshCw, blurb: 'Partners on the weekly fee', keywords: 'subscriptions weekly fee billing' },
       { label: 'Revenue', href: '/finance', icon: DollarSign, blurb: "What Swift is owed and paid — never the partners' money", keywords: 'finance settlements ledger' },
       { label: 'MMG payments', href: '/mmg-payments', icon: Receipt, blurb: 'Find a weekly-fee payment by any reference', keywords: 'checkout mobile money' },
-      { label: 'Cash rail', href: '/cash', icon: Banknote, blurb: 'Cash payments and collections', keywords: 'agent san collections' },
+      { label: 'Received agent cash', href: '/cash', icon: Banknote, blurb: 'Attach or refund cash already received', keywords: 'agent san collections' },
       { label: 'Promos', href: '/promos', icon: Tag, blurb: 'Discount codes', keywords: 'discounts codes' },
     ],
   },
