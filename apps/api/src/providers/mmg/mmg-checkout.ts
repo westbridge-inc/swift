@@ -403,7 +403,9 @@ export function describeShape(value: unknown): Record<string, string> {
 // -- Configuration --------------------------------------------------------------
 
 /**
- * [DS632] How MMG's lookup `creationDate` is read: MMG_CHECKOUT_CREATION_ZONE.
+ * [DS632 · 7 Oct] How MMG's times are read: MMG_CHECKOUT_CREATION_ZONE. Since
+ * 7 Oct that is its Transaction History record's `modificationDate` and the
+ * history query's dates (the lookup's `creationDate` is the lookup's moment).
  *  - GUYANA_WALL_CLOCK: a stamp ending in "Z", or with no zone, is Guyana
  *    wall-clock time; an explicit numeric offset is honoured as stated. This
  *    is what MMG writes (UAT verified 1 Oct; owner ruling 4 Oct: production
@@ -423,7 +425,7 @@ function creationZoneSetting(raw: string | undefined): MmgCreationZone | null | 
   return (MMG_CREATION_ZONES as readonly string[]).includes(raw) ? (raw as MmgCreationZone) : 'INVALID';
 }
 
-/** [DS632] The zone the verifier reads `creationDate` in, or null: unverified,
+/** [DS632] The zone the verifier reads MMG's times in, or null: unverified,
  *  and every MMG payment is held for a person. Never throws and never guesses:
  *  a value that is not exactly one of the two words is null here, and the boot
  *  guard refuses to start with it (assertMmgCheckoutConfig). */
@@ -627,7 +629,7 @@ export interface MmgCheckoutProvider {
   readonly driver: 'disabled' | 'sandbox' | 'live';
   /** The merchant MSISDN a checkout pays: what a verifier matches MMG's creditParty against. */
   readonly merchantId: string | null;
-  /** [DS632] How MMG's lookup creationDate is read; null = unverified, nothing confirms automatically. */
+  /** [DS632 · 7 Oct] How MMG's times (its history's modificationDate) are read; null = unverified, nothing confirms automatically. */
   readonly creationZone: MmgCreationZone | null;
   /** Builds the MMG page URL for one attempt. Local only: no network. */
   createCheckout(input: MmgCheckoutCreate): MmgCheckoutSession;

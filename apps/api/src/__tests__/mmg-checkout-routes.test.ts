@@ -40,6 +40,7 @@ import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTe
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { FakeMmgHistory } from './helpers/mmg-history-fake';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout ROUTES against the database (MMG-CHECKOUT-API.md
@@ -74,10 +75,15 @@ const startedAt = new Date();
 const lookups = new Map<string, MmgLookupDetail>();
 /** Every transaction MMG's lookup was asked about, in order. */
 const lookedUp: string[] = [];
-const lookup: MmgLookupClient = { transactionLookupDetail: async (id) => {
-  lookedUp.push(id);
-  return lookups.get(id) ?? { outcome: 'not_found' };
-} };
+/** [7 Oct] MMG's Transaction History (helpers/mmg-history-fake.ts): it holds every payment `found` registers, made now. */
+const history = new FakeMmgHistory();
+const lookup: MmgLookupClient = {
+  transactionLookupDetail: async (id) => {
+    lookedUp.push(id);
+    return lookups.get(id) ?? { outcome: 'not_found' };
+  },
+  transactionHistoryRows: (query) => history.transactionHistoryRows(query),
+};
 type Found = Extract<MmgLookupDetail, { outcome: 'found' }>;
 /** MMG stamps creationDate as Guyana wall-clock time written with a "Z" (UAT, 1 Oct). */
 const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
@@ -97,6 +103,7 @@ const uatAnswer = (txn: string, amountGyd: number, answer: Record<string, unknow
 /** MMG's lookup of `txn`, read exactly as the live adapter reads it. `answer` patches MMG's own fields; `patch` the reading. */
 function found(txn: string, amountGyd: number, answer: Record<string, unknown> = {}, patch: Partial<Found> = {}) {
   lookups.set(txn, { ...lookupDetailFrom(uatAnswer(txn, amountGyd, answer), txn), ...patch });
+  history.holds(txn, amountGyd);
 }
 const approved = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, amountGyd, {}, patch);
 const declined = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, amountGyd, { transactionStatus: 'failed' }, patch);
@@ -960,8 +967,8 @@ describe('[MMG-RETURN-PATH] the reply MMG puts in the address path', () => {
       const res = await app.inject({ method: 'POST', url: RETURN_URL, headers: { 'content-type': 'application/json' }, payload: { outcome, params: { token } } });
       expect(res.statusCode, res.body).toBe(200);
       expect(res.json()).toEqual({ success: true, data: { state: 'CONFIRMED' } });
-      // It reached observeReply: written down as MMG's success answer for this checkout, then MMG's lookup decided.
-      expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['RETURN', 'MMG_RESULT_0'], ['LOOKUP', txn]]);
+      // It reached observeReply: written down as MMG's success answer for this checkout, then MMG's lookup and history decided.
+      expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['RETURN', 'MMG_RESULT_0'], ['LOOKUP', txn], ['HISTORY', txn]]);
       expect(await intentOf(ref)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
       expect(await creditsOf(p.subId)).toBe(1);
       expect(await identitiesOf(txn)).toBe(1);
@@ -989,8 +996,8 @@ describe('[MMG, 4 Oct] Notify: MMG\'s server sends the same tokenized reply as t
       : await notify(`token=${shape === 'a form, the token as sent' ? token : encodeURIComponent(token)}`, 'application/x-www-form-urlencoded');
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ success: true });
-    // The same path as /return: written down as MMG's success answer, MMG's lookup decided, one credit.
-    expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['NOTIFY', 'MMG_RESULT_0'], ['LOOKUP', txn]]);
+    // The same path as /return: written down as MMG's success answer, MMG's lookup and history decided, one credit.
+    expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['NOTIFY', 'MMG_RESULT_0'], ['LOOKUP', txn], ['HISTORY', txn]]);
     expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
     expect(await creditsOf(p.subId)).toBe(1);
     expect(await identitiesOf(txn)).toBe(1);

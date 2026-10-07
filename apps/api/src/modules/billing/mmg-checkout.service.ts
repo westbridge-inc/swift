@@ -15,7 +15,7 @@ import {
   type MmgCheckoutProvider,
   type MmgCreationZone,
 } from '../../providers/mmg/mmg-checkout';
-import { getMmgLookupProvider, type MmgLookupClient, type MmgLookupDetail } from '../../providers/mmg/mmg-provider';
+import { getMmgLookupProvider, historyRowFrom, type MmgHistoryQuery, type MmgLookupClient, type MmgLookupDetail } from '../../providers/mmg/mmg-provider';
 import { mmgCheckoutEventsCounter, mmgCheckoutLookupsCounter } from '../../plugins/observability';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { isDuplicateOn } from '../money/evidence';
@@ -42,12 +42,14 @@ import { partnerReceiptIds } from './mmg-checkout-receipt';
 // when ALL hold: (1) MMG answered ResultCode 0 for THIS checkout, naming the
 // transaction, while the checkout was open; (2) MMG's lookup of that
 // transaction says "successful"; (3) the money went to our merchant's
-// "accountid"; (4) exactly the amount asked, in GYD; (5) MMG created it inside
-// the checkout's window, its stamp read in the configured zone
-// (MMG_CHECKOUT_CREATION_ZONE; unset, nothing confirms) and no later than the
-// first reply naming it [DS632]; (6) neither the transaction nor MMG's ledger
-// number for it was ever credited. Anything else is held for a person, with
-// reminders and suspension paused [F1].
+// "accountid"; (4) exactly the amount asked, in GYD; (5) MMG's Transaction
+// History has exactly one record of the transaction, agreeing with it, whose
+// time (modificationDate: when MMG performed it; the lookup's creationDate is
+// the lookup's own moment, MMG 7 Oct) lies inside the checkout's window, read
+// in the configured zone (MMG_CHECKOUT_CREATION_ZONE; unset, nothing
+// confirms), and no later than the first reply naming it [DS632]; (6) neither
+// the transaction nor MMG's ledger number for it was ever credited. Anything
+// else is held for a person, with reminders and suspension paused [F1].
 //
 // The credit is the provider_payments compare-and-set every channel claims
 // [I3 · F2]; one open checkout per subscription is a partial unique index
@@ -68,9 +70,10 @@ const CONFIRM_WINDOW_MS = 24 * 3_600_000;
 const LATE_WINDOW_MS = 7 * 24 * 3_600_000;
 const LATE_CHECK_MS = 6 * 3_600_000;
 const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_000] as const;
-/** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's
- *  creationDate, and for when MMG's success answer reached us. [DS632] Also
- *  how far MMG's creationDate may run past the first reply naming it. */
+/** [owner, 1 Oct] Clock tolerance around a checkout's window: for MMG's time
+ *  for the payment ([7 Oct] its history record's modificationDate), and for
+ *  when MMG's success answer reached us. [DS632] Also how far MMG's time may
+ *  run past the first reply naming it. */
 export const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
 /** An MMG transaction id or ledger number as MMG writes it. */
 export const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -244,8 +247,9 @@ export function bindingOf(merchantTransactionId: string, echoedReferences: reado
 }
 
 /**
- * [owner, 1 Oct · DS632] MMG's creationDate as an instant, read in the
- * configured zone (MMG_CHECKOUT_CREATION_ZONE). GUYANA_WALL_CLOCK reads a stamp
+ * [owner, 1 Oct · DS632] One of MMG's times as an instant ([7 Oct] history's
+ * modificationDate; the lookup's creationDate was read so before 7 Oct), read
+ * in the configured zone (MMG_CHECKOUT_CREATION_ZONE). GUYANA_WALL_CLOCK reads a stamp
  * with "Z" or no zone as Guyana wall-clock time: what MMG UAT writes (a checkout
  * opened at 15:38:19 Guyana time, 19:38:19Z, was paid with creationDate
  * "2026-10-01T15:39:36.526Z"). UTC reads "Z" as UTC and cannot read a stamp
@@ -286,6 +290,9 @@ export function mmgCreationInstant(stamp: string | null, zone: MmgCreationZone):
 export interface CreationCheck {
   zone: MmgCreationZone | null;
   firstReplyAt: Date | null;
+  /** [7 Oct] MMG's Transaction History for the transaction, as written down
+   *  (paymentHistoryOf). Absent or null: not asked, and nothing confirms. */
+  history?: PaymentHistory | null;
 }
 const UNVERIFIED: CreationCheck = { zone: null, firstReplyAt: null };
 
@@ -300,14 +307,6 @@ export function firstReplyNaming(answers: ReadonlyArray<{ body: unknown; created
   return first;
 }
 
-/**
- * [owner, 1 Oct · condition 5 · DS632] Where MMG's creationDate stands for
- * one checkout: the ONE check judge() credits by and the support console
- * shows [Sol, DS663 · #1422]. In order: no configured zone, nothing is
- * verified; an unreadable stamp; a stamp more than two minutes after Swift
- * first heard of the payment (MMG's stamps do not match the zone), or no reply
- * named it; outside the checkout's window (two minutes either side).
- */
 /** [DS632 · Fable S3-1] The creation zone of the checkout provider in use:
  *  null when there is none (switched off) or it cannot be built. verify() and
  *  the support console both read it here, so they never disagree. */
@@ -318,22 +317,115 @@ export function creationZoneInUse(checkout: () => MmgCheckoutProvider | null): M
     return null;
   }
 }
-export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNREADABLE' | 'AFTER_REPLY' | 'OUTSIDE';
-export function creationCheckOf(
-  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
+
+// ---------------------------------------------------------------------------
+// [7 Oct] Condition (5) from MMG's Transaction History. MMG said (7 Oct) that
+// the lookup's creationDate is the moment of the LOOKUP, and that history's
+// modificationDate is when the transaction was performed. MMG UAT (7 Oct):
+// a history row names the checkout's transactionId in BOTH
+// transactionReference and transactionReceipt, says "completed", and writes
+// its time as Guyana wall clock with a "Z", as the lookup does; the query's
+// dates are read the same way, and its `offset` is a row COUNT, oldest first.
+// ---------------------------------------------------------------------------
+
+/** How many history rows Swift asks for (MMG's `offset`). An answer this long may have been cut short. */
+export const MMG_HISTORY_ROWS = 100;
+/** How far beyond the accepted bounds the query reaches, so a payment just outside them is seen and held as outside. */
+export const MMG_HISTORY_MARGIN_MS = 10 * 60_000;
+/** The one transactionStatus history writes for a finished payment (UAT, 7 Oct). Anything else holds. */
+export const MMG_HISTORY_SUCCESS: readonly string[] = ['completed'];
+
+/** An instant written the way MMG reads (and writes) its times, to the whole
+ *  second: the inverse of mmgCreationInstant for the configured zone. */
+export function mmgStampOf(instant: number, zone: MmgCreationZone, round: 'floor' | 'ceil' = 'floor'): string {
+  const second = (round === 'ceil' ? Math.ceil(instant / 1000) : Math.floor(instant / 1000)) * 1000;
+  if (zone === 'UTC') return new Date(second).toISOString();
+  // Guyana wall clock: the face whose wall-clock reading is this instant.
+  const shift = instantOfGuyanaWallClock(new Date(second)).getTime() - second;
+  return new Date(second - shift).toISOString();
+}
+
+/** The history query for one checkout: every row from two minutes and the
+ *  margin before it opened, to two minutes and the margin after the first
+ *  reply naming the transaction or its deadline, whichever is first, and
+ *  never past now; up to MMG_HISTORY_ROWS rows. */
+export function historyQueryFor(
+  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, firstReplyAt: Date, zone: MmgCreationZone, now: Date,
+): MmgHistoryQuery {
+  const from = intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS - MMG_HISTORY_MARGIN_MS;
+  const bound = Math.min(intent.expiresAt.getTime(), firstReplyAt.getTime()) + CHECKOUT_CLOCK_TOLERANCE_MS + MMG_HISTORY_MARGIN_MS;
+  return { fromdate: mmgStampOf(from, zone), todate: mmgStampOf(Math.min(bound, now.getTime()), zone, 'ceil'), rows: MMG_HISTORY_ROWS };
+}
+
+/** The history rows that name this transaction: transactionReference or
+ *  transactionReceipt IS it, a whole string. Only these are ever written
+ *  down; other people's payments are not. */
+export function rowsNaming(rows: readonly Record<string, unknown>[], txnId: string): Record<string, unknown>[] {
+  return rows.filter((row) => row['transactionReference'] === txnId || row['transactionReceipt'] === txnId);
+}
+
+/** MMG's history for one transaction, exactly as written down [I9]: the rows
+ *  naming it, and whether the answer may have been cut short at the row
+ *  limit. MMG unreachable or unreadable, or a record not of this shape: error. */
+export type PaymentHistory =
+  | { outcome: 'rows'; naming: readonly Record<string, unknown>[]; truncated: boolean }
+  | { outcome: 'error' };
+/** The observation failure for a history call MMG did not answer readably. */
+export const HISTORY_FAILED = 'HISTORY_FAILED';
+export function paymentHistoryOf(record: { failure: string | null; body: unknown }): PaymentHistory {
+  const body = record.body && typeof record.body === 'object' && !Array.isArray(record.body) ? record.body as Record<string, unknown> : null;
+  const naming = body?.['naming'];
+  if (record.failure === HISTORY_FAILED || !Array.isArray(naming) || typeof body?.['truncated'] !== 'boolean') return { outcome: 'error' };
+  if (!naming.every((row: unknown) => !!row && typeof row === 'object' && !Array.isArray(row))) return { outcome: 'error' };
+  return { outcome: 'rows', naming: naming as Record<string, unknown>[], truncated: body['truncated'] as boolean };
+}
+
+/**
+ * [owner, 1 Oct · condition 5 · DS632 · 7 Oct] Where MMG's time for this
+ * payment stands: the ONE check judge() credits by and the support console
+ * shows [Sol, DS663 · #1422]. In order: no configured zone, nothing is
+ * verified; no reply named the transaction, it cannot be bounded; MMG's
+ * history could not be asked, read or seen whole (UNAVAILABLE), or has no
+ * record of it (NOT_IN_HISTORY): both may resolve on a later check; more than
+ * one record (AMBIGUOUS); a record that does not agree, exactly, with this
+ * checkout (DISAGREES: both of its numbers, "completed", the amount, GYD); a
+ * time that cannot be read; a time more than two minutes after Swift first
+ * heard of the payment (MMG's times do not match the zone, or it is not this
+ * checkout's payment); outside the checkout's window (two minutes either side).
+ * The lookup's creationDate plays no part: it is the lookup's own moment.
+ */
+export type CreationCheckResult = 'INSIDE' | 'ZONE_UNVERIFIED' | 'UNAVAILABLE' | 'NOT_IN_HISTORY' | 'AMBIGUOUS' | 'DISAGREES' | 'UNREADABLE' | 'AFTER_REPLY' | 'OUTSIDE';
+export function paymentTimeCheckOf(
+  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, txnId: string, creation: CreationCheck,
 ): CreationCheckResult {
   if (creation.zone === null) return 'ZONE_UNVERIFIED';
-  const created = mmgCreationInstant(stamp, creation.zone);
-  if (created === null) return 'UNREADABLE';
-  if (creation.firstReplyAt === null || created > creation.firstReplyAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'AFTER_REPLY';
-  if (created < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || created > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'OUTSIDE';
+  if (creation.firstReplyAt === null) return 'AFTER_REPLY';
+  const history = creation.history;
+  if (!history || history.outcome !== 'rows') return 'UNAVAILABLE';
+  if (history.naming.length === 0) return history.truncated ? 'UNAVAILABLE' : 'NOT_IN_HISTORY';
+  if (history.naming.length > 1) return 'AMBIGUOUS';
+  if (history.truncated) return 'UNAVAILABLE';
+  const row = historyRowFrom(history.naming[0]!);
+  if (row.transactionReference !== txnId || row.transactionReceipt !== txnId
+    || row.statusText === null || !MMG_HISTORY_SUCCESS.includes(row.statusText)
+    || row.amountMinor === null || row.amountMinor !== minorOf(intent)
+    || row.currencyCode !== 'GYD' || intent.currencyCode !== 'GYD') return 'DISAGREES';
+  const paid = mmgCreationInstant(row.modificationDate, creation.zone);
+  if (paid === null) return 'UNREADABLE';
+  if (paid > creation.firstReplyAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'AFTER_REPLY';
+  if (paid < intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS || paid > intent.expiresAt.getTime() + CHECKOUT_CLOCK_TOLERANCE_MS) return 'OUTSIDE';
   return 'INSIDE';
 }
-const CREATION_HOLDS: Record<Exclude<CreationCheckResult, 'INSIDE'>, string> = {
-  ZONE_UNVERIFIED: 'CREATION_ZONE_UNVERIFIED',
-  UNREADABLE: 'CREATION_DATE_UNREADABLE',
-  AFTER_REPLY: 'CREATION_AFTER_REPLY',
-  OUTSIDE: 'OUTSIDE_CHECKOUT_WINDOW',
+/** The hold for each answer; `retry`: it may resolve on a later check. */
+const PAYMENT_TIME_HOLDS: Record<Exclude<CreationCheckResult, 'INSIDE'>, { reason: string; retry: boolean }> = {
+  ZONE_UNVERIFIED: { reason: 'CREATION_ZONE_UNVERIFIED', retry: false },
+  UNAVAILABLE: { reason: 'PAYMENT_TIME_UNAVAILABLE', retry: true },
+  NOT_IN_HISTORY: { reason: 'PAYMENT_TIME_NOT_IN_HISTORY', retry: true },
+  AMBIGUOUS: { reason: 'PAYMENT_TIME_AMBIGUOUS', retry: false },
+  DISAGREES: { reason: 'PAYMENT_TIME_DISAGREES', retry: false },
+  UNREADABLE: { reason: 'PAYMENT_TIME_UNREADABLE', retry: false },
+  AFTER_REPLY: { reason: 'PAYMENT_TIME_AFTER_REPLY', retry: false },
+  OUTSIDE: { reason: 'PAYMENT_TIME_OUTSIDE_WINDOW', retry: false },
 };
 
 /** MMG's success answer for one checkout, or why there is none. */
@@ -368,7 +460,11 @@ export function successAnswerOf(
   return { txnId: txns[0]! };
 }
 
-type Hold = { verdict: 'HOLD'; txnId: string; reason: string; decisive: boolean };
+/** `decisiveWhenLate`: [7 Oct] a hold that may resolve on a later check
+ *  (MMG's history not yet showing the payment, or not answering) waits out
+ *  the confirmation window, but on a late check of a checkout MMG's answer
+ *  ties it to, a person looks at once: money MMG holds is never dropped. */
+type Hold = { verdict: 'HOLD'; txnId: string; reason: string; decisive: boolean; decisiveWhenLate?: boolean };
 type Declined = { verdict: 'DECLINED'; txnId: string; reason: string; bound: boolean };
 type Verdict =
   /** `ledgerReference`: MMG's ledger number for the payment, credited with it [owner condition 6]. */
@@ -385,8 +481,9 @@ type Verdict =
 /** What one lookup answer means for one checkout. `otherCheckoutRefs` are OUR
  *  other checkouts' references that the answer names (whole values): a
  *  contradiction a person must resolve [F1]. `success` is MMG's own success
- *  answer for this checkout (successAnswerOf). `creation` is how MMG's stamp is
- *  read and bounded [DS632]; without it nothing is confirmed. */
+ *  answer for this checkout (successAnswerOf). `creation` is how MMG's time for
+ *  the payment is found, read and bounded [DS632 · 7 Oct]: the zone, the first
+ *  reply naming it, and MMG's history for it; without it nothing is confirmed. */
 export function judge(
   intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'amount' | 'currencyCode' | 'createdAt' | 'expiresAt'>,
   txnId: string,
@@ -418,11 +515,14 @@ export function judge(
     // (3) Paid to this checkout's merchant: every "accountid" credit party is it.
     if (!detail.creditAccounts || detail.creditAccounts.length === 0) return hold('MERCHANT_UNCONFIRMED', tied);
     if (!detail.creditAccounts.every((account) => merchantIds.some((merchant) => sameMsisdn(merchant, account)))) return hold('MERCHANT_MISMATCH', tied);
-    // (5) Created inside this checkout's window, the stamp read in the
-    // configured zone [DS632], never after Swift first heard of the payment:
-    // the one creation-time check support shows too (creationCheckOf).
-    const created = creationCheckOf(intent, detail.createdAt, creation);
-    if (created !== 'INSIDE') return hold(CREATION_HOLDS[created], tied);
+    // (5) MMG's time for the payment fits this checkout [DS632]: its history
+    // record's time, never the lookup's own clock [7 Oct]; the one check
+    // support shows too (paymentTimeCheckOf).
+    const time = paymentTimeCheckOf(intent, txnId, creation);
+    if (time !== 'INSIDE') {
+      const { reason, retry } = PAYMENT_TIME_HOLDS[time];
+      return retry ? { verdict: 'HOLD', txnId, reason, decisive: false, decisiveWhenLate: tied } : hold(reason, tied);
+    }
     // (6) MMG's ledger number is credited with the transaction, once (confirm).
     if (!detail.ledgerReference || !MMG_TXN_ID.test(detail.ledgerReference)) return hold('LEDGER_REFERENCE_MISSING', tied);
     // Everything matches, but only MMG's success answer for THIS checkout
@@ -436,10 +536,18 @@ export function judge(
   return { verdict: 'PENDING', txnId };
 }
 
-/** [DS632] What operators need besides the reason code when the cause is how
- *  MMG's creationDate is read. */
+/** [DS632 · 7 Oct] What operators need besides the reason code when the cause
+ *  is MMG's time for the payment. */
 const HOLD_GUIDANCE: Readonly<Record<string, string>> = {
   CREATION_ZONE_UNVERIFIED: ' MMG_CHECKOUT_CREATION_ZONE is not set to GUYANA_WALL_CLOCK or UTC, so the time MMG gives for the payment cannot be checked against the checkout, and no MMG payment is confirmed automatically. Set it to GUYANA_WALL_CLOCK (MMG writes Guyana time; owner ruling, 4 Oct).',
+  PAYMENT_TIME_NOT_IN_HISTORY: ' MMG’s lookup says the payment succeeded, but MMG’s transaction history did not show it for the checkout’s time while Swift kept checking. If every MMG payment is held like this, check MMG_CHECKOUT_CREATION_ZONE against how MMG writes its times. Check the payment against the MMG statement before confirming it.',
+  PAYMENT_TIME_UNAVAILABLE: ' MMG’s transaction history could not be read in full, so the time of this payment could not be checked. Check the payment against the MMG statement before confirming it.',
+  PAYMENT_TIME_AMBIGUOUS: ' MMG’s transaction history shows more than one record of this transaction. Check the payment against the MMG statement before confirming it.',
+  PAYMENT_TIME_DISAGREES: ' MMG’s transaction history record of this transaction does not match the checkout (its numbers, its status, the amount or the currency). Check the payment against the MMG statement before confirming it.',
+  PAYMENT_TIME_UNREADABLE: ' MMG’s transaction history gives a time for this payment that cannot be read. Check the payment against the MMG statement before confirming it.',
+  PAYMENT_TIME_AFTER_REPLY: ' MMG’s transaction history dates this payment after Swift had already received the MMG reply naming it: either MMG_CHECKOUT_CREATION_ZONE does not match how MMG writes times, or the payment is not this checkout’s. Check the payment against the MMG statement before confirming it.',
+  PAYMENT_TIME_OUTSIDE_WINDOW: ' MMG’s transaction history dates this payment outside the time the checkout was open. Check the payment against the MMG statement before confirming it.',
+  // Held before 7 Oct, when MMG's lookup creationDate was read as the payment time; kept for those rows.
   CREATION_AFTER_REPLY: ' MMG says this payment was made after Swift had already received the MMG reply naming it, so the creationDate stamps from MMG may not match the configured MMG_CHECKOUT_CREATION_ZONE. Check that setting against a real payment before trusting any automatic confirmation.',
 };
 
@@ -1003,7 +1111,13 @@ export class MmgCheckoutService {
         failure: detail.outcome === 'not_found' ? 'LOOKUP_NOT_FOUND' : detail.outcome === 'error' ? 'LOOKUP_FAILED' : null,
       });
       const others = detail.outcome === 'found' ? await this.otherCheckoutRefsIn(detail.raw, intent) : [];
-      verdicts.push(judge(intent, txnId, detail, merchantIds, others, success, { zone, firstReplyAt: firstReplyNaming(answers, txnId) }));
+      const firstReplyAt = firstReplyNaming(answers, txnId);
+      // [7 Oct] Condition (5)'s time comes from MMG's history, asked only for
+      // a payment MMG's lookup calls "successful" and that can be bounded.
+      const history = detail.outcome === 'found' && detail.statusText === 'successful' && zone !== null && firstReplyAt !== null
+        ? await this.paymentHistory(intent, txnId, historyQueryFor(intent, firstReplyAt, zone, now), lookup)
+        : null;
+      verdicts.push(judge(intent, txnId, detail, merchantIds, others, success, { zone, firstReplyAt, history }));
     }
 
     const confirmed = verdicts.find((v): v is Extract<Verdict, { verdict: 'CONFIRM' }> => v.verdict === 'CONFIRM');
@@ -1016,8 +1130,13 @@ export class MmgCheckoutService {
     const decisive = verdicts.find((v): v is Hold => v.verdict === 'HOLD' && v.decisive);
     // Late checks (EXPIRED / NOT_PAID) look for a confirmation, and put any
     // record MMG shows as paid that cannot be tied to this checkout in front
-    // of a person: money MMG may hold for the partner is never dropped.
-    if (status !== 'CONFIRMING') return decisive ? this.hold(intent, decisive.reason, now) : this.reschedule(intent, now, intent.reason);
+    // of a person: money MMG may hold for the partner is never dropped. [7 Oct]
+    // A payment MMG's answer ties to this checkout whose time history cannot
+    // show yet is held too: a late check has no window left to wait out.
+    if (status !== 'CONFIRMING') {
+      const late = decisive ?? verdicts.find((v): v is Hold => v.verdict === 'HOLD' && v.decisiveWhenLate === true);
+      return late ? this.hold(intent, late.reason, now) : this.reschedule(intent, now, intent.reason);
+    }
 
     if (decisive) return this.hold(intent, decisive.reason, now);
     // [F5] A payment failed only when MMG's answer for THIS checkout says so:
@@ -1033,6 +1152,31 @@ export class MmgCheckoutService {
     // waits for the window rather than holding a payment that is still arriving.
     const weak = verdicts.find((v): v is Hold => v.verdict === 'HOLD');
     return this.reschedule(intent, now, weak ? `SEEN:HOLD:${weak.reason}` : intent.reason);
+  }
+
+  /** [7 Oct · I9] Ask MMG's history for one transaction's record and write the
+   *  answer down before anything is decided on it: the query, how many rows
+   *  came back, and only the rows naming this transaction (other people's
+   *  payments are never stored). What is decided on is read back from exactly
+   *  what was written (paymentHistoryOf), as the support console reads it. */
+  private async paymentHistory(intent: MmgCheckoutIntent, txnId: string, query: MmgHistoryQuery, lookup: MmgLookupClient): Promise<PaymentHistory> {
+    const answer = await lookup.transactionHistoryRows(query);
+    mmgCheckoutLookupsCounter.labels(`history_${answer.outcome}`).inc();
+    const naming = answer.outcome === 'rows' ? rowsNaming(answer.rows, txnId) : [];
+    const record = answer.outcome === 'rows'
+      ? { body: { query, rowsReturned: answer.rows.length, truncated: answer.rows.length >= query.rows, naming }, failure: naming.length === 0 ? 'HISTORY_NOT_FOUND' : null }
+      : { body: { query, error: answer.reason }, failure: HISTORY_FAILED };
+    const body = redactedObject(record.body);
+    await this.observe({
+      tenantId: intent.tenantId,
+      intentId: intent.id,
+      source: 'HISTORY',
+      detail: txnId,
+      body,
+      shape: answer.outcome === 'rows' ? describeShape(answer.rows) as Prisma.InputJsonValue : undefined,
+      failure: record.failure,
+    });
+    return paymentHistoryOf({ failure: record.failure, body });
   }
 
   /** [F1] Our OTHER checkouts' references that MMG's answer names, as whole values anywhere in it. */
@@ -1380,7 +1524,7 @@ export class MmgCheckoutService {
     /** [F7] The matched checkout's tenant, named: replies and polls run as the system. */
     tenantId?: string | null;
     intentId?: string | null;
-    source: 'RETURN' | 'NOTIFY' | 'LOOKUP';
+    source: 'RETURN' | 'NOTIFY' | 'LOOKUP' | 'HISTORY';
     detail?: string | null;
     body?: Prisma.InputJsonValue;
     shape?: Prisma.InputJsonValue;
