@@ -226,3 +226,18 @@ describe('search wears the ONE visibility predicate [B2]', () => {
     expect(ids).not.toContain(unverified.vendorId);
   });
 });
+
+
+it('HTTP search excludes a live database store and its items just outside the launch boundary', async () => {
+  try {
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 8.9999 } });
+    const inside = await get(`/api/v1/search?q=${NEEDLE}&limit=50`);
+    expect(inside.json().data.vendors.map((v: { id: string }) => v.id)).toContain(good.vendorId);
+    expect(inside.json().data.items.map((i: { id: string }) => i.id)).toContain(good.itemId);
+    await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 9.0001 } });
+    const outside = await get(`/api/v1/search?q=${NEEDLE}&limit=50`);
+    expect(outside.statusCode, outside.body).toBe(200);
+    expect(outside.json().data.vendors.map((v: { id: string }) => v.id)).not.toContain(good.vendorId);
+    expect(outside.json().data.items.map((i: { id: string }) => i.id)).not.toContain(good.itemId);
+  } finally { await app.prisma.vendor.update({ where: { id: good.vendorId }, data: { latitude: 6.801 } }); }
+});
