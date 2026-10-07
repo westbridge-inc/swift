@@ -212,6 +212,14 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // destination (mmg_unattested_cancellation → Main) still wins.
   if (audience === 'business' && orderId) return { screen: 'VendorOrderDetail', params: { orderId } };
 
+  // Only a producer-authoritative taxi marker selects this destination.
+  // A cancelled driver's ride is no longer ActiveJob; Main mounts their
+  // available mover home. Bare historical order ids keep the generic contract.
+  if (data['orderType'] === 'TAXI' && orderId && data['rideId'] === orderId) {
+    if (audience === 'earner') return { screen: 'Main' };
+    if (audience === 'customer') return { screen: 'Taxi' };
+  }
+
   // Orders: any payload carrying an orderId lands on that order's tracking
   // screen — covers status updates, substitutions, pickup READY.
   if (orderId) return { screen: 'Delivery', params: { orderId } };

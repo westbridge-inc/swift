@@ -10,6 +10,7 @@ import { registerIfGranted } from '../services/push';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 import { QrOutcomeScreen } from '../screens/QrOutcomeScreen';
+import { OwnedSafetyPanel } from '../modules/safety/OwnedSafetyPanel';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
@@ -129,6 +130,7 @@ export function RootNavigator() {
   }, [entryGate, isAuthenticated, resumeAuthContinuation, sessionGeneration, wantsAuth]);
 
   return (
+    <>
     <NavigationContainer
       ref={navigationRef}
       onReady={() => {
@@ -168,5 +170,7 @@ export function RootNavigator() {
         <Stack.Screen name="QrOutcome" component={QrOutcomeScreen} />
       </Stack.Navigator>
     </NavigationContainer>
+    <OwnedSafetyPanel />
+    </>
   );
 }
