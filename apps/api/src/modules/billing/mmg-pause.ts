@@ -74,12 +74,10 @@ export async function mmgReactivationPeriodEnd(
   tx: ConfigReader, subscriptionId: string, periodStart: Date, now = new Date(),
 ): Promise<{ periodEnd: Date; reactivatedAt: Date | null }> {
   let periodEnd = new Date(periodStart.getTime() + WEEK_MS);
-  const rows = await tx.platformConfig.findMany({
-    where: { key: { in: [`${MMG_REACTIVATED_PREFIX}${subscriptionId}`, FEE_PAUSE_OPEN_KEY] } },
-    select: { key: true, value: true },
-  });
-  const recorded = instant(rows.find((r) => r.key !== FEE_PAUSE_OPEN_KEY)?.value);
-  const at = recorded ?? (rows.some((r) => r.key === FEE_PAUSE_OPEN_KEY) ? now : null);
+  // Keyed reads, one row each (the way every platform setting is read).
+  const record = await tx.platformConfig.findUnique({ where: { key: `${MMG_REACTIVATED_PREFIX}${subscriptionId}` }, select: { value: true } });
+  const recorded = instant(record?.value);
+  const at = recorded ?? (await tx.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } }) ? now : null);
   if (!at) return { periodEnd, reactivatedAt: null };
   while (periodEnd.getTime() <= at.getTime()) periodEnd = new Date(periodEnd.getTime() + WEEK_MS);
   return { periodEnd, reactivatedAt: at };
@@ -133,9 +131,8 @@ export async function feePauseHoldsBilling(
   env: Record<string, string | undefined> = process.env,
 ): Promise<boolean> {
   if (noLivePayPath(env)) return true;
-  const rows = await db.platformConfig.findMany({ where: { key: { in: [FEE_PAUSE_OPEN_KEY, MMG_PAUSE_CLOCKS_KEY] } }, select: { key: true, value: true } });
-  if (rows.some((r) => r.key === FEE_PAUSE_OPEN_KEY)) return true;
-  const held = rows.find((r) => r.key === MMG_PAUSE_CLOCKS_KEY)?.value;
+  if (await db.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } })) return true;
+  const held = (await db.platformConfig.findUnique({ where: { key: MMG_PAUSE_CLOCKS_KEY }, select: { value: true } }))?.value;
   if (!Array.isArray(held) || held.length === 0) return false;
   const clock = await db.billingDunningClock.findUnique({ where: { subscriptionId }, select: { id: true } });
   return !!clock && (held as unknown[]).includes(clock.id);
