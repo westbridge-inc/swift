@@ -719,6 +719,37 @@ describe('F-013-07/09 — reinstatement authority + resumable retry [REPORT-013]
     expect(vendB.acceptingOrders).toBe(false); // document truth gates commerce
   });
 
+  it.each([
+    ['SUSPENDED', 'ADMIN'], ['SUSPENDED', null], ['PENDING_APPROVAL', null], ['CLOSED', null],
+  ] as const)('a store already %s (source %s) keeps its state when its fee then goes unpaid, so a fee payment never reopens it', async (status, source) => {
+    const adminToken = (await makeUserWithSession(['ADMIN'], 'ADMIN')).token;
+    // [#1393] Due 49 hours ago: the 48-hour grace has run, so the third failure suspends.
+    const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - 49 * HOUR) });
+    // Suspended first for another reason (an admin, or a suspension that
+    // recorded none), or not open at all (awaiting approval, or closed).
+    await app.prisma.vendor.update({ where: { id: fx.vendorId }, data: { status, acceptingOrders: false, suspensionSource: source } });
+    // The weekly fee then goes unpaid: the third failure suspends billing.
+    await app.prisma.subscription.update({
+      where: { id: fx.subId },
+      data: { status: 'PAST_DUE', failedAttempts: 2, nextRetryAt: new Date(Date.now() - HOUR), isInGracePeriod: true, gracePeriodEnd: new Date(Date.now() - HOUR) },
+    });
+    await billing.runBillingCycle(new Date());
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } })).status).toBe('SUSPENDED');
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: fx.vendorId } }))
+      .toMatchObject({ status, acceptingOrders: false, suspensionSource: source });
+
+    // The owner pays the fee: billing gives back only what billing took.
+    const res = await injectWithApproval(app, {
+      method: 'POST', url: `/api/v1/admin/subscriptions/${fx.subId}/topup`,
+      payload: { amount: 100000, reference: `KEEPSOURCE-${nanoid(10).replace(/[^a-zA-Z0-9]/g, '0')}` },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'idempotency-key': `topup-attempt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}` },
+    });
+    expect(res.statusCode, res.payload).toBe(200);
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: fx.subId } })).status).toBe('ACTIVE');
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: fx.vendorId } }))
+      .toMatchObject({ status, acceptingOrders: false, suspensionSource: source });
+  });
+
   it('a crash between the failure record and its outcome cannot suppress retries forever — the outcome RESUMES [F-013-09]', async () => {
     // [#1393] Due 49 hours ago: the 48-hour grace has run, so the third failure suspends.
     const fx = await makeVendorWithSub({ rate: 20000, prepaid: 0, due: new Date(Date.now() - 49 * HOUR) });

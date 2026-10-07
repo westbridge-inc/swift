@@ -7,6 +7,7 @@ import { T, TonePill, PillButton, useLogoutConfirm } from '../../kit';
 import { money } from '../../lib/money';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '../../lib/appointmentTime';
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
+import { MMG_DISPUTE_NOTICE, mmgDisputePaused, withoutForwardWorkWhilePaused } from './order-dispute';
 import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
 
 export const GUTTER = space['2xl'];
@@ -26,6 +27,12 @@ export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivere
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
 export function orderActions(order: any): { label: string; action: VendorOrderActionKind }[] {
+  // [NO-DEAD-ENDS · S1-6] A disputed MMG order is paused: no forward button
+  // that the server refuses on every tap (order-dispute.ts).
+  return withoutForwardWorkWhilePaused(order, statusActions(order));
+}
+
+function statusActions(order: any): { label: string; action: VendorOrderActionKind }[] {
   const s = (order?.status || '').toUpperCase();
   const isPickup = order?.fulfillment === 'PICKUP';
   const isAppt = order?.fulfillment === 'APPOINTMENT';
@@ -54,6 +61,24 @@ export function orderActions(order: any): { label: string; action: VendorOrderAc
     riderPresent: Boolean(order?.rider),
   })) return [{ label: 'Confirm delivered', action: 'delivered' }];
   return [];
+}
+
+/** [NO-DEAD-ENDS · S1-6] The paused state, said where the store works the order. */
+export function MmgDisputeNotice({ order }: { order: any }) {
+  if (!mmgDisputePaused(order)) return null;
+  return (
+    <View
+      testID="vendor-mmg-dispute-notice"
+      accessibilityRole="alert"
+      style={{ flexDirection: 'row', gap: space.sm, alignItems: 'flex-start', marginTop: space.sm, padding: space.md, borderRadius: radius.lg, backgroundColor: color.soft.warning }}
+    >
+      <MaterialCommunityIcons name="pause-circle-outline" size={16} color={color.warning} style={{ marginTop: 1 }} />
+      <View style={{ flex: 1 }}>
+        <T variant="label" weight="semibold">{MMG_DISPUTE_NOTICE.title}</T>
+        <T variant="caption" tone="muted" style={{ marginTop: 2 }}>{MMG_DISPUTE_NOTICE.body}</T>
+      </View>
+    </View>
+  );
 }
 
 export function timeAgo(iso?: string) {
