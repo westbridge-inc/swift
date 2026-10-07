@@ -97,6 +97,12 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
         title: "The store's supplier information is incomplete",
         next: `${NOTHING_CHANGED} Its documents are approved; it goes live by itself once the missing details are complete.`,
       };
+    case 'FEE_UNPAID':
+      return {
+        tone: 'refused',
+        title: 'This store is held by its weekly fee',
+        next: `${NOTHING_CHANGED} Its weekly fee is unpaid or its billing is stopped. It comes back by itself when the fee is paid through the MMG checkout page; the console cannot lift a fee hold.`,
+      };
     case 'ACCOUNT_CLOSED':
       return { tone: 'refused', title: 'The owner closed their Swift account', next: `${NOTHING_CHANGED} A closed account's store is not reopened from the console.` };
     case 'STORE_CLOSED':

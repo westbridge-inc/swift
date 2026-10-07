@@ -1607,14 +1607,16 @@ export class VerificationService {
   }
 
   /**
-   * [MC-PR2] Run the single vendor activation projection for this owner now —
+   * [MC-PR2] Run the single vendor activation projection now, for ONE store —
    * the console's "activate now" for a store whose documents are complete. It
    * applies every go-live rule the document path applies (checklist, the
    * disclosure gate, pricing and the trial, activation expiry, tier
-   * promotion); nothing here decides activation on its own.
+   * promotion); nothing here decides activation on its own. [DS816 S3] Only
+   * the named store is projected: the button names one store, so the owner's
+   * other stores are left to the document path and the daily belt.
    */
-  async activateOwnerStores(userId: string): Promise<void> {
-    await this.projectVendorActivation(this.prisma, userId);
+  async activateStore(userId: string, vendorId: string): Promise<void> {
+    await this.projectVendorActivation(this.prisma, userId, { vendorId });
   }
 
   /**
@@ -1638,12 +1640,13 @@ export class VerificationService {
   private async projectVendorActivation(
     db: Prisma.TransactionClient | PrismaClient,
     userId: string,
+    scope: { vendorId?: string } = {},
   ): Promise<void> {
     // A root client opens the one projection transaction. A client already inside one is used as is: a Prisma
     // transaction client has no `$transaction`, and a client this service is already projecting through is
     // registered in projectionNotices — so the projection can never re-enter itself, whatever the client shape.
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
-      return this.projectVendorActivation(tx, userId);
+      return this.projectVendorActivation(tx, userId, scope);
     });
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
@@ -1654,7 +1657,8 @@ export class VerificationService {
           // design, so document authority neither lights nor darkens them —
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
-          where: { tenant: { kind: { not: 'REVIEW' } } },
+          // [MC-PR2 · DS816 S3] The console's "activate now" projects only the store it names.
+          where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
           select: { id: true, vendorType: true, isVerified: true, status: true },
         },
       },
