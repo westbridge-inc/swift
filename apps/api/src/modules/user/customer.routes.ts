@@ -22,6 +22,11 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import {
+  publicOperatingHours,
+  publicStorefrontCategory,
+  publicStorefrontImage,
+} from './storefront-projection';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
@@ -46,19 +51,13 @@ import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
 } from '../legal/consent.service';
 import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { safePublicPhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
-
-/** [F-021-21] Consent surface from the client's own attestation header,
- *  constrained to the known set — never a hardcoded guess. */
-function consentSurface(request: { headers: Record<string, unknown> }): 'ios' | 'android' | 'mobile' | 'web' {
-  const h = String(request.headers['x-client-platform'] ?? '').toLowerCase();
-  return h === 'ios' || h === 'android' || h === 'web' ? h : 'mobile';
-}
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1495,15 +1494,10 @@ export async function customerRoutes(app: FastifyInstance) {
         })) > 0
       : false;
 
-    // Zero markup — customers pay the vendor base price (revenue = subscriptions).
-    const categories = vendor.categories.map((cat) => ({
-      ...cat,
-      items: cat.items.map((item) => ({
-        ...item,
-        basePrice: Number(item.basePrice),
-        customerPrice: Number(item.basePrice),
-      })),
-    }));
+    // [Row 77] Field-by-field guest allowlist (storefront-projection.ts) —
+    // never a spread of the raw category/item rows. A category the store has
+    // switched off is not on its public page.
+    const categories = vendor.categories.filter((cat) => cat.isActive).map(publicStorefrontCategory);
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1539,7 +1533,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cuisineTypes: vendor.cuisineTypes,
         logoUrl: vendor.logoUrl,
         coverImageUrl: vendor.coverImageUrl,
-        images: vendor.images,
+        images: vendor.images.map(publicStorefrontImage),
         addressLine1: vendor.addressLine1,
         city: vendor.city,
         latitude: vendor.latitude,
@@ -1568,7 +1562,7 @@ export async function customerRoutes(app: FastifyInstance) {
         estimatedPrepTime: vendor.estimatedPrepTime,
         minOrderAmount: Number(vendor.minOrderAmount),
         deliveryRadius: vendor.deliveryRadius,
-        operatingHours: vendor.operatingHours,
+        operatingHours: vendor.operatingHours.map(publicOperatingHours),
         categories,
         isFavorite,
         // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
@@ -2580,7 +2574,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // response — which the app discards on navigation — so "Share
         // tracking" had nothing durable to build a link from. Customer-scoped
         // read (this route already proves ownership); null on non-courier rows.
-        courierTrackingToken: order.courierTrackingToken,
+        courierTrackingToken: null,
         deliveryAddress: order.deliveryAddress,
         deliveryLat: order.deliveryLat,
         deliveryLng: order.deliveryLng,
@@ -3197,7 +3191,7 @@ export async function customerRoutes(app: FastifyInstance) {
       await recordConsent(tx, {
         subjectType: 'customer', subjectId: userId,
         documentType: 'marketing_consent', version: LEGAL_VERSION,
-        action, surface: consentSurface(request), ip: request.ip,
+        action, surface: consentSurfaceOf(request), ip: request.ip,
         evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
       });
       return { marketing: granted, changed: true };

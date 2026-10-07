@@ -341,6 +341,8 @@ const CENSUS: Case[] = [
   { k: 'trust_l3', to: null, why: 'GAP: rider trust tier raised' },
   { k: 'liveness_midshift_prompt', d: { respondBy: '2026-01-01T00:00:00.000Z', profile: 'DRIVER' }, to: { screen: 'LivenessCheck', params: { profile: 'DRIVER', respondBy: '2026-01-01T00:00:00.000Z' } }, why: 'E12: the timed selfie check, deadline riding along' },
   { k: 'liveness_midshift_missed', to: { screen: 'LivenessCheck', params: { profile: 'DRIVER' } }, why: 'E12: a fresh PASS is the only way back online' },
+  { k: 'password_changed', to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my password' } }, why: '[L04 · MASTER-003] security notice after a password change: if it was not the owner, support is the only way back' },
+  { k: 'password_sign_in_paused', to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Someone is trying my password' } }, why: '[L04 · MASTER-056] password sign-in paused after many wrong attempts; code sign-in still works, help is the door if it was not the owner' },
   { k: 'liveness_locked', to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Identity check locked my account' } }, why: 'E12: only support clears a lock' },
   { k: 'incident_interim_lifted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: suspension lifted' },
   { k: 'incident_shadow_restricted', d: { caseNumber: 'INC-1' }, to: null, why: 'GAP: account restricted' },

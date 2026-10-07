@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import type Redis from 'ioredis';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -167,6 +167,30 @@ export class TripShareService {
       });
     }
     return { token, url, expiresAt: row.expiresAt };
+  }
+
+  /** Owner controls use record metadata, never recovered bearer secrets. */
+  async listOwned(userId: string, orderId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id: orderId, customerId: userId, orderType: 'TAXI' }, select: { tenantId: true } });
+    if (!order) throw new NotFoundError('Trip', orderId);
+    return this.prisma.tripShareToken.findMany({
+      where: { orderId, tenantId: order.tenantId, createdByUserId: userId, revokedAt: null, expiresAt: { gt: new Date() } },
+      select: { id: true, createdAt: true, expiresAt: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: 100,
+    });
+  }
+
+  /** Stop ALL links for this owned trip, including links forgotten by a client. */
+  async revokeAll(userId: string, orderId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findFirst({ where: { id: orderId, customerId: userId, orderType: 'TAXI' }, select: { tenantId: true } });
+      if (!order) throw new NotFoundError('Trip', orderId);
+      await tx.$queryRaw(Prisma.sql`SELECT "id" FROM "orders" WHERE "id" = ${orderId} AND "customerId" = ${userId} AND "tenantId" = ${order.tenantId} FOR UPDATE`);
+      await tx.tripShareToken.updateMany({
+        where: { orderId, tenantId: order.tenantId, createdByUserId: userId, revokedAt: null }, data: { revokedAt: new Date() },
+      });
+      return { revoked: true };
+    });
   }
 
   /** Revoke — sharer only. Idempotent. */

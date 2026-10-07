@@ -374,6 +374,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /billing/settlement-batches/:id/confirm-deposit': c('C4', 'billing.deposit.confirm', E.settlementBatch),
   'POST /billing/settlement-batches/:id/adjust-deposit': c('C4', 'billing.deposit.adjust', E.settlementBatch),
   'POST /billing/collections/:subscriptionId/contact': c('C2', 'billing.collections.contact'),
+  // [PT-2] Card rail v2 read views: sessions, their evidence as hashes, and a
+  // subscription's cards as brand / last 4 / expiry. Nothing that moves money.
+  'GET /billing/card-sessions': c('C0', 'billing.read'),
+  'GET /billing/card-sessions/:id': c('C0', 'billing.read'),
+  'GET /billing/subscriptions/:subscriptionId/cards': c('C0', 'billing.read'),
 
   // ── Algorithms ──────────────────────────────────────────────────────────
   'GET /algo/eta/report': c('C0', 'algo.read'),

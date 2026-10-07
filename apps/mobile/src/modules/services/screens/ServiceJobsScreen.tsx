@@ -21,6 +21,7 @@ import {
   showsServiceJobAgreedPrice,
 } from '../../../lib/serviceJobPresentation';
 import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
+import { errorMessage } from '../../../lib/apiError';
 
 const STATUS_LABEL: Record<string, { label: string; tone: 'brand' | 'success' | 'neutral' }> = {
   REQUESTED: { label: 'Waiting for quote', tone: 'neutral' },
@@ -88,7 +89,7 @@ function ScheduleSheet({ job, onDone }: { job: any; onDone: () => void }) {
       ) : null}
       {schedule.isError ? (
         <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>
-          {serviceJobErrorMessage(schedule.error, 'Couldn’t schedule. Try again.')}
+          {serviceJobErrorMessage(schedule.error, errorMessage(schedule.error, 'Couldn’t schedule. Try again.'))}
         </T>
       ) : null}
     </View>
@@ -99,7 +100,7 @@ function RateRow({ job }: { job: any }) {
   const rate = useRateJob();
   const [score, setScore] = useState(0);
   // Already rated in a past session → the API answers with a conflict; show it calmly.
-  const errMsg = (rate.error as any)?.response?.data?.message;
+  const errMsg = rate.isError ? errorMessage(rate.error, 'Couldn’t rate') : undefined;
   return (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
       <T variant="label" tone="muted">
