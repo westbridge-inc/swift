@@ -44,7 +44,7 @@ const PHONE_PREFIX = '+5920874';
 const RUN = String(Date.now() % 100).padStart(2, '0');
 const MAX = 5 * 1024 * 1024;
 
-const ENV_KEYS = ['STORAGE_PROVIDER', 'AWS_S3_BUCKET', 'AWS_S3_ENDPOINT', 'UPLOAD_DIR', 'TENANT_UNSCOPED_ACCESS', 'PUBLIC_PHOTO_READ_TIMEOUT_MS'] as const;
+const ENV_KEYS = ['STORAGE_PROVIDER', 'AWS_S3_BUCKET', 'AWS_S3_ENDPOINT', 'UPLOAD_DIR', 'TENANT_UNSCOPED_ACCESS', 'PUBLIC_PHOTO_READ_TIMEOUT_MS', 'RUN_WORKERS'] as const;
 /** The storage deadline this suite runs with (production default: a few seconds). */
 const DEADLINE_MS = 300;
 const HOUR = 'public, max-age=3600';
@@ -105,6 +105,9 @@ const png = (fill: number) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47
 const webp = (fill: number) => Buffer.concat([Buffer.from('RIFF'), Buffer.from([0x60, 0, 0, 0]), Buffer.from('WEBPVP8 '), Buffer.alloc(96, fill)]);
 
 let app: FastifyInstance;
+/** The local-provider app (its own describe below); closed last, after the
+ *  cleanup reads, because both apps share one database client. */
+let local: FastifyInstance | undefined;
 const userIds: string[] = [];
 const tenantIds: string[] = [];
 let seq = 0;
@@ -154,6 +157,10 @@ beforeAll(async () => {
   process.env['STORAGE_PROVIDER'] = 's3';
   process.env['AWS_S3_BUCKET'] = BUCKET;
   process.env['PUBLIC_PHOTO_READ_TIMEOUT_MS'] = String(DEADLINE_MS);
+  // The API tier only: no queue consumers and no recurring schedules, which
+  // would outlive this file in the shared test Redis (the golden worker
+  // suites require an empty schedule).
+  process.env['RUN_WORKERS'] = '0';
   delete process.env['AWS_S3_ENDPOINT'];
   app = await buildApp();
   await app.ready();
@@ -208,6 +215,7 @@ afterAll(async () => {
   for (const k of ENV_KEYS) {
     if (priorEnv[k] === undefined) delete process.env[k]; else process.env[k] = priorEnv[k];
   }
+  await local?.close();
   await app.close();
 });
 
@@ -469,7 +477,6 @@ describe('[PUBLIC-PHOTOS] photo names: what the upload saves is what is served',
 
 describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
   const dir = path.join(os.tmpdir(), `swift-public-photos-${nanoid(6)}`);
-  let local: FastifyInstance;
   let key = '';
   let orphanKey = '';
   let doc = '';
@@ -494,41 +501,40 @@ describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
     await local.ready();
   });
   afterAll(async () => {
-    await local.close();
     process.env['STORAGE_PROVIDER'] = 's3';
     if (priorEnv['UPLOAD_DIR'] === undefined) delete process.env['UPLOAD_DIR']; else process.env['UPLOAD_DIR'] = priorEnv['UPLOAD_DIR'];
     await rm(dir, { recursive: true, force: true });
   });
 
   it('a referenced photo on disk is served from the upload directory; an unreferenced one is not', async () => {
-    const res = await local.inject({ method: 'GET', url: `/${key}` });
+    const res = await local!.inject({ method: 'GET', url: `/${key}` });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.headers['content-type']).toBe('image/png');
     expect(res.rawPayload.equals(png(11))).toBe(true);
-    const orphan = await local.inject({ method: 'GET', url: `/${orphanKey}` });
+    const orphan = await local!.inject({ method: 'GET', url: `/${orphanKey}` });
     expect(orphan.statusCode).toBe(404);
   });
 
   it('the address a real local upload returns (/uploads/items/…) is served while the store uses the photo, and not after', async () => {
     const item = await addItem(storeB.vendorId, storeB.categoryId, null);
-    const first = await uploadPhoto(local, storeB, item.id, 'dish.png', 'image/png', png(14));
+    const first = await uploadPhoto(local!, storeB, item.id, 'dish.png', 'image/png', png(14));
     expect(first).toMatch(new RegExp(`^/uploads/items/${storeB.vendorId}/[A-Za-z0-9_-]{16}\\.png$`));
-    const res = await local.inject({ method: 'GET', url: first });
+    const res = await local!.inject({ method: 'GET', url: first });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.headers['content-type']).toBe('image/png');
     expect(res.headers['cache-control']).toBe(HOUR);
     const before = await photoLookups();
-    const second = await uploadPhoto(local, storeB, item.id, 'dish.png', 'image/png', png(15));
-    expect((await local.inject({ method: 'GET', url: second })).statusCode).toBe(200);
+    const second = await uploadPhoto(local!, storeB, item.id, 'dish.png', 'image/png', png(15));
+    expect((await local!.inject({ method: 'GET', url: second })).statusCode).toBe(200);
     // The replaced photo's file is still on disk, but the store no longer uses it.
-    const old = await local.inject({ method: 'GET', url: first });
+    const old = await local!.inject({ method: 'GET', url: first });
     expect(old.statusCode).toBe(404);
     expect(old.headers['cache-control']).toBe('no-store');
     expect(await photoLookups(), 'the local address must go through the same check').toBeGreaterThan(before);
   });
 
   it('the review pack\'s drawn pictures keep their own rule on the local address', async () => {
-    expect((await local.inject({ method: 'GET', url: '/uploads/items/review-pack/v1/no-such-store--pepperpot.png' })).statusCode).toBe(404);
+    expect((await local!.inject({ method: 'GET', url: '/uploads/items/review-pack/v1/no-such-store--pepperpot.png' })).statusCode).toBe(404);
   });
 
   it('a climbing path a store typed as its photo never reaches a document on the same disk', async () => {
@@ -536,7 +542,7 @@ describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
       `/items/${storeB.vendorId}/..%2F..%2Fverification%2F${storeB.userId}%2F${doc}`,
       `/items/${storeB.vendorId}/../../verification/${storeB.userId}/${doc}`,
     ]) {
-      const res = await local.inject({ method: 'GET', url });
+      const res = await local!.inject({ method: 'GET', url });
       expect(res.statusCode, url).not.toBe(200);
       expect(res.rawPayload.equals(png(13)), url).toBe(false);
     }
