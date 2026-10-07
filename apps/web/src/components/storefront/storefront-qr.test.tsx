@@ -3,7 +3,7 @@ import { renderToString } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import styles from './storefront.module.css';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import StorePage from '@/app/store/[slug]/page';
+import StorePage from '@/app/(app)/store/[slug]/page';
 import LoginPage from '@/app/login/page';
 import type { StorefrontDetail } from '@/lib/api';
 import * as api from '@/lib/api';
@@ -60,7 +60,10 @@ describe('the actual /store/[slug] QR arrival', () => {
     const element = await page({ src: 'qr', c: 'BCDFGHJKMN', t: 'card' });
     const html = renderToString(element);
     expect(html).toContain('Garden Kitchen');
-    expect(html).toContain('powered by Swift');
+    // [W6] The store page sits inside Swift's own app frame now (rail, dock,
+    // footer), so it has no store-branded top bar of its own; its section
+    // chips are part of the server render.
+    expect(html).toContain('Menu sections');
     expect(html).toContain('Pumpkin roti');
     expect(html).toContain(copy);
     render(element);
@@ -85,7 +88,11 @@ describe('the actual /store/[slug] QR arrival', () => {
     const slot = dismiss.parentElement!;
     const menu = screen.getByRole('region', { name: 'Menu' });
     const checkout = screen.getByRole('complementary', { name: 'Your order and checkout' });
-    const cartLinks = screen.getAllByRole('link', { name: /Your order/ });
+    // [W6] The order panel is the store page's cart; a floating "View your
+    // order" link joins it once something is in the order. (The old
+    // store-branded top bar and its cart link are gone: the app's frame holds
+    // the page now.)
+    const cartLinks = screen.queryAllByRole('link', { name: /Your order/ });
     const layoutStyles = (element: Element) => {
       const computed = getComputedStyle(element);
       return Object.fromEntries([
@@ -134,7 +141,7 @@ describe('the actual /store/[slug] QR arrival', () => {
     if (before.height) expect(slot.getBoundingClientRect()).toEqual(before);
     expect(screen.queryByRole('button', { name: 'Dismiss dining-in message' })).toBeNull();
     expect(screen.getByRole('region', { name: 'Menu' })).toBe(document.activeElement);
-    expect(screen.getAllByRole('link', { name: /Your order/ }).length).toBeGreaterThan(0);
+    expect(screen.getByRole('complementary', { name: 'Your order and checkout' })).toBe(checkout);
   });
 
 
@@ -170,7 +177,7 @@ describe('the actual /store/[slug] QR arrival', () => {
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(add);
-    expect(nav.push).toHaveBeenCalledWith(`/login?next=${encodeURIComponent('/store/garden-kitchen?src=qr&c=BCDFGHJKMN&t=card')}`);
+    await waitFor(() => expect(nav.push).toHaveBeenCalledWith(`/login?next=${encodeURIComponent('/store/garden-kitchen?src=qr&c=BCDFGHJKMN&t=card')}`));
     expect(customer.addToCart).not.toHaveBeenCalled();
   });
 
@@ -207,6 +214,7 @@ describe('QR-01-W: real guest Add → sign-in → same item continuation', () =>
     const add = await screen.findByRole('button', { name: /Add Pumpkin roti/ });
     await waitFor(() => expect((add as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(add);
+    await waitFor(() => expect(nav.push).toHaveBeenCalledOnce());
     const loginUrl = String(nav.push.mock.calls[0]?.[0]);
     first.unmount();
     nav.query = startingState === 'Add prompt' ? loginUrl.split('?')[1]! : '';
@@ -224,7 +232,7 @@ describe('QR-01-W: real guest Add → sign-in → same item continuation', () =>
     const resumed = render(await page({ src: 'qr', c: 'BCDFGHJKMN' }));
     expect(await screen.findByRole('dialog', { name: 'Pumpkin roti' })).toBeTruthy();
     expect(customer.addToCart).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: /Add to order/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Add to order/ }));
     await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: store.id, itemId: 'roti', quantity: 1, selectedOptions: {} }));
     resumed.unmount();
     render(await page({ src: 'qr' }));
@@ -274,7 +282,7 @@ describe('QR-01-W continuation boundaries', () => {
     sessionStorage.setItem('swift_storefront_add', JSON.stringify(savedIntent));
     render(await page());
     await screen.findByRole('dialog');
-    fireEvent.click(screen.getByRole('button', { name: 'Add to order' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Add to order/ }));
     await waitFor(() => expect(customer.addToCart).toHaveBeenCalledExactlyOnceWith({ vendorId: store.id, itemId: 'roti', quantity: 1, selectedOptions: { filling: 'chickpea' } }));
   });
 
@@ -310,7 +318,7 @@ describe('QR-01-W continuation boundaries', () => {
     sessionStorage.setItem('swift_storefront_add', JSON.stringify(savedIntent));
     render(await page());
     await screen.findByRole('dialog');
-    fireEvent.click(screen.getByRole('button', { name: 'Add to order' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Add to order/ }));
     expect(await screen.findByText('Choose an option for Filling.')).toBeTruthy();
     expect(customer.addToCart).not.toHaveBeenCalled();
   });

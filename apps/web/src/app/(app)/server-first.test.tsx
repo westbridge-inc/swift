@@ -6,8 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
 import HomePage from './page';
-import VendorLayout from './order/vendor/[id]/layout';
-import VendorPage from './order/vendor/[id]/page';
+import StorePage from './store/[slug]/page';
+import LegacyStorePage from './order/vendor/[id]/page';
+import { storefrontFixture } from '@/test/storefront-fixture';
 import BrowsePage from './order/browse/page';
 import MarketPage from './market/page';
 
@@ -17,6 +18,8 @@ vi.mock('next/navigation', () => ({
   useParams: () => state.params,
   useSearchParams: () => new URLSearchParams(state.query),
   useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
+  notFound: () => { throw new Error('NEXT_NOT_FOUND'); },
+  permanentRedirect: (path: string) => { throw Object.assign(new Error('NEXT_REDIRECT'), { path }); },
 }));
 // The real config refuses to load while company details are placeholders.
 vi.mock('@/site.config', () => ({
@@ -87,6 +90,7 @@ beforeEach(async () => {
       return { body: { success: true, data: carriesAPerson(init) ? { ...FEED, activeOrder: LIVE_ORDER } : FEED } };
     }
     if (url.pathname === '/api/v1/customer/vendors/v1') return { body: { success: true, data: MENU } };
+    if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return { body: { success: true, data: storefrontFixture(MENU) } };
     if (url.pathname === '/api/v1/customer/vendors') return { body: { success: true, data: [VENDOR] } };
     if (url.pathname === '/api/v1/discovery/categories') return { body: { success: true, data: { categories: [{ slug: 'tools', name: 'Tools', vertical: 'RETAIL' }, { slug: 'meals', name: 'Meals', vertical: 'FOOD' }] } } };
     if (url.pathname === '/api/v1/market/items') return { body: { success: true, data: { items: [{ id: 'g1', name: 'Claw hammer', basePrice: 2500, imageUrl: null, vendorId: 'v9', vendorName: 'Regent Hardware', categoryName: 'Tools', isNew: false }], nextCursor: null } } };
@@ -173,21 +177,32 @@ describe('[W2] Home arrives with the stores in it', () => {
 
 describe('[W2] a store, a category and the Market arrive with their content in them', () => {
   it('a store’s menu is in the page; the server read it as a guest', async () => {
-    state.pathname = '/order/vendor/v1';
-    state.params = { id: 'v1' };
-    const page = await VendorLayout({ children: <VendorPage />, params: Promise.resolve({ id: 'v1' }) });
-    expect(calls('/api/v1/customer/vendors/v1')).toHaveLength(1);
-    expect(carriesAPerson(calls('/api/v1/customer/vendors/v1')[0]!.init)).toBe(false);
+    // [W6] The store's one page, /store/<slug>.
+    state.pathname = '/store/shanta-kitchen';
+    const page = await StorePage({ params: Promise.resolve({ slug: 'shanta-kitchen' }), searchParams: Promise.resolve({}) });
+    const reads = calls('/api/v1/public/storefronts/shanta-kitchen');
+    expect(reads).toHaveLength(1);
+    expect(carriesAPerson(reads[0]!.init)).toBe(false);
+    // In the HTML itself, before any script runs.
+    const html = renderToString(<AppLayout>{page}</AppLayout>);
+    expect(html).toContain('Shanta Kitchen');
+    expect(html).toContain('Curry chicken plate');
     render(<AppLayout>{page}</AppLayout>);
     expect(screen.getByRole('heading', { level: 1, name: 'Shanta Kitchen' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Curry chicken plate/ })).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 3, name: 'Curry chicken plate' })).toBeTruthy();
+  });
+
+  it('the old store address finds the store as a guest and sends it to that page', async () => {
+    await expect(LegacyStorePage({ params: Promise.resolve({ id: 'v1' }), searchParams: Promise.resolve({ item: 'm1' }) }))
+      .rejects.toMatchObject({ message: 'NEXT_REDIRECT', path: '/store/shanta-kitchen?item=m1' });
+    const reads = calls('/api/v1/customer/vendors/v1');
+    expect(reads).toHaveLength(1);
+    expect(carriesAPerson(reads[0]!.init)).toBe(false);
   });
 
   it('a made-up store id is never read on the server', async () => {
-    const page = await VendorLayout({ children: <span>menu</span>, params: Promise.resolve({ id: '../../admin' }) });
+    await expect(LegacyStorePage({ params: Promise.resolve({ id: '../../admin' }) })).rejects.toThrow('NEXT_NOT_FOUND');
     expect(fetchMock).not.toHaveBeenCalled();
-    render(<AppLayout>{page}</AppLayout>);
-    expect(screen.getByText('menu')).toBeTruthy();
   });
 
   it('a category’s stores are in the page; an unknown kind is never read on the server', async () => {
@@ -227,7 +242,10 @@ describe('[W2] the server never reads who is visiting', () => {
   it.each([
     'lib/browse-server.ts',
     'app/(app)/page.tsx',
-    'app/(app)/order/vendor/[id]/layout.tsx',
+    'app/(app)/order/vendor/[id]/page.tsx',
+    'app/(app)/store/[slug]/page.tsx',
+    'components/storefront/storefront-page.tsx',
+    'lib/api.ts',
     'app/(app)/order/browse/page.tsx',
     'app/(app)/market/page.tsx',
   ])('%s does not touch the visitor’s cookies or headers', (file) => {

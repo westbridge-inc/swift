@@ -6,6 +6,7 @@ import { ChevronRight, Star } from 'lucide-react';
 import { Bone, LoadingRegion } from './customer-skeletons';
 import { Pictogram, verticalPictogram } from './glyphs';
 import { money, type Vendor } from '@/lib/customer';
+import { storeHref } from '@/lib/customer-routes';
 
 /**
  * [WEB-REDESIGN] The store and item cards of the owner's design. Each card and
@@ -72,7 +73,7 @@ export function VendorCard({ v }: { v: Vendor }) {
   const closed = !v.isCurrentlyOpen;
   const meta = storeMeta(v);
   return (
-    <Link href={`/order/vendor/${v.id}`} className={`${ROW_CARD} transition-opacity active:opacity-85`}>
+    <Link href={storeHref(v)} className={`${ROW_CARD} transition-opacity active:opacity-85`}>
       <span data-store-part="image" className={`${ROW_THUMB} relative overflow-hidden`}>
         <Photo src={v.coverImageUrl} alt={v.name} vendorType={v.vendorType} sizes="84px" className="absolute inset-0 rounded-xl" dim={closed} />
       </span>
@@ -115,7 +116,7 @@ export function VendorGridSkeleton({ n = 6, label = 'Loading stores' }: { n?: nu
 export function VendorHeroCard({ v }: { v: Vendor }) {
   const meta = storeMeta(v);
   return (
-    <Link href={`/order/vendor/${v.id}`} className="sw-card relative block overflow-hidden transition-transform duration-200 hover:-translate-y-0.5">
+    <Link href={storeHref(v)} className="sw-card relative block overflow-hidden transition-transform duration-200 hover:-translate-y-0.5">
       <Photo src={v.coverImageUrl} alt="" vendorType={v.vendorType} sizes="(min-width: 760px) 400px, 72vw" className="aspect-video w-full rounded-none" iconSize={40} />
       <span aria-hidden className="absolute inset-x-0 bottom-0 h-[110px]" style={{ background: 'linear-gradient(180deg, rgba(33,26,26,0), rgba(33,26,26,0.62))' }} />
       <span className="absolute inset-x-4 bottom-3 flex flex-col gap-1">
@@ -133,7 +134,7 @@ export function VendorHeroCard({ v }: { v: Vendor }) {
 export function VendorSquareCard({ v }: { v: Vendor }) {
   const meta = storeMeta(v);
   return (
-    <Link href={`/order/vendor/${v.id}`} className="flex min-w-0 flex-col text-left text-[var(--swift-ink)] active:opacity-85">
+    <Link href={storeHref(v)} className="flex min-w-0 flex-col text-left text-[var(--swift-ink)] active:opacity-85">
       <span data-store-part="image" className="relative block aspect-square w-full overflow-hidden rounded-2xl">
         <Photo src={v.coverImageUrl} alt="" vendorType={v.vendorType} sizes="(min-width: 760px) 200px, 44vw" className="absolute inset-0" />
       </span>

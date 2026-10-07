@@ -3,7 +3,7 @@
   "firstLoadJsKb": {
     "/(app)/page": 159,
     "/(app)/order/vendor/[id]/page": 159,
-    "/store/[slug]/page": 140,
+    "/(app)/store/[slug]/page": 170,
     "/(app)/market/page": 155,
     "/(app)/order/browse/page": 154,
     "/(app)/cart/page": 158,

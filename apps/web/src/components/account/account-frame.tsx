@@ -1,7 +1,6 @@
 'use client';
 
 import { Fragment, type ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import { useCustomerSession } from '@/components/customer-session';
 import { SignInDoor } from '@/components/customer-shell';
 
@@ -26,8 +25,4 @@ export function AccountFrame({ title, children }: { title: string; children: Rea
   </div>;
 }
 
-export function useAccountQuery<T>(name: string, read: () => Promise<T>) {
-  const session = useCustomerSession();
-  return useQuery({ queryKey: ['account', session.scope, session.epoch, name], queryFn: read,
-    enabled: session.status === 'signed-in', retry: false, staleTime: 0, gcTime: 0 });
-}
+export { useAccountQuery } from './account-query';

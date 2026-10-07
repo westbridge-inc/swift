@@ -1,2 +1,1 @@
-// [W6] While the old address finds the store's one page, the page's own shape.
 export { StoreSkeleton as default } from '@/components/storefront/store-skeleton';

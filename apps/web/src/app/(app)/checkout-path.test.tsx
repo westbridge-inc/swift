@@ -2,7 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest, type ApiReply } from '@/test/test-utils';
 import AppLayout from './layout';
-import VendorPage from './order/vendor/[id]/page';
+import { StorefrontPage } from '@/components/storefront/storefront-page';
+import { storefrontFixture } from '@/test/storefront-fixture';
 import CartPage from './cart/page';
 import OrderDetailPage from './orders/[id]/page';
 
@@ -19,6 +20,8 @@ vi.mock('next/navigation', () => ({
 // (a guest signs in first and comes back to the same item), the cart and its
 // checkout (cash, or the business's own MMG when the server offers it), then
 // the order's tracking page.
+//
+// [W6] The store is its one page now, /store/<slug>, inside the app's frame.
 // ---------------------------------------------------------------------------
 
 const ITEM = {
@@ -65,6 +68,7 @@ const calls = (method: string, pathname: string) => fetchMock.mock.calls.filter(
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
+  sessionStorage.clear();
   window.history.replaceState({}, '', '/');
   signedIn = true;
   liveCart = cart();
@@ -80,7 +84,7 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/customer/cart/items' && method === 'POST') return { status: 201, body: { success: true, data: {} } };
     if (url.pathname === '/api/v1/customer/cart' && method === 'GET') return ok(liveCart);
     if (url.pathname === '/api/v1/customer/addresses') return ok([ADDRESS]);
-    if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return ok({ ...STORE, categories: [] });
+    if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return ok(storefrontFixture(STORE));
     if (url.pathname === '/api/v1/customer/cart/address' && method === 'PUT') return ok({ cart: liveCart });
     if (url.pathname === '/api/v1/customer/checkout' && method === 'POST') return ok({ order: { id: 'o9' }, orders: [{ id: 'o9' }], paymentAction: null });
     if (url.pathname === '/api/v1/customer/orders/o9') {
@@ -96,14 +100,30 @@ function at(pathname: string, params: Record<string, string>, page: React.ReactN
   return render(<AppLayout>{page}</AppLayout>);
 }
 
+/** The store's one page, as the server draws it for this address. */
+const storePage = (query: Record<string, string> = {}) =>
+  StorefrontPage({ params: Promise.resolve({ slug: 'shanta-kitchen' }), searchParams: Promise.resolve(query) });
+
+/** The item's Choose button, once the live menu is verified. */
+async function choose(name: string) {
+  const button = await screen.findByRole('button', { name: `Choose options for ${name}` });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(button);
+}
+
 describe('[Q7b] store → cart', () => {
   it('a guest can open the item, and is sent to sign in on the way to adding it — coming back to that same item', async () => {
     signedIn = false;
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
-    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
+    at('/store/shanta-kitchen', {}, await storePage());
+    await choose('Pepperpot bowl');
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Sign in to add · $1,800' }));
-    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Forder%2Fvendor%2Fv1%3Fitem%3Di1'));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $1,800' }));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Fstore%2Fshanta-kitchen'));
+    // The way back names this item and the choice made (the sign-in
+    // continuation reopens it on the store's page).
+    expect(JSON.parse(sessionStorage.getItem('swift_storefront_add')!)).toMatchObject({
+      storeSlug: 'shanta-kitchen', itemId: 'i1', selectedOptions: { g1: ['small'] }, returnPath: '/store/shanta-kitchen',
+    });
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
     // It tried the refresh cookie once first — a returning customer is not
     // sent to sign in for nothing.
@@ -111,16 +131,17 @@ describe('[Q7b] store → cart', () => {
   });
 
   it('a signed-in customer back on the item adds it, options and all, to the server cart', async () => {
-    window.history.replaceState({}, '', '/order/vendor/v1?item=i1');
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
+    window.history.replaceState({}, '', '/store/shanta-kitchen?item=i1');
+    at('/store/shanta-kitchen', {}, await storePage({ item: 'i1' }));
     // The link's ?item= reopens the item it named.
     const sheet = await screen.findByRole('dialog', { name: 'Pepperpot bowl' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /^Large/ }));
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $2,200' }));
-    await screen.findByText('Added to your cart');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $2,200' }));
+    await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
-    expect(screen.getByRole('link', { name: /View cart/ }).getAttribute('href')).toBe('/cart');
+    // The order is on this page: its panel, reached from the floating button.
+    expect(screen.getByRole('link', { name: /View your order/ }).getAttribute('href')).toBe('#checkout');
   });
 });
 
@@ -136,29 +157,29 @@ describe('[F4] a sold-out choice is never pre-selected or sent', () => {
 
   it('a sold-out default is neither offered nor chosen for the customer; their own choice is what is sent', async () => {
     api = ({ url }) => (url.pathname === '/api/v1/customer/vendors/v1' ? ok(storeWith([SMALL_SOLD_OUT, LARGE])) : null);
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
-    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
+    at('/store/shanta-kitchen', {}, await storePage());
+    await choose('Pepperpot bowl');
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
     expect(within(sheet).queryByRole('radio', { name: /^Small/ })).toBeNull();
     expect((within(sheet).getByRole('radio', { name: /^Large/ }) as HTMLInputElement).checked).toBe(false);
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
-    await screen.findByText('Choose an option for “Size”.');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $1,800' }));
+    await screen.findByText('Choose an option for Size.');
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
 
     fireEvent.click(within(sheet).getByRole('radio', { name: /^Large/ }));
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $2,200' }));
-    await screen.findByText('Added to your cart');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $2,200' }));
+    await screen.findByText('Pepperpot bowl added to your order.');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
   });
 
   it('a required group with every choice sold out says so and sends nothing', async () => {
     api = ({ url }) => (url.pathname === '/api/v1/customer/vendors/v1' ? ok(storeWith([SMALL_SOLD_OUT, { ...LARGE, isAvailable: false }])) : null);
-    at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
-    fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
+    at('/store/shanta-kitchen', {}, await storePage());
+    await choose('Pepperpot bowl');
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
     expect(within(sheet).queryAllByRole('radio')).toHaveLength(0);
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add to order · $1,800' }));
     await screen.findByText('“Size” is sold out right now.');
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
   });

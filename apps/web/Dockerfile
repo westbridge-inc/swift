@@ -66,6 +66,10 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# [W6] The store page judges an item's choices with the API's own validator
+# (src/lib/menu-options.ts imports it by path, never a second copy). It is a
+# pure module with no imports of its own, so exactly this file.
+COPY apps/api/src/modules/order/options.ts apps/api/src/modules/order/options.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

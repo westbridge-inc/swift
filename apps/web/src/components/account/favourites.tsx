@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { Heart } from 'lucide-react';
 import { useCustomerSession } from '@/components/customer-session';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { signInPath } from '@/lib/customer-routes';
+import { signInPath, storeHref } from '@/lib/customer-routes';
 import { accountApi } from './account-api';
 import { AccountFrame, useAccountQuery } from './account-frame';
 
@@ -52,7 +52,7 @@ export function Favourites() {
       : !favourites.data ? <p role="status">Loading favourites…</p>
       : favourites.data.length === 0 ? <p>No favourites yet. Save a store with its heart.</p>
       : <ul className="space-y-3">{favourites.data.map((vendor) => <li key={vendor.id} className="flex items-center justify-between gap-3 sw-card p-4">
-        <Link href={`/order/vendor/${encodeURIComponent(vendor.id)}`} className="min-h-11 flex-1 py-3 font-bold">{vendor.name}</Link>
+        <Link href={storeHref(vendor)} className="min-h-11 flex-1 py-3 font-bold">{vendor.name}</Link>
         <FavouriteButton vendorId={vendor.id} name={vendor.name} />
       </li>)}</ul>}
     <Link href="/order/search" className="inline-block py-3 font-semibold text-[var(--swift-red)]">Find a store</Link>
