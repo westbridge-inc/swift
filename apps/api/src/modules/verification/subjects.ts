@@ -15,6 +15,7 @@
  */
 import type { DocSubjectKind, Prisma, PrismaClient, SubjectRelation } from '@prisma/client';
 import { BUCKET_OF, registryCode } from './doc-registry';
+import type { VehicleSubmissionProfile } from './submission-authority';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
@@ -89,7 +90,7 @@ export interface ResolvedSubject {
  */
 export async function resolveSubject(
   db: Db,
-  input: { userId: string; countryCode: string; docType: string; tenantId: string },
+  input: { userId: string; countryCode: string; docType: string; tenantId: string; vehicleProfile?: VehicleSubmissionProfile | null },
 ): Promise<ResolvedSubject | null> {
   const kind = await subjectKindFor(db, input.countryCode, input.docType);
   const relation = RELATION_OF_KIND[kind];
@@ -115,9 +116,14 @@ export async function resolveSubject(
     return { subjectId: subject.id, kind, relation, linkId: await ensureLink(db, input.userId, subject.id, relation, input.tenantId, null), created: true, owned: true };
   }
   // VEHICLE: the mover's registered plate names the vehicle; no plate, no vehicle subject.
-  const driver = await db.driver.findUnique({ where: { userId: input.userId }, select: { licensePlate: true, vehicleType: true, vehicleMake: true, vehicleModel: true, vehicleYear: true, vehicleColor: true } });
-  const rider = driver ? null : await db.rider.findUnique({ where: { userId: input.userId }, select: { licensePlate: true, vehicleType: true, vehicleMake: true, vehicleModel: true, vehicleYear: true, vehicleColor: true } });
-  const profile = driver ?? rider;
+  let profile = input.vehicleProfile;
+  if (profile === undefined) {
+    // Legacy backfill has no stored operating role. A dual profile stays unresolved.
+    const driver = await db.driver.findUnique({ where: { userId: input.userId } });
+    const rider = await db.rider.findUnique({ where: { userId: input.userId } });
+    if (driver && rider) return null;
+    profile = driver ? { ...driver, kind: 'DRIVER' } : rider ? { ...rider, kind: 'RIDER' } : null;
+  }
   const rawMark = profile?.licensePlate?.trim();
   if (!profile || !rawMark) return null;
   const registrationMark = normalizeRegistrationMark(rawMark);
@@ -127,6 +133,9 @@ export async function resolveSubject(
   });
   if (existing) {
     const subjectId = await rootSubjectId(db, existing.subjectId);
+    // Submission and live-operation decisions serialize on this exact vehicle.
+    // The submission caller holds its own User first; never lock other users.
+    await db.$queryRaw`SELECT id FROM subject WHERE id = ${subjectId}::uuid FOR UPDATE /* mover-document-subject-writer */`;
     // [High #9 · DS109] Reusing a subject ANOTHER account registered is a PENDING
     // assignment: the submission names the durable vehicle, but its evidence does not
     // propagate to this account until an admin approves the link (approveVehicleAssignment).
@@ -172,7 +181,9 @@ export async function backfillSubjects(prisma: PrismaClient, opts: { batch?: num
     for (const r of rows) {
       scanned += 1;
       const done = await prisma.$transaction(async (tx) => {
-        const s = await resolveSubject(tx, { userId: r.userId, countryCode: r.user.countryCode, docType: r.docType, tenantId: r.user.tenantId });
+        await tx.$queryRaw`SELECT id FROM users WHERE id = ${r.userId} FOR UPDATE`;
+        const user = await tx.user.findUniqueOrThrow({ where: { id: r.userId }, select: { countryCode: true, tenantId: true } });
+        const s = await resolveSubject(tx, { userId: r.userId, countryCode: user.countryCode, docType: r.docType, tenantId: user.tenantId });
         if (!s) return false;
         await tx.verificationDocument.updateMany({ where: { id: r.id, subjectId: null }, data: { subjectId: s.subjectId } });
         return true;

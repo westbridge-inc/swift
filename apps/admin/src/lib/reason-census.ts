@@ -85,6 +85,11 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /billing/agent-payments/:id/refund-flag', helper: 'flagAgentPaymentRefund', args: ['pay_1'], requiredBodyKeys: ['note'] },
   { route: 'POST /billing/settlement-batches/:id/confirm-deposit', helper: 'confirmSettlementDeposit', args: ['batch_1', { depositedGyd: 500, depositedAt: '2026-01-01T00:00:00Z', bankRef: 'MMG-BANK-REF-1' }], requiredBodyKeys: ['depositedGyd', 'depositedAt', 'bankRef'] },
 
+  // ── Custody recovery [AF-MOB-006] ──────────────────────────────────────
+  { route: 'POST /custody-cases/:id/direct', helper: 'directCustodyCase', args: ['cc_1', 'RELAY_REQUIRED'], requiredBodyKeys: ['outcome'] },
+  { route: 'POST /custody-cases/:id/relay', helper: 'assignCustodyRelay', args: ['cc_1', 'rdr_1'], requiredBodyKeys: ['riderId'] },
+  { route: 'POST /custody-cases/:id/confirm-return', helper: 'confirmCustodyReturn', args: ['cc_1'] },
+
   // ── Returns ────────────────────────────────────────────────────────────
   { route: 'PUT /returns/:id/resolve', helper: 'resolveReturn', args: ['ret_1', 'APPROVED', undefined], requiredBodyKeys: ['status'] },
   { route: 'PUT /returns/:id/refund-settled', helper: 'settleReturnRefund', args: ['ret_1', 'REF-1', 500, undefined], requiredBodyKeys: ['reference', 'amount'] },
@@ -96,6 +101,11 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
     code: 'CENSUS', description: 'Census fixture', discountType: 'FIXED_AMOUNT', discountValue: 1,
     validFrom: '2026-01-01', validUntil: '2026-02-01',
   }], requiredBodyKeys: ['code', 'description', 'discountType', 'discountValue', 'validFrom', 'validUntil'] },
+
+  // [ZONE-FARES] Fixed zone-to-zone fares
+  { route: 'POST /zone-fares', helper: 'createZoneFare', args: [{ fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12000 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
+  { route: 'PUT /zone-fares/:id', helper: 'updateZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12500 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
+  { route: 'DELETE /zone-fares/:id', helper: 'deleteZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b' }], requiredBodyKeys: ['fromZoneId', 'toZoneId'] },
 
   // ── The decision itself ────────────────────────────────────────────────
   { route: 'POST /approvals/:id/decide', helper: 'decideApproval', args: ['apr_1', true], requiredBodyKeys: ['approve'] },

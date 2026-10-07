@@ -415,6 +415,8 @@ export function serviceBooking(id: string, extra: Row = {}): Row {
     estimatedPrepTime: null, estimatedDeliveryTime: null,
     promisedAt: null, promiseRevisedAt: null, promiseRevisionReason: null, promiseRevisions: null,
     rideClass: null, taxiFareTotal: null, taxiPassengerCount: null, courierPackageSize: null,
+    // [TAXI multi-stop 3/8] dispatch reads it to know whether an offer card carries stops.
+    taxiStopCount: null,
     riskFlagged: false, riskReason: null,
     foodAgeHeldAt: null, foodAgeWaivedAt: null,
     ...extra,

@@ -10,7 +10,7 @@
   padding-top: 8px;
 }
 
-@media (min-width: 47.5rem) {
+@media (min-width: 72rem) {
   .page { grid-template-columns: minmax(0, 1fr) 380px; }
   .rail { position: sticky; top: 16px; margin-top: 60px; }
 }

@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
 
 /**
@@ -14,19 +14,26 @@ import { SwiftLogo } from '@/components/swift-logo';
 export const DIAL_CODE = '+592';
 
 /**
- * The number the server is sent. The field holds the local number; a number
- * typed or pasted with its country code ("+592 600 1234", "5926001234") is
- * read as the same number, never as +592592….
+ * The number the server is sent. The field holds the local number beside the
+ * +592 chip:
+ *  - a local number ("600 1234") is sent as +5926001234;
+ *  - a number typed or pasted with Guyana's code ("+592 600 1234",
+ *    "5926001234") is the same number, never +592592…;
+ *  - any other number typed with a leading "+" is sent as typed (digits only),
+ *    exactly as sign-in sent it before the redesign.
  */
 export function fullPhone(local: string): string {
-  const digits = local.replace(/\D/g, '');
-  if (digits.startsWith('592') && digits.length > 7) return `+${digits}`;
+  const trimmed = local.trim();
+  const digits = trimmed.replace(/\D/g, '');
+  if (trimmed.startsWith('+')) return `+${digits}`;
+  if (digits.startsWith('592') && digits.length >= 10) return `+${digits}`;
   return `${DIAL_CODE}${digits}`;
 }
 
-/** Enough digits to be a Guyana number (seven after +592). */
+/** Enough to send: seven digits after +592, or eight after another code. */
 export function phoneReady(local: string): boolean {
-  return fullPhone(local).replace(/\D/g, '').length >= 10;
+  const number = fullPhone(local);
+  return number.startsWith(DIAL_CODE) ? number.length - DIAL_CODE.length >= 7 : number.replace(/\D/g, '').length >= 8;
 }
 
 export function AuthPage({ children, onBrandClick }: { children: ReactNode; onBrandClick?: () => void }) {
@@ -74,19 +81,27 @@ export function PhoneField({ id, value, onChange, onEnter, autoFocus = false }: 
 }
 
 /** Six boxes over one real input: typing, pasting and the phone's one-time
- *  code suggestion all land in the input; the boxes only draw it. */
+ *  code suggestion all land in the input; the boxes only draw it. While the
+ *  input has focus, the box where the next digit lands (the last one once all
+ *  six are in) carries the focus ring, so keyboard focus is always visible. */
 export function CodeBoxes({ id, value, onChange, onEnter }: { id: string; value: string; onChange: (_value: string) => void; onEnter?: () => void }) {
+  const [focused, setFocused] = useState(false);
+  const caret = Math.min(value.length, 5);
   return (
     <div className="relative grid grid-cols-6 gap-2">
-      {Array.from({ length: 6 }, (_, index) => (
-        <span
-          key={index}
-          aria-hidden="true"
-          className={`grid h-[60px] place-items-center rounded-xl bg-[var(--swift-card)] font-display text-[34px] font-bold leading-[38px] tabular-nums ${index === value.length ? 'border-2 border-[var(--swift-red)]' : 'border border-[var(--swift-border)]'}`}
-        >
-          {value[index] ?? ''}
-        </span>
-      ))}
+      {Array.from({ length: 6 }, (_, index) => {
+        const current = focused && index === caret;
+        return (
+          <span
+            key={index}
+            aria-hidden="true"
+            data-code-box={current ? 'focused' : 'idle'}
+            className={`grid h-[60px] place-items-center rounded-xl bg-[var(--swift-card)] font-display text-[34px] font-bold leading-[38px] tabular-nums ${current ? 'border-2 border-[var(--swift-red)] shadow-[0_0_0_3px_var(--swift-red-50)]' : 'border border-[var(--swift-border)]'}`}
+          >
+            {value[index] ?? ''}
+          </span>
+        );
+      })}
       <label htmlFor={id} className="sr-only">Verification code</label>
       <input
         id={id}
@@ -96,6 +111,8 @@ export function CodeBoxes({ id, value, onChange, onEnter }: { id: string; value:
         autoFocus
         value={value}
         maxLength={6}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         onChange={(event) => onChange(event.target.value.replace(/\D/g, '').slice(0, 6))}
         onKeyDown={(event) => { if (event.key === 'Enter') onEnter?.(); }}
         className="absolute inset-0 h-full w-full cursor-text opacity-0"

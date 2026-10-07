@@ -34,7 +34,7 @@ import {
   type Cart,
   type Place,
 } from '@/lib/customer';
-import { MONEY_UNKNOWN, lineDisplayAmount, parseAmount, sumAmounts } from '@/lib/money';
+import { MONEY_UNKNOWN, parseAmount, sumAmounts } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
 import {
   cartPaymentOptions,
@@ -50,12 +50,14 @@ const TIPS = [0, 200, 500, 1000];
 
 export default function CartPage() {
   const router = useRouter();
-  useOwnBackButton();
   // [WEB-REDESIGN] Every fresh read of the cart also updates the count the
   // rail and the dock show, so the badge never disagrees with this page.
   const { scope, epoch } = useCustomerSession();
   const queryClient = useQueryClient();
   const [cart, setCart] = useState<Cart | null>(null);
+  // The cart draws its own Back beside its title only once it has lines; in
+  // its loading, error and empty states the shell's Back row stays.
+  useOwnBackButton(Boolean(cart?.items?.length));
   const [addresses, setAddresses] = useState<any[]>([]);
   const [addrId, setAddrId] = useState<string | null>(null);
   const [addressError, setAddressError] = useState<string | null>(null);
@@ -484,7 +486,8 @@ export default function CartPage() {
               <div className={styles.itemCopy}>
                 <div className={styles.itemTop}>
                   <p className={styles.itemName}>{l.name}</p>
-                  <p className={styles.lineTotal}>{money(lineDisplayAmount(l.lineTotal, l.customerPrice, l.quantity))}</p>
+                  {/* The server's own line total, or the em-dash: never price × quantity worked out here. */}
+                  <p className={styles.lineTotal}>{money(l.lineTotal)}</p>
                 </div>
                 {(l.selectedOptionNames?.length ?? 0) > 0 ? <p className={styles.itemMeta}>{l.selectedOptionNames?.join(' · ')}</p> : null}
                 <p className={styles.itemPrice}>{money(l.customerPrice)} each</p>

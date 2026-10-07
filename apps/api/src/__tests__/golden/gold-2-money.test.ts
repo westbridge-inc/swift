@@ -23,6 +23,7 @@ import { NotificationService } from '../../modules/notification/notification.ser
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getMmgProvider, sandboxResetMmg, sandboxSetTxStatus } from '../../providers/mmg/mmg-provider';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
+import { cleanupBillingClocks, cleanupPayerBillingClocks } from '../helpers/billing-clock-cleanup';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
@@ -133,20 +134,35 @@ const eventsOf = async (subscriptionId: string) => (await sys(() => app.prisma.b
   where: { subscriptionId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { type: true, amount: true, idempotencyKey: true },
 }))).map((e) => ({ type: e.type, amount: e.amount == null ? null : Number(e.amount), key: e.idempotencyKey }));
 const countEvents = (subscriptionId: string, type: string) => sys(() => app.prisma.billingEvent.count({ where: { subscriptionId, type: type as never } }));
+/** Every success record's amount, oldest first (a zero is free coverage, never a charge). */
+const successAmounts = async (subscriptionId: string) => (await sys(() => app.prisma.billingEvent.findMany({
+  where: { subscriptionId, type: 'CHARGE_SUCCESS' }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { amount: true },
+}))).map((e) => Number(e.amount));
 const wallet = async (subscriptionId: string) => Number((await sys(() => app.prisma.prepaidBalance.findUnique({ where: { subscriptionId } })))?.balance ?? 0);
 const mmgPayments = (subscriptionId: string) => sys(() => app.prisma.subscriptionPayment.findMany({ where: { subscriptionId, paymentMethod: 'MOBILE_MONEY' }, orderBy: { createdAt: 'asc' } }));
 const noticesTo = async (userId: string) => (await sys(() => app.prisma.notification.findMany({ where: { userId }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { title: true } }))).map((n) => n.title);
 
-/** The 14-day trial ends (its aging input), and the convert-trials job runs. */
-async function trialEnds(p: Partner) {
-  await sys(() => app.prisma.subscription.update({ where: { id: p.subId }, data: { trialEndDate: new Date(Date.now() - 60_000) } }));
-  const convertedFrom = Date.now();
+/** The 14-day trial ends (its aging input), and the convert-trials job runs.
+ *  [#1393] A trial ends when its period does: the trial end, the period end and
+ *  the first due date are one instant (activation writes them together), so the
+ *  aging input moves all three, and the obligation keeps that due instant.
+ *  `endedAgoMs` ages how long ago it ended (the cycle is catching up a week that
+ *  fell due that long ago). The shared clock is born at the trial's due date;
+ *  compressing time here re-anchors that test-owned clock (no money, hold or
+ *  notice exists yet before the first fee), exactly as a real trial end would
+ *  find it. */
+async function trialEnds(p: Partner, endedAgoMs = 60_000) {
+  const ended = new Date(Date.now() - endedAgoMs);
+  await sys(() => cleanupBillingClocks(app.prisma, [p.subId]));
+  await sys(() => app.prisma.subscription.update({ where: { id: p.subId }, data: {
+    trialEndDate: ended, currentPeriodStart: new Date(ended.getTime() - 14 * 86_400_000), currentPeriodEnd: ended, nextBillingDate: ended,
+  } }));
   await subscriptions.convertExpiredTrials();
   const row = await subRow(p.subId);
   expect({ status: row.status, isTrialActive: row.isTrialActive }).toEqual({ status: 'ACTIVE', isTrialActive: false });
-  // Converted and immediately due, so the next billing cycle charges it.
-  expect(row.nextBillingDate.getTime()).toBeGreaterThanOrEqual(convertedFrom - 1000);
-  expect(row.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+  // Converted and due from the trial end itself, so the next billing cycle charges it.
+  expect(row.nextBillingDate.getTime()).toBe(ended.getTime());
+  expect(row.nextBillingDate.getTime()).toBeLessThanOrEqual(Date.now());
   return row.nextBillingDate;
 }
 /** The day's retry clock passes (its aging input). */
@@ -194,11 +210,7 @@ async function chooseMmg(p: Partner, msisdn: string) {
  *  `firstWeekDueAgoMs` ages the first week's due date (the cycle is catching
  *  up a week that fell due that long ago). */
 async function mmgRequestPending(p: Partner, firstWeekDueAgoMs = 0) {
-  let period = await trialEnds(p);
-  if (firstWeekDueAgoMs > 0) {
-    period = new Date(Date.now() - firstWeekDueAgoMs);
-    await sys(() => app.prisma.subscription.update({ where: { id: p.subId }, data: { nextBillingDate: period } }));
-  }
+  const period = await trialEnds(p, firstWeekDueAgoMs > 0 ? firstWeekDueAgoMs : undefined);
   await billing.runBillingCycle();
   const [request] = await mmgPayments(p.subId);
   expect(request).toBeDefined();
@@ -231,6 +243,10 @@ async function purgeFixtures() {
     const vendorIds = vendors.map((v) => v.id);
     if (ids.length === 0 && vendorIds.length === 0) return;
     const allSubIds = (await app.prisma.subscription.findMany({ where: { vendorId: { in: vendorIds } }, select: { id: true } })).map((s) => s.id);
+    // [#1393] Every fixture's shared dunning clock evidence goes first (a kept
+    // partner keeps its money records, never a pending fee demand or hold).
+    await cleanupBillingClocks(app.prisma, allSubIds);
+    await cleanupPayerBillingClocks(app.prisma, ids);
     const sessionIds = (await app.prisma.session.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((s) => s.id);
     // [SAFE-B · retained history] A partner whose owner declared an MMG payer keeps that declaration, and with it the
     // subscription, store, owner and money records it names. Everything else goes exactly as before.
@@ -370,7 +386,9 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
     expect((await call('GET', '/api/v1/vendor/subscription', outsider.token)).statusCode).toBe(403);
 
     // The trial ends; the weekly bill finds an empty wallet three days running.
-    const period = await trialEnds(p);
+    // [#1393] Compressed time: the three daily attempts span the owner's two
+    // full days of grace, so the trial ended two days (and a minute) ago.
+    const period = await trialEnds(p, 2 * DAY + 60_000);
     const expectedLadder: Array<[string, number, string]> = [
       ['PAST_DUE', 1, 'Subscription payment failed'],
       ['PAST_DUE', 2, 'Final warning — payment needed'],
@@ -588,8 +606,11 @@ describe('GOLD-2 · MONEY-03 — the MMG merchant request', () => {
     expect(request.expiresAt!.getTime()).toBeLessThanOrEqual(Date.now() + DAY);
     const asked = await subRow(p.subId);
     expect({ status: asked.status, nextBillingDate: asked.nextBillingDate.getTime() }).toEqual({ status: 'ACTIVE', nextBillingDate: period.getTime() });
-    expect(asked.nextRetryAt!.getTime()).toBeGreaterThan(Date.now() + DAY - 60_000);
-    expect(asked.nextRetryAt!.getTime()).toBeLessThanOrEqual(Date.now() + DAY);
+    // [#1393 owner decision] While MMG confirms the request it holds the shared
+    // clock: no retry, reminder or suspension until it is confirmed either way.
+    expect(asked.billingConfirmationPausedAt).not.toBeNull();
+    expect(asked.nextRetryAt).toBeNull();
+    expect(await sys(() => app.prisma.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: request.id } }))).toMatchObject({ status: 'ACTIVE' });
     expect(await noticesTo(p.owner.userId)).toEqual(['Approve your weekly fee in MMG']);
 
     // Still pending on the phone: the poller settles nothing.
@@ -803,10 +824,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
 
   it('a stopped store pauses at its period end, and the owner resumes it self-serve — charged at the resume, like a renewal', async () => {
     const p = await makePartner('E12e');
-    await trialEnds(p); // [DS198 D1] ACTIVE (the sweep only pauses ACTIVE rows)
-    // trialEnds ages only trialEndDate; in production currentPeriodEnd IS the
-    // trial end, so the period is over too.
-    await sys(() => app.prisma.subscription.update({ where: { id: p.subId }, data: { currentPeriodEnd: new Date(Date.now() - 60_000) } }));
+    await trialEnds(p); // [DS198 D1] ACTIVE (the sweep only pauses ACTIVE rows); the trial's period is over too
     await grantStepUp(app, p.owner.token);
     const stop = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, { 'x-vendor-id': p.vendorId });
     expect(stop.statusCode, stop.body).toBe(200);
@@ -816,7 +834,9 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
     expect({ status: lapsed.status, autoRenew: lapsed.autoRenew, nextRetryAt: lapsed.nextRetryAt })
       .toEqual({ status: 'PAUSED', autoRenew: false, nextRetryAt: null });
     await billing.runBillingCycle();
-    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(0);
+    // [#1393] Billing stopped before the first fee, so nothing was ever owed:
+    // the free trial is recorded as zero-fee coverage and nothing is charged.
+    expect(await successAmounts(p.subId)).toEqual([0]);
 
     await sys(() => app.prisma.prepaidBalance.create({
       data: { subscriptionId: p.subId, balance: RATE_CARD_SMALL_VENDOR, currencyCode: lapsed.currencyCode },
@@ -828,7 +848,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
     // [DS207 F2] Charged AT the resume, through the instant path a top-up
     // uses — not an hour later by the cycle, so there is no unpaid window to
     // work in and stop again. The paused weeks are never charged.
-    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
+    expect(await successAmounts(p.subId)).toEqual([0, RATE_CARD_SMALL_VENDOR]);
     const billed = await subRow(p.subId);
     expect({ status: billed.status, autoRenew: billed.autoRenew }).toEqual({ status: 'ACTIVE', autoRenew: true });
     expect(billed.currentPeriodStart.getTime()).toBeGreaterThanOrEqual(resumedAt - 1000);
@@ -836,7 +856,7 @@ describe('GOLD-2 · VEND-04 — E12 the owner stops and resumes weekly billing',
     expect(await wallet(p.subId)).toBe(0);
 
     await billing.runBillingCycle(); // nothing further is due this week
-    expect(await countEvents(p.subId, 'CHARGE_SUCCESS')).toBe(1);
+    expect(await successAmounts(p.subId)).toEqual([0, RATE_CARD_SMALL_VENDOR]);
   });
 });
 

@@ -17,8 +17,9 @@
 #
 # The `!not-a-secret` marker is REQUIRED for, and only for, a name whose text
 # matches the secret-word pattern (KEY, SECRET, TOKEN, PASSWORD, CREDENTIAL,
-# DSN, PRIVATE, AUTH). One legitimate name does — see the last entry — and the
-# marker makes that a deliberate, reviewed act instead of a silent exception.
+# DSN, PRIVATE, AUTH). Two legitimate names do (NEXT_PUBLIC_ALLOW_SITE_TOKENS and
+# EXPO_PUBLIC_SENTRY_DSN), and the marker makes each a deliberate, reviewed act
+# instead of a silent exception.
 #
 # ADDING AN ENTRY IS A SECURITY DECISION. Before adding one, answer in the
 # justification: what is the value, who can read it once it ships, and what can
@@ -33,3 +34,4 @@ NEXT_PUBLIC_WEB_ORDERING # The public site's pre-launch switch, a launch state a
 VITE_API_URL # The API base URL the Mission Control desktop app calls — the same public hostname the mobile and web apps announce. The packaged app separately REFUSES a plaintext http:// value (apps/desktop/src/lib/api.ts).
 VITE_RESTORE_SESSION # A developer opt-in flag for the desktop preview: set to restore a saved session without the packaged app's prompt. A boolean switch with no value of its own; it grants nothing at runtime.
 EXPO_PUBLIC_LINK_PREVIEW_HOSTS # [MOB-002] Comma-separated PREVIEW/staging hostnames a preview build may accept as Swift deep-link origins, on top of the production web origin. Public hostnames by definition; empty in production builds. It can only ADD exact hosts to the link policy for that build and grants nothing at runtime.
+EXPO_PUBLIC_SENTRY_DSN !not-a-secret # [L13 item 7] The mobile crash-report address (a Sentry-protocol client DSN) for Swift's self-hosted error tracker. Client DSNs are designed to ship inside apps: possession lets an install SUBMIT a crash report and nothing else (no read access, no project settings). Unset means crash reporting is OFF. It matches the secret-word pattern only because the protocol calls the address a DSN. Set by the owner as an EAS environment variable, never committed.

@@ -7,7 +7,7 @@ import { captureError, opsPageCounter, osrmOutcomeCounter } from '../plugins/obs
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
-import { runWithTenant } from '../plugins/tenant-context';
+import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import {
   requireActiveDiscoveryTenant,
   runForActiveDiscoveryTenants,
@@ -439,6 +439,23 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
   return { flaggedPairs: pairs.length };
 }
 
+/** [L01 · tenant wall] The capability a job runs under: its queue and its name. */
+export function jobCapability(queue: string, jobName: string | undefined): string {
+  return `job:${queue}:${jobName || 'unnamed'}`;
+}
+
+/** [L01 · tenant wall] Every job runs as NAMED system work, never unbound.
+ *  A job has no request and so no tenant: before this it ran with no tenant
+ *  context at all, which the tenant wall treats as an unbound composition root
+ *  (refused under TENANT_UNSCOPED_ACCESS=deny; zero rows on a walled login).
+ *  Each handler now runs under its own capability, `job:<queue>:<name>` —
+ *  counted and attributable — and a handler that works for ONE tenant narrows
+ *  itself with runWithTenant inside. Covers the standalone worker and the
+ *  combined API process alike: both build their consumers here. */
+export function inJobContext(queue: string, processor: (job: Job) => Promise<void>): (job: Job) => Promise<void> {
+  return (job: Job) => runAsSystem(jobCapability(queue, job?.name), () => processor(job));
+}
+
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
   const constructedWorkers: Worker[] = [];
@@ -450,7 +467,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     // Two-phase boot: constructing a Worker normally starts its processor
     // immediately. Keep every consumer dormant until all seven connections and
     // every recurring schedule are committed by initializeJobRuntime.
-    const worker = new Worker(name, processor, { ...options, autorun: false });
+    const worker = new Worker(name, inJobContext(name, processor), { ...options, autorun: false });
     constructedWorkers.push(worker);
     worker.on('failed', (job, err) => {
       ctx.log.error({ queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
@@ -525,6 +542,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       switch (job.name) {
         case 'process-billing': {
+          const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period
           // ends, then turns PAUSED (not operable, owing nothing); resuming
@@ -543,7 +561,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, confirmationReviews, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           // [DS213 F1-1] A stopped plan that fails to pause counts too.
@@ -612,6 +630,16 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const tails = await billing.drainTopUpTails();
           if (tails.retried > 0 || tails.pending > 0) {
             ctx.log.warn(tails, '[M-08] top-up tails owed — drained');
+          }
+          // [MMG checkout 2/6] Hosted checkouts: expire the ones no reply ever
+          // came for (I8, no dunning) and look again at every one that is due.
+          // Isolated: a checkout failure never stops the rest of this poll.
+          try {
+            const { MmgCheckoutService } = await import('../modules/billing/mmg-checkout.service');
+            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).pollIntents();
+            if (checkouts.expired + checkouts.checked > 0) ctx.log.info(checkouts, 'MMG checkouts polled');
+          } catch (err) {
+            ctx.log.error({ err }, '[MMG checkout] poll failed; the next poll retries');
           }
           await billing.scanUnkeyedTopUpDuplicates();
           // [G5-F6] A settlement publication that stopped part-way (interrupted,
@@ -898,7 +926,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const results = await runRetentionSweep(ctx.prisma);
         const enforced = results.filter((r) => !r.skipped);
         ctx.log.info(
-          { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).length },
+          { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
         return;
@@ -1643,6 +1671,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const report = await runBillingInvariants(ctx.prisma);
         const broken =
           report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
+          report.unjudgedSubscriptions.length +
           report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
@@ -1652,7 +1681,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} wallet mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger-wallet drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );
@@ -1912,6 +1941,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (dw.recovered.length + dw.flagged.length > 0) {
           ctx.log.error({ recovered: dw.recovered, flagged: dw.flagged }, 'Stranded-delivery watchdog: released pre-pickup orders / flagged goods-in-hand rider drops');
         }
+        // [AF-MOB-006] Custody recovery cases nobody has acted on by their
+        // deadline page operations again, every interval, until a human does.
+        const { escalateOverdueCases } = await import('../modules/custody/custody-recovery');
+        const overdue = await escalateOverdueCases({ prisma: ctx.prisma, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (overdue.length > 0) ctx.log.error({ overdue }, 'Custody recovery cases past their deadline were escalated to operations');
         return;
       }
 
