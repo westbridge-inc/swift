@@ -45,7 +45,7 @@ export function Header({ onOpenNavigation }: { onOpenNavigation?: () => void }) 
 
   return (
     <header className="mc-header">
-      <button type="button" className="mc-btn mc-btn-quiet md:hidden" aria-label="Open navigation" onClick={onOpenNavigation}>
+      <button type="button" className="mc-btn mc-btn-quiet mc-nav-toggle" aria-label="Open navigation" onClick={onOpenNavigation}>
         <Menu size={18} aria-hidden="true" />
       </button>
       <div className="min-w-0 flex-1">

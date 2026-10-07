@@ -360,6 +360,8 @@ body {
 .mc-header-title { font-weight: 700; font-size: .9375rem; line-height: 1.2; }
 .mc-header-blurb { font-size: .75rem; color: var(--mc-muted); }
 .mc-header .mc-btn-quiet { color: var(--mc-muted-strong); min-width: 44px; }
+/* Plain CSS outranks Tailwind's layered utilities, so the phone-only toggle hides here, not with md:hidden. */
+@media (min-width: 768px) { .mc-header .mc-nav-toggle { display: none; } }
 .mc-search-trigger { display: inline-flex; align-items: center; gap: .5rem; min-height: 40px; min-width: 0; max-width: 18rem; padding: .35rem .6rem; border: 1px solid var(--mc-line-strong); border-radius: var(--mc-radius-sm); background: var(--mc-card); color: var(--mc-muted-strong); font: 500 .8125rem var(--mc-font-body); cursor: pointer; }
 .mc-search-trigger:hover { border-color: var(--mc-accent); }
 .mc-search-trigger kbd, .mc-palette-field kbd { font: 500 .6875rem var(--mc-font-body); color: var(--mc-muted); border: 1px solid var(--mc-line-strong); border-radius: 5px; padding: 1px 5px; }
