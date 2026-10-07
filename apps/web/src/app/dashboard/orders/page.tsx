@@ -145,14 +145,14 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
               <input
                 type="checkbox"
                 checked={!!it.picked}
-                disabled={busy || it.subStatus === 'PROPOSED' || it.subStatus === 'REFUNDED'}
+                disabled={busy || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
                 onChange={(e) => pickedMut.mutate({ lineId: it.id, picked: e.target.checked })}
                 className="h-4 w-4 accent-[var(--swift-red)]"
               />
               <span className="flex-1 text-sm">
                 <b>{it.quantity}×</b> {it.name}
               </span>
-              {it.subStatus === 'PROPOSED' && (
+              {it.subStatus === 'PENDING' && (
                 <span className="text-xs font-semibold text-amber-600">Waiting on customer: {it.substituteName}</span>
               )}
               {/* [W-27] "Refunded" said money came back. On a cash order none
@@ -161,7 +161,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                   there is no tender here on which a refund could be owed. */}
               {it.subStatus === 'REFUNDED' && <span className="text-xs font-semibold text-[var(--swift-muted)]">Removed — not charged</span>}
               {it.subStatus === 'REJECTED' && <span className="text-xs font-semibold text-[var(--swift-red)]">Sub declined</span>}
-              {!it.picked && !it.subStatus?.match(/PROPOSED|REFUNDED/) && (
+              {!it.picked && it.subStatus !== 'PENDING' && it.subStatus !== 'REFUNDED' && it.subStatus !== 'REJECTED' && (
                 <button
                   onClick={() => setSubFor(subFor === it.id ? null : it.id)}
                   disabled={busy}
@@ -171,7 +171,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                 </button>
               )}
             </div>
-            {subFor === it.id && (
+            {subFor === it.id && it.subStatus !== 'PENDING' && it.subStatus !== 'REFUNDED' && it.subStatus !== 'REJECTED' && (
               <div className="mt-2 border-t border-black/5 pt-2">
                 <p className="text-xs font-semibold text-[var(--swift-muted)]">Offer a substitute:</p>
                 <div className="mt-1 flex flex-wrap gap-1.5">
