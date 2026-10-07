@@ -28,6 +28,7 @@ import { haversineDistance, estimateDeliveryMinutes } from '../../utils/distance
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { goOnlineRefusal } from '../subscription/go-online-refusals';
 import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
@@ -348,7 +349,7 @@ export async function driverRoutes(app: FastifyInstance) {
       if (live.reason === 'insurance') {
         throw new AppError(403, 'INSURANCE_HIRE_CLASS_REQUIRED', 'A current hire-class motor insurance must be verified before you can carry passengers');
       }
-      throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your documents must be verified before going online');
+      throw goOnlineRefusal('DOCUMENTS', 'DRIVER');
     }
 
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — drivers require a
@@ -359,9 +360,9 @@ export async function driverRoutes(app: FastifyInstance) {
     const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
-        throw new AppError(403, 'SUBSCRIPTION_PAST_DUE', 'Your grace period has ended — pay this week’s fee to go back online.');
+        throw goOnlineRefusal('FEE_GRACE_LAPSED', 'DRIVER');
       }
-      throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active subscription is required to go online');
+      throw goOnlineRefusal('FEE_INACTIVE', 'DRIVER');
     }
 
     // Identity assurance (safety spec §7.1): when the tenant enables liveness,
@@ -381,7 +382,7 @@ export async function driverRoutes(app: FastifyInstance) {
       assertMoverRoleAuthority(authority.activeRole, 'DRIVER');
       await lockMoverSources(tx, feePayer);
       if (!(await moverFeeOperability(tx, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') })).operable) {
-        throw new AppError(400, 'SUBSCRIPTION_REQUIRED', 'An active shared weekly fee is required to go online.');
+        throw goOnlineRefusal('FEE_INACTIVE', 'DRIVER');
       }
 
       // Revalidate the exact authenticated session under the User lock. A
