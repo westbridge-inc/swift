@@ -31,9 +31,10 @@ import { imageContentType, stripImageMetadataStrict } from './images';
 //   - ONLY a photo that store still uses: a menu item, a menu section, its
 //     logo or cover. A replaced photo stops being served, and a key typed into
 //     another store's field publishes nothing;
-//   - ONLY while the store's owner still has an account: deletion commits the
+//   - ONLY while the store's owner account is ACTIVE: deletion closes the
 //     account first and winds the store down after, and that second step can
 //     fail — the closed account alone already stops the photos;
+//   - a check that cannot be made (an error while deciding) is a refusal;
 //   - ONLY real JPEG/PNG/WebP bytes within the upload size limit, typed from
 //     the bytes themselves, read within a deadline, and served with every
 //     metadata tag removed (a camera's GPS position of the shop among them);
@@ -86,9 +87,10 @@ async function storeShowsPhoto(app: FastifyInstance, vendorId: string, stored: s
   // public catalogue read uses. It answers yes or no; nothing else leaves.
   return runAsSystem('public-store-photo', async () => {
     const store = await app.prisma.vendor.findFirst({
-      // The account-deletion state is the owner's, not the store's: a closed
-      // account is DEACTIVATED before its store is wound down.
-      where: { id: vendorId, ...visibleVendorForCaller(), owner: { user: { status: { not: 'DEACTIVATED' } } } },
+      // The owner's account must be ACTIVE — an allow-list, so a closed
+      // account (DEACTIVATED before its store is wound down), a suspended or
+      // banned one, and any state added later all publish nothing.
+      where: { id: vendorId, ...visibleVendorForCaller(), owner: { user: { status: 'ACTIVE' } } },
       select: { coverImageUrl: true, logoUrl: true },
     });
     if (!store) return false;
@@ -112,7 +114,13 @@ export async function serveStorePhoto(app: FastifyInstance, request: FastifyRequ
   const notServed = () => reply.code(404).header('Cache-Control', 'no-store').send();
   const { vendorId, file } = source;
   if (!STORE_ID.test(vendorId) || !photoNameAccepted(file)) return notServed();
-  if (!(await storeShowsPhoto(app, vendorId, source.stored(vendorId, file)))) return notServed();
+  let shown = false;
+  try {
+    shown = await storeShowsPhoto(app, vendorId, source.stored(vendorId, file));
+  } catch (err) {
+    request.log.error({ err }, '[PUBLIC-PHOTOS] could not decide whether the photo is public; not served');
+  }
+  if (!shown) return notServed();
 
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;

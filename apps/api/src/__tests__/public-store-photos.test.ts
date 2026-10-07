@@ -9,7 +9,7 @@ import { buildApp } from '../app';
 import { tenantUnscopedAccessCounter } from '../plugins/observability';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { windDownPartner } from '../modules/user/partner-wind-down';
-import { stripImageMetadata } from '../utils/images';
+import { stripImageMetadata, stripImageMetadataStrict } from '../utils/images';
 
 // ---------------------------------------------------------------------------
 // [PUBLIC-PHOTOS] Stores' own photos are served by the API, whatever the
@@ -496,6 +496,32 @@ describe('[PUBLIC-PHOTOS] a shop\'s location never leaves inside a photo', () =>
     expect(stripImageMetadata(envelope, 'application/octet-stream').equals(envelope)).toBe(true);
   });
 
+  it('a stripper that throws counts as "cannot be removed", never as "nothing to remove"', () => {
+    const hostile = { length: 64, subarray: () => { throw new Error('boom'); } } as unknown as Buffer;
+    for (const type of ['image/jpeg', 'image/png', 'image/webp'] as const) {
+      expect(stripImageMetadataStrict(hostile, type), type).toBeNull();
+    }
+  });
+
+  it('a photo whose tags cannot be taken off is refused at upload, and nothing is stored', async () => {
+    const item = await addItem(storeA.vendorId, storeA.categoryId, null);
+    const before = new Set(bucket.keys());
+    const body = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0xff, 0xf0]), Buffer.from(`Exif\0\0${GPS}`, 'latin1'), Buffer.alloc(40, 7)]);
+    const boundary = `----swift${nanoid(8)}`;
+    const payload = Buffer.concat([
+      Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="shop.jpg"\r\ncontent-type: image/jpeg\r\n\r\n`),
+      body,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    const up = await app.inject({
+      method: 'POST', url: `/api/v1/vendor/items/${item.id}/image`, payload,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, authorization: `Bearer ${storeA.token}` },
+    });
+    expect(up.statusCode).toBe(400);
+    expect([...bucket.keys()].filter((k) => !before.has(k))).toEqual([]);
+    expect((await app.prisma.item.findUnique({ where: { id: item.id }, select: { imageUrl: true } }))!.imageUrl).toBeNull();
+  });
+
   it('a photo whose tags cannot be taken off is not served at all', async () => {
     const key = `items/${storeA.vendorId}/${opaque('.jpg')}`;
     // An EXIF segment whose length runs past the end: nothing can be safely cut.
@@ -509,6 +535,34 @@ describe('[PUBLIC-PHOTOS] a shop\'s location never leaves inside a photo', () =>
 });
 
 describe('[PUBLIC-PHOTOS] an owner who deleted their account publishes nothing — even if the store was not wound down', () => {
+  it('only an ACTIVE owner account publishes: suspended, banned and unverified owners do not', async () => {
+    for (const status of ['SUSPENDED', 'BANNED', 'PENDING_VERIFICATION'] as const) {
+      const store = await makeStoreOwner();
+      const key = `items/${store.vendorId}/${opaque('.jpg')}`;
+      bucket.set(key, { body: jpeg(35), contentType: 'image/jpeg' });
+      await addItem(store.vendorId, store.categoryId, key);
+      await app.prisma.user.update({ where: { id: store.userId }, data: { status } });
+      const res = await get(`/${key}`);
+      expect(res.statusCode, status).toBe(404);
+    }
+  });
+
+  it('a check that cannot be made is a refusal: an error while deciding never serves the photo', async () => {
+    const before = asked.length;
+    const spy = vi.spyOn(app.prisma.vendor, 'findFirst').mockRejectedValueOnce(new Error('database unavailable'));
+    try {
+      const res = await get(`/${keys.cover}`);
+      expect(spy).toHaveBeenCalled();
+      expect(res.statusCode).toBe(404);
+      expect(res.headers['cache-control']).toBe('no-store');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(asked.slice(before)).toEqual([]);
+    // And the photo is served again once the check can be made.
+    expect((await get(`/${keys.cover}`)).statusCode).toBe(200);
+  });
+
   it('the account is closed (DEACTIVATED) while the store row is still ACTIVE: its photos are not served', async () => {
     const store = await makeStoreOwner();
     const key = `items/${store.vendorId}/${opaque('.jpg')}`;

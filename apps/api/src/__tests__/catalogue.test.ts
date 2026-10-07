@@ -356,9 +356,18 @@ describe('Image upload — validated, behind the StorageProvider', () => {
   });
 
   it('accepts a real PNG and stores a URL', async () => {
+    // A real PNG's structure: signature, then length-prefixed chunks ending in
+    // IEND. (A signature followed by filler is not one, and a menu photo whose
+    // metadata cannot be found and removed is refused — public-store-photos.)
+    const chunk = (type: string, data: Buffer) => {
+      const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+      return Buffer.concat([len, Buffer.from(type, 'ascii'), data, Buffer.alloc(4)]);
+    };
     const png = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      Buffer.alloc(64, 1),
+      chunk('IHDR', Buffer.alloc(13, 1)),
+      chunk('IDAT', Buffer.alloc(32, 1)),
+      chunk('IEND', Buffer.alloc(0)),
     ]);
     const { payload, contentType } = multipartBody('burger.png', 'image/png', png);
 

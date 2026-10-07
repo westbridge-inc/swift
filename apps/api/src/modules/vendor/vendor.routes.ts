@@ -46,7 +46,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
-import { ALLOWED_IMAGE_TYPES, IMAGE_EXTENSION, imageContentType, looksLikeImage } from '../../utils/images';
+import { ALLOWED_IMAGE_TYPES, IMAGE_EXTENSION, imageContentType, looksLikeImage, stripImageMetadataStrict } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
@@ -2885,6 +2885,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     const sniffed = imageContentType(buffer);
     if (!looksLikeImage(buffer) || !sniffed) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    }
+    // [PUBLIC-PHOTOS] A menu photo is public, so one whose metadata (a camera's
+    // GPS position of the shop among it) cannot be removed is refused rather
+    // than stored with it. The storage seam then strips it the same way.
+    if (!stripImageMetadataStrict(buffer, sniffed)) {
+      throw new AppError(400, 'BAD_IMAGE', 'This photo could not be prepared for the menu. Please choose another photo.');
     }
 
     // [PUBLIC-PHOTOS] Named by what the bytes are, never by the uploaded
