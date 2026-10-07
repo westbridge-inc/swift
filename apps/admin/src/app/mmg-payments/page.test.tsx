@@ -10,7 +10,13 @@ import {
   type MmgCheckoutSupportRow,
 } from '@swift/types';
 import MmgPaymentsPage from './page';
-import { API_ORIGIN, mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
+import { API_ORIGIN, mockApi as mockAnyApi, renderWithQuery, type ApiReply, type ApiRequest } from '@/test/test-utils';
+
+// [MC-AD3] The page also reads the held weekly-fee payments (its own section, graded in app/doors.test.tsx).
+// These cases are about the search, so that read answers "none held" and every other request goes to the case.
+const mockApi = (handler: (_request: ApiRequest) => ApiReply | Promise<ApiReply>) => mockAnyApi((request) => (
+  request.url.pathname === '/api/v1/admin/billing/confirmations' ? { body: { success: true, data: [] } } : handler(request)
+));
 
 // ---------------------------------------------------------------------------
 // [MMG support lookup] The console's MMG payments page, against the API's own

@@ -7,6 +7,7 @@ import { ArrowLeft, Phone } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund, errorStatus } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { PaymentDispute } from '@/components/mc/PaymentDispute';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
@@ -161,6 +162,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       </div>
 
       {actions.banner}
+
+      {/* [MC-AD5] an MMG payment dispute waits for a person's decision here */}
+      <PaymentDispute order={o} actions={actions} />
 
       {/* [A-14] An obligation nobody has settled is money the customer is still
           waiting for. It says so, with its age, until evidence closes it. */}

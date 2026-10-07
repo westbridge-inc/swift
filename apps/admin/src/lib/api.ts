@@ -917,3 +917,71 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 };
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
+
+// ── [MC-AD3] Weekly-fee payments held for a person's decision ─────────────
+// GET /admin/billing/confirmations (confirmation-finance.ts confirmationReviewQueue). A held MMG checkout,
+// card payment or recorded payment waits here; a paused obligation is listed but not resolvable here.
+export interface FeeConfirmation {
+  id: string;
+  subscriptionId: string;
+  epoch: number;
+  clockEpoch: number;
+  clockVersion: number;
+  status: string;
+  resolvable: boolean;
+  source: 'MMG_CHECKOUT' | 'CARD_SESSION' | 'PAYMENT' | 'OBLIGATION';
+  sourceId: string;
+  reason: string;
+  beganAt: string;
+  reviewDueAt: string;
+  overdue: boolean;
+  remainingGraceMs: number;
+}
+export const fetchFeeConfirmations = (): Promise<Envelope<FeeConfirmation[]>> => apiFetch('/api/v1/admin/billing/confirmations');
+/** C4 (money): a second admin approves it (202 APPROVAL_REQUIRED). PAID is accepted only on the provider evidence
+ *  Swift already recorded — the server refuses a typed claim (409 SETTLEMENT_EVIDENCE_REQUIRED). */
+export const resolveFeeConfirmation = (
+  id: string,
+  decision: { sourceId: string; epoch: number; clockVersion: number; decision: 'PAID' | 'UNPAID'; evidenceReference: string; providerPaymentId?: string },
+  reason: string,
+) => apiFetch(`/api/v1/admin/billing/confirmations/${encodeURIComponent(id)}/resolve`, {
+  method: 'POST',
+  body: JSON.stringify({
+    sourceId: decision.sourceId, epoch: decision.epoch, clockVersion: decision.clockVersion, decision: decision.decision,
+    evidenceReference: decision.evidenceReference, ...(decision.providerPaymentId ? { providerPaymentId: decision.providerPaymentId } : {}), reason,
+  }),
+  reason,
+});
+
+// ── [MC-AD4] Paid MMG orders held for review (ready too long) ─────────────
+export interface HeldOrder {
+  id: string;
+  orderNumber: string;
+  orderType: string;
+  status: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  totalAmount: number;
+  readyAt: string | null;
+  foodAgeHeldAt: string | null;
+  placedAt: string | null;
+  heldMinutes: number | null;
+  readyMinutes: number | null;
+  vendor: { id: string; name: string } | null;
+}
+export const fetchHeldOrders = (): Promise<Envelope<HeldOrder[]>> => apiFetch('/api/v1/admin/orders/held');
+/** C2 (operational): the only release the server offers today is "deliver anyway". */
+export const releaseHeldOrder = (id: string) =>
+  apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/food-age-hold/release`, { method: 'POST', body: JSON.stringify({ decision: 'DELIVER_ANYWAY' }) });
+
+// ── [MC-AD5] An MMG payment dispute on a store order ──────────────────────
+/** C3: decided against the claim revision the operator reviewed; the reason is the decision note too. */
+export const resolvePaymentDispute = (
+  id: string,
+  decision: { resolution: 'CUSTOMER_PAID' | 'CUSTOMER_DID_NOT_PAY'; expectedClaimRevision: number },
+  reason: string,
+) => apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/payment-claim/resolve`, {
+  method: 'POST',
+  body: JSON.stringify({ ...decision, note: reason }),
+  reason,
+});

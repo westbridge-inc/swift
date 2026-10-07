@@ -101,6 +101,13 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
       return { tone: 'refused', title: 'The owner closed their Swift account', next: `${NOTHING_CHANGED} A closed account's store is not reopened from the console.` };
     case 'STORE_CLOSED':
       return { tone: 'refused', title: 'This store is closed', next: `${NOTHING_CHANGED} A closed store is not reopened from the console.` };
+    case 'SETTLEMENT_EVIDENCE_REQUIRED':
+      // [MC-AD3] A held fee payment is confirmed PAID only on the provider's own record, never a typed claim.
+      return {
+        tone: 'refused',
+        title: "The provider's record of this payment isn't on file",
+        next: `${NOTHING_CHANGED} Swift credits a week only on the provider's own confirmation. Look the payment up in MMG payments; once Swift's lookup has recorded it, decide again.`,
+      };
     case 'ACTIVATION_HELD':
       return { tone: 'refused', title: 'The store changed while you were acting', next: `${NOTHING_CHANGED} Refresh and check its documents before trying again.` };
     case 'ALREADY_ACTIVE':

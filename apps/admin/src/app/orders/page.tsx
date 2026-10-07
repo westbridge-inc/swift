@@ -14,6 +14,7 @@ import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { ListToolbar, Pager } from '@/components/mc/ListControls';
+import { HeldOrders } from '@/components/mc/HeldOrders';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-3] Orders.
@@ -86,6 +87,8 @@ export default function OrdersPage() {
     <div className="mc-page">
       <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Orders</h1>
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-4" />
+      {/* [MC-AD4] paid MMG orders held for a person's decision */}
+      <HeldOrders />
       <ListToolbar
         state={state}
         onChange={setState}
