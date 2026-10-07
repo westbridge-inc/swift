@@ -23,6 +23,11 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { BookingService, type BookingConfig } from '../booking/booking.service';
 import { computeDaySlots, fmtSlotTime } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import {
+  publicOperatingHours,
+  publicStorefrontCategory,
+  publicStorefrontImage,
+} from './storefront-projection';
 import { tagsForRole, ensureRatingTagsSeeded } from '../rating/tag-taxonomy.seed';
 import { canonicalTag } from '../rating/tag-registry';
 import { RATING_MAX_TAGS } from '../rating/rating-math';
@@ -1533,15 +1538,10 @@ export async function customerRoutes(app: FastifyInstance) {
         })) > 0
       : false;
 
-    // Zero markup — customers pay the vendor base price (revenue = subscriptions).
-    const categories = vendor.categories.map((cat) => ({
-      ...cat,
-      items: cat.items.map((item) => ({
-        ...item,
-        basePrice: Number(item.basePrice),
-        customerPrice: Number(item.basePrice),
-      })),
-    }));
+    // [Row 77] Field-by-field guest allowlist (storefront-projection.ts) —
+    // never a spread of the raw category/item rows. A category the store has
+    // switched off is not on its public page.
+    const categories = vendor.categories.filter((cat) => cat.isActive).map(publicStorefrontCategory);
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1577,7 +1577,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cuisineTypes: vendor.cuisineTypes,
         logoUrl: vendor.logoUrl,
         coverImageUrl: vendor.coverImageUrl,
-        images: vendor.images,
+        images: vendor.images.map(publicStorefrontImage),
         addressLine1: vendor.addressLine1,
         city: vendor.city,
         latitude: vendor.latitude,
@@ -1606,7 +1606,7 @@ export async function customerRoutes(app: FastifyInstance) {
         estimatedPrepTime: vendor.estimatedPrepTime,
         minOrderAmount: Number(vendor.minOrderAmount),
         deliveryRadius: vendor.deliveryRadius,
-        operatingHours: vendor.operatingHours,
+        operatingHours: vendor.operatingHours.map(publicOperatingHours),
         categories,
         isFavorite,
         // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
@@ -2618,7 +2618,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // response — which the app discards on navigation — so "Share
         // tracking" had nothing durable to build a link from. Customer-scoped
         // read (this route already proves ownership); null on non-courier rows.
-        courierTrackingToken: order.courierTrackingToken,
+        courierTrackingToken: null,
         deliveryAddress: order.deliveryAddress,
         deliveryLat: order.deliveryLat,
         deliveryLng: order.deliveryLng,
