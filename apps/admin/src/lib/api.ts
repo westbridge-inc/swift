@@ -300,7 +300,7 @@ export interface ActivationChecklistItem {
   /** Approved, and a newer submission of the same type is waiting for review. */
   renewalPending: boolean;
 }
-export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'CLOSED';
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
 export interface VendorActivationChecklist {
   vendorId: string;
   /** The owner's user id: the Review Center's applicant. */

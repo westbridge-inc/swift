@@ -1453,7 +1453,7 @@ export async function adminRoutes(app: FastifyInstance) {
         // [MC-PR2 · Opus S3-1] Decide again under the locks the competing writers take, so nothing that
         // commits after the first read can be reopened: the owner's account row (account deletion and the
         // partner wind-down take it; so do document decisions, revocations and expiry), then the store row.
-        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR UPDATE /* admin-reinstate-owner-authority */`;
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${goLive.ownerUserId} FOR NO KEY UPDATE /* admin-reinstate-owner-authority */`;
         await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* admin-reinstate-store */`;
         const fresh = await tx.vendor.findUniqueOrThrow({
           where: { id },
@@ -1465,7 +1465,7 @@ export async function adminRoutes(app: FastifyInstance) {
         const refusedNow = again === 'CAN_REINSTATE' ? null
           : vendorActivationRefusal(again, vendor.name, freshGoLive) ?? new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
         if (refusedNow) throw refusedNow;
-        const activationValidUntil = await verification.checklistEvidenceValidUntil(goLive.ownerUserId, goLive.role, tx);
+        const activationValidUntil = await verification.checklistEvidenceValidUntil(freshGoLive.ownerUserId, freshGoLive.role, tx);
         // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
         // suspension source survives it for a later heal or payment to act on. The CAS names the exact
         // suspension decided above, under the lock.

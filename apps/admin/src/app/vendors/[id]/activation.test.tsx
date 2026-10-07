@@ -107,7 +107,7 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     const { user } = page();
     await user.click(await screen.findByRole('button', { name: 'Activate now…' }));
     const dialog = screen.getByRole('dialog', { name: 'Activate Target Store now?' });
-    expect(dialog.textContent).toContain("Only this store is activated; the owner's other stores are not changed.");
+    expect(dialog.textContent).toContain("Only this store is activated. A valid business registration also promotes the owner's other stores to registered sellers and lifts their unregistered-seller limits.");
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
     await user.click(within(dialog).getByRole('button', { name: 'Activate store' }));
     expect((await screen.findByRole('status')).textContent).toContain('Target Store is live and can take orders.');
@@ -135,6 +135,7 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     page();
     expect(await screen.findByText(/its weekly fee is unpaid or its billing is stopped/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
+    expect(screen.getByText(/After payment, refresh this checklist and reinstate the admin suspension/)).toBeTruthy();
   });
 
   it('[MC-AD2] a fee paid up but a billing mark left on the store: the server says CAN_REINSTATE, and the page offers it', async () => {
@@ -155,6 +156,13 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Reinstate store' }));
     expect(await screen.findByText('This store is held by its weekly fee')).toBeTruthy();
     expect(screen.getAllByText(/paid through the MMG checkout page/).length).toBeGreaterThan(0);
+  });
+
+  it('a restricted owner must be reinstated before their store', async () => {
+    serve('SUSPENDED', checklistOf('OWNER_ACCOUNT_RESTRICTED', { storeStatus: 'SUSPENDED', suspensionSource: 'ADMIN' }));
+    page();
+    expect(await screen.findByText(/The owner's account is banned or suspended/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
   });
 
   it('the store of an owner who closed their account offers nothing and says why', async () => {
