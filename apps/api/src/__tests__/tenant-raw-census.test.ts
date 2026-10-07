@@ -62,6 +62,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/safety/sos-retrigger.ts': { sites: 3, role: 'JOB_PENDING' },
   'modules/subscription/mover-fee-authority.ts': { sites: 1, role: 'SHARED' },
   'modules/subscription/mover-fee-history.ts': { sites: 3, role: 'SHARED' },
+  // isFiction (store-review demo check): reached only from authenticated requests — document
+  // submission (vendor, verification routes) and an admin's approval (admin routes).
+  'modules/subscription/subscription.service.ts': { sites: 1, role: 'REQUEST' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
   'modules/verification/mover-document-authority.ts': { sites: 2, role: 'SHARED' },
