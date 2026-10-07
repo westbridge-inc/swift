@@ -63,7 +63,7 @@ function doubles(opts: { commit?: 'ok' | 'fail-after-work'; receiptLanded?: bool
     prisma: {
       user: {
         findUniqueOrThrow: vi.fn(async () => ({
-          id: 'customer-1', tenantId: 'tenant-1', countryCode: 'GY', trustLevel: 'L2', selfieCapturedAt: new Date('2026-09-12T00:00:00Z'),
+          id: 'customer-1', tenantId: 'tenant-1', tenant: { kind: 'PRODUCTION' }, countryCode: 'GY', trustLevel: 'L2', selfieCapturedAt: new Date('2026-09-12T00:00:00Z'),
         })),
       },
       order: { findFirst: vi.fn(async () => null), count: vi.fn(async () => 3) },
