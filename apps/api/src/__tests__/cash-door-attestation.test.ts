@@ -207,6 +207,10 @@ afterAll(async () => {
     await app.prisma.session.deleteMany({ where: { id: { in: sessionIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: createdUserIds } } }).catch(() => {});
     await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } }).catch(() => {});
+    // Every suite shares the test database. Leaving an active fixture tenant
+    // behind makes the public catalogue correctly refuse an ambiguous tenant.
+    await app.prisma.tenant.deleteMany({ where: { id: { in: createdTenantIds } } });
+    expect(await app.prisma.tenant.count({ where: { id: { in: createdTenantIds } } })).toBe(0);
   }, 'test-cleanup:cash-door-attestation');
   await app.close();
 });
