@@ -39,6 +39,7 @@ import { parseMenuText } from '../../utils/menu-text-parse';
 import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { storeHoldRefusal } from './store-hold';
 import { ReviewDemoMoneyRefusedError, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
@@ -715,7 +716,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     // closing their account) keeps the ordinary rule.
     const billingHold = vendor.status === 'SUSPENDED' && vendor.suspensionSource === 'BILLING';
     if ((vendor.status === 'SUSPENDED' && !(work === 'IN_FLIGHT' && billingHold)) || vendor.status === 'CLOSED') {
-      throw new AppError(403, 'VENDOR_SUSPENDED', 'Your store is not active and cannot work orders. Reopen it from Account.');
+      // [NO-DEAD-ENDS] Name the hold, what lifts it and what still works —
+      // never "Reopen it from Account": no such control exists (store-hold.ts).
+      throw storeHoldRefusal(vendor);
     }
     const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
     if (!verified) {

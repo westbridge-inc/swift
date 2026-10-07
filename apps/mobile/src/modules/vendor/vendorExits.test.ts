@@ -25,6 +25,7 @@ const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:]
 const STACK = strip(read('./VendorStack.tsx'));
 const SETUP = strip(read('./screens/BusinessSetup.tsx'));
 const SUSPENDED = strip(read('./screens/VendorBillingSuspended.tsx'));
+const HELD = strip(read('./screens/VendorStoreBlocked.tsx'));
 const SHARED = strip(read('./shared.tsx'));
 
 /** One top-level function's source, up to the next top-level declaration. */
@@ -75,6 +76,10 @@ describe('no business screen is a one-way door', () => {
 
   it('the billing-paused screen offers Switch app beside Log out', () => {
     expectSwiftAndSignOutExits(fn(SUSPENDED, 'VendorBillingSuspended'));
+  });
+
+  it('[NO-DEAD-ENDS] the held-store screen (suspended by Swift, closed) offers Switch app beside Log out', () => {
+    expectSwiftAndSignOutExits(fn(HELD, 'VendorStoreBlocked'));
   });
 
   it('the List-your-business screen keeps the same exits', () => {

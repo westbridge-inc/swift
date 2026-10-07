@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  billingBlocked, classifyVendorProfile, failureOf, memberRoleOf, unwrapOptionalVendorProfile,
+  billingBlocked, classifyVendorProfile, failureOf, heldStoreOrders, memberRoleOf, storeHoldOf, unwrapOptionalVendorProfile,
 } from './vendorProfile';
 
 // ---------------------------------------------------------------------------
@@ -173,5 +173,43 @@ describe('[MOB-038] a blocked subscription blocks, mirrored or not', () => {
     // billingBlocked says the subscription is fine; the caller keeps the
     // moderation reason rather than telling them to pay a bill they do not owe
     expect(billingBlocked({ status: 'SUSPENDED', suspensionSource: 'MODERATION', subscription: { status: 'ACTIVE' } })).toBe(false);
+  });
+});
+
+describe('[NO-DEAD-ENDS] storeHoldOf names the hold the server actually wrote', () => {
+  it('reads the three sources the server writes and the closed status', () => {
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'BILLING', subscription: { status: 'SUSPENDED' } })).toBe('FEE_UNPAID');
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'ADMIN', subscription: { status: 'ACTIVE' } })).toBe('SUSPENDED_BY_SWIFT');
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN', subscription: { status: 'CANCELLED' } })).toBe('OWNER_ACCOUNT_CLOSED');
+    expect(storeHoldOf({ status: 'CLOSED', suspensionSource: null })).toBe('CLOSED');
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: null })).toBe('SUSPENDED');
+  });
+
+  it('a hold only Swift lifts wins over an unpaid fee: paying would not reopen the store', () => {
+    expect(storeHoldOf({ status: 'SUSPENDED', suspensionSource: 'ADMIN', subscription: { status: 'SUSPENDED' } })).toBe('SUSPENDED_BY_SWIFT');
+  });
+
+  it('a blocked subscription not mirrored onto a working store is still a fee hold; a healthy or pending store has none', () => {
+    expect(storeHoldOf({ status: 'ACTIVE', subscription: { status: 'CHURNED' } })).toBe('FEE_UNPAID');
+    expect(storeHoldOf({ status: 'ACTIVE', subscription: { status: 'ACTIVE' } })).toBeNull();
+    expect(storeHoldOf({ status: 'PENDING_APPROVAL', subscription: { status: 'TRIALING' } })).toBeNull();
+    expect(storeHoldOf(null)).toBeNull();
+  });
+});
+
+describe('[NO-DEAD-ENDS] heldStoreOrders splits what can be finished from what waits to be declined', () => {
+  it('accepted, cooking and ready orders are finished; new ones wait; done ones are gone', () => {
+    const split = heldStoreOrders([
+      { id: 'a', status: 'ACCEPTED' }, { id: 'p', status: 'PREPARING' }, { id: 'r', status: 'READY_FOR_PICKUP' },
+      { id: 'n', status: 'PENDING' }, { id: 'pl', status: 'PLACED' },
+      { id: 'd', status: 'DELIVERED' }, { id: 'c', status: 'CANCELLED' }, { id: 'x', status: 'COMPLETED' },
+      { status: 'PREPARING' }, null,
+    ]);
+    expect(split.accepted.map((o) => o.id)).toEqual(['a', 'p', 'r']);
+    expect(split.waiting.map((o) => o.id)).toEqual(['n', 'pl']);
+  });
+  it('a missing or malformed board is empty, never a crash', () => {
+    expect(heldStoreOrders(undefined)).toEqual({ accepted: [], waiting: [] });
+    expect(heldStoreOrders({ data: [] })).toEqual({ accepted: [], waiting: [] });
   });
 });

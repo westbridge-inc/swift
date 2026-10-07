@@ -20,11 +20,12 @@ import { useVendorPreview } from '../../stores/vendorPreview';
 import { VendorBulkImportScreen } from './screens/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
 import { catalogueMeta, safeVendorRole, TabHeader } from './shared';
-import { billingBlocked } from '../../lib/vendorProfile';
+import { storeHoldOf } from '../../lib/vendorProfile';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
 import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { VendorOps } from './screens/VendorOps';
 import { VendorBillingSuspended } from './screens/VendorBillingSuspended';
+import { VendorStoreBlocked } from './screens/VendorStoreBlocked';
 import { VendorMenuScreen } from './screens/VendorMenuScreen';
 import { VendorItemEditorScreen } from './screens/VendorItemEditorScreen';
 import { VendorInsightsScreen } from './screens/VendorInsightsScreen';
@@ -112,16 +113,19 @@ function VendorRoot() {
     );
   }
   if (!store) return <BusinessSetup />;
-  const suspensionSource = store.suspensionSource == null ? null : String(store.suspensionSource).toUpperCase();
   // [MOB-038] A blocked subscription blocks, whether or not it was mirrored
-  // onto the store row. Requiring store.status === 'SUSPENDED' left a store
-  // whose subscription was SUSPENDED or CHURNED taking orders it could not be
-  // paid for. The suspension SOURCE still decides which reason is shown.
-  const billingSuspended = billingBlocked(store) && suspensionSource !== 'MODERATION';
+  // onto the store row. [NO-DEAD-ENDS] The suspension SOURCE decides which
+  // reason is shown: a fee hold (pay, and finish what was accepted), or a hold
+  // only Swift lifts (suspended by Swift, owner account closed, closed). The
+  // old check named a 'MODERATION' source the server never writes, so those
+  // stores fell through to the onboarding checklist with no reason at all.
+  const hold = storeHoldOf(store);
   return (
     <>
-      {billingSuspended ? (
+      {hold === 'FEE_UNPAID' ? (
         <VendorBillingSuspended store={store} stores={stores} myRole={myRole} />
+      ) : hold ? (
+        <VendorStoreBlocked store={store} stores={stores} myRole={myRole} hold={hold} />
       ) : store.status !== 'ACTIVE' && !preview ? (
         <VendorOnboarding store={store} onPreview={() => enterPreview()} />
       ) : (
