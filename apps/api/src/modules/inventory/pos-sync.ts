@@ -55,7 +55,8 @@ export const newUploadId = (): string => randomBytes(18).toString('base64url');
 const MAX_PRICE = 10_000_000;
 const MAX_COUNT = 1_000_000;
 
-type Reading<T> = { kind: 'blank' } | { kind: 'ok'; value: T } | { kind: 'bad'; reason: string };
+/** (Not `kind`: the mobile notification census reads every `kind: '…'` literal in the API as a push kind.) */
+type Reading<T> = { reading: 'blank' } | { reading: 'ok'; value: T } | { reading: 'bad'; reason: string };
 
 const GROUPED = /^\d{1,3}(,\d{3})+(\.\d+)?$/;
 const PLAIN = /^\d+(\.\d+)?$/;
@@ -63,29 +64,29 @@ const PLAIN = /^\d+(\.\d+)?$/;
 /** A selling price as a till writes it: "1500", "1,500.00", "$1500", "GYD 1,500", "G$1500". */
 export function readPrice(raw: string | undefined): Reading<number> {
   const text = (raw ?? '').trim();
-  if (text === '') return { kind: 'blank' };
+  if (text === '') return { reading: 'blank' };
   const bare = text.replace(/^(?:GY\$|G\$|GYD|\$)\s*/i, '').replace(/\s*GYD$/i, '');
-  if (!GROUPED.test(bare) && !PLAIN.test(bare)) return { kind: 'bad', reason: `The price "${text}" is not a number Swift can read.` };
+  if (!GROUPED.test(bare) && !PLAIN.test(bare)) return { reading: 'bad', reason: `The price "${text}" is not a number Swift can read.` };
   const [, cents = ''] = bare.split('.');
-  if (cents.length > 2) return { kind: 'bad', reason: `The price "${text}" has more than 2 decimal places.` };
+  if (cents.length > 2) return { reading: 'bad', reason: `The price "${text}" has more than 2 decimal places.` };
   const value = Number(bare.replace(/,/g, ''));
-  if (!(value > 0)) return { kind: 'bad', reason: 'The price is zero. Swift never sells an item for nothing from a file.' };
-  if (value > MAX_PRICE) return { kind: 'bad', reason: `The price is over Swift's limit of ${MAX_PRICE.toLocaleString('en-US')}.` };
-  return { kind: 'ok', value };
+  if (!(value > 0)) return { reading: 'bad', reason: 'The price is zero. Swift never sells an item for nothing from a file.' };
+  if (value > MAX_PRICE) return { reading: 'bad', reason: `The price is over Swift's limit of ${MAX_PRICE.toLocaleString('en-US')}.` };
+  return { reading: 'ok', value };
 }
 
 /** A stock count: whole units, zero or more. "12", "1,200", "12.000" read; "2.5" and "-3" do not. */
 export function readCount(raw: string | undefined): Reading<number> {
   const text = (raw ?? '').trim();
-  if (text === '') return { kind: 'blank' };
+  if (text === '') return { reading: 'blank' };
   const negative = text.startsWith('-');
   const bare = negative ? text.slice(1) : text;
-  if (!GROUPED.test(bare) && !PLAIN.test(bare)) return { kind: 'bad', reason: `The stock "${text}" is not a number Swift can read.` };
+  if (!GROUPED.test(bare) && !PLAIN.test(bare)) return { reading: 'bad', reason: `The stock "${text}" is not a number Swift can read.` };
   const value = Number(bare.replace(/,/g, ''));
-  if (negative && value !== 0) return { kind: 'bad', reason: 'The stock is below zero in the file.' };
-  if (!Number.isInteger(value)) return { kind: 'bad', reason: `The stock "${text}" is not a whole number. Swift counts whole units.` };
-  if (value > MAX_COUNT) return { kind: 'bad', reason: `The stock is over Swift's limit of ${MAX_COUNT.toLocaleString('en-US')}.` };
-  return { kind: 'ok', value };
+  if (negative && value !== 0) return { reading: 'bad', reason: 'The stock is below zero in the file.' };
+  if (!Number.isInteger(value)) return { reading: 'bad', reason: `The stock "${text}" is not a whole number. Swift counts whole units.` };
+  if (value > MAX_COUNT) return { reading: 'bad', reason: `The stock is over Swift's limit of ${MAX_COUNT.toLocaleString('en-US')}.` };
+  return { reading: 'ok', value };
 }
 
 /** An item of the store, as the plan reads it. */
@@ -202,9 +203,9 @@ export function buildSyncPlan(input: {
     if (owners.length > 1) return refuse(`${owners.length} items in your store have this SKU. Give each one its own SKU on Swift first.`);
 
     const price = readPrice(r['basePrice']);
-    if (price.kind === 'bad') return refuse(price.reason);
+    if (price.reading === 'bad') return refuse(price.reason);
     const count = readCount(r['stockQuantity']);
-    if (count.kind === 'bad') return refuse(count.reason);
+    if (count.reading === 'bad') return refuse(count.reason);
     const available = (r['isAvailable'] ?? '').trim();
     if (available !== '' && available !== 'true' && available !== 'false') {
       return refuse(`The "available for sale" cell says "${available}". It should say yes or no.`);
@@ -213,8 +214,8 @@ export function buildSyncPlan(input: {
     if (owners.length === 1) {
       matched.push({
         row: rowNo, item: owners[0]!, fileName: name, sku,
-        count: count.kind === 'ok' ? count.value : null,
-        price: price.kind === 'ok' ? price.value : null,
+        count: count.reading === 'ok' ? count.value : null,
+        price: price.reading === 'ok' ? price.value : null,
         tillOff: available === 'false',
       });
       return;
@@ -222,7 +223,7 @@ export function buildSyncPlan(input: {
 
     // A SKU the store does not have yet: a new item, if the file says enough.
     const category = (r['category'] ?? '').trim();
-    const lacking = [!name && 'a name', !category && 'a category', price.kind !== 'ok' && 'a price'].filter(Boolean);
+    const lacking = [!name && 'a name', !category && 'a category', price.reading !== 'ok' && 'a price'].filter(Boolean);
     if (lacking.length > 0) return refuse(`This SKU is not in your store yet, and a new item needs ${lacking.join(', ')}.`);
     const description = (r['description'] ?? '').trim();
     const unit = (r['unit'] ?? '').trim();
@@ -233,7 +234,7 @@ export function buildSyncPlan(input: {
     newItems.push({
       row: rowNo, sku, name, category, description, unit,
       price: (price as { value: number }).value,
-      stock: count.kind === 'ok' ? count.value : null,
+      stock: count.reading === 'ok' ? count.value : null,
       isAvailable: available !== 'false',
     });
   });
