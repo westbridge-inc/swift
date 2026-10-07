@@ -352,7 +352,7 @@ function CollectionRow({ row, onLogged }: { row: Record<string, unknown>; onLogg
           onClick={() => log.mutate()}
           className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs disabled:opacity-40"
         >
-          Log the call
+          Log contact
         </button>
       </div>
       {outcome && problem && <p className="text-xs text-amber-500 mt-1">{problem}</p>}

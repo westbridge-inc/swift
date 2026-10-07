@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -268,6 +268,23 @@ describe('[MC-PR1] <ReasonDialog> runs the action and keeps the refusal in the p
     expect(screen.getByRole('dialog')).toBeTruthy();
     release({});
     expect(await done).toEqual({ tone: 'success', title: 'Suspended.' });
+  });
+
+  it('[MC shell] a double click on the confirm button runs the action ONCE (a money action must not ask twice)', async () => {
+    const user = mount();
+    let release: (_v: unknown) => void = () => {};
+    const submit = vi.fn(() => new Promise((r) => { release = r; }));
+    const done = api!.run({ title: 'Waive the fee?', confirmLabel: 'Waive', submit, success: () => 'Sent.' });
+    const dialog = await screen.findByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    const confirm = within(dialog).getByRole('button', { name: 'Waive' });
+    await act(async () => {
+      confirm.click();
+      confirm.click();
+    });
+    expect(submit).toHaveBeenCalledTimes(1);
+    release({});
+    expect(await done).toEqual({ tone: 'success', title: 'Sent.' });
   });
 
   it('Tab stays inside the panel', async () => {
