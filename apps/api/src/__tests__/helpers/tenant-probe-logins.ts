@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 
 /** Per-suite logins: parallel lanes never grant privileges to one another's roles. */
-export async function createTenantProbeLogins(prisma: PrismaClient, testUrl: string) {
+export async function createTenantProbeLogins(prisma: Pick<PrismaClient, '$executeRawUnsafe'>, testUrl: string) {
   const suffix = randomBytes(8).toString('hex');
   const requestRole = `l04_request_${suffix}`;
   const systemRole = `l04_system_${suffix}`;
