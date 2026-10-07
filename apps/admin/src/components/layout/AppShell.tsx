@@ -8,15 +8,14 @@ import { Modal } from '@/components/Modal';
 import { sessionProbe } from '@/lib/api';
 
 /**
- * Auth gate. `/login` renders standalone; every other route requires a token —
- * without one we bounce to `/login` (the admin console is no longer reachable
- * un-authenticated).
+ * `/login` renders standalone. Every other route waits for the server to
+ * attest an ADMIN or SUPER_ADMIN role before mounting the workspace.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const isLogin = pathname === '/login';
-  const [ready, setReady] = useState(false);
+  const [readyPath, setReadyPath] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
   useEffect(() => { setDrawer(false); }, [pathname]);
   useEffect(() => {
@@ -27,8 +26,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    setReadyPath(null);
     if (isLogin) {
-      setReady(true);
       return;
     }
     // [A-01] the shell gates on the SERVER's attestation of a session — not on a token's presence,
@@ -36,15 +35,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     void sessionProbe().then((session) => {
       if (cancelled) return;
-      if (!session.ok) router.replace('/login');
-      else setReady(true);
+      const roles = session.user?.roles;
+      const isAdmin = session.ok && Array.isArray(roles) && roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN');
+      if (!isAdmin) router.replace('/login');
+      else setReadyPath(pathname);
     });
     return () => { cancelled = true; };
   }, [isLogin, pathname, router]);
 
   if (isLogin) return <>{children}</>;
 
-  if (!ready) {
+  if (readyPath !== pathname) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[var(--ink)] text-[var(--muted)] text-sm">
         Loading…
