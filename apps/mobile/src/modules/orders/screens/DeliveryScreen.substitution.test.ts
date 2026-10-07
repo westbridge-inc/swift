@@ -28,13 +28,19 @@ describe('the order screen follows a substitution as it happens', () => {
     // The price change and the options note come from the server's swap view
     // (the approval's own formula), never from the substitute's price alone.
     expect(CARD).toContain(".filter((it: any) => it.subStatus === 'PENDING')");
-    expect(CARD).toContain('{swapChangeText(it.substitution) ? (');
-    expect(CARD).toContain('{swapChangeText(it.substitution)}');
+    expect(CARD).toContain('{swapChangeText(it.substitution, o.paymentMethod) ? (');
+    expect(CARD).toContain('{swapChangeText(it.substitution, o.paymentMethod)}');
   });
 
   it('the customer reads what approving changes before the buttons, and decides through the hook bound to this order', () => {
-    expect(SCREEN).toContain("import { swapChangeText } from '../substitutionCopy';");
-    expect(CARD.indexOf('swapChangeText(it.substitution)')).toBeGreaterThan(CARD.indexOf('Rejecting removes the item and lowers your total.'));
+    expect(SCREEN).toContain("import { swapChangeText, swapDecisionPermissions } from '../substitutionCopy';");
+    expect(CARD.indexOf('swapChangeText(it.substitution, o.paymentMethod)')).toBeGreaterThan(CARD.indexOf('Rejecting removes the item and lowers your total.'));
     expect(SCREEN).toContain('const decideSub = useDecideSubstitution(orderId);');
   });
+});
+
+it('both decision controls follow the permitted decisions, and MMG settlement guidance is shown', () => {
+  expect(SCREEN).toContain('disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}');
+  expect(SCREEN).toContain('disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).reject}');
+  expect(CARD).toContain('swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance');
 });

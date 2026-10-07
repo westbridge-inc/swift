@@ -2541,7 +2541,7 @@ export async function customerRoutes(app: FastifyInstance) {
           subStatus: i.subStatus,
           substituteName: i.substituteName,
           substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
-          substitution: substitutionView(i),
+          substitution: substitutionView(i, order.paymentMethod),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),

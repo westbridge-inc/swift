@@ -6,7 +6,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { substitutionLineChange } from './substitution-view';
+import { substitutionLineChange, MMG_SWAP_SETTLES_DIRECTLY } from './substitution-view';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -21,7 +21,7 @@ function assertMmgMoneyAdjustable(order: { paymentMethod: string | null }): void
   throw new AppError(
     409,
     'MMG_ADJUSTMENT_UNAVAILABLE',
-    'MMG order totals can’t change in-app — the store settles item changes with you directly until in-app MMG adjustments arrive.',
+    MMG_SWAP_SETTLES_DIRECTLY,
   );
 }
 

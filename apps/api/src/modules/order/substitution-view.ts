@@ -32,16 +32,28 @@ export function chosenOptions(rows: readonly OptionSnapshot[]): Array<{ group: s
   return rows.map((o) => ({ group: o.optionGroupName, name: o.optionName, price: Number(o.markedUpPrice) }));
 }
 
-/** The options a line is made and charged with: none once it is a substitute. */
+/** The options a line is made and charged with: none once it is a substitute,
+ *  and none once the line is closed (refunded or rejected: nothing is made or
+ *  charged, and a refunded swap must not list the original's choices beside
+ *  the substitute's name). The option rows stay as history. */
 export function lineOptionsAsMade(line: { subStatus: string; selectedOptions: readonly OptionSnapshot[] }) {
-  return line.subStatus === 'APPROVED' ? [] : chosenOptions(line.selectedOptions);
+  return ['APPROVED', 'REFUNDED', 'REJECTED'].includes(line.subStatus) ? [] : chosenOptions(line.selectedOptions);
 }
+
+/** What the customer is told when an MMG swap can't be settled in-app: the
+ *  same words the server answers a refused decision with. */
+export const MMG_SWAP_SETTLES_DIRECTLY =
+  'MMG order totals can’t change in-app — the store settles item changes with you directly until in-app MMG adjustments arrive.';
 
 /**
  * The swap as the customer decides it. While it is open: the line as ordered
- * (unit price with its options, and those options), the proposal, and the
- * exact change approving makes to the total. Once decided, the line itself is
- * the record (an approved line IS the substitute), so only the state remains.
+ * (unit price with its options, and those options), the proposal, the exact
+ * change approving makes to the total, and the decisions the server will
+ * accept. An MMG order's total can't change in-app (picking.service
+ * assertMmgMoneyAdjustable), so only a same-price approval is open there and
+ * the store settles anything else with the customer directly. Once decided,
+ * the line itself is the record (an approved line IS the substitute), so only
+ * the state remains.
  */
 export function substitutionView(line: {
   subStatus: string;
@@ -52,9 +64,11 @@ export function substitutionView(line: {
   substituteName: string | null;
   substitutePrice: unknown;
   selectedOptions: readonly OptionSnapshot[];
-}) {
+}, paymentMethod: string | null) {
   if (line.subStatus === 'NONE') return null;
-  if (line.subStatus !== 'PENDING') return { state: line.subStatus, original: null, proposed: null, priceDelta: null };
+  if (line.subStatus !== 'PENDING') return { state: line.subStatus, original: null, proposed: null, priceDelta: null, decisions: null, settlementGuidance: null };
+  const delta = substitutionLineChange(line).delta;
+  const mmg = paymentMethod === 'MOBILE_MONEY';
   return {
     state: line.subStatus,
     original: {
@@ -63,6 +77,8 @@ export function substitutionView(line: {
       options: chosenOptions(line.selectedOptions),
     },
     proposed: { itemId: line.substituteItemId, name: line.substituteName, unitPrice: Number(line.substitutePrice ?? 0) },
-    priceDelta: substitutionLineChange(line).delta,
+    priceDelta: delta,
+    decisions: { approve: !mmg || delta === 0, reject: !mmg },
+    settlementGuidance: mmg ? MMG_SWAP_SETTLES_DIRECTLY : null,
   };
 }
