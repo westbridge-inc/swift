@@ -538,6 +538,34 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
   });
 
+  it.each([['TTD', 'TT$1,500.25'], ['USD', 'US$1,500.25']])('labels deletion credit with the wallet currency %s', async (currencyCode, label) => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 1500.25, currencyCode } });
+    const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
+    expect(error).toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
+    expect(error?.message).toContain(`You have ${label} of unused weekly-fee credit`);
+    expect(error?.message).not.toContain('GY$');
+    await untouched(p.userId);
+  });
+
+  it('lists credits in different currencies separately rather than adding unlike amounts', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const riderFee = await feeSubscription(p.riderId);
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: riderFee.id, balance: 1500, currencyCode: 'GYD' } });
+    const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: nanoid(8), driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
+    await app.prisma.subscription.create({ data: {
+      driverId: driver.id, type: 'TAXI_DRIVER', weeklyRate: 100, currencyCode: 'TTD',
+      currentPeriodStart: riderFee.currentPeriodStart, currentPeriodEnd: riderFee.currentPeriodEnd, nextBillingDate: riderFee.nextBillingDate,
+      prepaidBalance: { create: { balance: 25.5, currencyCode: 'TTD' } },
+    } });
+    const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
+    expect(error).toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
+    expect(error?.message).toContain('GY$1,500 and TT$25.50');
+    expect(error?.message).not.toContain('1,525');
+    await untouched(p.userId);
+  });
+
   it('weekly-fee credit Swift holds for the person blocks deletion until it is used or returned', async () => {
     const p = await makePartner(['CUSTOMER', 'MOVER']);
     const sub = await feeSubscription(p.riderId);
