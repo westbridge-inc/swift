@@ -7,6 +7,8 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { buildApp } from '../app';
 import { tenantUnscopedAccessCounter } from '../plugins/observability';
+import { runWithoutTenant } from '../plugins/tenant-context';
+import { windDownPartner } from '../modules/user/partner-wind-down';
 
 // ---------------------------------------------------------------------------
 // [PUBLIC-PHOTOS] Stores' own photos are served by the API, whatever the
@@ -27,11 +29,13 @@ import { tenantUnscopedAccessCounter } from '../plugins/observability';
 // so build 9 asks for "<api>/items/<store>/<file>". Nothing on the API
 // answered that path, and every uploaded menu photo drew as broken.
 //
-// The route serves ONLY the stores' public photo folder, ONLY while the store
-// that owns the folder still uses the exact photo (a menu item, a menu
-// section, the store's logo or cover), only real images within the upload
-// size limit, and with long cache headers. Identity documents and every other
-// private upload stay unreachable.
+// The route serves ONLY the stores' public photo folder, ONLY while a store a
+// guest may see (the public catalogue's own wall) still uses the exact photo
+// (a menu item, a menu section, the store's logo or cover), only real images
+// within the upload size limit, within a storage deadline, and with a cache
+// short enough that a removal takes effect within the hour. Identity documents
+// and every other private upload stay unreachable. The local-disk address
+// (/uploads/items/...) follows the same rules.
 // ---------------------------------------------------------------------------
 
 const BUCKET = `public-photos-test-${nanoid(6)}`;
@@ -40,7 +44,10 @@ const PHONE_PREFIX = '+5920874';
 const RUN = String(Date.now() % 100).padStart(2, '0');
 const MAX = 5 * 1024 * 1024;
 
-const ENV_KEYS = ['STORAGE_PROVIDER', 'AWS_S3_BUCKET', 'AWS_S3_ENDPOINT', 'UPLOAD_DIR', 'TENANT_UNSCOPED_ACCESS'] as const;
+const ENV_KEYS = ['STORAGE_PROVIDER', 'AWS_S3_BUCKET', 'AWS_S3_ENDPOINT', 'UPLOAD_DIR', 'TENANT_UNSCOPED_ACCESS', 'PUBLIC_PHOTO_READ_TIMEOUT_MS'] as const;
+/** The storage deadline this suite runs with (production default: a few seconds). */
+const DEADLINE_MS = 300;
+const HOUR = 'public, max-age=3600';
 const priorEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 // --- a private bucket, in memory -------------------------------------------
@@ -48,6 +55,11 @@ interface StoredObject { body: Buffer; contentType: string; contentLength?: numb
 const bucket = new Map<string, StoredObject>();
 const asked: string[] = [];
 const bodiesRead: string[] = [];
+/** Keys whose storage answer never arrives, or whose body never finishes. */
+const stalledSend = new Set<string>();
+const stalledBody = new Set<string>();
+const aborted: string[] = [];
+const destroyed: string[] = [];
 
 function missing(): Error {
   const err = new Error('The specified key does not exist.');
@@ -56,7 +68,7 @@ function missing(): Error {
   return err;
 }
 
-const send = vi.spyOn(S3Client.prototype, 'send').mockImplementation((async (command: unknown) => {
+const send = vi.spyOn(S3Client.prototype, 'send').mockImplementation((async (command: unknown, options?: { abortSignal?: AbortSignal }) => {
   if (command instanceof PutObjectCommand) {
     const { Bucket, Key, Body, ContentType } = command.input;
     if (Bucket !== BUCKET) throw new Error(`wrong bucket ${Bucket}`);
@@ -67,14 +79,20 @@ const send = vi.spyOn(S3Client.prototype, 'send').mockImplementation((async (com
     const { Bucket, Key } = command.input;
     if (Bucket !== BUCKET) throw new Error(`wrong bucket ${Bucket}`);
     asked.push(Key!);
+    options?.abortSignal?.addEventListener('abort', () => aborted.push(Key!));
+    // A storage connection that never answers.
+    if (stalledSend.has(Key!)) return new Promise(() => undefined);
     const obj = bucket.get(Key!);
     if (!obj) throw missing();
     return {
       ContentType: obj.contentType,
       ContentLength: obj.contentLength ?? obj.body.length,
       Body: {
-        transformToByteArray: async () => { bodiesRead.push(Key!); return new Uint8Array(obj.body); },
-        destroy: () => undefined,
+        // A body that starts and then stalls.
+        transformToByteArray: stalledBody.has(Key!)
+          ? () => new Promise<Uint8Array>(() => undefined)
+          : async () => { bodiesRead.push(Key!); return new Uint8Array(obj.body); },
+        destroy: () => { destroyed.push(Key!); },
       },
     };
   }
@@ -88,15 +106,17 @@ const webp = (fill: number) => Buffer.concat([Buffer.from('RIFF'), Buffer.from([
 
 let app: FastifyInstance;
 const userIds: string[] = [];
+const tenantIds: string[] = [];
 let seq = 0;
 
-async function makeStoreOwner() {
+async function makeStoreOwner(opts: { tenantId?: string; status?: 'ACTIVE' | 'PENDING_APPROVAL'; isVerified?: boolean } = {}) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `${PHONE_PREFIX}${RUN}${seq}`,
+      phone: `${PHONE_PREFIX}${RUN}${String(seq).padStart(2, '0')}`,
       firstName: 'Photo', lastName: `Owner${seq}`,
       roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true, selfieCapturedAt: new Date(),
+      ...(opts.tenantId && { tenantId: opts.tenantId }),
     },
   });
   userIds.push(user.id);
@@ -108,8 +128,9 @@ async function makeStoreOwner() {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: owner.id, name: `Photo Store ${seq}`, slug: `photo-store-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT',
-      phone: `${PHONE_PREFIX}${RUN}${seq}`, addressLine1: '1 Photo Street', city: 'Georgetown', region: 'Demerara-Mahaica',
-      latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+      phone: `${PHONE_PREFIX}${RUN}${String(seq).padStart(2, '0')}`, addressLine1: '1 Photo Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: 6.8, longitude: -58.15, status: opts.status ?? 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: opts.isVerified ?? true,
+      ...(opts.tenantId && { tenantId: opts.tenantId }),
     },
   });
   const category = await app.prisma.category.create({ data: { vendorId: vendor.id, name: 'Mains' } });
@@ -132,6 +153,7 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
   process.env['STORAGE_PROVIDER'] = 's3';
   process.env['AWS_S3_BUCKET'] = BUCKET;
+  process.env['PUBLIC_PHOTO_READ_TIMEOUT_MS'] = String(DEADLINE_MS);
   delete process.env['AWS_S3_ENDPOINT'];
   app = await buildApp();
   await app.ready();
@@ -177,7 +199,10 @@ beforeAll(async () => {
 afterAll(async () => {
   if (userIds.length) {
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    await runWithoutTenant(() => app.prisma.user.deleteMany({ where: { id: { in: userIds } } }), 'test-cleanup:public-store-photos');
+  }
+  if (tenantIds.length) {
+    await runWithoutTenant(() => app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } }), 'test-cleanup:public-store-photos');
   }
   send.mockRestore();
   for (const k of ENV_KEYS) {
@@ -188,6 +213,22 @@ afterAll(async () => {
 
 const get = (url: string) => app.inject({ method: 'GET', url });
 
+/** POST a photo to the real menu-photo upload route of `on`. */
+async function uploadPhoto(on: FastifyInstance, store: { token: string }, itemId: string, filename: string, mime: string, bytes: Buffer) {
+  const boundary = `----swift${nanoid(8)}`;
+  const payload = Buffer.concat([
+    Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="${filename}"\r\ncontent-type: ${mime}\r\n\r\n`),
+    bytes,
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  const up = await on.inject({
+    method: 'POST', url: `/api/v1/vendor/items/${itemId}/image`, payload,
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, authorization: `Bearer ${store.token}` },
+  });
+  expect(up.statusCode, up.body).toBe(200);
+  return up.json().data.imageUrl as string;
+}
+
 /** Database reads the route has made (its system capability is counted by the tenant wall). */
 async function photoLookups(): Promise<number> {
   const metric = await tenantUnscopedAccessCounter.get();
@@ -195,12 +236,13 @@ async function photoLookups(): Promise<number> {
 }
 
 describe('[PUBLIC-PHOTOS] a store photo in private object storage is served at the address the apps build', () => {
-  it('a menu item photo: the exact bytes, as an image, cached for a year, embeddable by the website', async () => {
+  it('a menu item photo: the exact bytes, as an image, cached for an hour, embeddable by the website', async () => {
     const res = await get(`/${keys.item}`);
     expect(res.statusCode, res.body).toBe(200);
     expect(res.headers['content-type']).toBe('image/jpeg');
     expect(res.rawPayload.equals(bucket.get(keys.item)!.body)).toBe(true);
-    expect(res.headers['cache-control']).toBe('public, max-age=31536000, immutable');
+    // An hour, never `immutable`: a removed photo stops being served within the hour.
+    expect(res.headers['cache-control']).toBe(HOUR);
     expect(res.headers['cross-origin-resource-policy']).toBe('cross-origin');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     // The key is read literally from the configured bucket.
@@ -335,6 +377,96 @@ describe('[PUBLIC-PHOTOS] what is never served', () => {
   });
 });
 
+describe('[PUBLIC-PHOTOS] only a store a guest may see — the public catalogue\'s own wall', () => {
+  async function tenant(kind: 'REVIEW' | 'PRODUCTION', isActive: boolean) {
+    const id = `photos-${kind.toLowerCase()}-${nanoid(6).toLowerCase()}`;
+    await runWithoutTenant(() => app.prisma.tenant.create({ data: { id, name: `Photos ${kind}`, slug: id, kind, isActive } }), 'test-fixture:public-store-photos');
+    tenantIds.push(id);
+    return id;
+  }
+  async function storeWithPhoto(opts: Parameters<typeof makeStoreOwner>[0] = {}) {
+    const store = await makeStoreOwner(opts);
+    const key = `items/${store.vendorId}/${opaque('.jpg')}`;
+    bucket.set(key, { body: jpeg(20), contentType: 'image/jpeg' });
+    await addItem(store.vendorId, store.categoryId, key);
+    return { ...store, key };
+  }
+  const refused = async (key: string) => {
+    const before = asked.length;
+    const res = await get(`/${key}`);
+    expect(res.statusCode, key).toBe(404);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(asked.slice(before), 'storage asked for a photo that is not served').toEqual([]);
+  };
+
+  it('a store in a REVIEW tenant: its photo is not served to a guest', async () => {
+    await refused((await storeWithPhoto({ tenantId: await tenant('REVIEW', true) })).key);
+  });
+
+  it('an operator switched off: its stores\' photos are not served', async () => {
+    await refused((await storeWithPhoto({ tenantId: await tenant('PRODUCTION', false) })).key);
+  });
+
+  it('a store not yet approved, or whose papers are not verified, is not shown', async () => {
+    await refused((await storeWithPhoto({ status: 'PENDING_APPROVAL' })).key);
+    await refused((await storeWithPhoto({ isVerified: false })).key);
+  });
+
+  it('a partner who closes their account (the real wind-down): the store\'s photos stop being served', async () => {
+    const store = await storeWithPhoto();
+    expect((await get(`/${store.key}`)).statusCode).toBe(200);
+    await windDownPartner(app.prisma, store.userId);
+    await refused(store.key);
+  });
+});
+
+describe('[PUBLIC-PHOTOS] a stalled storage read ends fast', () => {
+  it('a storage answer that never comes: 504 within the deadline, and the request is aborted', async () => {
+    const key = `items/${storeA.vendorId}/${opaque('.jpg')}`;
+    stalledSend.add(key);
+    await addItem(storeA.vendorId, storeA.categoryId, key);
+    const started = Date.now();
+    const res = await get(`/${key}`);
+    expect(res.statusCode).toBe(504);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(Date.now() - started).toBeLessThan(DEADLINE_MS + 1500);
+    expect(aborted).toContain(key);
+  });
+
+  it('a body that starts and then stalls: 504 within the deadline, and the body is torn down', async () => {
+    const key = `items/${storeA.vendorId}/${opaque('.jpg')}`;
+    stalledBody.add(key);
+    bucket.set(key, { body: jpeg(21), contentType: 'image/jpeg' });
+    await addItem(storeA.vendorId, storeA.categoryId, key);
+    const started = Date.now();
+    const res = await get(`/${key}`);
+    expect(res.statusCode).toBe(504);
+    expect(Date.now() - started).toBeLessThan(DEADLINE_MS + 1500);
+    expect(destroyed).toContain(key);
+  });
+});
+
+describe('[PUBLIC-PHOTOS] photo names: what the upload saves is what is served', () => {
+  it('an upload named "photo.jpg-large" is saved under the type its bytes are, and served', async () => {
+    const item = await addItem(storeA.vendorId, storeA.categoryId, null);
+    const stored = await uploadPhoto(app, storeA, item.id, 'photo.jpg-large', 'image/jpeg', jpeg(22));
+    expect(stored).toMatch(new RegExp(`^items/${storeA.vendorId}/[A-Za-z0-9_-]{16}\\.jpg$`));
+    expect((await get(`/${stored}`)).statusCode).toBe(200);
+    // The bytes decide, not the name: PNG bytes called "menu.jpeg" are saved as .png.
+    const png1 = await uploadPhoto(app, storeA, item.id, 'menu.jpeg', 'image/png', png(23));
+    expect(png1).toMatch(/\.png$/);
+  });
+
+  it('a photo saved earlier under the uploaded file\'s own extension is still served', async () => {
+    const key = `items/${storeA.vendorId}/${opaque('.jpg-large')}`;
+    bucket.set(key, { body: jpeg(24), contentType: 'image/jpeg' });
+    await addItem(storeA.vendorId, storeA.categoryId, key);
+    const res = await get(`/${key}`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['content-type']).toBe('image/jpeg');
+  });
+});
+
 describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
   const dir = path.join(os.tmpdir(), `swift-public-photos-${nanoid(6)}`);
   let local: FastifyInstance;
@@ -375,6 +507,28 @@ describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
     expect(res.rawPayload.equals(png(11))).toBe(true);
     const orphan = await local.inject({ method: 'GET', url: `/${orphanKey}` });
     expect(orphan.statusCode).toBe(404);
+  });
+
+  it('the address a real local upload returns (/uploads/items/…) is served while the store uses the photo, and not after', async () => {
+    const item = await addItem(storeB.vendorId, storeB.categoryId, null);
+    const first = await uploadPhoto(local, storeB, item.id, 'dish.png', 'image/png', png(14));
+    expect(first).toMatch(new RegExp(`^/uploads/items/${storeB.vendorId}/[A-Za-z0-9_-]{16}\\.png$`));
+    const res = await local.inject({ method: 'GET', url: first });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['content-type']).toBe('image/png');
+    expect(res.headers['cache-control']).toBe(HOUR);
+    const before = await photoLookups();
+    const second = await uploadPhoto(local, storeB, item.id, 'dish.png', 'image/png', png(15));
+    expect((await local.inject({ method: 'GET', url: second })).statusCode).toBe(200);
+    // The replaced photo's file is still on disk, but the store no longer uses it.
+    const old = await local.inject({ method: 'GET', url: first });
+    expect(old.statusCode).toBe(404);
+    expect(old.headers['cache-control']).toBe('no-store');
+    expect(await photoLookups(), 'the local address must go through the same check').toBeGreaterThan(before);
+  });
+
+  it('the review pack\'s drawn pictures keep their own rule on the local address', async () => {
+    expect((await local.inject({ method: 'GET', url: '/uploads/items/review-pack/v1/no-such-store--pepperpot.png' })).statusCode).toBe(404);
   });
 
   it('a climbing path a store typed as its photo never reaches a document on the same disk', async () => {

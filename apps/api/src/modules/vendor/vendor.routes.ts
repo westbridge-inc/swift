@@ -46,7 +46,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
-import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { ALLOWED_IMAGE_TYPES, IMAGE_EXTENSION, imageContentType, looksLikeImage } from '../../utils/images';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { SearchService } from '../search/search.service';
 import { subscriptionOperability } from '../subscription/operate-gate';
@@ -2882,13 +2882,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     const buffer = await file.toBuffer();
-    if (!looksLikeImage(buffer)) {
+    const sniffed = imageContentType(buffer);
+    if (!looksLikeImage(buffer) || !sniffed) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    // [PUBLIC-PHOTOS] Named by what the bytes are, never by the uploaded
+    // file's name ("photo.jpg-large"): the saved name is the one the public
+    // photo address serves.
     const { url } = await storage.upload({
       buffer,
-      filename: file.filename,
+      filename: `photo${IMAGE_EXTENSION[sniffed]}`,
       mimeType: file.mimetype,
       folder: `items/${vendorId}`,
     });

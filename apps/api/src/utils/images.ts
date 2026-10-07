@@ -29,6 +29,13 @@ export function imageContentType(buffer: Buffer): 'image/jpeg' | 'image/png' | '
   return null;
 }
 
+/** The extension a stored photo is named with, by what its bytes are. */
+export const IMAGE_EXTENSION: Record<'image/jpeg' | 'image/png' | 'image/webp', string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+};
+
 /**
  * Document sniff (security spec §6): verification uploads accept PDFs too —
  * the content must match one of the allowed formats, never just the header.

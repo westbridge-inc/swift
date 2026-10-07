@@ -39,8 +39,23 @@ export interface StorageProvider {
 export interface BoundedObjectReader {
   /** Read an object only when it is at most `maxBytes`, deciding from its
    *  stored size BEFORE the body is downloaded. null = no such object, or
-   *  larger than the limit. Any other storage failure throws. */
-  getObjectWithin(fileKey: string, maxBytes: number): Promise<Buffer | null>;
+   *  larger than the limit. Any other storage failure throws. `signal`
+   *  aborts the whole read — the request, the answer and the body. */
+  getObjectWithin(fileKey: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer | null>;
+}
+
+/** Settle with `work`, or reject the moment `signal` aborts (running `onAbort`). */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined, onAbort?: () => void): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) { onAbort?.(); return Promise.reject(new Error('aborted')); }
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => { onAbort?.(); reject(new Error('aborted')); };
+    signal.addEventListener('abort', stop, { once: true });
+    work.then(
+      (v) => { signal.removeEventListener('abort', stop); resolve(v); },
+      (e) => { signal.removeEventListener('abort', stop); reject(e); },
+    );
+  });
 }
 
 export function canReadBounded(provider: StorageProvider): provider is StorageProvider & BoundedObjectReader {
@@ -122,12 +137,12 @@ export class LocalStorageProvider implements StorageProvider, BoundedObjectReade
     return readFile(this.resolveKey(fileKey));
   }
 
-  async getObjectWithin(fileKey: string, maxBytes: number): Promise<Buffer | null> {
+  async getObjectWithin(fileKey: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer | null> {
     const abs = this.resolveKey(fileKey);
     try {
       const s = await stat(abs);
       if (!s.isFile() || s.size > maxBytes) return null;
-      const bytes = await readFile(abs);
+      const bytes = await readFile(abs, { signal });
       return bytes.length > maxBytes ? null : bytes;
     } catch (err) {
       const code = (err as { code?: string }).code;
@@ -190,10 +205,12 @@ export class S3StorageProvider implements StorageProvider, BoundedObjectReader {
     return Buffer.from(bytes);
   }
 
-  async getObjectWithin(fileKey: string, maxBytes: number): Promise<Buffer | null> {
+  async getObjectWithin(fileKey: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer | null> {
     let res;
     try {
-      res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: fileKey }));
+      // The SDK aborts the request on the signal; the race makes sure a
+      // connection that never answers cannot hold this read open regardless.
+      res = await untilAborted(this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: fileKey }), { abortSignal: signal }), signal);
     } catch (err) {
       const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
       if (e.name === 'NoSuchKey' || e.$metadata?.httpStatusCode === 404) return null;
@@ -205,8 +222,11 @@ export class S3StorageProvider implements StorageProvider, BoundedObjectReader {
       (res.Body as { destroy?: () => void } | undefined)?.destroy?.();
       return null;
     }
-    const bytes = await res.Body?.transformToByteArray();
-    if (!bytes || bytes.length > maxBytes) return null;
+    const body = res.Body;
+    if (!body) return null;
+    // A body that starts and then stalls is torn down at the deadline.
+    const bytes = await untilAborted(body.transformToByteArray(), signal, () => (body as { destroy?: () => void }).destroy?.());
+    if (bytes.length > maxBytes) return null;
     return Buffer.from(bytes);
   }
 }
