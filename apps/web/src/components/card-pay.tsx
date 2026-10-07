@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CreditCard } from 'lucide-react';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import {
-  CARD_CONSENT_VERSION, CARD_IDLE, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
+  CARD_CONSENT_VERSION, CARD_IDLE, adoptableCardSession, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
   cardRemovedWords, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
 } from '@/lib/card-fee';
 
@@ -47,10 +47,12 @@ const TONE = {
  * CARD is live, or while a card payment this tab started is still being answered. The card number
  * is typed only on the bank's hosted page, opened in this tab; this page has no card field at all.
  */
-export function CardPay({ family, storeId, card, otherPaymentPending, refresh, onPaymentPending }: {
+export function CardPay({ family, storeId, card, latest, otherPaymentPending, refresh, onPaymentPending }: {
   family: CardFamily;
   storeId: string | null;
   card?: LiveCard;
+  /** The subscription's latestCardSession: followed when this tab holds no card session of its own. */
+  latest?: unknown;
   /** An MMG payment is being confirmed: no second payment is offered. */
   otherPaymentPending: boolean;
   refresh: () => void;
@@ -83,6 +85,8 @@ export function CardPay({ family, storeId, card, otherPaymentPending, refresh, o
     }, (e) => (e instanceof ApiRequestError ? { status: e.status, code: e.code } : {}));
   }, [base, family, storeId, refresh]);
   useEffect(() => { session.activate(); session.resume(); return () => session.dispose(); }, [session]);
+  const latestShown = adoptableCardSession(latest);
+  useEffect(() => { session.adopt(latest); }, [session, latestShown?.sessionId, latestShown?.status]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const focus = () => session.focus();
     window.addEventListener('focus', focus);

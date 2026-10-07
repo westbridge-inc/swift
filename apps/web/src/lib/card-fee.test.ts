@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  CardCheckoutSession, cardBrand, cardExpiry, cardRemovedWords, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending, cardPollDelay, cardSessionTone, cardSessionWords, cardSpoken, liveCard,
+  CardCheckoutSession, adoptableCardSession, cardBrand, cardExpiry, cardRemovedWords, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending, cardPollDelay, cardSessionTone, cardSessionWords, cardSpoken, liveCard,
   type CardCheckoutView, type CardPointer, type CardSessionStart, type CardSessionView,
 } from './card-fee';
 
@@ -233,5 +233,45 @@ describe('following a card session', () => {
     await vi.waitFor(() => expect(last().error).toBe('Could not check your card payment. Refresh to try again.'));
     expect(last().session?.status).toBe('OPEN');
     s.dispose();
+  });
+});
+
+describe('a new tab or an app restart: the server\'s latest card session', () => {
+  it('a Pay now that may still take money is followed — never a second payment, never a page reopened without its tap key', async () => {
+    vi.useFakeTimers();
+    const { s, transport, last } = setup();
+    transport.read.mockResolvedValueOnce(session('UNKNOWN')).mockResolvedValue(session('SUCCEEDED', { settlement: 'advanced' }));
+    s.adopt(session('UNKNOWN'));
+    expect(last().session?.status).toBe('UNKNOWN');
+    expect(cardPaymentPending(last().session)).toBe(true);
+    await s.start('PAY_NOW');
+    expect(transport.start).not.toHaveBeenCalled();
+    await s.reopen();
+    expect(transport.start).not.toHaveBeenCalled();
+    expect(transport.open).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(transport.read).toHaveBeenCalledWith('card-session-1');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(last().session?.status).toBe('SUCCEEDED');
+    expect(transport.refresh).toHaveBeenCalledOnce();
+  });
+  it('held for a person: shown, not polled; an open Add card page: followed', async () => {
+    const held = setup();
+    held.s.adopt(session('HELD'));
+    expect(held.last().session?.status).toBe('HELD');
+    expect(held.transport.read).not.toHaveBeenCalled();
+    expect(adoptableCardSession(session('OPEN', { purpose: 'ENROLL' }))?.purpose).toBe('ENROLL');
+  });
+  it('ignored when this screen holds its own session, when finished, malformed or absent (an older server)', async () => {
+    for (const latest of [session('SUCCEEDED'), session('FAILED'), session('EXPIRED'), session('CANCELLED'), session('EXPIRED', { purpose: 'ENROLL' }), { sessionId: 'x' }, null, undefined, 'OPEN']) {
+      const { s, views, transport } = setup();
+      s.adopt(latest);
+      expect(views, JSON.stringify(latest)).toEqual([]);
+      expect(transport.read).not.toHaveBeenCalled();
+    }
+    const own = setup();
+    own.transport.load.mockReturnValue({ sessionId: 'mine-1', purpose: 'PAY_NOW', key: 'tap-key-9' });
+    own.s.adopt(session('UNKNOWN'));
+    expect(own.views).toEqual([]);
   });
 });

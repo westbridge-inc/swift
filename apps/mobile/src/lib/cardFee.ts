@@ -135,6 +135,12 @@ export function cardPollDelay(elapsed: number, s?: Pick<CardSessionView, 'status
 export function cardPaymentPending(s?: CardSessionView | null): boolean {
   return s?.purpose === 'PAY_NOW' && (s.status === 'OPEN' || s.status === 'UNKNOWN' || s.status === 'HELD');
 }
+/** The subscription's latestCardSession, when it may still be taking money (or an Add card page is open):
+ *  a new tab or an app restart follows it. Anything else, malformed or finished, is null. */
+export function adoptableCardSession(latest: unknown): CardSessionView | null {
+  const seen = cardSessionOf(latest);
+  return seen && (cardPaymentPending(seen) || (seen.purpose === 'ENROLL' && seen.status === 'OPEN')) ? seen : null;
+}
 /** The open card page can be shown again (the same session) until its window closes. */
 export function cardPageReopenable(s: CardSessionView | null | undefined, now = Date.now()): boolean {
   return s?.status === 'OPEN' && Date.parse(s.expiresAt) > now;
@@ -195,6 +201,17 @@ export class CardCheckoutSession {
     if (p) { this.pointer = p; this.follow(p.sessionId, true); }
   }
   focus() { this.resume(); }
+  /** A new tab or an app restart holds no pointer: start from the partner's latest card session the
+   *  server reported (the subscription's latestCardSession) when it may still be taking money, so it
+   *  is followed and no second payment is offered. A finished one is not brought back. Its page cannot
+   *  be reopened from here: that needs the tap's own key, which only the tab that started it holds. */
+  adopt(latest: unknown) {
+    if (!this.active || this.pointer || this.view.session || this.transport.load()) return;
+    const seen = adoptableCardSession(latest);
+    if (!seen) return;
+    this.emit({ session: seen, returned: false });
+    if (cardPollDelay(0, seen) !== null) this.follow(seen.sessionId, false);
+  }
   /** ENROLL is called only after the partner accepted the consent on screen. */
   async start(purpose: CardPurpose) {
     if (!this.active || this.view.busy || this.view.off) return;

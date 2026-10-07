@@ -183,3 +183,26 @@ describe('the processor is never named on the page', () => {
     view.unmount();
   });
 });
+
+describe('a new tab follows the server\'s latest card session', () => {
+  it('a card payment still being checked (no session of this tab\'s own) is shown and followed, and nothing can be paid twice', async () => {
+    const latest = session('UNKNOWN');
+    const sub = { success: true, data: { status: 'PAST_DUE', amountDueGyd: 1200, payActions: [MMG, cardLive()], latestMmgCheckout: null, recentCheckouts: [], latestCardSession: latest } };
+    const calls = api(sub, [session('UNKNOWN')]);
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    expect(await screen.findByText("Checking with the bank. Don't pay again.")).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Pay GY$1,200 by card' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Pay GY$1,200 with MMG' })).toBeNull();
+    await waitFor(() => expect(calls.mock.calls.some(([url]) => String(url).includes('/card-sessions/card-session-1'))).toBe(true));
+    expect(calls.mock.calls.some(([url, init]) => String(url).endsWith('/card-sessions') && (init as RequestInit | undefined)?.method === 'POST')).toBe(false);
+    view.unmount();
+  });
+  it('a finished latest session brings nothing back: the page offers the ways to pay', async () => {
+    const sub = { success: true, data: { status: 'PAST_DUE', amountDueGyd: 1200, payActions: [MMG, cardLive()], latestMmgCheckout: null, recentCheckouts: [], latestCardSession: session('FAILED') } };
+    api(sub);
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    expect(await screen.findByRole('button', { name: 'Pay GY$1,200 by card' })).toBeTruthy();
+    expect(document.body.textContent).not.toContain("didn't go through");
+    view.unmount();
+  });
+});
