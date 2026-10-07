@@ -305,7 +305,14 @@ describe('server↔matrix prefix drift guard [SWIFT-092]', () => {
   // merchant key and only prompts the server's own MMG lookup; the answer is
   // one of four states with no amount, name or reference. Rate-limited,
   // body-capped, inert with the flag off — proven in mmg-checkout-routes.test.ts.
-  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/billing/mmg-checkout', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
+  // /billing/card is the card provider's return path [PT-2] (its MerchantResponseUrl)
+  // and, off production only, the card simulator's test page: the partner's browser
+  // arrives from the provider's page without a Swift session. A return is written
+  // down as evidence and only prompts the server's own question to the provider;
+  // the page answers one of four states with no amount, name, card or id.
+  // Rate-limited per source, body-capped, never logged, inert with the flag off —
+  // proven in card-rail-routes.test.ts.
+  const EXEMPT = new Set(['/api/v1/public', '/api/v1/billing/mmg', '/api/v1/billing/mmg-checkout', '/api/v1/billing/card', '/api/v1/attribution', '/api/v1/discovery', '/api/v1/market']);
 
   it('flags a server prefix the matrix never mounts (red-first)', () => {
     // Pretend server.ts added /api/v1/loyalty but buildTestApp never enrolled it.

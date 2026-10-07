@@ -349,7 +349,7 @@ describe('EV-ACT-11 — admin vendor approve is checklist-gated and exactly-once
     expect(fresh.isVerified).toBe(false);
   });
 
-  it('[Fable #1481 S4-2] approving a billing-suspended store clears its suspension source (no stale BILLING for a later heal)', async () => {
+  it('[Fable #1481 S4-2] a grandfathered store with no subscription clears its stale billing suspension', async () => {
     const owner = await makeUser('Reinstate');
     const vendor = await makePendingVendor(owner.id, 'SUSPENDED');
     await app.prisma.vendor.update({ where: { id: vendor.id }, data: { suspensionSource: 'BILLING' } });

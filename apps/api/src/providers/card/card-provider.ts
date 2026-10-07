@@ -175,6 +175,12 @@ export interface CardRailProvider {
   readonly binding: CardRailBinding;
   /** True ONLY for Swift's simulator: a test page, no real card, no real money. */
   readonly simulator: boolean;
+  /** [PT-2] Whether this provider can SAVE a card for the weekly fee (an
+   *  ENROLL session, then charges without the partner present). A provider
+   *  whose documentation gives no such charge, or no card facts to show
+   *  (brand, last 4, expiry), answers false: the API then offers Pay now only
+   *  and refuses an ENROLL session before any page is made. */
+  readonly savesCards: boolean;
 
   /** Ask the provider for a hosted page. `sessionRef` is Swift's durable
    *  intent (the CardSession id), created before this call. The return URL

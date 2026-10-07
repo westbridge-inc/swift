@@ -307,7 +307,7 @@ export interface ActivationChecklistItem {
   /** Approved, and a newer submission of the same type is waiting for review. */
   renewalPending: boolean;
 }
-export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'CLOSED';
+export type VendorActivationNext = 'LIVE' | 'NEEDS_DOCUMENTS' | 'NEEDS_DISCLOSURE' | 'CAN_ACTIVATE' | 'CAN_REINSTATE' | 'FEE_UNPAID' | 'ACCOUNT_CLOSED' | 'OWNER_ACCOUNT_RESTRICTED' | 'CLOSED';
 export interface VendorActivationChecklist {
   vendorId: string;
   /** The owner's user id: the Review Center's applicant. */
@@ -407,6 +407,10 @@ export const resolveSupportTicket = (
     method: 'PUT',
     body: JSON.stringify({ status, adminNote, resolution, expectedStatus }),
   });
+/** [DELETION-INTEGRITY] Completes an in-app account closure request: the
+ *  server runs the same erasure checks as a person's own deletion. */
+export const completeAccountClosure = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/support/${id}/complete-account-closure`, { method: 'POST', body: JSON.stringify({ reason }), reason });
 // [AF-MOB-006] Custody recovery after pickup: the operations side of an owned
 // case. Directing, naming the relay rider and confirming a return are C3 —
 // each carries the operator's stated reason on the one reason transport.

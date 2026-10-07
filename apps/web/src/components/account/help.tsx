@@ -36,7 +36,7 @@ export function Help({ orderId = '' }: { orderId?: string }) {
   return <AccountFrame title="Help">
     <p>Tell us what happened. Track your request and our reply here.</p>
     <div className="flex flex-wrap gap-4 text-[var(--swift-red)] underline"><a href={`mailto:${site.supportEmail}`}>Email support</a><Link href="/faq">Frequently asked questions</Link><Link href="/account/safety">Safety</Link></div>
-    <form onSubmit={submit} className="space-y-4 rounded-2xl border border-black/5 bg-white p-5">
+    <form onSubmit={submit} className="space-y-4 sw-card p-5">
       <fieldset disabled={busy} className="space-y-4">
         <label className="block space-y-1"><span>Topic</span><select className={fieldClass} value={category} onChange={(e) => setCategory(e.target.value as SupportCategory)}>{categories.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}</select></label>
         <label className="block space-y-1"><span>Order ID (optional)</span><input className={fieldClass} maxLength={64} value={order} onChange={(e) => setOrder(e.target.value)} /></label>
@@ -52,7 +52,7 @@ export function Help({ orderId = '' }: { orderId?: string }) {
       {tickets.isError ? <DataUnavailable what="your support requests" error={tickets.error} onRetry={() => void tickets.refetch()} />
         : !tickets.data ? <p role="status">Loading requests…</p>
         : tickets.data.length === 0 ? <p>No requests yet.</p>
-        : <ul className="space-y-3">{tickets.data.map((ticket) => <li key={ticket.id} className="rounded-2xl border border-black/5 bg-white p-4"><h3 className="font-bold">{ticket.subject}</h3><p>{ticket.status === 'RESOLVED' ? 'Resolved' : ticket.status === 'IN_PROGRESS' ? 'In progress' : 'Open'}</p>{ticket.adminNote && <p>Swift: {ticket.adminNote}</p>}</li>)}</ul>}
+        : <ul className="space-y-3">{tickets.data.map((ticket) => <li key={ticket.id} className="sw-card p-4"><h3 className="font-bold">{ticket.subject}</h3><p>{ticket.status === 'RESOLVED' ? 'Resolved' : ticket.status === 'IN_PROGRESS' ? 'In progress' : 'Open'}</p>{ticket.adminNote && <p>Swift: {ticket.adminNote}</p>}</li>)}</ul>}
     </section>
   </AccountFrame>;
 }

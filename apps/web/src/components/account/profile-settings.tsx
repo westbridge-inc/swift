@@ -32,7 +32,7 @@ function ProfileForm({ profile }: { profile: Profile }) {
     } catch (e) { setError((e as Error).message); }
     finally { sending.current = false; setBusy(false); }
   }
-  return <form onSubmit={save} className="space-y-4 rounded-2xl border border-black/5 bg-white p-5">
+  return <form onSubmit={save} className="space-y-4 sw-card p-5">
     <fieldset disabled={busy} className="space-y-4">
     <label className="block space-y-1"><span className="text-sm font-semibold">First name</span><input className={fieldClass} autoComplete="given-name" required maxLength={50} value={firstName} onChange={(e) => { setFirstName(e.target.value); setSaved(false); }} /></label>
     <label className="block space-y-1"><span className="text-sm font-semibold">Last name</span><input className={fieldClass} autoComplete="family-name" required maxLength={50} value={lastName} onChange={(e) => { setLastName(e.target.value); setSaved(false); }} /></label>
@@ -61,7 +61,7 @@ function MarketingPreference() {
     catch (e) { setError((e as Error).message); }
     finally { sending.current = false; setBusy(false); }
   }
-  return <section className="space-y-3 rounded-2xl border border-black/5 bg-white p-5" aria-label="Notification preferences">
+  return <section className="space-y-3 sw-card p-5" aria-label="Notification preferences">
     <h2 className="font-bold">Notification preferences</h2>
     {consent.isError ? <DataUnavailable what="your preferences" error={consent.error} onRetry={() => void consent.refetch()} />
       : <label className="flex min-h-11 items-center justify-between gap-3"><span>Marketing messages<span className="block text-sm text-[var(--swift-muted)]">Offers and promos. Service messages stay on.</span></span>
