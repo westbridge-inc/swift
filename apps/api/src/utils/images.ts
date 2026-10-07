@@ -183,14 +183,34 @@ function stripWebp(buf: Buffer): Buffer | null {
  */
 export function stripImageMetadata(buffer: Buffer, mimeType: string): Buffer {
   try {
+    // [PUBLIC-PHOTOS] For an image, the BYTES choose the stripper, never the
+    // declared type: a JPEG a phone labelled "image/png" went through the PNG
+    // stripper, did not parse, and kept its GPS tags.
+    const kind = mimeType.startsWith('image/') ? (imageContentType(buffer) ?? mimeType) : mimeType;
     let stripped: Buffer | null = null;
-    if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') stripped = stripJpeg(buffer);
-    else if (mimeType === 'image/png') stripped = stripPng(buffer);
-    else if (mimeType === 'image/webp') stripped = stripWebp(buffer);
+    if (kind === 'image/jpeg' || kind === 'image/jpg') stripped = stripJpeg(buffer);
+    else if (kind === 'image/png') stripped = stripPng(buffer);
+    else if (kind === 'image/webp') stripped = stripWebp(buffer);
     // A stripper that grew the file got something wrong; keep the original.
     if (!stripped || stripped.length > buffer.length) return buffer;
     return stripped;
   } catch {
     return buffer;
+  }
+}
+
+/**
+ * [PUBLIC-PHOTOS] The same stripping for bytes about to be PUBLISHED, which
+ * fails CLOSED: null when the container does not parse, so a photo whose tags
+ * cannot be removed is never served. (Upload keeps failing open — refusing a
+ * person's own document over an odd segment is the worse harm there.)
+ */
+export function stripImageMetadataStrict(buffer: Buffer, type: 'image/jpeg' | 'image/png' | 'image/webp'): Buffer | null {
+  try {
+    const stripped = type === 'image/jpeg' ? stripJpeg(buffer) : type === 'image/png' ? stripPng(buffer) : stripWebp(buffer);
+    if (!stripped || stripped.length > buffer.length) return null;
+    return stripped;
+  } catch {
+    return null;
   }
 }

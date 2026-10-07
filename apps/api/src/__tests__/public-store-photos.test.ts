@@ -9,6 +9,7 @@ import { buildApp } from '../app';
 import { tenantUnscopedAccessCounter } from '../plugins/observability';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { windDownPartner } from '../modules/user/partner-wind-down';
+import { stripImageMetadata } from '../utils/images';
 
 // ---------------------------------------------------------------------------
 // [PUBLIC-PHOTOS] Stores' own photos are served by the API, whatever the
@@ -99,10 +100,31 @@ const send = vi.spyOn(S3Client.prototype, 'send').mockImplementation((async (com
   throw new Error('unexpected storage command');
 }) as never);
 
-// --- real image bytes (magic numbers + padding) ------------------------------
-const jpeg = (fill: number) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xdb]), Buffer.alloc(96, fill), Buffer.from([0xff, 0xd9])]);
-const png = (fill: number) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(96, fill)]);
-const webp = (fill: number) => Buffer.concat([Buffer.from('RIFF'), Buffer.from([0x60, 0, 0, 0]), Buffer.from('WEBPVP8 '), Buffer.alloc(96, fill)]);
+// --- real image containers (the segment/chunk structure a decoder walks) ------
+const u16be = (n: number) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
+const u32be = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+const u32le = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
+/** Where a phone camera puts the shop's position: an EXIF (APP1) segment. */
+const GPS = 'GPSLatitude 6.8013N GPSLongitude 58.1551W';
+const exifSegment = () => { const body = Buffer.from(`Exif\0\0${GPS}`, 'latin1'); return Buffer.concat([Buffer.from([0xff, 0xe1]), u16be(body.length + 2), body]); };
+const jpeg = (fill: number, segments: Buffer[] = []) => Buffer.concat([
+  Buffer.from([0xff, 0xd8]), // SOI
+  Buffer.from([0xff, 0xe0]), u16be(16), Buffer.from('JFIF\0', 'latin1'), Buffer.from([1, 1, 0, 0, 1, 0, 1, 0, 0]), // APP0
+  ...segments,
+  Buffer.from([0xff, 0xda]), u16be(8), Buffer.from([1, 1, 0, 0, 0x3f, 0]), // SOS
+  Buffer.alloc(64, fill), // scan data
+  Buffer.from([0xff, 0xd9]), // EOI
+]);
+const pngChunk = (type: string, data: Buffer) => Buffer.concat([u32be(data.length), Buffer.from(type, 'ascii'), data, Buffer.alloc(4)]);
+const png = (fill: number, chunks: Buffer[] = []) => Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  pngChunk('IHDR', Buffer.alloc(13, fill)), ...chunks, pngChunk('IDAT', Buffer.alloc(32, fill)), pngChunk('IEND', Buffer.alloc(0)),
+]);
+const webp = (fill: number) => {
+  const vp8 = Buffer.concat([Buffer.from('VP8 ', 'ascii'), u32le(32), Buffer.alloc(32, fill)]);
+  return Buffer.concat([Buffer.from('RIFF', 'ascii'), u32le(4 + vp8.length), Buffer.from('WEBP', 'ascii'), vp8]);
+};
+const hasGps = (bytes: Buffer) => bytes.includes(Buffer.from(GPS, 'latin1')) || bytes.includes(Buffer.from('Exif\0\0', 'latin1'));
 
 let app: FastifyInstance;
 /** The local-provider app (its own describe below); closed last, after the
@@ -332,6 +354,10 @@ describe('[PUBLIC-PHOTOS] what is never served', () => {
     expect(lookups).toBeGreaterThan(0);
     for (const url of [
       `/items/..%2F..%2Fverification%2F${storeA.userId}/${docName}`,
+      `/items/${A}/${nanoid(16)}..`,
+      `/items/${A}/${nanoid(16)}.jpg%2F..%2F..`,
+      `/items/${A}/${nanoid(16)}.jp%00g`,
+      `/items/${A}/${nanoid(16)}.jp%0Ag`,
       `/items/${A}%2F..%2F..%2Fverification%2F${storeA.userId}/${docName}`,
       `/items/${A}/..%2F..%2Fverification%2F${storeA.userId}%2F${docName}`,
       `/items/..%2Fverification/${storeA.userId}%2F${docName}`,
@@ -425,6 +451,76 @@ describe('[PUBLIC-PHOTOS] only a store a guest may see — the public catalogue\
     expect((await get(`/${store.key}`)).statusCode).toBe(200);
     await windDownPartner(app.prisma, store.userId);
     await refused(store.key);
+  });
+});
+
+describe('[PUBLIC-PHOTOS] a shop\'s location never leaves inside a photo', () => {
+  it('a camera photo with its GPS tags, uploaded under the wrong type, is stored and served without them', async () => {
+    const item = await addItem(storeA.vendorId, storeA.categoryId, null);
+    const camera = jpeg(30, [exifSegment()]);
+    expect(hasGps(camera)).toBe(true);
+    // A JPEG the phone called "image/png": the bytes decide which tags come off.
+    const stored = await uploadPhoto(app, storeA, item.id, 'shop.png', 'image/png', camera);
+    expect(hasGps(bucket.get(stored)!.body), 'GPS tags kept in storage').toBe(false);
+    // The object is labelled with what it is.
+    expect(bucket.get(stored)!.contentType).toBe('image/jpeg');
+    const res = await get(`/${stored}`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['content-type']).toBe('image/jpeg');
+    expect(hasGps(res.rawPayload)).toBe(false);
+  });
+
+  it('a photo already stored with its tags is served without them — the picture itself unchanged', async () => {
+    const key = `items/${storeA.vendorId}/${opaque('.jpg')}`;
+    bucket.set(key, { body: jpeg(31, [exifSegment()]), contentType: 'image/png' });
+    await addItem(storeA.vendorId, storeA.categoryId, key);
+    const res = await get(`/${key}`);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(hasGps(res.rawPayload)).toBe(false);
+    expect(res.rawPayload.equals(jpeg(31))).toBe(true);
+    // PNG text chunks carry the same kind of note.
+    const pngKey = `items/${storeA.vendorId}/${opaque('.png')}`;
+    bucket.set(pngKey, { body: png(32, [pngChunk('tEXt', Buffer.from(`Comment\0${GPS}`, 'latin1'))]), contentType: 'image/png' });
+    await addItem(storeA.vendorId, storeA.categoryId, pngKey);
+    const pngRes = await get(`/${pngKey}`);
+    expect(pngRes.statusCode, pngRes.body).toBe(200);
+    expect(pngRes.rawPayload.includes(Buffer.from(GPS, 'latin1'))).toBe(false);
+  });
+
+  it('the storage seam strips by the bytes for every upload path, whatever type was declared', () => {
+    for (const declared of ['image/png', 'image/webp', 'image/jpeg']) {
+      expect(hasGps(stripImageMetadata(jpeg(34, [exifSegment()]), declared)), declared).toBe(false);
+    }
+    // Not an image: never touched (encrypted document envelopes pass this seam).
+    const envelope = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from(`Exif\0\0${GPS}`, 'latin1')]);
+    expect(stripImageMetadata(envelope, 'application/octet-stream').equals(envelope)).toBe(true);
+  });
+
+  it('a photo whose tags cannot be taken off is not served at all', async () => {
+    const key = `items/${storeA.vendorId}/${opaque('.jpg')}`;
+    // An EXIF segment whose length runs past the end: nothing can be safely cut.
+    const body = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1, 0xff, 0xf0]), Buffer.from(`Exif\0\0${GPS}`, 'latin1'), Buffer.alloc(40, 7)]);
+    bucket.set(key, { body, contentType: 'image/jpeg' });
+    await addItem(storeA.vendorId, storeA.categoryId, key);
+    const res = await get(`/${key}`);
+    expect(res.statusCode).toBe(404);
+    expect(hasGps(res.rawPayload)).toBe(false);
+  });
+});
+
+describe('[PUBLIC-PHOTOS] an owner who deleted their account publishes nothing — even if the store was not wound down', () => {
+  it('the account is closed (DEACTIVATED) while the store row is still ACTIVE: its photos are not served', async () => {
+    const store = await makeStoreOwner();
+    const key = `items/${store.vendorId}/${opaque('.jpg')}`;
+    bucket.set(key, { body: jpeg(33), contentType: 'image/jpeg' });
+    await addItem(store.vendorId, store.categoryId, key);
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+    // What account deletion commits first; the store wind-down runs after it and can fail.
+    await app.prisma.user.update({ where: { id: store.userId }, data: { status: 'DEACTIVATED' } });
+    expect((await app.prisma.vendor.findUnique({ where: { id: store.vendorId }, select: { status: true } }))!.status).toBe('ACTIVE');
+    const res = await get(`/${key}`);
+    expect(res.statusCode).toBe(404);
+    expect(res.headers['cache-control']).toBe('no-store');
   });
 });
 
@@ -531,6 +627,15 @@ describe('[PUBLIC-PHOTOS] the local provider answers the same address', () => {
     expect(old.statusCode).toBe(404);
     expect(old.headers['cache-control']).toBe('no-store');
     expect(await photoLookups(), 'the local address must go through the same check').toBeGreaterThan(before);
+  });
+
+  it('a photo saved long ago under a long extension of the uploaded file\'s own is still served', async () => {
+    const name = opaque('.jpeg_large_export');
+    await writeFile(path.join(dir, 'items', storeB.vendorId, name), png(16));
+    await addItem(storeB.vendorId, storeB.categoryId, `/uploads/items/${storeB.vendorId}/${name}`);
+    const res = await local!.inject({ method: 'GET', url: `/uploads/items/${storeB.vendorId}/${name}` });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.headers['content-type']).toBe('image/png');
   });
 
   it('the review pack\'s drawn pictures keep their own rule on the local address', async () => {

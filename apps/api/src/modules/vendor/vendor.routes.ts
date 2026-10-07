@@ -2893,7 +2893,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { url } = await storage.upload({
       buffer,
       filename: `photo${IMAGE_EXTENSION[sniffed]}`,
-      mimeType: file.mimetype,
+      // The type the bytes are: it selects the metadata stripper and labels the object.
+      mimeType: sniffed,
       folder: `items/${vendorId}`,
     });
 

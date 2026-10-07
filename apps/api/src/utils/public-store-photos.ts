@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { canReadBounded, getStorageProvider } from '../providers/storage/storage-provider';
 import { runAsSystem } from '../plugins/tenant-context';
 import { visibleVendorForCaller } from '../modules/vendor/vendor-visibility';
-import { imageContentType } from './images';
+import { imageContentType, stripImageMetadataStrict } from './images';
 
 // ---------------------------------------------------------------------------
 // [PUBLIC-PHOTOS] Stores' own photos, whatever the storage provider.
@@ -31,8 +31,13 @@ import { imageContentType } from './images';
 //   - ONLY a photo that store still uses: a menu item, a menu section, its
 //     logo or cover. A replaced photo stops being served, and a key typed into
 //     another store's field publishes nothing;
+//   - ONLY while the store's owner still has an account: deletion commits the
+//     account first and winds the store down after, and that second step can
+//     fail — the closed account alone already stops the photos;
 //   - ONLY real JPEG/PNG/WebP bytes within the upload size limit, typed from
-//     the bytes themselves, read within a deadline;
+//     the bytes themselves, read within a deadline, and served with every
+//     metadata tag removed (a camera's GPS position of the shop among them);
+//     a photo whose tags cannot be removed is not served;
 //   - cached for an hour, never `immutable`, so a removal takes effect within
 //     the hour; a refusal is never cached.
 // ---------------------------------------------------------------------------
@@ -46,11 +51,25 @@ export const STORE_PHOTO_CACHE = 'public, max-age=3600';
 
 /** A store id: the folder name the upload route writes. No dots, no separators. */
 const STORE_ID = /^[A-Za-z0-9_-]{1,64}$/;
-/** createOpaqueStorageName: 16 random characters, then an extension. New menu
- *  photos are named by their bytes (.jpg/.png/.webp); older ones kept the
- *  uploaded file's own extension ("photo.jpg-large" → ".jpg-large"). No dots
- *  beyond the one, no separators, no escapes. */
-const PHOTO_NAME = /^[A-Za-z0-9_-]{16}(?:\.[A-Za-z0-9_-]{1,16})?$/;
+/** createOpaqueStorageName: 16 random characters, then the extension
+ *  `path.extname` gave. New menu photos are named by their bytes
+ *  (.jpg/.png/.webp); older ones kept the uploaded file's own extension,
+ *  whatever it was ("photo.jpg-large", "dish.jpeg_large_export"). The name is
+ *  only ever compared with what a store's row holds, exactly, so the extension
+ *  may be any printable text up to 64 characters — but never another dot, a
+ *  separator or a control character. */
+const PHOTO_ID = /^[A-Za-z0-9_-]{16}$/;
+function photoNameAccepted(file: string): boolean {
+  const dot = file.indexOf('.');
+  if (dot === -1) return PHOTO_ID.test(file);
+  const ext = file.slice(dot + 1);
+  if (!PHOTO_ID.test(file.slice(0, dot)) || ext.length < 1 || ext.length > 64) return false;
+  for (const ch of ext) {
+    const code = ch.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f || ch === '.' || ch === '/' || ch === '\\') return false;
+  }
+  return true;
+}
 
 /** The storage read deadline: connect, answer and body together. */
 function readDeadlineMs(): number {
@@ -67,7 +86,9 @@ async function storeShowsPhoto(app: FastifyInstance, vendorId: string, stored: s
   // public catalogue read uses. It answers yes or no; nothing else leaves.
   return runAsSystem('public-store-photo', async () => {
     const store = await app.prisma.vendor.findFirst({
-      where: { id: vendorId, ...visibleVendorForCaller() },
+      // The account-deletion state is the owner's, not the store's: a closed
+      // account is DEACTIVATED before its store is wound down.
+      where: { id: vendorId, ...visibleVendorForCaller(), owner: { user: { status: { not: 'DEACTIVATED' } } } },
       select: { coverImageUrl: true, logoUrl: true },
     });
     if (!store) return false;
@@ -90,7 +111,7 @@ export interface StorePhotoSource {
 export async function serveStorePhoto(app: FastifyInstance, request: FastifyRequest, reply: FastifyReply, source: StorePhotoSource) {
   const notServed = () => reply.code(404).header('Cache-Control', 'no-store').send();
   const { vendorId, file } = source;
-  if (!STORE_ID.test(vendorId) || !PHOTO_NAME.test(file)) return notServed();
+  if (!STORE_ID.test(vendorId) || !photoNameAccepted(file)) return notServed();
   if (!(await storeShowsPhoto(app, vendorId, source.stored(vendorId, file)))) return notServed();
 
   const controller = new AbortController();
@@ -114,7 +135,13 @@ export async function serveStorePhoto(app: FastifyInstance, request: FastifyRequ
     clearTimeout(timer);
   }
   const type = bytes ? imageContentType(bytes) : null;
-  if (!bytes || !type) return notServed();
+  // Published without its tags, whatever was stored (older uploads could keep
+  // them); a photo whose tags cannot be removed is not published at all.
+  const clean = bytes && type ? stripImageMetadataStrict(bytes, type) : null;
+  if (!clean || !type) {
+    if (bytes && type) request.log.warn('[PUBLIC-PHOTOS] stored photo did not parse; not served');
+    return notServed();
+  }
 
   return reply
     .header('Content-Type', type)
@@ -123,7 +150,7 @@ export async function serveStorePhoto(app: FastifyInstance, request: FastifyRequ
     // The website draws these from another origin (its own pages and its
     // image optimiser), so the photo may be embedded cross-origin.
     .header('Cross-Origin-Resource-Policy', 'cross-origin')
-    .send(bytes);
+    .send(clean);
 }
 
 /** A store photo on local disk, under `<uploadBase>/items/<store>/<file>`. */
