@@ -95,3 +95,12 @@ describe('[A-12] a waived fee carries the operator’s own words', () => {
     expect((await within(dialog).findByRole('alert')).textContent).toContain('This period is already waived.');
   });
 });
+
+it('a failed billing-trail read offers Retry instead of empty history', async () => {
+  const fallback = handler();
+  mockApi((request) => request.url.pathname.endsWith('/billing-events') ? { status: 500, body: { success: false } } : fallback(request));
+  const { user } = renderWithQuery(<SubscriptionsPage />);
+  await user.click(await screen.findByRole('button', { name: /Billing trail/i }));
+  expect(await screen.findByText("Couldn't load the billing trail")).toBeTruthy();
+  expect(screen.queryByText('No billing events.')).toBeNull();
+});

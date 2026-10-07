@@ -21,9 +21,10 @@ function holder(s: any): { name: string; kind: string; href?: string } {
 }
 
 function BillingEvents({ id }: { id: string }) {
-  const { data, isLoading } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
   const events: any[] = data?.data ?? [];
   if (isLoading) return <p className="text-xs text-[var(--muted)] p-3">Loading billing trail…</p>;
+  if (isError) return <QueryFailed error={error} what="the billing trail" onRetry={() => void refetch()} retrying={isFetching} />;
   if (events.length === 0) return <p className="text-xs text-[var(--muted)] p-3">No billing events.</p>;
   return (
     <div className="p-3 space-y-1.5">

@@ -15,6 +15,23 @@ const REASON_HEADER = 'x-swift-reason';
 export const BROWSER_CLIENT = 'admin-web';
 const clientHeaders = { 'X-Swift-Client': BROWSER_CLIENT } as const;
 
+/** Bound the whole exchange, including response-body reads. A timeout never proves a write failed. */
+async function withRequestTimeout<T>(work: (_signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal | null): Promise<T> {
+  const controller = new AbortController();
+  const abort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abort();
+  else callerSignal?.addEventListener('abort', abort, { once: true });
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new DOMException('The request timed out. Check whether it went through before trying again.', 'TimeoutError'));
+      controller.abort();
+    }, 30_000);
+  });
+  try { return await Promise.race([work(controller.signal), timeout]); }
+  finally { clearTimeout(timer!); callerSignal?.removeEventListener('abort', abort); }
+}
+
 let refreshFlight: Promise<boolean> | null = null;
 
 /** One refresh at a time: concurrent 401s share the flight, so a rotated refresh cookie is never replayed. */
@@ -22,7 +39,7 @@ async function tryRefresh(): Promise<boolean> {
   if (!refreshFlight) {
     refreshFlight = (async () => {
       try {
-        const res = await fetch(`${API_URL}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { ...clientHeaders } });
+        const res = await withRequestTimeout((signal) => fetch(`${API_URL}/api/v1/auth/refresh`, { method: 'POST', credentials: 'include', headers: { ...clientHeaders }, signal }));
         return res.ok;
       } catch {
         return false;
@@ -76,9 +93,11 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
     error.code = 'REASON_UNSENDABLE';
     throw error;
   }
+  return withRequestTimeout(async (signal) => {
   const doFetch = () =>
     fetch(`${API_URL}${path}`, {
       ...requestOptions,
+      signal,
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
@@ -102,7 +121,9 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
       throw expired;
     }
   }
-  const json = await res.json().catch(() => ({}));
+  const unreadable = () => Object.assign(new Error('Swift returned an unreadable answer. Refresh and check whether the action went through before retrying.'), { code: 'RESPONSE_UNREADABLE', status: 502 });
+  const json = await res.json().catch(() => { throw unreadable(); });
+  if (res.status === 202 && json?.error?.code !== 'APPROVAL_REQUIRED') throw unreadable();
   if (!res.ok || json?.success === false) {
     // Carry the server's error CODE, not just its prose. A page that has to
     // tell "the queues are not running on this server" apart from "no jobs have
@@ -123,6 +144,7 @@ async function apiFetch(path: string, options?: RequestInit & { reason?: string 
     throw error;
   }
   return json;
+  }, requestOptions.signal);
 }
 
 /** The HTTP status of a thrown apiFetch error. 202 is not a failure — see

@@ -70,7 +70,7 @@ export default function ClaimsPage() {
     confirmLabel: 'Record entry',
     fields: [
       { kind: 'amount', name: 'amount', label: 'Amount', hint: 'In GYD; start with a minus sign to correct downwards', cents: true, signed: true },
-      { kind: 'text', name: 'note', label: 'Note', hint: 'Recorded with the entry', required: true, maxLength: 500 },
+      { kind: 'text', name: 'note', label: 'Note', hint: 'Recorded with the entry', required: true, minLength: 3, maxLength: 500 },
     ],
     submit: ({ reason, values }) => adjustRlpReserve('GY', Number(values['amount']), String(values['note']), reason),
     success: (_r, { values }) => `${gyd(values['amount'])} recorded on the GY reserve line.`,
@@ -89,23 +89,24 @@ export default function ClaimsPage() {
 
       {actions.banner}
 
+      {metricsQ.isError && <QueryFailed error={metricsQ.error} what="the claims metrics" onRetry={() => void metricsQ.refetch()} retrying={metricsQ.isFetching} />}
       {/* Founder cockpit numbers (cash-rules founderMetrics) */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Failed-payment rate (30d)</p>
           <p className="text-3xl font-bold mt-1">
-            {metricsQ.isLoading ? '—' : m.failedPaymentPct != null ? `${Number(m.failedPaymentPct).toFixed(1)}%` : '—'}
+            {!metricsQ.data || metricsQ.isError ? '—' : m.failedPaymentPct != null ? `${Number(m.failedPaymentPct).toFixed(1)}%` : '—'}
           </p>
           <p className="text-[var(--muted)] text-xs mt-1">failed handovers vs completed</p>
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Guarantee payouts (7d)</p>
-          <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : gyd(m.guaranteePayoutsThisWeek?.total ?? 0)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">{m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
+          <p className="text-3xl font-bold mt-1">{!metricsQ.data || metricsQ.isError ? '—' : gyd(m.guaranteePayoutsThisWeek?.total ?? 0)}</p>
+          <p className="text-[var(--muted)] text-xs mt-1">{!metricsQ.data || metricsQ.isError ? '—' : `${m.guaranteePayoutsThisWeek?.count ?? 0} approved claims`}</p>
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Riders with claims (30d)</p>
-          <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : Number((m.claimsByRider ?? []).length).toLocaleString()}</p>
+          <p className="text-3xl font-bold mt-1">{!metricsQ.data || metricsQ.isError ? '—' : Number((m.claimsByRider ?? []).length).toLocaleString()}</p>
           <p className="text-[var(--muted)] text-xs mt-1">repeat filers surface first</p>
         </div>
       </div>

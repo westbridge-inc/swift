@@ -40,7 +40,7 @@ export type ReasonField =
       /** Amounts that may go below zero (a correcting entry). */ signed?: boolean }
   | { kind: 'reference'; name: string; label: string; hint?: string }
   /** Free text: a short note, or an identifier typed by hand. Optional unless `required`. */
-  | { kind: 'text'; name: string; label: string; hint?: string; required?: boolean; maxLength?: number };
+  | { kind: 'text'; name: string; label: string; hint?: string; required?: boolean; minLength?: number; maxLength?: number; pattern?: RegExp };
 
 export interface ReasonAnswer {
   /** The reason as it is sent: trimmed, smart punctuation made plain. Empty when none was asked. */
@@ -146,6 +146,8 @@ function checkField(field: ReasonField, raw: string): FieldCheck<string | number
   if (field.kind === 'text') {
     const value = raw.trim();
     if (field.required && !value) return { ok: false, message: `Enter ${field.label.toLowerCase()}.` };
+    if (value && field.minLength && value.length < field.minLength) return { ok: false, message: `Enter at least ${field.minLength} characters.` };
+    if (value && field.pattern && !field.pattern.test(value)) return { ok: false, message: 'Use letters, numbers, dots, underscores, colons, slashes or hyphens; no spaces.' };
     if (value.length > (field.maxLength ?? 500)) return { ok: false, message: `Keep it under ${field.maxLength ?? 500} characters.` };
     return { ok: true, value };
   }

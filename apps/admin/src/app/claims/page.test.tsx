@@ -289,3 +289,26 @@ describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
     expect(bundle.textContent).toContain('bundle incomplete');
   });
 });
+
+describe('reviewed money-screen recovery', () => {
+  it('shows failed metrics with Retry, never zero payouts or claims', async () => {
+    const fallback = claimsHandler(() => ({ body: { success: true, data: [] } }));
+    mockApi((request) => request.url.pathname.endsWith('/metrics') ? { status: 500, body: { success: false } } : fallback(request));
+    renderWithQuery(<ClaimsPage />);
+    expect(await screen.findByText("Couldn't load the claims metrics")).toBeTruthy();
+    expect(screen.queryByText('0 approved claims')).toBeNull();
+    expect(screen.getByRole('button', { name: /Retry/ })).toBeTruthy();
+  });
+  it('rejects a reserve note shorter than the server minimum before queuing', async () => {
+    const fetchMock = mockApi(claimsHandler(() => ({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED' } } })));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Adjust reserve…' }));
+    const dialog = screen.getByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Amount' }), '500');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Note' }), 'x');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Record entry' }));
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    expect(within(dialog).getByText(/at least 3 characters/)).toBeTruthy();
+  });
+});
