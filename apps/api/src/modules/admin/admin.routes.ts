@@ -65,6 +65,7 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
+import { vendorActivationNext, disclosureMissingWords } from './vendor-activation';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 
@@ -1356,58 +1357,132 @@ export async function adminRoutes(app: FastifyInstance) {
     };
   });
 
+  /**
+   * [MC-PR2] The store's activation checklist: every required document with its
+   * state in the gate's own terms, the storefront disclosure verdict (missing
+   * element names only, never values), and what the console may do next — the
+   * same verdict the approve route below enforces. Read-only; no file reference.
+   */
+  app.get('/vendors/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id },
+      select: { id: true, status: true, suspensionSource: true, isVerified: true, activationValidUntil: true, owner: { select: { userId: true, user: { select: { status: true } } } } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    const goLive = await verification.vendorGoLive(id);
+    if (!goLive) throw new NotFoundError('Vendor', id);
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status }, goLive);
+    return {
+      success: true,
+      data: {
+        vendorId: vendor.id,
+        applicantId: goLive.ownerUserId,
+        storeStatus: vendor.status,
+        suspensionSource: vendor.suspensionSource,
+        ownerAccountStatus: vendor.owner.user.status,
+        isVerified: vendor.isVerified,
+        activationValidUntil: vendor.activationValidUntil,
+        role: goLive.role,
+        checklist: { items: goLive.checklist.items, complete: goLive.checklist.complete },
+        disclosure: goLive.disclosure,
+        ready: goLive.ready,
+        next,
+      },
+    };
+  });
+
+  /**
+   * [ACTIVATION AUTHORITY / EV-ACT-11 · MC-PR2] Activate a store that is waiting
+   * for approval, or reinstate a suspended one — never past a gate the single
+   * activation projection enforces.
+   *
+   * This route used to be its own activation authority: it checked the document
+   * checklist and wrote ACTIVE, skipping the storefront-disclosure go-live gate
+   * (DOC-INV-27) and leaving no activation expiry, and it would reopen the store
+   * of a partner who had closed their account. Now one verdict
+   * (vendorActivationNext, shared with the checklist read) decides:
+   *  - waiting for approval with every rule met → the projection itself makes it
+   *    live (checklist, disclosure, pricing and trial, expiry, tier promotion);
+   *  - suspended with every rule met → reinstated by CAS, carrying the same
+   *    expiry the projection would write [Fable #1481 S4-2: the suspension
+   *    source is cleared, so no stale BILLING survives for a later heal];
+   *  - otherwise refused with what is missing, and nothing changes.
+   */
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
     const vendor = await app.prisma.vendor.findUnique({
       where: { id },
-      include: { owner: true },
+      include: { owner: { include: { user: { select: { status: true } } } } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
     if (vendor.status === 'ACTIVE') throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
 
-    // [ACTIVATION AUTHORITY / EV-ACT-11] This button is no longer a
-    // checklist-free ACTIVE writer. The founder invariant is: submit owner ID
-    // + required business documents → restricted per-document review →
-    // activation. Approval here CONFIRMS that evidence; it cannot substitute
-    // for it — a store whose checklist is incomplete, expired, or purged
-    // stays pending and the reviewer is pointed at the Verification queue.
-    const checklistComplete = await verification.isRoleVerified(
-      vendor.owner.userId,
-      vendor.vendorType as Parameters<typeof verification.isRoleVerified>[1],
-    );
-    if (!checklistComplete) {
-      throw new AppError(
-        409,
-        'CHECKLIST_INCOMPLETE',
-        `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
-      );
+    const goLive = await verification.vendorGoLive(id);
+    if (!goLive) throw new NotFoundError('Vendor', id);
+    const next = vendorActivationNext({ status: vendor.status, suspensionSource: vendor.suspensionSource, ownerAccountStatus: vendor.owner.user.status }, goLive);
+    switch (next) {
+      case 'CLOSED':
+        throw new AppError(409, 'STORE_CLOSED', `${vendor.name} is closed. A closed store is not reopened from the console.`);
+      case 'ACCOUNT_CLOSED':
+        throw new AppError(409, 'ACCOUNT_CLOSED', `${vendor.name}'s owner has closed their Swift account, so the store stays closed. It cannot be reopened from the console.`);
+      case 'NEEDS_DOCUMENTS':
+        throw new AppError(
+          409,
+          'CHECKLIST_INCOMPLETE',
+          `${vendor.name}'s required documents are not all approved and current — review them in the Verification queue first.`,
+        );
+      case 'NEEDS_DISCLOSURE':
+        throw new AppError(
+          409,
+          'DISCLOSURE_INCOMPLETE',
+          `${vendor.name}'s documents are complete, but its storefront supplier information is not: missing ${disclosureMissingWords(goLive.disclosure.missing)}. It goes live by itself once that is complete.`,
+          { missing: goLive.disclosure.missing },
+        );
+      default:
+        break;
     }
 
-    // [PR1270-S2-03] Price BEFORE the activation write. A market that cannot
-    // price this store refuses the approval here, with the config error, and
-    // the store stays pending — never ACTIVE and searchable with no
-    // subscription, which a failure after the CAS below used to leave behind.
-    const updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
-      // [Fable #1481 S4-2] An approval (or reinstatement) ends whatever suspension the store was under: no stale
-      // suspension source survives it for a later heal or payment to act on.
-      const won = await tx.vendor.updateMany({ where: { id, status: { not: 'ACTIVE' } }, data: { status: 'ACTIVE', isVerified: true, suspensionSource: null } });
-      if (won.count === 0) throw new AppError(400, 'ALREADY_ACTIVE', 'Vendor is already approved');
-      return tx.vendor.findUniqueOrThrow({ where: { id } });
-    });
+    let updated;
+    if (next === 'CAN_ACTIVATE') {
+      // The one authority that makes a store live, on every path (review,
+      // auto-approval, the reconcile belt — and now this button). It prices the
+      // store and starts its trial in the same transaction, or refuses with the
+      // config error and leaves it pending.
+      await verification.activateOwnerStores(goLive.ownerUserId);
+      updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
+      if (updated.status !== 'ACTIVE') {
+        throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: its documents or details changed while approving. Refresh and check its checklist.`);
+      }
+    } else {
+      // CAN_REINSTATE. [PR1270-S2-03] Price BEFORE the activation write: a
+      // market that cannot price this store refuses here and it stays suspended.
+      updated = await subscriptions.withActivation({ vendorId: id }, async (tx) => {
+        const activationValidUntil = await verification.checklistEvidenceValidUntil(goLive.ownerUserId, goLive.role, tx);
+        // [Fable #1481 S4-2] A reinstatement ends whatever suspension the store was under: no stale
+        // suspension source survives it for a later heal or payment to act on.
+        const won = await tx.vendor.updateMany({
+          where: { id, status: 'SUSPENDED' },
+          data: { status: 'ACTIVE', isVerified: true, suspensionSource: null, activationValidUntil },
+        });
+        if (won.count === 0) throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} changed while reinstating. Refresh and check its status.`);
+        return tx.vendor.findUniqueOrThrow({ where: { id } });
+      });
+    }
 
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
 
     await audit(request.user.userId, 'APPROVE_VENDOR', 'Vendor', id, { previousStatus: vendor.status }, request);
 
-    // A subscription is born as a 14-day trial the moment the vendor goes live.
-
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Vendor Approved!',
-      body: `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
+      title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',
+      body: next === 'CAN_REINSTATE'
+        ? `${vendor.name} has been reinstated and can take orders again once you open it.`
+        : `Congratulations! ${vendor.name} has been approved and is now live on Swift.`,
       data: { vendorId: id },
     });
 
@@ -1525,6 +1600,50 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!rider) throw new NotFoundError('Rider', id);
 
     return { success: true, data: rider };
+  });
+
+  /**
+   * [MC-PR2] A mover's activation checklist: every required document for their
+   * PERSISTED vehicle class with its state, and the live-operation gate the
+   * Verify button obeys (the same call the verify routes make). The per-item
+   * states are the document picture; `live` is the verdict — a vehicle
+   * document can be approved yet belong to a previous vehicle, and only the
+   * gate decides. Read-only; no file reference.
+   */
+  const moverActivationChecklist = async (
+    kind: 'RIDER' | 'DRIVER',
+    profile: { id: string; userId: string; vehicleType: Parameters<typeof verification.getLiveOperationStatus>[1]['vehicleType']; documentsVerified: boolean },
+  ) => {
+    const checklist = await verification.activationChecklist(profile.userId, 'MOVER', { vehicleType: profile.vehicleType });
+    const live = await verification.getLiveOperationStatus(
+      profile.userId,
+      kind === 'RIDER' ? { vehicleType: profile.vehicleType, kind: 'RIDER' } : { vehicleType: profile.vehicleType },
+    );
+    const next = profile.documentsVerified ? 'VERIFIED'
+      : live.allowed ? 'CAN_VERIFY'
+        : live.reason === 'insurance' ? 'NEEDS_INSURANCE' : 'NEEDS_DOCUMENTS';
+    return {
+      moverId: profile.id,
+      kind,
+      applicantId: profile.userId,
+      vehicleType: profile.vehicleType,
+      documentsVerified: profile.documentsVerified,
+      checklist: { items: checklist.items, complete: checklist.complete },
+      live,
+      next,
+    };
+  };
+
+  app.get('/riders/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const rider = await app.prisma.rider.findFirst({
+      where: { id, user: { tenantId } },
+      select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+    });
+    if (!rider) throw new NotFoundError('Rider', id);
+    return { success: true, data: await moverActivationChecklist('RIDER', rider) };
   });
 
   app.put('/riders/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {
@@ -1662,6 +1781,18 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!driver) throw new NotFoundError('Driver', id);
 
     return { success: true, data: driver };
+  });
+
+  app.get('/drivers/:id/activation-checklist', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const driver = await app.prisma.driver.findFirst({
+      where: { id, user: { tenantId } },
+      select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+    });
+    if (!driver) throw new NotFoundError('Driver', id);
+    return { success: true, data: await moverActivationChecklist('DRIVER', driver) };
   });
 
   app.put('/drivers/:id/verify-documents', { preHandler: [adminGuard] }, async (request) => {

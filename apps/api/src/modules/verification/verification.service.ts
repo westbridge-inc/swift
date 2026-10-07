@@ -44,6 +44,39 @@ import {
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
 
+/** [MC-PR2] One required document, as the admin console's activation checklist shows it. No file reference, ever. */
+export interface ActivationChecklistItem {
+  docType: string;
+  /** APPROVED only when the gate's own evidence query counts it. */
+  state: 'APPROVED' | 'PENDING' | 'REJECTED' | 'EXPIRED' | 'MISSING';
+  /** The newest submission of this type (absent for evidence held on a vehicle subject, or when nothing was sent). */
+  documentId: string | null;
+  submittedAt: string | null;
+  expiresAt: string | null;
+  /** The reviewer's note on a rejection — what the applicant was told. */
+  note: string | null;
+  /** Approved, and a newer submission of the same type is waiting for review. */
+  renewalPending: boolean;
+}
+
+export interface ActivationChecklist {
+  checklist: string[];
+  items: ActivationChecklistItem[];
+  /** The gate's own verdict (isVerifiedForList) over the same checklist. */
+  complete: boolean;
+}
+
+/** [MC-PR2] Everything that decides whether a store may be live, read-only, in the projection's own terms. */
+export interface VendorGoLive {
+  ownerUserId: string;
+  role: ChecklistRole;
+  checklist: ActivationChecklist;
+  /** DOC-INV-27: engaged once the market's BUSINESS document types are active; when engaged, an incomplete block holds the store. */
+  disclosure: { engaged: boolean; complete: boolean; missing: string[] };
+  /** checklist complete AND (gate disengaged OR disclosure complete) — exactly the projection's `verified`. */
+  ready: boolean;
+}
+
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
 export const IDENTITY_DOC_TYPE = 'identity_l2';
 
@@ -1493,6 +1526,89 @@ export class VerificationService {
       if (bound == null || typeBest < bound) bound = typeBest;
     }
     return bound;
+  }
+
+  /**
+   * [MC-PR2] The activation checklist, item by item, for the admin console.
+   *
+   * `complete` is the gate's own predicate over the same checklist, and an item
+   * reads APPROVED only when the gate's evidence query counts it — so the panel
+   * can never show "all approved" while the gate refuses (an approval whose
+   * image was purged, or whose retention ran out, is EXPIRED here as it is
+   * there). Read-only; returns no file reference.
+   */
+  async activationChecklist(
+    userId: string,
+    roleKey: ChecklistRole,
+    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient } = {},
+  ): Promise<ActivationChecklist> {
+    const db = options.db ?? this.prisma;
+    const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+    if (!user) return { checklist: [], items: [], complete: false };
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType);
+    const evidence = await this.approvedEvidence(db, userId, checklist, new Date());
+    const approved = new Set(evidence.map((e) => e.docType));
+    const submissions = (await db.verificationDocument.findMany({
+      where: { userId, docType: { in: [...checklist] } },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, docType: true, status: true, state: true, expiresAt: true, reviewNote: true, createdAt: true },
+    })).filter((d) => d.state !== 'SUPERSEDED');
+    const items = checklist.map((docType): ActivationChecklistItem => {
+      const latest = submissions.find((d) => d.docType === docType) ?? null;
+      const state: ActivationChecklistItem['state'] = approved.has(docType) ? 'APPROVED'
+        : !latest ? 'MISSING'
+          : latest.status === 'PENDING' ? 'PENDING'
+            : latest.status === 'REJECTED' ? 'REJECTED'
+              : 'EXPIRED'; // EXPIRED, or APPROVED but no longer counted (lapsed, purged, retention over)
+      return {
+        docType,
+        state,
+        documentId: latest?.id ?? null,
+        submittedAt: latest ? latest.createdAt.toISOString() : null,
+        expiresAt: latest?.expiresAt ? latest.expiresAt.toISOString() : null,
+        note: state === 'REJECTED' ? latest?.reviewNote ?? null : null,
+        renewalPending: state === 'APPROVED' && latest?.status === 'PENDING',
+      };
+    });
+    return { checklist, items, complete: await this.isVerifiedForList(userId, checklist, db) };
+  }
+
+  /**
+   * [MC-PR2] The go-live verdict for one store, read-only, in the projection's
+   * own terms (projectVendorActivation): the owner's checklist for the store's
+   * type, and — once the market's BUSINESS document types are active — a
+   * complete storefront disclosure block. Returns the block's missing element
+   * names only, never its values.
+   */
+  async vendorGoLive(vendorId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VendorGoLive | null> {
+    const vendor = await db.vendor.findUnique({
+      where: { id: vendorId },
+      select: { vendorType: true, owner: { select: { userId: true, user: { select: { countryCode: true } } } } },
+    });
+    if (!vendor) return null;
+    const role = vendor.vendorType as ChecklistRole;
+    const ownerUserId = vendor.owner.userId;
+    const checklist = await this.activationChecklist(ownerUserId, role, { db });
+    const engaged = await disclosureGateEngaged(db, vendor.owner.user.countryCode);
+    const block = await compileStorefrontDisclosure(db, vendorId);
+    return {
+      ownerUserId,
+      role,
+      checklist,
+      disclosure: { engaged, complete: block.complete, missing: block.missing },
+      ready: checklist.complete && (!engaged || block.complete),
+    };
+  }
+
+  /**
+   * [MC-PR2] Run the single vendor activation projection for this owner now —
+   * the console's "activate now" for a store whose documents are complete. It
+   * applies every go-live rule the document path applies (checklist, the
+   * disclosure gate, pricing and the trial, activation expiry, tier
+   * promotion); nothing here decides activation on its own.
+   */
+  async activateOwnerStores(userId: string): Promise<void> {
+    await this.projectVendorActivation(this.prisma, userId);
   }
 
   /**

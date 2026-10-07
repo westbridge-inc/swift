@@ -1,17 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchRiders, verifyRiderDocuments } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { useQuery } from '@tanstack/react-query';
+import { fetchRiders } from '@/lib/api';
+
+// [MC-PR2] Verifying a rider's documents happens on their page, beside the
+// checklist that shows what is approved and what is missing — never blind from
+// a list row (the old button also dropped the server's refusal).
 
 export default function RidersPage() {
-  const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ['riders'], queryFn: fetchRiders });
-  const verifyMutation = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => verifyRiderDocuments(id, reason),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['riders'] }),
-  });
 
   return (
     <div>
@@ -53,12 +51,9 @@ export default function RidersPage() {
                   <td className="p-4">{rider.averageRating?.toFixed(1) || '\u2014'}</td>
                   <td className="p-4 text-right">
                     {!rider.documentsVerified && (
-                      <button
-                        onClick={() => { const reason = askReason({ action: 'verify these documents', subject: `${rider.user?.firstName} ${rider.user?.lastName}` }); if (reason) verifyMutation.mutate({ id: rider.id, reason }); }}
-                        className="px-3 py-1 bg-[var(--accent)] text-white rounded-lg text-xs hover:bg-[var(--accent)]/80"
-                      >
-                        Verify Docs
-                      </button>
+                      <Link href={`/riders/${rider.id}`} className="px-3 py-1 border border-[var(--border)] rounded-lg text-xs hover:bg-white/10">
+                        Check documents
+                      </Link>
                     )}
                   </td>
                 </tr>
