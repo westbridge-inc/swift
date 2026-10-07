@@ -312,7 +312,7 @@ export interface VendorActivationChecklist {
   activationValidUntil: string | null;
   role: string;
   checklist: { items: ActivationChecklistItem[]; complete: boolean };
-  disclosure: { engaged: boolean; complete: boolean; missing: string[] };
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
   ready: boolean;
   next: VendorActivationNext;
 }

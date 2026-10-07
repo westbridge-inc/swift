@@ -71,8 +71,9 @@ export interface VendorGoLive {
   ownerUserId: string;
   role: ChecklistRole;
   checklist: ActivationChecklist;
-  /** DOC-INV-27: engaged once the market's BUSINESS document types are active; when engaged, an incomplete block holds the store. */
-  disclosure: { engaged: boolean; complete: boolean; missing: string[] };
+  /** DOC-INV-27: engaged once the market's BUSINESS document types are active; when engaged, an incomplete block holds
+   *  the store. `complete` is null while the gate is not engaged (the block is not compiled: it decides nothing). */
+  disclosure: { engaged: boolean; complete: boolean | null; missing: string[] };
   /** checklist complete AND (gate disengaged OR disclosure complete) — exactly the projection's `verified`. */
   ready: boolean;
 }
@@ -1583,20 +1584,25 @@ export class VerificationService {
   async vendorGoLive(vendorId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VendorGoLive | null> {
     const vendor = await db.vendor.findUnique({
       where: { id: vendorId },
-      select: { vendorType: true, owner: { select: { userId: true, user: { select: { countryCode: true } } } } },
+      select: { vendorType: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
     });
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
     const ownerUserId = vendor.owner.userId;
     const checklist = await this.activationChecklist(ownerUserId, role, { db });
     const engaged = await disclosureGateEngaged(db, vendor.owner.user.countryCode);
-    const block = await compileStorefrontDisclosure(db, vendorId);
+    // The projection's own compile, with the same payer and tenant authority it names — and only
+    // when the gate is engaged, as in the projection: a disengaged gate decides nothing, so no
+    // document field is opened (each open is audited) just to show a verdict that does not apply.
+    const block = engaged
+      ? await compileActivationDisclosure(db, vendorId, { accountId: ownerUserId, tenantId: vendor.owner.user.tenantId })
+      : null;
     return {
       ownerUserId,
       role,
       checklist,
-      disclosure: { engaged, complete: block.complete, missing: block.missing },
-      ready: checklist.complete && (!engaged || block.complete),
+      disclosure: { engaged, complete: block ? block.complete : null, missing: block ? block.missing : [] },
+      ready: checklist.complete && (!block || block.complete),
     };
   }
 

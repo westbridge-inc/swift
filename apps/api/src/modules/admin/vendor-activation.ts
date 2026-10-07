@@ -45,7 +45,7 @@ export function vendorActivationNext(vendor: VendorActivationFacts, goLive: Pick
   if (vendor.status === 'CLOSED') return 'CLOSED';
   if (vendor.suspensionSource === 'WIND_DOWN' || vendor.ownerAccountStatus === 'DEACTIVATED') return 'ACCOUNT_CLOSED';
   if (!goLive.checklist.complete) return 'NEEDS_DOCUMENTS';
-  if (goLive.disclosure.engaged && !goLive.disclosure.complete) return 'NEEDS_DISCLOSURE';
+  if (goLive.disclosure.engaged && goLive.disclosure.complete !== true) return 'NEEDS_DISCLOSURE';
   return vendor.status === 'SUSPENDED' ? 'CAN_REINSTATE' : 'CAN_ACTIVATE';
 }
 
