@@ -30,6 +30,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { swapChangeText } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
@@ -1056,6 +1057,14 @@ export function DeliveryScreen() {
                   {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
                   {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
                 </T>
+                {/* [L09 · M028] What approving changes, from the server's own
+                    numbers: the total (paid options included), and the chosen
+                    options that do not come with the swap. */}
+                {swapChangeText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapChangeText(it.substitution)}
+                  </T>
+                ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   <PillButton
                     label="Approve swap"
