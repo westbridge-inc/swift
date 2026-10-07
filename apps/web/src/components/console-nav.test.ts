@@ -4,9 +4,9 @@ import { NAV as dashboardNav } from '@/app/dashboard/dashboard-shell';
 import { NAV as portalNav } from '@/app/portal/portal-shell';
 
 describe('console navigation', () => {
-  it('keeps Today first and places Weekly fee between Bulk import and Settings', () => {
+  it('keeps Today first and places Documents and Weekly fee between Bulk import and Settings, in the portal’s order', () => {
     expect(dashboardNav.map(({ label }) => label)).toEqual([
-      'Today', 'Orders', 'Inventory', 'Bulk import', 'Weekly fee', 'Settings',
+      'Today', 'Orders', 'Inventory', 'Bulk import', 'Documents', 'Weekly fee', 'Settings',
     ]);
   });
 

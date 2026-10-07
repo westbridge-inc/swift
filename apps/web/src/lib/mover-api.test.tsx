@@ -143,7 +143,12 @@ describe('[W-10] the blanket catch is gone, and the pages say so', () => {
   });
 
   it('documents does not report an outage as "no obligations"', () => {
-    expect(page('documents/page.tsx')).toMatch(/\{status\.isError && \(/);
+    // [DOCS-1] The mover page draws its checklist with the shared partner
+    // documents component (the store console uses it too); the failed read is
+    // answered there, and partner-documents.test.tsx shows it on screen.
+    expect(page('documents/page.tsx')).toMatch(/<PartnerDocuments role="MOVER"/);
+    const shared = readFileSync(join(__dirname, '..', 'components', 'partner-documents.tsx'), 'utf8');
+    expect(shared).toMatch(/\{status\.isError \? \(\s*<DataUnavailable what="your document checklist"/);
   });
 });
 

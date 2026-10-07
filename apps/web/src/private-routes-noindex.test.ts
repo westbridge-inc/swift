@@ -60,6 +60,7 @@ const PRIVATE_PAGES = [
   '(app)/orders/page.tsx',
   '(app)/orders/[id]/page.tsx',
   'dashboard/page.tsx',
+  'dashboard/documents/page.tsx', // [DOCS-1] a store owner's verification documents
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',

@@ -77,28 +77,4 @@ export const updateDriverProfile = (body: Record<string, unknown>) =>
 export const cancelPendingMmgPayUrl = () =>
   apiFetch('/api/v1/driver/profile/mmg-pay-url/pending', { method: 'DELETE' });
 
-// ── Documents (verification) ────────────────────────────────────────────────
-export interface DocStatus {
-  checklist: string[];
-  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string }>;
-  missing: string[];
-  vehicleType?: string | null;
-  roleVerified: boolean;
-}
-export const getVerificationStatus = (vehicleType?: string) =>
-  apiFetch(`/api/v1/verification/status?role=MOVER${vehicleType ? `&vehicleType=${vehicleType}` : ''}`).then(
-    (r) => r.data as DocStatus,
-  );
-export const uploadVerificationFile = (file: File) => {
-  const form = new FormData();
-  form.append('file', file);
-  return apiFetch('/api/v1/verification/upload', { method: 'POST', body: form }).then(
-    (r) => r.data as { url: string },
-  );
-};
-export const submitVerificationDocument = (docType: string, fileUrl: string) =>
-  apiFetch('/api/v1/verification/documents', {
-    method: 'POST',
-    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5)
-    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1' }),
-  });
+// ── Documents (verification): lib/partner-documents.ts, shared with the store console.
