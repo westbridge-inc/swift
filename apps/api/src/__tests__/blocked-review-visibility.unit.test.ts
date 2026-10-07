@@ -14,6 +14,7 @@ import {
 } from '../modules/rating/vendor-review-visibility';
 
 /** The live author every real reply-door read includes (deletion leaves a marker instead). */
+const REVIEW_CREATED_AT = new Date('2026-09-12T12:00:00Z');
 const ACTIVE_RATER = { status: 'ACTIVE', phone: '+5920000002' };
 
 function fakePrisma(
@@ -169,7 +170,7 @@ describe('vendor review visibility for a user block', () => {
       },
       rating: {
         updateMany,
-        findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: scrubbed }),
+        findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: scrubbed, createdAt: REVIEW_CREATED_AT }),
         findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null, rater: ACTIVE_RATER }),
       },
       vendor: {
@@ -227,7 +228,7 @@ describe('vendor review visibility for a user block', () => {
       rating: {
         findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null, rater: ACTIVE_RATER }),
         updateMany: firstUpdate,
-        findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: 'First try' }),
+        findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: 'First try', createdAt: REVIEW_CREATED_AT }),
       },
       vendor: { findUniqueOrThrow: vi.fn().mockResolvedValue({ name: 'Store One' }) },
       notification: { create: firstNotification },
@@ -285,7 +286,7 @@ describe('vendor review visibility for a user block', () => {
       rating: {
         findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null, rater: ACTIVE_RATER }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-        findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: 'This request' }),
+        findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: 'This request', createdAt: REVIEW_CREATED_AT }),
       },
       vendor: { findUniqueOrThrow: vi.fn().mockResolvedValue({ name: 'Store One' }) },
       notification: { create: vi.fn().mockResolvedValue({ id: 'rolled-back-notification' }) },
@@ -355,7 +356,7 @@ describe('vendor review visibility for a user block', () => {
       })).rejects.toMatchObject({ statusCode: 404, code: 'NOT_FOUND' });
   });
 
-  it('uses the same active, released, public predicate for an operator viewer', async () => {
+  it('uses the same active, released, public predicate for a customer viewer', async () => {
     const db = fakePrisma(['blocked-author']);
 
     const where = await vendorReviewWhereForViewer(
@@ -375,7 +376,7 @@ describe('vendor review visibility for a user block', () => {
     });
   });
 
-  it('does not open the reply door for a hidden review', async () => {
+  it('does not open the store reply door for an unpublished review', async () => {
     const db = fakePrisma(['blocked-author']);
 
     await expect(requireRespondableVendorReview(db.prisma, {
@@ -393,7 +394,6 @@ describe('vendor review visibility for a user block', () => {
         state: 'ACTIVE',
         isPublic: true,
         visibleAt: { not: null },
-        raterId: { notIn: ['blocked-author'] },
       },
       include: { rater: { select: { status: true, phone: true } } },
     });
@@ -430,7 +430,7 @@ describe('vendor review visibility for a user block', () => {
   });
 
   it('reads a written reply back through the store allowlist only', async () => {
-    const findUniqueOrThrow = vi.fn().mockResolvedValue({ id: 'review-1', response: 'Thanks' });
+    const findUniqueOrThrow = vi.fn().mockResolvedValue({ id: 'review-1', response: 'Thanks', createdAt: REVIEW_CREATED_AT });
     const writeDb = {
       rating: {
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -494,16 +494,15 @@ describe('vendor review visibility for a user block', () => {
       vendorId: 'vendor-1',
       reviewId: 'review-1',
     })).resolves.toMatchObject({ rating: review });
+    expect(db.userBlockFindMany).not.toHaveBeenCalled();
     expect(db.userBlockFindFirst).toHaveBeenCalledWith({
       where: {
         tenantId: 'tenant-1',
         unblockedAt: null,
-        OR: [
-          { blockerId: 'operator-1', blockedId: 'author-1' },
-          { blockerId: 'author-1', blockedId: 'operator-1' },
-        ],
+        blockerId: 'author-1',
+        blockedId: 'operator-1',
       },
-      select: { id: true, blockerId: true, blockedId: true, blockedAt: true },
+      select: { id: true },
     });
   });
 });

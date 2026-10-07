@@ -59,7 +59,8 @@ import {
   respondToVendorReview,
   STORE_REVIEW_PROJECTION,
   summarizeRatingDistribution,
-  vendorReviewWhereForViewer,
+  publishedVendorReviewWhere,
+  storeVisibleReview,
 } from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
@@ -3655,12 +3656,10 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(500, 'TENANT_CONTEXT_REQUIRED', 'This review request has no authenticated tenant context.');
     }
     const { minScore, maxScore } = reviewsQuerySchema.parse(request.query);
-    const publishedWhere = await vendorReviewWhereForViewer(
-      app.prisma,
-      tenantId,
-      request.user.userId,
-      vendorId,
-    );
+    // The store console must not vary with the operator's own blocks: an
+    // operator already knows customers from orders and could link a review
+    // to a customer by toggling a block and watching this list change.
+    const publishedWhere = publishedVendorReviewWhere(vendorId);
     const where = {
       ...publishedWhere,
       ...(minScore || maxScore
@@ -3695,7 +3694,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
     return {
       success: true,
-      ...paginatedResponse(reviews, summary.totalReviews, pagination),
+      ...paginatedResponse(reviews.map(storeVisibleReview), summary.totalReviews, pagination),
       summary: {
         averageRating: summary.averageRating,
         totalReviews: summary.totalReviews,

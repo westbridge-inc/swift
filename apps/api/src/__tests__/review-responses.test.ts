@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
+import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   return { userId: user.id, token };
 }
 
-function inject(method: 'GET' | 'POST', url: string, payload?: unknown, token?: string) {
+function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, token?: string) {
   return app.inject({
     method,
     url,
@@ -77,6 +78,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
+  await app.register(moderationRoutes, { prefix: '/api/v1' });
   await app.ready();
 
   owner = await makeUser(['VENDOR_OWNER', 'CUSTOMER'], 'VENDOR_OWNER');
@@ -327,5 +329,77 @@ describe('A review whose author deleted their account', () => {
     expect(after.respondedAt).toBeNull();
     expect(after.respondedBy).toBeNull();
     expect(await app.prisma.notification.count({ where: { userId: author.userId } })).toBe(notesBefore);
+  });
+});
+
+describe('Store review privacy across blocks and dates', () => {
+  it('blocking and unblocking a customer changes neither the store list nor the reply-edit outcome', async () => {
+    const response = 'Thanks for the feedback.';
+    const reply = () => inject('POST', `/api/v1/vendor/reviews/${ratingId}/respond`, { response }, owner.token);
+    const beforeReply = await reply();
+    expect(beforeReply.statusCode, beforeReply.body).toBe(200);
+    const beforeList = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+    expect(beforeList.statusCode).toBe(200);
+
+    // Exercise the actual caller-controlled action, not a planted block row.
+    const block = await inject('POST', '/api/v1/blocks', { blockedUserId: customer.userId }, owner.token);
+    expect(block.statusCode, block.body).toBe(201);
+    try {
+      const blockedList = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+      expect(blockedList.statusCode).toBe(200);
+      expect(blockedList.json()).toEqual(beforeList.json());
+      const blockedReply = await reply();
+      expect(blockedReply.statusCode, blockedReply.body).toBe(200);
+      expect(blockedReply.json().data).toEqual({
+        ...beforeReply.json().data, respondedAt: expect.any(String),
+      });
+      expect(blockedReply.body).not.toContain(customer.userId);
+    } finally {
+      const unblock = await inject('PUT', `/api/v1/blocks/${customer.userId}`, undefined, owner.token);
+      expect(unblock.statusCode, unblock.body).toBe(200);
+    }
+    const unblockedList = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+    expect(unblockedList.json().summary).toEqual(beforeList.json().summary);
+    expect(unblockedList.json().data.map((r: { id: string }) => r.id))
+      .toEqual(beforeList.json().data.map((r: { id: string }) => r.id));
+    const afterReply = await reply();
+    expect(afterReply.statusCode, afterReply.body).toBe(200);
+    expect(afterReply.json().data).toEqual({ ...beforeReply.json().data, respondedAt: expect.any(String) });
+  });
+
+  it('an author-side block keeps the list intact but prevents a reply and a notification', async () => {
+    const beforeList = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+    const beforeReview = await app.prisma.rating.findUniqueOrThrow({ where: { id: ratingId } });
+    const notesBefore = await app.prisma.notification.count({ where: { userId: customer.userId } });
+    const block = await inject('POST', '/api/v1/blocks', { blockedUserId: owner.userId }, customer.token);
+    expect(block.statusCode, block.body).toBe(201);
+    try {
+      const afterList = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+      expect(afterList.json()).toEqual(beforeList.json());
+      const reply = await inject('POST', `/api/v1/vendor/reviews/${ratingId}/respond`, { response: 'A new reply' }, owner.token);
+      expect(reply.statusCode, reply.body).toBe(403);
+      expect(reply.json().error.code).toBe('USER_BLOCKED');
+      expect(await app.prisma.rating.findUniqueOrThrow({ where: { id: ratingId } })).toEqual(beforeReview);
+      expect(await app.prisma.notification.count({ where: { userId: customer.userId } })).toBe(notesBefore);
+    } finally {
+      await inject('PUT', `/api/v1/blocks/${owner.userId}`, undefined, customer.token);
+    }
+  });
+
+  it('list and reply dates expose only the Guyana calendar day, while the stored creation instant stays exact', async () => {
+    for (const [instant, day] of [
+      ['2026-10-07T03:59:59.987Z', '2026-10-06T04:00:00.000Z'],
+      ['2026-10-07T04:00:00.123Z', '2026-10-07T04:00:00.000Z'],
+    ] as const) {
+      await app.prisma.rating.update({ where: { id: ratingId }, data: { createdAt: new Date(instant) } });
+      const list = await inject('GET', '/api/v1/vendor/reviews', undefined, owner.token);
+      expect(list.statusCode).toBe(200);
+      expect(list.json().data.find((r: { id: string }) => r.id === ratingId).createdAt).toBe(day);
+      const reply = await inject('POST', `/api/v1/vendor/reviews/${ratingId}/respond`, { response: 'Thanks again.' }, owner.token);
+      expect(reply.statusCode, reply.body).toBe(200);
+      expect(reply.json().data.createdAt).toBe(day);
+      const stored = await app.prisma.rating.findUniqueOrThrow({ where: { id: ratingId }, select: { createdAt: true } });
+      expect(stored.createdAt.toISOString()).toBe(instant);
+    }
   });
 });

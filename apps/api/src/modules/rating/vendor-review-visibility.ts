@@ -1,7 +1,8 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { assertUsersMayContact, blockedAuthorIds } from '../moderation/user-block.service';
+import { blockedAuthorIds } from '../moderation/user-block.service';
 import { processReviewText } from './review-scrub';
+import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 
 type VendorReviewDb = Pick<PrismaClient, 'rating' | 'userBlock'>;
 
@@ -27,6 +28,12 @@ export const STORE_REVIEW_REPLY_PROJECTION = {
   ...STORE_REVIEW_PROJECTION,
   respondedBy: true,
 } as const satisfies Prisma.RatingSelect;
+
+/** Store orders already name customers and carry exact event times. Expose
+ * only the review's Guyana calendar day, on both list and reply read-back. */
+export function storeVisibleReview<T extends { createdAt: Date }>(review: T): T {
+  return { ...review, createdAt: startOfGuyanaDay(guyanaDayKey(review.createdAt)) };
+}
 
 export interface RatingScoreBucket {
   score: number;
@@ -120,10 +127,11 @@ export async function writeVendorReviewResponse(
       'This review response changed. Refresh it before replying again.',
     );
   }
-  return db.rating.findUniqueOrThrow({
+  const review = await db.rating.findUniqueOrThrow({
     where: { id: input.reviewId },
     select: STORE_REVIEW_REPLY_PROJECTION,
   });
+  return storeVisibleReview(review);
 }
 
 /**
@@ -267,9 +275,10 @@ export function isDeletedAccount(user: { status: string; phone: string } | null 
 }
 
 /**
- * A public operator reply is contact, not just a database edit. The review
- * must first be publishable to this operator (directional visibility), then
- * the two people must be allowed to contact one another in either direction.
+ * The store console uses publication alone. An operator controls their own
+ * blocks and already knows customers from orders: changing a block must not
+ * identify a review's author through either this door or the review list.
+ * The author's own block still prevents a reply addressed to that author.
  */
 export async function requireRespondableVendorReview(
   db: VendorReviewDb,
@@ -280,12 +289,7 @@ export async function requireRespondableVendorReview(
     reviewId: string;
   },
 ) {
-  const where = await vendorReviewWhereForViewer(
-    db,
-    input.tenantId,
-    input.responderId,
-    input.vendorId,
-  );
+  const where = publishedVendorReviewWhere(input.vendorId);
   const found = await db.rating.findFirst({
     where: { id: input.reviewId, ...where },
     include: { rater: { select: { status: true, phone: true } } },
@@ -303,11 +307,17 @@ export async function requireRespondableVendorReview(
     );
   }
 
-  await assertUsersMayContact(
-    db,
-    input.tenantId,
-    input.responderId,
-    rating.raterId,
-  );
+  const authorBlock = await db.userBlock.findFirst({
+    where: {
+      tenantId: input.tenantId,
+      blockerId: rating.raterId,
+      blockedId: input.responderId,
+      unblockedAt: null,
+    },
+    select: { id: true },
+  });
+  if (authorBlock) {
+    throw new AppError(403, 'USER_BLOCKED', 'Contact is unavailable between these accounts.');
+  }
   return { rating, where };
 }
