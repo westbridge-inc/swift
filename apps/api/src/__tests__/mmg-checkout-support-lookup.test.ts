@@ -38,6 +38,8 @@ import {
   type MmgCheckoutSupportDetail,
   type MmgCheckoutSupportRow,
 } from '@swift/types';
+import { mmgCheckoutSupportDetail } from '../modules/billing/mmg-checkout-support';
+import { getMmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 
 // ---------------------------------------------------------------------------
 // [MMG support lookup] What MMG must see before it issues production
@@ -539,6 +541,22 @@ describe('2. the answer discloses nothing secret: exactly the contract keys', ()
 });
 
 describe('2. the detail: the row, a timeline from the observations, and the credited period', () => {
+  it('[Fable · #1422 S3-1] support reads the zone from the checkout provider in use, as verify() does: a provider with no zone shows UNREADABLE, never INSIDE', async () => {
+    const row = await app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: s.confirmed.ref } });
+    const detailWith = (checkout: () => ReturnType<typeof getMmgCheckoutProvider>) =>
+      runWithoutTenant(() => mmgCheckoutSupportDetail(app.prisma, { tenantId: row.tenantId, id: row.id }, { checkout }));
+    // The provider verify() would use here (this file's sandbox, GUYANA_WALL_CLOCK): the lookup reads INSIDE.
+    expect((await detailWith(() => sandbox))!.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ windowCheck: 'INSIDE' });
+    // The checkout switched off (the environment still names a zone): verify() reads no zone and holds
+    // every payment CREATION_ZONE_UNVERIFIED, so support claims nothing either.
+    expect(process.env['MMG_CHECKOUT_CREATION_ZONE']).toBe('GUYANA_WALL_CLOCK');
+    const off = getMmgCheckoutProvider({ ...process.env, MMG_CHECKOUT_ENABLED: '0' });
+    expect(off.creationZone).toBeNull();
+    expect((await detailWith(() => off))!.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ windowCheck: 'UNREADABLE' });
+    // A provider that cannot be built (a configuration error) is no zone too.
+    expect((await detailWith(() => { throw new Error('bad MMG configuration'); }))!.timeline.find((e) => e.source === 'LOOKUP')).toMatchObject({ windowCheck: 'UNREADABLE' });
+  });
+
   it('[Sol, DS663] a payment MMG stamps ten minutes after its first reply and its lookup, inside the window: held as CREATION_UNCONFIRMED, and support shows UNCONFIRMED, never INSIDE', async () => {
     const rider = await makeRider();
     const c = await started(rider);

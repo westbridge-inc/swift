@@ -2446,6 +2446,8 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
       expect(await codeReply(row, '0', second, 'NOTIFY')).toBe('CONFIRMING');
       releaseA.open();
       await a;
+      // [Fable S4-3] While pages cannot be saved, the reconcile reports none sent.
+      expect(await service.reconcileUnappliedPages(new Date())).toBe(0);
     } finally {
       failing.mockRestore();
       lookup.transactionLookupDetail = plainLookup;
@@ -2455,6 +2457,15 @@ describe('[owner, 1 Oct] automatic confirmation of an MMG weekly-fee payment', (
     // The next poll pages it; a later poll finds the page and sends nothing more.
     await service.pollIntents(new Date());
     expect(await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied')).toHaveLength(1);
+    // [Fable S4-4] ...even when the database's clock runs an hour behind the
+    // app's (the page's saved time then reads earlier than the credit).
+    const confirmedAt = (await intentOf(row.id)).confirmedAt!;
+    const [saved] = await pagesAbout(operator.id, row.id, 'mmg-checkout-unapplied');
+    // Every operator's copy of the page (one per admin, the same key).
+    const copies = await app.prisma.notification.updateMany({ where: { dedupeKey: saved!.dedupeKey! }, data: { createdAt: new Date(confirmedAt.getTime() - 3_600_000) } });
+    expect(copies.count).toBeGreaterThanOrEqual(1);
+    expect((await app.prisma.notification.findUniqueOrThrow({ where: { id: saved!.id } })).createdAt.getTime()).toBe(confirmedAt.getTime() - 3_600_000);
+    expect(await service.reconcileUnappliedPages(new Date())).toBe(0);
     const watching = vi.spyOn(notifications, 'send');
     try {
       await service.pollIntents(new Date());
