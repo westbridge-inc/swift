@@ -20,10 +20,10 @@ export function PaymentMethods() {
   return (
     <section aria-label="Payment methods" className="mx-auto max-w-6xl px-5 py-5 text-xs text-[var(--swift-muted)]">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-5">
-        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--swift-ink)]">Payment methods</h2>
+        <h2 className="sw-eyebrow">Payment methods</h2>
         <ul className="flex flex-wrap gap-2">
           {methods.map((name) => (
-            <li key={name} className="inline-flex items-center rounded-full border border-[var(--swift-border)] bg-white px-3 py-1 text-sm font-semibold text-[var(--swift-ink)]">
+            <li key={name} className="inline-flex items-center rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-1 text-[13px] font-semibold leading-[18px] text-[var(--swift-ink)]">
               {name}
             </li>
           ))}
@@ -39,11 +39,11 @@ export function PaymentMethods() {
 
 export function SiteFooter() {
   return (
-    <footer className="border-t border-black/5 bg-[var(--swift-subtle)]">
+    <footer className="border-t border-[var(--swift-border)] bg-[var(--swift-card)]">
       <div className="mx-auto grid max-w-6xl gap-10 px-5 py-12 md:grid-cols-[1.4fr_1fr_1fr]">
         <div>
           <SwiftLogo />
-          <p className="mt-3 max-w-xs text-sm leading-relaxed text-[var(--swift-muted)]">
+          <p className="mt-3 max-w-xs text-[13px] leading-[18px] text-[var(--swift-muted)]">
             One app for food, groceries, shops, couriers, rides and trades — where the people doing
             the work keep 100% of what they earn.
           </p>
@@ -58,10 +58,10 @@ export function SiteFooter() {
         </div>
 
         <nav aria-label="Company" className="text-sm">
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--swift-ink)]">
+          <h2 className="sw-eyebrow">
             Company
           </h2>
-          <ul className="mt-4 space-y-2.5 text-[var(--swift-muted)]">
+          <ul className="mt-3 space-y-2.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">
             <li><Link href="/about" className="hover:text-[var(--swift-ink)]">About</Link></li>
             <li><Link href="/contact" className="hover:text-[var(--swift-ink)]">Contact</Link></li>
             <li><Link href="/vendors" className="hover:text-[var(--swift-ink)]">For businesses</Link></li>
@@ -71,10 +71,10 @@ export function SiteFooter() {
         </nav>
 
         <nav aria-label="Legal" className="text-sm">
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--swift-ink)]">
+          <h2 className="sw-eyebrow">
             Legal
           </h2>
-          <ul className="mt-4 space-y-2.5 text-[var(--swift-muted)]">
+          <ul className="mt-3 space-y-2.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">
             {/* [Q36] Every policy the card bank asks for is one tap from every footer. */}
             <li><Link href="/legal/terms" className="hover:text-[var(--swift-ink)]">Terms of service</Link></li>
             <li><Link href="/legal/privacy" className="hover:text-[var(--swift-ink)]">Privacy policy</Link></li>
@@ -96,14 +96,14 @@ export function SiteFooter() {
         </nav>
       </div>
 
-      <div className="border-t border-black/5">
+      <div className="border-t border-[var(--swift-border)]">
         <PaymentMethods />
       </div>
 
       {/* AC-3: the legal entity name appears in EVERY footer, on every page.
           [Q36] With it: the trade name, where the company is registered, and
           the transaction currency. All read from site.config. */}
-      <div className="border-t border-black/5">
+      <div className="border-t border-[var(--swift-border)]">
         <div className="mx-auto flex max-w-6xl flex-col gap-1 px-5 py-5 text-xs text-[var(--swift-muted)] md:flex-row md:items-center md:justify-between">
           <p>
             {site.tradeName} is a trade name of{' '}
@@ -124,7 +124,7 @@ export function SiteFooter() {
 /** Section shell with the marketing rhythm baked in. */
 export function Section({ children, tint = false }: { children: React.ReactNode; tint?: boolean }) {
   return (
-    <section className={tint ? 'bg-[var(--swift-subtle)]' : ''}>
+    <section className={tint ? 'bg-[var(--swift-sunken)]' : ''}>
       <div className="mx-auto max-w-6xl px-5 py-16 md:py-20">{children}</div>
     </section>
   );

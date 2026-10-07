@@ -183,7 +183,7 @@ describe('[seal 1] operators are never paged by the fiction', () => {
     const notifications = new NotificationService(app.prisma, app.io);
     expect(await system(() => notifyAdmins(app.prisma, notifications, { tenantId: REVIEW, title: 'x', body: 'y', data: { kind: 'seal_probe' } }))).toBe(0);
     const ops = await system(() => openOpsAlert(app.prisma, notifications, { kind: 'SOS', tenantId: REVIEW, title: 'x', body: 'y', data: {} }));
-    expect(ops).toEqual({ opsAlertId: '', recipients: 0, delivered: 0 });
+    expect(ops).toEqual({ opsAlertId: '', recipients: 0, delivered: 0, oncallTexted: 0 });
     expect(await system(() => app.prisma.notification.count({ where: { userId: ids.admin, createdAt: { gte: t0 } } }))).toBe(0);
     expect(await system(() => app.prisma.opsAlert.count({ where: { tenantId: REVIEW } }))).toBe(0);
     expect(await system(() => notifyAdmins(app.prisma, notifications, { tenantId: PRODUCTION, title: 'x', body: 'y', data: { kind: 'seal_probe' } }))).toBeGreaterThan(0);
