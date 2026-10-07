@@ -183,3 +183,29 @@ export async function requireStepUp(app: FastifyInstance, request: { user: { use
     stepUp: { send: 'POST /auth/step-up', verify: 'POST /auth/step-up/verify', validForSeconds: STEP_UP_TTL_S },
   });
 }
+
+/**
+ * [DELETION-INTEGRITY · coordinator ruling 2026-10-05, Q3b] Account deletion
+ * and closure requests only: a session that an OTP sign-in created within the
+ * step-up window already carries what a step-up proves — a code reached the
+ * phone on the account, on THIS session, minutes ago. App builds without the
+ * step-up sheet (and a store reviewer who just signed in with a code) can
+ * therefore still delete. Any older session, or one not created by an OTP
+ * sign-in, still needs the step-up. Refresh rotation keeps createdAt, so a
+ * refreshed session never looks fresh.
+ */
+export async function requireRecentOtpOrStepUp(
+  app: FastifyInstance,
+  request: { user: { userId: string }; authSessionId: string | null },
+): Promise<void> {
+  const sessionId = request.authSessionId;
+  if (sessionId) {
+    const session = await app.prisma.session.findUnique({
+      where: { id: sessionId }, select: { userId: true, authMethod: true, createdAt: true },
+    });
+    if (session && session.userId === request.user.userId && session.authMethod === 'OTP'
+      && Date.now() - session.createdAt.getTime() <= STEP_UP_TTL_S * 1000) return;
+  }
+  await requireStepUp(app, request);
+}
+
