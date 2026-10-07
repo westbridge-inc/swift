@@ -321,6 +321,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
+  // [PT-2] Card rail v2 public doors: the provider's return (an observation
+  // that never credits by itself) and, off production, the simulator's test
+  // page. Rate-limited, body-capped, never logged; inert while CARD_RAIL_V2 is off.
+  {
+    const { cardRailPublicRoutes } = await import('./modules/billing/card-rail.routes');
+    await app.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card' });
+  }
   // Unauthenticated read-only storefront pages (web SEO) — see module header.
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
   // Printed-QR short links: /s/{code} at the ROOT path (the production web

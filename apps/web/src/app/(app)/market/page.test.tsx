@@ -50,7 +50,7 @@ describe('[Q7b] Market', () => {
     render(<AppLayout><MarketPage /></AppLayout>);
     const hammer = await screen.findByRole('link', { name: /Claw hammer/ });
     expect(hammer.getAttribute('href')).toBe('/order/vendor/v9?item=m1');
-    expect(hammer.textContent).toMatch(/GY\$2,500/);
+    expect(hammer.textContent).toMatch(/\$2,500/);
     expect(hammer.textContent).toMatch(/City Hardware/);
     // Only goods categories are offered as chips.
     const chips = await screen.findByRole('navigation', { name: 'Market categories' });

@@ -11,6 +11,8 @@ import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { liveCard } from '../../../lib/cardFee';
+import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
 export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false }: {
   family: FeeFamily; sub?: FeeSubscription | null; loading?: boolean; error?: boolean;
@@ -23,6 +25,8 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const principal = useAuthStore((s) => s.user?.id);
   const generation = useAuthStore((s) => s.sessionGeneration);
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
+  // A card Pay now that may still take money hides the MMG button too: one payment at a time.
+  const [cardPending, setCardPending] = useState(false);
   const refreshRef = React.useRef(refresh); refreshRef.current = refresh;
   const session = useMemo(() => {
     const owner = getAuthSessionSnapshot();
@@ -53,7 +57,11 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const pull = usePullToRefresh(async () => { await refreshRef.current(); if (!contextPending) session.focus(undefined, checkoutRef); });
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const blocked = contextPending || view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const mmgPending = contextPending || view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const blocked = mmgPending || cardPending;
+  // The card choice exists only when the server says CARD is live (or a card payment of ours is in flight).
+  const card = liveCard(sub?.payActions);
+  const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId));
   return <Screen>
     <Header title="Weekly fee" />
     {contextError ? <Card>
@@ -69,9 +77,15 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
           {checkout ? <T variant="body" style={{ marginTop: space.md }}>{checkoutWords(checkout, view.returned)}</T> : null}
           {view.returned && !checkout ? <T variant="body">Waiting for MMG…</T> : null}
           {view.error ? <T variant="caption" tone="error" style={{ marginTop: space.md }}>{view.error}</T> : null}
-          {action && !blocked ? <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} /> : null}
-          <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.md }} onPress={() => { void refresh(); if (!contextPending) session.focus(undefined, checkoutRef); }} />
+          <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.lg }} onPress={() => { void refresh(); if (!contextPending) session.focus(undefined, checkoutRef); }} />
         </Card>
+        {action && !blocked && card ? <T variant="heading" accessibilityRole="header">Choose how to pay</T> : null}
+        {action && !blocked ? <Card>
+          <T variant="heading">Pay with MMG</T>
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>Opens MMG&apos;s page, then brings you back to Swift.</T>
+          <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
+        </Card> : null}
+        {showCard ? <CardPaySection family={family} card={card} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
         <View>
           <T variant="heading">Recent checkouts</T>

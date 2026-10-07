@@ -1,6 +1,6 @@
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { confirmReturn } from '../custody/custody-recovery';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
@@ -65,6 +65,7 @@ import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice }
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
+import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -430,13 +431,57 @@ async function resolveVendor(app: FastifyInstance, userId: string, requestedVend
 }
 
 /** Gate an action on the caller's store role. */
-function requireRole(access: VendorAccess, min: 'MANAGER' | 'OWNER') {
+function requireRole(access: { role: VendorAccessRole }, min: 'MANAGER' | 'OWNER') {
   if (ROLE_RANK[access.role] < ROLE_RANK[min]) {
     throw new AppError(403, 'STAFF_FORBIDDEN',
       min === 'OWNER'
         ? 'Only the store owner can do this'
         : 'This needs a manager — ask the store owner to upgrade your role');
   }
+}
+
+/**
+ * [Row 52] The caller's membership in the store that OWNS this order — not the
+ * store selected in the header — so a manager of one store who is only staff
+ * at another cannot borrow the higher role. resolveOwnedOrder has already
+ * proved the order belongs to one of the caller's stores.
+ */
+async function orderStoreMember(
+  app: FastifyInstance,
+  userId: string,
+  vendorId: string,
+): Promise<{ role: VendorAccessRole; memberId: string }> {
+  const owner = await app.prisma.vendorOwner.findFirst({
+    where: { userId, vendors: { some: { id: vendorId } } },
+    select: { id: true },
+  });
+  if (owner) return { role: 'OWNER', memberId: owner.id };
+  const staff = await app.prisma.vendorStaff.findUnique({
+    where: { vendorId_userId: { vendorId, userId } },
+    select: { id: true, role: true },
+  });
+  if (!staff) throw new AppError(403, 'STAFF_FORBIDDEN', 'You are not a member of this store');
+  return { role: staff.role as VendorAccessRole, memberId: staff.id };
+}
+
+/** [Row 52] Coordinator ruling 5 Oct: OWNER and MANAGER confirm MMG payments. */
+const CONFIRM_PAYMENT_MIN_ROLE = 'MANAGER' as const;
+
+/** The flag the board and the order screen read to show the confirm button. */
+function canConfirmPayment(role: VendorAccessRole | undefined): boolean {
+  return role !== undefined && ROLE_RANK[role] >= ROLE_RANK[CONFIRM_PAYMENT_MIN_ROLE];
+}
+
+/** The caller's role at each of their stores, for per-order flags on a board
+ *  that may span several stores (an owner owns them all; staff roles differ
+ *  store by store). */
+async function storeRoles(app: FastifyInstance, userId: string, access: VendorAccess): Promise<Map<string, VendorAccessRole>> {
+  if (access.ownerId) return new Map(access.vendorIds.map((id) => [id, 'OWNER' as const]));
+  const rows = await app.prisma.vendorStaff.findMany({
+    where: { userId, vendorId: { in: access.vendorIds } },
+    select: { vendorId: true, role: true },
+  });
+  return new Map(rows.map((r) => [r.vendorId, r.role as VendorAccessRole]));
 }
 
 /** The verification gate belongs to the BUSINESS (its owner), not to whoever
@@ -1538,6 +1583,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The response-SLA deadline rides on the read so the board's accept-clock
     // drains toward the auto-cancel cut-off the server actually enforces.
     const respondOpts = { slaMinutes: await vendorResponseSlaMinutes(app.prisma), holdMs: holdWindowMs() ?? 0 };
+    const roles = await storeRoles(app, request.user.userId, access);
     // [S1 response-shaping] a terminal order no longer hands floor staff the
     // customer's phone, the rider's phone, or the delivery address/GPS — the
     // live order keeps all of it, which is the only thing a handover needs.
@@ -1545,6 +1591,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
       respondBy: vendorRespondBy(order, respondOpts),
+      canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
     }));
 
     return { success: true, ...paginatedResponse(data, total, pagination) };
@@ -1561,7 +1608,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [AF-MOB-006] The store sees the order's recovery case: a return coming
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
-    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy }), custodyRecovery } };
+    const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
+    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -1993,6 +2041,11 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  only (cash is settled at handover). Idempotent. */
   app.post<{ Params: IdParam }>('/orders/:id/confirm-payment', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // [Row 52] Coordinator ruling 5 Oct: OWNER and MANAGER may confirm an MMG
+    // payment; STAFF may not. Checked first, before any read-back or write, so
+    // a refused tap leaves the order exactly as it was.
+    const member = await orderStoreMember(app, request.user.userId, order.vendorId!);
+    requireRole(member, CONFIRM_PAYMENT_MIN_ROLE);
     if (order.paymentMethod !== 'MOBILE_MONEY') {
       throw new AppError(400, 'NOT_MMG', 'Only MMG orders are confirmed here — cash is handled at handover.');
     }
@@ -2102,7 +2155,11 @@ export async function vendorRoutes(app: FastifyInstance) {
         // [DOC-1 §31.6] Every money event is somebody's assertion: who claimed what, when, on what evidence.
         await tx.auditLog.create({ data: {
           userId: request.user.userId, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED', entity: 'Order', entityId: order.id,
-          changes: { reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor' },
+          changes: {
+            reference, amount: String(fresh.totalAmount), claim: 'payment_claimed_by_vendor',
+            // [Row 52] who confirmed it, as a store member
+            memberId: member.memberId, memberRole: member.role,
+          },
         } });
         // [S1-6] The disagreement's evidence and the durable notice obligation
         // commit with the claim; the customer is told what the STORE said.
@@ -2145,7 +2202,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** POST /cash-settlements/:id/confirm — "we handed the rider their delivery
    *  fee". First confirm marks the store's half; the rider's confirm settles
-   *  it. Idempotent; any staff can confirm (same as the payment-received button). */
+   *  it. Idempotent; any staff can confirm. */
   app.post<{ Params: IdParam }>('/cash-settlements/:id/confirm', auth, async (request) => {
     const access = await resolveVendor(app, request.user.userId);
     // [W-26] The confirmer states the amount they handed over; the ledger
@@ -3578,12 +3635,15 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** GET /subscription — Current subscription details */
   // The MMG weekly-fee checkout [mmg checkout 3/6]: the store's OWNER starts
   // and follows a checkout for the selected store's subscription.
-  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
-    subscriptionFor: async (request) => {
-      const { vendorId } = await requireVendor(app, request, 'OWNER');
-      return app.prisma.subscription.findFirst({ where: { vendorId } });
-    },
-  });
+  const feeSubscriptionFor = async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    return app.prisma.subscription.findFirst({ where: { vendorId } });
+  };
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the store's
+  // OWNER lists, removes, adds and pays by card for the selected store's
+  // subscription. Card rail v2 stays behind CARD_RAIL_V2 (default off).
+  const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
 
   app.get('/subscription', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
@@ -3605,7 +3665,7 @@ export async function vendorRoutes(app: FastifyInstance) {
             ...(await sanDisplay(app.prisma, subscription)),
             ...(await payInfo(app.prisma, subscription)),
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-            ...(await mmgCheckout.feePayload(subscription, request.headers)),
+            ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
             weeklyRate: Number(subscription.weeklyRate),
           }
         : null,

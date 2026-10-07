@@ -117,6 +117,21 @@ export default function VerificationPage() {
     setApplicant(next);
     if (next) selectDocument(next.documents[0]!); else setSelected(null);
   };
+  // [MC-PR1] /verification?applicant=<userId>: "Open in Review Center" on a
+  // refusal (a store whose documents are not all approved) lands on THAT
+  // applicant's file, once; from there the reviewer browses as usual. When
+  // nothing of theirs is waiting, the page says so instead of showing the
+  // whole queue as if it were the answer.
+  const deepLink = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (deepLink.current === undefined) deepLink.current = new URLSearchParams(window.location.search).get('applicant');
+    const wanted = deepLink.current;
+    if (!wanted || !queue.data) return;
+    deepLink.current = null;
+    const match = groupApplicants(queue.data).find((a) => a.id === wanted);
+    if (match) openApplicant(match);
+    else setNotice('No documents from this applicant are waiting for review. They may still need to upload one, or the decision is under Approved, Rejected or Expired.');
+  }, [queue.data]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per queue load by design
   const needsExpiry = !!selected && (EXPIRING_DOC_TYPES as readonly string[]).includes(selected.docType);
   const expiryOk = !needsExpiry || (!!expiresAt && Date.parse(expiresAt) > now);
   const isInsurance = selected?.docType === 'vehicle_insurance';
