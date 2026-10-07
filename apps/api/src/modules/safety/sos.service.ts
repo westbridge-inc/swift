@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins, tenantOfUser, isReviewTenantId } from '../notification/notification.service';
-import { warRoomsFor } from './war-room';
+import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { stageEscalations, drainSosEscalations } from './sos-escalation';
@@ -256,7 +256,10 @@ export class SosService {
           // never by the other person on the ride. The ops page body stays
           // free of them (see sos-escalation.ts: it is pushed to phones and
           // repeated in the on-call SMS).
-          this.io.to(warRoomsFor(live.tenantId)).emit('sos:retrigger', {
+          // [GUARDRAILS §3] the store-review fiction's repeat press stays in its own tenant's room
+          const fiction = live.tenantId ? await runWithoutTenant(() => isReviewTenantId(this.prisma, live.tenantId!)) : false;
+          const rooms = warRoomsFor(live.tenantId).filter((room) => !(fiction && room === OPS_WAR_ROOM));
+          this.io.to(rooms).emit('sos:retrigger', {
             sosAlertId: live.id, actorUserId: live.actorUserId, orderId: live.orderId,
             at: now, source, lat: input.lat ?? null, lng: input.lng ?? null,
             retriggerCount: merged.seq, note: input.note ?? null,
@@ -454,7 +457,14 @@ export class SosService {
   async ack(id: string, opsUserId: string) {
     const acked = await this.transition(id, 'ACKNOWLEDGED', { acknowledgedAt: new Date(), acknowledgedBy: opsUserId });
     // [S-19] A human acknowledged the emergency: the ops page's obligation is met.
-    await runWithoutTenant(() => acknowledgeOpsAlert(this.prisma, { sosAlertId: id, userId: opsUserId })).catch(() => null);
+    // [M076] The page keeps its own rule (only its audience can acknowledge
+    // it, with a receipt), so an SOS acknowledged by someone outside that
+    // audience leaves the page open and escalating: say so, never silently.
+    const page = await runWithoutTenant(() => acknowledgeOpsAlert(this.prisma, { sosAlertId: id, userId: opsUserId })).catch((err) => {
+      log().error({ err, sosAlertId: id }, '[S-19] SOS acknowledged, but acknowledging its ops page failed: the page stays open and escalates');
+      return null;
+    });
+    if (page && page.refused.length > 0) log().warn({ sosAlertId: id, opsUserId, refused: page.refused }, '[S-19] SOS acknowledged by someone outside its ops page audience: the page stays open and escalates');
     return acked;
   }
 
