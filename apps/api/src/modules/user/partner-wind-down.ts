@@ -32,8 +32,8 @@ export interface PartnerObligations {
   pendingFeePaymentCount?: number;
   /** Fee subscriptions with prepaid credit Swift holds for the person. */
   feeCreditCount?: number;
-  /** That credit in total, in GYD major units — the amount Swift refunds. */
-  feeCreditAmount?: number;
+  /** Credit totals by the wallet's own currency; unlike amounts never mix. */
+  feeCreditAmounts?: { currencyCode: string; amount: number }[];
 }
 
 export interface PartnerDeletionVerdict {
@@ -83,10 +83,10 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
 
 /** The whole refusal, as one sentence a person can act on, with the amounts
  *  that apply to this person filled in. */
-export function refusalMessage(blockers: PartnerBlocker[], o?: Pick<PartnerObligations, 'feeCreditAmount'>): string {
-  const credit = o?.feeCreditAmount;
-  return blockers.map((b) => b === 'FEE_CREDIT' && credit !== undefined
-    ? BLOCKER_MESSAGE[b].replace('{amount}', formatMoney(credit, 'GYD', { whole: Number.isInteger(credit) }))
+export function refusalMessage(blockers: PartnerBlocker[], o?: Pick<PartnerObligations, 'feeCreditAmounts'>): string {
+  const credit = o?.feeCreditAmounts?.map(({ amount, currencyCode }) => formatMoney(amount, currencyCode, { whole: Number.isInteger(amount) })).join(' and ');
+  return blockers.map((b) => b === 'FEE_CREDIT' && credit
+    ? BLOCKER_MESSAGE[b].replace('{amount}', credit)
     : BLOCKER_MESSAGE[b]).join(' ');
 }
 
@@ -139,7 +139,7 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
     where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
     select: { id: true },
   });
-  if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0 };
+  if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmounts: [] };
   const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
   const lateHorizon = new Date(Date.now() - LATE_WINDOW_MS);
   const [checkouts, cardPayments, payments, holds, credit] = await Promise.all([
@@ -159,12 +159,12 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
     // The weekly MMG prompt and any other fee payment not yet settled.
     tx.subscriptionPayment.count({ where: { subscriptionId, status: { in: ['PENDING', 'AUTHORIZED', 'UNKNOWN'] } } }),
     tx.paymentConfirmationHold.count({ where: { subscriptionId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }),
-    tx.prepaidBalance.aggregate({ where: { subscriptionId, balance: { gt: 0 } }, _count: { _all: true }, _sum: { balance: true } }),
+    tx.prepaidBalance.groupBy({ by: ['currencyCode'], where: { subscriptionId, balance: { gt: 0 } }, orderBy: { currencyCode: 'asc' }, _count: { _all: true }, _sum: { balance: true } }),
   ]);
   return {
     pendingFeePaymentCount: checkouts + cardPayments + payments + holds,
-    feeCreditCount: credit._count._all,
-    feeCreditAmount: Number(credit._sum.balance ?? 0),
+    feeCreditCount: credit.reduce((count, group) => count + group._count._all, 0),
+    feeCreditAmounts: credit.map((group) => ({ currencyCode: group.currencyCode, amount: Number(group._sum.balance ?? 0) })),
   };
 }
 
