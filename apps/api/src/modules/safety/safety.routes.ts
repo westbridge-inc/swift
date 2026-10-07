@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { SosService, LIVE_SOS_STATUSES } from './sos.service';
 import { GuardianService } from './guardian.service';
 import { LivenessService } from './liveness.service';
-import { IncidentService, DECISION_CODES } from './incident.service';
+import { IncidentService, DECISION_CODES, intakeFingerprint } from './incident.service';
 import { EvidenceService } from './evidence.service';
 import { EmergencyContactService } from './emergency-contact.service';
 import { getChannels } from '../../providers/notifications/channels';
@@ -11,7 +11,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { NotFoundError, ForbiddenError, AppError } from '../../utils/errors';
 import { NotificationService } from '../notification/notification.service';
-import { runWithoutTenant } from '../../plugins/tenant-context';
+import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
 
 // SOS endpoints (safety spec §4.5). The engine (state machine, grace, fan-out)
 // lives in SosService; these are thin, authed wrappers. Owner actions require
@@ -309,6 +309,14 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: share };
   });
 
+  app.get<{ Params: { id: string } }>('/trips/:id/shares', auth, async (request) => {
+    return { success: true, data: await tripShare.listOwned(request.user.userId, request.params.id) };
+  });
+
+  app.delete<{ Params: { id: string } }>('/trips/:id/shares', auth, async (request) => {
+    return { success: true, data: await tripShare.revokeAll(request.user.userId, request.params.id) };
+  });
+
   app.delete<{ Params: { token: string } }>('/share/:token', auth, async (request) => {
     return { success: true, data: await tripShare.revoke(request.user.userId, request.params.token) };
   });
@@ -464,6 +472,37 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: { caseNumber: kase.caseNumber, status: kase.status } };
   });
 
+  /**
+   * [M069] The subject / order / SOS tuple of an ops-logged case, validated
+   * BEFORE any effect or replay: every id must exist; the subject must be in
+   * the caller's tenant (a SUPER_ADMIN may work any tenant's); the order and
+   * the alert must belong to the subject's tenant and name the subject as a
+   * party; and an alert that names an order must name this one. A refused
+   * tuple creates no case, suspends nobody, pages nobody and replays nothing.
+   */
+  async function opsIntakeTuple(role: string, callerTenant: string | null | undefined, input: { subjectUserId: string; orderId?: string; sosAlertId?: string }) {
+    const subject = await runWithoutTenant(() => app.prisma.user.findUnique({ where: { id: input.subjectUserId }, select: { id: true, tenantId: true } }));
+    if (!subject || (!isPlatformResponder(role) && subject.tenantId !== callerTenant)) throw new NotFoundError('User', input.subjectUserId);
+    if (input.orderId) {
+      const order = await runWithoutTenant(() => app.prisma.order.findUnique({ where: { id: input.orderId }, select: { tenantId: true, customerId: true, driver: { select: { userId: true } }, rider: { select: { userId: true } } } }));
+      if (!order || order.tenantId !== subject.tenantId) throw new NotFoundError('Order', input.orderId);
+      if (![order.customerId, order.driver?.userId, order.rider?.userId].includes(subject.id)) {
+        throw new AppError(409, 'SUBJECT_NOT_ON_ORDER', 'The subject is not a party to that order.');
+      }
+    }
+    if (input.sosAlertId) {
+      const alert = await runWithoutTenant(() => app.prisma.sosAlert.findUnique({ where: { id: input.sosAlertId }, select: { tenantId: true, actorUserId: true, counterpartyUserId: true, orderId: true } }));
+      if (!alert || alert.tenantId !== subject.tenantId) throw new NotFoundError('SosAlert', input.sosAlertId);
+      if (alert.actorUserId !== subject.id && alert.counterpartyUserId !== subject.id) {
+        throw new AppError(409, 'SUBJECT_NOT_ON_ALERT', 'The subject is not a party to that SOS.');
+      }
+      if (input.orderId && alert.orderId && alert.orderId !== input.orderId) {
+        throw new AppError(409, 'ORDER_NOT_ON_ALERT', 'That SOS was raised on a different order.');
+      }
+    }
+    return { tenantId: subject.tenantId };
+  }
+
   /** Ops intake — phone call / email / social report, logged by a human. */
   app.post('/incidents/ops', auth, async (request) => {
     if (!isOps(request.user.role)) throw new ForbiddenError('Only ops can log a case directly.');
@@ -473,12 +512,23 @@ export async function safetyRoutes(app: FastifyInstance) {
       subjectUserId: z.string().min(1),
       category: z.string().trim().min(2).max(60),
       severity: z.enum(['S0', 'S1', 'S2', 'S3', 'S4']).optional(),
-      orderId: z.string().optional(),
-      sosAlertId: z.string().optional(),
+      // [M069 · DS757] An empty id would skip the tuple checks below and be stored: refused up front.
+      orderId: z.string().min(1).optional(),
+      sosAlertId: z.string().min(1).optional(),
       summary: z.string().trim().min(5).max(2000),
     }).parse(request.body ?? {});
     const { idempotencyKey, ...intakeBody } = body;
-    const kase = await incidents.intake({ ...intakeBody, intake: 'OPS_CREATED', reporterUserId: null, source: idempotencyKey ? { type: 'OPS', id: `${request.user.userId}:${idempotencyKey}` } : null });
+    const { tenantId } = await opsIntakeTuple(request.user.role, request.tenantId, intakeBody);
+    const source = idempotencyKey ? { type: 'OPS', id: `${request.user.userId}:${idempotencyKey}` } : null;
+    if (source) {
+      // [M069] A replayed key must carry the tuple it was first used with: never another case's.
+      const prior = await runWithoutTenant(() => app.prisma.incidentCase.findUnique({ where: { sourceFingerprint: intakeFingerprint(source) }, select: { subjectUserId: true, orderId: true, sosAlertId: true } }));
+      if (prior && (prior.subjectUserId !== intakeBody.subjectUserId || (prior.orderId ?? null) !== (intakeBody.orderId ?? null) || (prior.sosAlertId ?? null) !== (intakeBody.sosAlertId ?? null))) {
+        throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That key already logged a different case.');
+      }
+    }
+    // The case lives in the SUBJECT's tenant (a SUPER_ADMIN's own tenant may differ).
+    const kase = await runWithTenant(tenantId, () => incidents.intake({ ...intakeBody, intake: 'OPS_CREATED', reporterUserId: null, source }));
     return { success: true, data: kase };
   });
 

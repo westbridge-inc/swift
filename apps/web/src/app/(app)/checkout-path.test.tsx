@@ -102,7 +102,7 @@ describe('[Q7b] store → cart', () => {
     at('/order/vendor/v1', { id: 'v1' }, <VendorPage />);
     fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Sign in to add · GY$1,800' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Sign in to add · $1,800' }));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/login?next=%2Forder%2Fvendor%2Fv1%3Fitem%3Di1'));
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
     // It tried the refresh cookie once first — a returning customer is not
@@ -116,7 +116,7 @@ describe('[Q7b] store → cart', () => {
     // The link's ?item= reopens the item it named.
     const sheet = await screen.findByRole('dialog', { name: 'Pepperpot bowl' });
     fireEvent.click(within(sheet).getByRole('radio', { name: /^Large/ }));
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · GY$2,200' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $2,200' }));
     await screen.findByText('Added to your cart');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
@@ -141,12 +141,12 @@ describe('[F4] a sold-out choice is never pre-selected or sent', () => {
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
     expect(within(sheet).queryByRole('radio', { name: /^Small/ })).toBeNull();
     expect((within(sheet).getByRole('radio', { name: /^Large/ }) as HTMLInputElement).checked).toBe(false);
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · GY$1,800' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
     await screen.findByText('Choose an option for “Size”.');
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
 
     fireEvent.click(within(sheet).getByRole('radio', { name: /^Large/ }));
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · GY$2,200' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $2,200' }));
     await screen.findByText('Added to your cart');
     const [[, init]] = calls('POST', '/api/v1/customer/cart/items') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({ vendorId: 'v1', itemId: 'i1', quantity: 1, selectedOptions: { g1: 'large' } });
@@ -158,7 +158,7 @@ describe('[F4] a sold-out choice is never pre-selected or sent', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Pepperpot bowl/ }));
     const sheet = screen.getByRole('dialog', { name: 'Pepperpot bowl' });
     expect(within(sheet).queryAllByRole('radio')).toHaveLength(0);
-    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · GY$1,800' }));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Add · $1,800' }));
     await screen.findByText('“Size” is sold out right now.');
     expect(calls('POST', '/api/v1/customer/cart/items')).toHaveLength(0);
   });
@@ -167,7 +167,7 @@ describe('[F4] a sold-out choice is never pre-selected or sent', () => {
 describe('[Q7b] cart → checkout → tracking', () => {
   it('places a cash order against the server quote, once, and opens its tracking', async () => {
     at('/cart', {}, <CartPage />);
-    const place = await screen.findByRole('button', { name: 'Place cash order · GY$2,150' });
+    const place = await screen.findByRole('button', { name: 'Place cash order · $2,150' });
     // No MMG on this cart, so no choice is offered — cash, stated plainly.
     expect(screen.queryByRole('radiogroup')).toBeNull();
     expect(screen.getByText('Cash at the door')).toBeTruthy();
@@ -194,9 +194,9 @@ describe('[Q7b] cart → checkout → tracking', () => {
       expect.stringContaining('Pay with MMG'),
     ]);
     // Cash until the customer chooses otherwise.
-    expect(screen.getByRole('button', { name: 'Place cash order · GY$2,150' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Place cash order · $2,150' })).toBeTruthy();
     fireEvent.click(within(choices).getByRole('radio', { name: /Pay with MMG/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Place order · GY$2,150 · pay by MMG' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Place order · $2,150 · pay by MMG' }));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/o9'));
     const [[, init]] = calls('POST', '/api/v1/customer/checkout') as [[unknown, RequestInit]];
     expect(JSON.parse(String(init.body))).toEqual({
@@ -210,11 +210,11 @@ describe('[Q7b] cart → checkout → tracking', () => {
     const choices = await screen.findByRole('radiogroup', { name: 'Payment' });
     fireEvent.click(within(choices).getByRole('radio', { name: /Pay with MMG/ }));
     liveCart = cart({ available: false, scope: 'cash-now' });
-    fireEvent.click(screen.getByRole('button', { name: 'Place order · GY$2,150 · pay by MMG' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Place order · $2,150 · pay by MMG' }));
     expect(await screen.findByText(/MMG is no longer available for this order/)).toBeTruthy();
     expect(calls('POST', '/api/v1/customer/checkout')).toHaveLength(0);
     expect(state.push).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Place cash order · GY$2,150' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Place cash order · $2,150' })).toBeTruthy();
   });
 
   it('sends a guest who opens the cart to sign in and back to the cart — never showing a cart', async () => {
