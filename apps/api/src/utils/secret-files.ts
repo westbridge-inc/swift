@@ -40,6 +40,9 @@ export const SECRET_FILE_NAMES = [
   // Notifications.
   'TWILIO_API_KEY_SECRET',
   'SMTP_PASS',
+  // [L04] Non-production SMS recipient allowlist: phone numbers are personal
+  // data, so they arrive by file from the store, never in a compose file.
+  'SMS_RECIPIENT_ALLOWLIST',
   // MMG mobile money.
   'MMG_API_KEY',
   'MMG_PASSWORD',

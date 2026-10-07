@@ -53,6 +53,8 @@ const good: Record<string, string | undefined> = {
   SMTP_USER: 'noreply@example.test',
   SMTP_PASS: 'smtp-password-of-the-sending-mailbox',
   EMAIL_FROM: 'Swift <noreply@example.test>',
+  SCAN_IP_SALT: 'synthetic-scan-boot-salt',
+  ATTRIB_SALT: 'synthetic-attribution-boot-salt',
 };
 
 const cardOff = {
@@ -78,7 +80,7 @@ const paddedTwilioIdentities = ([
 function runPreflight(candidate: Record<string, string | undefined>) {
   const directory = mkdtempSync(join(tmpdir(), 'swift-twilio-preflight-'));
   try {
-    const candidatePath = join(directory, 'candidate.env');
+    const candidatePath = join(directory, 'candidate.txt');
     writeFileSync(candidatePath, Object.entries(candidate)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
       .map(([name, value]) => `${name}=${value}`).join('\n'));
@@ -94,6 +96,30 @@ function runPreflight(candidate: Record<string, string | undefined>) {
 }
 
 describe('assertSafeBootConfig — fail-closed production secrets', () => {
+  it.each([
+    ['CONSENT_REQUIRED', '0'],
+    ['ADMIN_CAPABILITY_MODE', 'shadow'],
+    ['PREVIEW_MODE', '1'],
+  ])('launch bypass %s=%s is refused by production', (name, value) => {
+    expect(() => assertSafeBootConfig({ ...good, [name]: value })).toThrow(name);
+  });
+
+  it.each(['development', 'test'])('launch bypass fixtures remain available in %s', (mode) => {
+    expect(() => assertSafeBootConfig({
+      NODE_ENV: mode,
+      CONSENT_REQUIRED: '0',
+      ADMIN_CAPABILITY_MODE: 'shadow',
+      PREVIEW_MODE: '1',
+    })).not.toThrow();
+  });
+
+  it('launch bypass defaults keep production admission open', () => {
+    expect(() => assertSafeBootConfig({
+      ...good, CONSENT_REQUIRED: '1', ADMIN_CAPABILITY_MODE: 'enforce', PREVIEW_MODE: '0',
+    })).not.toThrow();
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
   it('boots with the card rail explicitly disabled and no card credentials', () => {
     expect(() => assertSafeBootConfig(cardOff)).not.toThrow();
   });

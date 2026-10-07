@@ -7,7 +7,7 @@ import { captureError, opsPageCounter, osrmOutcomeCounter } from '../plugins/obs
 import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
-import { runWithTenant } from '../plugins/tenant-context';
+import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import {
   requireActiveDiscoveryTenant,
   runForActiveDiscoveryTenants,
@@ -439,6 +439,23 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
   return { flaggedPairs: pairs.length };
 }
 
+/** [L01 · tenant wall] The capability a job runs under: its queue and its name. */
+export function jobCapability(queue: string, jobName: string | undefined): string {
+  return `job:${queue}:${jobName || 'unnamed'}`;
+}
+
+/** [L01 · tenant wall] Every job runs as NAMED system work, never unbound.
+ *  A job has no request and so no tenant: before this it ran with no tenant
+ *  context at all, which the tenant wall treats as an unbound composition root
+ *  (refused under TENANT_UNSCOPED_ACCESS=deny; zero rows on a walled login).
+ *  Each handler now runs under its own capability, `job:<queue>:<name>` —
+ *  counted and attributable — and a handler that works for ONE tenant narrows
+ *  itself with runWithTenant inside. Covers the standalone worker and the
+ *  combined API process alike: both build their consumers here. */
+export function inJobContext(queue: string, processor: (job: Job) => Promise<void>): (job: Job) => Promise<void> {
+  return (job: Job) => runAsSystem(jobCapability(queue, job?.name), () => processor(job));
+}
+
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
   const constructedWorkers: Worker[] = [];
@@ -450,7 +467,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     // Two-phase boot: constructing a Worker normally starts its processor
     // immediately. Keep every consumer dormant until all seven connections and
     // every recurring schedule are committed by initializeJobRuntime.
-    const worker = new Worker(name, processor, { ...options, autorun: false });
+    const worker = new Worker(name, inJobContext(name, processor), { ...options, autorun: false });
     constructedWorkers.push(worker);
     worker.on('failed', (job, err) => {
       ctx.log.error({ queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
@@ -1928,6 +1945,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (dw.recovered.length + dw.flagged.length > 0) {
           ctx.log.error({ recovered: dw.recovered, flagged: dw.flagged }, 'Stranded-delivery watchdog: released pre-pickup orders / flagged goods-in-hand rider drops');
         }
+        // [AF-MOB-006] Custody recovery cases nobody has acted on by their
+        // deadline page operations again, every interval, until a human does.
+        const { escalateOverdueCases } = await import('../modules/custody/custody-recovery');
+        const overdue = await escalateOverdueCases({ prisma: ctx.prisma, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (overdue.length > 0) ctx.log.error({ overdue }, 'Custody recovery cases past their deadline were escalated to operations');
         return;
       }
 
