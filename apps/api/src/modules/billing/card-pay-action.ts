@@ -6,7 +6,7 @@ import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import { weeklyFeeAmount } from './subscription-fee';
 import { readFeePaymentDecision } from './fee-payment-authority';
 import type { ClientPlatform } from './fee-pay-actions';
-import { INSTRUMENT_DTO_SELECT, type PaymentInstrumentDto } from './card-rail.service';
+import { INSTRUMENT_DTO_SELECT, cardTestLabel, type PaymentInstrumentDto } from './card-rail.service';
 import type { CardRailProvider, CardRailSource } from '../../providers/card/card-provider';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,9 @@ export type CardPayAction =
       addCard: boolean;
       /** The ACTIVE card, if any. */
       cardOnFile: CardView | null;
+      /** [PT-4] True on the provider's TEST system (sandbox): the screen shows testModeLabel. */
+      testMode: boolean;
+      testModeLabel?: string;
     };
 
 export const CARD_OFF: CardPayAction = { id: 'CARD', state: 'off' };
@@ -173,5 +176,6 @@ export async function cardPayAction(
   const cardOnFile = addCard
     ? await prisma.paymentInstrument.findFirst({ where: { subscriptionId: sub.id, status: 'ACTIVE' }, select: INSTRUMENT_DTO_SELECT })
     : null;
-  return { id: 'CARD', state: 'live', payNow, addCard, cardOnFile };
+  const testModeLabel = cardTestLabel({ provider: decision.provider.binding.provider, environment: decision.provider.binding.environment });
+  return { id: 'CARD', state: 'live', payNow, addCard, cardOnFile, testMode: testModeLabel !== undefined, ...(testModeLabel ? { testModeLabel } : {}) };
 }
