@@ -27,3 +27,26 @@ export async function restoreBillingAccess(tx: Prisma.TransactionClient, vendorI
   });
   return true;
 }
+
+/**
+ * A store awaiting approval whose weekly fee billing holds (SUSPENDED, or its
+ * later CHURNED stage) goes live under that hold when its documents complete
+ * [#1516 review S4]: SUSPENDED with source BILLING and intake closed, the state
+ * billing gives a live store whose fee went unpaid. Without it the activation
+ * opened the store (ACTIVE and taking orders) while browse hid it and checkout
+ * refused it, and the owner's payment found no billing hold to lift. A payment
+ * lifts this one through restoreBillingAccess like any other.
+ *
+ * Billing never holds a store awaiting approval itself (billing.service
+ * suspendAccessRows touches open stores only), so this is the one place a
+ * pending store takes billing's hold: on its activation edge, decided at write
+ * time against the live subscription row, inside the activation transaction.
+ * Returns true when the store was held.
+ */
+export async function holdActivationForUnpaidFee(tx: Prisma.TransactionClient, vendorId: string): Promise<boolean> {
+  const held = await tx.vendor.updateMany({
+    where: { id: vendorId, status: 'PENDING_APPROVAL', subscription: { is: { status: { in: ['SUSPENDED', 'CHURNED'] } } } },
+    data: { status: 'SUSPENDED', acceptingOrders: false, suspensionSource: 'BILLING' },
+  });
+  return held.count === 1;
+}
