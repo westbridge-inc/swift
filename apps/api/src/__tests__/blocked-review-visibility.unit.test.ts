@@ -13,6 +13,9 @@ import {
   writeVendorReviewResponse,
 } from '../modules/rating/vendor-review-visibility';
 
+/** The live author every real reply-door read includes (deletion leaves a marker instead). */
+const ACTIVE_RATER = { status: 'ACTIVE', phone: '+5920000002' };
+
 function fakePrisma(
   blockedIds: string[] = [],
   options: {
@@ -167,7 +170,7 @@ describe('vendor review visibility for a user block', () => {
       rating: {
         updateMany,
         findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: scrubbed }),
-        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null }),
+        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null, rater: ACTIVE_RATER }),
       },
       vendor: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({ name: 'Store One' }),
@@ -222,7 +225,7 @@ describe('vendor review visibility for a user block', () => {
         findFirst: vi.fn().mockResolvedValue(null),
       },
       rating: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null }),
+        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null, rater: ACTIVE_RATER }),
         updateMany: firstUpdate,
         findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: 'First try' }),
       },
@@ -241,7 +244,7 @@ describe('vendor review visibility for a user block', () => {
         }),
       },
       rating: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null }),
+        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null, rater: ACTIVE_RATER }),
         updateMany: secondUpdate,
       },
     };
@@ -280,7 +283,7 @@ describe('vendor review visibility for a user block', () => {
         findFirst: vi.fn().mockResolvedValue(null),
       },
       rating: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null }),
+        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: null, rater: ACTIVE_RATER }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         findUniqueOrThrow: vi.fn().mockResolvedValue({ id: 'review-1', response: 'This request' }),
       },
@@ -297,7 +300,7 @@ describe('vendor review visibility for a user block', () => {
         findFirst: vi.fn().mockResolvedValue(null),
       },
       rating: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: 'Other winner' }),
+        findFirst: vi.fn().mockResolvedValue({ id: 'review-1', raterId: 'author-1', response: 'Other winner', rater: ACTIVE_RATER }),
         updateMany: secondUpdate,
       },
     };
@@ -413,6 +416,54 @@ describe('vendor review visibility for a user block', () => {
     }
   });
 
+  it('fails closed when the author row is missing: no reply, no contact check', async () => {
+    for (const rater of [null, undefined]) {
+      const db = fakePrisma([], { review: { id: 'review-1', raterId: 'author-1', response: null, rater } });
+      await expect(requireRespondableVendorReview(db.prisma, {
+        tenantId: 'tenant-1',
+        responderId: 'operator-1',
+        vendorId: 'vendor-1',
+        reviewId: 'review-1',
+      })).rejects.toMatchObject({ statusCode: 409, code: 'REVIEW_AUTHOR_DELETED' });
+      expect(db.userBlockFindFirst).not.toHaveBeenCalled();
+    }
+  });
+
+  it('reads a written reply back through the store allowlist only', async () => {
+    const findUniqueOrThrow = vi.fn().mockResolvedValue({ id: 'review-1', response: 'Thanks' });
+    const writeDb = {
+      rating: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        findFirst: vi.fn(),
+        findUniqueOrThrow,
+      },
+    } as unknown as PrismaClient;
+
+    await writeVendorReviewResponse(writeDb, {
+      reviewId: 'review-1',
+      publishedWhere: { vendorId: 'vendor-1', type: 'CUSTOMER_TO_VENDOR' },
+      observedResponse: null,
+      processedText: 'Thanks',
+      responderId: 'operator-1',
+      respondedAt: new Date('2026-09-12T00:00:00Z'),
+    });
+
+    expect(findUniqueOrThrow).toHaveBeenCalledWith({
+      where: { id: 'review-1' },
+      select: {
+        id: true,
+        type: true,
+        score: true,
+        comment: true,
+        tags: true,
+        response: true,
+        respondedAt: true,
+        createdAt: true,
+        respondedBy: true,
+      },
+    });
+  });
+
   it('refuses a reply when the author blocked the operator', async () => {
     const contactBlock = {
       id: 'block-1',
@@ -421,7 +472,7 @@ describe('vendor review visibility for a user block', () => {
       blockedAt: new Date('2026-09-12T00:00:00Z'),
     };
     const db = fakePrisma([], {
-      review: { id: 'review-1', raterId: 'author-1' },
+      review: { id: 'review-1', raterId: 'author-1', rater: ACTIVE_RATER },
       contactBlock,
     });
 
@@ -435,7 +486,7 @@ describe('vendor review visibility for a user block', () => {
 
   it('allows an unaffected operator to reach a published review', async () => {
     const review = { id: 'review-1', raterId: 'author-1' };
-    const db = fakePrisma([], { review });
+    const db = fakePrisma([], { review: { ...review, rater: ACTIVE_RATER } });
 
     await expect(requireRespondableVendorReview(db.prisma, {
       tenantId: 'tenant-1',

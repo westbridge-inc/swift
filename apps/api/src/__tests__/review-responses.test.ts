@@ -245,6 +245,45 @@ describe('Store review list projection', () => {
     expect(text).not.toContain(released.orderId);
     expect(text).not.toContain(reviewer.lastName as string);
   });
+
+  it('the reply door answers with the same fields (plus the replying team member), never the reviewer or moderation state', async () => {
+    const author = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `RR-${nanoid(8)}`,
+        orderType: 'FOOD_DELIVERY',
+        customerId: author.userId,
+        vendorId,
+        status: 'DELIVERED',
+        deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000,
+        deliveryFee: 0, totalAmount: 1000, paymentMethod: 'CASH',
+      },
+    });
+    const review = await app.prisma.rating.create({
+      data: {
+        orderId: order.id, raterId: author.userId, vendorId, type: 'CUSTOMER_TO_VENDOR',
+        score: 5, comment: 'Lovely bake', tags: ['tasty'], visibleAt: new Date(),
+        flagReason: 'sweep-note-for-staff-only', stateReason: 'internal-only',
+      },
+    });
+    const authorRow = await app.prisma.user.findUniqueOrThrow({ where: { id: author.userId } });
+    const REPLY_KEYS = [...ALLOWED_KEYS, 'respondedBy'].sort();
+
+    for (const response of ['Thank you, come again!', 'Thank you — see you soon!']) {
+      const res = await inject('POST', `/api/v1/vendor/reviews/${review.id}/respond`, { response }, owner.token);
+      expect(res.statusCode).toBe(200);
+      const data = res.json().data as Record<string, unknown>;
+      expect(Object.keys(data).sort()).toEqual(REPLY_KEYS);
+      expect(data['id']).toBe(review.id);
+      expect(data['respondedBy']).toBe(owner.userId);
+      expect(res.body).not.toContain(author.userId);
+      expect(res.body).not.toContain(order.id);
+      expect(res.body).not.toContain(authorRow.lastName as string);
+      expect(res.body).not.toContain('sweep-note-for-staff-only');
+      expect(res.body).not.toContain('internal-only');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

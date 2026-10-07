@@ -5,6 +5,29 @@ import { processReviewText } from './review-scrub';
 
 type VendorReviewDb = Pick<PrismaClient, 'rating' | 'userBlock'>;
 
+/**
+ * The only review fields a store may read about its own reviews: what was
+ * said, when, and the store's own reply. Never the reviewer, the reviewer id,
+ * the order id or moderation state — the order list already names the
+ * customer per order, so any of those would tie a review to a person.
+ */
+export const STORE_REVIEW_PROJECTION = {
+  id: true,
+  type: true,
+  score: true,
+  comment: true,
+  tags: true,
+  response: true,
+  respondedAt: true,
+  createdAt: true,
+} as const satisfies Prisma.RatingSelect;
+
+/** The reply door answers with the same fields plus which team member replied. */
+export const STORE_REVIEW_REPLY_PROJECTION = {
+  ...STORE_REVIEW_PROJECTION,
+  respondedBy: true,
+} as const satisfies Prisma.RatingSelect;
+
 export interface RatingScoreBucket {
   score: number;
   _count: number;
@@ -97,7 +120,10 @@ export async function writeVendorReviewResponse(
       'This review response changed. Refresh it before replying again.',
     );
   }
-  return db.rating.findUniqueOrThrow({ where: { id: input.reviewId } });
+  return db.rating.findUniqueOrThrow({
+    where: { id: input.reviewId },
+    select: STORE_REVIEW_REPLY_PROJECTION,
+  });
 }
 
 /**
@@ -233,9 +259,10 @@ export async function vendorReviewWhereForViewer(
 }
 
 /** A deleted account: deactivated by the deletion flow, which also replaces
- *  the phone with a `deleted:` marker. Either signal is enough. */
+ *  the phone with a `deleted:` marker. Either signal is enough. A missing
+ *  account row counts as deleted too (fail closed). */
 export function isDeletedAccount(user: { status: string; phone: string } | null | undefined): boolean {
-  if (!user) return false;
+  if (!user) return true;
   return user.status === 'DEACTIVATED' || user.phone.startsWith('deleted:');
 }
 
