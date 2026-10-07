@@ -1,6 +1,7 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { Prisma } from '@prisma/client';
 import type {
   PrismaClient,
@@ -365,7 +366,8 @@ export function assertMmgFulfilmentAllowed(
   }
   // [DOC-1 §31.5] Two claims that disagree open a case BEFORE the rider is dispatched, not after.
   if (order.mmgClaimMismatchAt) {
-    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim. A person must resolve it before the order moves.');
+    // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
+    throw new AppError(409, 'MMG_CLAIM_MISMATCH', 'The customer disputes the store\'s payment claim, so this order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don\'t hand anything over until then.');
   }
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
@@ -2576,7 +2578,7 @@ export class OrderService {
         type: 'ORDER_UPDATE',
         title: 'Ride cancelled',
         body: 'The passenger cancelled this ride. You can stop and go back online.',
-        data: { orderId, status: 'CANCELLED' },
+        data: taxiNotificationData(orderId, { status: 'CANCELLED' }, 'earner'),
       });
     }
 
@@ -2704,7 +2706,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId);
+        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
         break;
     }
 

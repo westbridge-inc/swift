@@ -6,6 +6,7 @@
 import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
 import { formatAmount, parseAmount } from './money';
 import type { StorefrontDetail } from './api';
+import { retailCategories } from './browse-keys';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 export { sendOtp };
@@ -167,6 +168,12 @@ export async function getHome(near?: { lat: number; lng: number }): Promise<Home
   const qs = near ? `?lat=${near.lat}&lng=${near.lng}` : '';
   return (await apiFetch(`/api/v1/customer/home${qs}`, undefined, { redirectOnExpired: false })).data as HomeFeed;
 }
+/** [W2] The guest Home feed — the one the server renders into the page — read
+ *  with no session at all, so nothing personal is ever filed under it. */
+export async function getPublicHome(near?: { lat: number; lng: number }): Promise<HomeFeed> {
+  const qs = near ? `?lat=${near.lat}&lng=${near.lng}` : '';
+  return publicGet<HomeFeed>(`/api/v1/customer/home${qs}`);
+}
 export async function getVendors(type?: string): Promise<Vendor[]> {
   const qs = type ? `?type=${encodeURIComponent(type)}` : '';
   return (await apiFetch(`/api/v1/customer/vendors${qs}`)).data as Vendor[];
@@ -232,8 +239,7 @@ export function getMarketItems(params: { category?: string; cursor?: string }): 
 }
 /** The goods categories the Market chips offer — only ones with a live store. */
 export async function getMarketCategories(): Promise<MarketCategory[]> {
-  const rail = await publicGet<{ enabled?: boolean; categories?: MarketCategory[] }>('/api/v1/discovery/categories?vertical=RETAIL');
-  return (rail.categories ?? []).filter((category) => category.vertical === 'RETAIL');
+  return retailCategories(await publicGet<unknown>('/api/v1/discovery/categories?vertical=RETAIL'));
 }
 
 // ── Cart ──────────────────────────────────────────────────────────────────
