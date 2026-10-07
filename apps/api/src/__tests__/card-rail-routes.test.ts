@@ -20,7 +20,8 @@ import { driverRoutes } from '../modules/driver/driver.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { stepUpKey } from '../modules/auth/step-up';
 import { BillingService } from '../modules/billing/billing.service';
-import { ACTIVE_CONFIRMATION_STATES, readDunningClock } from '../modules/billing/dunning-clock';
+import { resolveConfirmationInTx, ACTIVE_CONFIRMATION_STATES, hasConfirmationInTx, readDunningClock } from '../modules/billing/dunning-clock';
+import { readFeePaymentDecision } from '../modules/billing/fee-payment-authority';
 import { confirmationReviewQueue, resolveFinanceConfirmation } from '../modules/billing/confirmation-finance';
 import { CARD_ON_FILE_CONSENT_VERSION, CARD_SANDBOX_TEST_LABEL, CardRailService } from '../modules/billing/card-rail.service';
 import { CARD_CHECKOUT_PLATFORMS_KEY, resetCardCheckoutSwitchCache } from '../modules/billing/card-pay-action';
@@ -1077,7 +1078,7 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
   type Answer = { status: number; body: unknown } | 'network';
   const calls: Array<{ path: string; body: string }> = [];
   let sale: (body: Record<string, unknown>) => Answer;
-  let payment: (held: { txnId: string; orderId: string }) => Answer;
+  let payment: (held: { txnId: string; orderId: string }) => Answer | Promise<Answer>;
   let voidAnswer: (body: Record<string, unknown>) => Answer;
   let refundAnswer: (body: Record<string, unknown>) => Answer;
 
@@ -1096,7 +1097,7 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
         txnId = (await redis.hget(k, 'txnId')) ?? '';
         orderId = (await redis.hget(k, 'orderId')) ?? '';
       }
-      answer = payment({ txnId, orderId });
+      answer = await payment({ txnId, orderId });
     } else if (path === '/api/void') answer = voidAnswer(JSON.parse(body) as Record<string, unknown>);
     else if (path === '/api/refund') answer = refundAnswer(JSON.parse(body) as Record<string, unknown>);
     else answer = { status: 404, body: 'not found' };
@@ -1179,6 +1180,22 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     payment = approve();
     voidAnswer = adjusted;
     return { sessionId: session.sessionId as string, txnId: row.providerTransactionRef! };
+  }
+
+  async function verifiedHeldPayment(p: Partner) {
+    const billing = (serviceOf() as unknown as { billing: BillingService }).billing;
+    const settle = billing.settleHostedCardPayment.bind(billing);
+    billing.settleHostedCardPayment = async () => ({ outcome: 'held', failureCode: 'WALLET_CURRENCY_MISMATCH' });
+    try {
+      payment = approve();
+      const session = (await open(p)).json().data;
+      await bankFramePosts(session.sessionId, 'Y');
+      const row = await rowOf(session.sessionId);
+      expect(row.status).toBe('HELD');
+      expect(row.completionEvidence).toMatchObject({ Approved: true, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y' } } });
+      expect((await money(p.subId)).successes).toBe(0);
+      return { sessionId: session.sessionId as string, txnId: row.providerTransactionRef! };
+    } finally { billing.settleHostedCardPayment = settle; }
   }
 
   beforeAll(async () => {
@@ -1508,6 +1525,204 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     expect((await money(p.subId)).successes).toBe(0);
   });
 
+  describe('[CARDS] delayed completion money fences', () => {
+    for (const situation of ['finance during request', 'expiry sweep during request', 'approval after finance closure', 'approval after finance closure with refused void'] as const) {
+      it(situation, async () => {
+        const finance = await makeFinance();
+        const p = await makeStore();
+        const session = (await open(p)).json().data;
+        const row = await rowOf(session.sessionId);
+        const txnId = (await heldOf(session.sessionId))['txnId']!;
+        const before = completions();
+        if (situation.endsWith('refused void')) voidAnswer = () => ({ status: 200, body: { Approved: false, IsoResponseCode: '12' } });
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        const started = new Promise<void>((r) => { entered = r; });
+        payment = async (held) => { entered(); await gate; return approve()(held); };
+        // Start the real browser-return path; stop only the fake gateway answer.
+        const returning = bankFramePosts(session.sessionId, 'Y');
+        await started;
+        try {
+          if (situation === 'expiry sweep during request') {
+            await serviceOf().sweepSessions(new Date(row.expiresAt.getTime() + 1));
+            expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+          } else {
+            const later = situation.startsWith('approval after finance closure') ? new Date(Date.now() + 120_000) : new Date();
+            const [hold] = (await confirmationReviewQueue(app.prisma, row.tenantId, later)).filter((r) => r.sourceId === row.id);
+            const input = {
+              id: hold!.id, tenantId: row.tenantId, actorId: finance.userId, sourceId: row.id,
+              epoch: hold!.epoch, clockVersion: hold!.clockVersion, decision: 'UNPAID' as const, evidenceReference: 'synthetic-portal-check',
+            };
+            if (situation === 'finance during request') {
+              await expect(resolveFinanceConfirmation(app.prisma, input, async () => undefined, later)).rejects.toMatchObject({ code: 'CARD_COMPLETION_IN_FLIGHT' });
+            } else {
+              // Even after the wait an uncertain completion cannot reopen collection.
+              await expect(resolveFinanceConfirmation(app.prisma, input, async () => undefined, later)).rejects.toMatchObject({ code: 'CARD_SESSION_RESOLVE_REQUIRED' });
+              // Reproduce a closure persisted by the previous implementation.
+              await app.prisma.$transaction(async (tx) => {
+                await tx.cardSession.update({ where: { id: row.id }, data: { status: 'FAILED', failureCode: 'FINANCE_CONFIRMED_UNPAID', confirmedAt: new Date() } });
+                await resolveConfirmationInTx(tx, row.subscriptionId, { cardSessionId: row.id }, 'PROVEN_UNPAID', { actor: finance.userId, reference: 'legacy-closure-fixture' });
+              });
+            }
+          }
+        } finally { release(); await returning; }
+        if (situation.startsWith('approval after finance closure')) {
+          expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(1);
+          expect((await money(p.subId)).successes).toBe(0);
+          expect(await app.prisma.notification.count({ where: { userId: finance.userId, dedupeKey: `card-session-late-approval:${row.id}` } })).toBe(1);
+          if (situation.endsWith('refused void')) {
+            expect(await rowOf(row.id)).toMatchObject({ status: 'HELD', failureCode: 'LATE_PROVIDER_APPROVAL', providerVoidState: 'FAILED' });
+            expect(ACTIVE_CONFIRMATION_STATES).toContain((await confirmationOf(row.id))?.status);
+            const again = await open(p);
+            expect(again.statusCode, again.body).toBe(409);
+            const book = await resolve(finance, row.id, { action: 'BOOK', providerReference: txnId, amount: 2100 });
+            expect(book.json().error?.code, book.body).toBe('PROVIDER_COMPLETION_EVIDENCE_REQUIRED');
+            expect((await money(p.subId)).successes).toBe(0);
+            // The held late approval blocks every new collection ON ITS OWN, even when its confirmation
+            // is resolved (fixture: as when a newer obligation meant it could not be reopened).
+            await app.prisma.$transaction((tx) => resolveConfirmationInTx(tx, row.subscriptionId, { cardSessionId: row.id }, 'PROVEN_UNPAID', { actor: finance.userId, reference: 'newer-obligation-fixture' }));
+            expect(ACTIVE_CONFIRMATION_STATES).not.toContain((await confirmationOf(row.id))?.status);
+            const blocked = await open(p);
+            expect(blocked.statusCode, blocked.body).toBe(409);
+            expect(blocked.json().error?.code).toBe('PAYMENT_CONFIRMING');
+            expect(await readFeePaymentDecision(app.prisma, p.subId)).toMatchObject({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
+            expect(await app.prisma.$transaction((tx) => hasConfirmationInTx(tx, p.subId, new Date()))).toBe(true);
+          } else expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', providerVoidState: 'VOIDED' });
+        } else {
+          expect((await rowOf(row.id)).status).toBe('SUCCEEDED');
+          expect((await money(p.subId)).successes).toBe(1);
+        }
+        expect(completions() - before).toBe(1);
+      });
+    }
+
+    it('a late approval for a session finance already resolved: the decision stands, nothing is rewritten or booked, admins are alerted', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const row = await rowOf(session.sessionId);
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      const started = new Promise<void>((r) => { entered = r; });
+      payment = async (held) => { entered(); await gate; return approve()(held); };
+      const returning = bankFramePosts(session.sessionId, 'Y');
+      await started;
+      try {
+        // A finance decision persisted while the completion was answering (fixture).
+        await app.prisma.$transaction(async (tx) => {
+          await tx.cardSession.update({ where: { id: row.id }, data: { status: 'FAILED', failureCode: 'NOTHING_TAKEN', confirmedAt: new Date(), resolution: 'NOTHING_TAKEN', resolvedBy: finance.userId, resolvedAt: new Date() } });
+          await resolveConfirmationInTx(tx, row.subscriptionId, { cardSessionId: row.id }, 'PROVEN_UNPAID', { actor: finance.userId, reference: 'resolved-fixture' });
+        });
+      } finally { release(); }
+      expect((await returning).statusCode).toBe(200);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', resolution: 'NOTHING_TAKEN', providerVoidState: null, paymentId: null });
+      expect(await app.prisma.notification.count({ where: { userId: finance.userId, dedupeKey: `card-session-late-approval:${row.id}` } })).toBe(1);
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+
+    it('the durable claim and provider proof are write-once', async () => {
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const row = await rowOf(session.sessionId);
+      const before = completions();
+      await bankFramePosts(row.id, 'Y');
+      const proven = await rowOf(row.id);
+      expect(proven.completionClaimedAt).not.toBeNull();
+      expect(proven.completionEvidence).toMatchObject({ Approved: true, RiskManagement: { ThreeDSecure: { AuthenticationStatus: 'Y' } } });
+      await expect(app.prisma.cardSession.update({ where: { id: row.id }, data: { completionClaimedAt: new Date(Date.now() + 60_000) } })).rejects.toThrow(/claim is written once/);
+      await expect(app.prisma.cardSession.update({ where: { id: row.id }, data: { completionEvidence: { forged: true } } })).rejects.toThrow(/evidence is written once/);
+      await serviceOf().confirm(row.id);
+      expect(completions() - before).toBe(1);
+      expect((await money(p.subId)).successes).toBe(1);
+    });
+
+    it('finance closes the session before its completion is claimed: the completion is never sent — nothing to void, no late-approval alert', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const row = await rowOf(session.sessionId);
+      const txnId = (await heldOf(session.sessionId))['txnId']!;
+      const before = completions();
+      const realConfirm = real.confirm.bind(real);
+      // Finance's "not paid" lands between the browser's return and the claim.
+      real.confirm = async (input) => {
+        const [hold] = (await confirmationReviewQueue(app.prisma, row.tenantId)).filter((r) => r.sourceId === row.id);
+        await resolveFinanceConfirmation(app.prisma, {
+          id: hold!.id, tenantId: row.tenantId, actorId: finance.userId, sourceId: row.id,
+          epoch: hold!.epoch, clockVersion: hold!.clockVersion, decision: 'UNPAID', evidenceReference: 'synthetic-portal-check',
+        }, async () => undefined);
+        return realConfirm(input);
+      };
+      try {
+        expect(pageState((await bankFramePosts(session.sessionId, 'Y')).body)).toBe('FAILED');
+      } finally { real.confirm = realConfirm; }
+      expect(completions() - before).toBe(0);
+      expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', failureCode: 'FINANCE_CONFIRMED_UNPAID', completionClaimedAt: null, providerVoidState: null });
+      expect(await app.prisma.notification.count({ where: { dedupeKey: `card-session-late-approval:${row.id}` } })).toBe(0);
+      expect((await confirmationOf(row.id))?.status).toBe('PROVEN_UNPAID');
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+
+    it('a claimed completion whose page record the provider store lost: finance still cannot close it; past its deadline it is voided under the recorded transaction', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const row = await rowOf(session.sessionId);
+      const txnId = (await heldOf(session.sessionId))['txnId']!;
+      const claimedAt = new Date();
+      // A server claimed (and may have sent) the completion, then the card provider's record of the page was lost.
+      await app.prisma.cardSession.update({ where: { id: row.id }, data: { completionClaimedAt: claimedAt, providerTransactionRef: txnId } });
+      await redis.del(`${PTZ_PREFIX}s:${row.providerSessionRef}`);
+      await serviceOf().confirm(row.id, { now: new Date(claimedAt.getTime() + 10_000) });
+      expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+      expect((await rowOf(row.id)).status).toBe('OPEN');
+      const later = new Date(claimedAt.getTime() + 120_000);
+      const [hold] = (await confirmationReviewQueue(app.prisma, row.tenantId, later)).filter((r) => r.sourceId === row.id);
+      await expect(resolveFinanceConfirmation(app.prisma, {
+        id: hold!.id, tenantId: row.tenantId, actorId: finance.userId, sourceId: row.id,
+        epoch: hold!.epoch, clockVersion: hold!.clockVersion, decision: 'UNPAID', evidenceReference: 'synthetic-portal-check',
+      }, async () => undefined, later)).rejects.toMatchObject({ code: 'CARD_SESSION_RESOLVE_REQUIRED' });
+      await serviceOf().confirm(row.id, { now: new Date(claimedAt.getTime() + 36_000) });
+      expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(1);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', failureCode: 'VOIDED_UNPROVEN', providerVoidState: 'VOIDED' });
+      expect((await confirmationOf(row.id))?.status).toBe('PROVEN_UNPAID');
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+
+    it('a durable claim the provider store lost its own copy of: the completion is never sent a second time — the transaction is voided', async () => {
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const row = await rowOf(session.sessionId);
+      const txnId = (await heldOf(session.sessionId))['txnId']!;
+      const before = completions();
+      // The bank's check passes and is noted; this server stops before its completion.
+      const realConfirm = real.confirm.bind(real);
+      real.confirm = async () => ({ status: 'pending' as const, rawSha256: 'synthetic-pending' });
+      try { await bankFramePosts(session.sessionId, 'Y'); } finally { real.confirm = realConfirm; }
+      // Another server's durable claim stands (its completion may have gone out); this store has no claim.
+      await app.prisma.cardSession.update({ where: { id: row.id }, data: { completionClaimedAt: new Date(), providerTransactionRef: txnId } });
+      await serviceOf().confirm(row.id);
+      expect(completions() - before).toBe(0);
+      expect(sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(1);
+      expect(await rowOf(row.id)).toMatchObject({ status: 'FAILED', failureCode: 'VOIDED_UNPROVEN', providerVoidState: 'VOIDED' });
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+
+    it('BOOK refuses an approval without the provider own 3DS proof even after two-person approval', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const { sessionId, txnId } = await heldPayment(p);
+      const booked = await resolve(finance, sessionId, { action: 'BOOK', providerReference: txnId, amount: 2100 });
+      expect(booked.statusCode, booked.body).toBe(409);
+      expect(booked.json().error?.code).toBe('PROVIDER_COMPLETION_EVIDENCE_REQUIRED');
+      expect(await rowOf(sessionId)).toMatchObject({ status: 'HELD', paymentId: null, bookClaimedAt: null });
+      expect((await money(p.subId)).successes).toBe(0);
+    });
+  });
+
   describe('[concurrency · one money movement] parallel calls on a real database: each money step at most once per session, and never a booking beside a void or refund', () => {
     const voids = (txnId: string) => sent('/api/void').filter((b) => b['TransactionIdentifier'] === txnId).length;
     const refunds = (txnId: string) => sent('/api/refund').filter((b) => b['TransactionIdentifier'] === txnId).length;
@@ -1711,10 +1926,27 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
       expect(partner.statusCode).toBe(403);
     });
 
-    it('BOOK: only the recorded transaction, only this week\'s exact price; then the week is booked ONCE', async () => {
+    it('BOOK: only the recorded transaction, only this week\'s exact price; missing provider 3DS proof still refuses BOOK', async () => {
       const finance = await makeFinance();
       const p = await makeStore();
       const { sessionId, txnId } = await heldPayment(p);
+      const wrongRef = await resolve(finance, sessionId, { action: 'BOOK', providerReference: '00000000-0000-4000-8000-000000000000', amount: 2100 });
+      expect(wrongRef.json().error?.code, wrongRef.body).toBe('PROVIDER_REFERENCE_MISMATCH');
+      const wrongAmount = await resolve(finance, sessionId, { action: 'BOOK', providerReference: txnId, amount: 2000 });
+      expect(wrongAmount.json().error?.code, wrongAmount.body).toBe('AMOUNT_NOT_THE_PRICE');
+      expect((await money(p.subId)).successes).toBe(0);
+      const booked = await resolve(finance, sessionId, { action: 'BOOK', providerReference: txnId, amount: 2100 });
+      expect(booked.statusCode, booked.body).toBe(409);
+      expect(booked.json().error?.code).toBe('PROVIDER_COMPLETION_EVIDENCE_REQUIRED');
+      expect((await money(p.subId)).successes).toBe(0);
+      expect(await rowOf(sessionId)).toMatchObject({ status: 'HELD', paymentId: null, bookClaimedAt: null });
+      expect(ACTIVE_CONFIRMATION_STATES).toContain((await confirmationOf(sessionId))?.status);
+    });
+
+    it('BOOK with the provider\'s own approved completion and its 3-D Secure proof: only the recorded transaction, only this week\'s exact price; then the week is booked ONCE', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const { sessionId, txnId } = await verifiedHeldPayment(p);
       const wrongRef = await resolve(finance, sessionId, { action: 'BOOK', providerReference: '00000000-0000-4000-8000-000000000000', amount: 2100 });
       expect(wrongRef.json().error?.code, wrongRef.body).toBe('PROVIDER_REFERENCE_MISMATCH');
       const wrongAmount = await resolve(finance, sessionId, { action: 'BOOK', providerReference: txnId, amount: 2000 });
@@ -1776,7 +2008,7 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     it('[hypothesis: book AND refund] while a BOOK is booking, a refund or a "nothing taken" is refused; the week is booked once and nothing is refunded', async () => {
       const finance = await makeFinance();
       const p = await makeStore();
-      const { sessionId, txnId } = await heldPayment(p);
+      const { sessionId, txnId } = await verifiedHeldPayment(p);
       const row = await rowOf(sessionId);
       const service = serviceOf();
       const billing = (service as unknown as { billing: BillingService }).billing;
@@ -1841,7 +2073,7 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     it('[hypothesis: booked twice] two BOOK decisions racing book the week ONCE (one payment row, one success)', async () => {
       const finance = await makeFinance();
       const p = await makeStore();
-      const { sessionId, txnId } = await heldPayment(p);
+      const { sessionId, txnId } = await verifiedHeldPayment(p);
       const row = await rowOf(sessionId);
       const base = { sessionId, tenantId: row.tenantId, action: 'BOOK' as const, providerReference: txnId, amount: 2100, adminUserId: finance.userId };
       const results = await Promise.allSettled([serviceOf().resolveHeld(base), serviceOf().resolveHeld(base), serviceOf().resolveHeld(base)]);

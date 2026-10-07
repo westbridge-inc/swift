@@ -3933,6 +3933,10 @@ model CardSession {
   /// answer may mean money was taken (what finance looks up and what a void or
   /// refund names).
   providerTransactionRef String?
+  /// Claimed under the billing/session locks before the provider completion is sent.
+  completionClaimedAt DateTime?
+  /// Whitelisted approved provider completion, including its own 3DS proof. Never browser evidence.
+  completionEvidence Json?
   /// [PT-4] The one void Swift sends for a payment it cannot book:
   /// SENDING -> VOIDED | FAILED | UNKNOWN (forward only, trigger-guarded).
   providerVoidState  String?

@@ -6,13 +6,15 @@ import {
   assertBinding,
   rawDigest,
   type CardChargeOutcome,
+  COMPLETION_CLAIM_WAIT_MS,
+  type CardCompletionEvidence,
   type CardRailBinding,
   type CardRailEnvironment,
   type CardRailProvider,
   type CardRefundOutcome,
   type CardReturnObservation,
   type CardSessionOutcome,
-  type CardSessionPurpose,
+  type CompletionClaim,
   type CreateCardSessionOutcome,
 } from './card-provider';
 
@@ -45,7 +47,7 @@ import {
 //      The answer to that server-to-server call is the ONLY money truth, and
 //      Swift books it only when it is Approved with IsoResponseCode "00" for
 //      THIS transaction AND its OWN 3-D Secure fields (RiskManagement.
-//      ThreeDSecure, present in every response per sec. 6) show the payment
+//      ThreeDSecure, listed in sec. 6) show the payment
 //      was authenticated (AuthenticationStatus Y or A, sec. 8.3; not a
 //      failed / non-3DS ECI, sec. 8.4). An approval without that proof is
 //      unknown: a person looks, nothing is booked, nothing is dropped. Swift
@@ -86,6 +88,9 @@ const PATH = {
 const REQUEST_TIMEOUT_MS = 15_000;
 /** The completion goes on to the issuing bank (sec. 2.2 1.7): give it longer. */
 const COMPLETION_TIMEOUT_MS = 30_000;
+// [CARDS S2] A claimed completion is answering until its own deadline plus a
+// margin to record the answer (card-provider.ts); never shorter than the call.
+if (COMPLETION_CLAIM_WAIT_MS < COMPLETION_TIMEOUT_MS + 5_000) throw new Error('COMPLETION_CLAIM_WAIT_MS is shorter than the completion deadline');
 /** sec. 2.2 1.7: "The payment completion needs to be sent within 5 minutes." */
 export const SPI_TOKEN_LIFETIME_MS = 5 * 60_000;
 /** A page's facts outlive it long enough for any reconciliation (as the simulator's). */
@@ -325,7 +330,7 @@ const UNAUTHENTICATED_ECI = new Set(['07', '00', 'N0']);
 
 /**
  * The 3-D Secure proof carried by PowerTranz's OWN server-side answer (sec. 6:
- * RiskManagement.ThreeDSecure is present in every response): authenticated
+ * RiskManagement.ThreeDSecure; the completion sample omits it): authenticated
  * only when AuthenticationStatus is Y or A (sec. 8.3) and the ECI, when given,
  * is not a failed / non-3DS value (sec. 8.4). Nothing the browser sent counts here.
  */
@@ -353,7 +358,7 @@ function errorCodes(json: Record<string, unknown>): string[] {
 }
 
 export type CompletionReading =
-  | { status: 'succeeded'; amountMinor: number; currencyCode: string }
+  | { status: 'succeeded'; amountMinor: number; currencyCode: string; completionEvidence: CardCompletionEvidence }
   | { status: 'failed'; reason: string }
   /** [Review S2-2] Money may have been taken (an approval, or an answer that
    *  may be one) and Swift cannot book it: it is voided at once (sec. 5.2,
@@ -396,7 +401,14 @@ export function readCompletion(json: unknown, held: HeldCompletion): CompletionR
     const amountMinor = currencyCode ? minorOfTotalAmount(json['TotalAmount'], currencyCode) : null;
     if (!currencyCode || amountMinor === null) return unbookable('APPROVED_AMOUNT_UNREADABLE');
     if (amountMinor !== held.amountMinor || currencyCode !== held.currencyCode) return unbookable('APPROVED_AMOUNT_MISMATCH');
-    return { status: 'succeeded', amountMinor, currencyCode };
+    const tds = (json['RiskManagement'] as { ThreeDSecure: Record<string, unknown> }).ThreeDSecure;
+    const eci = typeof tds['Eci'] === 'number' ? String(tds['Eci']).padStart(2, '0') : str(tds['Eci']);
+    return { status: 'succeeded', amountMinor, currencyCode, completionEvidence: {
+      Approved: true, IsoResponseCode: '00', TransactionType: 2,
+      TransactionIdentifier: held.txnId, OrderIdentifier: held.orderId,
+      TotalAmount: totalAmountOf(amountMinor, currencyCode), CurrencyCode: CURRENCY_NUMERIC[currencyCode]!,
+      RiskManagement: { ThreeDSecure: { AuthenticationStatus: String(tds['AuthenticationStatus']), ...(eci === undefined ? {} : { Eci: eci }) } },
+    } };
   }
   if (approved === false) {
     if (iso === '00') return unbookable('DECLINED_WITH_APPROVAL_CODE');
@@ -616,7 +628,7 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
   // confirm — sec. 2.2 1.7-1.8, 7.3: the completion, at most once
   // -------------------------------------------------------------------------
 
-  async confirm(input: { binding: CardRailBinding; providerSessionRef: string; purpose: CardSessionPurpose }): Promise<CardSessionOutcome> {
+  async confirm(input: Parameters<CardRailProvider['confirm']>[0]): Promise<CardSessionOutcome> {
     assertBinding(this.binding, input.binding);
     if (input.purpose !== 'PAY_NOW') return { status: 'failed', reason: 'SAVING_CARDS_NOT_OFFERED', rawSha256: rawDigest({ refused: 'enroll' }) };
     const k = this.key.session(input.providerSessionRef);
@@ -627,8 +639,12 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
       if (rec['purpose'] !== input.purpose) return { status: 'failed', reason: 'PURPOSE_MISMATCH', rawSha256: digest({ purpose: rec['purpose'] }) };
       if (rec['completion'] === 'done') return this.outcomeOf(rec);
       if (rec['completion'] === 'sending') {
-        // Sent, and its answer never recorded (a crash mid-call): money may
-        // have been taken. Never sent again; voided by the service.
+        const claimedAt = Number(rec['completionClaimedAtMs']);
+        if (Number.isFinite(claimedAt) && this.now().getTime() <= claimedAt + COMPLETION_CLAIM_WAIT_MS) {
+          return { status: 'pending', rawSha256: digest({ completion: 'sending', claimedAt }) };
+        }
+        // Only past the deadline + persistence margin is an answer lost.
+        // Legacy claims without a timestamp are uncertain too; never resend.
         return { status: 'unknown', reason: 'COMPLETION_SENT_ANSWER_LOST', voidable: { providerRef: rec['txnId'] ?? '' }, rawSha256: digest({ completion: 'sending' }) };
       }
       if (rec['completion'] === 'abandoned') return { status: 'failed', reason: rec['abandonReason'] || 'NOT_COMPLETED', rawSha256: digest({ completion: 'abandoned', why: rec['abandonReason'] }) };
@@ -653,11 +669,40 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
         if (await this.abandon(k, why)) return { status: 'failed', reason: why, rawSha256: digest({ completion: 'abandoned', why }) };
         continue;
       }
-      // Claim the one completion this page may ever have.
-      if (Number(await this.redis.hsetnx(k, 'completion', 'sending')) !== 1) continue;
+      // Claim the one completion this page may ever have (timestamped [CARDS S2]).
+      if (Number(await this.redis.eval(CLAIM_COMPLETION, 1, k, String(now))) !== 1) continue;
+      // [CARDS S1] Claim it durably on the session, immediately before asking
+      // the bank: finance never closes a session whose completion is claimed.
+      let claim: CompletionClaim = 'send';
+      try {
+        if (input.beforeCompletion) claim = await input.beforeCompletion(rec['txnId'] ?? '');
+      } catch (err) {
+        // Nothing was sent, and it never will be for this page.
+        await this.notSent(k, 'COMPLETION_CLAIM_FAILED');
+        throw err;
+      }
+      if (claim === 'closed') {
+        // The session closed first: the completion is never sent; nothing was taken.
+        await this.notSent(k, 'SESSION_CLOSED_BEFORE_COMPLETION');
+        return { status: 'failed', reason: 'SESSION_CLOSED_BEFORE_COMPLETION', rawSha256: digest({ completion: 'abandoned', why: 'SESSION_CLOSED_BEFORE_COMPLETION' }) };
+      }
+      if (claim === 'claimed') {
+        // A durable claim already exists (this store lost its own): a completion
+        // may already have been sent. Never sent again; voided by the service.
+        await this.redis.hset(k, { completion: 'done', result: JSON.stringify({ status: 'unbookable', reason: 'COMPLETION_ALREADY_CLAIMED', rawSha256: digest({ completion: 'not-resent' }) }) });
+        await this.redis.hdel(k, 'spiToken', 'redirectData');
+        return this.outcomeOf(await this.redis.hgetall(k));
+      }
       return this.complete(k, rec);
     }
     return { status: 'unknown', reason: 'COMPLETION_STATE_CHANGING', rawSha256: rawDigest({ ref: input.providerSessionRef, racing: true }) };
+  }
+
+  /** [CARDS S1] This process holds the page's completion claim and never sent
+   *  it: the page is closed as not completed (the SpiToken is dropped). */
+  private async notSent(k: string, why: string): Promise<void> {
+    await this.redis.hset(k, { completion: 'abandoned', abandonReason: why });
+    await this.redis.hdel(k, 'spiToken', 'redirectData');
   }
 
   private async abandon(k: string, why: string): Promise<boolean> {
@@ -715,8 +760,15 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
     const rawSha256 = stored?.rawSha256 ?? rawDigest({ result: rec['result'] ?? null });
     if (!stored) return { status: 'unknown', reason: 'COMPLETION_RECORD_UNREADABLE', rawSha256 };
     switch (stored.status) {
-      case 'succeeded':
-        return { status: 'succeeded', purpose: 'PAY_NOW', providerRef: rec['txnId'] ?? '', amountMinor: stored.amountMinor, currencyCode: stored.currencyCode, rawSha256 };
+      case 'succeeded': {
+        // Old cached success markers without the provider's proof cannot
+        // restore booking authority. Re-validate the stored completion.
+        const verified = readCompletion(stored.completionEvidence, {
+          txnId: rec['txnId'] ?? '', orderId: rec['orderId'] ?? '', amountMinor: Number(rec['amountMinor']), currencyCode: rec['currencyCode'] ?? '',
+        });
+        if (verified.status !== 'succeeded') return { status: 'unknown', reason: 'COMPLETION_EVIDENCE_UNVERIFIED', voidable: { providerRef: rec['txnId'] ?? '' }, rawSha256 };
+        return { status: 'succeeded', purpose: 'PAY_NOW', providerRef: rec['txnId'] ?? '', amountMinor: verified.amountMinor, currencyCode: verified.currencyCode, completionEvidence: verified.completionEvidence, rawSha256 };
+      }
       case 'failed':
         return { status: 'failed', reason: stored.reason, rawSha256 };
       case 'unbookable':
@@ -856,6 +908,12 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
 }
 
 /** The first accepted return's decision stands: written once, never rewritten. */
+const CLAIM_COMPLETION = `
+if redis.call('HEXISTS', KEYS[1], 'completion') == 1 then return 0 end
+redis.call('HSET', KEYS[1], 'completion', 'sending', 'completionClaimedAtMs', ARGV[1])
+return 1
+`;
+
 const NOTE_ONCE = `
 if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
 if redis.call('HSETNX', KEYS[1], 'returnedAtMs', ARGV[1]) == 0 then return 0 end
