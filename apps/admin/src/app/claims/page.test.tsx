@@ -170,7 +170,11 @@ describe('claim payout mutation', () => {
 
     await user.click(paidButtons[1]!);
     const dialog = screen.getByRole('dialog');
-    await fillPayout(user, dialog, 'PAY-REF-REJECTED', '3400');
+    // the amount sent is the amount the payer typed — never the claim's own
+    // figure filled in by the console, which would make the attestation empty
+    await fillPayout(user, dialog, 'PAY-REF-REJECTED', '3000');
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[0]![1]?.body))).toEqual({ reference: 'PAY-REF-REJECTED', amount: 3000 });
 
     expect((await within(dialog).findByRole('alert')).textContent).toContain(
       'Claim is PAID; expected AUTO_APPROVED/APPROVED',

@@ -29,12 +29,10 @@ import type { ReasonPrompt } from '@/lib/ask-reason';
 //   const answer = await dialog.askWith({ title, confirmLabel, fields });
 //       → collects { reason, values } only (the caller sends it).
 //   const ask = useAskReason();  const reason = await ask({ action, subject });
-//       → the drop-in for lib/ask-reason `askReason` (same argument, a Promise of
-//         the same string | null). Migrating a page is mechanical:
-//           `const reason = askReason(p); if (reason) m.mutate(reason);`
-//         becomes
-//           `const reason = await ask(p); if (reason) m.mutate(reason);`
-//         Prefer `run` where the refusal should stay in the panel.
+//       → resolves the reason, or null when the operator cancels (the caller
+//         then does nothing). It replaced the retired browser-prompt helper;
+//         prefer `run` (or components/mc/useActionRunner) where the refusal
+//         should stay in the panel.
 // ---------------------------------------------------------------------------
 
 export type ReasonField =
@@ -138,7 +136,7 @@ export function useActionDialog(): ActionDialogApi {
   }), [ctx]);
 }
 
-/** The drop-in for `askReason`: same argument, a Promise of the same `string | null`. */
+/** Asks for a reason in the panel: resolves it, or null when the operator cancels. */
 export function useAskReason(): (_prompt: ReasonPrompt) => Promise<string | null> {
   const dialog = useActionDialog();
   return dialog.ask;
