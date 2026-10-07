@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React, { useCallback, useMemo, useState } from 'react';
 import { Dimensions, FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { color, elevation, radius, space } from '@swift/ui';
@@ -20,6 +20,7 @@ import {
   LoadingBlock,
   Money,
   Photo,
+  PillButton,
   SectionHeader,
   T,
   TonePill,
@@ -202,6 +203,12 @@ export function MarketScreen() {
 
   const rail = useDiscoveryCategories(locationFix?.latitude, locationFix?.longitude);
   const feed = useMarketItems({ category });
+  const refetchFeed = feed.refetch;
+  // Visited tabs stay mounted. Recheck prices when this tab is shown again;
+  // share any in-flight mount/reconnect request instead of cancelling it.
+  useFocusEffect(useCallback(() => {
+    void refetchFeed({ cancelRefetch: false });
+  }, [refetchFeed]));
   // The pull spinner is the person's gesture, never a background refetch over
   // items already on screen — the same stale-while-revalidate rule as Home
   // (lib/pullToRefresh). The first-load skeleton below stays on isLoading.
@@ -295,6 +302,16 @@ export function MarketScreen() {
           </ScrollView>
         ) : null}
       </View>
+
+      {items.length > 0 && (!feed.isFetchedAfterMount || feed.isFetching || feed.isError || feed.fetchStatus === 'paused') ? (
+        <View accessibilityLiveRegion="polite" style={{ paddingHorizontal: GUTTER, paddingBottom: space.md, gap: space.xs }}>
+          <T variant="caption" tone="muted">
+            {feed.isError ? 'Couldn’t refresh prices. Showing the last loaded prices. ' : 'Showing the last loaded prices. '}
+            {feed.dataUpdatedAt > 0 ? `Last updated ${new Date(feed.dataUpdatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` : ''}
+          </T>
+          {feed.isError ? <PillButton size="sm" label="Try again" onPress={() => { void refetchFeed({ cancelRefetch: false }); }} /> : null}
+        </View>
+      ) : null}
 
       {feed.isLoading && items.length === 0 ? (
         <LoadingBlock />
