@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { Prisma } from '@prisma/client';
+import { OrderStatus, Prisma } from '@prisma/client';
 import { AppError } from '../../utils/errors';
-import { applyStockMovement, recordOpeningBalance } from './stock';
+import { OrderService } from '../order/order.service';
+import { applyStockMovements, recordOpeningBalances } from './stock';
 
 // ---------------------------------------------------------------------------
 // [POS-SYNC] Re-uploading a till export updates the store.
@@ -22,9 +23,13 @@ import { applyStockMovement, recordOpeningBalance } from './stock';
 //
 // What it writes, and how:
 //  - stock: the till's count is an absolute number, so the change is a ledger
-//    movement of (till count - Swift count), reason POS_IMPORT, note naming the
-//    upload — through applyStockMovement, the single writer. An item Swift does
-//    not count stays uncounted (the till's figure is shown, not applied).
+//    movement of (till count - units promised to open orders - Swift count),
+//    reason POS_IMPORT, note naming the upload — through the single writer's
+//    batch form. Units sold on Swift but not yet collected are still on the
+//    till's shelf; Swift already took them off its count at checkout, so they
+//    are taken off the till's figure again rather than sold twice. An item
+//    Swift does not count stays uncounted (the till's figure is shown, not
+//    applied).
 //  - sold out: the inventory engine's own edges — zero hides an item that is
 //    switched on; a restock brings back only an item the ENGINE hid. The
 //    owner's own "off" is never undone. A till that says "not for sale" switches
@@ -106,7 +111,8 @@ export interface ChangeView {
   itemId: string;
   name: string;
   fileName: string;
-  stock: { from: number | null; to: number | null } | null;
+  /** from -> to on Swift; `till` is the file's count and `held` the units in open orders taken off it. */
+  stock: { from: number | null; to: number | null; till: number; held: number } | null;
   price: { from: number; to: number } | null;
   soldOut: SoldOutEffect | null;
   notes: string[];
@@ -168,8 +174,11 @@ export function buildSyncPlan(input: {
   items: StoreItem[];
   missingPolicy: MissingPolicy;
   canAddNew: boolean;
+  /** Units of each item sold on Swift in orders not yet collected (still on the till's shelf). */
+  held?: Map<string, number>;
 }): SyncPlan {
   const { rows, items, missingPolicy } = input;
+  const held = input.held ?? new Map<string, number>();
 
   const store = new Map<string, StoreItem[]>();
   let notOnSku = 0;
@@ -246,7 +255,11 @@ export function buildSyncPlan(input: {
   for (const [key, owners] of store) {
     if (inFile.has(key)) continue;
     for (const item of owners) {
-      const action = missingPolicy === 'LEAVE' ? 'LEAVE' : item.isAvailable ? 'SWITCH_OFF' : 'ALREADY_OFF';
+      // An item the ENGINE hid at zero is switched off too: the store chose
+      // "sold out", and a later restock must not bring it back on its own.
+      const action = missingPolicy === 'LEAVE'
+        ? 'LEAVE'
+        : item.isAvailable || item.autoHiddenAt !== null ? 'SWITCH_OFF' : 'ALREADY_OFF';
       if (action === 'SWITCH_OFF') switchOffIds.push(item.id);
       missing.push({ itemId: item.id, sku: item.sku ?? '', name: item.name, action });
     }
@@ -256,7 +269,7 @@ export function buildSyncPlan(input: {
   const changes: ChangeView[] = [];
   let unchanged = 0;
   for (const m of matched) {
-    const change = describeChange(m);
+    const change = describeChange(m, held.get(m.item.id) ?? 0);
     if (change) changes.push(change); else unchanged += 1;
   }
 
@@ -270,7 +283,8 @@ export function buildSyncPlan(input: {
       .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
     newItems: newItems.map((n) => [skuKey(n.sku), n.name, n.category, n.price, n.stock, n.isAvailable]).sort(),
     attention: needsAttention.map((n) => n.row).sort((a, b) => a - b),
-    missing: missing.map((m) => [m.itemId, m.action === 'LEAVE' ? 'LEAVE' : 'SWITCH_OFF']).sort(),
+    // What happens to each missing item, exactly as the preview said it.
+    missing: missing.map((m) => [m.itemId, m.action]).sort(),
   })).digest('hex');
 
   const count = (effect: SoldOutEffect) => changes.filter((c) => c.soldOut === effect).length;
@@ -301,7 +315,7 @@ export function buildSyncPlan(input: {
 }
 
 /** What confirming would do to one matched item, judged against its current state. Null = nothing. */
-function describeChange(m: MatchedRow): ChangeView | null {
+function describeChange(m: MatchedRow, heldUnits: number): ChangeView | null {
   const { item } = m;
   const notes: string[] = [];
   const from = item.stockQuantity;
@@ -309,8 +323,14 @@ function describeChange(m: MatchedRow): ChangeView | null {
   if (m.count !== null) {
     if (from === null) {
       notes.push(`Swift does not count stock for this item, so the till's count (${m.count}) is not used. Turn on stock counting in the item editor to use it.`);
-    } else if (m.count !== from) {
-      stock = { from, to: m.count };
+    } else {
+      const target = Math.max(0, m.count - heldUnits);
+      if (heldUnits > 0) {
+        notes.push(m.count >= heldUnits
+          ? `${heldUnits} of the till's ${m.count} are in Swift orders not yet collected, so Swift shows ${target}.`
+          : `${heldUnits} are in Swift orders not yet collected but the till counts only ${m.count}, so Swift shows 0.`);
+      }
+      if (target !== from) stock = { from, to: target, till: m.count, held: heldUnits };
     }
   }
   const currentPrice = Number(item.basePrice);
@@ -336,6 +356,42 @@ const ITEM_SELECT = {
   id: true, name: true, sku: true, basePrice: true, stockQuantity: true, isAvailable: true, autoHiddenAt: true,
 } as const;
 
+/** Order states in which the goods are still in the store — the states a
+ *  cancellation restocks from (OrderService.restocksOnCancel, the one list). */
+const GOODS_AT_STORE: OrderStatus[] = (Object.values(OrderStatus) as OrderStatus[]).filter((s) => OrderService.restocksOnCancel(s));
+
+/**
+ * Units of each item that Swift has already taken off its count for orders
+ * whose goods are still in the store. Read from the ledger: the net of every
+ * movement tied to those orders (a sale, a pick, a pick refund).
+ */
+export async function unitsHeldByOpenOrders(
+  db: Prisma.TransactionClient,
+  vendorId: string,
+  itemIds: string[],
+): Promise<Map<string, number>> {
+  if (itemIds.length === 0) return new Map();
+  const open = await db.order.findMany({ where: { vendorId, status: { in: GOODS_AT_STORE } }, select: { id: true } });
+  if (open.length === 0) return new Map();
+  const sums = await db.stockMovement.groupBy({
+    by: ['itemId'],
+    where: { orderId: { in: open.map((o) => o.id) }, itemId: { in: itemIds } },
+    _sum: { delta: true },
+  });
+  const held = new Map<string, number>();
+  for (const s of sums) {
+    const units = -(s._sum.delta ?? 0);
+    if (units > 0) held.set(s.itemId, units);
+  }
+  return held;
+}
+
+/** Tracked store items a file row names (the only ones whose held units matter). */
+function trackedSkuItemIds(items: StoreItem[], rows: Array<Record<string, string>>): string[] {
+  const keys = new Set(rows.map((r) => skuKey(r['sku'])).filter(Boolean));
+  return items.filter((i) => i.stockQuantity !== null && keys.has(skuKey(i.sku))).map((i) => i.id);
+}
+
 /** The preview: the plan against the store as it is now. Reads only. */
 export async function previewSync(
   db: Prisma.TransactionClient,
@@ -343,7 +399,8 @@ export async function previewSync(
 ) {
   const contentHash = contentHashOf(input.csv);
   const items = await db.item.findMany({ where: { vendorId: input.vendorId }, select: ITEM_SELECT });
-  const plan = buildSyncPlan({ vendorId: input.vendorId, contentHash, rows: input.rows, items, missingPolicy: input.missingPolicy, canAddNew: input.canAddNew });
+  const held = await unitsHeldByOpenOrders(db, input.vendorId, trackedSkuItemIds(items, input.rows));
+  const plan = buildSyncPlan({ vendorId: input.vendorId, contentHash, rows: input.rows, items, missingPolicy: input.missingPolicy, canAddNew: input.canAddNew, held });
   const earlier = await db.posImport.findFirst({
     where: { vendorId: input.vendorId, contentHash },
     select: { id: true, createdAt: true },
@@ -381,8 +438,16 @@ const AUDIT_PRICE_LINES = 200;
  *
  * The vendor row lock is the one checkout takes before it moves stock, so a
  * confirm and a checkout at the same store never interleave (and cannot
- * deadlock: both lock the vendor first, then items). It also serialises two
- * confirms of one store, which is what makes a double-click a replay.
+ * deadlock: both lock the vendor first, then items in id order). It also
+ * serialises two confirms of one store, which is what makes a double-click a
+ * replay.
+ *
+ * Every write is SET-BASED, so the lock is held for a handful of statements
+ * whatever the size of the file: one UPDATE for the prices, the single
+ * writer's batch (one UPDATE + one INSERT) for the counts, one UPDATE per
+ * sold-out rule, one INSERT for new items (+ their opening balances). A
+ * checkout that does meet the lock waits a bounded time and is told the store
+ * is updating (order.service: STORE_BUSY), never a server error.
  */
 export async function confirmSync(
   db: { $transaction: <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, opts?: { timeout?: number; maxWait?: number }) => Promise<T> },
@@ -406,73 +471,109 @@ export async function confirmSync(
         { uploadId: sameFile.id, appliedAt: sameFile.createdAt.toISOString() });
     }
 
-    // Every item of the store is locked before it is read, so the counts the
-    // deltas are taken from cannot move until this commits.
+    // Every item of the store is locked (in id order, like every other path
+    // that moves several items) before it is read, so the counts the deltas
+    // are taken from cannot move until this commits.
     await tx.$queryRaw`SELECT id FROM "items" WHERE "vendorId" = ${input.vendorId} ORDER BY id FOR UPDATE`;
     const items = await tx.item.findMany({ where: { vendorId: input.vendorId }, select: ITEM_SELECT });
+    const held = await unitsHeldByOpenOrders(tx, input.vendorId, trackedSkuItemIds(items, input.rows));
     const plan = buildSyncPlan({
       vendorId: input.vendorId, contentHash: input.contentHash, rows: input.rows, items,
-      missingPolicy: input.missingPolicy, canAddNew: input.canAddNew,
+      missingPolicy: input.missingPolicy, canAddNew: input.canAddNew, held,
     });
     if (plan.digest !== input.planDigest) {
       throw new AppError(409, 'PREVIEW_STALE', 'Your store changed since the preview, so it no longer shows what would happen. Preview the file again.');
     }
 
     const now = input.now ?? new Date();
-    const note = `Till export ${input.uploadId}`;
-    const changeOf = new Map(plan.view.changes.map((c) => [c.itemId, c]));
-    for (const m of plan.matched) {
-      const change = changeOf.get(m.item.id);
-      if (!change) continue;
-      if (change.price) {
-        await tx.item.update({ where: { id: m.item.id }, data: { basePrice: change.price.to } });
-      }
-      if (change.stock && change.stock.from !== null && change.stock.to !== null) {
-        const moved = await applyStockMovement(tx, {
-          itemId: m.item.id,
-          delta: change.stock.to - change.stock.from,
-          reason: 'POS_IMPORT',
-          actorId: input.actorId,
-          tenantId: input.tenantId,
-          note,
-        });
-        if (moved.applied) await applyAvailabilityEdges(tx, m.item.id, moved.balanceAfter ?? 0, now);
-      }
-      if (change.soldOut === 'SWITCHED_OFF_BY_TILL') {
-        await tx.item.update({ where: { id: m.item.id }, data: { isAvailable: false, autoHiddenAt: null } });
-      }
+    const { changes } = plan.view;
+
+    // Prices: one statement.
+    const prices = changes.filter((c) => c.price);
+    if (prices.length > 0) {
+      const values = Prisma.join(prices.map((c) => Prisma.sql`(${c.itemId}::text, ${c.price!.to.toFixed(2)}::numeric)`));
+      const priced = await tx.$executeRaw`
+        UPDATE "items" AS i SET "basePrice" = v.price, "updatedAt" = now()
+          FROM (VALUES ${values}) AS v(id, price)
+         WHERE i.id = v.id AND i."vendorId" = ${input.vendorId}`;
+      if (priced !== prices.length) throw new AppError(409, 'PREVIEW_STALE', 'Your store changed while the file was being applied. Preview it again.');
+    }
+
+    // Counts: the single writer's batch, then the inventory engine's two edges.
+    const counts = changes.filter((c) => c.stock && c.stock.from !== null && c.stock.to !== null);
+    const moved = await applyStockMovements(tx, {
+      vendorId: input.vendorId,
+      tenantId: input.tenantId,
+      entries: counts.map((c) => ({ itemId: c.itemId, delta: c.stock!.to! - c.stock!.from! })),
+      reason: 'POS_IMPORT',
+      actorId: input.actorId,
+      note: `Till export ${input.uploadId}`,
+    });
+    const movedIds = [...moved.keys()];
+    if (movedIds.length > 0) {
+      // Zero hides an item that is switched on (marked as the engine's hide)...
+      await tx.item.updateMany({
+        where: { id: { in: movedIds }, vendorId: input.vendorId, stockQuantity: { lte: 0 }, isAvailable: true },
+        data: { isAvailable: false, autoHiddenAt: now },
+      });
+      // ...and a restock brings back only an item the engine hid. The owner's
+      // own "off" carries no marker, so it is never undone.
+      await tx.item.updateMany({
+        where: { id: { in: movedIds }, vendorId: input.vendorId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
+        data: { isAvailable: true, autoHiddenAt: null },
+      });
+    }
+
+    // The till says "not for sale", and items missing from the file when the
+    // store chose "mark them sold out": switched off the way the owner would.
+    const switchOff = [
+      ...changes.filter((c) => c.soldOut === 'SWITCHED_OFF_BY_TILL').map((c) => c.itemId),
+      ...plan.switchOffIds,
+    ];
+    if (switchOff.length > 0) {
+      await tx.item.updateMany({
+        where: { id: { in: switchOff }, vendorId: input.vendorId },
+        data: { isAvailable: false, autoHiddenAt: null },
+      });
     }
 
     if (plan.view.newItems.length > 0) {
-      const categories = await tx.category.findMany({ where: { vendorId: input.vendorId }, select: { id: true, name: true } });
-      const categoryIds = new Map(categories.map((c) => [c.name.toLowerCase(), c.id]));
-      for (const n of plan.view.newItems) {
-        let categoryId = categoryIds.get(n.category.toLowerCase());
-        if (!categoryId) {
-          const created = await tx.category.create({ data: { vendorId: input.vendorId, name: n.category, sortOrder: categoryIds.size } });
-          categoryId = created.id;
-          categoryIds.set(n.category.toLowerCase(), categoryId);
-        }
-        // Born sold out when the till has none, so a restock brings it in.
-        const bornEmpty = n.stock === 0 && n.isAvailable;
-        const item = await tx.item.create({
-          data: {
-            vendorId: input.vendorId, categoryId, name: n.name, description: n.description || undefined,
-            basePrice: n.price, sku: n.sku, unit: n.unit || undefined,
-            isAvailable: n.isAvailable && !bornEmpty, autoHiddenAt: bornEmpty ? now : null,
-            fulfillment: 'DELIVERY', dietaryTags: [], allergens: [],
-          },
-          select: { id: true },
+      const wanted = new Map(plan.view.newItems.map((n) => [n.category.toLowerCase(), n.category]));
+      const existing = await tx.category.findMany({ where: { vendorId: input.vendorId }, select: { id: true, name: true } });
+      const have = new Set(existing.map((c) => c.name.toLowerCase()));
+      const missingCategories = [...wanted.entries()].filter(([k]) => !have.has(k)).map(([, name]) => name);
+      if (missingCategories.length > 0) {
+        await tx.category.createMany({
+          data: missingCategories.map((name, i) => ({ vendorId: input.vendorId, name, sortOrder: existing.length + i })),
         });
-        // [F2] The ledger explains the count the item is born with.
-        await recordOpeningBalance(tx, item.id, n.stock, input.actorId);
       }
-    }
+      const categories = await tx.category.findMany({ where: { vendorId: input.vendorId }, select: { id: true, name: true } });
+      const categoryIds = new Map<string, string>();
+      for (const c of categories) if (!categoryIds.has(c.name.toLowerCase())) categoryIds.set(c.name.toLowerCase(), c.id);
 
-    if (plan.switchOffIds.length > 0) {
-      await tx.item.updateMany({
-        where: { id: { in: plan.switchOffIds }, vendorId: input.vendorId, isAvailable: true },
-        data: { isAvailable: false, autoHiddenAt: null },
+      const created = await tx.item.createManyAndReturn({
+        data: plan.view.newItems.map((n) => {
+          // Born sold out when the till has none, so a restock brings it in.
+          const bornEmpty = n.stock === 0 && n.isAvailable;
+          return {
+            vendorId: input.vendorId, categoryId: categoryIds.get(n.category.toLowerCase())!,
+            name: n.name, description: n.description || null, basePrice: n.price, sku: n.sku, unit: n.unit || null,
+            isAvailable: n.isAvailable && !bornEmpty, autoHiddenAt: bornEmpty ? now : null,
+            fulfillment: 'DELIVERY' as const, dietaryTags: [], allergens: [],
+          };
+        }),
+        select: { id: true, sku: true },
+      });
+      if (created.length !== plan.view.newItems.length) throw new AppError(500, 'NEW_ITEMS_MISMATCH', 'New items were not all created');
+      // [F2] The ledger explains the count each item is born with.
+      const idBySku = new Map(created.map((c) => [skuKey(c.sku), c.id]));
+      await recordOpeningBalances(tx, {
+        vendorId: input.vendorId,
+        tenantId: input.tenantId,
+        actorId: input.actorId,
+        entries: plan.view.newItems
+          .filter((n) => n.stock !== null)
+          .map((n) => ({ itemId: idBySku.get(skuKey(n.sku))!, quantity: n.stock! })),
       });
     }
 
@@ -489,7 +590,6 @@ export async function confirmSync(
         summary: summary as unknown as Prisma.InputJsonValue,
       },
     });
-    const priceLines = plan.view.changes.filter((c) => c.price);
     await tx.auditLog.create({
       data: {
         userId: input.actorId,
@@ -501,13 +601,13 @@ export async function confirmSync(
           contentHash: input.contentHash,
           missingPolicy: input.missingPolicy,
           ...plan.view.totals,
-          prices: priceLines.slice(0, AUDIT_PRICE_LINES).map((c) => ({ itemId: c.itemId, sku: c.sku, from: c.price!.from, to: c.price!.to })),
-          pricesListed: Math.min(priceLines.length, AUDIT_PRICE_LINES),
+          prices: prices.slice(0, AUDIT_PRICE_LINES).map((c) => ({ itemId: c.itemId, sku: c.sku, from: c.price!.from, to: c.price!.to })),
+          pricesListed: Math.min(prices.length, AUDIT_PRICE_LINES),
         },
       },
     });
     return { ...summary, replayed: false };
-  }, { timeout: 120_000, maxWait: 10_000 });
+  }, { timeout: 60_000, maxWait: 10_000 });
 
   try {
     return await run();
@@ -516,29 +616,9 @@ export async function confirmSync(
       // A racer committed the same upload or the same file first; answer as it would have.
       return run();
     }
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2034') {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && (err.code === 'P2034' || err.code === 'P2028')) {
       throw new AppError(409, 'STORE_BUSY', 'Your store was busy with orders for a moment. Try again.');
     }
     throw err;
-  }
-}
-
-/**
- * The inventory engine's edges after a count changed: zero hides an item that
- * is switched on (marking it as the engine's hide), and a restock brings back
- * only an item the engine hid. The owner's own "off" carries no marker, so a
- * restock never undoes it. Same predicates as checkout, cancel and /adjust.
- */
-async function applyAvailabilityEdges(tx: Prisma.TransactionClient, itemId: string, balance: number, now: Date) {
-  if (balance <= 0) {
-    await tx.item.updateMany({
-      where: { id: itemId, stockQuantity: { lte: 0 }, isAvailable: true },
-      data: { isAvailable: false, autoHiddenAt: now },
-    });
-  } else {
-    await tx.item.updateMany({
-      where: { id: itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
-      data: { isAvailable: true, autoHiddenAt: null },
-    });
   }
 }

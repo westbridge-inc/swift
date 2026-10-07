@@ -385,7 +385,10 @@ function SyncPreviewPanel({ preview, missing, busy, nothingToApply, onMissing, o
                       <span className="block text-xs text-[var(--swift-muted)]">SKU {c.sku}</span>
                       {c.notes.map((n) => <span key={n} className="block text-xs text-[var(--swift-muted)]">{n}</span>)}
                     </td>
-                    <td className="px-3 py-2">{c.stock ? `${c.stock.from} → ${c.stock.to}` : 'No change'}</td>
+                    <td className="px-3 py-2">
+                      {c.stock ? `${c.stock.from} → ${c.stock.to}` : 'No change'}
+                      {c.stock?.held ? <span className="block text-xs text-[var(--swift-muted)]">till {c.stock.till}, less {c.stock.held} in open orders</span> : null}
+                    </td>
                     <td className="px-3 py-2">{c.price ? `${formatMoney(c.price.from)} → ${formatMoney(c.price.to)}` : 'No change'}</td>
                     <td className="px-3 py-2">{c.soldOut ? SOLD_OUT_WORDS[c.soldOut] : '—'}</td>
                   </tr>

@@ -321,7 +321,8 @@ export const automapXlsx = (file: File, choice: Pick<ColumnChoice, 'mode' | 'til
 export type MissingPolicy = 'LEAVE' | 'SOLD_OUT';
 export interface SyncChange {
   row: number; sku: string; itemId: string; name: string; fileName: string;
-  stock: { from: number | null; to: number | null } | null;
+  /** `till` = the file's count; `held` = units in Swift orders not yet collected, taken off it. */
+  stock: { from: number | null; to: number | null; till?: number; held?: number } | null;
   price: { from: number; to: number } | null;
   soldOut: 'BECOMES_SOLD_OUT' | 'BACK_ON_SALE' | 'STAYS_SWITCHED_OFF' | 'SWITCHED_OFF_BY_TILL' | null;
   notes: string[];

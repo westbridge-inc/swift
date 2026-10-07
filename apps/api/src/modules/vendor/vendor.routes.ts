@@ -2703,6 +2703,16 @@ export async function vendorRoutes(app: FastifyInstance) {
       return text;
     };
 
+    // [POS-SYNC] A code typed as a number in a zero-padded format ("00123",
+    // a barcode) is stored as 123 and shown as 00123. Read such a cell as the
+    // digits the store sees, or the SKU loses its leading zeros and never matches.
+    const readCell = (cell: { value: unknown; numFmt?: string }): unknown => {
+      const fmt = cell.numFmt ?? '';
+      return typeof cell.value === 'number' && /^0+$/.test(fmt) && Number.isSafeInteger(cell.value) && cell.value >= 0
+        ? String(cell.value).padStart(fmt.length, '0')
+        : cell.value;
+    };
+
     const headerRow = sheet.getRow(1);
     const headers: string[] = [];
     headerRow.eachCell({ includeEmpty: false }, (cell, col) => { headers[col - 1] = cellText(cell.value, `header column ${col}`).trim(); });
@@ -2714,7 +2724,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       let hasValue = false;
       headers.forEach((h, i) => {
         if (!h) return;
-        const value = cellText(row.getCell(i + 1).value, `row ${rowNumber}, column ${i + 1}`).trim();
+        const value = cellText(readCell(row.getCell(i + 1)), `row ${rowNumber}, column ${i + 1}`).trim();
         record[h] = value;
         if (value) hasValue = true;
       });

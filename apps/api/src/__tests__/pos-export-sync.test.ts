@@ -12,7 +12,10 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { reconcileItemStock } from '../modules/inventory/stock';
+import { reconcileItemStock, applyStockMovement, applyStockMovements } from '../modules/inventory/stock';
+import { OrderService } from '../modules/order/order.service';
+import ExcelJS from 'exceljs';
+import type { Server } from 'socket.io';
 import { rateLimitKey } from '../utils/rate-limit-key';
 
 // ---------------------------------------------------------------------------
@@ -170,6 +173,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithoutTenant(async () => {
+    const placed = await app.prisma.order.findMany({ where: { customerId: { in: createdUserIds } }, select: { id: true } }).catch(() => []);
+    createdOrderIds.push(...placed.map((o) => o.id));
     if (createdOrderIds.length) {
       await app.prisma.orderItem.deleteMany({ where: { orderId: { in: createdOrderIds } } }).catch(() => undefined);
       await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } }).catch(() => undefined);
@@ -847,4 +852,264 @@ describe('pos_imports is walled like every tenant table', () => {
     expect(applied).toMatchObject({ vendorId: store.vendorId, contentHash: p.contentHash, planDigest: p.planDigest, actorId: store.owner.userId });
     await expect(app.prisma.posImport.update({ where: { id: p.uploadId }, data: { missingPolicy: 'SOLD_OUT' } })).rejects.toThrow(/never changes/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// [POS-SYNC review] Availability under load, units promised to open orders,
+// and the smaller edges (digest, missing items, Excel codes, lock order).
+// ---------------------------------------------------------------------------
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function makeCustomer() {
+  const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+  await app.prisma.address.create({
+    data: { userId: c.userId, label: 'Home', addressLine1: '1 Till Lane', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, isDefault: true },
+  });
+  return c;
+}
+const asCustomer = (token: string, method: 'GET' | 'POST', url: string, payload?: unknown) => app.inject({
+  method, url: `/api/v1/customer${url}`,
+  ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
+  headers: { authorization: `Bearer ${token}`, ...(payload !== undefined ? { 'content-type': 'application/json' } : {}) },
+});
+
+/** An order whose goods are (or are not) still at the store, with its sale in the ledger. */
+async function openOrderHolding(store: Store, itemId: string, units: number, status: 'PENDING' | 'PREPARING' | 'DELIVERED') {
+  const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+  const order = await app.prisma.order.create({
+    data: {
+      orderNumber: `POSH-${RUN}-${seq}-${nanoid(4)}`, orderType: 'GROCERY_DELIVERY', customerId: customer.userId, vendorId: store.vendorId,
+      status, fulfillment: 'DELIVERY', pickupAddress: 'Store', pickupLat: 6.8, pickupLng: -58.15,
+      deliveryAddress: 'Home', deliveryLat: 6.81, deliveryLng: -58.14,
+      subtotalBase: 100 * units, subtotalMarkup: 0, subtotalCustomer: 100 * units, deliveryFee: 0, totalAmount: 100 * units, paymentMethod: 'CASH',
+      items: { create: [{ itemId, name: 'Held', quantity: units, basePrice: 100, markedUpPrice: 100, markupAmount: 0, totalBase: 100 * units, totalMarkup: 0, totalCustomer: 100 * units }] },
+    },
+  });
+  createdOrderIds.push(order.id);
+  await app.prisma.$transaction((tx) => applyStockMovement(tx, { itemId, delta: -units, reason: 'SALE', orderId: order.id }));
+  return order;
+}
+
+describe('availability: a big file never turns a checkout into a server error (S2)', () => {
+  it('a checkout that meets a store busy applying a file is told to try again (409), not a 500', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'BUSY-1', 20, 500);
+    const customer = await makeCustomer();
+    expect((await asCustomer(customer.token, 'POST', '/cart/items', { vendorId: store.vendorId, itemId: item.id, quantity: 1 })).statusCode).toBe(201);
+
+    // Hold the store's lock the way an apply does, for longer than checkout may wait.
+    let releaseAt = 0;
+    const holder = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${store.vendorId} FOR UPDATE`;
+      await sleep(6_000);
+      releaseAt = Date.now();
+    }, { timeout: 30_000 });
+    await sleep(200);
+    const res = await asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' });
+    const answeredAt = Date.now();
+    await holder;
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('STORE_BUSY');
+    expect(answeredAt).toBeLessThan(releaseAt); // answered while the store was still busy, not after
+    expect(await app.prisma.order.count({ where: { customerId: customer.userId } })).toBe(0);
+    // And the cart is still there to try again.
+    expect((await asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' })).statusCode).toBe(200);
+  }, 60_000);
+
+  it('a 5,000-row file applied while a customer checks out: both finish, nothing is a server error', async () => {
+    const store = await makeStore();
+    const N = 5000;
+    await app.prisma.item.createMany({
+      data: Array.from({ length: N }, (_, i) => ({
+        vendorId: store.vendorId, categoryId: store.categoryId, name: `Bulk ${i}`, basePrice: 100,
+        sku: `BULK-${String(i).padStart(4, '0')}`, isAvailable: true, stockQuantity: 50,
+      })),
+    });
+    const bulk = await app.prisma.item.findMany({ where: { vendorId: store.vendorId }, select: { id: true, sku: true } });
+    const first = bulk.find((b) => b.sku === 'BULK-0000')!;
+    const customer = await makeCustomer();
+    expect((await asCustomer(customer.token, 'POST', '/cart/items', { vendorId: store.vendorId, itemId: first.id, quantity: 1 })).statusCode).toBe(201);
+
+    const file = csvOf(...Array.from({ length: N }, (_, i) => row(`BULK-${String(i).padStart(4, '0')}`, 'b', '110', '40')));
+    const p = await previewOk(store, file);
+    expect(p.totals['stockChanges']).toBe(N);
+
+    const t0 = Date.now();
+    const [applied, checkout] = await Promise.all([
+      confirm(store, file, p).then((r) => ({ r, ms: Date.now() - t0 })),
+      sleep(30).then(() => asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' })),
+    ]);
+    expect(applied.r.statusCode, applied.r.body).toBe(200);
+    expect([200, 409]).toContain(checkout.statusCode);
+    if (checkout.statusCode === 409) expect(checkout.json().error.code).toBe('STORE_BUSY');
+    // The whole file landed set-based (about 1.7 s end to end locally; row by
+    // row it took over 20 s). Whatever the runner's speed, a checkout that meets
+    // it waits a bounded time and is answered 409 at worst — asserted above.
+    expect(applied.ms).toBeLessThan(10_000);
+    expect(await app.prisma.stockMovement.count({ where: { itemId: { in: bulk.map((b) => b.id) }, reason: 'POS_IMPORT' } })).toBe(N);
+    expect(await app.prisma.item.count({ where: { vendorId: store.vendorId, basePrice: 110 } })).toBe(N);
+    // The one sold unit is never sold twice: 40 on the till, less the open order.
+    const firstAfter = await itemOf(first.id);
+    expect(firstAfter.stockQuantity).toBe(checkout.statusCode === 200 ? 39 : 40);
+    // The fixture set 50 without a ledger row; every movement after it is in the ledger.
+    expect((await reconcileItemStock(app.prisma, first.id)).drift).toBe(50);
+  }, 240_000);
+});
+
+describe('units sold on Swift but not yet collected (S3)', () => {
+  it('are taken off the till count, shown in the preview, and only while the goods are still at the store', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'HELD-1', 10, 100);
+    await openOrderHolding(store, item.id, 3, 'PENDING'); // 10 -> 7, the 3 still on the shelf
+    await openOrderHolding(store, item.id, 2, 'DELIVERED'); // 7 -> 5, gone
+    expect((await itemOf(item.id)).stockQuantity).toBe(5);
+
+    // The till counts what is physically there: 5 + the 3 not yet collected, plus 4 received = 12.
+    const { preview: p } = await syncOk(store, csvOf(row('HELD-1', 'h', '100', '12')));
+    const change = p.changes.find((c) => c.itemId === item.id)!;
+    expect(change.stock).toEqual({ from: 5, to: 9, till: 12, held: 3 });
+    expect(change.notes.join(' ')).toMatch(/3 of the till's 12 are in Swift orders not yet collected/);
+    expect((await itemOf(item.id)).stockQuantity).toBe(9);
+
+    // Fewer on the till than are promised: Swift shows 0, never a negative.
+    const { preview: p2 } = await syncOk(store, csvOf(row('HELD-1', 'h', '100', '2')));
+    expect(p2.changes.find((c) => c.itemId === item.id)!.stock).toEqual({ from: 9, to: 0, till: 2, held: 3 });
+    expect((await itemOf(item.id)).stockQuantity).toBe(0);
+  });
+});
+
+describe('smaller edges from the review (S4)', () => {
+  it('the preview is stale if a missing item it would switch off was switched off by hand meanwhile', async () => {
+    const store = await makeStore();
+    await makeItem(store, 'KEEP-1', 5, 100);
+    const gone = await makeItem(store, 'GONE-1', 5, 100);
+    const file = csvOf(row('KEEP-1', 'k', '100', '5'));
+    const p = await previewOk(store, file, 'SOLD_OUT');
+    expect(p.missing).toEqual([expect.objectContaining({ itemId: gone.id, action: 'SWITCH_OFF' })]);
+    const toggle = await app.inject({
+      method: 'PUT', url: `/api/v1/vendor/items/${gone.id}/availability`, payload: { isAvailable: false },
+      headers: { authorization: `Bearer ${store.owner.token}`, 'content-type': 'application/json' },
+    });
+    expect(toggle.statusCode).toBe(200);
+    const res = await confirm(store, file, p);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('PREVIEW_STALE');
+  });
+
+  it('"mark them sold out" also covers an item the engine hid at zero, so a later restock does not bring it back', async () => {
+    const store = await makeStore();
+    await makeItem(store, 'KEEP-2', 5, 100);
+    const hidden = await makeItem(store, 'HID-2', 0, 100, { isAvailable: false });
+    await app.prisma.item.update({ where: { id: hidden.id }, data: { autoHiddenAt: new Date() } });
+    const { result } = await syncOk(store, csvOf(row('KEEP-2', 'k', '100', '5')), 'SOLD_OUT');
+    expect(result.missing).toEqual([expect.objectContaining({ itemId: hidden.id, action: 'SWITCH_OFF' })]);
+    expect((await itemOf(hidden.id)).autoHiddenAt).toBeNull();
+    const restock = await app.inject({
+      method: 'POST', url: `/api/v1/vendor/items/${hidden.id}/adjust`, payload: { delta: 5, reason: 'RECEIVED' },
+      headers: { authorization: `Bearer ${store.owner.token}`, 'content-type': 'application/json' },
+    });
+    expect(restock.statusCode, restock.body).toBe(200);
+    expect((await itemOf(hidden.id)).isAvailable).toBe(false);
+  });
+
+  it('an Excel code typed as a zero-padded number keeps its leading zeros', async () => {
+    const store = await makeStore();
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Till');
+    sheet.addRow(['SKU', 'Name', 'Price', 'Qty']);
+    sheet.addRow([123, 'Rice 5kg', 3500, 4]);
+    sheet.getCell('A2').numFmt = '00000';
+    const buffer = Buffer.from(await workbook.xlsx.writeBuffer());
+    const boundary = `----pos${nanoid(8)}`;
+    const payload = Buffer.concat([
+      Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="till.xlsx"\r\ncontent-type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n`),
+      buffer, Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/vendor/items/import/xlsx?mode=sync', payload,
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, authorization: `Bearer ${store.owner.token}` },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.preview[0].sku).toBe('00123');
+    expect(res.json().data.preview[0].basePrice).toBe('3500'); // an ordinary number is untouched
+  });
+
+  it('a cancellation restocks its items in id order, so it cannot deadlock with a holder taking them the same way', async () => {
+    const store = await makeStore();
+    const one = await makeItem(store, 'ORD-1', 5, 100);
+    const two = await makeItem(store, 'ORD-2', 5, 100);
+    const [lo, hi] = [one, two].sort((a, b) => (a.id < b.id ? -1 : 1)) as [typeof one, typeof one];
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `POSD-${RUN}-${nanoid(4)}`, orderType: 'GROCERY_DELIVERY', customerId: customer.userId, vendorId: store.vendorId,
+        status: 'PENDING', fulfillment: 'DELIVERY', pickupAddress: 'Store', pickupLat: 6.8, pickupLng: -58.15,
+        deliveryAddress: 'Home', deliveryLat: 6.81, deliveryLng: -58.14,
+        subtotalBase: 200, subtotalMarkup: 0, subtotalCustomer: 200, deliveryFee: 0, totalAmount: 200, paymentMethod: 'CASH',
+      },
+    });
+    createdOrderIds.push(order.id);
+    // The HIGHER id is the first line, so restocking line by line takes hi, then lo.
+    for (const it of [hi, lo]) {
+      await app.prisma.orderItem.create({ data: { orderId: order.id, itemId: it.id, name: it.name, quantity: 1, basePrice: 100, markedUpPrice: 100, markupAmount: 0, totalBase: 100, totalMarkup: 0, totalCustomer: 100 } });
+    }
+    const ioStub = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
+    const orders = new OrderService(app.prisma as never, ioStub);
+
+    // A holder takes lo, then (while the cancellation runs) hi — the till sync's order.
+    const holder = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "items" WHERE id = ${lo.id} FOR UPDATE`;
+      await sleep(400);
+      await tx.$queryRaw`SELECT id FROM "items" WHERE id = ${hi.id} FOR UPDATE`;
+      await sleep(100);
+    }, { timeout: 20_000 });
+    await sleep(100);
+    const cancel = app.prisma.$transaction((tx) => orders.restockCancelledOrder(order.id, tx), { timeout: 20_000 });
+    const outcome = await Promise.allSettled([holder, cancel]);
+    expect(outcome.map((o) => o.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect((await itemOf(lo.id)).stockQuantity).toBe(6);
+    expect((await itemOf(hi.id)).stockQuantity).toBe(6);
+  }, 60_000);
+});
+
+describe('the batch stock writer (S2)', () => {
+  it('is all or nothing: one row that would go below zero moves nothing and writes no ledger row', async () => {
+    const store = await makeStore();
+    const a = await makeItem(store, 'BAT-A', 5, 100);
+    const b = await makeItem(store, 'BAT-B', 5, 100);
+    const tenantId = (await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId }, select: { tenantId: true } })).tenantId;
+    await expect(app.prisma.$transaction((tx) => applyStockMovements(tx, {
+      vendorId: store.vendorId, tenantId, reason: 'POS_IMPORT', note: 'batch test',
+      entries: [{ itemId: a.id, delta: 1 }, { itemId: b.id, delta: -99 }],
+    }))).rejects.toThrow(/Stock changed while/);
+    expect((await itemOf(a.id)).stockQuantity).toBe(5);
+    expect((await itemOf(b.id)).stockQuantity).toBe(5);
+    expect(await app.prisma.stockMovement.count({ where: { itemId: { in: [a.id, b.id] }, note: 'batch test' } })).toBe(0);
+  });
+
+  it('a checkout takes its items in id order, so it cannot deadlock with a holder taking them the same way', async () => {
+    const store = await makeStore();
+    const one = await makeItem(store, 'CHK-1', 5, 300);
+    const two = await makeItem(store, 'CHK-2', 5, 300);
+    const [lo, hi] = [one, two].sort((x, y) => (x.id < y.id ? -1 : 1)) as [typeof one, typeof one];
+    const customer = await makeCustomer();
+    // The HIGHER id goes in the cart first, so line-by-line decrements take hi, then lo.
+    for (const it of [hi, lo]) {
+      expect((await asCustomer(customer.token, 'POST', '/cart/items', { vendorId: store.vendorId, itemId: it.id, quantity: 1 })).statusCode).toBe(201);
+    }
+    const holder = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "items" WHERE id = ${lo.id} FOR UPDATE`;
+      await sleep(1_500); // long enough for the checkout to reach its stock moves
+      await tx.$queryRaw`SELECT id FROM "items" WHERE id = ${hi.id} FOR UPDATE`;
+      await sleep(100);
+    }, { timeout: 20_000 });
+    await sleep(100);
+    const checkout = asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' });
+    const [held, placed] = await Promise.allSettled([holder, checkout]);
+    expect(held.status).toBe('fulfilled');
+    expect(placed.status === 'fulfilled' ? placed.value.statusCode : 0).toBe(200);
+    expect((await itemOf(lo.id)).stockQuantity).toBe(4);
+    expect((await itemOf(hi.id)).stockQuantity).toBe(4);
+  }, 60_000);
 });

@@ -3,7 +3,7 @@ import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
 import { FloatService } from '../dispatch/float.service';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { applyStockMovement } from '../inventory/stock';
+import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
 
@@ -397,6 +397,9 @@ export class PickingService {
         throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
       }
 
+      // Two items move here (the substitute off the shelf, the original back):
+      // lock them in id order first, as every multi-item stock path does.
+      await lockItemsInIdOrder(tx, [fresh.substituteItemId, fresh.itemId]);
       if (fresh.substituteItemId) {
         const sub = await tx.item.findUnique({
           where: { id: fresh.substituteItemId },
