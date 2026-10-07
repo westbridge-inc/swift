@@ -258,7 +258,8 @@ describe('QR-01-W continuation boundaries', () => {
     const resumed = render(await page());
     const dialog = await screen.findByRole('dialog', { name: 'Pumpkin roti' });
     expect((screen.getByRole('radio', { name: /Chickpea/ }) as HTMLInputElement).checked).toBe(true);
-    expect(dialog.textContent).toContain('GY$1,300');
+    expect(dialog.textContent).toContain('$1,300');
+    expect(dialog.textContent).not.toContain('GY$');
     expect(sessionStorage.getItem('swift_storefront_add')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Close item options' }));
     resumed.unmount();
