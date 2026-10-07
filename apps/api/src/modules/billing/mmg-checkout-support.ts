@@ -11,8 +11,8 @@ import type {
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { normalizePhone } from '../../utils/phone';
 import { maskPhone } from '../auth/step-up';
-import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, creationCheckOf, firstReplyNaming, type CreationCheck } from './mmg-checkout.service';
-import { mmgCreationZone } from '../../providers/mmg/mmg-checkout';
+import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, creationCheckOf, creationZoneInUse, firstReplyNaming, type CreationCheck } from './mmg-checkout.service';
+import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 
 // ---------------------------------------------------------------------------
 // [MMG support lookup] Support finds an MMG weekly-fee payment by any id MMG or
@@ -375,7 +375,9 @@ async function creditedPeriodOf(db: PrismaClient, row: IntentRow): Promise<MmgCh
 }
 
 /** One checkout: the row, every reply and lookup it recorded in order, and what its credit paid. Null when not this tenant's. */
-export async function mmgCheckoutSupportDetail(db: PrismaClient, input: { tenantId: string; id: string }): Promise<MmgCheckoutSupportDetail | null> {
+export async function mmgCheckoutSupportDetail(
+  db: PrismaClient, input: { tenantId: string; id: string }, deps: { checkout?: () => MmgCheckoutProvider } = {},
+): Promise<MmgCheckoutSupportDetail | null> {
   if (!ROW_ID.test(input.id)) return null;
   const row = await db.mmgCheckoutIntent.findFirst({ where: { id: input.id, tenantId: input.tenantId }, select: ROW_SELECT });
   if (!row) return null;
@@ -393,7 +395,10 @@ export async function mmgCheckoutSupportDetail(db: PrismaClient, input: { tenant
       select: { body: true, createdAt: true },
     }),
   ]);
-  const zone = mmgCreationZone();
+  // [Fable · S3-1] The zone of the checkout provider in use, read exactly as
+  // verify() reads it: a switched-off or unbuildable provider has none, and
+  // then judge() holds every payment, so support claims no window either.
+  const zone = creationZoneInUse(deps.checkout ?? (() => getMmgCheckoutProvider()));
   const creationFor = (o: ObservationForTimeline): CreationCheck => ({
     zone, firstReplyAt: o.source === 'LOOKUP' && o.detail ? firstReplyNaming(answers, o.detail) : null,
   });

@@ -12,6 +12,7 @@ import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
+import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 
 const ACTIVE_TAXI_STATUSES = [
   'PENDING',
@@ -194,8 +195,14 @@ export async function assertRideGates(
 ): Promise<GatedUser> {
   const user = await app.prisma.user.findUniqueOrThrow({
     where: { id: userId },
-    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, selfieCapturedAt: true },
+    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, selfieCapturedAt: true, tenant: { select: { kind: true } } },
   });
+
+  // [REVIEW-PARTNER · DL-5] The store-review fiction books no rides: its taxi
+  // driver's board stays honestly empty, and nothing — no order, no queue
+  // entry, no dispatch, no SMS — is written. First, so no other gate (a
+  // selfie, an ID check through a provider) is ever asked of a reviewer.
+  if (user.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError(REVIEW_DEMO_NO_BOOKINGS_MESSAGE);
 
   const active = await app.prisma.order.findFirst({
     where: activeTaxiWhere(user.id, user.tenantId),
