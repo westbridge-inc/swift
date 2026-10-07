@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Freshness } from './live-tracking';
+import { tilesAround } from '@/components/tile-map';
 import {
   COARSE_DECIMALS,
   STALE_AFTER_MS,
@@ -9,7 +10,6 @@ import {
   coarsen,
   createSequence,
   freshness,
-  mapEmbedUrl,
   mapLinkUrl,
   validPoint,
 } from './live-tracking';
@@ -116,11 +116,14 @@ describe('[W-47] a third party never receives the precise position', () => {
     expect(COARSE_DECIMALS).toBe(3);
   });
 
-  it('neither map URL carries the precise point', () => {
-    for (const url of [mapEmbedUrl(precise), mapLinkUrl(precise)]) {
-      expect(url).not.toContain('6.801347');
-      expect(url).not.toContain('-58.155198');
-      expect(url).toContain('6.801');
+  it('the map link carries only the coarsened point, and the map tiles carry no point at all', () => {
+    const link = mapLinkUrl(precise);
+    expect(link).not.toContain('6.801347');
+    expect(link).not.toContain('-58.155198');
+    expect(link).toContain('6.801');
+    // [W7] The in-page map is tiles: each names a ~1 km square (zoom/x/y), never a coordinate.
+    for (const { src } of tilesAround(coarsen(precise), 15)) {
+      expect(src).toMatch(/^https:\/\/tile\.openstreetmap\.org\/15\/\d+\/\d+\.png$/);
     }
   });
 });
@@ -151,13 +154,12 @@ describe('[W-47] both public pages use it', () => {
     });
 
     it(`the ${name} page sends only a coarsened point, with no referer`, () => {
-      expect(page).toMatch(/mapEmbedUrl\(/);
-      expect(page).toMatch(/mapLinkUrl\(/);
-      // The map frame and the map link each carry no referer. (The trip page may
-      // carry more no-referrer elements, its driver photo [M053]; never fewer.)
-      const mapTags = page.match(/<iframe[\s\S]*?\/>|<a(?:(?!<a)[\s\S])*?href=\{mapLinkUrl\([\s\S]*?>/g) ?? [];
-      expect(mapTags).toHaveLength(2);
-      for (const tag of mapTags) expect(tag).toMatch(/referrerPolicy="no-referrer"/);
+      // [W7] The map is the tile map, handed the COARSENED point; its tiles and
+      // its link carry no referrer (components/tile-map.tsx, proved on screen in
+      // tile-map.test.tsx). No frame: the site's policy blocks frames.
+      expect(page).toMatch(/<TileMap point=\{coarsen\(/);
+      expect(page).toMatch(/linkHref=\{mapLinkUrl\(/);
+      expect(page).not.toMatch(/<iframe/);
       // no hand-built OpenStreetMap URL carrying raw coordinates
       expect(page).not.toMatch(/openstreetmap\.org\/export\/embed\.html\?bbox=\$\{/);
       expect(page).not.toMatch(/openstreetmap\.org\/\?mlat=\$\{/);

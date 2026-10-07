@@ -3,7 +3,8 @@
 import { SwiftLogo } from '@/components/swift-logo';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createSequence, freshness, mapEmbedUrl, mapLinkUrl, validPoint } from '@/lib/live-tracking';
+import { coarsen, createSequence, freshness, mapLinkUrl, validPoint } from '@/lib/live-tracking';
+import { TileMap } from '@/components/tile-map';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 // The polling client for the public parcel page [B9]. Renders exactly what
@@ -187,27 +188,11 @@ export function TrackClient({ token }: { token: string }) {
 
             {showMap && loc ? (
               <div className="mt-3 overflow-hidden sw-card">
-                {/* [W-47] The point is COARSENED to about 110 m before it leaves for
-                    a third party, and no referer goes with it — every map load used
-                    to disclose a live person's precise position and which tracking
-                    token was watching. A first-party tile proxy is the real answer
-                    and is stated as deferred in the register. */}
-                <iframe
-                  title="Courier location, approximate"
-                  className="h-64 w-full border-0"
-                  loading="lazy"
-                  referrerPolicy="no-referrer"
-                  src={mapEmbedUrl(loc)}
-                />
-                <a
-                  className="block px-4 py-3 text-sm font-semibold text-[var(--swift-red)]"
-                  href={mapLinkUrl(loc)}
-                  target="_blank"
-                  rel="noreferrer"
-                  referrerPolicy="no-referrer"
-                >
-                  Open approximate map ↗
-                </a>
+                {/* [W-47 · W7] Coarsened to about 110 m, drawn from map tiles that name
+                    only a ~1 km square and carry the site's origin, never this link's
+                    token. The old embedded map was a frame, which the site's security
+                    policy blocks, so it never drew. */}
+                <TileMap point={coarsen(loc)} label="Courier location, approximate" linkHref={mapLinkUrl(loc)} linkLabel="Open approximate map ↗" />
               </div>
             ) : live ? (
               <div className="mt-3 sw-card p-4 text-sm text-[var(--swift-muted)]">
