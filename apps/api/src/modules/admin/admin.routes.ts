@@ -1175,7 +1175,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] Who may suspend whom is decided inside the transition, from
     // the database's view of both accounts (see mover-authority.ts).
@@ -1199,7 +1199,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/users/:id/unsuspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // Restoration obeys the same hierarchy as the act it reverses: an ordinary
     // ADMIN cannot lift a suspension a SUPER_ADMIN imposed on another ADMIN.
@@ -1224,7 +1224,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
 
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     // [DS110 #12] The role hierarchy — not an ADMIN-string check — decides who
     // may ban whom, inside the transition: the seed mints the SUPER_ADMIN as
@@ -1253,7 +1253,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // nothing could reverse one. Lifting a ban is SUPER_ADMIN-only; the
     // transition enforces that whichever route asks, so an ordinary ADMIN can
     // never walk a ban back, through this route or /unsuspend.
-    const user = await app.prisma.user.findUnique({ where: { id } });
+    const user = await app.prisma.user.findUnique({ where: { id }, select: { id: true } });
     if (!user) throw new NotFoundError('User', id);
     const { updated } = await transitionUserStatusAuthority(app, id, 'ACTIVE', {
       actorUserId: request.user.userId,
