@@ -557,14 +557,33 @@ export class PickingService {
     // The movement names its order, like the sale it gives back, so the units
     // an open order still holds net to zero for this line (POS-SYNC
     // unitsHeldByOpenOrders).
-    const restock = await applyStockMovement(db, {
-      itemId: line.itemId,
-      delta: line.quantity,
-      reason: 'PICK_REFUND',
-      orderId: line.orderId,
-      note: `picking: ${note}`,
+    // [POS-SYNC · Sol S2] Only units this order actually took are given back
+    // in its name. An order placed before the item tracked stock took nothing
+    // from the count; naming it on a return would cancel another open order's
+    // hold. Whatever it did not take is still put back, as before, but not in
+    // its name. The item lock serializes this read with every stock writer.
+    await lockItemsInIdOrder(db, [line.itemId]);
+    const taken = await db.stockMovement.aggregate({
+      where: { itemId: line.itemId, orderId: line.orderId },
+      _sum: { delta: true },
     });
-    if (restock.applied) {
+    const ownUnits = Math.min(line.quantity, Math.max(0, -(taken._sum.delta ?? 0)));
+    const parts = [
+      { delta: ownUnits, orderId: line.orderId },
+      { delta: line.quantity - ownUnits, orderId: null },
+    ].filter((part) => part.delta > 0);
+    let applied = false;
+    for (const part of parts) {
+      const restock = await applyStockMovement(db, {
+        itemId: line.itemId,
+        delta: part.delta,
+        reason: 'PICK_REFUND',
+        orderId: part.orderId,
+        note: `picking: ${note}`,
+      });
+      applied = applied || restock.applied;
+    }
+    if (applied) {
       await db.item.updateMany({
         where: { id: line.itemId, autoHiddenAt: { not: null }, stockQuantity: { gt: 0 } },
         data: { isAvailable: true, autoHiddenAt: null },

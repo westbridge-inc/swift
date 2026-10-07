@@ -363,7 +363,9 @@ const GOODS_AT_STORE: OrderStatus[] = (Object.values(OrderStatus) as OrderStatus
 /**
  * Units of each item that Swift has already taken off its count for orders
  * whose goods are still in the store. Read from the ledger: the net of every
- * movement tied to those orders (a sale, a pick, a pick refund).
+ * movement tied to those orders (a sale, a pick, a pick refund), taken per
+ * order, so one order that gave back more than it took never cancels what
+ * another order still holds.
  */
 export async function unitsHeldByOpenOrders(
   db: Prisma.TransactionClient,
@@ -374,14 +376,14 @@ export async function unitsHeldByOpenOrders(
   const open = await db.order.findMany({ where: { vendorId, status: { in: GOODS_AT_STORE } }, select: { id: true } });
   if (open.length === 0) return new Map();
   const sums = await db.stockMovement.groupBy({
-    by: ['itemId'],
+    by: ['itemId', 'orderId'],
     where: { orderId: { in: open.map((o) => o.id) }, itemId: { in: itemIds } },
     _sum: { delta: true },
   });
   const held = new Map<string, number>();
   for (const s of sums) {
     const units = -(s._sum.delta ?? 0);
-    if (units > 0) held.set(s.itemId, units);
+    if (units > 0) held.set(s.itemId, (held.get(s.itemId) ?? 0) + units);
   }
   return held;
 }

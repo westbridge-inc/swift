@@ -917,7 +917,7 @@ describe('availability: a big file never turns a checkout into a server error (S
     expect((await asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' })).statusCode).toBe(200);
   }, 60_000);
 
-  it('a 5,000-row file applied while a customer checks out: both finish, nothing is a server error', async () => {
+  it('a 5,000-row file confirmed between a checkout’s pricing and its commit: both finish, nothing is a server error', async () => {
     const store = await makeStore();
     const N = 5000;
     await app.prisma.item.createMany({
@@ -935,34 +935,75 @@ describe('availability: a big file never turns a checkout into a server error (S
     const p = await previewOk(store, file);
     expect(p.totals['stockChanges']).toBe(N);
 
+    // [Sol S3] An explicit barrier, not a delay: the checkout has priced the
+    // cart (at 100) when the whole file is confirmed, and only then begins its
+    // transaction.
     const t0 = Date.now();
-    const [applied, checkout] = await Promise.all([
-      confirm(store, file, p).then((r) => ({ r, ms: Date.now() - t0 })),
-      sleep(30).then(() => asCustomer(customer.token, 'POST', '/checkout', { paymentMethod: 'CASH' })),
-    ]);
+    let applied!: { r: Awaited<ReturnType<typeof confirm>>; ms: number };
+    const checkout = await new OrderService(app.prisma, app.io).checkout({
+      userId: customer.userId, paymentMethod: 'CASH',
+      beforeTransaction: async () => {
+        const r = await confirm(store, file, p);
+        applied = { r, ms: Date.now() - t0 };
+        expect(r.statusCode, r.body).toBe(200);
+      },
+    }).then(
+      () => ({ statusCode: 200, code: '' }),
+      (error) => {
+        if (!error.statusCode) throw error;
+        return { statusCode: error.statusCode as number, code: error.code as string };
+      },
+    );
     expect(applied.r.statusCode, applied.r.body).toBe(200);
-    expect([200, 409]).toContain(checkout.statusCode);
-    // A checkout that meets the file is refused, never charged unseen: STORE_BUSY
-    // when it waited past its bound, or CART_CHANGED when it waited for the file
-    // and then found the price it was about to charge had changed (100 -> 110).
-    if (checkout.statusCode === 409) expect(['STORE_BUSY', 'CART_CHANGED']).toContain(checkout.json().error.code);
-    // A checkout that committed first is placed at the price the customer saw.
-    if (checkout.statusCode === 200) {
-      const placed = await app.prisma.orderItem.findFirstOrThrow({ where: { order: { customerId: customer.userId } } });
-      expect(Number(placed.markedUpPrice)).toBe(100);
-    }
+    // On this branch the order is placed at the price the customer saw (100):
+    // checkout does not yet re-read prices where it commits. (The price lock,
+    // #1493, refuses this snapshot instead; this assertion moves with it.)
+    expect(checkout).toEqual({ statusCode: 200, code: '' });
+    const placed = await app.prisma.orderItem.findFirstOrThrow({ where: { order: { customerId: customer.userId } } });
+    expect(Number(placed.markedUpPrice)).toBe(100);
     // The whole file landed set-based (about 1.7 s end to end locally; row by
-    // row it took over 20 s). Whatever the runner's speed, a checkout that meets
-    // it waits a bounded time and is answered 409 at worst — asserted above.
+    // row it took over 20 s).
     expect(applied.ms).toBeLessThan(10_000);
     expect(await app.prisma.stockMovement.count({ where: { itemId: { in: bulk.map((b) => b.id) }, reason: 'POS_IMPORT' } })).toBe(N);
     expect(await app.prisma.item.count({ where: { vendorId: store.vendorId, basePrice: 110 } })).toBe(N);
-    // The one sold unit is never sold twice: 40 on the till, less the open order.
+    // The file set 40 before the order existed; the order then took its unit.
     const firstAfter = await itemOf(first.id);
-    expect(firstAfter.stockQuantity).toBe(checkout.statusCode === 200 ? 39 : 40);
+    expect(firstAfter.stockQuantity).toBe(39);
     // The fixture set 50 without a ledger row; every movement after it is in the ledger.
     expect((await reconcileItemStock(app.prisma, first.id)).drift).toBe(50);
   }, 240_000);
+});
+
+describe('explicit checkout and till ordering (Sol S3)', () => {
+  it('a file confirmed while an order is committing waits for it, then keeps that order’s unit held', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'ORDER-FIRST', 50, 100);
+    const customer = await makeCustomer();
+    expect((await asCustomer(customer.token, 'POST', '/cart/items', { vendorId: store.vendorId, itemId: item.id, quantity: 1 })).statusCode).toBe(201);
+    const file = csvOf(row('ORDER-FIRST', 'o', '110', '40'));
+    const p = await previewOk(store, file);
+    let sync: ReturnType<typeof confirm> | undefined;
+    let syncSettled = false;
+    const placed = await new OrderService(app.prisma, app.io).checkout({
+      userId: customer.userId, paymentMethod: 'CASH',
+      afterDurableTail: async () => {
+        // The order is written and its store and item are locked, but it has
+        // not committed: the store confirms its file now, and must wait.
+        sync = confirm(store, file, p).finally(() => { syncSettled = true; });
+        await sleep(500);
+        expect(syncSettled).toBe(false);
+      },
+    });
+    const applied = await sync!;
+    expect(applied.statusCode, applied.body).toBe(200);
+    expect(placed.orders).toHaveLength(1);
+    const ordered = await app.prisma.orderItem.findFirstOrThrow({ where: { order: { customerId: customer.userId } } });
+    expect(Number(ordered.markedUpPrice)).toBe(100);
+    const after = await itemOf(item.id);
+    // 40 on the till, less the one unit the open order still holds.
+    expect(after.stockQuantity).toBe(39);
+    expect(Number(after.basePrice)).toBe(110);
+  });
 });
 
 describe('units sold on Swift but not yet collected (S3)', () => {
@@ -992,6 +1033,53 @@ describe('units given back at the store are not held (refund movements carry the
     method: 'POST', url: `/api/v1/vendor${url}`,
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
     headers: { authorization: `Bearer ${store.owner.token}`, ...(payload !== undefined ? { 'content-type': 'application/json' } : {}) },
+  });
+
+  it('a return from an order placed before the item tracked stock never cancels another order’s hold (Sol S2)', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'HELD-UNTRACKED', null, 100);
+    const oldOrder = await openOrderHolding(store, item.id, 3, 'PREPARING'); // untracked: took nothing from a count
+    const { recordOpeningBalance } = await import('../modules/inventory/stock');
+    await app.prisma.$transaction((tx) => recordOpeningBalance(tx, item.id, 10, store.owner.userId));
+    await openOrderHolding(store, item.id, 3, 'PREPARING'); // tracked: 10 -> 7, these 3 are held
+    expect((await itemOf(item.id)).stockQuantity).toBe(7);
+    const line = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: oldOrder.id } });
+    const refund = await asStore(store, `/orders/${oldOrder.id}/items/${line.id}/refund-line`);
+    expect(refund.statusCode, refund.body).toBe(200);
+    // Nothing is given back in the old order's name: it took nothing.
+    expect(await app.prisma.stockMovement.count({ where: { orderId: oldOrder.id, reason: 'PICK_REFUND' } })).toBe(0);
+    const { unitsHeldByOpenOrders } = await import('../modules/inventory/pos-sync');
+    expect((await unitsHeldByOpenOrders(app.prisma, store.vendorId, [item.id])).get(item.id)).toBe(3);
+    // The till counts 10; Swift keeps the tracked order's 3 back from what it sells.
+    const p = await previewOk(store, csvOf(row('HELD-UNTRACKED', 'h', '100', '10')));
+    expect(p.changes.find((c) => c.itemId === item.id)?.stock).toMatchObject({ to: 7, till: 10, held: 3 });
+  });
+
+  it('two lines of one item: refunding one gives back only its own units, and the other line stays held', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'HELD-TWO', 10, 100);
+    const order = await openOrderHolding(store, item.id, 2, 'PREPARING'); // 10 -> 8
+    const second = await app.prisma.orderItem.create({
+      data: { orderId: order.id, itemId: item.id, name: 'Held', quantity: 3, basePrice: 100, markedUpPrice: 100, markupAmount: 0, totalBase: 300, totalMarkup: 0, totalCustomer: 300, specialInstructions: 'second line' },
+    });
+    await app.prisma.$transaction((tx) => applyStockMovement(tx, { itemId: item.id, delta: -3, reason: 'SALE', orderId: order.id })); // 8 -> 5
+    const first = await app.prisma.orderItem.findFirstOrThrow({ where: { orderId: order.id, id: { not: second.id } } });
+    const refund = await asStore(store, `/orders/${order.id}/items/${first.id}/refund-line`);
+    expect(refund.statusCode, refund.body).toBe(200);
+    expect((await itemOf(item.id)).stockQuantity).toBe(7);
+    const { unitsHeldByOpenOrders } = await import('../modules/inventory/pos-sync');
+    expect((await unitsHeldByOpenOrders(app.prisma, store.vendorId, [item.id])).get(item.id)).toBe(3);
+  });
+
+  it('a historical positive order balance cannot cancel another order hold', async () => {
+    const store = await makeStore();
+    const item = await makeItem(store, 'HELD-LEGACY', 10, 100);
+    const a = await openOrderHolding(store, item.id, 1, 'PREPARING');
+    const b = await openOrderHolding(store, item.id, 3, 'PREPARING');
+    await app.prisma.$transaction((tx) => applyStockMovement(tx, { itemId: item.id, delta: 4, reason: 'PICK_REFUND', orderId: a.id }));
+    const { unitsHeldByOpenOrders } = await import('../modules/inventory/pos-sync');
+    expect((await unitsHeldByOpenOrders(app.prisma, store.vendorId, [item.id])).get(item.id)).toBe(3);
+    expect(await app.prisma.stockMovement.count({ where: { orderId: b.id, reason: 'SALE' } })).toBe(1);
   });
 
   it('a line the store refunds (back on the shelf) holds nothing: its refund nets its sale', async () => {
