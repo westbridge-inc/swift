@@ -26,7 +26,8 @@ export function listQueryString(state: ListState, limit = LIST_PAGE_SIZE): strin
   const search = state.search.trim();
   if (search) q.set('search', search);
   for (const [key, value] of Object.entries(state.filters)) if (value) q.set(key, value);
-  if (state.showTestData) q.set('excludeFixtures', 'false');
+  // The server hides test data only when asked; the console asks unless "Show test data" is ticked.
+  if (!state.showTestData) q.set('excludeFixtures', 'true');
   return q.toString();
 }
 
