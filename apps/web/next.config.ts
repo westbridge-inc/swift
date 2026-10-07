@@ -1,6 +1,7 @@
 import type { NextConfig } from 'next';
 import { PHASE_DEVELOPMENT_SERVER } from 'next/constants';
 import { SITE_DOMAIN } from './src/site.domain';
+import { mediaRemotePatterns } from './src/lib/media-patterns';
 
 /** The public site's own names: never noindexed, whichever build answers them. */
 const PUBLIC_SITE_HOSTS = [SITE_DOMAIN, `www.${SITE_DOMAIN}`];
@@ -56,6 +57,21 @@ export default function createNextConfig(phase: string): NextConfig {
     // so no consumer can fall back to localhost in a release by accident.
     env: {
       NEXT_PUBLIC_API_URL: browserApiOrigin,
+    },
+    // [W2b · owner ruling h4] Stores' photos are resized by this server for
+    // the screen that asks (WebP, cached), instead of every phone downloading
+    // the full upload. Only the public photo folders on the API's own origin
+    // may be fetched (src/lib/media-patterns.ts). WebP only: AVIF is a little
+    // smaller but several times slower to encode on a small server. A stored
+    // photo's address never changes (a new photo is a new file name), so a
+    // resized copy is kept for a year.
+    images: {
+      remotePatterns: mediaRemotePatterns(browserApiOrigin),
+      formats: ['image/webp'],
+      minimumCacheTTL: 60 * 60 * 24 * 365,
+      deviceSizes: [390, 640, 828, 1080, 1200, 1920],
+      imageSizes: [48, 64, 96, 128, 160, 256, 320],
+      dangerouslyAllowSVG: false,
     },
     // App Router ignores dot-prefixed folders, so the OS association files are
     // route handlers under /well-known/* surfaced at their mandated paths here.

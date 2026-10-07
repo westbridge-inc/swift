@@ -4,6 +4,7 @@ import Image from 'next/image';
 import { Star, Clock } from 'lucide-react';
 import { Section } from '@/components/site';
 import { fetchStorefronts } from '@/lib/api';
+import { photo } from '@/lib/media';
 import styles from './stores.module.css';
 
 export const metadata: Metadata = {
@@ -60,12 +61,12 @@ export default async function StoresPage({ searchParams }: { searchParams: Promi
               className={styles.card}
             >
               <div className={styles.media}>
-                {s.coverImageUrl && (
+                {photo(s.coverImageUrl) && (
                   <Image
-                    src={s.coverImageUrl}
+                    {...photo(s.coverImageUrl)!}
                     alt={s.name}
                     fill
-                    unoptimized
+                    sizes="(min-width: 760px) 360px, 100vw"
                     className={styles.mediaImage}
                   />
                 )}
