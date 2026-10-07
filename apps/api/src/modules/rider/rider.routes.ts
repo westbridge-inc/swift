@@ -1,7 +1,7 @@
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
 import { lockIdentityAuthority, requireIdentityAuthority } from '../integrity/identity-review';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -69,6 +69,7 @@ import {
   RIDER_IN_CUSTODY_STATUSES,
   RIDER_PICKUP_FROM,
 } from '../order/order-status';
+import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
@@ -2257,13 +2258,16 @@ export async function riderRoutes(app: FastifyInstance) {
   // follows a checkout for their own weekly fee: the payer's ONE canonical
   // subscription [#1393 mover fee authority], the same one GET /subscription
   // shows, which may sit on the mover's driver profile.
-  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, {
-    subscriptionFor: async (request) => {
-      const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
-      if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
-      return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
-    },
-  });
+  const feeSubscriptionFor = async (request: FastifyRequest) => {
+    const found = await app.prisma.rider.findUnique({ where: { userId: request.user.userId }, select: { userId: true } });
+    if (!found) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Rider');
+    return (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, found!.userId)))?.subscription ?? null;
+  };
+  const mmgCheckout = registerPartnerMmgCheckoutRoutes(app, { subscriptionFor: feeSubscriptionFor });
+  // [PT-2] Card payment for the weekly fee (CARD-CHECKOUT-API.md): the rider
+  // lists, removes, adds and pays by card for the same subscription. Card rail
+  // v2 stays behind CARD_RAIL_V2 (default off).
+  const cardRail = registerPartnerCardRoutes(app, { subscriptionFor: feeSubscriptionFor });
 
   app.get('/subscription', { preHandler: [app.authenticate] }, async (request) => {
     const found = await app.prisma.rider.findUnique({
@@ -2304,7 +2308,7 @@ export async function riderRoutes(app: FastifyInstance) {
         ...(await sanDisplay(app.prisma, sub)),
         ...(await payInfo(app.prisma, sub)),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
-        ...(await mmgCheckout.feePayload(sub, request.headers, now)),
+        ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)
