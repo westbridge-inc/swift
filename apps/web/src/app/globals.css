@@ -70,6 +70,18 @@ body {
     outline: medium solid var(--swift-focus);
     outline-offset: var(--swift-space-xs);
   }
+
+  /* [WEB-REDESIGN] Titles speak in Bricolage on every customer-facing page
+     (the app, the company pages, legal, sharing). The partner consoles keep
+     their own type until their redesign (phase 2). */
+  :where(h1, h2) {
+    font-family: var(--swift-face-display), var(--swift-face-body), system-ui, sans-serif;
+    letter-spacing: -0.005em;
+  }
+  .swift-console :where(h1, h2) {
+    font-family: inherit;
+    letter-spacing: normal;
+  }
 }
 
 /* ── The customer app shell [Q7b] ──────────────────────────────────────────

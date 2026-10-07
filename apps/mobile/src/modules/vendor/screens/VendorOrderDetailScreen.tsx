@@ -19,6 +19,7 @@ import {
   fmtClock,
   fmtWhen,
   formatSlot,
+  MmgDisputeNotice,
   orderActions,
   prettyStatus,
 } from '../shared';
@@ -224,6 +225,8 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
             {fmtWhen(order.placedAt)}
           </T>
         </View>
+        {/* [NO-DEAD-ENDS · S1-6] A disputed MMG order is paused: say so and what happens next. */}
+        <MmgDisputeNotice order={order} />
 
         {/* [AF-MOB-006] A delivery that went wrong after pickup: the store sees
             the case, and confirms when returned goods are back with it. */}
