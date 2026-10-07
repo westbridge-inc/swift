@@ -1657,7 +1657,6 @@ export class VerificationService {
           // design, so document authority neither lights nor darkens them —
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
-          // [MC-PR2 · DS816 S3] The console's "activate now" projects only the store it names.
           where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
           select: { id: true, vendorType: true, isVerified: true, status: true },
         },
