@@ -44,6 +44,9 @@ line = " ".join(argv)
 with open(os.environ["CALL_LOG"], "a") as log:
     channel = os.environ.get("SWIFT_WEB_CHANNEL", "")
     log.write("docker " + line + (" [channel=" + channel + "]" if " build " in " " + line + " " else "") + "\n")
+if argv[:2] == ["context", "show"]:
+    print(os.environ.get("DOCKER_CURRENT_CONTEXT", "default"))
+    sys.exit(0)
 if argv[:1] == ["network"]:
     if "-f" in argv:
         print("bridge")
@@ -74,15 +77,22 @@ sys.exit(0)
 `;
 
 // getent ahostsv4 NAME → the address DNS_MAP gives it ("name=ip;name=ip").
+// getent ahostsv6 NAME → the AAAA addresses DNS6_MAP gives it ("name=a,b;…"),
+// and, as glibc does, the IPv4-mapped form of its A address besides.
 const FAKE_GETENT = String.raw`import os, sys
-if sys.argv[1:2] != ["ahostsv4"]:
-    sys.exit(2)
 pairs = dict(p.split("=", 1) for p in os.environ.get("DNS_MAP", "").split(";") if "=" in p)
-ip = pairs.get(sys.argv[2])
-if not ip:
+pairs6 = dict(p.split("=", 1) for p in os.environ.get("DNS6_MAP", "").split(";") if "=" in p)
+if sys.argv[1:2] == ["ahostsv4"]:
+    found = [pairs[sys.argv[2]]] if sys.argv[2] in pairs else []
+elif sys.argv[1:2] == ["ahostsv6"]:
+    found = [a for a in pairs6.get(sys.argv[2], "").split(",") if a] + (["::ffff:" + pairs[sys.argv[2]]] if sys.argv[2] in pairs else [])
+else:
     sys.exit(2)
-print(ip + "      STREAM " + sys.argv[2])
-print(ip + "      DGRAM")
+if not found:
+    sys.exit(2)
+for ip in found:
+    print(ip + "      STREAM " + sys.argv[2])
+    print(ip + "      DGRAM")
 `;
 
 function baseShims() {
@@ -128,6 +138,8 @@ function preparePilot() {
 const PRODUCTION = {
   PILOT_ENV: 'production', NODE_ENV: 'production', API_HOST: PROD_HOST, MAPS_PROVIDER: 'osrm', OSRM_URL: 'http://osrm:5000',
   BACKUP_BUCKET: 'prod-backups', STORAGE_PROVIDER: 's3', CORS_ORIGIN: 'https://example.org',
+  // Production also requires the public origins the API hands out (#1448 review).
+  API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
@@ -353,9 +365,74 @@ describe('[PROD-PATH] deploy/.env is read once, the way Compose reads it: one pl
   it('ordinary production names are not mistaken for test ones', () => {
     for (const name of ['api.example.org', 'contest.example.org', 'developer-api.example.org']) {
       writeFileSync(log, '');
-      const r = runPilot({ ...PRODUCTION, API_HOST: name }, { env: { DNS_MAP: `${name}=${HOST_IP}` } });
+      const r = runPilot({ ...PRODUCTION, API_HOST: name, API_PUBLIC_URL: `https://${name}` }, { env: { DNS_MAP: `${name}=${HOST_IP}` } });
       expect(r.status, `${name}: ${r.stderr}`).toBe(0);
     }
+  });
+});
+
+describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the production public origins, IPv6 too', () => {
+  it.each(['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG'])('refuses %s exported in the shell (Docker would act on another daemon), before anything runs, on staging too', (name) => {
+    for (const settings of [PRODUCTION, STAGING]) {
+      writeFileSync(log, '');
+      const r = runPilot(settings, { env: { [name]: name === 'DOCKER_HOST' ? 'ssh://elsewhere.example.org' : 'other' } });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain(`${name} is set in this shell, and Docker would act on another daemon`);
+      expect(r.calls).toEqual([]);
+    }
+  });
+
+  it('production refuses a Docker context other than this host\'s own, before the stack changes', () => {
+    const r = runPilot(PRODUCTION, { env: { DOCKER_CURRENT_CONTEXT: 'remote-box' } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("docker's current context is not this host's own daemon");
+    expect(changedNothing(r.calls)).toEqual([]);
+    expect(r.calls.filter((l) => l.startsWith('git '))).toEqual([]);
+  });
+
+  it.each([
+    [{ API_PUBLIC_URL: undefined }, 'API_PUBLIC_URL'],
+    [{ API_PUBLIC_URL: `http://${PROD_HOST}` }, 'API_PUBLIC_URL'],
+    [{ API_PUBLIC_URL: 'https://api-other.example.org' }, 'API_PUBLIC_URL'],
+    [{ API_PUBLIC_URL: `https://${PROD_HOST}/v1` }, 'API_PUBLIC_URL'],
+    [{ API_PUBLIC_URL: `https://${PROD_HOST}:8443` }, 'API_PUBLIC_URL'],
+    [{ APP_PUBLIC_URL: undefined }, 'APP_PUBLIC_URL'],
+    [{ APP_PUBLIC_URL: 'http://example.org' }, 'APP_PUBLIC_URL'],
+    [{ APP_PUBLIC_URL: 'https://localhost' }, 'APP_PUBLIC_URL'],
+    [{ APP_PUBLIC_URL: 'https://203.0.113.10' }, 'APP_PUBLIC_URL'],
+    [{ APP_PUBLIC_URL: 'https://staging.example.org' }, 'staging name staging.example.org'],
+    [{ APP_PUBLIC_URL: 'https://uat.example.org' }, 'test-environment name uat.example.org'],
+    [{ CORS_ORIGIN: undefined }, 'CORS_ORIGIN'],
+    [{ CORS_ORIGIN: 'http://example.org' }, 'CORS_ORIGIN entry http://example.org'],
+    [{ CORS_ORIGIN: 'https://example.org,http://localhost:3000' }, 'CORS_ORIGIN entry http://localhost:3000'],
+    [{ CORS_ORIGIN: '*' }, 'CORS_ORIGIN entry *'],
+    [{ CORS_ORIGIN: 'https://example.org,https://staging.example.org' }, 'staging name staging.example.org'],
+    [{ CORS_ORIGIN: 'https://example.org,https://dev.example.org' }, 'test-environment name dev.example.org'],
+  ])('production refuses %j before anything runs', (over, named) => {
+    const r = runPilot({ ...PRODUCTION, ...over });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(named);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('production accepts its public origins with a trailing slash, and several https CORS origins', () => {
+    const r = runPilot({ ...PRODUCTION, API_PUBLIC_URL: `https://${PROD_HOST}/`, APP_PUBLIC_URL: 'https://example.org/', CORS_ORIGIN: 'https://example.org, https://www.example.org' });
+    expect(r.status, r.stderr).toBe(0);
+  });
+
+  it('staging keeps its own origins (the production checks are production\'s)', () => {
+    const r = runPilot({ ...STAGING, API_PUBLIC_URL: undefined, APP_PUBLIC_URL: undefined, CORS_ORIGIN: 'http://localhost:3000' });
+    expect(r.status, r.stderr).toBe(0);
+  });
+
+  it('production refuses a served name whose IPv6 (AAAA) address is not this host\'s, before anything runs; this host\'s own IPv6 passes', () => {
+    const elsewhere = runPilot(PRODUCTION, { env: { DNS6_MAP: `${PROD_HOST}=2001:db8::99` } });
+    expect(elsewhere.status).not.toBe(0);
+    expect(elsewhere.stderr).toContain(`${PROD_HOST} resolves to 2001:db8::99, which is not this host`);
+    expect(elsewhere.calls).toEqual([]);
+    writeFileSync(log, '');
+    const here = runPilot(PRODUCTION, { env: { DNS6_MAP: `${PROD_HOST}=2001:DB8::10`, HOST_IPS: `${HOST_IP} 10.10.0.5 2001:db8::10 ` } });
+    expect(here.status, here.stderr).toBe(0);
   });
 });
 
@@ -430,6 +507,13 @@ describe('[PROD-PATH] seed-production.sh: the host and the database must agree',
     const r = runSeed(PROD_SEED);
     expect(r.status, r.stderr).toBe(0);
     expect(seeded(r.calls)).toBe(true);
+  });
+
+  it.each(['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG'])('refuses %s exported in the shell (another daemon), before Docker is asked anything', (name) => {
+    const r = runSeed(PROD_SEED, { [name]: 'other' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(`${name} is set in this shell, and Docker would act on another daemon`);
+    expect(r.calls).toEqual([]);
   });
 
   it('refuses to seed a database that is not production from the production host', () => {

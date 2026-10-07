@@ -623,28 +623,14 @@ export class LiveMmgProvider implements MmgMerchantProvider {
  * [PROD-PATH] MMG fully OFF — the owner's ruling for a production launch
  * before the live merchant keys arrive. `MMG_DRIVER=disabled`, exactly; the
  * boot guard accepts it in production only with the hosted checkout off.
- * Nothing in this mode reaches MMG: the billing rail defers instead of
- * charging (billing.service attemptCharge), the poller leaves every row as
- * it is, and any other caller gets this explicit refusal — never a
- * sandbox answer, never a silent no-op.
+ * Nothing in this mode reaches MMG: the billing rail never asks MMG
+ * (billing.service attemptCharge), the poller leaves every row as it is, and
+ * any other caller gets this explicit refusal — never a sandbox answer, never
+ * a silent no-op. Whether partners' fees are PAUSED is a separate rule that
+ * also asks whether a card can be used: modules/billing/fee-pause.ts.
  */
 export function mmgDisabled(env: Record<string, string | undefined> = process.env): boolean {
   return env['MMG_DRIVER'] === 'disabled';
-}
-
-/**
- * [PROD-PATH] A subscription on the MMG rail while MMG is switched off: its
- * billing is PAUSED, not deferred and then dunned. Nothing is charged (not
- * even prepaid balance), nothing fails, nobody is dunned, suspended, nudged
- * or churned, and the operate gate does not lock the partner out on a grace
- * deadline that ran out while the partner could not pay (the clock is frozen
- * for the span: modules/billing/mmg-pause.ts). One predicate for all of them.
- */
-export function mmgRailPaused(
-  sub: { billingMethod: string },
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  return mmgDisabled(env) && sub.billingMethod === 'MOBILE_MONEY';
 }
 
 export class MmgDisabledError extends AppError {

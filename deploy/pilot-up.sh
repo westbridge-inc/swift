@@ -64,6 +64,13 @@ for name in $compose_names COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_FILE CO
   [ -z "${!name+set}" ] ||
     die "$name is set in this shell, and Compose would use it instead of deploy/.env (which every check here reads); unset it, or run from a clean shell"
 done
+# [PROD-PATH] One Docker: this host's own daemon. DOCKER_HOST, DOCKER_CONTEXT or
+# DOCKER_CONFIG in this shell would point every docker call below — the checks
+# and the deploy alike — at another daemon (another machine's stack).
+for name in DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG; do
+  [ -z "${!name+set}" ] ||
+    die "$name is set in this shell, and Docker would act on another daemon than this host's; unset it, or run from a clean shell"
+done
 PILOT_ENV="$(env_value PILOT_ENV)"
 case "$PILOT_ENV" in
   staging | production) ;;
@@ -183,25 +190,49 @@ if [ -n "$ADMIN_BASIC_AUTH_HASH" ]; then
     die "ADMIN_BASIC_AUTH_HASH must be a bcrypt hash of cost 10 or more in single quotes (see PILOT-RUNBOOK.md 3d), or empty for no gate"
   unset gate_hash
 fi
+# [PROD-PATH] A name a production stack serves, links to or trusts is never a
+# staging name, nor a test-environment one: a label that is (or starts) uat,
+# test, sandbox, dev, qa or demo.
+production_name() {
+  case "$(lower "$1")" in
+    *staging*) die "PILOT_ENV=production refuses the staging name $1: a production stack never answers a staging name" ;;
+  esac
+  read -r -a name_labels <<< "$(lower "$1" | tr '.' ' ')"
+  for name_label in "${name_labels[@]}"; do
+    case "$name_label" in
+      uat | uat-* | uat[0-9]* | test | test-* | test[0-9]* | testing | sandbox | sandbox-* | dev | dev-* | dev[0-9]* | qa | qa-* | demo | demo-*)
+        die "PILOT_ENV=production refuses the test-environment name $1" ;;
+    esac
+  done
+}
 # [PROD-PATH] The production host's own refusals. Each names its setting and
 # runs before anything changes; staging is exactly as it was.
 if [ "$PILOT_ENV" = production ]; then
   [ "$(env_setting NODE_ENV)" = production ] ||
     die "PILOT_ENV=production needs NODE_ENV=production: the production host never runs a development, loadtest or test posture"
   read -r -a served_names <<< "$API_HOST $API_ALIAS_HOST $WEB_HOST $WEB_ALIAS_HOSTS $ADMIN_HOST"
-  for served_name in "${served_names[@]}"; do
-    case "$(lower "$served_name")" in
-      *staging*) die "PILOT_ENV=production refuses the staging name $served_name: a production stack never answers a staging name" ;;
-    esac
-    # Nor a test-environment name: a label that is (or starts) uat, test,
-    # sandbox, dev, qa or demo.
-    read -r -a name_labels <<< "$(lower "$served_name" | tr '.' ' ')"
-    for name_label in "${name_labels[@]}"; do
-      case "$name_label" in
-        uat | uat-* | uat[0-9]* | test | test-* | test[0-9]* | testing | sandbox | sandbox-* | dev | dev-* | dev[0-9]* | qa | qa-* | demo | demo-*)
-          die "PILOT_ENV=production refuses the test-environment name $served_name" ;;
-      esac
-    done
+  for served_name in "${served_names[@]}"; do production_name "$served_name"; done
+  # The public origins the API hands out and trusts: https, a public DNS name
+  # (no localhost, no address, no wildcard, no path), never staging or test.
+  https_origin_re='^https://([a-zA-Z0-9][a-zA-Z0-9.-]*[.][a-zA-Z]{2,})(:[0-9]{1,5})?/?$'
+  # API_PUBLIC_URL: storage links and card return pages are built from it.
+  api_public_url="$(env_setting API_PUBLIC_URL)"
+  [[ "$api_public_url" =~ $https_origin_re ]] && [ -z "${BASH_REMATCH[2]}" ] && [ "$(lower "${BASH_REMATCH[1]}")" = "$(lower "$API_HOST")" ] ||
+    die "PILOT_ENV=production needs API_PUBLIC_URL=https://$API_HOST: storage links and card return pages are built from it"
+  # APP_PUBLIC_URL: every printed QR code and trip-share link names it.
+  app_public_url="$(env_setting APP_PUBLIC_URL)"
+  [[ "$app_public_url" =~ $https_origin_re ]] && [ -z "${BASH_REMATCH[2]}" ] ||
+    die "PILOT_ENV=production needs APP_PUBLIC_URL to be the public website's https:// origin (printed QR codes and trip-share links name it)"
+  production_name "${BASH_REMATCH[1]}"
+  # CORS_ORIGIN: the browser origins allowed to call the API with its cookies.
+  cors_setting="$(env_setting CORS_ORIGIN | tr -d " \t\"'")"
+  [ -n "$cors_setting" ] || die "PILOT_ENV=production needs CORS_ORIGIN: the https:// origins allowed to call the API"
+  IFS=',' read -r -a cors_entries <<< "$cors_setting"
+  for cors_entry in "${cors_entries[@]}"; do
+    [ -n "$cors_entry" ] || continue
+    [[ "$cors_entry" =~ $https_origin_re ]] ||
+      die "PILOT_ENV=production refuses the CORS_ORIGIN entry $cors_entry: only https:// origins of public names (no http, localhost, address or wildcard)"
+    production_name "${BASH_REMATCH[1]}"
   done
   case "$(env_setting STORAGE_PROVIDER)" in
     s3 | r2) ;;
@@ -220,22 +251,32 @@ for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || di
 # [PROD-PATH] The production stack obtains certificates for every name it
 # serves, so each must already resolve to this host. Until DNS moves, the
 # public names still reach the old host: starting here would fail its own
-# readiness check after stopping nothing, or worse, after a migration. The
-# database-only stage serves nothing and needs no name.
+# readiness check after stopping nothing, or worse, after a migration. IPv6
+# counts too: an AAAA record left on the old host sends IPv6 clients — and the
+# certificate authority, which prefers IPv6 — elsewhere. The database-only
+# stage serves nothing and needs no name.
 if [ "$PILOT_ENV" = production ] && [ "$DATA_ONLY" -eq 0 ]; then
   for tool in getent hostname; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
-  host_addresses=" $(hostname -I 2>/dev/null || true) "
+  host_addresses=" $(hostname -I 2>/dev/null | tr '[:upper:]' '[:lower:]' || true) "
   read -r -a served_names <<< "$API_HOST $API_ALIAS_HOST $WEB_HOST $WEB_ALIAS_HOSTS $ADMIN_HOST"
   for served_name in "${served_names[@]}"; do
     resolved="$(getent ahostsv4 "$served_name" 2>/dev/null | awk '{print $1}' | sort -u || true)"
     [ -n "$resolved" ] || die "$served_name does not resolve yet; point its DNS at this host before the production stack starts (the database-only stage needs none: --data-only)"
-    for address in $resolved; do
+    # Its IPv6 addresses (AAAA), without the IPv4-mapped forms getent adds.
+    resolved6="$(getent ahostsv6 "$served_name" 2>/dev/null | awk '{print tolower($1)}' | grep -v '^::ffff:' | sort -u || true)"
+    for address in $resolved $resolved6; do
       case "$host_addresses" in
         *" $address "*) ;;
         *) die "$served_name resolves to $address, which is not this host; move its DNS here before the production stack starts (the database-only stage needs none: --data-only)" ;;
       esac
     done
   done
+fi
+# [PROD-PATH] And Docker's own persisted choice of daemon (docker context use)
+# is this host's: every call below acts on the daemon the checks above vouch for.
+if [ "$PILOT_ENV" = production ]; then
+  [ "$(docker context show 2>/dev/null || true)" = default ] ||
+    die "docker's current context is not this host's own daemon (default); run: docker context use default"
 fi
 
 cd "$ROOT"

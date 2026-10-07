@@ -3,14 +3,14 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type UserRole } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
-  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, planApprovalRequest, promoteBootstrapAdmin, promotionApprovalRequest, seedPlanDigest,
+  SeedRefused, applySeedPlan, buildSeedPlan, diffDesired, planApprovalRequest, planRequestFacts, promoteBootstrapAdmin, promotionApprovalRequest, seedPlanDigest,
   type DesiredConfig, type SeedPlan,
 } from '../modules/ops/seed-plan';
-import { approvalRequest, parseApproverKeys, promotionSubject, type SignedApproval } from '../modules/ops/approver-signatures';
+import { approvalRequest, parseApproverKeys, parseRequest, promotionSubject, type SignedApproval } from '../modules/ops/approver-signatures';
 import { desiredPlatformConfig, seedPlatformSpine } from '../modules/ops/platform-config';
 import { assertSafeToSeedDemo } from '../utils/seed-guard';
 import { seedPlanCounter } from '../plugins/observability';
@@ -286,16 +286,17 @@ describe('[R048-005] a production target is a ceremony', () => {
       const desired = desiredFor(31);
       const plan = await buildSeedPlan(prisma, URL_, desired);
       const now = new Date();
-      const expired = approvalRequest('plan', plan.target.digest, plan.digest, new Date(now.getTime() - 25 * 3600_000));
+      const expired = approvalRequest(planRequestFacts(plan), new Date(now.getTime() - 25 * 3600_000));
       await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(expired), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_EXPIRED' });
-      const tooLong = approvalRequest('plan', plan.target.digest, plan.digest, now, 80 * 3600_000);
+      const tooLong = approvalRequest(planRequestFacts(plan), now, 80 * 3600_000);
       await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(tooLong), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_TOO_LONG' });
-      const otherPlan = approvalRequest('plan', plan.target.digest, 'f'.repeat(64), now);
+      const otherPlan = approvalRequest({ ...planRequestFacts(plan), subject: 'f'.repeat(64) }, now);
       await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(otherPlan), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
-      const otherDb = approvalRequest('plan', 'e'.repeat(64), plan.digest, now);
+      const otherDb = approvalRequest({ ...planRequestFacts(plan), target: 'e'.repeat(64) }, now);
       await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(otherDb), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
       // A promotion approval is not a plan approval.
-      const promoteKind = approvalRequest('promote', plan.target.digest, plan.digest, now);
+      const facts = planRequestFacts(plan);
+      const promoteKind = approvalRequest({ ...facts, change: 'promote', shows: [facts.shows[0]!, 'promote: the phone ending 0000 becomes SUPER_ADMIN (its roles are set to SUPER_ADMIN and CUSTOMER)'] }, now);
       await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(promoteKind), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
       expect(await prisma.platformConfig.findUnique({ where: { key: KEY } }).then((r) => r?.value)).not.toBe(31);
     } finally {
@@ -345,8 +346,12 @@ describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-
     expect(u.roles).toContain('SUPER_ADMIN');
     const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: promoted.userId } } });
     expect((audit!.detail as { mode: string; approvers: string[] })).toMatchObject({ mode: 'break-glass', approvers: ['alice', 'bob'] });
-    // Single use: the same two lines cannot promote again.
+    // A phone that already holds SUPER_ADMIN changes nothing (no ceremony is owed for no change).
+    expect(await promoteBootstrapAdmin(prisma, URL_, phone2, { actor: 'test' })).toMatchObject({ mode: 'already', userId: promoted.userId });
+    // Single use: once the role is gone again, the same two lines cannot promote it back.
+    await prisma.user.update({ where: { id: promoted.userId }, data: { roles: { set: ['CUSTOMER'] }, activeRole: 'CUSTOMER' } });
     await expect(promoteBootstrapAdmin(prisma, URL_, phone2, opts(lines))).rejects.toMatchObject({ code: 'APPROVAL_REPLAYED' });
+    expect((await prisma.user.findUniqueOrThrow({ where: { id: promoted.userId }, select: { roles: true } })).roles).not.toContain('SUPER_ADMIN');
   });
 });
 
@@ -365,8 +370,12 @@ describe('[PROD-PATH] the real seed entry point on a production target', () => {
       const first = run({});
       expect(first.status, first.stderr).toBe(2);
       const request = first.stdout;
-      expect(request.split('\n')[0]).toBe('swift-seed-approval v1');
+      expect(request.split('\n')[0]).toBe('swift-seed-approval v2');
       expect(request).toMatch(/^kind: plan$/m);
+      // What the approvers read, in words, is in the signed request.
+      expect(request).toMatch(/^database: \S+ on \S+, deployment dep-test \(production\)$/m);
+      expect(request).toMatch(/^config: \S+ \([0-9a-f]{16}\), 1 change, FX \d+(\.\d+)? GYD per USD$/m);
+      expect(request).toMatch(new RegExp(`^change: create platformConfig ${spineKey}: null -> `, 'm'));
       expect(await prisma.platformConfig.findUnique({ where: { key: spineKey } })).toBeNull();
       const lines = both(request);
       const applied = run({ SEED_PLAN_APPROVALS: JSON.stringify(lines), SEED_APPROVER_KEYS: PINNED });
@@ -385,7 +394,9 @@ describe('[PROD-PATH] the real seed entry point on a production target', () => {
   }, 300_000);
 
   it('deploy/seed-approve.sh signs only a well-formed request, only after a yes, and prints one line', () => {
-    const okRequest = approvalRequest('plan', 'a'.repeat(64), 'b'.repeat(64));
+    const okRequest = approvalRequest({ change: 'plan', target: 'a'.repeat(64), subject: 'b'.repeat(64), admin: 'none', shows: [
+      'database: swift on postgres, deployment dep-x (production)', 'config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD', 'admin phone: none',
+    ] });
     const runApprove = (input: string, env: Record<string, string>, name = 'alice') => spawnSync('bash', [APPROVE, name, join(KEYDIR, 'alice')], { input, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', ...env } });
     const good = runApprove(`\n${okRequest.replace(/\n/g, '\r\n')}\n\n`, { SEED_APPROVE_YES: '1' });
     expect(good.status, good.stderr).toBe(0);
@@ -420,3 +431,163 @@ describe('[R048-005] the demo seed needs an ephemeral database', () => {
     expect(await prisma.platformConfig.count()).toBe(before);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [PROD-PATH · #1448 review S3/S4] The ceremony is bound to what people read:
+// the approvers see the database, the configuration and FX rate, the first
+// admin (last four digits) and every change, and the server applies only
+// approvals whose words match the change it is about to make. A request is
+// good for at most 72 hours from when it was ISSUED. Approvals of a plan with
+// nothing to change are used up too. On production the first SUPER_ADMIN is
+// minted only by the signed plan that names it.
+// ---------------------------------------------------------------------------
+describe('[PROD-PATH] the seed ceremony is bound to what the approvers read', () => {
+  const PHONE = `+5926155${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+
+  it('deploy/seed-approve.sh shows the database, the FX rate, the first admin and every change before the yes', async () => {
+    await setIdentity('production');
+    try {
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const plan = await buildSeedPlan(prisma, URL_, desiredFor(50));
+      const request = planApprovalRequest(plan, { fxGydPerUsd: 212.5, adminPhone: PHONE });
+      const out = spawnSync('bash', [APPROVE, 'alice', join(KEYDIR, 'alice')], { input: request, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', SEED_APPROVE_YES: '1' } });
+      expect(out.status, out.stderr).toBe(0);
+      // The readable summary (before the exact signed text) says it all.
+      const summary = out.stderr.split('Signed exactly as')[0]!;
+      expect(summary).toContain(`database: ${plan.target.database} on ${plan.target.host}, deployment dep-test (production)`);
+      expect(summary).toContain('FX 212.5 GYD per USD');
+      expect(summary).toContain(`admin phone: ending ${PHONE.slice(-4)} becomes the first SUPER_ADMIN`);
+      expect(summary).toMatch(new RegExp(`^ {6}create platformConfig ${KEY}: null -> 50$`, 'm'));
+      expect(out.stderr).not.toContain(PHONE);
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('deploy/seed-approve.sh refuses a request that hides what it approves: no database, no configuration, a hidden line, or something after the end', () => {
+    const facts = { change: 'plan' as const, target: 'a'.repeat(64), subject: 'b'.repeat(64), admin: 'none',
+      shows: ['database: swift on postgres, deployment dep-x (production)', 'config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD', 'admin phone: none'] };
+    const ok = approvalRequest(facts);
+    const run = (input: string) => spawnSync('bash', [APPROVE, 'alice', join(KEYDIR, 'alice')], { input, encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '', SEED_APPROVE_YES: '1' } });
+    expect(run(ok).status).toBe(0);
+    expect(run(ok.split('\n').filter((l) => !l.startsWith('database: ')).join('\n')).status).not.toBe(0);
+    expect(run(ok.split('\n').filter((l) => !l.startsWith('config: ')).join('\n')).status).not.toBe(0);
+    expect(run(ok.replace('admin phone: none', 'admin phone: none\x1b[2K\x1b[1A')).status).not.toBe(0);
+    expect(run(`${ok}change: create platformConfig x: null -> 1\n`).status).not.toBe(0);
+    expect(run(ok.replace('swift-seed-approval v2', 'swift-seed-approval v1')).status).not.toBe(0);
+  });
+
+  it('the server refuses a request whose words carry a control character (C0 or C1), or that does not name the database', () => {
+    const facts = { change: 'plan' as const, target: 'a'.repeat(64), subject: 'b'.repeat(64), admin: 'none',
+      shows: ['database: swift on postgres, deployment dep-x (production)', 'config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD', 'admin phone: none'] };
+    expect(parseRequest(approvalRequest(facts)).shows).toEqual(facts.shows);
+    for (const hidden of ['\u001b[2K', '\u009b2K', '\u007f']) {
+      expect(() => parseRequest(approvalRequest({ ...facts, shows: [facts.shows[0]!, `${facts.shows[1]!}${hidden}`, facts.shows[2]!] }))).toThrow(/REQUEST_MALFORMED/);
+    }
+    expect(() => parseRequest(approvalRequest({ ...facts, shows: facts.shows.slice(1) }))).toThrow(/REQUEST_MALFORMED/);
+  });
+
+  it('the server refuses approvals signed over other words: another FX rate, another first admin', async () => {
+    await setIdentity('production');
+    try {
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const desired = desiredFor(51);
+      const plan = await buildSeedPlan(prisma, URL_, desired);
+      const opts = (request: string) => ({ approvals: both(request), approverKeys: PINNED, request: { fxGydPerUsd: 209, adminPhone: PHONE } });
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts(planApprovalRequest(plan, { fxGydPerUsd: 215, adminPhone: PHONE })))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts(planApprovalRequest(plan, { fxGydPerUsd: 209, adminPhone: '+5926155000' })))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts(planApprovalRequest(plan, { fxGydPerUsd: 209 })))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      // A phone with the same last four digits reads the same, but is not the phone that was signed for.
+      const twin = `+5926156${PHONE.slice(-4)}`;
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts(planApprovalRequest(plan, { fxGydPerUsd: 209, adminPhone: twin })))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      // The same digests with a reworded change line are refused too: the words are signed.
+      const reworded = planApprovalRequest(plan, { fxGydPerUsd: 209, adminPhone: PHONE }).replace(`create platformConfig ${KEY}: null -> 51`, `create platformConfig ${KEY}: null -> 5`);
+      await expect(applySeedPlan(prisma, URL_, desired, plan, opts(reworded))).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      expect(await prisma.platformConfig.findUnique({ where: { key: KEY } })).toBeNull();
+      expect(await applySeedPlan(prisma, URL_, desired, plan, opts(planApprovalRequest(plan, { fxGydPerUsd: 209, adminPhone: PHONE })))).toMatchObject({ applied: 1 });
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('a request is good for at most 72 hours from when it was issued, however late it is used; one issued in the future is refused', async () => {
+    await setIdentity('production');
+    try {
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const desired = desiredFor(52);
+      const plan = await buildSeedPlan(prisma, URL_, desired);
+      const now = new Date();
+      // Issued 70 hours ago with an 80-hour life: it expires in 10 hours, but it was good for more than 72 from issue.
+      const stale = approvalRequest(planRequestFacts(plan), new Date(now.getTime() - 70 * 3600_000), 80 * 3600_000);
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(stale), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_TOO_LONG' });
+      const future = approvalRequest(planRequestFacts(plan), new Date(now.getTime() + 3600_000), 3600_000);
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: both(future), approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_INVALID' });
+      // Issued 70 hours ago with a 72-hour life: still good for 2 hours.
+      const late = approvalRequest(planRequestFacts(plan), new Date(now.getTime() - 70 * 3600_000), 72 * 3600_000);
+      expect(await applySeedPlan(prisma, URL_, desired, plan, { approvals: both(late), approverKeys: PINNED })).toMatchObject({ applied: 1 });
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('approvals of a plan with nothing to change are used up: the same lines are refused next time', async () => {
+    await setIdentity('production');
+    try {
+      const desired = desiredFor(53);
+      await prisma.platformConfig.upsert({ where: { key: KEY }, update: { value: 53 }, create: { key: KEY, value: 53 } });
+      const plan = await buildSeedPlan(prisma, URL_, desired);
+      expect(plan.changes).toEqual([]);
+      const lines = both(planApprovalRequest(plan));
+      expect(await applySeedPlan(prisma, URL_, desired, plan, { approvals: lines, approverKeys: PINNED })).toMatchObject({ applied: 0, noop: true });
+      await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: lines, approverKeys: PINNED })).rejects.toMatchObject({ code: 'APPROVAL_REPLAYED' });
+      // Consumed means recorded: each line once, as SEED_CONFIG's.
+      const consumed = await prisma.privilegedChangeAudit.count({ where: { action: 'SEED_APPROVAL_CONSUMED', detail: { path: ['nonce'], equals: Buffer.from(lines[0]!.request, 'base64').toString('utf8').match(/^nonce: (\w+)$/m)![1]! } } });
+      expect(consumed).toBe(2);
+    } finally {
+      await setIdentity('test');
+    }
+  });
+
+  it('on production the first SUPER_ADMIN is minted only by the signed plan that names its phone', async () => {
+    // A production database with no SUPER_ADMIN yet: the suite's database has
+    // some, so their role is set aside for this case and put back after.
+    const supers = await prisma.user.findMany({ where: { roles: { has: 'SUPER_ADMIN' } }, select: { id: true, roles: true, activeRole: true } });
+    await setIdentity('production');
+    try {
+      for (const u of supers) {
+        const rest = u.roles.filter((r) => r !== 'SUPER_ADMIN');
+        const roles: UserRole[] = rest.length > 0 ? rest : ['CUSTOMER'];
+        await prisma.user.update({ where: { id: u.id }, data: { roles: { set: roles }, activeRole: roles.includes(u.activeRole) ? u.activeRole : roles[0]! } });
+      }
+      expect(await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })).toBe(0);
+      // No ceremony-free first admin on production.
+      await expect(promoteBootstrapAdmin(prisma, URL_, PHONE, { actor: 'test' })).rejects.toMatchObject({ code: 'FIRST_ADMIN_NEEDS_PLAN' });
+      expect(await prisma.user.count({ where: { phone: PHONE } })).toBe(0);
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const desired = desiredFor(54);
+      const plan = await buildSeedPlan(prisma, URL_, desired);
+      // A plan signed without naming an admin mints none.
+      const unnamed = await applySeedPlan(prisma, URL_, desired, plan, { approvals: both(planApprovalRequest(plan)), approverKeys: PINNED });
+      expect(unnamed.firstAdmin).toBeNull();
+      expect(await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })).toBe(0);
+      // The signed plan that names the phone mints it, in the plan's own transaction, audited with the plan.
+      await prisma.platformConfig.deleteMany({ where: { key: KEY } });
+      const again = await buildSeedPlan(prisma, URL_, desired);
+      const ctx = { fxGydPerUsd: 209, adminPhone: PHONE };
+      const named = await applySeedPlan(prisma, URL_, desired, again, { approvals: both(planApprovalRequest(again, ctx)), approverKeys: PINNED, request: ctx, actor: 'alice' });
+      expect(named.firstAdmin).not.toBeNull();
+      userIds.push(named.firstAdmin!.userId);
+      const admin = await prisma.user.findUniqueOrThrow({ where: { id: named.firstAdmin!.userId }, select: { phone: true, roles: true } });
+      expect(admin).toMatchObject({ phone: PHONE });
+      expect(admin.roles).toContain('SUPER_ADMIN');
+      const audit = await prisma.privilegedChangeAudit.findFirst({ where: { action: 'PROMOTE_SUPER_ADMIN', detail: { path: ['userId'], equals: named.firstAdmin!.userId } } });
+      expect(audit!.detail).toMatchObject({ mode: 'signed-plan', plan: again.digest });
+      expect(((audit!.detail as { approvers: string[] }).approvers).sort()).toEqual(['alice', 'bob']);
+    } finally {
+      await prisma.user.updateMany({ where: { phone: PHONE }, data: { roles: { set: ['CUSTOMER'] }, activeRole: 'CUSTOMER' } });
+      for (const u of supers) await prisma.user.update({ where: { id: u.id }, data: { roles: { set: u.roles }, activeRole: u.activeRole } });
+      await setIdentity('test');
+    }
+  });
+});
+

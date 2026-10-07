@@ -505,13 +505,23 @@ people. An approval is the person's own signature: each approver has an
 Ed25519 key made on their own computer, the server holds only the public
 halves, and so the server (or anyone operating it) cannot sign for anyone. A
 name is never identity: a signature must verify under the key pinned for that
-name, and two approvals need two different pinned keys. Approvals expire (24
-hours as printed, never more than 72) and are single-use: each one used is
-recorded in the append-only privileged-change audit, so replaying it is
-refused even after the data is rolled back, in any encoding of the same
-signature (keyed on the signer and the request, not the pasted text).
-Replacing the whole database with an older backup would also bring back
-approvals consumed since; the expiry (72 hours at most) bounds that window.
+name, and two approvals need two different pinned keys.
+
+What an approver signs is what they read: the request names, in words, the
+database (its name, server and deployment), the configuration version and the
+FX rate the seed records, the first admin's phone (its last four digits; the
+request carries only the phone's hash) and every change, one line each (a
+long value is shown by its start, its length and its digest). The server
+rebuilds those words from the change it is about to make and refuses an
+approval whose words differ by a single character. Approvals expire (24 hours
+as printed, never more than 72 hours after the server ISSUED the request,
+however late it is used) and are single-use, even when the plan turns out to
+have nothing to change: each one used is recorded in the append-only
+privileged-change audit, so replaying it is refused even after the data is
+rolled back, in any encoding of the same signature (keyed on the signer and
+the request, not the pasted text). Replacing the whole database with an older
+backup would also bring back approvals consumed since; the expiry (72 hours
+from issue at most) bounds that window.
 
 1. Once per approver, on their own computer (choose a passphrase):
 
@@ -532,8 +542,11 @@ approvals consumed since; the expiry (72 hours at most) bounds that window.
        SEED_ADMIN_PHONE=+5920400001 ./deploy/seed-production.sh "$SHA" > request.txt
 
 3. Each approver checks the request and signs it on their own computer. The
-   script shows it, asks for `yes`, and prints one line,
-   `{"approver":"…","request":"…","signature":"…"}`:
+   script shows the database, the configuration and FX rate, the first
+   admin's phone ending and every change, asks for `yes`, and prints one
+   line, `{"approver":"…","request":"…","signature":"…"}`. It refuses a
+   request that does not say these things in words, or that hides anything
+   (control characters, lines after its `end`):
 
        ./deploy/seed-approve.sh <their-name> ~/.ssh/swift_seed_approver < request.txt
 
@@ -765,9 +778,22 @@ anything changes:
 - any setting Compose fills from `${…}` that is also set in the operator's
   shell (Compose prefers the shell to deploy/.env, which is what every check
   reads), and the COMPOSE_* switches. Run it from a clean shell;
+- DOCKER_HOST, DOCKER_CONTEXT or DOCKER_CONFIG in the shell (on any host), and
+  on production a Docker context other than `default`: every docker call must
+  act on this host's own daemon;
+- a test-environment name (a label that is or starts uat, test, sandbox, dev,
+  qa or demo) anywhere a staging name is refused;
+- API_PUBLIC_URL other than `https://<API_HOST>` (storage links and card
+  return pages are built from it); an APP_PUBLIC_URL that is not the public
+  website's `https://` origin (every printed QR code and trip-share link
+  names it); and a CORS_ORIGIN that is empty or has an entry that is not an
+  `https://` origin of a public name (no http, localhost, address or
+  wildcard), or is a staging or test name;
 - for the whole stack, a served name that does not already resolve to this
-  host (`getent ahostsv4` against `hostname -I`): Caddy obtains the
-  certificates, and the public names stay on the old host until DNS moves.
+  host, over IPv4 and IPv6 (`getent ahostsv4` and `getent ahostsv6` against
+  `hostname -I`; an AAAA record left on the old host sends IPv6 clients and
+  the certificate authority there): Caddy obtains the certificates, and the
+  public names stay on the old host until DNS moves.
 
 The website, when WEB_HOST is set, is built on the production channel
 (SWIFT_WEB_CHANNEL follows PILOT_ENV), so it must call `https://api.<site
@@ -778,13 +804,26 @@ explicitly off. Beyond the earlier guards:
 
 - **MMG.** `MMG_DRIVER=live` with every credential and the verified
   reference round-trip, or exactly `MMG_DRIVER=disabled` with
-  `MMG_CHECKOUT_ENABLED=0`. With MMG off, the weekly fee on the MMG rail is
-  paused: nothing is charged (not even prepaid balance), failed, dunned,
-  suspended, nudged or churned, and the partner's grace does not run (its
-  dunning clock is paused). When MMG is switched on, only the current week
-  is billed: one fee covers the weeks MMG was off and the week in progress
-  (owner ruling, 5 Oct). The poller leaves every row untouched, and any MMG
-  call refuses with MMG_DISABLED.
+  `MMG_CHECKOUT_ENABLED=0`. With MMG off and no live card rail, no partner
+  has a way to pay, so EVERY partner's weekly fee is paused, whatever their
+  billing method (cash included; ruling of 6 Oct): nothing is charged (not
+  even prepaid balance), failed, dunned, suspended, nudged or churned, no
+  "due soon" reminder or trial fee notice names a fee, and nobody's grace
+  runs (each due fee's dunning clock is paused). The pause follows the
+  server's switches only (the MMG driver and the card rail: CARD_RAIL_V2=1
+  and not killed), never anything a partner sets, so a partner can neither
+  cause it nor dodge it. When a way to pay comes back, only the current week
+  is billed: one fee covers the weeks nobody could pay and the week in
+  progress (owner ruling, 5 Oct), whatever job runs first (billing waits
+  until the resume has recorded it). Each pause and resume is in the audit
+  log (BILLING_FEE_PAUSE_STARTED/ENDED, and BILLING_FEE_PAUSED/RESUMED per
+  fee), and an admin sees the state and counts at
+  `GET /api/v1/admin/billing/fee-pause`. The poller leaves every MMG row
+  untouched, and any MMG call refuses with MMG_DISABLED.
+  To switch MMG on, set `MMG_DRIVER=live` and `MMG_CHECKOUT_ENABLED=1`
+  together (cash partners pay through the checkout page) and redeploy;
+  turning the card rail on also ends the pause, so do it only when partners
+  can open the card pages.
 - **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
@@ -835,11 +874,23 @@ must be pinned first (section 6b, step 1).
 
 2. Each approver signs it on their own computer (section 6b, step 3).
 
-3. The operator applies with both lines. While no SUPER_ADMIN exists,
-   SEED_ADMIN_PHONE becomes the first one:
+3. The operator applies with both lines, with the same FX rate and phone
+   (the request names both; a different one refuses both lines). While no
+   SUPER_ADMIN exists, SEED_ADMIN_PHONE becomes the first one, in the signed
+   plan's own transaction and audited with it: on production the first
+   SUPER_ADMIN is minted only by a signed plan that names its phone, never
+   without approvals. A phone that already holds SUPER_ADMIN changes nothing.
 
        SEED_FX_GYD_PER_USD=<rate> SEED_ADMIN_PHONE='+592…' \
        SEED_PLAN_APPROVALS='[<first line>,<second line>]' ./deploy/seed-production.sh "$SHA"
+
+4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
+   signatures). If the production store still holds it, from 5 Oct, remove
+   it, then confirm the list no longer names it:
+
+       sudo rm /etc/credstore.encrypted/swift/SEED_PLAN_SECRET.cred
+       sudo systemctl restart swift-secrets.service
+       sudo swift-secrets list
 
 ### The whole stack
 

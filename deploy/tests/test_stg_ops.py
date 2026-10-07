@@ -1642,7 +1642,10 @@ class AdminConsoleDocs(unittest.TestCase):
 
     def test_the_runbook_says_how_the_owner_becomes_an_admin_without_skipping_the_two_person_rule(self):
         section = self.section()
-        for needle in ("6b", "SEED_SIGN_APPROVER", "SEED_PROMOTION_APPROVALS", "two different people"):
+        # Each approver signs the printed request with their own key on their
+        # own machine (deploy/seed-approve.sh); no private key reaches the server.
+        for needle in ("6b", "deploy/seed-approve.sh", "with their own key", "SEED_PROMOTION_APPROVALS",
+                       "two different people", "no private key"):
             self.assertIn(needle, section)
 
     def test_the_example_settings_document_both_and_leave_them_empty(self):

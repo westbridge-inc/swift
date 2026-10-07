@@ -862,7 +862,7 @@ export class OrderService {
       const vendorSub = await this.prisma.subscription.findFirst({
         where: { vendorId: vendor.id },
         orderBy: { createdAt: 'desc' },
-        select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true, billingMethod: true },
+        select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
       });
       const vendorOperability = subscriptionOperability(vendorSub, { missingRow: 'GRANDFATHER' });
       if (!vendorOperability.operable) {
@@ -1244,7 +1244,7 @@ export class OrderService {
         const lockedSub = await tx.subscription.findFirst({
           where: { vendorId: planVendorId },
           orderBy: { createdAt: 'desc' },
-          select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true, billingMethod: true },
+          select: { status: true, gracePeriodEnd: true, billingConfirmationPausedAt: true, billingEnforcementDueAt: true, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: true },
         });
         const lockedOperability = subscriptionOperability(lockedSub, { missingRow: 'GRANDFATHER' });
         if (!lockedOperability.operable) {

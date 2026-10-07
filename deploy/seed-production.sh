@@ -67,6 +67,12 @@ for name in $compose_names COMPOSE_PROJECT_NAME COMPOSE_PROFILES COMPOSE_FILE CO
   [ -z "${!name+set}" ] ||
     die "$name is set in this shell, and Compose would use it instead of deploy/.env (which every check here reads); unset it, or run from a clean shell"
 done
+# [PROD-PATH] One Docker: this host's own daemon, never another one named by
+# DOCKER_HOST, DOCKER_CONTEXT or DOCKER_CONFIG in this shell.
+for name in DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG; do
+  [ -z "${!name+set}" ] ||
+    die "$name is set in this shell, and Docker would act on another daemon than this host's; unset it, or run from a clean shell"
+done
 PILOT_ENV="$(env_value PILOT_ENV)"
 case "$PILOT_ENV" in
   staging | production) ;;

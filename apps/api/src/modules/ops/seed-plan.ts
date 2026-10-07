@@ -4,7 +4,7 @@ import { targetFingerprint, type TargetFingerprint } from './purge-plan';
 import { seedPlanCounter } from '../../plugins/observability';
 import {
   approvalRequest, consumeApprovals, parseApproverKeys, promotionSubject, verifyApprovals,
-  type SignedApproval, type VerifiedApproval,
+  type RequestFacts, type SignedApproval, type VerifiedApproval,
 } from './approver-signatures';
 
 // ---------------------------------------------------------------------------
@@ -25,7 +25,8 @@ import {
 // config version, the digest, the approvers and the change cardinality in
 // the privileged-change audit. A replay with nothing to change changes
 // nothing and says so. Schema objects come only from migrations; the seed
-// holds none. The first SUPER_ADMIN is minted only while none exists, or by
+// holds none. The first SUPER_ADMIN is minted only while none exists — on a
+// production target only by the signed plan that names it — or by
 // break-glass with two people.
 // ---------------------------------------------------------------------------
 
@@ -146,13 +147,50 @@ export async function buildSeedPlan(prisma: PrismaClient, databaseUrl: string, d
 }
 
 /**
- * [PROD-PATH] What the approvers sign for a production apply of this plan:
- * the plan digest on this target, valid 24 hours, with a random nonce. Each
- * approver signs it with their OWN key on their own computer
- * (deploy/seed-approve.sh); the server holds only their public keys.
+ * [PROD-PATH] The facts outside the plan's own data that the approvers must
+ * see and sign with it: the FX rate the operator recorded for this seed, and
+ * the phone that becomes the first SUPER_ADMIN (shown by its last four digits;
+ * the request carries only its hash).
  */
-export function planApprovalRequest(plan: SeedPlan, now = new Date()): string {
-  return approvalRequest('plan', plan.target.digest, plan.digest, now);
+export interface RequestContext { fxGydPerUsd?: number | null; adminPhone?: string | null }
+
+const E164 = /^\+[1-9]\d{6,14}$/;
+/** A value as the approver reads it: whole while short; a long one as its head,
+ *  length and digest (the plan digest and the server's rebuild bind it whole). */
+function shown(v: unknown): string {
+  const text = JSON.stringify(v) ?? 'null';
+  return text.length <= 200 ? text : `${text.slice(0, 120)}… (${text.length} chars, sha256 ${sha256(text).slice(0, 16)})`;
+}
+const databaseLine = (t: TargetFingerprint) => `database: ${t.database} on ${t.host}, deployment ${t.deploymentId} (${t.environment})`;
+const phoneTail = (phone: string) => phone.slice(-4);
+
+/** The words an approver reads for this plan, in order, every change listed. */
+export function planRequestFacts(plan: SeedPlan, ctx: RequestContext = {}): RequestFacts {
+  if (ctx.adminPhone && !E164.test(ctx.adminPhone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
+  const fx = ctx.fxGydPerUsd ?? null;
+  const shows = [
+    databaseLine(plan.target),
+    `config: ${plan.configVersion} (${plan.configDigest.slice(0, 16)}), ${plan.changes.length} change${plan.changes.length === 1 ? '' : 's'}, FX ${fx === null ? 'not set' : `${fx} GYD per USD`}`,
+    `admin phone: ${ctx.adminPhone ? `ending ${phoneTail(ctx.adminPhone)} becomes the first SUPER_ADMIN if there is none` : 'none'}`,
+    ...plan.changes.map((ch) => {
+      const where = ch.table === 'countryConfig' ? `${ch.table} ${ch.key}.${ch.field}` : `${ch.table} ${ch.key}`;
+      return 'from' in ch ? `change: ${ch.op} ${where}: ${shown(ch.from)} -> ${shown(ch.to)}` : `change: ${ch.op} ${where}`;
+    }),
+  ];
+  return { change: 'plan', target: plan.target.digest, subject: plan.digest, admin: ctx.adminPhone ? promotionSubject(ctx.adminPhone) : 'none', shows };
+}
+
+/**
+ * [PROD-PATH] What the approvers sign for a production apply of this plan:
+ * the plan digest on this target and the first admin's phone hash, with what
+ * they are approving in words (the database, the configuration and FX rate,
+ * the admin phone's last digits, every change), issued now and valid 24
+ * hours, with a random nonce. Each approver signs it with their OWN key on
+ * their own computer (deploy/seed-approve.sh); the server holds only their
+ * public keys, and at apply it rebuilds these words and requires them exactly.
+ */
+export function planApprovalRequest(plan: SeedPlan, ctx: RequestContext = {}, now = new Date()): string {
+  return approvalRequest(planRequestFacts(plan, ctx), now);
 }
 
 export interface ApplyOptions {
@@ -160,13 +198,18 @@ export interface ApplyOptions {
    *  people over this plan (approver-signatures.ts), and the pinned keys. */
   approvals?: SignedApproval[];
   approverKeys?: string;
+  /** The FX rate and first admin the approvals must name (planRequestFacts).
+   *  On a production target the first SUPER_ADMIN is minted ONLY here, in the
+   *  plan's own transaction, when the signed plan names this phone and no
+   *  SUPER_ADMIN exists. */
+  request?: RequestContext;
   /** The clock approvals are checked against (expiry). */
   now?: Date;
   actor?: string;
   /** Test seam: a pause at a named boundary inside the transaction (the race proof holds both seeders here). */
   failpoint?: (boundary: string) => Promise<void>;
 }
-export interface ApplyResult { applied: number; noop: boolean; configVersion: string; digest: string }
+export interface ApplyResult { applied: number; noop: boolean; configVersion: string; digest: string; firstAdmin: { userId: string } | null }
 
 const audit = (tx: Prisma.TransactionClient | PrismaClient, plan: SeedPlan, event: string, detail: Record<string, unknown>, actor?: string) =>
   tx.privilegedChangeAudit.create({ data: { action: 'SEED_CONFIG', planDigest: plan.digest, event, target: plan.target as unknown as Prisma.InputJsonValue, detail: detail as Prisma.InputJsonValue, actor: actor ?? null } });
@@ -189,15 +232,24 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
   let verified: VerifiedApproval[] = [];
   if (target.environment === 'production') {
     if (!opts.approvals?.length) throw new SeedRefused('APPROVALS_REQUIRED', 'a production configuration change needs two independent approvals');
-    verified = verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), { change: 'plan', target: plan.target.digest, subject: plan.digest }, opts.now);
+    verified = verifyApprovals(opts.approvals, parseApproverKeys(opts.approverKeys), planRequestFacts(plan, opts.request), opts.now);
   }
   const approvers = verified.map((v) => v.approver);
   if (plan.changes.length === 0) {
-    await audit(prisma, plan, 'NOOP', { configVersion: plan.configVersion, approvers }, opts.actor);
+    // [PROD-PATH] Nothing to change is still a use of the approvals: they are
+    // consumed under the same lock (never reusable), and a first admin the
+    // signed plan names is minted here too.
+    const firstAdmin = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('swift:seed-plan'))`;
+      if (plan.target.environment === 'production') await consumeApprovals(tx, verified, { action: 'SEED_CONFIG', target: plan.target as unknown as Prisma.InputJsonValue, actor: opts.actor });
+      const minted = await mintSignedFirstAdmin(tx, plan, verified, opts);
+      await audit(tx, plan, 'NOOP', { configVersion: plan.configVersion, approvers, firstAdmin: !!minted }, opts.actor);
+      return minted;
+    });
     seedPlanCounter.labels('noop').inc();
-    return { applied: 0, noop: true, configVersion: plan.configVersion, digest: plan.digest };
+    return { applied: 0, noop: true, configVersion: plan.configVersion, digest: plan.digest, firstAdmin };
   }
-  let applied: number;
+  let applied: { count: number; firstAdmin: { userId: string } | null };
   try {
     applied = await runPlanTransaction(prisma, desired, plan, verified, opts);
   } catch (err) {
@@ -209,10 +261,40 @@ export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, d
     throw err;
   }
   seedPlanCounter.labels('applied').inc();
-  return { applied, noop: false, configVersion: plan.configVersion, digest: plan.digest };
+  return { applied: applied.count, noop: false, configVersion: plan.configVersion, digest: plan.digest, firstAdmin: applied.firstAdmin };
 }
 
-async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, plan: SeedPlan, verified: VerifiedApproval[], opts: ApplyOptions): Promise<number> {
+/** The account a SUPER_ADMIN promotion sets: roles SUPER_ADMIN and CUSTOMER. */
+async function upsertSuperAdmin(tx: Prisma.TransactionClient, phone: string): Promise<{ id: string }> {
+  return tx.user.upsert({
+    where: { phone },
+    update: { roles: { set: ['SUPER_ADMIN', 'CUSTOMER'] }, activeRole: 'SUPER_ADMIN', status: 'ACTIVE' },
+    create: { phone, firstName: 'Swift', lastName: 'Admin', roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } },
+    select: { id: true },
+  });
+}
+
+/**
+ * [PROD-PATH] The first production SUPER_ADMIN, covered by the signed plan:
+ * minted in the plan's transaction, after its approvals are consumed, only
+ * when every approval names this phone and no SUPER_ADMIN exists yet.
+ */
+async function mintSignedFirstAdmin(tx: Prisma.TransactionClient, plan: SeedPlan, verified: VerifiedApproval[], opts: ApplyOptions): Promise<{ userId: string } | null> {
+  const phone = opts.request?.adminPhone;
+  if (plan.target.environment !== 'production' || !phone || verified.length < 2) return null;
+  if (verified.some((v) => v.admin !== promotionSubject(phone))) return null;
+  if ((await tx.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) > 0) return null;
+  const u = await upsertSuperAdmin(tx, phone);
+  await tx.privilegedChangeAudit.create({ data: {
+    action: 'PROMOTE_SUPER_ADMIN', planDigest: sha256(canonical({ target: plan.target.digest, phone, mode: 'signed-plan' })), event: 'APPLIED',
+    target: plan.target as unknown as Prisma.InputJsonValue,
+    detail: { mode: 'signed-plan', plan: plan.digest, approvers: verified.map((v) => v.approver), userId: u.id } as Prisma.InputJsonValue,
+    actor: opts.actor ?? null,
+  } });
+  return { userId: u.id };
+}
+
+async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, plan: SeedPlan, verified: VerifiedApproval[], opts: ApplyOptions): Promise<{ count: number; firstAdmin: { userId: string } | null }> {
   const approvers = verified.map((v) => v.approver);
   return prisma.$transaction(async (tx) => {
     // two seeders serialise here; the loser then sees the winner's writes as drift and is refused
@@ -247,8 +329,9 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
         await tx.zoneFare.create({ data: { fromZoneId, toZoneId, fare: want.fare } });
       }
     }
-    await audit(tx, plan, 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))] }, opts.actor);
-    return plan.changes.length;
+    const firstAdmin = await mintSignedFirstAdmin(tx, plan, verified, opts);
+    await audit(tx, plan, 'APPLIED', { configVersion: plan.configVersion, configDigest: plan.configDigest, approvers, changes: plan.changes.length, tables: [...new Set(plan.changes.map((c) => c.table))], firstAdmin: !!firstAdmin }, opts.actor);
+    return { count: plan.changes.length, firstAdmin };
   });
 }
 
@@ -258,37 +341,55 @@ async function runPlanTransaction(prisma: PrismaClient, desired: DesiredConfig, 
 
 export interface PromoteOptions { approvals?: SignedApproval[]; approverKeys?: string; actor?: string; now?: Date }
 
+/** The words an approver reads for a break-glass promotion on this target. */
+export function promotionRequestFacts(target: TargetFingerprint, phone: string): RequestFacts {
+  return {
+    change: 'promote', target: target.digest, subject: promotionSubject(phone), admin: promotionSubject(phone),
+    shows: [databaseLine(target), `promote: the phone ending ${phoneTail(phone)} becomes SUPER_ADMIN (its roles are set to SUPER_ADMIN and CUSTOMER)`],
+  };
+}
+
 /**
  * [PROD-PATH] What the two approvers sign for a break-glass promotion of
  * `phone` on THIS target: the target digest and the phone's hash (the request
- * never carries the number), valid 24 hours, with a random nonce. Read-only.
+ * never carries the number, only its last four digits in words), issued now
+ * and valid 24 hours, with a random nonce. Read-only.
  */
 export async function promotionApprovalRequest(prisma: PrismaClient, databaseUrl: string, phone: string, now = new Date()): Promise<string> {
-  if (!/^\+[1-9]\d{6,14}$/.test(phone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
+  if (!E164.test(phone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
   const target = await targetFingerprint(prisma, databaseUrl);
   if (target.environment === 'unknown') throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first');
-  return approvalRequest('promote', target.digest, promotionSubject(phone), now);
+  return approvalRequest(promotionRequestFacts(target, phone), now);
 }
 
 /**
  * Mint or restore the platform's SUPER_ADMIN. Allowed without ceremony only
- * while NO super-admin exists (bootstrap); afterwards it is a break-glass
+ * while NO super-admin exists (bootstrap) on a target that is not
+ * production; on production the first SUPER_ADMIN is minted only by the
+ * signed plan that names it (applySeedPlan). Afterwards it is a break-glass
  * change needing two distinct approvals signed over this target and this
- * phone. Either way it is a durable, audited change — never a silent upsert.
+ * phone. A phone that already holds SUPER_ADMIN changes nothing. Either way
+ * it is a durable, audited change — never a silent upsert.
  */
-export async function promoteBootstrapAdmin(prisma: PrismaClient, databaseUrl: string, phone: string, opts: PromoteOptions = {}): Promise<{ userId: string; mode: 'bootstrap' | 'break-glass' }> {
-  if (!/^\+[1-9]\d{6,14}$/.test(phone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
+export async function promoteBootstrapAdmin(prisma: PrismaClient, databaseUrl: string, phone: string, opts: PromoteOptions = {}): Promise<{ userId: string; mode: 'bootstrap' | 'break-glass' | 'already' }> {
+  if (!E164.test(phone)) throw new SeedRefused('PHONE_INVALID', 'the admin phone must be E.164');
   const target = await targetFingerprint(prisma, databaseUrl);
   if (target.environment === 'unknown') throw new SeedRefused('TARGET_UNKNOWN', 'the database declares no deployment identity; bootstrap it first');
+  const already = await prisma.user.findFirst({ where: { phone, roles: { has: 'SUPER_ADMIN' } }, select: { id: true } });
+  if (already) return { userId: already.id, mode: 'already' };
   const existing = await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } });
   let mode: 'bootstrap' | 'break-glass' = 'bootstrap';
   let verified: VerifiedApproval[] = [];
+  if (existing === 0 && target.environment === 'production') {
+    seedPlanCounter.labels('promotion_refused').inc();
+    throw new SeedRefused('FIRST_ADMIN_NEEDS_PLAN', 'on production the first SUPER_ADMIN is minted only by the signed plan that names its phone (seed-production.sh with SEED_ADMIN_PHONE set when the request is printed)');
+  }
   if (existing > 0) {
     mode = 'break-glass';
     const approvals = opts.approvals ?? [];
     if (approvals.length === 0) { seedPlanCounter.labels('promotion_refused').inc(); throw new SeedRefused('BREAK_GLASS_REQUIRED', `a SUPER_ADMIN already exists (${existing}); promoting another is a break-glass change needing two approvals`); }
     try {
-      verified = verifyApprovals(approvals, parseApproverKeys(opts.approverKeys), { change: 'promote', target: target.digest, subject: promotionSubject(phone) }, opts.now);
+      verified = verifyApprovals(approvals, parseApproverKeys(opts.approverKeys), promotionRequestFacts(target, phone), opts.now);
     } catch (err) {
       seedPlanCounter.labels('promotion_refused').inc();
       throw err;
@@ -302,12 +403,7 @@ export async function promoteBootstrapAdmin(prisma: PrismaClient, databaseUrl: s
     // Break-glass: the two approvals are consumed before the account is
     // touched, in this transaction; fewer than two refuse (consumeApprovals).
     if (mode === 'break-glass') await consumeApprovals(tx, verified, { action: 'PROMOTE_SUPER_ADMIN', target: target as unknown as Prisma.InputJsonValue, actor: opts.actor });
-    const u = await tx.user.upsert({
-      where: { phone },
-      update: { roles: { set: ['SUPER_ADMIN', 'CUSTOMER'] }, activeRole: 'SUPER_ADMIN', status: 'ACTIVE' },
-      create: { phone, firstName: 'Swift', lastName: 'Admin', roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } },
-      select: { id: true },
-    });
+    const u = await upsertSuperAdmin(tx, phone);
     await tx.privilegedChangeAudit.create({ data: { action: 'PROMOTE_SUPER_ADMIN', planDigest: digest, event: 'APPLIED', target: target as unknown as Prisma.InputJsonValue, detail: { mode, approvers, userId: u.id } as Prisma.InputJsonValue, actor: opts.actor ?? null } });
     return u;
   });
