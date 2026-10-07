@@ -11,6 +11,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   const [error, setError] = useState('');
   const [missing, setMissing] = useState(false);
   const [pdfFailed, setPdfFailed] = useState(false);
+  const [pdfInlineLoaded, setPdfInlineLoaded] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [full, setFull] = useState(false);
@@ -25,7 +26,7 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
   useEffect(() => () => { generation.current++; }, []);
   const view = async () => {
     const attempt = ++generation.current;
-    setLoading(true); setError(''); setMissing(false); setPdfFailed(false); setUrl(''); setLoaded(false); onViewed(false);
+    setLoading(true); setError(''); setMissing(false); setPdfFailed(false); setPdfInlineLoaded(false); setUrl(''); setLoaded(false); onViewed(false);
     setZoom(1); setRotation(0);
     try {
       const signed = await getDocSignedUrl(id);
@@ -61,9 +62,9 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
         <p>{pdfFailed ? 'The inline PDF could not be displayed.' : 'If the PDF preview is blank or unreadable, open the document in a new tab.'}</p>
         <a href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open document in a new tab</a>
       </div>
-      {!pdfFailed && <iframe title={`${label} evidence`} src={url} className="rc-pdf" sandbox="allow-same-origin" ref={(frame) => { if (frame) frame.onerror = () => { setPdfFailed(true); setLoaded(false); onViewed(false); }; }} />}
-      <label className="rc-check"><input type="checkbox" checked={loaded} onChange={(e) => { setLoaded(e.target.checked); onViewed(e.target.checked); }} />I can see and read the PDF in the preview or new tab</label>
-      <p className="rc-muted">If your browser cannot display this PDF, leave the check clear. Do not approve unreadable evidence.</p>
+      {!pdfFailed && <iframe title={`${label} evidence`} src={url} className="rc-pdf" sandbox="allow-same-origin" ref={(frame) => { if (frame) { frame.onload = () => setPdfInlineLoaded(true); frame.onerror = () => { setPdfFailed(true); setPdfInlineLoaded(false); setLoaded(false); onViewed(false); }; } }} />}
+      <label className="rc-check"><input type="checkbox" disabled={!pdfInlineLoaded || pdfFailed} checked={loaded} onChange={(e) => { const confirmed = e.target.checked && pdfInlineLoaded && !pdfFailed; setLoaded(confirmed); onViewed(confirmed); }} />I can see and read the PDF in the inline preview</label>
+      <p className="rc-muted">Approval requires a readable inline preview. Opening a new tab does not unlock approval.</p>
     </> :
       // next/image would persist optimized evidence. Direct no-store rendering is intentional.
       // eslint-disable-next-line @next/next/no-img-element
