@@ -437,20 +437,34 @@ export class SosService {
     return this.prisma.sosAlert.findUniqueOrThrow({ where: { id } });
   }
 
-  /** "I'm safe now" — flags the alert, notifies ops, but NEVER resolves it. */
+  /** "I'm safe now" — flags the alert, notifies ops, but NEVER resolves it.
+   *
+   *  [73] Idempotent: the first timestamp is a compare-and-set, never an
+   *  overwrite, and only a live (ACTIVE / ACKNOWLEDGED) alert can take it; a
+   *  pending or closed alert is returned as it stands. The ops notice is keyed
+   *  to that first timestamp, so a repeated tap, a lost response or a retry
+   *  after a crash between the flag and the notice delivers it at most once
+   *  per admin — and still delivers it. A notice that cannot be delivered is
+   *  logged, never turned into a failure of the person's own tap: the flag on
+   *  the alert (shown on the ops board) is the record. */
   async markSafe(id: string) {
+    await this.prisma.sosAlert.updateMany({
+      where: { id, userSafeFlaggedAt: null, status: { in: ['ACTIVE', 'ACKNOWLEDGED'] } },
+      data: { userSafeFlaggedAt: new Date() },
+    });
     const alert = await this.prisma.sosAlert.findUnique({ where: { id } });
     if (!alert) throw new NotFoundError('SosAlert', id);
-    if (alert.status === 'RESOLVED' || alert.status === 'CANCELLED') return alert;
-    const updated = await this.prisma.sosAlert.update({ where: { id }, data: { userSafeFlaggedAt: new Date() } });
-    await notifyAdmins(this.prisma, this.notifications, {
-      title: 'SOS — user marked safe (verify)',
-      body: `The user on alert ${id} tapped "I'm safe". This does NOT close the case — call back to verify before resolving.`,
-      data: { kind: 'sos_marked_safe', sosAlertId: id },
-      // [F-026-15] scope the page to the alert's own tenant — see fanOut.
-      tenantId: alert.tenantId,
-    }).catch(() => {});
-    return updated;
+    if (alert.userSafeFlaggedAt && (alert.status === 'ACTIVE' || alert.status === 'ACKNOWLEDGED')) {
+      await notifyAdmins(this.prisma, this.notifications, {
+        title: 'SOS — user marked safe (verify)',
+        body: `The user on alert ${id} tapped "I'm safe". This does NOT close the case — call back to verify before resolving.`,
+        data: { kind: 'sos_marked_safe', sosAlertId: id },
+        // [F-026-15] scope the page to the alert's own tenant — see fanOut.
+        tenantId: alert.tenantId,
+        dedupeKey: `sos-mark-safe:${id}:${alert.userSafeFlaggedAt.toISOString()}`,
+      }).catch((err) => log().error({ err, sosAlertId: id }, '[73] the marked-safe notice could not be delivered — the flag on the alert stands; a retry re-delivers'));
+    }
+    return alert;
   }
 
   /** Ops acknowledges — ACTIVE → ACKNOWLEDGED. Ops-only (enforced at the route). */

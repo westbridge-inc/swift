@@ -21,3 +21,15 @@ export interface Notification {
   readAt?: string | null;
   createdAt: string;
 }
+
+/** Opaque taxi lifecycle identity; never includes passenger/vehicle details. */
+export interface TaxiLifecycleNotificationData {
+  orderType: 'TAXI';
+  rideId: string;
+  orderId: string;
+  audience: 'customer' | 'earner';
+  status?: string;
+  kind?: string;
+  etaMinutes?: number;
+  eta?: number;
+}

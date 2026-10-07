@@ -1,4 +1,5 @@
 import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { randomUUID } from 'node:crypto';
 import type { Order, OrderStatus, PrismaClient, RideClass } from '@prisma/client';
 import { Prisma } from '@prisma/client';
@@ -2928,13 +2929,23 @@ export class DispatchService {
     } catch (err) {
       warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch socket publication failed after claim commit');
     }
-    await this.notifications
-      .riderAssigned(
+    // [73 · owner ruling] A taxi rider hears "Driver Found!" with the car and its plate, tagged
+    // as a taxi, from either entrance; every other order keeps the delivery copy.
+    const assignedPush = order.orderType === 'TAXI' && order.driver
+      ? this.notifications.driverFound(order.customerId, orderId, {
+        firstName: order.driver.user?.firstName || 'Your driver',
+        vehicleColor: order.driver.vehicleColor,
+        vehicleMake: order.driver.vehicleMake,
+        vehicleModel: order.driver.vehicleModel,
+        licensePlate: order.driver.licensePlate,
+      })
+      : this.notifications.riderAssigned(
         order.customerId,
         order.orderNumber,
         (pool === 'DRIVER' ? order.driver?.user?.firstName : order.rider?.user?.firstName) || 'Your mover',
         orderId,
-      )
+      );
+    await assignedPush
       .catch((err) => warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch assignment notification failed after claim commit'));
 
     try {
@@ -3090,7 +3101,7 @@ export class DispatchService {
           title: 'Still looking for a mover',
           body: `All nearby movers are busy right now — we are automatically retrying for order ${order.orderNumber}.`,
           audience: 'customer',
-          data: { kind: 'dispatch_retrying', orderId: order.id },
+          data: order.orderType === 'TAXI' ? taxiNotificationData(order.id, { kind: 'dispatch_retrying' }) : { kind: 'dispatch_retrying', orderId: order.id },
           // [E36] A redelivered run re-sends under the same replay tag, and
           // the (user, dedupeKey) unique collapses it into the first row. Not
           // keyed by the attempt count: that restarts at 1 after a manual
@@ -3163,7 +3174,7 @@ export class DispatchService {
               title: "We couldn't find you a driver",
               body: 'No drivers came online in time, so your request was released — nothing to pay. Try again anytime.',
               audience: 'customer',
-              data: { kind: 'ride_released_no_drivers', orderId: order.id },
+              data: taxiNotificationData(order.id, { kind: 'ride_released_no_drivers', status: 'CANCELLED' }),
               // [E36] The release is a status CAS (updateMany above): a replay
               // whose CAS won nothing must not re-send the release notice.
               dedupeKey: `ride-released:${order.id}`,
@@ -3189,7 +3200,7 @@ export class DispatchService {
       title: 'No movers available right now',
       body: `We could not find a mover for order ${order.orderNumber}. ${order.vendor?.name ?? 'The vendor'} can hold it or cancel — we will keep you posted.`,
       audience: 'customer',
-      data: { kind: 'dispatch_exhausted', orderId: order.id },
+      data: order.orderType === 'TAXI' ? taxiNotificationData(order.id, { kind: 'dispatch_exhausted' }) : { kind: 'dispatch_exhausted', orderId: order.id },
       // [E36] A redelivered run collapses into its first terminal notice.
       ...(replayTag ? { dedupeKey: `dispatch-exhausted:${order.id}:${replayTag}` } : {}),
     });
@@ -3628,7 +3639,7 @@ export async function recoverStrandedTaxiRides(
         type: 'ORDER_UPDATE',
         title: 'Your driver lost signal',
         body: 'We’ve lost your driver’s live location. Stay where you are — we’re reaching out to them. If you’re not moving, contact support.',
-        data: { orderId, status: order.status },
+        data: taxiNotificationData(orderId, { status: order.status }),
       }).catch(() => {});
       flagged.push(orderId);
       continue;
@@ -3640,7 +3651,7 @@ export async function recoverStrandedTaxiRides(
       type: 'ORDER_UPDATE',
       title: 'Finding you another driver',
       body: 'Your driver dropped off the map before pickup — we’re matching you with the nearest available driver now.',
-      data: { orderId, status: 'PENDING' },
+      data: taxiNotificationData(orderId, { status: 'PENDING' }),
     }).catch(() => {});
     await enqueue(orderId).catch(() => {});
     recovered.push(orderId);
