@@ -104,7 +104,7 @@ export default function CourierPage() {
     <div className="flex flex-col">
       <span className="sw-eyebrow">Send</span>
       <h1 className="sw-title mt-1">A parcel across town</h1>
-      <div className="mt-5 grid grid-cols-1 items-start gap-x-12 gap-y-6 wide:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="mt-5 grid grid-cols-1 items-start gap-x-12 gap-y-6 split:grid-cols-[minmax(0,1fr)_380px]">
         <div className="flex min-w-0 flex-col gap-3">
           <LocationField
             label="Pick up from"
@@ -146,7 +146,7 @@ export default function CourierPage() {
           <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes for the rider (optional)" aria-label="Notes for the rider (optional)" className="sw-input" />
         </div>
 
-        <aside className="flex flex-col gap-3 wide:sticky wide:top-4">
+        <aside className="flex flex-col gap-3 split:sticky split:top-4">
           <span className="sw-eyebrow">Fee · cash on delivery</span>
           {fee !== null ? (
             <>
