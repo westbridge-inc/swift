@@ -169,10 +169,16 @@ export async function hasStepUp(redis: Redis, sessionId: string): Promise<boolea
  * The gate a money surface calls first. 403 STEP_UP_REQUIRED tells the client
  * exactly how to earn it, so the screen can run the code sheet and retry.
  */
-export async function requireStepUp(app: FastifyInstance, request: { user: { userId: string }; authSessionId: string | null }): Promise<void> {
+export async function requireStepUp(app: FastifyInstance, request: { user: { userId: string }; authSessionId: string | null }, options: { consume?: boolean } = {}): Promise<void> {
   const sessionId = request.authSessionId;
   if (!sessionId) throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
-  if (await hasStepUp(app.redis, sessionId)) return;
+  // Credential changes consume the proof BEFORE the write. Redis DEL is
+  // atomic: concurrent changes cannot both spend the same proof. A failed
+  // database change requires fresh proof; we never restore spent authority.
+  const confirmed = options.consume
+    ? (await app.redis.del(stepUpKey(sessionId))) === 1
+    : await hasStepUp(app.redis, sessionId);
+  if (confirmed) return;
   throw new AppError(403, 'STEP_UP_REQUIRED', 'Confirm it’s you first — we’ll text a code to the phone on this account.', {
     stepUp: { send: 'POST /auth/step-up', verify: 'POST /auth/step-up/verify', validForSeconds: STEP_UP_TTL_S },
   });
